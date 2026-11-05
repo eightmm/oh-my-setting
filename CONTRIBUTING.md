@@ -1,23 +1,31 @@
 # Contributing
 
-## Before you push
+## Verify and publish
 
-Run the core gate shared with CI (CI also runs install E2E and macOS fixtures):
+During development, run the nearest affected tests and static checks. The
+smoke runner accepts repeatable selectors:
 
 ```bash
-bash scripts/check.sh
+bash tests/run-smoke-shard.sh --only TEST_NAME
 ```
 
-This runs `shellcheck -x -S warning` over install, scripts/libraries, plugin
-hooks, generated project checks, and tests, then runs the smoke suite. It fails
-hard if shellcheck is missing — never a silent skip.
+For a committed range, use `bash scripts/check.sh --affected --changed-from BASE --changed-to HEAD`.
+Ordinary docs use reference checks; critical changes or
+uncertain impact select full coverage. Shell lint requires ShellCheck.
+
+When publication is authorized, finish the scoped commits and run `oms land`.
+It owns the gate, unchanged-tree push, CI receipt and eligible installation
+update. Do not run a duplicate full gate first. See
+[verification and release](docs/COMPONENTS.md#verification-and-release) for CI
+scope, installation proof and direct-push requirements.
 
 ## Style
 
-- Bash, `set -euo pipefail`, POSIX-portable where practical (CI checks macOS).
+- Bash 3.2, `set -euo pipefail`, GNU/BSD-compatible on Linux, WSL2 and macOS.
 - Keep changes task-scoped; match the surrounding script's conventions.
-- New behavior needs a `test_*` function in `tests/scripts-smoke.sh`; the shard
-  runner discovers every definition automatically. Prefer behavior/interface tests.
+- Extend the canonical test or fixture; add a new test only for an uncovered
+  path, and look for coverage it supersedes. The smoke runner discovers every
+  `test_*` definition automatically. Prefer behavior/interface tests.
 - No secrets in code, tests, commits, or fixtures — the suite self-scans its own
   sources; split secret-shaped literals (e.g. `'aws_secret_access_''key=...'`).
 - Fail closed: a check that cannot run is an error, not a pass.

@@ -32,8 +32,8 @@ oms agent-plan --repo . retire --apply \
 The apply call runs a new plan acceptance itself; an earlier passing row is not
 proof. It requires a clean committed tree and fails closed around active task
 authority or worker markers. For a reviewed replacement contract, only an old
-plan whose tasks are all `done` may use `--disposition superseded`; that receipt
-states that it did not verify completion. Replay the identical command after
+plan whose tasks are all `done` or `cancelled` may use `--disposition superseded`;
+that receipt states that it did not verify completion. Replay the identical command after
 an interruption. The content-addressed archive/receipt pair makes replay
 idempotent and prevents an old replay from unlinking a newly-created live plan.
 Do not mutate the same plan around a residual retirement intent: canonical

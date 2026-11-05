@@ -5,20 +5,45 @@ It covers startup, navigation, role routing, results, recovery and the contracts
 
 ## In this guide
 
+| I want to… | Jump to |
+|---|---|
+| Open a main conversation | [Quick start](#quick-start) |
+| Find a key or change focus | [Keys](#keys) · [Control menu](#control-menu-and-focus) |
+| Choose an account or dispatch work | [Provider accounts](#provider-accounts) · [Roles and tiers](#dispatch-roles-and-tiers) |
+| Review and accept a result | [Finalize an outcome](#finalize-an-outcome) · [Accept a patch](#accept-and-publish-a-patch) |
+| Recover interrupted work | [Settle workers](#settle-stopped-workers) · [Salvage](#salvaging-a-stopped-worker) |
+
+**Section index**
+
 - [Quick start](#quick-start) and [starting the sole main](#starting-the-sole-main)
 - [Layout and activity](#layout-and-activity), including [keys](#keys)
 - [Roles and automatic allocation](#roles-and-automatic-allocation)
 - [Discussion and results](#discussion-and-results)
 - [Reference](#shared-work-rooms-and-the-graph), [contract and verification](#contract-and-verification), and [recovery](#salvaging-a-stopped-worker)
 
-Run `oms` in a terminal to open the control panel. Native Claude Code, Pi or Codex
-keeps the conversation pane; the OMS sidebar shows recorded main, advisor and
-worker activity. `oms --help` and bare `oms` with redirected input/output retain
-command help. The panel uses existing OMS state, authentication and front doors.
-Without `--repo`, the panel resolves the current Git top-level and refuses a non-repository with exit 3; explicit `--repo PATH` also requires a Git repository and returns 3 otherwise. `--providers`, `--routes` and `--help` remain available anywhere.
-The sidebar reads OMS state; it does not replace the providers' native conversation or authentication.
+Run `oms` in a terminal to open the control panel. Native Claude Code, Pi or Codex keeps
+the conversation pane; the OMS sidebar shows recorded main, advisor and worker activity.
+`oms --help` and bare `oms` with redirected input/output retain command help. The panel
+uses existing OMS state, authentication and front doors. Without `--repo`, the panel
+resolves the current Git top-level and refuses a non-repository with exit 3; explicit
+`--repo PATH` also requires a Git repository and returns 3 otherwise. `--providers`,
+`--routes` and `--help` remain available anywhere. The sidebar reads OMS state; it does
+not replace the providers' native conversation or authentication.
 
-Finished dispatch calls keep an owner-only OMS transcript beside their activity summary in `.oms/panel-state/dispatch-logs/`. In a call's Detail press `x` for Transcript, or select Transcript (`x` or Tab) in its Results reader; arrows, Page Up/Down and search in the reader navigate the captured assistant messages, commands and tool results, edit content and final report. Esc returns. Secret-shaped lines are masked using the outbound scanner patterns. Each capture keeps at most the last 8 MiB with a truncation marker; captures older than 30 days or beyond the newest 128 are pruned when another capture finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show “transcript not captured”; provider homes are never read.
+<details>
+<summary>Transcripts: navigation, masking and retention</summary>
+
+Finished dispatch calls keep an owner-only OMS transcript beside their activity summary
+in `.oms/panel-state/dispatch-logs/`. In a call's Detail press `x` for Transcript, or
+select Transcript (`x` or Tab) in its Results reader; arrows, Page Up/Down and search in
+the reader navigate the captured assistant messages, commands and tool results, edit
+content and final report. Esc returns. Secret-shaped lines are masked using the outbound
+scanner patterns. Each capture keeps at most the last 8 MiB with a truncation marker;
+captures older than 30 days or beyond the newest 128 are pruned when another capture
+finishes. Output excerpts are capped at 8 KiB. Calls without an OMS capture show
+“transcript not captured”; provider homes are never read.
+
+</details>
 
 ## Quick start
 
@@ -28,6 +53,15 @@ Finished dispatch calls keep an owner-only OMS transcript beside their activity 
 4. The control window's **Needs you** inbox lists failed or timed-out calls, calls or mains waiting for approval or input, unanswered broadcasts and patches awaiting admission. Select with arrows or a click; Enter opens the selected chat or result.
 5. `Tab` cycles visible tabs; arrows move within the current surface; Enter opens or expands. `Esc` closes a reader or backs out. The detailed keys and their surfaces are listed under [Keys](#keys).
 6. At a main's exit prompt, `r` resumes or restarts in that pane and Enter closes the window. `F9` switches between chat and board; `F5` opens the control window, and from that window returns to the previous one; `F12` shows panel-wide keys.
+
+```bash
+oms                                      # open the control panel
+oms panel --repo . --launch codex         # start a Codex main
+oms panel --repo . --results              # read retained results
+```
+
+<details>
+<summary>All launch, layout, status and council command examples</summary>
 
 ```bash
 oms panel --repo . --layout inline         # portable menu, no tmux needed
@@ -52,6 +86,8 @@ oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
 ```
 
+</details>
+
 `oms panel --salvage TASK_ID` verifies a kept worktree against the execution repository recorded for that room call and saves its patch and provenance in the room repository.
 
 Each dispatched call has a short room alias such as `B7`, shown before its role
@@ -73,23 +109,29 @@ handoff is an intermediate step. The main continues actionable work within the
 user's scope, or records a concrete blocker and the next action. Publication
 still requires the user's authority; a local result can be completed first.
 
+### Swap the main
+
 The `s` board key lists installed main targets and their weekly quota readings, then
-requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER
-[--model MODEL]` is the command form. It requires an existing tmux panel, one
-verified live main and an inactive landing operation. The current main is asked
-for a handoff of at most 3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300); if
-none arrives, OMS uses a recorded-state digest. Before asking the main to exit,
-OMS validates the target's durable owner/harness pair, prepares the replacement
-command and rechecks the current room, attempt and window ownership. OMS then exits the old main and
-relaunches the replacement in the same pane and room without stopping workers.
-If preparation or a recheck fails before the exit request, OMS removes that swap's
-handoff file so the preserved main can be swapped again.
-If the old main does not exit, the panel preserves it and the room claims.
-A current Pi main can be swapped without a resume binding: the replacement
-starts fresh. If replacement startup fails or ownership cannot be verified,
-OMS does not restore Pi; it reports no verified replacement main and retains
-the handoff file and room claims for recovery. `--model`
-selects an exact installed catalog model; swap has no dry-run and requires tmux.
+requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER [--model
+MODEL]` is the command form. It requires an existing tmux panel, one verified live main
+and an inactive landing operation. The current main is asked for a handoff of at most
+3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300);
+if none arrives, OMS uses a recorded-state digest. Before asking the main to exit, OMS
+validates the target's durable owner/harness pair, prepares the replacement command and
+rechecks the current room, attempt and window ownership.
+
+OMS then exits the old main and relaunches the replacement in the same pane and room
+without stopping workers. If preparation or a recheck fails before the exit request, OMS
+removes that swap's handoff file so the preserved main can be swapped again. If the old
+main does not exit, the panel preserves it and the room claims. A current Pi main can be
+swapped without a resume binding: the replacement starts fresh. If replacement startup
+fails or ownership cannot be verified, OMS does not restore Pi; it reports no verified
+replacement main and retains the handoff file and room claims for recovery.
+
+`--model` selects an exact installed catalog model; swap has no dry-run and requires
+tmux.
+
+#### Automatic quota swaps
 
 The main board also requests this swap automatically when its fresh weekly quota
 reading reaches 97%. Thresholds compare whole percentages as displayed: 97% for
@@ -103,16 +145,30 @@ postpones the swap if the main does not provide a handoff; at 100% it may use
 the recorded-state digest. It checks for an active land again before exit;
 neither a postponed handoff nor an active land starts the cooldown.
 
+### Installation deferral while workers are live
+
 Delegated workers and other panel calls also defer installation: `oms update`
 exits 76 while a worker marker proves its owner is live, or while a call is
-registered in the install checkout, the current checkout, or a checkout that
-`oms land` names (its repository, state root, receipt handoff and sync target).
-A symlinked or unreadable call registry also defers, and a malformed entry is
-named with how to clear it. `oms land` keeps successful push and CI evidence,
-records `update.reason: deferred-live-workers`, and prints a retry command. Under `--wait`, `oms land` rechecks the deferred installation every 15 seconds until the workers finish or `--sibling-wait` (default 1800 seconds) expires, so no manual retry is needed. Without `--wait`, the run does not recheck; rerun the printed retry command (which includes `--wait`) to resume installation. Auto-update records the deferral as skipped. This
+registered in the install checkout, current checkout, or a checkout named by
+`oms land` (its repository, state root, receipt handoff and sync target).
+A symlinked or unreadable call registry also defers; a malformed entry names how
+to clear it. `oms land` keeps successful push and CI evidence, records
+`update.reason: deferred-live-workers`, and prints a retry command. Under `--wait`, `oms
+land` rechecks the deferred installation every 15 seconds until the workers finish or
+`--sibling-wait` (default 1800 seconds) expires, so no manual retry is needed. Without
+`--wait`, the run does not recheck; rerun the printed retry command (which includes
+`--wait`) to resume installation. Auto-update records the deferral as skipped. This
 check does not detect a worker that starts after installation begins.
 
-The owner can correct an unleased ready or blocked task with `oms agent-plan amend --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA [--allowed "p1,p2"] [--verify CMD] --reason TEXT`. It records the old and new fields in task history and prints the new task SHA. Live workers and proposal-bound tasks prevent amendment; dependents keep their existing links.
+### Amend an unclaimed task
+
+The owner can correct an unleased ready or blocked task with `oms agent-plan amend --id
+ID --expected-plan-sha256 SHA --expected-task-sha256 SHA [--allowed "p1,p2"] [--verify
+CMD] --reason TEXT`. It records the old and new fields in task history and prints the
+new task SHA. Live workers and proposal-bound tasks prevent amendment; dependents keep
+their existing links.
+
+### Run a planned goal
 
 For a goal bounded by `PROJECT.md`, the main reads the user's request scope,
 `PROJECT.md` and its References before planning. It proposes bounded tasks with
@@ -122,42 +178,58 @@ shared-plan tasks and use the same lifecycle as every other plan task: claim a
 ready task in the confirmed `PROJECT.md` plan's order (dependencies first),
 dispatch it with `--task-id`, verify and inspect the work, integrate
 it with the required checks, run `oms agent-plan review` after acceptance, and
-record the owner result with `oms panel --finalize`. For one-step owner patch
-acceptance, `oms panel --accept TASK --repo PATH --message TEXT --verify
-COMMAND` admits and commits the reviewed patch and records the plan review;
-after a published landing, `oms panel --finalize --landed-commit SHA` binds the
-owner result to that accepted change. Acceptance treats a `--continue` chain as
-one candidate: its latest round supersedes earlier unadmitted rounds, and its
-patch still needs a matching passing review gate. Choose the role from the
-task's scope and source, rely on the automatic reviewer gate, and add a critic
-or security-auditor when the change warrants one. Use `oms agent-plan add` only
-for bounded gaps outside the reviewed proposal. Dependencies become ready
-automatically once every prerequisite is `done`: after an authorized land, use
-`oms agent-plan finish --id ID --landed-commit SHA`; after patch-land, use
-`finish` with its expected landing receipt. Eligible verified local research
-completion uses `oms agent-plan accept-main-research`. Owner `--finalize` records
-the result but does not itself mark the plan task done; the plan makes dependents
-ready automatically, so do not manually release them. `oms autopilot run`
-remains the headless workflow. When the user asks the panel main to complete a
-project, or this repository already has an autopilot contract, the main
-supervises that campaign instead of starting a competing panel plan driver: it
-checks autopilot status and the receipt before acting, reviews the exact
-proposal digest before running, and uses only `oms autopilot propose`, `run
---review-mode gate`, `status`, or validated receipt re-entry. It does not dispatch
-panel write workers for campaign tasks, release or reclaim them, reset cycle
-exhaustion, or override a parked receipt. Read-only reviewer, critic, or
-security-auditor judgment can inform proposals, parks, and final changes. Accept
-only after gated whole-change review and fresh acceptance. Without a campaign,
-ordinary panel plan execution above is unchanged. To start without a panel, run
-`oms autopilot propose`, review its exact proposal and digest, then run with
-`--review-mode gate` and `--expected-proposal-sha256`.
-An autopilot campaign runs from the main checkout on its own `oms/autopilot-*`
-work branch, the sole exception to the no-commit-in-shared-checkout rule; the
-main does not commit there itself, and publication still needs authority (Draft
-PR or `oms land` from that branch).
+record the owner result with `oms panel --finalize`.
+
+#### Acceptance and plan completion
+
+For one-step owner patch acceptance, `oms panel --accept TASK --repo PATH --message TEXT
+--verify COMMAND` admits and commits the reviewed patch and records the plan review;
+after a published landing, `oms panel --finalize --landed-commit SHA` binds the owner
+result to that accepted change. Acceptance treats a `--continue` chain as one candidate:
+its latest round supersedes earlier unadmitted rounds, and its patch still needs a
+matching passing review gate. Choose the role from the task's scope and source, rely on
+the automatic reviewer gate, and add a critic or security-auditor when the change
+warrants one.
+
+Use `oms agent-plan add` only for bounded gaps outside the reviewed proposal.
+Dependencies become ready automatically once every prerequisite is `done`: after an
+authorized land, use `oms agent-plan finish --id ID --landed-commit SHA`; after
+patch-land, use `finish` with its expected landing receipt. Eligible verified local
+research completion uses `oms agent-plan accept-main-research`. Owner `--finalize`
+records the result but does not itself mark the plan task done; the plan makes
+dependents ready automatically, so do not manually release them.
+
+`oms autopilot run` remains the headless workflow.
+
+#### Existing autopilot campaigns
+
+When the user asks the panel main to complete a project, or this repository already has
+an autopilot contract, the main supervises that campaign instead of starting a competing
+panel plan driver: it checks autopilot status and the receipt before acting, reviews the
+exact proposal digest before running, and uses only `oms autopilot propose`, `run
+--review-mode gate`, `status`, or validated receipt re-entry. It does not dispatch panel
+write workers for campaign tasks, release or reclaim them, reset cycle exhaustion, or
+override a parked receipt. Read-only reviewer, critic, or security-auditor judgment can
+inform proposals, parks, and final changes.
+
+Accept only after gated whole-change review and fresh acceptance. Without a campaign,
+ordinary panel plan execution above is unchanged. To start without a panel, run `oms
+autopilot propose`, review its exact proposal and digest, then run with `--review-mode
+gate` and `--expected-proposal-sha256`. An autopilot campaign runs from the main
+checkout on its own `oms/autopilot-*` work branch, the sole exception to the
+no-commit-in-shared-checkout rule; the main does not commit there itself, and
+publication still needs authority (Draft PR or `oms land` from that branch).
+
+
+#### Parked campaigns
+
 For a parked campaign, `oms autopilot status` puts the recorded phase, reason,
 semantic verdict and evidence path first, so a failed or incomplete review is
 not presented as a completed drive.
+
+
+
+### State and execution repositories
 
 Use the shared `OMS_ROOM_REPO` for plan and result records when editing elsewhere.
 For `--dispatch`, it selects the state repository for the room, main attempt,
@@ -168,16 +240,47 @@ of the worker's recorded base plus its digest-verified patch; both the complete 
 and mechanical gate use that candidate. Missing base objects, digest mismatches or
 patch-application failures require manual review; they never fall back to testing
 the unpatched source. The gate rejects candidate changes by the verifier.
-Automatic review uses routine for patches containing only `.md` or `.rst` files under `docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and `CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns also use deep (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins, hooks, install/uninstall, land and patch scripts, workflows, rules, permission/settings/policy files).
-Patch admission reports `security: ADVISE` with risk paths and auditor guidance, or `SKIP` when none are found; this advisory does not change the `ADMIT`/`REJECT` verdict.
-A write call with a digest-verified patch, no failed verify and no guard stop starts this review automatically when it exits 0. If the worker exits nonzero, the recorded call verifier must actually have run and passed; the worker failure remains visible and review does not imply acceptance. Timeout and signal exits do not start automatic review. The reviewer is told that a failed worker may have left a partial patch, and its completion hint requires owner judgment. The candidate patch must also apply for the review gate to run (`auto_review` in config/panel-routing.json, default true). It reuses the call's `--verify`, else the plan task's, and mails the main for manual review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints its command without launching it.
-Gate reviewers make a full pass over the scoped diff and report every evidenced
-blocking finding. A follow-up gate receives screened findings from the last
-completed failed gate's final provider attempt and checks whether each remains
-blocking. The carried findings are bounded to 3000 bytes; an omission notice
+
+
+#### Automatic patch review
+
+Automatic review uses routine for patches containing only `.md` or `.rst` files under
+`docs/` or top-level `README.md` and `CHANGELOG.md`, excluding `AGENTS.md` and
+`CLAUDE.md`; otherwise it uses deep. Unknown or unsafe paths and trust-boundary patterns
+also use deep (`_AUTO_REVIEW_FRONTIER_PATHS` in scripts/lib/panel_review.py: plugins,
+hooks, install/uninstall, land and patch scripts, workflows, rules,
+permission/settings/policy files). Patch admission reports `security: ADVISE` with risk
+paths and auditor guidance, or `SKIP` when none are found; this advisory does not change
+the `ADMIT`/`REJECT` verdict.
+
+
+#### Review triggers and findings
+
+A write call with a digest-verified patch, no failed verify and no guard stop starts
+this review automatically when it exits 0. If the worker exits nonzero, the recorded
+call verifier must actually have run and passed; the worker failure remains visible and
+review does not imply acceptance. Timeout and signal exits do not start automatic
+review. The reviewer is told that a failed worker may have left a partial patch, and its
+completion hint requires owner judgment. The candidate patch must also apply for the
+review gate to run (`auto_review` in config/panel-routing.json, default true).
+
+It reuses the call's `--verify`, else the plan task's, and mails the main for manual
+review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints
+its command without launching it. Gate reviewers make a full pass over the scoped diff
+and report every evidenced blocking finding. A follow-up gate receives screened findings
+from the last completed failed gate's final provider attempt and checks whether each
+remains blocking. The carried findings are bounded to 3000 bytes; an omission notice
 links the previous artifact when findings exceed that limit.
+
+
+#### Room selection
+
 `--room` selects a room without
 changing `OMS_ROOM_REPO`. With no `OMS_ROOM_REPO`, that room resolves in `--repo`.
+
+
+#### Owner result binding
+
 An owner result saved with `--finalize --outcome completed --verify COMMAND`
 binds to the current plan and task. Plan displays **completed locally** for a
 matching passing result, including one recorded outside a panel session, while
@@ -191,7 +294,11 @@ snapshot before writing.
 Historical results without the binding remain available in Results.
 `--outcome failed` asks for rework, so the task's review and blocked calls stay on
 the board; `--outcome rejected` withdraws the work and moves them to Past. A review
-whose task continues in a later `--continue` round also moves to Past. After an
+whose task continues in a later `--continue` round also moves to Past.
+
+#### Landing receipt handoff
+
+After an
 authorized landing in another worktree, `agent-plan finish --landed-commit SHA`
 can complete the shared task using its exact landing evidence. If the landing
 uses a separate clone, opt into `oms land --handoff-receipt-to PATH` with the
@@ -203,12 +310,18 @@ SHA may be an ancestor of a destination another main advanced. Omitting
 `--no-update` retains normal CI/install steps and exact-tip safety checks.
 Ordinary receipt lookup stays clone-local;
 see [receipt handoff](COMPONENTS.md#plans-and-bounded-autonomy).
+
+
+#### Refresh the shared checkout
+
 To refresh the shared checkout's scripts after a passed land and handoff, add
 `--sync-shared PATH` with an explicit checkout path. The separate refresh respects
 live-call locks and refuses dirty or diverged trees; deferred/refused sync is
 reported in land status without failing the passed land. Its companion sync
 receipt preserves the original handed-off landing bytes. Without this flag,
 handoff leaves the checkout untouched.
+
+### Start a main in an existing panel
 
 The board offers `[+ Claude main]`, `[+ Pi main]` and `[+ Codex main]` for installed harnesses
 when no main is active. A click, or `n` then `1` (Claude), `2` (Pi) or `0` (Codex), starts the
@@ -230,51 +343,59 @@ oms panel --repo . --launch pi --task 'short task'
 when any panel room has a live main. It permits a replacement after terminal evidence
 confirms the previous main ended. Unknown window/lifecycle state refuses replacement.
 
-Fresh Claude mains receive a panel-generated UUID via `--session-id`, retained as
-the attempt's `native_session` reference. Resumed Claude mains keep `--resume`
-and that reference, so restarting keeps the same room participant and unread mail.
-Resumed Claude mains pass `--system-prompt-snapshot off` so they rebuild their appended
-prompt instead of reusing the stored one; this needs Claude Code 2.1.257 or later.
-When supported by the installed Claude CLI, panel Claude mains also use `--autocompact 300000`.
-When supported, they pass `--disallowedTools=Agent` to route delegation through the panel.
-After `/clear`, restart and explicit resume follow the participant's current
-bound session; the original join boundary and mailbox remain intact.
-Codex starts with its existing flags; a recorded native session can be resumed.
-After a native main exits in its panel window, the chat pane shows
-`r resume/restart here · Enter close window`. Press `r` to relaunch in that pane,
-resuming its recorded session or starting fresh when no session is recorded.
-Restart does not resend the original `--task`, even when starting a fresh session.
-Fresh Codex restarts start a new session even after the previous session's first
-hook bound its room consumer; that binding is checked only when resuming a stored session.
-The previous attempt must be terminal, and startup rechecks the sole-main limit
-and resume ownership under the main-session lock. Another live main or unverified
-ownership refuses restart and returns to the prompt. Enter closes the whole
-window, including its board watcher, only while the attempt tag and repository
-still match and the native pane marker is unset; otherwise the window is preserved.
-Close pins the window id and rechecks the repository, attempt and native marker on the tmux
-server at deletion. Repository paths containing `#`, commas, colons, braces,
-backslashes or control characters preserve the window with a notice because they
-cannot be safely embedded in that guard.
-Failed ownership queries preserve the window. SIGTERM/SIGHUP
-at the prompt restore terminal modes before exiting with 143/129.
-Without a terminal, native launch retains its existing exit behavior.
+### Resume and restart
+
+Fresh Claude mains receive a panel-generated UUID via `--session-id`, retained as the
+attempt's `native_session` reference. Resumed Claude mains keep `--resume` and that
+reference, so restarting keeps the same room participant and unread mail. Resumed Claude
+mains pass `--system-prompt-snapshot off` so they rebuild their appended prompt instead
+of reusing the stored one; this needs Claude Code 2.1.257 or later. When supported by
+the installed Claude CLI, panel Claude mains also use `--autocompact 300000`. When
+supported, they pass `--disallowedTools=Agent` to route delegation through the panel.
+
+After `/clear`, restart and explicit resume follow the participant's current bound
+session; the original join boundary and mailbox remain intact. Codex starts with its
+existing flags; a recorded native session can be resumed. After a native main exits in
+its panel window, the chat pane shows `r resume/restart here · Enter close window`.
+Press `r` to relaunch in that pane, resuming its recorded session or starting fresh when
+no session is recorded. Restart does not resend the original `--task`, even when
+starting a fresh session. Fresh Codex restarts start a new session even after the
+previous session's first hook bound its room consumer; that binding is checked only when
+resuming a stored session.
+
+The previous attempt must be terminal, and startup rechecks the sole-main limit and
+resume ownership under the main-session lock. Another live main or unverified ownership
+refuses restart and returns to the prompt. Enter closes the whole window, including its
+board watcher, only while the attempt tag and repository still match and the native pane
+marker is unset; otherwise the window is preserved. Close pins the window id and
+rechecks the repository, attempt and native marker on the tmux server at deletion.
+Repository paths containing `#`, commas, colons, braces, backslashes or control
+characters preserve the window with a notice because they cannot be safely embedded in
+that guard.
+
+Failed ownership queries preserve the window. SIGTERM/SIGHUP at the prompt restore
+terminal modes before exiting with 143/129. Without a terminal, native launch retains
+its existing exit behavior.
 
 Panel owner fields and `--owner` for dispatch, finalize and review settlement accept
 `claude`, `codex`, `pi` and `antigravity`. The resolver records Claude and Codex under
-their own identities. Pi's default model and effort come from the Codex main preset;
-an explicit model in the full Codex catalog resolves to the gateway with owner `codex`.
-Any other exact Pi model resolves to direct transport with owner `pi`. The `agy`
-harness resolves to registry owner `antigravity`. Deep and frontier tiers also offer
-read-only Antigravity routes after native providers with known weekly quota.
+their own identities. Pi's default model and effort come from the Codex main preset; an
+explicit model in the full Codex catalog resolves to the gateway with owner `codex`. Any
+other exact Pi model resolves to direct transport with owner `pi`. The `agy` harness
+resolves to registry owner `antigravity`. Deep and frontier tiers also offer read-only
+Antigravity routes after native providers with known weekly quota.
+
 Reviewers, verifiers, security auditors and critics of Codex or Claude work take
-Antigravity first while it is installed, not in daily cooldown and below 90% of
-any recorded weekly quota; the judged provider stays last. Independent review
-of Pi or Antigravity uses the recorded main model's registry family; an unknown
-family cannot establish independence. Existing Pi rows with owner `codex` remain readable. Swap events and restart ownership validate the
-recorded owner/harness pair without consulting the current model cache; Pi permits
-recorded owners `codex` and `pi`, while `agy` uses `antigravity`. A default Pi swap
-retains the default gateway selection even when its cached catalog is empty.
-Registered native-adapter mains retain their registry identities for watchers,
+Antigravity first while it is installed, not in daily cooldown and below 90% of any
+recorded weekly quota; the judged provider stays last. Independent review of Pi or
+Antigravity uses the recorded main model's registry family; an unknown family cannot
+establish independence. Existing Pi rows with owner `codex` remain readable. Swap events
+and restart ownership validate the recorded owner/harness pair without consulting the
+current model cache; Pi permits recorded owners `codex` and `pi`, while `agy` uses
+`antigravity`.
+
+A default Pi swap retains the default gateway selection even when its cached catalog is
+empty. Registered native-adapter mains retain their registry identities for watchers,
 dispatch and council. Their registration fallback remains separate from worker tiers.
 
 Direct Pi and agy launch are deferred; this ownership phase enables their stored
@@ -346,20 +467,42 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | Shift-drag | Copy terminal selection in a managed panel | — |
 | Mouse click | Select a row/tab; graph calls and the main preview their cards | — |
 
-In the control menu, `d` (Drive goal) sends the shared plan goal to a Claude main as a Claude Code `/goal`, so the main keeps working across turns until a small model judges the condition met from the transcript. The panel shows the condition (the goal, `oms agent-plan accept` (which runs the stored acceptance command; omitted when the plan has none), and a stop clause for decisions, missing authority or hard blockers; at most 4000 characters), and nothing is sent until you press Enter, type replacement text, or cancel with `n`. A live Claude main receives `/goal ...` in its tmux pane after the same ownership checks as a swap, verified and typed under the swap's `panel-main-start` lock (a busy lock refuses with a retry line); with no main, a Claude main starts with it as its task. It refuses when the plan has no active goal or is finished, when the main is not Claude, or when the live main is not in a tmux panel; Codex `/goal` is not verified, so there is no fallback.
+In the control menu, `d` (Drive goal) sends the shared plan goal to a Claude main as a
+Claude Code `/goal`, so the main keeps working across turns until a small model judges
+the condition met from the transcript. The panel shows the condition (the goal, `oms
+agent-plan accept` (which runs the stored acceptance command; omitted when the plan has
+none), and a stop clause for decisions, missing authority or hard blockers; at most 4000
+characters), and nothing is sent until you press Enter, type replacement text, or cancel
+with `n`. A live Claude main receives `/goal ...` in its tmux pane after the same
+ownership checks as a swap, verified and typed under the swap's `panel-main-start` lock
+(a busy lock refuses with a retry line); with no main, a Claude main starts with it as
+its task. It refuses when the plan has no active goal or is finished, when the main is
+not Claude, or when the live main is not in a tmux panel; Codex `/goal` is not verified,
+so there is no fallback.
 
 At the native main's exit prompt, `r` resumes/restarts there and Enter closes the window. The terminal/job workspace has its own controls; this table covers only the board and result reader.
 
-A dispatched call settles only after its supervisor proves the whole process tree exited. On macOS and Windows, where that supervisor is unsupported, the call stays pending and the panel prints a manual-clear hint; independently stop every provider descendant before clearing its retained scope.
+A dispatched call settles only after its supervisor proves the whole process tree
+exited. On macOS and Windows, where that supervisor is unsupported, the call stays
+pending and the panel prints a manual-clear hint; independently stop every provider
+descendant before clearing its retained scope.
 
 
-`--host auto|inline|tmux|herdr` selects the terminal host independently of
-the activity view. Auto reuses an existing local POSIX Herdr pane; otherwise
-the existing layout selection applies. `--host inline` disables host automation;
-`--host tmux` explicitly selects split. Herdr requires the running pane's
-`HERDR_ENV`, `HERDR_PANE_ID` and owned `HERDR_SOCKET_PATH`. It is optional,
-never installed or started by OMS, and its Windows named-pipe transport is not
-implemented here. Ordinary Windows/inline OMS remains available.
+### Terminal hosts
+
+`--host` selects the terminal host independently of the activity view.
+
+| Host | Behavior | Needs |
+|---|---|---|
+| `auto` | Reuse an existing local POSIX Herdr pane; otherwise use layout selection. | Existing host environment |
+| `inline` | Disable host automation. | No terminal multiplexer |
+| `tmux` | Explicitly select split layout. | An already-installed tmux |
+| `herdr` | Use the current owned Herdr pane. | `HERDR_ENV`, `HERDR_PANE_ID`, owned `HERDR_SOCKET_PATH` |
+
+Herdr is optional: OMS never installs or starts it. Its Windows named-pipe
+transport is not implemented. Native Windows is unsupported; WSL2 uses the
+Linux host path.
+
 
 In a Herdr repository pane, the menu opens a fresh tab containing the native
 OMS launch wrapper and a task panel. It does not type into an existing
@@ -369,43 +512,49 @@ main ownership and exact pane/terminal/socket identity; reused panes and
 unproven sessions are rejected. Numeric footer readings retain their reported
 scope and unknown values. A socket error does not stop the native sibling.
 
+### Layout modes and resizing
+
 The board stays on the left in a landscape window; it moves above the CLI when the
-window is too narrow or physically tall (terminal cells are about twice as tall as
-wide, so rows × 2 ≥ 1.1 × columns, with at least 41 rows), and returns left when it
-is wide enough again (4 columns past the narrow limit and rows × 2 ≤ 0.9 × columns;
-between the two a window keeps its current edge) (28
-percent of the width or 45 percent of the height the first time, sized from the
-terminal that is attaching; optional integer `OMS_PANEL_BOARD_PERCENT` overrides the
-landscape default, clamped to 25–35 percent, with invalid values ignored). In Work
-mode, a landscape default or scaled record is capped at the smaller of 38 percent
-of the window and the width that leaves 120 columns for the CLI; the existing minimum
-split rules apply on narrower windows. A new landscape board stays unsplit when
-20 board columns, the divider and 40 CLI columns cannot fit; a portrait split needs
-20 rows on each side of the divider. A deliberate border drag remains in effect
-for that Work window and is recorded there. A call opened from the board shows in a
-reader pane above the CLI.
-Herdr uses the same left board, starting at the same 28 percent share and honoring
-`OMS_PANEL_BOARD_PERCENT`; the tall-window rule is tmux-only and Herdr's placement is unchanged. Later Herdr resizing is not recorded or shared;
-`SplitSync` synchronizes the board width or portrait height only in tmux.
-In tmux, each window records its board edge and size in its window option
-`@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older percent form is
-converted on first sight). Resizing recomputes the portrait/landscape edge with a
-small hysteresis band and scales the recorded size with the window, clamped to keep
-at least 20 cells for the board and chat. A flip moves the
-existing board pane without moving focus, preserving pane ids; dragging the border sets the size followed
-by later resizes. Press `m` on the board or `F8` in tmux to cycle Work, Overview and
-Focus. Overview gives the graph about 62 percent of the landscape width without
-changing the Work record. Focus zooms the CLI pane; leaving it unzooms and returning
-to Work restores its recorded width. SplitSync stays idle while Focus is zoomed and
-does not apply the Work record in Overview. Graph rendering falls back to the tree
-when the board is too narrow for the graph. The control window and other zoomed
-windows are left alone.
-A watcher whose OMS sources change re-executes itself once they compile, so
-updated boards need no manual restart; an open reader stays. Select `v` in the
-task panel to expand its graph; `Esc` or watcher shutdown collapses it. Native input and permission
-prompts stay in the original CLI. The room's detailed tree and graph remain
-available. A successfully exited native main is labelled `exited`, independently
-of a worker result, verifier or owner acceptance.
+window is too narrow or physically tall (terminal cells are about twice as tall as wide,
+so rows × 2 ≥ 1.1 × columns, with at least 41 rows), and returns left when it is wide
+enough again (4 columns past the narrow limit and rows × 2 ≤ 0.9 × columns; between the
+two a window keeps its current edge) (28 percent of the width or 45 percent of the
+height the first time, sized from the terminal that is attaching; optional integer
+`OMS_PANEL_BOARD_PERCENT` overrides the landscape default, clamped to 25–35 percent,
+with invalid values ignored).
+
+In Work mode, a landscape default or scaled record is capped at the smaller of 38
+percent of the window and the width that leaves 120 columns for the CLI; the existing
+minimum split rules apply on narrower windows. A new landscape board stays unsplit when
+20 board columns, the divider and 40 CLI columns cannot fit; a portrait split needs 20
+rows on each side of the divider. A deliberate border drag remains in effect for that
+Work window and is recorded there. A call opened from the board shows in a reader pane
+above the CLI. Herdr uses the same left board, starting at the same 28 percent share and
+honoring `OMS_PANEL_BOARD_PERCENT`; the tall-window rule is tmux-only and Herdr's
+placement is unchanged.
+
+Later Herdr resizing is not recorded or shared; `SplitSync` synchronizes the board width
+or portrait height only in tmux. In tmux, each window records its board edge and size in
+its window option `@oms_panel_split` (`left:<cells>c` or `top:<rows>r`; the older
+percent form is converted on first sight). Resizing recomputes the portrait/landscape
+edge with a small hysteresis band and scales the recorded size with the window, clamped
+to keep at least 20 cells for the board and chat. A flip moves the existing board pane
+without moving focus, preserving pane ids; dragging the border sets the size followed by
+later resizes.
+
+Press `m` on the board or `F8` in tmux to cycle Work, Overview and Focus. Overview gives
+the graph about 62 percent of the landscape width without changing the Work record.
+Focus zooms the CLI pane; leaving it unzooms and returning to Work restores its recorded
+width. SplitSync stays idle while Focus is zoomed and does not apply the Work record in
+Overview. Graph rendering falls back to the tree when the board is too narrow for the
+graph. The control window and other zoomed windows are left alone. A watcher whose OMS
+sources change re-executes itself once they compile, so updated boards need no manual
+restart; an open reader stays.
+
+Select `v` in the task panel to expand its graph; `Esc` or watcher shutdown collapses
+it. Native input and permission prompts stay in the original CLI. The room's detailed
+tree and graph remain available. A successfully exited native main is labelled `exited`,
+independently of a worker result, verifier or owner acceptance.
 
 The graph fits from 76 columns by 16 rows. Advisors/reviewers sit above their
 exact main, and its workers sit below, with activity moving on verified parent
@@ -427,35 +576,39 @@ the pinned usage line); call totals appear once and are not account quotas. A na
 usage line uses `W` for weekly quota left and `C` for main context used. Activity keeps
 main/role branches, wraps task titles, separates repository tasks, and closes
 the viewport border even while scrolling. Empty declared scopes are omitted.
-The control menu is an inbox. **Needs you** lists up to 12 items, newest first,
-each as glyph, who (`Sol 6.1 worker for Opus 5.5`), what and age: failed or
-timed-out calls with their title, calls or mains waiting for approval or input,
-unanswered room messages that a main sent to `all`, and finished write workers
-whose patch has no admission or landing record. Arrow keys or a click select a
-row; the wheel moves by lines and page keys by the visible item count, stopping
-at either end. Enter (or a click) opens that main's chat or shows the call's result,
-and Esc returns. An empty list says `Nothing needs you right now`; a room with no
-main shows `Press 1 (Claude) or 2 (Pi) to start the sole main`. The menu keeps
-start (`1` Claude, `2` Pi, `0` Codex, `3` Resume, `t` Task), `o` rooms, `9` refresh and
-quit/detach; board keys are not repeated. Enter `?` for all other actions in
-ordinary scrollable help (chats, results, views, advisor, review, council,
-finalize); existing shortcuts still work.
-Menu keys act at once, without Enter, on a POSIX terminal with raw input; the
-board's key handling is reused. Text prompts (a task title, a provider) stay
-line-based inside that prompt only. Elsewhere, such as Windows Git Bash or
-redirected input, the menu reads `oms> ` and needs key + Enter. The inbox
-refreshes every five seconds. The watcher retains its arrow, mouse and page-key
-navigation.
-In a managed tmux control pane the quit key is labelled `Detach`; it preserves
-the native sessions. In a coupled tmux board, `F9` swaps focus between the
-chat and the board and keeps both alive; `q` does nothing there, and Esc or `v`
-un-zoom the board only while it is zoomed.
-Standalone watchers retain `q` to exit. If a board was explicitly removed,
-`oms panel --reopen` restores it without restarting the native CLI. Repeating
-the operation preserves an existing board. Inside an OMS window, bare
-`oms panel` does the same; the control menu also provides `z` for this action.
-Restore accepts only this checkout's front door with a matching repository,
-refuses ambiguous/replaced input panes, and does not restart a terminated CLI.
+
+### Control menu and focus
+
+The control menu is an inbox. **Needs you** lists up to 12 items, newest first, each as
+glyph, who (`Sol 6.1 worker for Opus 5.5`), what and age: failed or timed-out calls with
+their title, calls or mains waiting for approval or input, unanswered room messages that
+a main sent to `all`, and finished write workers whose patch has no admission or landing
+record. Arrow keys or a click select a row; the wheel moves by lines and page keys by
+the visible item count, stopping at either end. Enter (or a click) opens that main's
+chat or shows the call's result, and Esc returns.
+
+An empty list says `Nothing needs you right now`; a room with no main shows `Press 1
+(Claude) or 2 (Pi) to start the sole main`. The menu keeps start (`1` Claude, `2` Pi,
+`0` Codex, `3` Resume, `t` Task), `o` rooms, `9` refresh and quit/detach; board keys are
+not repeated. Enter `?` for all other actions in ordinary scrollable help (chats,
+results, views, advisor, review, council, finalize); existing shortcuts still work. Menu
+keys act at once, without Enter, on a POSIX terminal with raw input; the board's key
+handling is reused. Text prompts (a task title, a provider) stay line-based inside that
+prompt only.
+
+Elsewhere, such as Windows Git Bash or redirected input, the menu reads `oms> ` and
+needs key + Enter. The inbox refreshes every five seconds. The watcher retains its
+arrow, mouse and page-key navigation. In a managed tmux control pane the quit key is
+labelled `Detach`; it preserves the native sessions. In a coupled tmux board, `F9` swaps
+focus between the chat and the board and keeps both alive; `q` does nothing there, and
+Esc or `v` un-zoom the board only while it is zoomed. Standalone watchers retain `q` to
+exit. If a board was explicitly removed, `oms panel --reopen` restores it without
+restarting the native CLI.
+
+Repeating the operation preserves an existing board. Inside an OMS window, bare `oms
+panel` does the same; the control menu also provides `z` for this action. Restore
+accepts only this checkout's front door with a matching repository, refuses
+ambiguous/replaced input panes, and does not restart a terminated CLI.
 
 Client detach retains the host's live processes. A Herdr server restart is
 different: bare vendor auto-restore is not an OMS resume and cannot prove
@@ -464,36 +617,57 @@ checks after its previous execution is confirmed terminal. An unknown shutdown
 remains blocked; pane IDs or a Herdr `done` badge cannot authorize takeover.
 This adapter does not change Herdr's global configuration or restore policy.
 
+
+
+### tmux sessions
+
 Outside Herdr, `auto` chooses split on POSIX when tmux is installed, including
 `--launch` and runs started inside another tmux session (the client switches to
 the panel instead of nesting); otherwise it uses inline. `--host inline` or
-`--layout inline` keeps a run in the current terminal. Each checkout has one OMS panel
+`--layout inline` keeps a run in the current terminal.
+
+#### Session identity
+
+Each checkout has one OMS panel
 session, `oms-<project>`: the checkout's directory name lowercased, runs of other
 characters turned into `-`, at most 32 characters (`project` when nothing is left). When that
 name is held by another checkout or by a session OMS did not create, the panel uses
 `oms-<project>-` plus the first 6 hex digits of the SHA-256 of the resolved path, and neither
 session is taken over. A live legacy `oms-panel-<12 hex>` session proven for the checkout stays in use
 under its name, because its processes carry that name; new panels use the new name. The first `split` creates it with a control window and records the
-checkout on the session. A new panel opened without `--launch` also opens one
+checkout on the session.
+
+#### Default main selection
+
+A new panel opened without `--launch` also opens one
 installed main (Claude, then Pi, then Codex) in its own window with a new room;
 `OMS_PANEL_MAIN=pi` selects Pi; an empty value opens no main, and an unknown value opens none with a stderr warning.
 Inline and Herdr without `--launch` instead open the control menu, preselecting nonempty
 `OMS_PANEL_HARNESS`, otherwise the new-panel main (the selected `OMS_PANEL_MAIN` name
 or first installed Claude/Pi/Codex), falling back to Claude. Press the selected harness's
 key (`1` Claude, `2` Pi, `0` Codex) to start it.
-Reattaching opens a main the same way only when the panel has no live main, under the same
-start guards; when none can open, the control view shows why (for example an empty
+
+
+#### Reattach and concurrent launches
+
+Reattaching opens a main the same way only when the panel has no live main, under the
+same start guards; when none can open, the control view shows why (for example an empty
 `OMS_PANEL_MAIN` or a missing CLI). A main window whose startup fails waits for Enter
-before closing, so its error stays readable. Later launches attach to it (or switch the current
-tmux client), and `--launch` adds a native window there instead of opening a
-second session. A session with that name recorded for another checkout is
-refused. A launch that loses a creation race, or arrives before a just-created
-session has recorded its checkout, waits up to two seconds and joins it; the
-owner marker is written after the session's room, so a joining launch follows
-that room. New mains default to the panel's recorded room while it is open and
-has participant/message headroom; otherwise, or when `--room` is given, the
-existing room rules apply. Rooms stay bounded and task-scoped; the panel
-outlives them. Separate tmux servers are separate scopes. Each native conversation gets
+before closing, so its error stays readable. Later launches attach to it (or switch the
+current tmux client), and `--launch` adds a native window there instead of opening a
+second session. A session with that name recorded for another checkout is refused. A
+launch that loses a creation race, or arrives before a just-created session has recorded
+its checkout, waits up to two seconds and joins it; the owner marker is written after
+the session's room, so a joining launch follows that room.
+
+New mains default to the panel's recorded room while it is open and has
+participant/message headroom; otherwise, or when `--room` is given, the existing room
+rules apply. Rooms stay bounded and task-scoped; the panel outlives them. Separate tmux
+servers are separate scopes.
+
+#### Refresh and key bindings
+
+Each native conversation gets
 its own sidebar with state refreshed every five seconds. Existing windows and tmux settings
 are preserved, with one addition: `F9` selects the other pane
 of the window, `F8` cycles layout modes, `F5` opens the control window and `F12` shows
@@ -501,79 +675,105 @@ the key list, all without the prefix (F10/F11 belong to terminal menus). tmux ke
 bindings are server-wide, so the binding acts only in sessions that carry the panel's `@oms_panel_repo` marker,
 passes the key through unchanged in every other session, and is not installed when the key is
 already bound by the user (a binding OMS installed earlier under the old session-name test is replaced). With default bindings, `Ctrl-b w` picks a window and `Ctrl-b d`
-detaches while work continues. Quit in the control pane also detaches. Failed
+detaches while work continues. Quit in the control pane also detaches.
+
+#### Failed construction and inline exit
+
+Failed
 construction rolls back only the new OMS session or added window. Inline returns to the menu
 when the native CLI exits and refreshes then; it has no permanent sidebar.
 
-The board has one MAIN card for its live main, with its team grouped into
-ADVISORS, REVIEWERS and WORKERS. Team counts and elapsed time appear with the
-main summary; call rows show state, model and task title. Calls remain attached
-to their recorded parent, and each row opens its reader. The repository control view shows `NEXT MAIN` as a one-line preset;
-that preset never fills missing model/effort fields in a recorded main.
-The native main card shows provider, requested model/effort and recorded task
-when supplied at launch. Missing fields remain unrecorded.
-Tasks entered later inside the native conversation are not intercepted:
-its main title stays unrecorded unless supplied at launch, while dispatched child
-titles are recorded. The palette uses warm Claude, blue Codex, teal workers and
-lavender advisors and reviewers. Role cards show lifecycle state,
-model, task title/ID, read/write authority, effort and location. Worktree locations
-use a relative unique suffix; repository calls show `repository`. Detached
-worker worktrees can be cleaned after completion; their locations remain history.
-Task titles have their own bright lines, wrapping to two lines in wide views
-and up to three in narrow sidebars. Main task titles wrap too. Internal task IDs
-stay in wide metadata rows or Details. Details gives bounded titles separate
-wrapped lines, so long titles need not compete with location and purpose.
-No absolute home paths or transcripts are added to panel metadata.
-Up to four background rows sit below the board: `Autopilot:` with the receipt's
-recorded stage and age, `Graph:` runs started within 24 hours (marked
-unconfirmed), `Queue:` tsp and fallback jobs whose enqueue recorded this
-project's physical checkout, and `Install pending:` with the short SHA and
-recorded reason while the newest land pushed but did not install. They are
-recorded evidence, not process liveness; a failing source drops only its row.
+### Activity and usage
 
-Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS /
-WORKERS, followed by each call and its task title. Main rows can show `? N open` questions and `cN%` context used. When room history contains earlier mains, they fold to their status rows automatically; the selected main and the main owning the selected call stay expanded. The control window renders the Needs you attention inbox; the main board carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
+The board has one MAIN card for its live main, with its team grouped into ADVISORS,
+REVIEWERS and WORKERS. Team counts and elapsed time appear with the main summary; call
+rows show state, model and task title. Calls remain attached to their recorded parent,
+and each row opens its reader. The repository control view shows `NEXT MAIN` as a
+one-line preset; that preset never fills missing model/effort fields in a recorded main.
+The native main card shows provider, requested model/effort and recorded task when
+supplied at launch. Missing fields remain unrecorded.
+
+Tasks entered later inside the native conversation are not intercepted: its main title
+stays unrecorded unless supplied at launch, while dispatched child titles are recorded.
+The palette uses warm Claude, blue Codex, teal workers and lavender advisors and
+reviewers. Role cards show lifecycle state, model, task title/ID, read/write authority,
+effort and location. Worktree locations use a relative unique suffix; repository calls
+show `repository`. Detached worker worktrees can be cleaned after completion; their
+locations remain history. Task titles have their own bright lines, wrapping to two lines
+in wide views and up to three in narrow sidebars.
+
+Main task titles wrap too. Internal task IDs stay in wide metadata rows or Details.
+Details gives bounded titles separate wrapped lines, so long titles need not compete
+with location and purpose. No absolute home paths or transcripts are added to panel
+metadata. Up to four background rows sit below the board: `Autopilot:` with the
+receipt's recorded stage and age, `Graph:` runs started within 24 hours (marked
+unconfirmed), `Queue:` tsp and fallback jobs whose enqueue recorded this project's
+physical checkout, and `Install pending:` with the short SHA and recorded reason while
+the newest land pushed but did not install.
+
+They are recorded evidence, not process liveness; a failing source drops only its row.
+
+Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS / WORKERS,
+followed by each call and its task title. Main rows can show `? N open` questions and
+`cN%` context used. When room history contains earlier mains, they fold to their status
+rows automatically; the selected main and the main owning the selected call stay
+expanded. The control window renders the Needs you attention inbox; the main board
+carries the MAIN card and its team counts. Legacy calls without explicit panel ownership
 remain unlinked; a generic attempt parent is never promoted into a native-main
 relationship. A linked owner whose metadata is unavailable is labelled so.
 
-Press `v` to toggle board expansion between the current overview and an expanded graph; `Esc` or closing the watcher collapses any expansion. In compact layouts, calls retain their model, state and task title. At 80 columns or wider, these share one row with metadata on the
-right; narrow views place metadata below the title. Detail expands wrapped
-titles and location/effort metadata. The view prioritizes attention calls and reports overflow when calls do not fit. Small panes use compact summaries. Press `b` to
-toggle attention-only: waiting input, waiting approval, blocked, review and
-orphaned calls, plus retained failed terminal outcomes. Filtered calls are
-counted rather than changing their states. Settled calls stay in the Past tab
-and are hidden from the board; attention-only empties the Past tab as well. Both controls affect presentation, not the main identity or
-dispatch authority. A native window inherits these
-settings when opened, and the control sidebar follows subsequent menu changes.
-CLI `--view` overrides a watch's window density; `--attention-only` keeps its
-filter enabled. These flags apply only to the menu or watch, not model operations.
+Press `v` to toggle board expansion between the current overview and an expanded graph;
+`Esc` or closing the watcher collapses any expansion. In compact layouts, calls retain
+their model, state and task title. At 80 columns or wider, these share one row with
+metadata on the right; narrow views place metadata below the title. Detail expands
+wrapped titles and location/effort metadata. The view prioritizes attention calls and
+reports overflow when calls do not fit. Small panes use compact summaries. Press `b` to
+toggle attention-only: waiting input, waiting approval, blocked, review and orphaned
+calls, plus retained failed terminal outcomes.
 
-The usage line has one `Claude` reading and one `Codex` reading. For each provider, the selected window's exact main attempt wins; otherwise the live, then newest, matching main is used. Claude reads its session HUD cache first, then the proven pane footer when the cache is absent/stale and to fill missing fields; Codex uses its native reading or proven pane footer. Missing readings show `--`. Claude's existing session HUD cache supplies reported context and optional
-`seven_day` usage, with a ten-minute TTL and expired reset values suppressed.
-The consumer hash selects that session's cache; no newest-session guess is
-made. A proven existing tmux pane can supply numeric fields from its last
-eight visible native footer lines. `TUI` or `HUD/TUI` labels those mirrored
-readings; native output may lag while idle and changed footer formats become
-unknown. The watcher performs no native transcript/registry scan or account
-request for these readings. Header collection runs once per five-second
-snapshot, never per animation frame. Ended mains have unknown current context.
+Filtered calls are counted rather than changing their states. Settled calls stay in the
+Past tab and are hidden from the board; attention-only empties the Past tab as well.
+Both controls affect presentation, not the main identity or dispatch authority. A native
+window inherits these settings when opened, and the control sidebar follows subsequent
+menu changes. CLI `--view` overrides a watch's window density; `--attention-only` keeps
+its filter enabled. These flags apply only to the menu or watch, not model operations.
 
-The separate `USAGE` area groups reported tokens by model using only the existing
-recent eight repository artifact records. It stays repository-wide when the
-activity view is scoped or filtered. A short wide pane uses a single usage
-strip; taller panes use a small card, with reported USD cost when height is at
-least 40 rows. `x` counts retained call records, not retries or native turns.
-`(sel)` identifies a selected model whose served identity was not reported;
-served identities and selected identities are separate groups. Mixed/fallback
-operations stay in `Mixed models`, and unknown models stay unknown. `?` means
-unreported; `+?` means a known subtotal plus unreported records, while a reported
-zero stays zero. Overflow reports omitted model groups. Owner results, review
-gate summaries and council syntheses are excluded, and lifecycle usage is not
-added again. These are provider-reported partial observations, not account
-totals or remaining quota; they do not supply the provider header. Provider token definitions can
-differ, particularly for cache input; no cross-model total is shown. The window
-can change or shrink as new artifact records arrive.
-`oms panel --metrics` reports retained owner decisions for write tasks by provider and model, counting a task once per model it touched and grouping attempts without a recorded model as `unknown`.
+The usage line has one `Claude` reading and one `Codex` reading. For each provider, the
+selected window's exact main attempt wins; otherwise the live, then newest, matching
+main is used. Claude reads its session HUD cache first, then the proven pane footer when
+the cache is absent/stale and to fill missing fields; Codex uses its native reading or
+proven pane footer. Missing readings show `--`. Claude's existing session HUD cache
+supplies reported context and optional `seven_day` usage, with a ten-minute TTL and
+expired reset values suppressed. The consumer hash selects that session's cache; no
+newest-session guess is made.
+
+A proven existing tmux pane can supply numeric fields from its last eight visible native
+footer lines. `TUI` or `HUD/TUI` labels those mirrored readings; native output may lag
+while idle and changed footer formats become unknown. The watcher performs no native
+transcript/registry scan or account request for these readings. Header collection runs
+once per five-second snapshot, never per animation frame. Ended mains have unknown
+current context.
+
+The separate `USAGE` area groups reported tokens by model using only the existing recent
+eight repository artifact records. It stays repository-wide when the activity view is
+scoped or filtered. A short wide pane uses a single usage strip; taller panes use a
+small card, with reported USD cost when height is at least 40 rows. `x` counts retained
+call records, not retries or native turns. `(sel)` identifies a selected model whose
+served identity was not reported; served identities and selected identities are separate
+groups. Mixed/fallback operations stay in `Mixed models`, and unknown models stay
+unknown.
+
+`?` means unreported; `+?` means a known subtotal plus unreported records, while a
+reported zero stays zero. Overflow reports omitted model groups. Owner results, review
+gate summaries and council syntheses are excluded, and lifecycle usage is not added
+again. These are provider-reported partial observations, not account totals or remaining
+quota; they do not supply the provider header. Provider token definitions can differ,
+particularly for cache input; no cross-model total is shown. The window can change or
+shrink as new artifact records arrive.
+
+`oms panel --metrics` reports retained owner decisions for write tasks by provider and
+model, counting a task once per model it touched and grouping attempts without a
+recorded model as `unknown`.
 
 Claude and Codex panel mains also receive advisory feedback while doing direct work.
 The `panel-direct-work-hook.sh` PostToolUse hook matches
@@ -622,23 +822,24 @@ the `--since` window. Claude and Codex share the same counter records. There is
 no transcript backfill. Antigravity currently wires only PreInvocation and Stop, with no
 certified post-tool equivalent.
 
-On a capable terminal the sidebar animates live-state indicators
-at four frames per second using the cached snapshot. Borders and role dividers
-stay still. Only changed
-rows are redrawn; resizing triggers a complete repaint. Starting, working,
-verifying and live-marker records can move; blocked/waiting/review and terminal
-states stay still. The motion means recorded activity, not token streaming,
-progress percentage or a new dispatch event. The native main's explicit child
-links determine the call tree. Rendering frames makes no state writes or model
-calls; state collection remains every five seconds, plus collection time.
-Interactive watch collects state and quota readings in one background read
-at a time. It keeps the last frame available for input while a read is pending,
-and applies completed reads within a 50 ms polling interval. Redirected or
-noninteractive watch retains synchronous snapshots and `--count` semantics.
-Snapshots that change the hit map discard stale coordinate clicks; navigation still validates
-the current room, participant and terminal before focusing it. A proven terminal
-destination does not require scanning unrelated native chat histories; app
-navigation and the full chat catalog keep their bounded identity lookup.
+On a capable terminal the sidebar animates live-state indicators at four frames per
+second using the cached snapshot. Borders and role dividers stay still. Only changed
+rows are redrawn; resizing triggers a complete repaint. Starting, working, verifying and
+live-marker records can move; blocked/waiting/review and terminal states stay still. The
+motion means recorded activity, not token streaming, progress percentage or a new
+dispatch event. The native main's explicit child links determine the call tree.
+Rendering frames makes no state writes or model calls; state collection remains every
+five seconds, plus collection time.
+
+Interactive watch collects state and quota readings in one background read at a time. It
+keeps the last frame available for input while a read is pending, and applies completed
+reads within a 50 ms polling interval. Redirected or noninteractive watch retains
+synchronous snapshots and `--count` semantics. Snapshots that change the hit map discard
+stale coordinate clicks; navigation still validates the current room, participant and
+terminal before focusing it. A proven terminal destination does not require scanning
+unrelated native chat histories; app navigation and the full chat catalog keep their
+bounded identity lookup.
+
 `--count` counts collected snapshots rather than animation frames.
 
 Use `oms panel --watch --no-animation` for a motion-free view, or set
@@ -678,22 +879,22 @@ reports a breakdown, so Claude and Codex compare. Unknown usage leaves the row
 cell blank; missing data is never shown as 0. Narrow panes keep the short form
 or drop it before clipping the call's name.
 
-A Claude main's own subagents (Agent tool and workflow runs) appear as
-read-only rows under it while their files were written in the last 10 minutes;
-they are not panel workers. The panel reads Claude's transcripts under
-`.claude/projects/<project>/<session>/subagents/`, matching the session by the
-room's stored hash, so no session id is kept. An Agent-tool row shows its
-transcript's input and output tokens (`2.0k in / 450 out`); a workflow row
-shows the summed tokens of the agent transcripts under its run directory and
-how many of them are live (`3/5 agents live · 100.0k+ in / 20.0k out`). Only
-the main this window shows has rows. Reads are bounded: only assistant records
-holding a usage object are parsed, one entry per message id; a refresh reads
-appended bytes (at most 8 MiB per transcript and 16 MiB per refresh, marked
-`+` until a large file is read through, and also while any agent or record
-of the total is unread or unreadable; a record over 256 KiB is read from its
-first and last bytes), a replaced transcript is read again, and a missing,
-torn or malformed file is skipped. A Codex or Pi main has no
-such rows.
+A Claude main's own subagents (Agent tool and workflow runs) appear as read-only rows
+under it while their files were written in the last 10 minutes; they are not panel
+workers. The panel reads Claude's transcripts under
+`.claude/projects/<project>/<session>/subagents/`, matching the session by the room's
+stored hash, so no session id is kept. An Agent-tool row shows its transcript's input
+and output tokens (`2.0k in / 450 out`); a workflow row shows the summed tokens of the
+agent transcripts under its run directory and how many of them are live (`3/5 agents
+live · 100.0k+ in / 20.0k out`).
+
+Only the main this window shows has rows. Reads are bounded: only assistant records
+holding a usage object are parsed, one entry per message id; a refresh reads appended
+bytes (at most 8 MiB per transcript and 16 MiB per refresh, marked `+` until a large
+file is read through, and also while any agent or record of the total is unread or
+unreadable; a record over 256 KiB is read from its first and last bytes), a replaced
+transcript is read again, and a missing, torn or malformed file is skipped. A Codex or
+Pi main has no such rows.
 
 | Menu action | Behavior |
 | --- | --- |
@@ -739,14 +940,44 @@ The launcher does not autonomously fan out before the main has a task.
 | Claude main (default) | `claude-opus-5-5` | high |
 | Codex main / gateway-backed Pi | `gpt-6.1-sol` (shown as Sol 6.1) | high |
 
-Set `OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1` for a dispatch to allow public-only routes in a private or unverified repository; otherwise these routes require a GitHub origin verified public. Visibility for a normalized GitHub origin is checked with `gh` on every routing decision; only a not-public answer is cached, for 10 minutes, in the state repository at `.oms/panel-state/public-route-visibility.json`, so a repository made private never keeps free routes; rejected origins are not cached and filtering prints nothing. An explicit `--to pi --model ...` bypasses the `public_only` check entirely.
+Set `OMS_PANEL_PUBLIC_ROUTE_OPT_IN=1` for a dispatch to allow public-only routes in a
+private or unverified repository; otherwise these routes require a GitHub origin
+verified public. Visibility for a normalized GitHub origin is checked with `gh` on every
+routing decision; only a not-public answer is cached, for 10 minutes, in the state
+repository at `.oms/panel-state/public-route-visibility.json`, so a repository made
+private never keeps free routes; rejected origins are not cached and filtering prints
+nothing. An explicit `--to pi --model ...` bypasses the `public_only` check entirely.
 
-Routing is provider-neutral within the configured light, routine, deep and frontier capability tiers. It filters to installed providers and removes candidates reporting at least 90% weekly usage when multiple providers are available; a sole installed provider remains eligible regardless of usage. With readings for all remaining candidates, more weekly quota left goes first; when any reading is missing, routing spreads work away from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as tied. A tie goes to the provider with fewer dispatches in this room, then to the one that is not the main's; configured tier order settles what remains. Weekly quota comes from the provider's available local reading; Codex uses `rate_limits` records in its local CLI session logs. Missing, stale or malformed readings stay unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than the reviewed patch's writer (an automatic review whose patch links to one write attempt) or else the main's, when one remains. Researchers are pinned to the light tier at low effort. Only security-auditor defaults to frontier; other roles use deep or below. An explicit `--workload frontier` remains available. Role defaults are shown below. A write session can continue across write-capable roles with `--continue`; judges use fresh context.
+Routing is provider-neutral within the configured light, routine, deep and frontier
+capability tiers. It filters to installed providers and removes candidates reporting at
+least 90% weekly usage when multiple providers are available; a sole installed provider
+remains eligible regardless of usage. With readings for all remaining candidates, more
+weekly quota left goes first; when any reading is missing, routing spreads work away
+from the main's provider. Readings less than 15 points apart (`tie_band.gap`) count as
+tied. A tie goes to the provider with fewer dispatches in this room, then to the one
+that is not the main's; configured tier order settles what remains.
 
-On a Linux host where `kernel.apparmor_restrict_unprivileged_userns` is 1 (the probe `oms doctor` warns about), Codex's `workspace-write` sandbox (bwrap) cannot start. Write-access routing then skips Codex, takes the next tier entry and records a `route_reason` naming the restriction; an explicit `--to codex` write call fails before any provider call with a one-line message. Read-only Codex seats are not gated: the source shows no evidence that they need the same namespace, so that stays unverified.
+Weekly quota comes from the provider's available local reading; Codex uses `rate_limits`
+records in its local CLI session logs. Missing, stale or malformed readings stay
+unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than
+the reviewed patch's writer (an automatic review whose patch links to one write attempt)
+or else the main's, when one remains. Researchers are pinned to the light tier at low
+effort. Only security-auditor defaults to frontier; other roles use deep or below. An
+explicit `--workload frontier` remains available.
 
+Role defaults are shown below. A write session can continue across write-capable roles
+with `--continue`; judges use fresh context.
+
+On a Linux host where `kernel.apparmor_restrict_unprivileged_userns` is 1 (the probe
+`oms doctor` warns about), Codex's `workspace-write` sandbox (bwrap) cannot start.
+Write-access routing then skips Codex, takes the next tier entry and records a
+`route_reason` naming the restriction; an explicit `--to codex` write call fails before
+any provider call with a one-line message. Read-only Codex seats are not gated: the
+source shows no evidence that they need the same namespace, so that stays unverified.
 
 ### Provider accounts
+
+#### Register and remove accounts
 
 Register another entitled Codex account with:
 
@@ -754,24 +985,23 @@ Register another entitled Codex account with:
 oms connect-services --codex-account credits --first
 ```
 
-The command creates `~/.codex-credits` with mode 0700. Use `--home PATH` for
-another location; relative paths are resolved physically from the current
-directory. The home must differ from the main Codex home and be outside Git
-repositories.
-If your home directory is versioned, use `--home PATH` outside that repository.
-Existing account homes must belong to the current user and must not be writable
-by the group or other users. Every ancestor through the filesystem root must be
-owned by the current user or root. An ancestor writable by the group or other
-users must have the sticky bit. Refusals name the offending directory and
-`--home PATH` elsewhere as a fix; the command never changes
-existing permissions automatically. Registration requires verifiable ownership,
-so native Windows Python, which cannot report file owners, refuses it.
-The main home is the parent environment's `CODEX_HOME`, or
-`~/.codex`. The new home links `AGENTS.md`, `config.toml`, `hooks.json`,
-`.hook-trust`, `plugins`, `rules`, and `skills` to the matching main-home entries.
-Re-running keeps matching links and existing files. Conflicting links are
-reported; `--repair` replaces only those links. Missing main-home entries leave
-dangling links, reported by `oms doctor`.
+The command creates `~/.codex-credits` with mode 0700. Use `--home PATH` for another
+location; relative paths are resolved physically from the current directory. The home
+must differ from the main Codex home and be outside Git repositories. If your home
+directory is versioned, use `--home PATH` outside that repository. Existing account
+homes must belong to the current user and must not be writable by the group or other
+users. Every ancestor through the filesystem root must be owned by the current user or
+root. An ancestor writable by the group or other users must have the sticky bit.
+
+Refusals name the offending directory and `--home PATH` elsewhere as a fix; the command
+never changes existing permissions automatically. Registration requires verifiable
+ownership, so native Windows Python, which cannot report file owners, refuses it. The
+main home is the parent environment's `CODEX_HOME`, or `~/.codex`. The new home links
+`AGENTS.md`, `config.toml`, `hooks.json`, `.hook-trust`, `plugins`, `rules`, and
+`skills` to the matching main-home entries. Re-running keeps matching links and existing
+files. Conflicting links are reported; `--repair` replaces only those links.
+
+Missing main-home entries leave dangling links, reported by `oms doctor`.
 
 When `auth.json` is absent, registration succeeds with `registered, login pending`
 and prints the exact interactive command `CODEX_HOME=<home> codex login`, quoting
@@ -790,43 +1020,43 @@ changes it. To unregister and remove only links created by this command:
 oms connect-services --codex-account credits --remove
 ```
 
-The home, login, model cache, sessions, private files, and pre-existing links
-remain. A private `codex-account-links.json` ownership receipt beside the
-registry records each home's `st_dev` and `st_ino`, plus link targets before
-creation, including interrupted work. Removal and `--repair` open and verify the
-directory without following a symlink, then check each link through that directory
-handle. Changes to the directory identity, entry type, or target keep the entry
-and produce a warning. Moved or recreated homes and older receipts without an
-identity cannot authorize link removal. On platforms lacking directory-relative
-unlink or `O_NOFOLLOW`, entries stay with `skipped: platform lacks safe unlink`.
-An explicit `--remove` retires stale receipts for missing or replaced homes,
-keeps their links, and prints the exact registration command with `--home`.
-Re-registering that ID at the same path then succeeds when the home is safe;
-existing matching links remain unowned by the command. Cleanup updates receipts
-per entry, retaining only remaining recorded links for a later `--remove`.
-Removed, absent, or changed entries lose their recorded authority; matching
-links subsequently created at those names remain untouched by later cleanup.
-Authority is retired before unlink. A kill between those steps can leave an
-unrecorded shared link that stays in place on subsequent cleanup.
-Uninstall also removes recorded links still pointing to main-home or OMS-managed
-targets. It preserves account homes and logins.
-Uninstall ends its account cleanup with counts of removed links, kept links by
-reason, and kept receipt rows; the account registry is always kept. Kept-link
-counts include changed or unmanaged entries and recorded links whose directory
-identity, safety, target or unlink checks prevented removal. `--dry-run` prints
-the projected summary without changing account state. When links or receipt rows
-stay, recovery guidance names `oms connect-services --codex-account ID --remove`
-or `oms connect-services --codex-account ID --repair`; replace `ID` with the
-account to unregister or repair.
-Registry and receipt writes use
-atomic replacement under one shared writer lock; an interrupted operation can
-leave partial links or an older registry, and is safe to rerun. `oms doctor`
-reports each registered home's presence, safety of its complete ancestor chain,
-shared-link resolution, and existence
+The home, login, model cache, sessions, private files, and pre-existing links remain. A
+private `codex-account-links.json` ownership receipt beside the registry records each
+home's `st_dev` and `st_ino`, plus link targets before creation, including interrupted
+work. Removal and `--repair` open and verify the directory without following a symlink,
+then check each link through that directory handle. Changes to the directory identity,
+entry type, or target keep the entry and produce a warning. Moved or recreated homes and
+older receipts without an identity cannot authorize link removal.
+
+On platforms lacking directory-relative unlink or `O_NOFOLLOW`, entries stay with
+`skipped: platform lacks safe unlink`. An explicit `--remove` retires stale receipts for
+missing or replaced homes, keeps their links, and prints the exact registration command
+with `--home`. Re-registering that ID at the same path then succeeds when the home is
+safe; existing matching links remain unowned by the command. Cleanup updates receipts
+per entry, retaining only remaining recorded links for a later `--remove`. Removed,
+absent, or changed entries lose their recorded authority; matching links subsequently
+created at those names remain untouched by later cleanup.
+
+Authority is retired before unlink. A kill between those steps can leave an unrecorded
+shared link that stays in place on subsequent cleanup. Uninstall also removes recorded
+links still pointing to main-home or OMS-managed targets. It preserves account homes and
+logins. Uninstall ends its account cleanup with counts of removed links, kept links by
+reason, and kept receipt rows; the account registry is always kept. Kept-link counts
+include changed or unmanaged entries and recorded links whose directory identity,
+safety, target or unlink checks prevented removal.
+
+`--dry-run` prints the projected summary without changing account state. When links or
+receipt rows stay, recovery guidance names `oms connect-services --codex-account ID
+--remove` or `oms connect-services --codex-account ID --repair`; replace `ID` with the
+account to unregister or repair. Registry and receipt writes use atomic replacement
+under one shared writer lock; an interrupted operation can leave partial links or an
+older registry, and is safe to rerun. `oms doctor` reports each registered home's
+presence, safety of its complete ancestor chain, shared-link resolution, and existence
 of `auth.json` and `models_cache.json`; these account checks only warn.
-Missing registered homes and receipt homes absent from the registry (even when
-the registry itself is absent) warn with the same remove/repair guidance. Doctor
-leaves homes, links, login state, registry entries and receipt rows unchanged.
+
+Missing registered homes and receipt homes absent from the registry (even when the
+registry itself is absent) warn with the same remove/repair guidance. Doctor leaves
+homes, links, login state, registry entries and receipt rows unchanged.
 
 Provider accounts are stored machine-wide in
 `${XDG_CONFIG_HOME:-~/.config}/oh-my-setting/provider-accounts.json`.
@@ -837,43 +1067,60 @@ and its resolved absolute `home`. It preserves other providers and unknown
 fields, refusing malformed state without rewriting it. Routing's existing
 validation still rejects unsupported providers and unknown fields.
 
-Provider names must occur in the routing policy. Only Codex accounts are enabled;
-Claude and Pi entries are rejected with `accounts for PROVIDER are not supported yet`.
-The home-variable table in `scripts/lib/provider_accounts.py` maps Codex to
-`CODEX_HOME`; Claude's `CLAUDE_CONFIG_DIR` and Pi's `PI_CODING_AGENT_DIR` remain
-disabled until independent CLI homes are verified. Account entries have only
-`id` and `home` fields. Unknown keys, duplicate IDs or physical homes (including
-across providers), malformed configuration and non-absolute homes are errors.
-IDs use 1–64 lowercase letters, digits, underscores or hyphens, beginning with a
-letter or digit. Invalid configuration excludes Codex from tier selection while
-other providers remain available. A missing or unavailable directory is reported
-per account and that account is skipped. Panel collection retains both provider
-rows and shows configuration/home errors on the Codex usage line through
-`accounts_error`; account readings and individual errors are under `accounts`.
-Where `os.getuid` is available, the resolved home must belong to the current user
-and must not be group/other-writable. Use mode `0700`, or remove group/other write
-bits with `chmod go-w`; ownership errors require restoring ownership or choosing
-a user-owned home. Directory existence is still checked on other platforms.
-Routing, launch and pinned continuation all recheck this validator, so a
-permission change after selection is refused before the launch anchor.
+Provider names must occur in the routing policy. Only Codex accounts are enabled; Claude
+and Pi entries are rejected with `accounts for PROVIDER are not supported yet`. The
+home-variable table in `scripts/lib/provider_accounts.py` maps Codex to `CODEX_HOME`;
+Claude's `CLAUDE_CONFIG_DIR` and Pi's `PI_CODING_AGENT_DIR` remain disabled until
+independent CLI homes are verified. Account entries have only `id` and `home` fields.
+Unknown keys, duplicate IDs or physical homes (including across providers), malformed
+configuration and non-absolute homes are errors.
 
-Per-provider policy defaults to `ordered`. Both `ordered` and `spread` rank
-eligible accounts by measured weekly quota usage ascending (most quota left
-first), placing unknown readings after measured readings. A reading counts as
-measured only when its own recorded event timestamp (`observed_at` from
-`account_readings`, not session-log file `mtime`) is within
-`ACCOUNT_READING_FRESH_SECONDS` and its reset time has not passed; stale,
-missing or malformed readings are treated as unknown and remain eligible.
-`ordered` breaks equal or unknown quota ties by registry configuration order
-(and uses registry order when all readings are unknown).
-Each account is ineligible at 90% weekly usage during tier selection, including
-when Codex is the sole provider; missing, stale or malformed readings remain
-eligible. Codex remains a candidate while any account can serve the requested
-model. Only model slugs are read from each home's `models_cache.json` (at most
-4 MiB): a readable list omitting the requested model excludes that account and
-appears in `account_reason`. Missing, unreadable or malformed caches leave support
-unknown and eligible. Routing inspects no other home files beyond the existing
-bounded session-log reader.
+IDs use 1–64 lowercase letters, digits, underscores or hyphens, beginning with a letter
+or digit. Invalid configuration excludes Codex from tier selection while other providers
+remain available. A missing or unavailable directory is reported per account and that
+account is skipped. Panel collection retains both provider rows and shows
+configuration/home errors on the Codex usage line through `accounts_error`; account
+readings and individual errors are under `accounts`. Where `os.getuid` is available, the
+resolved home must belong to the current user and must not be group/other-writable.
+
+Use mode `0700`, or remove group/other write bits with `chmod go-w`; ownership errors
+require restoring ownership or choosing a user-owned home. Directory existence is still
+checked on other platforms. Routing, launch and pinned continuation all recheck this
+validator, so a permission change after selection is refused before the launch anchor.
+
+#### Account selection
+
+Both policies rank fresh measured weekly quota usage ascending, with unknown
+readings after measured ones. Accounts at 90% weekly usage are ineligible during
+tier selection; missing, stale or malformed readings remain eligible.
+
+| Policy | Equal-quota or unknown-quota tie break |
+|---|---|
+| `ordered` (default) | Registry configuration order |
+| `spread` | Fewer live OMS workers for that provider/account in this repository, then registry order |
+
+`spread` is best-effort: simultaneous decisions can choose the same account,
+and workers in other repositories are outside its count.
+
+<details>
+<summary>Quota freshness, model availability, headless routes and account bindings</summary>
+
+Per-provider policy defaults to `ordered`. Both `ordered` and `spread` rank eligible
+accounts by measured weekly quota usage ascending (most quota left first), placing
+unknown readings after measured readings. A reading counts as measured only when its own
+recorded event timestamp (`observed_at` from `account_readings`, not session-log file
+`mtime`) is within `ACCOUNT_READING_FRESH_SECONDS` and its reset time has not passed;
+stale, missing or malformed readings are treated as unknown and remain eligible.
+`ordered` breaks equal or unknown quota ties by registry configuration order (and uses
+registry order when all readings are unknown).
+
+Each account is ineligible at 90% weekly usage during tier selection, including when
+Codex is the sole provider; missing, stale or malformed readings remain eligible. Codex
+remains a candidate while any account can serve the requested model. Only model slugs
+are read from each home's `models_cache.json` (at most 4 MiB): a readable list omitting
+the requested model excludes that account and appears in `account_reason`. Missing,
+unreadable or malformed caches leave support unknown and eligible. Routing inspects no
+other home files beyond the existing bounded session-log reader.
 
 `spread` uses the same measured-quota-first, unknown-after-known order, but
 breaks equal or unknown quota ties by fewer live OMS workers for that
@@ -884,6 +1131,9 @@ there is no reservation store, so same-instant decisions can select the same
 account before either worker appears in the records. Other projects share the
 configuration but their workers are outside this repository's count.
 
+
+##### Route metadata
+
 Runtime routes carry `account` and `account_reason`. The route line includes
 `codex account=credits (runs under its own home) / MODEL / EFFORT / ACCESS`.
 The private dispatch launch anchor retains that decision under `route` without
@@ -893,20 +1143,26 @@ when applying the home to the child's environment. With no configuration file
 and display behavior is unchanged; the implicit default home is `CODEX_HOME` or
 `~/.codex`. Account fields remain invalid in `config/panel-routing.json`.
 
+
+##### Headless calls
+
 Headless Codex calls through peer review, peer ask, consult/advise, agent-call,
-delegation and autonomy workers share this account policy at the common runner.
-Explicit Codex targets (`--to codex` on direct calls/delegation, `--providers`
-on peer ask/review, or `--model`)
-follow the panel's rule: select from eligible accounts in the same
-measured-quota-first, registry-tie-break order,
-falling back to the caller's home if none qualifies. Implicit/tier routes keep
-the configured ordered/spread policy and require an eligible account.
-Automatic consult and advise selections use that implicit policy and may try
-the next peer after a failed call; explicit provider choices retain caller-home fallback.
-A direct `--resume-session ID` without a panel account decision keeps the caller's
-home and selects nothing. A malformed account registry emits one warning with
-the configuration error and runs under the caller's home; panel dispatch still
-validates its own registry and refuses invalid configuration.
+delegation and autonomy workers share this account policy at the common runner. Explicit
+Codex targets (`--to codex` on direct calls/delegation, `--providers` on peer
+ask/review, or `--model`) follow the panel's rule: select from eligible accounts in the
+same measured-quota-first, registry-tie-break order, falling back to the caller's home
+if none qualifies. Implicit/tier routes keep the configured ordered/spread policy and
+require an eligible account. Automatic consult and advise selections use that implicit
+policy and may try the next peer after a failed call; explicit provider choices retain
+caller-home fallback.
+
+A direct `--resume-session ID` without a panel account decision keeps the caller's home
+and selects nothing. A malformed account registry emits one warning with the
+configuration error and runs under the caller's home; panel dispatch still validates its
+own registry and refuses invalid configuration.
+
+##### Applied account identity
+
 An explicit `CODEX_HOME` differing from the main `~/.codex` home takes precedence.
 Panel dispatch marks its route with internal `OMS_CODEX_ACCOUNT_ROUTE` so the
 runner preserves that decision, including unbound legacy continuations, without
@@ -918,40 +1174,55 @@ Applied accounts appear as `account` and `account_applied: true` in the existing
 the caller's current home. Provider-default calls have no model pin, so model
 cache filtering applies only when a model is specified.
 
-At launch, the selected id is resolved again and its directory is rechecked. Only
-the Codex child's `CODEX_HOME` changes; the caller and independently routed calls
-keep their own environment. OMS never reads or transfers account credentials.
-`--continue TASK` reuses the previous write attempt's account when resuming its
-native Codex session. A removed account or missing home refuses native resume
-with the id and recovery instructions: re-register the account, or continue on a
-non-Codex provider using `--to PROVIDER --model MODEL` or a `--workload TIER`
-routed to another provider for a fresh worker. Switching to another provider
-uses the existing summary handoff without the old account.
-Attempts without a recorded account, including implicit default-home selections,
-retain the current home. Selection-only anchors without `account_applied: true`
-and missing or invalid anchors also continue without an account binding under
-the current home. Implicit selections are not recorded as an account in
-new launch anchors. A recorded Codex capacity/usage-limit failure can overflow
-once to the next eligible account in quota order across all remaining configured
-accounts serving the same model (not only accounts listed after the failed one),
-provided the failed worker left the
-worktree unchanged. Both launch anchors retain their respective account ids.
-Account overflow is capacity-only; the tier provider fallback remains available
-for provider-down/model-unavailable failures and after the overflow account fails.
-Each fallback is bounded to one use. Policy refusals and verification failures
-never trigger account overflow or provider fallback. The home is rechecked
-before publishing the launch anchor.
-When a primary applies an account home, provider fallback runs as a separate call
-with the parent-derived environment: `CODEX_HOME` returns to the parent's value
-or is absent if the parent left it unset. This also applies after account
-overflow. Once child exit is confirmed, the controller records the withheld
-in-delegate decision as `panel_fallback_decision: deferred` through the existing
-lifecycle metadata writer.
-The workspace balance is the upstream hard spending limit; v1 has no OMS money
-cap or strict-cap ledger. Registering an account shares the main home's existing
-OMS setup; it does not install a separate OMS copy.
+</details>
 
-Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly reading, so the configured preference stays first, and its exact model is checked against a populated local catalog. A recorded Pi provider failure can fall back once to an eligible tier candidate, provided a write leaves the worktree unchanged; policy refusals and verification failures do not trigger fallback. An OpenRouter free-model daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only trigger the one-time fallback. Judge tier allocation also permits Antigravity on deep and frontier; an explicit `--to` may select another provider.
+#### Continuation and fallback
+
+At launch, the selected id is resolved again and its directory is rechecked. Only the
+Codex child's `CODEX_HOME` changes; the caller and independently routed calls keep their
+own environment. OMS never reads or transfers account credentials. `--continue TASK`
+reuses the previous write attempt's account when resuming its native Codex session. A
+removed account or missing home refuses native resume with the id and recovery
+instructions: re-register the account, or continue on a non-Codex provider using `--to
+PROVIDER --model MODEL` or a `--workload TIER` routed to another provider for a fresh
+worker.
+
+Switching to another provider uses the existing summary handoff without the old account.
+Attempts without a recorded account, including implicit default-home selections, retain
+the current home. Selection-only anchors without `account_applied: true` and missing or
+invalid anchors also continue without an account binding under the current home.
+Implicit selections are not recorded as an account in new launch anchors. A recorded
+Codex capacity/usage-limit failure can overflow once to the next eligible account in
+quota order across all remaining configured accounts serving the same model (not only
+accounts listed after the failed one), provided the failed worker left the worktree
+unchanged.
+
+Both launch anchors retain their respective account ids. Account overflow is
+capacity-only; the tier provider fallback remains available for
+provider-down/model-unavailable failures and after the overflow account fails. Each
+fallback is bounded to one use. Policy refusals and verification failures never trigger
+account overflow or provider fallback. The home is rechecked before publishing the
+launch anchor. When a primary applies an account home, provider fallback runs as a
+separate call with the parent-derived environment: `CODEX_HOME` returns to the parent's
+value or is absent if the parent left it unset.
+
+This also applies after account overflow. Once child exit is confirmed, the controller
+records the withheld in-delegate decision as `panel_fallback_decision: deferred` through
+the existing lifecycle metadata writer. The workspace balance is the upstream hard
+spending limit; v1 has no OMS money cap or strict-cap ledger. Registering an account
+shares the main home's existing OMS setup; it does not install a separate OMS copy.
+
+### Dispatch roles and tiers
+
+Routine work tries Pi with `openrouter/thinkingmachines/inkling:free` at medium effort
+first, then the eligible Claude Sonnet and Codex Terra candidates; Pi has no weekly
+reading, so the configured preference stays first, and its exact model is checked
+against a populated local catalog. A recorded Pi provider failure can fall back once to
+an eligible tier candidate, provided a write leaves the worktree unchanged; policy
+refusals and verification failures do not trigger fallback. An OpenRouter free-model
+daily-cap failure cools the exact Pi route until 00:00 UTC; ordinary rate limits only
+trigger the one-time fallback. Judge tier allocation also permits Antigravity on deep
+and frontier; an explicit `--to` may select another provider.
 
 | Tier | Configured model candidates (effort) |
 | --- | --- |
@@ -1010,7 +1281,50 @@ warning changes neither command nor plan claims; write dispatch still requires
 a scoped brief and a verifier.
 
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
-`--reasoning-effort` overrides one dispatch's effort. Panel dispatches with `--verify` and patch-admit (including patch-land admission) default to a 20m verify timeout; the `oms peer-review --gate` verify also defaults to 20m; other standalone peer commands default to 10m. Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must be positive finite durations up to 24h; zero, malformed and larger values are refused before the command runs on both native and Python timeout backends. An empty value keeps the caller's default, and fractional durations remain valid. A write attempt keeps its heartbeat while verification runs, then stops it within about two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a passing verify resumes only that exact block (same attempt, sequence and reason, checked under the ledger lock) to review. Operator blocks, cancellation, timeout and failed verification keep their outcome. The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`, `OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping `OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level verdict without recording into the live room. Use `--to` and `--model` only when a specific provider is explicitly required; `--model` requires `--to`, and an exact route does not silently fall back. Codex and Claude tier routes use the configured model as a floor and pin the newest catalog version in that same provider family by numeric version (an omitted minor version counts as zero). Pi and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported effort flag. Availability comes from installed/cached provider data; no paid model probe runs, and a chosen model failure does not substitute an older or more expensive family. `--workload` cannot be combined with explicit `--to`. Independence ordering applies to reviewer, verifier, security-auditor and critic when multiple providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
+`--reasoning-effort` overrides one dispatch's effort.
+
+#### Verification budgets
+
+| Verification path | Default timeout |
+|---|---|
+| Panel `--verify`, patch-admit and patch-land admission | 20m |
+| `oms peer-review --gate` | 20m |
+| Other standalone peer commands | 10m |
+
+Set `OMS_PEER_VERIFY_TIMEOUT` in the environment to override it. Verifier budgets must
+be positive finite durations up to 24h; zero, malformed and larger values are refused
+before the command runs on both native and Python timeout backends. An empty value keeps
+the caller's default, and fractional durations remain valid.
+
+#### Heartbeats during verification
+
+A write attempt keeps its heartbeat while verification runs, then stops it within about
+two seconds; if reconciliation left that attempt blocked as `heartbeat_expired`, a
+passing verify resumes only that exact block (same attempt, sequence and reason, checked
+under the ledger lock) to review. Operator blocks, cancellation, timeout and failed
+verification keep their outcome.
+
+#### Verifier environment
+
+The verify command runs without the worker's `OMS_PANEL_*`, `OMS_ROOM_*`, `OMS_MODEL_*`,
+`OMS_REASONING_*`, `OMS_INDEX_*` and state/attempt/lease variables, while keeping
+`OMS_HARNESS_*` as the recursion guard; nested suites therefore reach the top-level
+verdict without recording into the live room.
+
+#### Explicit routes and model selection
+
+Use `--to` and `--model` only when a specific provider is explicitly required; `--model`
+requires `--to`, and an exact route does not silently fall back. Codex and Claude tier
+routes use the configured model as a floor and pin the newest catalog version in that
+same provider family by numeric version (an omitted minor version counts as zero). Pi
+and OpenCode tier routes keep exact `provider/model` IDs; OpenCode omits the unsupported
+effort flag. Availability comes from installed/cached provider data; no paid model probe
+runs, and a chosen model failure does not substitute an older or more expensive family.
+`--workload` cannot be combined with explicit `--to`.
+
+#### Role records and owner detection
+
+Independence ordering applies to reviewer, verifier, security-auditor and critic when multiple providers remain available. Their records keep the board kinds `worker`, `researcher` (researcher, scholar),
 `advisor` (advisor, architect, critic) and `reviewer` (reviewer, verifier,
 security-auditor) in `panel_role`; the strategy is generally the recorded purpose
 (plain workers record explain/investigate/implement, and scholar records research).
@@ -1020,6 +1334,9 @@ these kinds and the write-capable roles. Dispatch and council owner defaults use
 `OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
 Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
 
+
+#### Main workflow and briefs
+
 [The panel policy](../config/panel-routing.json) is separate from generic OMS
 provider defaults. An explicit native `--model` override preserves native effort
 settings. Advisor (which direction?), architect (how to structure?) and critic
@@ -1028,42 +1345,48 @@ to call them together. A missing provider or unsupported model fails that route
 without silently selecting another model.
 
 A panel main acts as the control tower: its bootstrap delegates implementation,
-investigation and test repair to bounded workers by default and keeps scope,
-briefs, integration, review, patch admission and coordination.
-Claude, Codex and Pi share the compact main contract with their durable `--owner`
-value; provider launch details and the appended room identity remain separate.
-The contract retains authority, delegation, admission, review, finalization and
-recovery invariants.
-Command walkthroughs live in the `oms-agent-harness`
-[panel main command reference](../custom-skills/oms-agent-harness/references/delegation-artifacts.md#panel-main-command-reference),
-[roles](../custom-skills/oms-agent-harness/references/roles.md) and
-[model routing](../custom-skills/oms-agent-harness/references/model-routing.md).
+investigation and test repair to bounded workers by default and keeps scope, briefs,
+integration, review, patch admission and coordination. Claude, Codex and Pi share the
+compact main contract with their durable `--owner` value; provider launch details and
+the appended room identity remain separate. The contract retains authority, delegation,
+admission, review, finalization and recovery invariants. Command walkthroughs live in
+the `oms-agent-harness` [panel main command
+reference](../custom-skills/oms-agent-harness/references/delegation-artifacts.md#panel-main-command-reference),
+[roles](../custom-skills/oms-agent-harness/references/roles.md) and [model
+routing](../custom-skills/oms-agent-harness/references/model-routing.md).
+
 Reference pointers use the absolute bundled directory resolved from the `oms`
-entrypoint, so they also work without the skill installed.
-The native integration regression caps the UTF-8 bootstrap at 6,250 bytes with
-fixed repository/entrypoint/reference labels (6,077 bytes, formerly 12,549);
-room instructions and provider launch labels are measured separately.
-Wait on each dispatched call separately, with one notification per call; review,
-admit or re-dispatch it as soon as it finishes, never batch-wait for a wave.
-Start the next ready plan task or follow-up round in the same turn; a new write
-dispatch is refused while your results awaiting review exceed the backlog
-threshold. Send remaining review findings to a worker with `--continue`.
-Edit directly for admitted-patch integration or conflict resolution, when the
-cause is known, the change is local (one or two files) and a brief costs more
-than the edit, or after a worker failed the same bounded task twice. Delegate
-investigation, larger multi-file or parallelisable work, long verification, and trust
-boundary changes (authentication, permissions, secrets, install, deletion,
-hooks). Direct edits use the same review gate (oms peer-review --gate --verify)
-and the same landing path as worker patches.
-Serialize shared release bookkeeping (changelog, version, manifest, inventory
-files) outside parallel worker briefs: the main writes it once per landing
-batch during integration, or assigns one documenter for the batch.
-For experiments the main authorizes launches, since paid compute needs the user's authority; builders
-write run scripts and configs, a worker with `--purpose investigate`
-reports finished outputs (`oms job-digest` condenses a
-training or Slurm log), and the main waits on jobs with one background wait or
-notification, not repeated polls. Outside the panel, the global rule still requires an
-explicit request before spawning subagents.
+entrypoint, so they also work without the skill installed. The native integration
+regression caps the UTF-8 bootstrap at 6,250 bytes with fixed
+repository/entrypoint/reference labels (6,077 bytes, formerly 12,549); room instructions
+and provider launch labels are measured separately.
+
+#### Process results as they arrive
+
+Wait on each dispatched call separately, with one notification per call; review, admit
+or re-dispatch it as soon as it finishes, never batch-wait for a wave. Start the next
+ready plan task or follow-up round in the same turn; a new write dispatch is refused
+while your results awaiting review exceed the backlog threshold. Send remaining review
+findings to a worker with `--continue`. Edit directly for admitted-patch integration or
+conflict resolution, when the cause is known, the change is local (one or two files) and
+a brief costs more than the edit, or after a worker failed the same bounded task twice.
+
+Delegate investigation, larger multi-file or parallelisable work, long verification, and
+trust boundary changes (authentication, permissions, secrets, install, deletion, hooks).
+Direct edits use the same review gate (oms peer-review --gate --verify) and the same
+landing path as worker patches. Serialize shared release bookkeeping (changelog,
+version, manifest, inventory files) outside parallel worker briefs: the main writes it
+once per landing batch during integration, or assigns one documenter for the batch. For
+experiments the main authorizes launches, since paid compute needs the user's authority;
+builders write run scripts and configs, a worker with `--purpose investigate` reports
+finished outputs (`oms job-digest` condenses a training or Slurm log), and the main
+waits on jobs with one background wait or notification, not repeated polls.
+
+Outside the panel, the global rule still requires an explicit request before spawning
+subagents.
+
+
+#### Land from an isolated worktree
 
 The sole panel main also lands its own work. `oms scratch-worktree add` starts a detached
 worktree; create a local, nontracking task branch there with
@@ -1077,6 +1400,9 @@ Worker guard stop diagnostics identify the snapshot, path and kind that caused
 the stop. The worker guard treats `oms/*` branches and harness worktrees belonging to
 mains in other sessions as soft, and `oms room scope` warns about overlapping files before the work
 starts.
+
+
+#### Write authority
 
 Task complexity and write authority are independent. A write role needs a
 scoped brief file and mechanical verifier. Read workers
@@ -1105,6 +1431,9 @@ oms panel --repo . --room team --dispatch advisor --owner claude --main opus-mai
   --prompt 'Advise on the parser plan.'
 ```
 
+
+#### Carry findings into a dispatch
+
 `oms panel --dispatch ROLE --task-id T --brief-file F` or `--continue` appends
 up to five newest settled read-only findings for T from each artifact's
 Output section, with repo-relative references; repeat `--from-task ID` to carry
@@ -1112,8 +1441,17 @@ findings from other tasks into the same brief; `--dry-run` appends none. A carri
 block that the outbound scan flags, or that holds a machine path, is replaced by
 an omission line naming its artifact, so reviewer text never blocks the dispatch.
 
-From the control window, a dispatch belongs to the room's active main of that
-provider. `--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); a room with multiple live mains refuses every dispatch until the others are released with `oms panel --release-main` or the swap is finished. A native main always dispatches as itself.
+
+#### Bind the dispatch to its main
+
+From the control window, a dispatch belongs to the room's active main of that provider.
+`--main PARTICIPANT` asserts that caller's identity (the board's `a` uses it); a room
+with multiple live mains refuses every dispatch until the others are released with `oms
+panel --release-main` or the swap is finished. A native main always dispatches as
+itself.
+
+
+#### Shared-plan task transitions
 
 A `--task-id` that names a shared-plan task moves it for the calling main: a
 write dispatch claims and starts a ready task (a read-only one leaves it ready), a claimed one is started, and later workers
@@ -1127,38 +1465,45 @@ task ID with `oms agent-plan claim --id ID --provider PROVIDER` and
 `oms panel --dispatch ROLE --owner PROVIDER --task-id ID` hints when one exists.
 These hints leave claiming and dispatch to the main.
 
-Continue reviewed work with `--continue TASK_ID`: `oms panel --repo . --dispatch refactorer --owner claude
---continue TASK_ID --access write --brief-file next.md --verify COMMAND` takes the same role,
-workload and access checks; any write-capable role may continue (a builder session can
-become a refactorer), while reviewer, verifier, security-auditor, critic and the other
-read-only roles never resume. The short form `oms panel --repo . --owner claude
---continue TASK_ID --brief-file next.md` takes the role, `--access write`, workload, every
-`--scope` and `--verify` from the task's newest recorded write dispatch in this main's
-lineage; any flag you pass overrides its recorded value, except that `--scope` adds to the
-inherited scope (a plan-bound dispatch's declared scope also covers the plan task's allowed
-paths). A recorded explicit model also inherits its provider and model; a recorded explicit
-reasoning effort is inherited independently. Historical records without these markers keep tier
-selection. `--workload` forces tier selection instead of inheriting the model. Stderr identifies
-an inherited route and its attempt; an inherited model is an explicit target and does not fall
-back to another provider. A task with no recoverable
-write dispatch is refused with a message to pass `--dispatch ROLE`. It finds the latest worker of that task owned by this
-main, and starts a new run in a new worktree at the current HEAD that resumes
-the worker's native session (recorded as `refs.native_session` in the attempt,
-never in room text). A continuation transfers native conversation history only when
-that provider session is still available. Files and the old worktree never transfer.
-Only an exact exit-zero result contributes its verified patch inline, plus a bounded
-recorded summary for a fresh session. Stderr names what actually transferred.
-An oversized patch refuses continuation instead of pointing at artifacts absent
-from the new worktree. Inspect and admit that patch in the owner checkout first,
-or include a bounded recovery in a fresh dispatch brief.
-Stopped writes with a recorded worktree must first go through
-`oms panel --salvage TASK_ID --attempt ATTEMPT_ID`; inspect the recovery and include
-the recovered work in a fresh dispatch brief. A timed-out write result card advises
-salvage first; a timed-out read keeps the `--continue` hint. Salvage of an attempt
-with nothing to recover reports `nothing_to_recover` and exits 0.
-A continued implementation needs `--access write` (the default is read-only); later rounds of one task show "round N". Unless the
-environment sets them, write calls get a 40m wall (60m at high effort) and any
-call with `--verify` gets a 20m verify wall, enough for the repository smoke suites.
+#### Continue a write task
+
+Continue reviewed work with `--continue TASK_ID`: `oms panel --repo . --dispatch
+refactorer --owner claude --continue TASK_ID --access write --brief-file next.md
+--verify COMMAND` takes the same role, workload and access checks; any write-capable
+role may continue (a builder session can become a refactorer), while reviewer, verifier,
+security-auditor, critic and the other read-only roles never resume. The short form `oms
+panel --repo . --owner claude --continue TASK_ID --brief-file next.md` takes the role,
+`--access write`, workload, every `--scope` and `--verify` from the task's newest
+recorded write dispatch in this main's lineage; any flag you pass overrides its recorded
+value, except that `--scope` adds to the inherited scope (a plan-bound dispatch's
+declared scope also covers the plan task's allowed paths).
+
+A recorded explicit model also inherits its provider and model; a recorded explicit
+reasoning effort is inherited independently. Historical records without these markers
+keep tier selection. `--workload` forces tier selection instead of inheriting the model.
+Stderr identifies an inherited route and its attempt; an inherited model is an explicit
+target and does not fall back to another provider. A task with no recoverable write
+dispatch is refused with a message to pass `--dispatch ROLE`. It finds the latest worker
+of that task owned by this main, and starts a new run in a new worktree at the current
+HEAD that resumes the worker's native session (recorded as `refs.native_session` in the
+attempt, never in room text).
+
+A continuation transfers native conversation history only when that provider session is
+still available. Files and the old worktree never transfer. Only an exact exit-zero
+result contributes its verified patch inline, plus a bounded recorded summary for a
+fresh session. Stderr names what actually transferred. An oversized patch refuses
+continuation instead of pointing at artifacts absent from the new worktree. Inspect and
+admit that patch in the owner checkout first, or include a bounded recovery in a fresh
+dispatch brief. Stopped writes with a recorded worktree must first go through `oms panel
+--salvage TASK_ID --attempt ATTEMPT_ID`; inspect the recovery and include the recovered
+work in a fresh dispatch brief.
+
+A timed-out write result card advises salvage first; a timed-out read keeps the
+`--continue` hint. Salvage of an attempt with nothing to recover reports
+`nothing_to_recover` and exits 0. A continued implementation needs `--access write` (the
+default is read-only); later rounds of one task show "round N". Unless the environment
+sets them, write calls get a 40m wall (60m at high effort) and any call with `--verify`
+gets a 20m verify wall, enough for the repository smoke suites.
 
 Give each dispatched subtask a descriptive task ID and short `--label`; reuse
 the exact reviewed plan task ID where one exists. Labels are optional for direct
@@ -1185,12 +1530,40 @@ ID`. `--dry-run` prints the chosen route and argv without running a model.
 
 ## Discussion and results
 
-The council uses the existing `peer-ask` debate, thread, artifact and lifecycle
-front doors. Omitted `--task-id` and `--label` are derived from the prompt and reported on stderr; dry-run JSON includes both values. `--workload routine` selects the routine pair (Sonnet, Terra); the default
-`deep` adds the deep pair (Opus, Sol), while `frontier` combines the deep pair with
-the frontier pair (Fable, Astra). Seats come from the `tiers` routes and `council.extra` in `config/panel-routing.json`: routine uses the routine tier plus the extra Antigravity seat, deep uses the deep and routine tiers plus Antigravity, and frontier uses the deep and frontier tiers plus Antigravity, so every workload seats all three provider families (`claude`, `codex`, and `antigravity`). One rebuttal round
-means six primary calls for routine (three seats) and ten for deep or frontier (five seats); two rounds
-mean nine for routine and exceed the 12-primary-call budget for five-seat deep or frontier councils. Its configured Gemini ID selects a name and
+### Council workloads
+
+The council uses read-only seats. The owner decides the outcome.
+
+| Workload | Routes | Seats | Primary calls with one rebuttal |
+|---|---|---|---|
+| `routine` | Routine pair + Antigravity | 3 | 6 |
+| `deep` (default) | Routine and deep pairs + Antigravity | 5 | 10 |
+| `frontier` | Deep and frontier pairs + Antigravity | 5 | 10 |
+
+- Two rebuttal rounds use 9 primary calls for `routine`; `deep` and `frontier`
+  exceed the 12-primary-call budget.
+- **The budget counts primary calls.** Format repair can add one call per primary
+  call. `--dry-run` reports both counts without running a model.
+- Missing required families or unavailable routes refuse the council before
+  dispatch. `OMS_COUNCIL_ALLOW_PARTIAL=1` is the explicit partial-seat opt-out.
+
+<details>
+<summary>Exact routes, model catalog selection, family requirements and output contracts</summary>
+
+The council uses the existing `peer-ask` debate, thread, artifact and lifecycle front
+doors. Omitted `--task-id` and `--label` are derived from the prompt and reported on
+stderr; dry-run JSON includes both values. `--workload routine` selects the routine pair
+(Sonnet, Terra); the default `deep` adds the deep pair (Opus, Sol), while `frontier`
+combines the deep pair with the frontier pair (Fable, Astra). Seats come from the
+`tiers` routes and `council.extra` in `config/panel-routing.json`: routine uses the
+routine tier plus the extra Antigravity seat, deep uses the deep and routine tiers plus
+Antigravity, and frontier uses the deep and frontier tiers plus Antigravity, so every
+workload seats all three provider families (`claude`, `codex`, and `antigravity`). One
+rebuttal round means six primary calls for routine (three seats) and ten for deep or
+frontier (five seats); two rounds mean nine for routine and exceed the 12-primary-call
+budget for five-seat deep or frontier councils.
+
+Its configured Gemini ID selects a name and
 level (for example, `gemini-4-argon-high` selects `argon-high`); council routing
 pins the newest numeric generation of that family in the provider's routable
 catalog, excluding models shown as not routed by `oms models`. Codex and Claude
@@ -1199,28 +1572,46 @@ name is absent, routing may select the newest generation of another Gemini name
 at the same level only when exactly one name is routable there. An installed
 Codex or Claude CLI with an empty catalog retains the configured model: Claude
 Code cannot enumerate models, and Codex may not have refreshed its catalog yet.
-Installation and catalog lookup checks still apply to every seat. When `codex`, `claude`, or `antigravity` cannot seat (not installed, catalog lookup failed, model absent, or the 12-call budget would be exceeded), the council refuses before any provider call or started-council record, exiting nonzero with one line naming the missing family and the reason (unless `OMS_COUNCIL_ALLOW_PARTIAL=1` is set as an explicit opt-out for hosts that cannot run a provider, which keeps the skip-and-continue behavior). The council summary shows the resolved model. Format repair can add one call per
+
+
+Installation and catalog lookup checks still apply to every seat. When `codex`,
+`claude`, or `antigravity` cannot seat (not installed, catalog lookup failed, model
+absent, or the 12-call budget would be exceeded), the council refuses before any
+provider call or started-council record, exiting nonzero with one line naming the
+missing family and the reason (unless `OMS_COUNCIL_ALLOW_PARTIAL=1` is set as an
+explicit opt-out for hosts that cannot run a provider, which keeps the skip-and-continue
+behavior). The council summary shows the resolved model.
+
+Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every
 required seat must complete to report council success; failed seats remain
 visible and the owner still decides the outcome. All seats are read-only. There
 is no model fallback after a seat launches or additional synthesis-model call.
 
-For blind lens reviews, add `--lenses correctness,security,compatibility` to
-`oms panel --council`. Each unique comma-separated name of 1..32 characters
-matching `[a-z0-9-]+` gets one seat; 2..12 seats are required. Assignments cycle over the exact
-routes selected by `--workload`, with the first pass covering all three provider families before repeating a family, and
-are frozen before dispatch. With at least three lenses, each family gets at least one lens; two-lens reviews still require two independent families.
-Lens mode defaults to `--rounds 0` and rejects every other round count: there
+</details>
+
+### Blind lens reviews
+
+For blind lens reviews, add `--lenses correctness,security,compatibility` to `oms panel
+--council`. Each unique comma-separated name of 1..32 characters matching `[a-z0-9-]+`
+gets one seat; 2..12 seats are required. Assignments cycle over the exact routes
+selected by `--workload`, with the first pass covering all three provider families
+before repeating a family, and are frozen before dispatch. With at least three lenses,
+each family gets at least one lens; two-lens reviews still require two independent
+families. Lens mode defaults to `--rounds 0` and rejects every other round count: there
 are no rebuttals, but every opening still requires the deliberation evidence,
-alternatives, counterargument and verification sections. Each run uses a fresh
-thread; `--thread ID` supplies its prefix. Seat IDs, lenses and targets identify
-prompts, artifacts, repairs and thread turns even when targets repeat.
-Failure history stays keyed by the provider target; summaries retain the seat
-and lens labels so later calls can warn about failures and clear them on recovery.
-Synthesis remains local and labels every seat, including failures and answers
-omitted by the existing byte budget. Without `--lenses`, the council keeps its
-ordinary routes, thread behavior and one-round default. `--rounds` requires
-`--council`, including an explicit `--rounds 1`.
+alternatives, counterargument and verification sections.
+
+Each run uses a fresh thread; `--thread ID` supplies its prefix. Seat IDs, lenses and
+targets identify prompts, artifacts, repairs and thread turns even when targets repeat.
+Failure history stays keyed by the provider target; summaries retain the seat and lens
+labels so later calls can warn about failures and clear them on recovery. Synthesis
+remains local and labels every seat, including failures and answers omitted by the
+existing byte budget. Without `--lenses`, the council keeps its ordinary routes, thread
+behavior and one-round default. `--rounds` requires `--council`, including an explicit
+`--rounds 1`.
+
+### Dock and message navigation
 
 The board's bottom is one box whose top edge is a tab strip: Log, Detail, Plan,
 Messages, Past and Attention, which stay even when empty, plus Debate while a debate exists. The selected tab is bracketed; a `•` after Debate marks a
@@ -1233,16 +1624,50 @@ On supported ordinary layouts (80x40, 157x60 and 126x90), its bounds stay fixed
 as calls come and go. Physically short terminals adapt the readable body, strip,
 or tree fallback to available space. The tabs stay clickable when only the strip fits.
 
-Messages shows up to 200 retained messages, with sender, recipient, unread state and message kind. Left/Right cycles the filters in this order: needs you, by call, all, then this call when a call is selected. To/from me is offered only when the room has multiple recorded mains. Up/Down selects; Enter expands a message, and a second Enter on an expanded row or `f` opens its associated call in the right reader. Reading does not acknowledge messages. The unread badge and message tags count pending messages for live readers; complete projections are exact and truncated projections show a lower bound with `+`.
+#### Messages
+
+Messages shows up to 200 retained matching messages, oldest first. Each row
+shows local time (and date on another day), sender and recipient by board main
+name, unread state, and question/answer/handoff/status kind.
+
+| Key | Action |
+|---|---|
+| Left / Right | Cycle `needs you` → `all` → `this call` → `to/from me`. |
+| Up / Down | Select a message. |
+| Enter or click | Expand or collapse its full wrapped text. |
+| `f` | Open the associated call in the right reader; show a notice when none exists. |
+
+- `this call` appears only when a non-main participant is selected.
+- `to/from me` appears only with multiple recorded mains and an identified main
+  for this window.
+- **Reading never acknowledges a message.** Unread badges and tags count pending
+  messages for live readers. Complete projections are exact; truncated counts
+  are lower bounds marked with `+`.
+
+The full log is read in the background and reread only when the room's message
+counts change.
+
+
+
+
+#### Detail and Past
 
 Detail is the selected call's persistent, reserved reader; it remains present
 when dismissed or when there is no selection. Past lists every settled call of the room's mains
 and of calls with no known main, newest first, one row each (role and model, task, how it ended,
 end time). Up/Down pick a row; Enter or a click shows it in Detail exactly as a board card would,
-and `f` opens its full result on the right. Plan shows the shared repository plan:
+and `f` opens its full result on the right.
+
+#### Plan
+
+Plan shows the shared repository plan:
 the goal, then one row per task (state glyph, id, title, claimant by the board's
 main name or provider, verify command) ordered verified, review, running or
-claimed, ready, blocked. Debate shows the shown main's debates, newest first
+claimed, ready, blocked.
+
+#### Debate
+
+Debate shows the shown main's debates, newest first
 (Left/Right cycles when there are several): title with the opener's board name
 and local time, seats answered and round, the question (at most three lines),
 one line per seat with its VERDICT or first Answer sentence (sentences end only
@@ -1256,39 +1681,37 @@ was retained, the tab shows a truncation notice and the recorded source artifact
 path. Esc returns, and `f` opens the full recorded result reader. Evidence is
 read in the background.
 
-Messages lists the room's last 200 messages, oldest first, one row each with
-local time (date when from another day), sender and recipient by the board's
-main names, an `unread` mark while a recipient has not consumed it, and the
-question/answer/handoff/status kind. Left/Right cycles the filter (all,
-to/from the selected main, to/from this window's main), Up/Down selects, Enter
-or a click expands the message in place to its full wrapped text and again
-collapses it. Reading never acknowledges a message; the full log is read in the
-background and re-read only when the room's message counts change.
 
-The owning main records a result through `--finalize`. Native process exit and
-worker completion never create accepted results by themselves. `completed`
-records an owner summary; `accepted` additionally requires a passing explicit
-`--verify` and matching landed patch evidence for every recorded write worker of that task and every write worker
-without a task ID under the finalizing native main; workers assigned to other
-tasks are checked when their own task is accepted. A plan-bound patch retains its
-exact plan lineage; a standalone patch matches its successful landing by digest.
-Without `--evidence`, accepted records the one digest-verified admission report
-of each landed patch, and refuses when that report is missing or ambiguous.
-If a digest-matching landing patch still applies cleanly to the verifier checkout, `accepted` refuses before verification; finalize with `--repo WORKTREE` containing the landing, or after landing and syncing.
-Verifier output stays local. Evidence references bind repository-relative files
-of at most 1 MiB each to SHA-256. The summary is
-bounded to 8 KiB, rejects sensitive-looking text and private absolute paths,
-and is cleaned of terminal controls. New result revisions are immutable artifacts
-registered in the existing artifact index, rather than a second task database.
-For each landed write patch, `accepted` also requires a passing automatic review
-gate. Before any side effect, `--finalize` waits up to 120 seconds for live
-review read passes on the same execution checkout; if they remain, it exits 75,
-so retry later. If review is missing or ends without a verdict, finalize `completed` (not
-`accepted`) and explain why in the summary. Finalization checks the full lifecycle
-projection, independently of the display
-window. Missing retained patch or landing evidence refuses acceptance. A failed,
-abandoned or rejected write worker under the same main also refuses `accepted`;
-the owner can record `completed` or `failed` with its actual summary instead.
+
+### Finalize an outcome
+
+The owning main records a result through `--finalize`. Native process exit and worker
+completion never create accepted results by themselves. `completed` records an owner
+summary; `accepted` additionally requires a passing explicit `--verify` and matching
+landed patch evidence for every recorded write worker of that task and every write
+worker without a task ID under the finalizing native main; workers assigned to other
+tasks are checked when their own task is accepted. A plan-bound patch retains its exact
+plan lineage; a standalone patch matches its successful landing by digest.
+
+Without `--evidence`, accepted records the one digest-verified admission report of each
+landed patch, and refuses when that report is missing or ambiguous. If a digest-matching
+landing patch still applies cleanly to the verifier checkout, `accepted` refuses before
+verification; finalize with `--repo WORKTREE` containing the landing, or after landing
+and syncing. Verifier output stays local. Evidence references bind repository-relative
+files of at most 1 MiB each to SHA-256. The summary is bounded to 8 KiB, rejects
+sensitive-looking text and private absolute paths, and is cleaned of terminal controls.
+
+New result revisions are immutable artifacts registered in the existing artifact index,
+rather than a second task database. For each landed write patch, `accepted` also
+requires a passing automatic review gate. Before any side effect, `--finalize` waits up
+to 120 seconds for live review read passes on the same execution checkout; if they
+remain, it exits 75, so retry later. If review is missing or ends without a verdict,
+finalize `completed` (not `accepted`) and explain why in the summary. Finalization
+checks the full lifecycle projection, independently of the display window.
+
+Missing retained patch or landing evidence refuses acceptance. A failed, abandoned or
+rejected write worker under the same main also refuses `accepted`; the owner can record
+`completed` or `failed` with its actual summary instead.
 
 After saving the immutable result, finalize closes stopped `review` workers of
 exactly that task and the owner's lineage: `completed` → `done`
@@ -1300,6 +1723,8 @@ plan review/acceptance, and acceptance derives only from the `accepted` outcome.
 The result must still match the current plan task generation. Workers created
 after the result revision remain pending as `newer_than_decision`.
 
+### Settle stopped workers
+
 `oms panel --settle-review` lists eligible finalized-task leftovers without
 writing, including task, age in review, selection reason and target state.
 Add `--apply` to close them. Repeat `--attempt ID` with `--reason TEXT` to
@@ -1309,6 +1734,8 @@ selects a named dead main's lineage. Unknown ownership and other live mains are
 refused. Compare-and-set transitions and per-attempt revision keys make retries
 safe after partial settlement. No worktree, patch or artifact is deleted.
 
+#### Legacy mains
+
 For legacy terminal mains with no host/native ownership refs, explicitly add
 `--legacy` to `--owner-attempt ID`. Every legacy main in that participant's chain
 must have its last lifecycle event older than 24 hours; override this threshold
@@ -1317,6 +1744,8 @@ with `--legacy-older-than HOURS` (finite and positive). Selected workers report
 with any host/native ownership refs still require the normal absence proofs;
 age never substitutes for those proofs. Finalized-result and explicit `--attempt`
 selection otherwise remain unchanged.
+
+#### Standalone workers
 
 `oms panel --settle-review --standalone --older-than DAYS` selects parentless or absent-parent
 workers in review, without requiring a main. The finite positive threshold
@@ -1330,23 +1759,29 @@ attempts remain pending. This mode cannot be combined with owner or explicit
 attempt selection. Both recovery modes are dry runs until `--apply` is added
 and use the same result lock and expected-review-state transitions.
 
-For an undecided backlog, explicitly use `--aged-days N` in the calling main's
-lineage, a named dead main's lineage, or with `--standalone`. There is no
-default; N must be finite and at least 7. This selects review workers, and in a
-main's lineage also blocked workers, whose last transition into their current
-state was more than N days ago (`--standalone` selects review workers only), even without a finalized result or indexed exit artifact. Room-bound standalone attempts remain pending under this policy. Blocked
-workers are cancelled with `reason_code: owner_superseded` and reason
-`aged blocked without owner decision (N days)`; review workers use
-`aged review without owner decision (N days)`. Unknown ages and recent workers
-remain pending. The calling-main scope never selects newer workers. Named-main
-recovery still requires its existing dead-main and host/native absence proofs.
-Parentless or absent-parent attempts with room ownership refs remain pending. Waiting-input and
-waiting-approval workers are not selected. This option cannot be combined with
-`--older-than`, `--attempt` or `--reason`. Preview first; `--apply` uses the same
-result lock and lifecycle-sequence compare-and-set transitions, without deleting artifacts.
-Settlement also compares the selected attempt's lifecycle sequence under the
-lifecycle lock. Leaving review and re-entering it before apply invalidates the
-selection, even when the state name is again `review`; retry rechecks its age.
+#### Aged undecided work
+
+For an undecided backlog, explicitly use `--aged-days N` in the calling main's lineage,
+a named dead main's lineage, or with `--standalone`. There is no default; N must be
+finite and at least 7. This selects review workers, and in a main's lineage also blocked
+workers, whose last transition into their current state was more than N days ago
+(`--standalone` selects review workers only), even without a finalized result or indexed
+exit artifact. Room-bound standalone attempts remain pending under this policy. Blocked
+workers are cancelled with `reason_code: owner_superseded` and reason `aged blocked
+without owner decision (N days)`; review workers use `aged review without owner decision
+(N days)`.
+
+Unknown ages and recent workers remain pending. The calling-main scope never selects
+newer workers. Named-main recovery still requires its existing dead-main and host/native
+absence proofs. Parentless or absent-parent attempts with room ownership refs remain
+pending. Waiting-input and waiting-approval workers are not selected. This option cannot
+be combined with `--older-than`, `--attempt` or `--reason`. Preview first; `--apply`
+uses the same result lock and lifecycle-sequence compare-and-set transitions, without
+deleting artifacts. Settlement also compares the selected attempt's lifecycle sequence
+under the lifecycle lock.
+
+Leaving review and re-entering it before apply invalidates the selection, even when the
+state name is again `review`; retry rechecks its age.
 
 ```bash
 oms panel --finalize --owner codex --task-id ID \
@@ -1358,49 +1793,64 @@ oms panel --retry-delivery --task-id ID
 
 Accepted results also require a passing automatic reviewer gate for each landed write patch.
 
-For one reviewed worker result, the owning room main runs
-`oms panel --accept TASK --repo INTEGRATION_CLONE --message 'fix: description' --verify CMD`
-(optionally `--expected-patch-sha256 DIGEST`). It admits the unique candidate, commits only
-its patch, and records plan review: **committed locally; publication pending**.
-Successive accepts replay earlier canonical acceptances' verifiers in the same clone before the candidate verifier, refuse candidates naming the earlier task they break, and reset the replay set once those commits are landed.
-Run `oms land --repo INTEGRATION_CLONE` explicitly, then add `--repo INTEGRATION_CLONE
---landed-commit SHA` to `--finalize`: publication proof finishes the plan before recording
-its result. SHA is the full head that `oms land` pushed, not the accepted commit when commits such as the batch changelog sit on top. Verification runs in that execution clone; evidence remains in the canonical
-state repository. Only clones recognized by the existing repository resolver are supported.
-Accepted outcomes still require matching landed-patch evidence and a passing review gate.
-`--landed-commit` is allowed only with `--outcome accepted` or `completed`. The post-apply
-fence compares the candidate identity and digest, plan task hash and lease, and passing review
-gate; heartbeat, usage and settlement updates alone do not invalidate it. Acceptance records its
-exact commit and tree with the task, lease, candidate digest and review gate. Publication must
-contain that commit or a rebased candidate whose tree exactly matches replay of the reviewed patch
-bytes; patch-ID only locates candidates. The locked plan finish enforces this binding for direct
-`agent-plan finish --landed-commit` calls too.
-The commit is built from the locked, verified index tree with a ref compare-and-swap, without commit
-hooks. If authority changes after application, recovery prints a literal-pathspec add command and
-a helper that repeats the current-authority and exact-tree checks before committing; inspect the
-reviewed bytes before running it and never reapply.
-The per-clone lock serializes callers sharing an integration clone; the plan lease compare-and-set
-remains the authority across clones. Use `patch-land --recover` for incomplete application
-receipts. If finish succeeds but result recording fails, retry only `--finalize` after confirming
-the exact task completion.
+### Accept and publish a patch
 
-Results lists the latest twenty retained tasks from at most 300 lifecycle
-attempts and 1000 artifact events. Selecting a task shows up to eight recent
-call records. Participant browsing selects that participant's tasks before
-applying the recent-20-task limit. An explicit query outside retained evidence
-reports an incomplete window. Bounded normalized answer sections retain up to
-32 KiB per answer; raw prompts, provider
-logs and native conversation histories are not exported. Missing, changed or
-linked evidence is reported as unavailable. Oversized answers show a preview
-notice and their source artifact reference. The reader retains answer lines
-and reflows them when resized; Up/Down moves one line and Home/End goes to the
-first/last page. Page keys and the wheel expose the complete retained preview.
-The registered result and source artifacts retain their full bounded content.
-The menu's numbered list shows titles, outcome, verifier and app status before
-loading any normalized answers. Select a number to open that task's detail and
-return to the list afterward. Browsing performs read-only queries; it does not
-dispatch, accept a patch or retry app delivery. CLI `--results --task-id ID`
-continues to expose the same detail directly.
+For one reviewed worker result, the owning room main runs `oms panel --accept TASK
+--repo INTEGRATION_CLONE --message 'fix: description' --verify CMD` (optionally
+`--expected-patch-sha256 DIGEST`). It admits the unique candidate, commits only its
+patch, and records plan review: **committed locally; publication pending**. Successive
+accepts replay earlier canonical acceptances' verifiers in the same clone before the
+candidate verifier, refuse candidates naming the earlier task they break, and reset the
+replay set once those commits are landed. Run `oms land --repo INTEGRATION_CLONE`
+explicitly, then add `--repo INTEGRATION_CLONE --landed-commit SHA` to `--finalize`:
+publication proof finishes the plan before recording its result.
+
+SHA is the full head that `oms land` pushed, not the accepted commit when commits such
+as the batch changelog sit on top. Verification runs in that execution clone; evidence
+remains in the canonical state repository. Only clones recognized by the existing
+repository resolver are supported. Accepted outcomes still require matching landed-patch
+evidence and a passing review gate. `--landed-commit` is allowed only with `--outcome
+accepted` or `completed`. The post-apply fence compares the candidate identity and
+digest, plan task hash and lease, and passing review gate; heartbeat, usage and
+settlement updates alone do not invalidate it.
+
+Acceptance records its exact commit and tree with the task, lease, candidate digest and
+review gate. Publication must contain that commit or a rebased candidate whose tree
+exactly matches replay of the reviewed patch bytes; patch-ID only locates candidates.
+The locked plan finish enforces this binding for direct `agent-plan finish
+--landed-commit` calls too. The commit is built from the locked, verified index tree
+with a ref compare-and-swap, without commit hooks. If authority changes after
+application, recovery prints a literal-pathspec add command and a helper that repeats
+the current-authority and exact-tree checks before committing; inspect the reviewed
+bytes before running it and never reapply.
+
+The per-clone lock serializes callers sharing an integration clone; the plan lease
+compare-and-set remains the authority across clones. Use `patch-land --recover` for
+incomplete application receipts. If finish succeeds but result recording fails, retry
+only `--finalize` after confirming the exact task completion.
+
+### Results reader
+
+Results lists the latest twenty retained tasks from at most 300 lifecycle attempts and
+1000 artifact events. Selecting a task shows up to eight recent call records.
+Participant browsing selects that participant's tasks before applying the recent-20-task
+limit. An explicit query outside retained evidence reports an incomplete window. Bounded
+normalized answer sections retain up to 32 KiB per answer; raw prompts, provider logs
+and native conversation histories are not exported. Missing, changed or linked evidence
+is reported as unavailable. Oversized answers show a preview notice and their source
+artifact reference.
+
+The reader retains answer lines and reflows them when resized; Up/Down moves one line
+and Home/End goes to the first/last page. Page keys and the wheel expose the complete
+retained preview. The registered result and source artifacts retain their full bounded
+content. The menu's numbered list shows titles, outcome, verifier and app status before
+loading any normalized answers. Select a number to open that task's detail and return to
+the list afterward. Browsing performs read-only queries; it does not dispatch, accept a
+patch or retry app delivery.
+
+CLI `--results --task-id ID` continues to expose the same detail directly.
+
+### Result delivery
 
 `--notify` sends a cleaned summary to the existing fixed Codex app receiver.
 The local app must be available and that receiver must exist, be unarchived and
@@ -1463,62 +1913,70 @@ main from the menu or with `--launch` keeps the panel's recorded room while it i
 main start a new room, and an explicit `--room ID` or `o Rooms` choice wins.
 A bare control window shows the panel's recorded room.
 Role dispatch refuses a full room before enrollment, checking headroom for assignment and result
-messages. A main has no cap on concurrent calls: split separable work into as many parallel calls as it
-Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts and send a numeric
-result handoff. Sensitive summaries are withheld with an `oms panel --results --task-id` pointer;
-room races can still prevent delivery, while the indexed evidence remains available.
-Each finished call sends one result handoff containing its outcome, verification or
-review judgment, retained artifact path and next command. Failures combine the
-judgment and result in that handoff. Automatic-review launch retries defer the
-handoff until a reviewer launch or manual-review decision is settled. Successful
-write results stay quiet while their automatic review runs. A passing automatic
-review also prepares an editable completion
-summary and an owner finalization command, or names the paths outside the worker's
-declared scope instead of a command acceptance would refuse; admission and acceptance remain explicit.
-Room hooks render one line per message: exact message ID, sender role and ID,
-the first 300 characters of text and the artifact path when present, including
-paths beyond the excerpt. The untrusted peer-data framing remains. One
-`oms room ack` command lists the delivered IDs; delivery requires explicit
-acknowledgment after consumption. Full text remains in `oms room updates` and results.
-Acknowledgment reminders are at most once per five minutes per session and are
-omitted when that hook delivers new mail.
-The `o Rooms` menu selects or creates a task-scoped room. It does not enroll
-other sessions merely because they share a repository. Auto uses the connected tree when the board is at least 20 columns wide and 12 rows high. Every
-joined main of the room, the live one first, has rows; empty role cards are omitted. Explicit parent IDs
-connect advisors, reviewers and workers under their own main. Calls whose
-parent is outside the room's mains stay in `UNLINKED`. Scrolling exposes rows
-outside the viewport. `--view tree` selects this layout directly. `g Graph`
-retains the card graph at 76 columns and 16 rows. When the graph cannot fit or collection warnings are present, a board at least 20 columns wide and 8 rows high uses the tree for chat/result navigation and warnings. Passive
-output retains its list fallback. `--view compact|detail` keeps the list at any size.
+messages. A main has no cap on concurrent calls: split separable work into parallel calls.
 
-On a POSIX terminal, the board watcher accepts clicks, arrow keys/Tab and
-Enter. Clicking a main focuses its proven existing tmux conversation pane;
-if no terminal exists, a proven exact Codex app link can open its original chat.
-An unresolved or departed participant shows a reason. These clicks do not
-start or resume CLI sessions, send a prompt or call a model. In the graph, the
-click (or Enter) on a worker, advisor, reviewer, researcher or council seat
-keeps a short summary in the board's detail area and opens the call's full
-retained result (answer, review state, changed files) in a reader pane on the
-right: the native chat pane is split, the reader on top (about 62 percent of
-its height) and the chat below, and the board keeps its width. Another call
-reuses that reader. `q` or Esc in the reader, or Esc on the board, closes only
-the reader, and focus returns to the board; selecting a main closes it and
-shows the chat. The reader is started as `oms panel --results --participant ID
-[--task-id ID]` with identifiers revalidated from recorded state, closes itself
-when its board pane goes away, and is never discovered as a board or an input
-pane by `--reopen`. When the reader would get fewer than 8 rows, and outside a
-managed tmux main window (inline layout, Herdr, a standalone `--watch`, the
-control window), the call's content stays in the board's detail area as before.
-A main's detail lists its whole team, finished calls included, and clicking a
-team row opens that call the same way, as does Enter on a call in the tree. Repository tasks show the
-displayed snapshot's title, dependencies and declared paths. Escape closes the
-detail or a results screen. Click a main's left chevron or press Space to fold its calls;
-the wheel and PageUp/PageDown scroll. `t`, `g`, and `b` select tree, graph and
-attention views in the watcher; `Home`/`End` jump to the first/last item and keys
-the board does not bind are ignored. `q` quits a standalone watcher and does
-nothing on a managed tmux board (use `F9`). Resize discards pending coordinate
-clicks; a refresh discards them only when it changes the drawn hit map.
-The selection is shown before a chat or result opens.
+Interruptions give the child up to 20 seconds to clean up, settle unfinished attempts
+and send a numeric result handoff. Sensitive summaries are withheld with an `oms panel
+--results --task-id` pointer; room races can still prevent delivery, while the indexed
+evidence remains available. Each finished call sends one result handoff containing its
+outcome, verification or review judgment, retained artifact path and next command.
+Failures combine the judgment and result in that handoff. Automatic-review launch
+retries defer the handoff until a reviewer launch or manual-review decision is settled.
+
+Successful write results stay quiet while their automatic review runs. A passing
+automatic review also prepares an editable completion summary and an owner finalization
+command, or names the paths outside the worker's declared scope instead of a command
+acceptance would refuse; admission and acceptance remain explicit. Room hooks render one
+line per message: exact message ID, sender role and ID, the first 300 characters of text
+and the artifact path when present, including paths beyond the excerpt. The untrusted
+peer-data framing remains. One `oms room ack` command lists the delivered IDs; delivery
+requires explicit acknowledgment after consumption.
+
+Full text remains in `oms room updates` and results. Acknowledgment reminders are at
+most once per five minutes per session and are omitted when that hook delivers new mail.
+The `o Rooms` menu selects or creates a task-scoped room. It does not enroll other
+sessions merely because they share a repository. Auto uses the connected tree when the
+board is at least 20 columns wide and 12 rows high. Every joined main of the room, the
+live one first, has rows; empty role cards are omitted. Explicit parent IDs connect
+advisors, reviewers and workers under their own main.
+
+Calls whose parent is outside the room's mains stay in `UNLINKED`. Scrolling exposes
+rows outside the viewport. `--view tree` selects this layout directly. `g Graph` retains
+the card graph at 76 columns and 16 rows. When the graph cannot fit or collection
+warnings are present, a board at least 20 columns wide and 8 rows high uses the tree for
+chat/result navigation and warnings. Passive output retains its list fallback. `--view
+compact|detail` keeps the list at any size.
+
+On a POSIX terminal, the board watcher accepts clicks, arrow keys/Tab and Enter.
+Clicking a main focuses its proven existing tmux conversation pane; if no terminal
+exists, a proven exact Codex app link can open its original chat. An unresolved or
+departed participant shows a reason. These clicks do not start or resume CLI sessions,
+send a prompt or call a model. In the graph, the click (or Enter) on a worker, advisor,
+reviewer, researcher or council seat keeps a short summary in the board's detail area
+and opens the call's full retained result (answer, review state, changed files) in a
+reader pane on the right: the native chat pane is split, the reader on top (about 62
+percent of its height) and the chat below, and the board keeps its width.
+
+Another call reuses that reader. `q` or Esc in the reader, or Esc on the board, closes
+only the reader, and focus returns to the board; selecting a main closes it and shows
+the chat. The reader is started as `oms panel --results --participant ID [--task-id ID]`
+with identifiers revalidated from recorded state, closes itself when its board pane goes
+away, and is never discovered as a board or an input pane by `--reopen`. When the reader
+would get fewer than 8 rows, and outside a managed tmux main window (inline layout,
+Herdr, a standalone `--watch`, the control window), the call's content stays in the
+board's detail area as before.
+
+A main's detail lists its whole team, finished calls included, and clicking a team row
+opens that call the same way, as does Enter on a call in the tree. Repository tasks show
+the displayed snapshot's title, dependencies and declared paths. Escape closes the
+detail or a results screen. Click a main's left chevron or press Space to fold its
+calls; the wheel and PageUp/PageDown scroll. `t`, `g`, and `b` select tree, graph and
+attention views in the watcher; `Home`/`End` jump to the first/last item and keys the
+board does not bind are ignored. `q` quits a standalone watcher and does nothing on a
+managed tmux board (use `F9`).
+
+Resize discards pending coordinate clicks; a refresh discards them only when it changes
+the drawn hit map. The selection is shown before a chat or result opens.
 
 Mouse support is enabled only in the OMS tmux session, never globally. To copy
 text, hold Shift while dragging for the terminal's own selection (emulators
@@ -1560,71 +2018,103 @@ its lines; the Plan tab also shows the full goal with plan details and supports
 scrolling. The tree pins the header, usage line and goal preview. Small
 boards retain selection for the main and at least one call.
 
-The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a provider without a
-reading reads `Codex --`, whichever main the window belongs to. The goal box is a card titled `GOAL` with the
-full wrapped plan goal, with progress right-aligned on the title row
-(`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 in review · 2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`).
-Cancelled tasks are closed, never verified, so they leave the total (the `[oms plan]` sentence uses the
-same total). A running task whose recorded calls all ended counts as `stale` instead of `claimed`; one whose
-calls wait for its main's decision stays `claimed` (the main card and Plan tab mark it `awaiting decision`);
-expired claims and abandoned review leases are stale too.
-Only the current holder's calls count: the claimant call itself, or calls of the claiming main that joined at or
-after the claim, so calls an earlier holder left never mark a fresh claim stale (an `oms agent-plan touch`
-heartbeat restarts that clock, so a touched hold reads claimed until a new call joins).
-Zero counts are omitted and `stale` is dropped first on narrow boards; the full box adds
-`N stale, not counted: no live worker · release with oms agent-plan release --id ID`. On a
-board under 20 rows (or when the pinned rows would starve the body) the box shrinks to one row,
-`[ GOAL  <goal>  <bar> <counts> ]`, before any pinned row is dropped. Clicking the box selects the
-`("tab", "plan")` target on every row it draws. Without an active plan (none, no goal, or idle for 7 days)
-it is a one-row dim box, `[ GOAL · none · oms agent-plan init --goal TEXT ]`. While `oms land status --json` reports `active: true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7> · <step> · <N>m`. `oms agent-plan claim` run by a panel main
-also records its room participant (`claimed_by_participant`); the main's card then adds
-`Task: <id> · <state>` beside its title (`+N more running` counts only held tasks with a live or unknown
-call, `N awaiting decision` those whose calls wait for the main's decision; tasks whose calls all ended are left out), or, without a recorded title, `Now: <declared status>`
-(with its age past 30 minutes and `(stale)` past an hour) or a dim `no status yet`. Every prompt of a panel main
-carries a `[oms plan]` sentence (goal, progress, the main's task, the next ready task and its claim
-command) and, when its declared status is missing or older than 20 minutes, a reminder to set it.
-When no goal is active (none, no goal, all-closed, or idle 7 days with no held work),
-the hint directs the main to register the stated objective with `oms agent-plan init --goal TEXT`
-(`init` archives and replaces the current canonical plan) or ask one
-question using prior-work candidates, then manually re-add relevant unfinished tasks; bounded
-previous-plan details are reference data. A registered goal with zero tasks awaits them:
-use `oms agent-plan add`, never `init`.
+### Goal and task states
 
-What the numbers mean. Each word names one stage, and the same set carries the same word on the
-board group, the goal box, the main card's `Team:` line, Detail, the Attention queue and the Plan tab:
+The usage line always covers both providers (`Claude week 66% · ctx 73% │ Codex --`); a
+provider without a reading reads `Codex --`, whichever main the window belongs to. The
+goal box is a card titled `GOAL` with the full wrapped plan goal, with progress
+right-aligned on the title row (`╭─ GOAL ──── ▕██████░░░░▏ 6/9 verified · 1 in review ·
+2 claimed ─╮`; ASCII `+- GOAL` and `[######....]`). Cancelled tasks are closed, never
+verified, so they leave the total (the `[oms plan]` sentence uses the same total). A
+running task whose recorded calls all ended counts as `stale` instead of `claimed`; one
+whose calls wait for its main's decision stays `claimed` (the main card and Plan tab
+mark it `awaiting decision`); expired claims and abandoned review leases are stale too.
 
-- `running`/`active`: a call's process is live.
-- `finished`: a call's process exited; that alone admits or verifies nothing.
-- `awaiting decision`: a finished call whose patch awaits admission, or a call in lifecycle `review`, until
-  its main records a decision on the task (`Awaiting decision (N)` on the board, `N awaiting decision` in `Team:`;
-  the Attention queue names the patch case `patch awaits admission` and shows how long it has waited);
-  `completed`, `accepted` and `rejected` decide the same task across the board, Attention, window flag,
-  Plan fold and carried calls. `failed` keeps it in rework. A decision recorded under a different plan binding than the
-  current plan's task of the same id does not apply to it; decisions without a binding, and decisions for
-  tasks the current plan no longer holds, keep applying.
-- `unrecorded`: no live process, heartbeat or exit was seen (`status unknown`); it is not a failure and stays
-  until its main decides. Detail says so in one line.
-- `in review`: plan tasks in the plan's `review` state only (`N in review` in the goal box, `in review` in the
-  Plan tab, the tree and the main card's `Task:`).
-- `verified`: plan tasks `done` (`N/M verified`); finished or admitted calls never count.
-- `landed`: `oms land` pushed the change and `agent-plan finish --landed-commit SHA` recorded it; while a land
-  runs the goal box adds `LANDING`.
+Only the current holder's calls count: the claimant call itself, or calls of the
+claiming main that joined at or after the claim, so calls an earlier holder left never
+mark a fresh claim stale (an `oms agent-plan touch` heartbeat restarts that clock, so a
+touched hold reads claimed until a new call joins). Zero counts are omitted and `stale`
+is dropped first on narrow boards; the full box adds `N stale, not counted: no live
+worker · release with oms agent-plan release --id ID`. On a board under 20 rows (or when
+the pinned rows would starve the body) the box shrinks to one row, `[ GOAL  <goal>
+<bar> <counts> ]`, before any pinned row is dropped.
 
-The Attention queue ranks what needs the person by urgency, not recency, and every board surface reads the
-same ranked list, computed once per frame. Its classes, in rank order, are `answer needed` (a call or main
-waiting for approval or input, a question escalated to the person or asked of `all` by a main), `failed` (a
-failed, timed-out, abandoned or lost call whose result handoff is unread, that no later round superseded and
-whose task is still open), `awaiting decision` (a finished call awaiting its main's decision, oldest first,
-with its age; a patch awaiting admission is labeled `pending admission`), `held, workers ended` (a running
-plan task whose holder's calls all ended; its row opens the Plan tab), `unread mail` (other unanswered room
-mail from or to mains), and `delivery failed` (a failed main wake-up delivery). Provider errors are labeled
-`failed`. Failed items open a reader with the ending, errors, kept worktree and a salvage hint when applicable.
-Within a class the newest comes first. Above the board a header such as
-`Attention 7 · 1 needs you · 2 failed · 3 decide · 1 stale` (zero classes dropped; narrower widths shorten
-the words to `1 you · 2 fail · 3 dec`, then `Attention 7`) opens the Attention tab and is followed by the top
-three items. The `Attention N` tab groups every item under a class heading; arrows pick one, Enter or a click
-shows it in Detail, and `f` opens a call's full result on the right. The queue is display-only: it changes no
-lifecycle state or authority.
+Clicking the box selects the `("tab", "plan")` target on every row it draws. Without an
+active plan (none, no goal, or idle for 7 days) it is a one-row dim box, `[ GOAL · none
+· oms agent-plan init --goal TEXT ]`. While `oms land status --json` reports `active:
+true` (a probe of the land lock, never the receipt), one more row reads `LANDING <sha7>
+· <step> · <N>m`. `oms agent-plan claim` run by a panel main also records its room
+participant (`claimed_by_participant`); the main's card then adds `Task: <id> · <state>`
+beside its title (`+N more running` counts only held tasks with a live or unknown call,
+`N awaiting decision` those whose calls wait for the main's decision; tasks whose calls
+all ended are left out), or, without a recorded title, `Now: <declared status>` (with
+its age past 30 minutes and `(stale)` past an hour) or a dim `no status yet`.
+
+Every prompt of a panel main carries a `[oms plan]` sentence (goal, progress, the main's
+task, the next ready task and its claim command) and, when its declared status is
+missing or older than 20 minutes, a reminder to set it. When no goal is active (none, no
+goal, all-closed, or idle 7 days with no held work), the hint directs the main to
+register the stated objective with `oms agent-plan init --goal TEXT` (`init` archives
+and replaces the current canonical plan) or ask one question using prior-work
+candidates, then manually re-add relevant unfinished tasks; bounded previous-plan
+details are reference data.
+
+A registered goal with zero tasks awaits them: use `oms agent-plan add`, never `init`.
+
+### State vocabulary
+
+Each word names one stage. Board groups, the goal box, the main card's `Team:`
+line, Detail, Attention and Plan use the same vocabulary.
+
+| State | Meaning |
+|---|---|
+| `running` / `active` | The call's process is live. |
+| `finished` | The process exited; admission and verification are separate. |
+| `awaiting decision` | A finished patch awaits admission, or a call is in lifecycle `review`, until its main decides. |
+| `unrecorded` | No live process, heartbeat or exit was seen. Detail says `status unknown`; this is not failure and remains until the main decides. |
+| `in review` | A plan task is in the plan's `review` state. |
+| `verified` | A plan task is `done`. Finished or admitted calls do not count. |
+| `landed` | `oms land` pushed the change and `agent-plan finish --landed-commit SHA` recorded it. The goal box shows `LANDING` while land runs. |
+
+<details>
+<summary>Decision labels and plan-generation matching</summary>
+
+`awaiting decision` appears as `Awaiting decision (N)` on the board and
+`N awaiting decision` in `Team:`. Attention names the patch case `patch awaits
+admission` and shows its wait time. Plan-task review appears as `N in review`
+in the goal box, and `in review` in Plan, the tree and the main card's `Task:`.
+
+`completed`, `accepted` and `rejected` decide the same task across the board,
+Attention, window flag, Plan fold and carried calls. `failed` keeps it in rework.
+A decision under a different plan binding does not apply to the current plan's
+task of the same id. Decisions without a binding, and decisions for tasks no
+longer held by the current plan, keep applying.
+
+</details>
+
+### Attention priority
+
+The Attention queue ranks what needs the person by urgency, not recency, and every board
+surface reads the same ranked list, computed once per frame. Its classes, in rank order,
+are `answer needed` (a call or main waiting for approval or input, a question escalated
+to the person or asked of `all` by a main), `failed` (a failed, timed-out, abandoned or
+lost call whose result handoff is unread, that no later round superseded and whose task
+is still open), `awaiting decision` (a finished call awaiting its main's decision,
+oldest first, with its age; a patch awaiting admission is labeled `pending admission`),
+`held, workers ended` (a running plan task whose holder's calls all ended; its row opens
+the Plan tab), `unread mail` (other unanswered room mail from or to mains), and
+`delivery failed` (a failed main wake-up delivery).
+
+Provider errors are labeled `failed`. Failed items open a reader with the ending,
+errors, kept worktree and a salvage hint when applicable. Within a class the newest
+comes first. Above the board a header such as `Attention 7 · 1 needs you · 2 failed · 3
+decide · 1 stale` (zero classes dropped; narrower widths shorten the words to `1 you · 2
+fail · 3 dec`, then `Attention 7`) opens the Attention tab and is followed by the top
+three items. The `Attention N` tab groups every item under a class heading; arrows pick
+one, Enter or a click shows it in Detail, and `f` opens a call's full result on the
+right.
+
+The queue is display-only: it changes no lifecycle state or authority.
 
 Results classify call endings as `cancelled`, `guard stop`, `timed out`,
 `verify failed`, `provider error` or `failed` from the recorded lifecycle,
@@ -1655,25 +2145,65 @@ When a call of a main fails, times out, is blocked or waits for a person, that
 main's tmux window name gets a `! ` prefix, set and cleared only by the watcher in
 that window. Numeric usage readings from a native pane count only when they are
 whole fields of its last two status lines. A notice shows on a short board in place
-of the key hints. Board text is written for
+of the key hints.
+
+### Reader-facing status labels
+
+Board text is written for
 people: states read `running`, `finished` or `needs approval`, call exits and
 provider status lines are dropped from messages, and the detail says whether its
-main reviewed a result instead of showing internal fields. A main reads `working`
-during a hook-recorded turn, `idle · Nm` after Stop, `quiet · Nm` after a stale
-busy signal plus 90 seconds of unchanged native-pane output, and `live` until its
-first activity signal. Quiet output does not prove that the model stopped. Clicking the main's
+main reviewed a result instead of showing internal fields.
+
+#### Native main activity
+
+| Main label | Meaning |
+|---|---|
+| `working` | A hook-recorded turn is active. |
+| `idle · Nm` | Time since Stop. |
+| `quiet · Nm` | A stale busy signal plus 90 seconds of unchanged native-pane output. |
+| `live` | No first activity signal has arrived yet. |
+
+ Quiet output does not prove that the model stopped. Clicking the main's
 card opens its proven original conversation. Calls with no known main are counted on one
 warning row (`t` lists them in the tree). Within advisors and within workers, attention states sort
-first. A panel permits one live main across all its rooms; `--launch` and `--spawn-main`
+first.
+
+### Single-main and recovery guards
+
+A panel permits one live main across all its rooms; `--launch` and `--spawn-main`
 refuse another while it is active. A start first abandons a main that a crash or reboot left open when
 the `--release-main` proof holds (expired heartbeat, host and native process gone) and says so on stderr;
 an unverifiable main still refuses the start. The control window's board shows the room's live main. PageUp/PageDown scroll the detail
 when one is shown, otherwise every call band by one page. Graphs of different
 rooms are never merged, and `o Rooms` in the control window switches rooms.
-The bottom box state (tab, previewed target and detail scroll) is shared by the panel session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is ignored, and a target that does not name a participant in the current room is not applied. Changes reach every board on refresh, and entering a window does not reset the selection. The dock opens on the Log tab unless a tab was chosen or stored. At heights of 28 rows or more, it reserves at least its height-band body (12, 8 or 5 rows) and takes every row left under the activity tree and warnings, with no blank padding. The Log tab lists the recorded events (one line says so when there are none); the strip shows how many events it is scrolled past, and `[` / `]` or the wheel scroll it. A finished goal banner names `superseded` (instant) and `completed-external` (which reruns acceptance, about 9 minutes), with the `oms agent-plan --repo . retire --check` and `retire --apply` command forms; the check prints the SHA-256 CAS token required by apply. Narrow banners retain the completion ratio.
-Terminals attached to the same panel session share its current window, so
-navigating from one client also moves the other. The wheel scrolls only the band or detail under the
-pointer.
+
+
+### Shared dock state
+
+The bottom box state (tab, previewed target and detail scroll) is shared by the panel
+session in `@oms_panel_bottom`, capped at 512 bytes; malformed or oversized state is
+ignored, and a target that does not name a participant in the current room is not
+applied. Changes reach every board on refresh, and entering a window does not reset the
+selection. The dock opens on the Log tab unless a tab was chosen or stored.
+
+#### Dock size and scrolling
+
+At heights of 28 rows or more, it reserves at least its height-band body (12, 8 or 5
+rows) and takes every row left under the activity tree and warnings, with no blank
+padding. The Log tab lists the recorded events (one line says so when there are none);
+the strip shows how many events it is scrolled past, and `[` / `]` or the wheel scroll
+it.
+
+#### Completed-plan banner
+
+A finished goal banner names `superseded` (instant) and `completed-external` (which
+reruns acceptance, about 9 minutes), with the `oms agent-plan --repo . retire --check`
+and `retire --apply` command forms; the check prints the SHA-256 CAS token required by
+apply. Narrow banners retain the completion ratio. Terminals attached to the same panel
+session share its current window, so navigating from one client also moves the other.
+The wheel scrolls only the band or detail under the pointer.
+
+### Footer and quick actions
 
 The footer shows at most three hints chosen by the selection (a main: `Enter Chat`,
 `a Ask advisor`; a call: `Enter Show`, `w Worktree` when it applies;
@@ -1682,15 +2212,18 @@ The footer shows at most three hints chosen by the selection (a main: `Enter Cha
 that work in that view, with `v Expand` or `v Collapse` following the board's state.
 Notices disappear on the next input or after ten seconds.
 
-`a` in the watcher asks an advisor for the selected main (or the shown one).
-In tmux it opens a popup that takes one question and runs
-`oms panel --dispatch advisor --main PARTICIPANT` without the
-watcher's inherited caller identity; the dispatch re-proves that main is live,
-and the answer returns to that main's room mail. Outside tmux the board shows
-the command instead. The board split sizes the pane in cells; only a detached or unmeasured window uses `-l N%`, and only on tmux 3.1 or newer (probed once with `tmux -V`; older or unparseable versions get cells of the best known size). `-p` is never used because tmux 3.3/3.4 mis-parse it. Popups need tmux 3.2 or newer; when the popup cannot open,
-the board says so and the control menu's `a Advisor` remains. A failed call keeps
-the popup open with its exit status. Selecting or clicking never calls a model. A prompt-less
-`--dispatch advisor` on a terminal asks its question interactively.
+`a` in the watcher asks an advisor for the selected main (or the shown one). In tmux it
+opens a popup that takes one question and runs `oms panel --dispatch advisor --main
+PARTICIPANT` without the watcher's inherited caller identity; the dispatch re-proves
+that main is live, and the answer returns to that main's room mail. Outside tmux the
+board shows the command instead. The board split sizes the pane in cells; only a
+detached or unmeasured window uses `-l N%`, and only on tmux 3.1 or newer (probed once
+with `tmux -V`; older or unparseable versions get cells of the best known size). `-p` is
+never used because tmux 3.3/3.4 mis-parse it. Popups need tmux 3.2 or newer; when the
+popup cannot open, the board says so and the control menu's `a Advisor` remains. A
+failed call keeps the popup open with its exit status. Selecting or clicking never calls
+a model. A prompt-less `--dispatch advisor` on a terminal asks its question
+interactively.
 
 `w` on a selected, finished worker opens a plain shell window at its kept
 worktree. The recorded `worktree:PARENT/NAME` label must match exactly one entry
@@ -1699,26 +2232,32 @@ and repository-local calls are refused, and recorded results stay available.
 The shell has no worker authority; edits there are not part of the recorded
 patch. Outside tmux the board shows the path.
 
-The board is an overview above and a detail area below. Cards keep only the
-rows their content needs (an unrecorded location stays in the detail), and a
-provider without a reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where model-use data exists). Antigravity shows rolling seven-day input, cached and output tokens and calls (`agy 7d in … · cached … · out … / N calls`) from the most recent 1000 artifact index rows when available; these are recorded usage, not a quota percentage. On a
-board of 24 rows or more, the bottom dock is reserved before the upper
-layout is sized and then grows to the rows left under the tree. When the main preview is
-automatic, it is marked `auto` and does not replace a chosen preview. Esc
-dismisses the preview while preserving the box. Choosing a block replaces the
-Detail content without resizing the reserved box; it shows the selected content,
-starting with outcome and verification: for a worker or advisor the latest retained answer, the changed files
-of a recorded patch (summarized only while its SHA-256 still matches, so it
-survives worktree cleanup), outcome, verification and artifact references (read
-in the background, refreshed with each snapshot); for a main its addressed mail
-and team. Reading mail there never
-acknowledges it. The native CLI pane itself is never used for detail; the reader is
-a separate pane split from it.
-A CLI exit never changes a task to accepted. The board is repository-wide, not
-a claim that every displayed task belongs to this room. Declared scopes are
-labels, not file locks or authority; write workers still use isolated patches,
-verifiers and owner admission. Usage retains the recent-eight-artifact limit,
-selected/served attribution and unknown native usage.
+The board is an overview above and a detail area below. Cards keep only the rows their
+content needs (an unrecorded location stays in the detail), and a provider without a
+reading reads `Codex --` on the pinned usage line (the tree keeps its USAGE box where
+model-use data exists). Antigravity shows rolling seven-day input, cached and output
+tokens and calls (`agy 7d in … · cached … · out … / N calls`) from the most recent 1000
+artifact index rows when available; these are recorded usage, not a quota percentage. On
+a board of 24 rows or more, the bottom dock is reserved before the upper layout is sized
+and then grows to the rows left under the tree.
+
+When the main preview is automatic, it is marked `auto` and does not replace a chosen
+preview. Esc dismisses the preview while preserving the box. Choosing a block replaces
+the Detail content without resizing the reserved box; it shows the selected content,
+starting with outcome and verification: for a worker or advisor the latest retained
+answer, the changed files of a recorded patch (summarized only while its SHA-256 still
+matches, so it survives worktree cleanup), outcome, verification and artifact references
+(read in the background, refreshed with each snapshot); for a main its addressed mail
+and team.
+
+Reading mail there never acknowledges it. The native CLI pane itself is never used for
+detail; the reader is a separate pane split from it. A CLI exit never changes a task to
+accepted. The board is repository-wide, not a claim that every displayed task belongs to
+this room. Declared scopes are labels, not file locks or authority; write workers still
+use isolated patches, verifiers and owner admission. Usage retains the
+recent-eight-artifact limit, selected/served attribution and unknown native usage.
+
+### Room commands
 
 ```bash
 oms room new --repo . --id team --topic 'Parser change'
@@ -1784,40 +2323,39 @@ the title changes: declared paths use the separate scope workflow, and workers
 cannot use `describe`. A session bound to a room can describe only its own main.
 Legacy room logs remain readable; the new event kind requires a current reader.
 
-The canonical thread log records participant roles, addressed message IDs,
-reply links and explicit consumption. Stable message IDs deduplicate identical
-sends; conflicting reuse fails. Broadcast recipients are fixed at send time.
-A new join does not replay earlier messages. Reads exclude sender echoes and
-other participants' direct mail, advance a checked cursor and do not acknowledge.
-Routine worker notes stay in the durable log and `oms room updates` but are
-omitted from main hook prompts and acknowledgment reminders. Typed questions,
-answers and handoffs, actionable notes (questions, blockers, verification failures,
-review verdicts and owner decisions), unclassified notes, and notes from other
-roles remain immediate.
-Use `--kind question` for questions and `--kind handoff` for completion.
-Delivery/consumption/answer/acceptance are separate states. Rooms are bounded
-to 32 members (mains and other unparented participants), 480 dispatched calls
-(participants with a parent, which keep their slot after finishing) and 1024
-messages, so each tick's room read stays bounded.
+The canonical thread log records participant roles, addressed message IDs, reply links
+and explicit consumption. Stable message IDs deduplicate identical sends; conflicting
+reuse fails. Broadcast recipients are fixed at send time. A new join does not replay
+earlier messages. Reads exclude sender echoes and other participants' direct mail,
+advance a checked cursor and do not acknowledge. Routine worker notes stay in the
+durable log and `oms room updates` but are omitted from main hook prompts and
+acknowledgment reminders. Typed questions, answers and handoffs, actionable notes
+(questions, blockers, verification failures, review verdicts and owner decisions),
+unclassified notes, and notes from other roles remain immediate.
 
-Bounds apply per room log. When a room passes 896 messages or 416 calls, the
-next dispatch rolls it over to a linked successor (`oms room rollover --id ROOM`
-does the same by hand); ids that name the old room keep working, the old log is
-sealed and retained (`oms room show --id OLD --exact`), and nothing is
-discarded. The successor carries joined mains, running calls, calls whose
-results are unread, mail still owed to calls, open questions (a call's oldest
-one; its later ones count as other mail) and each main's latest status, plus
-the newest other unread mail up to 128 messages; older unread mail stays in the
-sealed log, a note in the successor says so, and acknowledging it through
-either id records the receipt. Carried mail keeps its send time and a
-broadcast its original audience; a call whose parent left stays behind. Until
-its carry completes the successor refuses other writes; the next write by a
-main or the panel finishes a carry a crash cut short, and a worker's write is
-refused until then, since workers cannot carry. The successor keeps the sealed
-room's creator, and a rebound main keeps its first native session. The Past
-tab also lists the previous room's settled calls.
-A running main keeps its environment and native session: its writes, reads and
-dispatches follow the old id to the successor.
+Use `--kind question` for questions and `--kind handoff` for completion.
+Delivery/consumption/answer/acceptance are separate states. Rooms are bounded to 32
+members (mains and other unparented participants), 480 dispatched calls (participants
+with a parent, which keep their slot after finishing) and 1024 messages, so each tick's
+room read stays bounded.
+
+Bounds apply per room log. When a room passes 896 messages or 416 calls, the next
+dispatch rolls it over to a linked successor (`oms room rollover --id ROOM` does the
+same by hand); ids that name the old room keep working, the old log is sealed and
+retained (`oms room show --id OLD --exact`), and nothing is discarded. The successor
+carries joined mains, running calls, calls whose results are unread, mail still owed to
+calls, open questions (a call's oldest one; its later ones count as other mail) and each
+main's latest status, plus the newest other unread mail up to 128 messages; older unread
+mail stays in the sealed log, a note in the successor says so, and acknowledging it
+through either id records the receipt.
+
+Carried mail keeps its send time and a broadcast its original audience; a call whose
+parent left stays behind. Until its carry completes the successor refuses other writes;
+the next write by a main or the panel finishes a carry a crash cut short, and a worker's
+write is refused until then, since workers cannot carry. The successor keeps the sealed
+room's creator, and a rebound main keeps its first native session. The Past tab also
+lists the previous room's settled calls. A running main keeps its environment and native
+session: its writes, reads and dispatches follow the old id to the successor.
 
 New event kinds need a current reader: install the same SHA and restart panel processes.
 
@@ -1849,54 +2387,57 @@ resolve the verified active main; missing or ambiguous ownership is refused.
 A standalone dispatch without room/main binding remains available and reports
 that its relationship is unrecorded.
 
-Mains declare what they are editing so their dispatches and other sessions can
-see it: `oms room scope --id team --participant opus-main --owns scripts/lib
---owns docs/TERMINAL-PANEL.md` replaces that participant's declared scopes and
-`--clear` empties them. Only the participant itself may declare (the inherited
+Mains declare what they are editing so their dispatches and other sessions can see it:
+`oms room scope --id team --participant opus-main --owns scripts/lib --owns
+docs/TERMINAL-PANEL.md` replaces that participant's declared scopes and `--clear`
+empties them. Only the participant itself may declare (the inherited
 `OMS_ROOM_PARTICIPANT` must match; workers cannot); at most sixteen normalized
-repo-relative scopes; advisors and reviewers own none. A write dispatch takes
-repeatable `--scope PATH`; the worker joins with those scopes, and before launch
-the panel compares them with every other joined main's scopes (including mains
-from sessions outside this panel) and every live write call's (no result handoff,
-no terminal attempt). Two scopes overlap when
-one equals the other or is a path-component prefix of it (`scripts/lib`
-overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps everything;
-globs compare literally). Overlaps print one stderr warning and appear as
-`overlaps` in `--dry-run` JSON. The launch is never refused: declarations
-coordinate work, they are not locks. The main detail view shows `Scope: …`.
-Finalizing as `accepted` refuses write-worker patches outside their declared
-scopes (including rename sources and destinations), using glob-aware path matching;
-`completed` remains allowed, and workers without declared scopes keep the existing behavior.
+repo-relative scopes; advisors and reviewers own none. A write dispatch takes repeatable
+`--scope PATH`; the worker joins with those scopes, and before launch the panel compares
+them with every other joined main's scopes (including mains from sessions outside this
+panel) and every live write call's (no result handoff, no terminal attempt).
+
+Two scopes overlap when one equals the other or is a path-component prefix of it
+(`scripts/lib` overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps
+everything; globs compare literally). Overlaps print one stderr warning and appear as
+`overlaps` in `--dry-run` JSON. The launch is never refused: declarations coordinate
+work, they are not locks. The main detail view shows `Scope: …`. Finalizing as
+`accepted` refuses write-worker patches outside their declared scopes (including rename
+sources and destinations), using glob-aware path matching; `completed` remains allowed,
+and workers without declared scopes keep the existing behavior.
 
 ### Original chats and recovery
 
-`h Chats` lists the selected room's participants. Selecting a native main focuses
-its existing tmux conversation pane when that pane still exists and its canonical
-repository, provider, room and active main attempt match the enrolled participant.
-First launches and resumed stable participants both qualify; blocked but
-nonterminal attempts remain navigable. Old or unprovable window markers do not
-establish a destination. When that destination is in another tmux session, navigation selects its window
-and pane and switches the single client attached to the caller's verified
-session. Missing or multiple current clients require selecting the original
-terminal; another attached client is never chosen by recency. Herdr pane lookup
-failures affect their participant while other proven targets remain available.
-An unqueried duplicate candidate cannot establish unique ownership, and socket
-failures continue to make host evidence unavailable. Without a proven terminal
-destination, Codex uses the exact local session's `codex://threads/<thread-id>` app link.
-Claude Desktop navigation uses `claude --desktop --resume <session-id>` on
-macOS/native Windows when the installed CLI advertises `--desktop`; native
-platform, authentication and live-session restrictions still apply. It never
-force-closes a running CLI. Linux/WSL users use the original Claude app sidebar
-or the existing terminal; OMS does not invent a Claude Code session URI.
-Headless workers expose their recorded results and artifacts instead of a
-native app chat. Unbound or undiscovered sessions say `unresolved`.
-The list shows ambiguity reasons and marks participants that left. Their proven
-original chats remain available as history; this does not rejoin them or resume work.
-Room views and chat navigation require an explicit selection from `o Rooms`,
-`--room` or the room environment; another session's `CURRENT` pointer does not
-select a work room. Narrow panes retain joined main names and mailbox totals;
-an explicitly requested graph uses the 76x16 requirement, retaining tree
-navigation when the interactive card layout cannot fit.
+`h Chats` lists the selected room's participants. Selecting a native main focuses its
+existing tmux conversation pane when that pane still exists and its canonical
+repository, provider, room and active main attempt match the enrolled participant. First
+launches and resumed stable participants both qualify; blocked but nonterminal attempts
+remain navigable. Old or unprovable window markers do not establish a destination. When
+that destination is in another tmux session, navigation selects its window and pane and
+switches the single client attached to the caller's verified session.
+
+Missing or multiple current clients require selecting the original terminal; another
+attached client is never chosen by recency. Herdr pane lookup failures affect their
+participant while other proven targets remain available. An unqueried duplicate
+candidate cannot establish unique ownership, and socket failures continue to make host
+evidence unavailable. Without a proven terminal destination, Codex uses the exact local
+session's `codex://threads/<thread-id>` app link. Claude Desktop navigation uses `claude
+--desktop --resume <session-id>` on macOS/native Windows when the installed CLI
+advertises `--desktop`; native platform, authentication and live-session restrictions
+still apply.
+
+It never force-closes a running CLI. Linux/WSL users use the original Claude app sidebar
+or the existing terminal; OMS does not invent a Claude Code session URI. Headless
+workers expose their recorded results and artifacts instead of a native app chat.
+Unbound or undiscovered sessions say `unresolved`. The list shows ambiguity reasons and
+marks participants that left. Their proven original chats remain available as history;
+this does not rejoin them or resume work. Room views and chat navigation require an
+explicit selection from `o Rooms`, `--room` or the room environment; another session's
+`CURRENT` pointer does not select a work room.
+
+Narrow panes retain joined main names and mailbox totals; an explicitly requested graph
+uses the 76x16 requirement, retaining tree navigation when the interactive card layout
+cannot fit.
 
 `--chats` is read-only. `--open-chat PARTICIPANT --dry-run --json` previews the
 destination without navigation; an explicit open submits no new prompt. Local
@@ -1904,17 +2445,18 @@ lookup examines bounded filenames and Codex's first metadata row, without
 copying transcript bodies or native session IDs into the shared room log.
 Navigation success is a request, not evidence that an app window appeared.
 
-A native main launched by the panel binds its first real prompt-hook session
-to its explicitly enrolled participant. This preserves the original join
-boundary, pending messages and cursor. An existing unbound Claude participant
-can also be bound by its own agent with
-`oms room bind --repo . --id team --participant opus-main --native-session current`.
-An already bound identity cannot silently change; a different native session
-requires explicit leave/rejoin. Closed or left membership does not auto-resume.
-A main's own SessionStart moves its binding when the provider starts another native session in that process (Claude `clear`; Codex `clear`, `resume` or `fork`), replacing only the identity bound at that moment; `startup` and `compact` never do.
-Later hooks compare both enrolled provider and native identity before reading or
-advancing a cursor. A mismatched user prompt receives a short reconnection notice;
-tool hooks withhold the room mail without repeating that notice.
+A native main launched by the panel binds its first real prompt-hook session to its
+explicitly enrolled participant. This preserves the original join boundary, pending
+messages and cursor. An existing unbound Claude participant can also be bound by its own
+agent with `oms room bind --repo . --id team --participant opus-main --native-session
+current`. An already bound identity cannot silently change; a different native session
+requires explicit leave/rejoin. Closed or left membership does not auto-resume. A main's
+own SessionStart moves its binding when the provider starts another native session in
+that process (Claude `clear`; Codex `clear`, `resume` or `fork`), replacing only the
+identity bound at that moment; `startup` and `compact` never do. Later hooks compare
+both enrolled provider and native identity before reading or advancing a cursor. A
+mismatched user prompt receives a short reconnection notice; tool hooks withhold the
+room mail without repeating that notice.
 
 A Claude main moved to Claude Code's background service continues under a new
 session id without the panel environment. Its SessionStart `fork`/`resume` hook,
@@ -2033,25 +2575,30 @@ lists capabilities; it neither calls a model nor adds that adapter to preset
 or automatic routing. Presence is executable discovery, not an authentication
 or runtime health check. Models come from the existing cache without refresh.
 
-A main can explicitly select a registered CLI for a bounded worker, advisor
-or reviewer. `--to codex|claude` without `--model` pins that provider's newest
-candidate family and effort from the role's tier; an explicit `--model` overrides
-it. Other transports supporting per-call model selection require an exact
-`--model`; omit the `--workload` tier. An optional `--reasoning-effort` is forwarded through the existing
-provider capability checks. With an explicit model or custom route, omitting
-effort retains the front door's native settings. For profile-controlled transports such as Vibe/DeepSeek Harness,
-omit `--model`; the native profile selects it and an exact override is refused.
-Preset roles use a capability tier ordered by weekly quota left, with readings within the 15-point tie band going to fewer room dispatches, then away from the main (see Roles below). The light tier starts with Pi’s Inkling route when available; researchers remain on Haiku or Luna.
-Codex delegated routes accept a versioned model of the Astra, Sol, Terra and Luna
-families (cost order, highest first). Model-family versions are distinct from roles. Preset dispatch chooses the newest
-configured/catalog numeric version within its existing family and pins the exact ID;
-a newer Astra never replaces a Terra, Luna or Sol route. `oms models` routes a
-family only at its newest version, and not at all while that version is a major
-generation behind the others (any 5.6 model once 6.x is listed). Preset dispatch
-applies the same rule: a tier candidate whose family is not routed is ineligible, the
-usual availability and quota rules choose among the rest, and with none eligible the dispatch
-is refused. Explicit CLI selections retain
-the caller's exact model request. A compact model preview does not limit routing.
+A main can explicitly select a registered CLI for a bounded worker, advisor or reviewer.
+`--to codex|claude` without `--model` pins that provider's newest candidate family and
+effort from the role's tier; an explicit `--model` overrides it. Other transports
+supporting per-call model selection require an exact `--model`; omit the `--workload`
+tier. An optional `--reasoning-effort` is forwarded through the existing provider
+capability checks. With an explicit model or custom route, omitting effort retains the
+front door's native settings. For profile-controlled transports such as Vibe/DeepSeek
+Harness, omit `--model`; the native profile selects it and an exact override is refused.
+
+Preset roles use a capability tier ordered by weekly quota left, with readings within
+the 15-point tie band going to fewer room dispatches, then away from the main (see Roles
+below). The light tier starts with Pi’s Inkling route when available; researchers remain
+on Haiku or Luna. Codex delegated routes accept a versioned model of the Astra, Sol,
+Terra and Luna families (cost order, highest first). Model-family versions are distinct
+from roles. Preset dispatch chooses the newest configured/catalog numeric version within
+its existing family and pins the exact ID; a newer Astra never replaces a Terra, Luna or
+Sol route.
+
+`oms models` routes a family only at its newest version, and not at all while that
+version is a major generation behind the others (any 5.6 model once 6.x is listed).
+Preset dispatch applies the same rule: a tier candidate whose family is not routed is
+ineligible, the usual availability and quota rules choose among the rest, and with none
+eligible the dispatch is refused. Explicit CLI selections retain the caller's exact
+model request. A compact model preview does not limit routing.
 
 ```bash
 oms panel --repo . --dispatch advisor --owner codex --to grok --model MODEL \
@@ -2077,22 +2624,25 @@ exit status, print the answer on stdout and diagnostics on stderr. Unsupported
 access or arguments must fail explicitly. An adapter must not commit, push,
 modify OMS owner state or retain background processes.
 
-The inventory distinguishes headless calls, room polling, native launch and
-unverified native hook wiring. A call adapter alone does not attach to an
-already-open app or wake an idle session. For additional native launch, explicitly
-list canonical provider IDs in `OMS_PROVIDER_NATIVE_ADAPTERS` and provide the
-marker executable `oms-agent-adapter-ID` on PATH or in the same adapter directory.
-Its additional contract is `open --workdir PATH --context-file PATH`, with
-optional `--model` and `--resume`. The file contains bounded OMS bootstrap,
-room participation and the supplied user task; it is removed after process exit.
-The adapter must preserve interactive stdio, forward exit status, consume that
-context, and translate only supported documented vendor flags. It inherits
-`OMS_ROOM_ID`, `OMS_ROOM_PARTICIPANT` and canonical `OMS_ROOM_REPO` for polling.
-The `p CLIs` menu's `n Native` action or `--launch ID` uses this explicit capability;
-unsupported native adapters fail rather than falling back to a headless call.
-This opt-in grants no write/publication authority. The actual Grok/Muse interactive
-interfaces have not been verified; the contract is covered by protocol fixtures.
-Owner finalization/council retains Codex/Claude's existing policy. No additional daemon, dependency or terminal injection is added.
+The inventory distinguishes headless calls, room polling, native launch and unverified
+native hook wiring. A call adapter alone does not attach to an already-open app or wake
+an idle session. For additional native launch, explicitly list canonical provider IDs in
+`OMS_PROVIDER_NATIVE_ADAPTERS` and provide the marker executable `oms-agent-adapter-ID`
+on PATH or in the same adapter directory. Its additional contract is `open --workdir
+PATH --context-file PATH`, with optional `--model` and `--resume`. The file contains
+bounded OMS bootstrap, room participation and the supplied user task; it is removed
+after process exit.
+
+The adapter must preserve interactive stdio, forward exit status, consume that context,
+and translate only supported documented vendor flags. It inherits `OMS_ROOM_ID`,
+`OMS_ROOM_PARTICIPANT` and canonical `OMS_ROOM_REPO` for polling. The `p CLIs` menu's `n
+Native` action or `--launch ID` uses this explicit capability; unsupported native
+adapters fail rather than falling back to a headless call. This opt-in grants no
+write/publication authority. The actual Grok/Muse interactive interfaces have not been
+verified; the contract is covered by protocol fixtures.
+
+Owner finalization/council retains Codex/Claude's existing policy. No additional daemon,
+dependency or terminal injection is added.
 
 
 ## Context limits for mains
@@ -2133,42 +2683,45 @@ Native launches propagate the process exit. Existing tools retain patch
 admission, verification and publication authority. No permission bypass,
 automatic patch application, commit, push, installation or new service is added.
 
-The existing operator-tools suite exercises exact role routes through real OMS
-front doors and lifecycle writers using fixture provider executables. It checks
-model/effort arguments, parent links, titles, read/write separation, worktree
-isolation, returned patches, review gates, worker recursion rejection and
-read-only views. Native PTY and real tmux checks cover inline restoration,
-exact resume, main selection, independent sidebars and detach/preservation.
-Width/height, Korean title wrapping, cached frame cadence, changed-row repaint,
-resize, reduced motion, attribution and unsafe-label tests cover the renderer.
+The existing operator-tools suite exercises exact role routes through real OMS front
+doors and lifecycle writers using fixture provider executables. It checks model/effort
+arguments, parent links, titles, read/write separation, worktree isolation, returned
+patches, review gates, worker recursion rejection and read-only views. Native PTY and
+real tmux checks cover inline restoration, exact resume, main selection, independent
+sidebars and detach/preservation. Width/height, Korean title wrapping, cached frame
+cadence, changed-row repaint, resize, reduced motion, attribution and unsafe-label tests
+cover the renderer.
+
 A PTY watch verifies actual incremental animation output without lifecycle writes. The
-lifecycle-events suite covers bounded refs and immutable idempotency. Fixture
-execution does not establish account access or a live main's judgment quality.
-When a sandbox denies Unix sockets, the suite reports socket-dependent sections
-as skipped and exits 77; parent verification outside that sandbox remains authoritative.
-The same operator suite covers council routes, durable results, verifier and
-patch lineage, privacy refusal and delivery deduplication/retry after interruption.
-The notifier suite covers unloaded and busy receivers, shell wrappers, early
-events, lost acknowledgements and correlated persisted output.
-The operator suite prints per-section and per-shard timings. `ci-status history`
-shows recent completed CI runs and ranked failing jobs/tests. The operator suite
-also verifies the main hierarchy with earlier mains on record, legacy ownership,
-separate review groups, compact/detail budgets, attention filtering, numbered
-result selection, menu cycling and view inheritance in an existing tmux server.
-Use `tests/operator-tools-smoke.sh --list-sections` to see focused verification
-areas: `auto-review` covers the review gate, `native-pty` covers terminal
-lifecycle behavior, and `room-rollover` covers room succession; combine
-independent areas with commas. `core/room-and-board-rendering` covers board
-rendering and shared-plan verifier warnings; `dispatch-results` covers dispatch
-and result handling. Size a composed `--verify` from its measured section timings:
-sequential sections add together, and slot waiting precedes the verifier clock.
-Use a finite caller override when that composition outlasts the default.
-Local measurements on 2026-10-31 were 16s for
-`core/room-and-board-rendering`, 422s for `dispatch-results` and 4s for the two
-selected timeout regressions (`test_python_timeout_fallback_bounds_verifier` and
-`test_run_with_timeout_require_refuses_unbounded`). These scoped runs did not
-reproduce a 20m budget exhaustion; they do not bound the full serial suite or
-other host loads.
+lifecycle-events suite covers bounded refs and immutable idempotency. Fixture execution
+does not establish account access or a live main's judgment quality. When a sandbox
+denies Unix sockets, the suite reports socket-dependent sections as skipped and exits
+77; parent verification outside that sandbox remains authoritative. The same operator
+suite covers council routes, durable results, verifier and patch lineage, privacy
+refusal and delivery deduplication/retry after interruption.
+
+The notifier suite covers unloaded and busy receivers, shell wrappers, early events,
+lost acknowledgements and correlated persisted output. The operator suite prints
+per-section and per-shard timings. `ci-status history` shows recent completed CI runs
+and ranked failing jobs/tests. The operator suite also verifies the main hierarchy with
+earlier mains on record, legacy ownership, separate review groups, compact/detail
+budgets, attention filtering, numbered result selection, menu cycling and view
+inheritance in an existing tmux server. Use `tests/operator-tools-smoke.sh
+--list-sections` to see focused verification areas: `auto-review` covers the review
+gate, `native-pty` covers terminal lifecycle behavior, and `room-rollover` covers room
+succession; combine independent areas with commas.
+
+`core/room-and-board-rendering` covers board rendering and shared-plan verifier
+warnings; `dispatch-results` covers dispatch and result handling. Size a composed
+`--verify` from its measured section timings: sequential sections add together, and slot
+waiting precedes the verifier clock. Use a finite caller override when that composition
+outlasts the default. Local measurements on 2026-10-31 were 16s for
+`core/room-and-board-rendering`, 422s for `dispatch-results` and 4s for the two selected
+timeout regressions (`test_python_timeout_fallback_bounds_verifier` and
+`test_run_with_timeout_require_refuses_unbounded`).
+
+These scoped runs did not reproduce a 20m budget exhaustion; they do not bound the full
+serial suite or other host loads.
 
 
 ## Researcher, scholar and supporting strategies
@@ -2179,19 +2732,20 @@ expanded `e Researcher` entry uses the same route. Researcher is a separate room
 participant beneath its main; its bounded answer is retained in Results and its
 status appears in tree/graph views. It never becomes a main or a patch approver.
 
-The researcher takes the light tier's Haiku or Luna candidate, whichever provider
-is installed first (`--to codex|claude` narrows it). Current configured floors are
+The researcher takes the light tier's Haiku or Luna candidate, whichever provider is
+installed first (`--to codex|claude` narrows it). Current configured floors are
 `claude-haiku-5-5` and `gpt-6-luna`. Read-only researcher seats that the panel
-dispatched may use provider web search/fetch while judging roles remain
-web-free. A researcher reads the repository and the web in one context, so
-repository text can leave the machine in a search query or fetched URL; do not
-dispatch researchers in a repository whose content must stay local. The dispatcher compares
-numeric versions within that family against the cached provider catalog and pins
-the newest exact ID. An omitted minor version means zero; `6.10` is newer than
-`6.2`. Cached discovery does not prove account access or live availability. No
-paid availability probe runs. If the pinned model cannot run, the task fails
-without an implicit older-model or more expensive-family substitution. A provider
-without a model catalog retains the configured exact ID until policy is refreshed.
+dispatched may use provider web search/fetch while judging roles remain web-free. A
+researcher reads the repository and the web in one context, so repository text can leave
+the machine in a search query or fetched URL; do not dispatch researchers in a
+repository whose content must stay local. The dispatcher compares numeric versions
+within that family against the cached provider catalog and pins the newest exact ID.
+
+An omitted minor version means zero; `6.10` is newer than `6.2`. Cached discovery does
+not prove account access or live availability. No paid availability probe runs. If the
+pinned model cannot run, the task fails without an implicit older-model or more
+expensive-family substitution. A provider without a model catalog retains the configured
+exact ID until policy is refreshed.
 
 Use `oms panel --dispatch scholar --owner claude --prompt 'Compare the primary sources with verified citations.'`
 for a multi-source literature survey. Scholar uses the deep tier at high effort by
@@ -2286,25 +2840,26 @@ their room evidence stay intact.
 
 ## Salvaging a stopped worker
 
-Run `oms panel --repo . --salvage TASK_ID [--attempt ATTEMPT_ID] [--json]` to capture the latest stopped
-delegate's recorded, kept execution worktree, including a separate clone or
-scratch worktree, or the explicitly selected stopped attempt of that task.
-Selection keeps the same room-owner, stopped-state and worktree identity checks;
-an attempt from another task is refused. It preserves that checkout and index,
-and reports changed paths, before/after byte sizes, the patch path and its
-`.patch.json` metadata under `.oms/artifacts/delegate/`. Metadata and the patch
-header carry `salvaged_from` (task, attempt, kept path and stop reason), base and
-payload hashes, file sizes and `encoding_warnings` for display. Admission uses
-controller records in `.oms/salvage-provenance/`, keyed by the diff payload hash;
-editing headers, sidecars or warning lists cannot change those records.
-The flags guard the salvaged artifact as captured; an edited or reformatted
-patch is a different patch that ordinary admission checks. `patch-admit`
-examines every textual patch hunk for encoding loss, independent of salvage
-identity; `--accept-encoding-loss` records owner acceptance for detected hunks.
-Warnings flag hunks whose
-replacement has the same ASCII skeleton after Unicode decomposition but fewer
-non-ASCII characters, and files losing more than half their non-ASCII bytes.
-These are review hints; they can include intentional edits or deletions.
-Review the patch before using `oms patch-land --patch PATH --accept-salvaged`.
-Flagged encoding loss also requires `--accept-encoding-loss`; normal admission
-checks still run. Salvage captures evidence and never admits or applies it.
+Run `oms panel --repo . --salvage TASK_ID [--attempt ATTEMPT_ID] [--json]` to capture
+the latest stopped delegate's recorded, kept execution worktree, including a separate
+clone or scratch worktree, or the explicitly selected stopped attempt of that task.
+Selection keeps the same room-owner, stopped-state and worktree identity checks; an
+attempt from another task is refused. It preserves that checkout and index, and reports
+changed paths, before/after byte sizes, the patch path and its `.patch.json` metadata
+under `.oms/artifacts/delegate/`. Metadata and the patch header carry `salvaged_from`
+(task, attempt, kept path and stop reason), base and payload hashes, file sizes and
+`encoding_warnings` for display.
+
+Admission uses controller records in `.oms/salvage-provenance/`, keyed by the diff
+payload hash; editing headers, sidecars or warning lists cannot change those records.
+The flags guard the salvaged artifact as captured; an edited or reformatted patch is a
+different patch that ordinary admission checks. `patch-admit` examines every textual
+patch hunk for encoding loss, independent of salvage identity; `--accept-encoding-loss`
+records owner acceptance for detected hunks. Warnings flag hunks whose replacement has
+the same ASCII skeleton after Unicode decomposition but fewer non-ASCII characters, and
+files losing more than half their non-ASCII bytes.
+
+These are review hints; they can include intentional edits or deletions. Review the
+patch before using `oms patch-land --patch PATH --accept-salvaged`. Flagged encoding
+loss also requires `--accept-encoding-loss`; normal admission checks still run. Salvage
+captures evidence and never admits or applies it.

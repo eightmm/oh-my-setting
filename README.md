@@ -16,10 +16,6 @@ shared control panel and see the work in progress.
 
 <p align="center"><img src="docs/assets/panel-graph.svg" alt="OMS panel graph showing the goal, main agent, delegated worker, verifier gate, session events and provider quota" width="100%"></p>
 
-The panel puts the goal, calls, review state and recent activity in one view.
-See the [panel guide](docs/TERMINAL-PANEL.md) for startup, navigation and role
-routing.
-
 ## Install
 
 ```bash
@@ -28,11 +24,11 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | Host | Needs |
 |---|---|
-| Linux (glibc) | Bash, curl. Git, tar, gzip and find are installed if missing. **Python 3.11+ is provisioned as a managed runtime.** |
-| macOS | Bash, curl, Command Line Tools (`xcode-select --install`). **Python 3.11+ is provisioned as a managed runtime.** |
+| Linux (glibc) | Bash, curl. Git, tar, gzip and find are installed if missing. |
+| macOS | Bash, curl, Command Line Tools (`xcode-select --install`). |
 | Windows via WSL2 | A glibc Linux distribution inside WSL2; use the Linux requirements above |
 
-Python 3.11 or newer is required, with no upper version bound. The managed runtime stays on the 3.12 version in `tools.lock.json`, so older system Python on Ubuntu 20.04/22.04 or macOS Command Line Tools does not need replacing.
+OMS provisions Python 3.11+ as a managed runtime; system Python stays unchanged.
 
 The default `core` profile installs the harness and one coding agent.
 musl-based Linux such as Alpine is not supported. Profiles and Windows notes
@@ -126,14 +122,9 @@ Read project progress and next decisions with `oms dashboard`. See the
 | **ML and HPC** | Run reproducible work, data checks and Slurm tools. [Components](docs/COMPONENTS.md#ml-and-hpc-components) |
 | **Typed runtime** | Inspect task contracts and evidence coverage. [Runtime guide](docs/OMS-RUNTIME.md) |
 
-Your agent finds these on its own; the full catalog is in
-[docs/COMPONENTS.md](docs/COMPONENTS.md).
-Installed peer CLIs can also include Muse (`muse`), Kimi Code (`kimi`), Kiro
-(`kiro-cli`), Continue (`cn`), Goose (`goose`), Cline (`cline`), Kilo (`kilo`),
-OpenHands (`openhands`) and Auggie (`auggie`); see the [provider routing
-reference](custom-skills/oms-agent-harness/references/provider-routing.md) for
-their access boundaries. Junie and Crush remain custom-adapter candidates until
-their headless write approval behavior is confirmed.
+Use the [documentation map](docs/README.md) to choose a guide. The
+[provider routing reference](custom-skills/oms-agent-harness/references/provider-routing.md)
+lists additional peer CLIs and their read/write boundaries.
 
 ## Notes
 

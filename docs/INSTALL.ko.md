@@ -1,10 +1,7 @@
 # oh-my-setting 설치
 
-이 안내는 Linux, macOS, Windows via WSL2에서 OMS를 설치하고 관리하는 사용자를 위한 문서다.
-아래 명령으로 시작한 뒤 호스트와 프로필별 세부 내용을 확인한다.
-
-한 줄 설치 명령과 설치하면 바뀌는 것은 [README](../README.ko.md)에 있다. 이
-문서는 호스트 요구 사항, capability 프로필, 업데이트의 세부 내용을 다룬다.
+Linux, macOS, Windows via WSL2의 호스트 요구 사항, 프로필과 유지보수를 다룬다.
+한 줄 설치 명령과 바뀌는 파일의 요약은 [README](../README.ko.md)를 참고한다.
 [English](INSTALL.md)
 
 ```bash
@@ -15,11 +12,13 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 | 관리 파일 |
 |---|---|---|
-| Linux (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다). Python 3.11+는 관리형 런타임으로 설치된다 | symlink |
-| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다). Python 3.11+는 관리형 런타임으로 설치된다 | symlink |
+| Linux (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다) | symlink |
+| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다) | symlink |
 | Windows via WSL2 | WSL2 안에서 위 Linux 요구 사항 적용 | symlink |
 
-Python 요구 사항은 상한 없는 3.11 이상이다. 관리형 런타임은 `tools.lock.json`의 3.12 버전을 사용하므로 Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된 시스템 Python을 바꿀 필요가 없다.
+Python 요구 사항은 상한 없는 3.11 이상이며 `tools.lock.json`에 고정된 3.12
+런타임을 설치한다. Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된
+시스템 Python은 바꾸지 않는다.
 
 시스템 `python3`가 없거나 3.11 미만이면 설치기는 고정 버전 uv를 받아 sha256을
 확인하고, `tools.lock.json`의 Python을 직접 만든 뒤 관리형 `python3` shim이
@@ -43,6 +42,9 @@ WSL1이 아닌 **WSL2**를 사용한다. 저장소와 `~/.oh-my-setting`, WSL �
 WSL 안에 설치하고 실행하며 위 Linux 요구 사항을 따른다.
 네이티브 Windows(Git Bash/MSYS2/Cygwin)는 지원하지 않으며 OMS 실행을 거부한다.
 
+<details>
+<summary>기존 네이티브 Windows 설치 제거 절차</summary>
+
 기존 네이티브 Windows 설치를 제거하려면 기존 설치 체크아웃에서 Windows를
 마지막으로 지원한 `oms-windows-final` 태그를 사용한다.
 
@@ -57,6 +59,8 @@ bash scripts/uninstall.sh
 `oms uninstall`도 거부한다. 이미 실행 중인 구버전 업데이트도 새 트리에 진입하면
 중단하고 체크아웃과 관리 링크를 롤백한다. WSL2 설치는 별도로 시작한다.
 
+</details>
+
 ## 프로필과 도구
 
 기본 설치는 `core` capability를 고른다. 하네스, Bash, Git, Python, 코딩 agent
@@ -70,27 +74,43 @@ bash scripts/uninstall.sh
 묶음만 다시 적용한다. capability receipt가 없는 기존 설치는 agent가 명시적으로
 옮기기 전까지 예전의 전체 도구 업데이트 경로를 유지한다.
 [MIGRATION.md](MIGRATION.md#capability-profiles)를 참고한다.
-`oms install-profile --apply --add --profile github`은 기존 프로필, provider,
-누락 허용 정책을 유지하며 capability를 추가한다. `--add` 없는 `--profile`은
-기록된 선택을 대체하고, `--reapply`는 그대로 다시 적용한다. `--plan`으로
-변경 없이 미리 확인할 수 있다.
+
+| `oms install-profile` 옵션 | 동작 |
+|---|---|
+| `--apply --add --profile github` | 기존 프로필·provider·누락 허용 정책을 유지하며 capability를 추가한다. |
+| `--add` 없는 `--profile NAME` | 기록된 선택을 대체한다. |
+| `--reapply` | 기록된 선택을 그대로 다시 적용한다. |
+| `--plan` | 변경 없이 미리 확인한다. |
 
 `OH_MY_SETTING_MCP=0`, `OH_MY_SETTING_AGY_PLUGIN=0`은 각각의 연동 설치를
 건너뛴다. 설치 receipt에 두 선택을 기록하므로 환경 변수가 없는 업데이트와
 예약 실행도 유지한다. `oms update`에 환경 변수를 명시하면 기록된 선택을
 바꾼다. Antigravity는 `auto`(기본: 있을 때 설치), `1`(필수)도 받는다.
 
-`oms list`는 설정(`init`, `install-profile`), 일상 작업(`agent-plan`, `status`),
-협업, 전달, 유지보수(`doctor`, `update`, `uninstall`) 순으로 명령을 묶는다.
-`oms list --all`은 전체 목록을 유지한다.
+## Provider 설치와 갱신
 
 없는 Git·tar·gzip·find를 설치할 때를 빼면 root가 필요 없다. 관리 도구의
 부트스트랩 버전, 플랫폼 URL, 무결성 값은 `tools.lock.json`에 고정되어 있다.
 새 provider 설치는 안정판을 찾아 비공개 `provider-tools.lock.json` 스냅샷에
 기록한다. Linux/macOS의 새 Claude는 공식 HTTPS manifest의 SHA-256으로
 네이티브 바이너리를 검증한 뒤 `install VERSION`을 실행한다. manifest에
-OMS가 GPG 서명을 별도로 검증하지는 않는다. 네이티브 Windows Git Bash는 기존 npm 경로를 쓰며,
-새 Codex와 agy도 기존 검증 설치 경로를 유지한다.
+OMS가 GPG 서명을 별도로 검증하지는 않는다. 새 Codex와 agy도 기존 검증 설치
+경로를 유지한다.
+
+인식된 vendor 설치 경로의 동작은 다음과 같다.
+
+| Provider | 일반 갱신 | 명시적 lock 적용 |
+|---|---|---|
+| Claude | `claude update` | `claude install VERSION` 후 정확한 버전 확인 |
+| Codex(네이티브) | `codex update` | 버전 불일치 시 갱신 전 거부; 일치하면 유지 |
+| agy(네이티브) | `agy update`; 기본 채널은 vendor가 관리 | pin 불일치·OMS 관리 바이트 변조 시 거부; 일치하면 유지 |
+| Pi | `install-tools.sh --providers`에서만 `pi update self` | Pi 항목이 없어 갱신 생략 |
+
+> Pi는 이미 설치된 경우에만 갱신한다. 전체 도구 설치와 프로필 재적용은
+> Pi를 갱신하지 않는다. 수동 `--no-tools`는 도구 갱신을 건너뛴다.
+
+<details>
+<summary>상세 갱신 규칙: 무결성, 중단 복구, Claude migration과 사본 점검</summary>
 
 인식된 Claude, Codex, agy는 각 vendor의 update 명령으로 갱신한다.
 Pi 갱신은 `install-tools.sh --providers`에서만 `pi update self`로 실행한다.
@@ -101,18 +121,29 @@ Pi는 이미 설치된 경우에만 갱신한다. 예약 업데이트도 설치�
 npm lifecycle 스크립트는 실행될 수 있고 git/URL 의존성에는 이 기간이
 적용되지 않는다. 수동 `--no-tools`는 도구 갱신을 건너뛴다.
 
+
+
+#### 고정 버전과 무결성
+
 명시한 `OH_MY_SETTING_TOOL_LOCK`이 있으면 Claude는 `claude install VERSION`으로
 고정하고 정확한 버전을 확인한다. 네이티브 Codex와 agy는 고정 버전과 다르면
 변경 전에 거부한다. 현재 lock에는 Pi 항목이 없어 명시적인 lock이 있으면
 안내 한 줄과 함께 Pi 갱신만 건너뛰고 성공으로 끝낸다. 기본 채널의 agy는
-lock으로 검증한 첫 설치 뒤 Claude·Codex처럼 vendor가 갱신한다. 새 설치는 소유
-digest를 남기지 않고, 갱신은 `~/.local`과 `~/.local/bin`이 실제 디렉터리일 때만
-예전 digest sidecar를 지운다(바이트가 달라졌으면 경고). 명시적 lock에서는 갱신
-전에 기존 digest가 맞아야 실행하며, doctor도 변경된 바이트를 drift로 보고한다.
+lock으로 검증한 첫 설치 뒤 vendor가 갱신하며 소유 digest를 남기지 않는다.
+갱신은 `~/.local`과 `~/.local/bin`이 실제 디렉터리이고 기존 sidecar 형식이
+정상일 때만 sidecar를 지운다. 바이트 불일치는 경고 후 vendor 갱신을 진행하지만,
+잘못된 형식·링크·digest 읽기 오류·삭제 실패는 계속 거부한다.
+
+명시적 lock에서는 기존 OMS 소유 marker의 digest가 실행 전에 일치해야 한다.
 검증된 바이너리와 marker를 복원하거나 둘 다 보존한 뒤 프로필을 다시 적용한다.
+marker 없는 vendor 설치는 그대로 vendor 소유이며, pin이 같으면 marker를 만들지
+않고 유지한다.
+
 중단된 OMS 직접 설치의 잔여 상태는 고정 payload의 checksum을 검증한 뒤
-먼저 복구한다. 잔여 상태 없는 변조는 계속 거부한다. doctor는 provider/model
-실행 전에 선택된 관리 도구를 검증하고, digest가 틀린 사본의 버전 실행도 건너뛴다.
+먼저 복구한다. 명시적 lock에서 OMS marker가 남아 있는 agy의 변조는 복구 근거가
+없으면 계속 거부한다. doctor는 provider/model 실행 전에 관리 도구를 검증한다.
+기본 채널의 검증 가능한 stale agy sidecar는 한 번 경고하고 선택된 도구의 probe를
+허용하지만, 잘못된 형식이나 그 밖의 무효한 소유권 근거는 실행을 건너뛴다.
 버전 명령은 PATH에서 선택된 CLI에만 실행한다. 추가 사본은 sidecar digest가
 일치해도 실행하지 않고 `not executed`로 표시한다. npm 버전은 패키지 metadata에서 읽는다.
 `digest` 상태는 `matched`, `unmarked`, `invalid`, `unknown`이며 바이트 확인
@@ -122,6 +153,10 @@ vendor 보관 버전은 PATH에 있어도 한 설치로 묶고 삭제 명령을 
 무결성 오류로 버전 확인을 건너뛰면 `not probed`로 표시한다. 직접 설치 도구의
 중단된 트랜잭션 잔여 상태는 vendor 버전을 정상으로 판단하기 전에 보고한다.
 
+
+
+#### Claude migration과 추가 사본
+
 네이티브 versions 디렉터리가 없거나 비었거나 유효한 실행 파일이 없으면
 기존 npm/shim 경로를 유지한다. OMS 소유 Claude npm shim과 기존 네이티브 버전이 함께 있으면 최신 네이티브
 바이너리의 설치기로 launcher를 복원하고, shim에 기록된 prefix의 npm 사본만
@@ -129,11 +164,16 @@ vendor 보관 버전은 PATH에 있어도 한 설치로 묶고 삭제 명령을 
 vendor 설치 후 npm 정리 전에 중단되면 backup을 유지한다. 재실행은 PATH
 순서와 무관하게 네이티브 launcher를 직접 확인하고 재설치 없이 정리한다.
 활성 npm 루트의 Claude launcher는 `~/.local` prefix에서도 그대로 허용한다.
+
+
+#### 사본 점검과 정리
+
 `oms doctor`는 PATH, vendor 루트, 모든 nvm Node prefix의 사본을 나열하고
 선택된 경로, 채널, 버전과 중복 제거 명령을 표시한다. 정리 명령은 선택되지
-않은 npm 패키지나 외부 launcher만 대상으로 한다. vendor가 보관한 이전
-버전 파일은 중복으로 세거나 실행·제거하지 않고, alias의 버전 점검은 재사용한다.
+않은 npm 패키지나 외부 launcher만 대상으로 하며, alias는 버전 점검을 추가하지 않는다.
 제거와 복구는 vendor launcher나 루트를 지우지 않는다.
+
+</details>
 
 provider 의존성은 provider와 함께 정해진다. Codex와 Claude는 고정된 Node를
 포함하고 Antigravity는 포함하지 않는다. 새로 받은 파일은 쓰기 전에 검증한다.

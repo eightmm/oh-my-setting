@@ -16,9 +16,6 @@ oh-my-setting은 Codex, Claude Code, Antigravity가 프로젝트 규칙, 상태,
 
 <p align="center"><img src="docs/assets/panel-graph.svg" alt="목표, main agent, 위임 작업자, verifier gate, 세션 기록과 provider 사용량을 보여 주는 OMS 패널 그래프" width="100%"></p>
 
-패널은 목표, 호출, 리뷰 상태와 최근 활동을 한 화면에 보여 준다. 시작,
-탐색, 역할 라우팅은 [패널 안내](docs/TERMINAL-PANEL.md)를 참고한다.
-
 ## 설치
 
 ```bash
@@ -27,11 +24,11 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 |
 |---|---|
-| Linux (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. **Python 3.11+는 관리형 런타임으로 설치된다.** |
-| macOS | Bash, curl, Command Line Tools(`xcode-select --install`). **Python 3.11+는 관리형 런타임으로 설치된다.** |
+| Linux (glibc) | Bash, curl. Git·tar·gzip·find는 없으면 설치한다. |
+| macOS | Bash, curl, Command Line Tools(`xcode-select --install`). |
 | Windows via WSL2 | WSL2 안의 glibc Linux 배포판. 위 Linux 요구 사항 적용 |
 
-Python 요구 사항은 상한 없는 3.11 이상이다. 관리형 런타임은 `tools.lock.json`의 3.12 버전을 사용하므로 Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된 시스템 Python을 바꿀 필요가 없다.
+Python 3.11+는 관리형 런타임으로 설치하며 시스템 Python은 바꾸지 않는다.
 
 기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. Alpine 같은 musl
 기반 Linux는 지원하지 않는다. 프로필과 Windows 참고 사항은
@@ -124,11 +121,9 @@ oh-my-setting 업데이트하고 doctor 다시 돌려줘.
 | **ML과 HPC** | 재현 가능한 실행, 데이터 검사, Slurm 도구를 제공한다. [구성 요소](docs/COMPONENTS.md#ml-and-hpc-components) |
 | **Typed runtime** | 작업 계약과 증거 범위를 살핀다. [Runtime 안내](docs/OMS-RUNTIME.md) |
 
-agent가 알아서 골라 쓴다. 전체 목록은 [docs/COMPONENTS.md](docs/COMPONENTS.md)에 있다.
-설치된 peer CLI로 Muse(`muse`), Kimi Code(`kimi`), Kiro(`kiro-cli`),
-Continue(`cn`), Goose(`goose`), Cline(`cline`), Kilo(`kilo`), OpenHands(`openhands`),
-Auggie(`auggie`)도 사용할 수 있다. Junie와 Crush는 headless 쓰기 승인 동작을
-확인할 때까지 custom adapter 후보로 남긴다. 접근 경계는 [provider 라우팅 안내](custom-skills/oms-agent-harness/references/provider-routing.md)를 참고한다.
+필요한 안내는 [문서 지도](docs/README.md)에서 고른다.
+[provider 라우팅 안내](custom-skills/oms-agent-harness/references/provider-routing.md)에서
+추가 peer CLI와 읽기·쓰기 경계를 확인한다.
 
 ## 참고
 
