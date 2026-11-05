@@ -488,6 +488,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Landing capture gc no longer stalls on `.oms/plan` siblings that are not
+  task plans (proposals, discovery and candidate reports, autopilot run
+  records); task-shaped or explicitly named plans still pin captures.
 - A peer call stopped by HUP, INT or TERM removes its own pid-stamped
   Antigravity read trees after its provider jobs are reaped, instead of
   leaking `oh-my-setting-agy-read.*` directories.
