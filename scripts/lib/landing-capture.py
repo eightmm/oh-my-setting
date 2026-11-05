@@ -1188,6 +1188,13 @@ def delegation_state(repo, log=None):
         plan_root = Path(repo) / '.oms/plan'
         scanned_plans = set()
         retired_archives = set()
+        if log:
+            for row in log:
+                pf = row.get('plan_file', '')
+                if isinstance(pf, str) and pf:
+                    extra_plans.add(pf)
+        explicit_paths = {os.path.normcase(os.path.realpath(
+            pf if os.path.isabs(pf) else os.path.join(repo, pf))) for pf in extra_plans}
 
         def scan_plan_file(path_str, is_explicit=False):
             real = os.path.normcase(os.path.realpath(path_str))
@@ -1197,6 +1204,22 @@ def delegation_state(repo, log=None):
             if os.path.basename(path_str) != 'tasks.json' and real in retired_archives:
                 return True
             data = _read_bounded_json(path_str, MAX_STREAM)
+            name = os.path.basename(path_str)
+            if not is_explicit and real not in explicit_paths:
+                # These writers persist proposals and run metadata, not task leases.
+                # A task-shaped document is always scanned, even under these names.
+                if (not isinstance(data.get('tasks'), dict) and 'state' not in data and
+                        ('tasks' not in data or re.fullmatch(r'proposal-.+\.json', name))):
+                    kind = data.get('kind')
+                    if ((re.fullmatch(r'proposal-.+\.json', name) and kind == 'agent-plan-proposal'
+                         and isinstance(data.get('tasks'), list)) or
+                        (re.fullmatch(r'candidates-.+\.json', name) and kind == 'work-discovery-candidate-report'
+                         and isinstance(data.get('candidates'), list)) or
+                        (re.fullmatch(r'discovery-.+\.json', name) and isinstance(data.get('sections'), dict)
+                         and type(data.get('bytes')) is int and data['bytes'] >= 0) or
+                        (re.fullmatch(r'autopilot-run(?:\.[^.]+)?\.json', name) and kind == 'autopilot-run') or
+                        (re.fullmatch(r'autopilot-run\.[^.]+\.abandoned\.json', name) and kind == 'autopilot-abandon')):
+                        return True
             if 'tasks' in data or os.path.basename(path_str) == 'tasks.json' or is_explicit:
                 tasks = data.get('tasks')
                 if not isinstance(tasks, dict):
@@ -1271,11 +1294,6 @@ def delegation_state(repo, log=None):
                         if pins:
                             active_leases.add(entry.name[:-5])
                             live_records.append(idx)
-        if log:
-            for row in log:
-                pf = row.get('plan_file', '')
-                if isinstance(pf, str) and pf:
-                    extra_plans.add(pf)
         plan_root_real = os.path.normcase(os.path.realpath(str(plan_root)))
         for pf in extra_plans:
             target = Path(pf) if os.path.isabs(pf) else Path(repo) / pf

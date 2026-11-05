@@ -1679,6 +1679,61 @@ def new_leased(name, task_id='', lease_id=''):
     return capture, patch
 
 if os.name != 'nt':
+    plan_dir = repo / '.oms/plan'
+    siblings = {
+        'proposal-fixture.json': {'kind': 'agent-plan-proposal', 'tasks': []},
+        'autopilot-run.json': {'kind': 'autopilot-run', 'stage': 'driving'},
+        'autopilot-run.abc.json': {'kind': 'autopilot-run', 'stage': 'done'},
+        'autopilot-run.abc.abandoned.json': {'kind': 'autopilot-abandon'},
+        'discovery-fixture.json': {'schema': 1, 'sections': {}, 'bytes': 0},
+        'candidates-fixture.json': {'kind': 'work-discovery-candidate-report', 'candidates': []},
+    }
+    (plan_dir / 'tasks.json').write_text(json.dumps({'tasks': {}}))
+    for name, data in siblings.items():
+        (plan_dir / name).write_text(json.dumps(data))
+    cap, pub = new('plan-siblings')
+    h['gc'](str(repo), 0, True)
+    assert not cap.exists() and not pub.exists(), 'known plan siblings vetoed GC'
+    probe = plan_dir / 'discovery-edge.json'
+    for value in (None, -1, True, '0'):
+        probe.write_text(json.dumps({'sections': {}, 'bytes': value}))
+        assert h['delegation_state'](str(repo)) is None, value
+    probe.write_text(json.dumps({'sections': {}, 'bytes': 0}))
+    assert h['delegation_state'](str(repo)) is not None
+    probe.write_text(json.dumps({'sections': {}, 'bytes': 1}))
+    assert h['delegation_state'](str(repo)) is not None
+    probe.unlink()
+    disguised = plan_dir / 'autopilot-run.disguised.json'
+    disguised.write_text(json.dumps({'kind': 'autopilot-run', 'tasks': {
+        't': {'id': 't', 'state': 'running', 'lease_id': 'lease_disguised'}}}))
+    assert 'lease_disguised' in h['delegation_state'](str(repo))[1]
+    disguised.write_text(json.dumps({'kind': 'autopilot-run', 'state': 'malformed'}))
+    assert h['delegation_state'](str(repo)) is None
+    disguised.write_text(json.dumps({'kind': 'autopilot-run', 'tasks': []}))
+    assert h['delegation_state'](str(repo)) is None
+    disguised.unlink()
+    for name, body in (('unknown.json', '{}'), ('unknown.json', '{malformed'),
+                       ('proposal-bad.json', '{}'), ('tasks.json', '{"tasks":[]}')):
+        target = plan_dir / name
+        target.write_text(body)
+        cap, pub = new('plan-invalid-' + str(len(body)) + '-' + name.replace('.', '-'))
+        h['gc'](str(repo), 0, True)
+        assert cap.exists() and pub.exists(), 'invalid plan sibling did not veto GC: ' + name
+        target.unlink()
+        h['gc'](str(repo), 0, True)
+        assert not cap.exists() and not pub.exists(), 'removed invalid plan still vetoed GC'
+    # A marker or journal can name a custom plan with a reserved sibling name.
+    explicit = plan_dir / 'proposal-explicit.json'
+    explicit.write_text(json.dumps(siblings['proposal-fixture.json']))
+    assert h['delegation_state'](str(repo), [{'plan_file': str(explicit)}]) is None
+    explicit.write_text(json.dumps({'tasks': {'t': {'id': 't', 'state': 'running',
+                                                     'lease_id': 'lease_explicit'}}}))
+    state = h['delegation_state'](str(repo), [{'plan_file': str(explicit)}])
+    assert state is not None and 'lease_explicit' in state[1]
+    explicit.unlink()
+    for name in siblings:
+        (plan_dir / name).unlink()
+
     # Keep the capture predicate aligned with the engine's authority guard,
     # rather than allowing another state list to drift independently.
     import ast
