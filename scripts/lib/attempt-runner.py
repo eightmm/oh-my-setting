@@ -494,15 +494,16 @@ class BoundedLogCapture:
             raise ae.OpsError("could not persist worker output: %s" % self.error)
 
 
-def write_launch_failure(path: Path, message: str, max_bytes: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = message.encode("utf-8", "replace")[:max_bytes]
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        BoundedLogCapture._write_all(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+def _finish_job(job: Dict[str, Any], runtime_state: str, **extra: Any) -> None:
+    job.update({
+        "runtime_state": runtime_state,
+        "pid": 0,
+        "pid_identity": "",
+        "runner_pid": 0,
+        "runner_pid_identity": "",
+        "finished_at": ae.utc_now(),
+        **extra,
+    })
 
 
 def load_job(repo: Path, attempt_id: str) -> Dict[str, Any]:
@@ -1140,15 +1141,7 @@ def runner(repo: Path, attempt_id: str) -> int:
         job = load_job(repo, attempt_id)
         if job.get("runtime_state") == "cancel_requested":
             cancelled_before_launch = True
-            job.update({
-                "runtime_state": "cancelled",
-                "exit_code": None,
-                "pid": 0,
-                "pid_identity": "",
-                "runner_pid": 0,
-                "runner_pid_identity": "",
-                "finished_at": ae.utc_now(),
-            })
+            _finish_job(job, "cancelled", exit_code=None)
             save_job(repo, job)
         elif job.get("runtime_state") not in {"queued", "launching"}:
             return 0
@@ -1161,15 +1154,7 @@ def runner(repo: Path, attempt_id: str) -> int:
             # afterward would already have spent the budget, so refuse before
             # Popen instead.
             hard_budget_unsupported = True
-            job.update({
-                "runtime_state": "finished",
-                "exit_code": 78,
-                "pid": 0,
-                "pid_identity": "",
-                "runner_pid": 0,
-                "runner_pid_identity": "",
-                "finished_at": ae.utc_now(),
-            })
+            _finish_job(job, "finished", exit_code=78)
             save_job(repo, job)
         else:
             job["runtime_state"] = "starting"
@@ -1218,21 +1203,23 @@ def runner(repo: Path, attempt_id: str) -> int:
             job["argv"], job["cwd"], env
         )
     except (OSError, ValueError, ae.OpsError) as exc:
-        message = "launch failed: %s\n" % exc
-        write_launch_failure(output, message, max_log_bytes)
+        raw_msg = ("launch failed: %s\n" % exc).encode("utf-8", "replace")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(output), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            BoundedLogCapture._write_all(fd, raw_msg[:max_log_bytes])
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         with ae.file_lock(lock_target):
             job = load_job(repo, attempt_id)
-            job.update({
-                "runtime_state": "finished",
-                "exit_code": 127,
-                "log_bytes": len(message.encode("utf-8", "replace")[:max_log_bytes]),
-                "log_truncated": len(message.encode("utf-8", "replace")) > max_log_bytes,
-                "pid": 0,
-                "pid_identity": "",
-                "runner_pid": 0,
-                "runner_pid_identity": "",
-                "finished_at": ae.utc_now(),
-            })
+            _finish_job(
+                job,
+                "finished",
+                exit_code=127,
+                log_bytes=len(raw_msg[:max_log_bytes]),
+                log_truncated=len(raw_msg) > max_log_bytes,
+            )
             save_job(repo, job)
         transition(repo, attempt_id, "failed", "launch_failed", "runner-launch-failed")
         return 127
@@ -1307,21 +1294,15 @@ def runner(repo: Path, attempt_id: str) -> int:
             job = load_job(repo, attempt_id)
             if job.get("runtime_state") == "cancel_requested":
                 cancelled = True
-            job.update({
-                "runtime_state": (
-                    "interrupted"
-                    if identity_failed
-                    else ("cancelled" if cancelled else "finished")
-                ),
-                "exit_code": int(exit_code),
-                "log_bytes": capture.bytes_written,
-                "log_truncated": capture.truncated,
-                "pid": 0,
-                "pid_identity": "",
-                "runner_pid": 0,
-                "runner_pid_identity": "",
-                "finished_at": ae.utc_now(),
-            })
+            _finish_job(
+                job,
+                "interrupted"
+                if identity_failed
+                else ("cancelled" if cancelled else "finished"),
+                exit_code=int(exit_code),
+                log_bytes=capture.bytes_written,
+                log_truncated=capture.truncated,
+            )
             save_job(repo, job)
 
         if timed_out:
@@ -1491,14 +1472,7 @@ def dispatch(args: argparse.Namespace) -> int:
         with ae.file_lock(queue_lock_path(repo)):
             job = load_job(repo, attempt_id)
             if job.get("runtime_state") == "cancel_requested":
-                job.update({
-                    "runtime_state": "cancelled",
-                    "pid": 0,
-                    "pid_identity": "",
-                    "runner_pid": 0,
-                    "runner_pid_identity": "",
-                    "finished_at": ae.utc_now(),
-                })
+                _finish_job(job, "cancelled")
                 save_job(repo, job)
                 cancelled_before_spawn = True
         if cancelled_before_spawn:
@@ -1532,14 +1506,7 @@ def dispatch(args: argparse.Namespace) -> int:
         except (OSError, ValueError):
             with ae.file_lock(queue_lock_path(repo)):
                 job = load_job(repo, attempt_id)
-                job.update({
-                    "runtime_state": "interrupted",
-                    "runner_pid": 0,
-                    "runner_pid_identity": "",
-                    "pid": 0,
-                    "pid_identity": "",
-                    "finished_at": ae.utc_now(),
-                })
+                _finish_job(job, "interrupted")
                 save_job(repo, job)
             transition(
                 repo,
@@ -1627,14 +1594,7 @@ def cancel(args: argparse.Namespace) -> int:
         job = load_job(repo, attempt_id)
         state = job.get("runtime_state")
         if state == "queued":
-            job.update({
-                "runtime_state": "cancelled",
-                "pid": 0,
-                "pid_identity": "",
-                "runner_pid": 0,
-                "runner_pid_identity": "",
-                "finished_at": ae.utc_now(),
-            })
+            _finish_job(job, "cancelled")
             save_job(repo, job)
             transition(repo, attempt_id, "cancelled", "cancelled_by_owner", "owner-cancelled")
         elif state in {
@@ -1835,10 +1795,7 @@ def reconcile(args: argparse.Namespace) -> int:
                 continue
             if runtime_state == "launching" and not runner_pid:
                 try:
-                    launch_age = (
-                        ae.dt.datetime.now(ae.dt.timezone.utc)
-                        - ae.parse_ts(job.get("launch_started_at", ""))
-                    ).total_seconds()
+                    launch_age = (now - ae.parse_ts(job.get("launch_started_at", ""))).total_seconds()
                 except ae.OpsError:
                     launch_age = 999
                 if launch_age < 10:
@@ -1854,12 +1811,7 @@ def reconcile(args: argparse.Namespace) -> int:
             interrupted.append(job["attempt_id"])
             if args.apply:
                 if identity_mismatch:
-                    job["runtime_state"] = "interrupted"
-                    job["pid"] = 0
-                    job["pid_identity"] = ""
-                    job["runner_pid"] = 0
-                    job["runner_pid_identity"] = ""
-                    job["finished_at"] = ae.utc_now()
+                    _finish_job(job, "interrupted")
                     save_job(repo, job)
                     _, attempts = ae.load_projection(repo)
                     if attempts.get(job["attempt_id"], {}).get("state") in ae.NONTERMINAL_STATES:
@@ -1878,12 +1830,7 @@ def reconcile(args: argparse.Namespace) -> int:
                     save_job(repo, job)
                     continue
                 cancelled = runtime_state == "cancel_requested"
-                job["runtime_state"] = "cancelled" if cancelled else "interrupted"
-                job["pid"] = 0
-                job["pid_identity"] = ""
-                job["runner_pid"] = 0
-                job["runner_pid_identity"] = ""
-                job["finished_at"] = ae.utc_now()
+                _finish_job(job, "cancelled" if cancelled else "interrupted")
                 save_job(repo, job)
                 _, attempts = ae.load_projection(repo)
                 state = attempts.get(job["attempt_id"], {}).get("state")

@@ -86,18 +86,27 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(stale["entries"], [])
 
     def test_determinism_incremental_and_symbol_changes(self) -> None:
-        self.write("a.py", "def first():\n    return 1\n")
+        self.write("a.py", "import b\ndef first():\n    return 1\n")
+        self.write("b.py", "import a\n")
         one = build(self.repo, state=self.state)
         bytes_one = (self.state / "graph.json").read_bytes()
+        first_graph = load_graph(self.repo, state=self.state)
+        imports = {(edge["source"], edge["target"]) for edge in first_graph["edges"] if edge["relation"] == "imports"}
+        self.assertIn(("file:a.py", "module:b.py"), imports)
+        self.assertIn(("file:b.py", "module:a.py"), imports)
         two = build(self.repo, state=self.state)
         self.assertEqual(bytes_one, (self.state / "graph.json").read_bytes())
         self.assertEqual(two["stats"]["cached"], one["stats"]["files"])
-        self.write("a.py", "def second():\n    return 2\n")
+        self.assertFalse((self.state / ".gitignore").exists())
+        self.assertFalse((Path(self.temp.name) / ".gitignore").exists())
+        self.write("a.py", "import b\ndef second():\n    return 2\n")
         edited = build(self.repo, state=self.state)
         self.assertEqual(edited["stats"]["parsed"], 1)
         ids = {node["id"] for node in load_graph(self.repo, state=self.state)["nodes"]}
         self.assertIn("symbol:a.py::second", ids)
         self.assertNotIn("symbol:a.py::first", ids)
+        build(self.repo)
+        self.assertEqual((self.repo / ".oms" / ".gitignore").read_text(encoding="utf-8"), "*\n")
 
     def test_python_resolution_and_ambiguity(self) -> None:
         self.write("a.py", "from b import imported\ndef caller():\n    imported()\n    unique()\n    duplicate()\n")
@@ -501,9 +510,8 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertLessEqual(len(pack["files"]), 1)
         from oms_runtime.common import canonical_json
         self.assertEqual(pack["pack_bytes"], len(canonical_json(pack)))
-        self.assertNotIn("byte_estimate", pack)
         self.assertEqual(pack["project_graph_revision"], graph["revision"])
-        self.assertTrue((self.state / pack["pack_path"]).is_file() if not pack["pack_path"].startswith("context/") else (self.state / pack["pack_path"]).is_file())
+        self.assertTrue((self.state / pack["pack_path"]).is_file())
 
         self.write("src/needle.py", "def needle(): return 1\n")
         self.write("src/middle.py", "from src.needle import needle\n")
@@ -605,36 +613,65 @@ class ProjectGraphTest(unittest.TestCase):
         changes = {row["change"] for row in model["nodes"] if row["path"] in ("src/base.py", "src/dependent.py")}
         self.assertEqual(changes, {"changed", "impacted"})
 
-    def test_ensure_builds_refreshes_and_leaves_a_current_graph_alone(self) -> None:
+    def test_ensure_lifecycle_bounds_options_upgrade_and_safety(self) -> None:
+        from oms_runtime.common import CoreError
+
         self.write("a.py", "def first():\n    return 1\n")
         self.write("b.py", "import a\n")
+        with self.assertRaises(GraphError) as caught:
+            ensure(self.repo, state=self.state, max_files=1)
+        self.assertIn("2 files exceed the 1-file bound", str(caught.exception))
+        self.assertFalse((self.state / "graph.json").exists())
+
         first = ensure(self.repo, state=self.state)
-        self.assertEqual(first["action"], "built")
-        self.assertEqual(first["stats"]["cached"], 0)
+        self.assertEqual((first["action"], first["stats"]["cached"]), ("built", 0))
         self.assertTrue(load_graph(self.repo, state=self.state)["nodes"])
 
-        # A current graph is read, never rewritten: the bytes and the mtime of
-        # graph.json are the evidence, since a rebuild is deterministic and
-        # would otherwise be invisible.
         graph_file = self.state / "graph.json"
         before = (graph_file.read_bytes(), graph_file.stat().st_mtime_ns)
         os.utime(graph_file, ns=(before[1] - 2_000_000_000, before[1] - 2_000_000_000))
         stamp = graph_file.stat().st_mtime_ns
-        fresh = ensure(self.repo, state=self.state)
-        self.assertEqual(fresh["action"], "fresh")
-        self.assertEqual(fresh["revision"], first["revision"])
+        fresh = ensure(self.repo, state=self.state, max_files=1)
+        self.assertEqual((fresh["action"], fresh["revision"]), ("fresh", first["revision"]))
         self.assertNotIn("stats", fresh)
         self.assertEqual(graph_file.stat().st_mtime_ns, stamp)
 
-        # A stale graph is refreshed through the cache, so only the edited
-        # file is re-parsed.
         self.write("a.py", "def second():\n    return 2\n")
-        refreshed = ensure(self.repo, state=self.state)
-        self.assertEqual(refreshed["action"], "refreshed")
+        refreshed = ensure(self.repo, state=self.state, max_files=1)
+        self.assertEqual((refreshed["action"], refreshed["stats"]["parsed"]), ("refreshed", 1))
         self.assertNotEqual(refreshed["revision"], first["revision"])
         self.assertLess(refreshed["stats"]["cached"], refreshed["stats"]["files"])
-        self.assertEqual(refreshed["stats"]["parsed"], 1)
         self.assertTrue(check(self.repo, state=self.state)["fresh"])
+
+        manifest_path = self.state / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["parser_version"] = manifest["parser_version"] - 1
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        verdict = check(self.repo, state=self.state)
+        self.assertFalse(verdict["fresh"])
+        self.assertIn("parser_version", verdict["outdated"])
+        self.assertEqual(ensure(self.repo, state=self.state)["action"], "refreshed")
+        self.assertTrue(check(self.repo, state=self.state)["fresh"])
+
+        build(self.repo, state=self.state, exclude=("b.py",))
+        self.write("a.py", "def third():\n    return 3\n")
+        opt_refreshed = ensure(self.repo, state=self.state)
+        self.assertEqual((opt_refreshed["action"], opt_refreshed["stats"]["files"]), ("refreshed", 1))
+        self.assertNotIn("file:b.py", {node["id"] for node in load_graph(self.repo, state=self.state)["nodes"]})
+        self.assertTrue(check(self.repo, state=self.state)["fresh"])
+
+        outside = self.state.parent / "outside.json"
+        original = graph_file.read_bytes()
+        outside.write_bytes(original)
+        graph_file.unlink()
+        try:
+            graph_file.symlink_to(outside)
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        with self.assertRaises(CoreError):
+            ensure(self.repo, state=self.state)
+        self.assertTrue(graph_file.is_symlink())
+        self.assertEqual(outside.read_bytes(), original)
 
     def test_ensure_recovers_unusable_graph_artifacts(self) -> None:
         self.write("a.py", "def first():\n    return 1\n")
@@ -661,61 +698,6 @@ class ProjectGraphTest(unittest.TestCase):
                 self.assertEqual(load_graph(self.repo, state=self.state), expected)
                 self.assertEqual(ensure(self.repo, state=self.state)["action"], "fresh")
 
-    def test_ensure_refuses_an_unsafe_graph_target(self) -> None:
-        from oms_runtime.common import CoreError
-
-        self.write("a.py", "def first():\n    return 1\n")
-        build(self.repo, state=self.state)
-        graph = self.state / "graph.json"
-        outside = self.state.parent / "outside.json"
-        original = graph.read_bytes()
-        outside.write_bytes(original)
-        graph.unlink()
-        try:
-            graph.symlink_to(outside)
-        except OSError:
-            self.skipTest("symlinks unavailable")
-        with self.assertRaises(CoreError):
-            ensure(self.repo, state=self.state)
-        self.assertTrue(graph.is_symlink())
-        self.assertEqual(outside.read_bytes(), original)
-
-    def test_ensure_refuses_a_first_build_over_the_file_bound_but_never_a_refresh(self) -> None:
-        self.write("a.py", "def first():\n    return 1\n")
-        self.write("b.py", "def second():\n    return 2\n")
-        with self.assertRaises(GraphError) as caught:
-            ensure(self.repo, state=self.state, max_files=1)
-        self.assertIn("2 files exceed the 1-file bound", str(caught.exception))
-        self.assertFalse((self.state / "graph.json").exists())
-        # The explicit build has no file bound, and once a graph exists its
-        # refresh is never refused: whoever built it already decided.
-        build(self.repo, state=self.state)
-        self.assertEqual(ensure(self.repo, state=self.state, max_files=1)["action"], "fresh")
-        self.write("a.py", "def third():\n    return 3\n")
-        self.assertEqual(ensure(self.repo, state=self.state, max_files=1)["action"], "refreshed")
-
-    def test_ensure_refresh_keeps_the_discovery_options_the_graph_was_built_with(self) -> None:
-        self.write("keep.py", "def keep():\n    return 1\n")
-        self.write("drop.py", "def drop():\n    return 2\n")
-        build(self.repo, state=self.state, exclude=("drop.py",))
-        self.write("keep.py", "def kept():\n    return 1\n")
-        refreshed = ensure(self.repo, state=self.state)
-        self.assertEqual(refreshed["action"], "refreshed")
-        self.assertEqual(refreshed["stats"]["files"], 1)
-        self.assertNotIn("symbol:drop.py::drop", {node["id"] for node in load_graph(self.repo, state=self.state)["nodes"]})
-        self.assertTrue(check(self.repo, state=self.state)["fresh"])
-
-    def test_import_cycle_and_cache_reuse(self) -> None:
-        self.write("a.py", "import b\n")
-        self.write("b.py", "import a\n")
-        first = build(self.repo, state=self.state)
-        graph = load_graph(self.repo, state=self.state)
-        imports = {(edge["source"], edge["target"]) for edge in graph["edges"] if edge["relation"] == "imports"}
-        self.assertIn(("file:a.py", "module:b.py"), imports)
-        self.assertIn(("file:b.py", "module:a.py"), imports)
-        second = build(self.repo, state=self.state)
-        self.assertEqual(second["stats"]["cached"], first["stats"]["files"])
-
     def test_oversized_cache_entry_is_a_miss_and_is_not_stored(self) -> None:
         from oms_runtime.common import MAX_STATE_BYTES
         from oms_graph.project import cache as cache_module
@@ -725,7 +707,6 @@ class ProjectGraphTest(unittest.TestCase):
         cold_graph = load_graph(self.repo, state=self.state)
         entries = sorted((self.state / "cache").glob("*.json"))
         self.assertEqual(len(entries), 2)
-        # Plant an entry past the read limit, as a very large source file would.
         with entries[0].open("ab") as handle:
             handle.write(b" " * (MAX_STATE_BYTES + 1))
         rebuilt = build(self.repo, state=self.state)
@@ -733,7 +714,6 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(rebuilt["revision"], cold["revision"])
         self.assertEqual(load_graph(self.repo, state=self.state), cold_graph)
         self.assertLessEqual(entries[0].stat().st_size, MAX_STATE_BYTES)
-        # A payload that could never be read back is not written at all.
         big = {"refs": ["x" * 1024] * (MAX_STATE_BYTES // 1024 + 1)}
         self.assertIsNone(cache_module.store(self.state, "f" * 64, big))
         self.assertFalse((self.state / "cache" / ("f" * 64 + ".json")).exists())
@@ -754,40 +734,8 @@ class ProjectGraphTest(unittest.TestCase):
             self.assertEqual(second["stats"]["cached"], second["stats"]["files"])
             self.assertEqual(first["revision"], second["revision"])
 
-    def test_default_state_dir_leaves_the_oms_ignore_marker(self) -> None:
-        self.write("a.py", "def f(): pass\n")
-        build(self.repo)
-        self.assertEqual((self.repo / ".oms" / ".gitignore").read_text(encoding="utf-8"), "*\n")
-        self.assertFalse((self.state / ".gitignore").exists())
-        build(self.repo, state=self.state)
-        self.assertFalse((Path(self.temp.name) / ".gitignore").exists())
-
-    def test_methods_and_inheritance_are_linked(self) -> None:
-        self.write("base.py", "class Base:\n    def run(self):\n        return self.step()\n    def step(self):\n        return 1\n")
-        self.write("child.py", "from base import Base\nclass Child(Base):\n    def go(self):\n        return self.step()\n")
-        graph = self.graph()
-        edges = {(e["source"], e["target"], e["relation"], e["confidence"]) for e in graph["edges"]}
-        self.assertIn(("symbol:base.py::Base.run", "symbol:base.py::Base.step", "calls", "EXTRACTED"), edges)
-        self.assertIn(("symbol:child.py::Child", "symbol:base.py::Base", "depends_on", "EXTRACTED"), edges)
-        inherited = [e for e in graph["edges"] if e["source"] == "symbol:child.py::Child.go" and e["relation"] == "calls"]
-        self.assertEqual([(e["target"], e["confidence"]) for e in inherited], [("symbol:base.py::Base.step", "INFERRED")])
-
-    def test_parser_upgrade_makes_the_graph_stale(self) -> None:
-        import json as _json
-        self.write("a.py", "def f(): pass\n")
-        build(self.repo, state=self.state)
-        manifest_path = self.state / "manifest.json"
-        manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["parser_version"] = manifest["parser_version"] - 1
-        manifest_path.write_text(_json.dumps(manifest), encoding="utf-8")
-        verdict = check(self.repo, state=self.state)
-        self.assertFalse(verdict["fresh"])
-        self.assertIn("parser_version", verdict["outdated"])
-        from oms_graph.project.build import ensure
-        self.assertEqual(ensure(self.repo, state=self.state)["action"], "refreshed")
-        self.assertTrue(check(self.repo, state=self.state)["fresh"])
-
     def test_map_summary_reports_areas_and_file_hubs_and_build_caches_orientation(self) -> None:
+        from oms_graph.project.orientation import BRIEF_BYTES, brief_text
         self.write("pkg/a.py", "def fail(): pass\n")
         self.write("pkg/b.py", "from a import fail\ndef g(): return fail()\n")
         self.write("run.sh", "fail() { :; }\nfail\n")
@@ -800,17 +748,14 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual({item["kind"] for item in summary["file_hubs"]}, {"file"})
         self.assertFalse([item for item in summary["file_hubs"] if "::" in item["id"]])
         cached = json.loads((self.state / "orientation.json").read_text(encoding="utf-8"))
-        self.assertEqual(cached["schema"], 1)
-        self.assertEqual(cached["revision"], summary["revision"])
-        self.assertLessEqual(len(cached["text"].encode("utf-8")), 1536)
+        self.assertEqual((cached["schema"], cached["revision"]), (1, summary["revision"]))
+        self.assertLessEqual(len(cached["text"].encode("utf-8")), BRIEF_BYTES)
         self.assertIn(summary["revision"][:12], cached["text"])
 
-    def test_orientation_brief_truncates_whole_lines_and_survives_empty_input(self) -> None:
-        from oms_graph.project.orientation import BRIEF_BYTES, brief_text
         self.assertIn("[oms graph]", brief_text({}, {}, "r"))
-        summary = {"revision": "a" * 64, "areas": {"d%d/" % i: {"files": 1, "languages": {"python": 1}} for i in range(5)},
-                   "file_hubs": [{"id": "file:" + "p" * 400 + str(i), "kind": "file", "degree": i} for i in range(8)]}
-        text = brief_text(summary, {"stats": {"files": 1, "nodes": 2}}, "r")
+        big_summary = {"revision": "a" * 64, "areas": {"d%d/" % i: {"files": 1, "languages": {"python": 1}} for i in range(5)},
+                       "file_hubs": [{"id": "file:" + "p" * 400 + str(i), "kind": "file", "degree": i} for i in range(8)]}
+        text = brief_text(big_summary, {"stats": {"files": 1, "nodes": 2}}, "r")
         self.assertLessEqual(len(text.encode("utf-8")), BRIEF_BYTES)
         self.assertTrue(text.startswith("[oms graph]"))
         self.assertNotIn("ask the graph", text)

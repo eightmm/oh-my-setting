@@ -1,9 +1,8 @@
 execution_repo = temporary / "verification-execution-root"
 execution_repo.mkdir()
 import panel_dispatch as dispatch
-from contextlib import redirect_stderr, redirect_stdout
-from unittest.mock import Mock, patch
-import io
+import panel_routing, runpy, tempfile, types
+from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 
 # Routing reads provider account homes (registered Codex accounts, provider-accounts.json);
@@ -309,7 +308,6 @@ with patch.object(saved, "_records", return_value=(index_attempts, index_rows)),
 
 
 def exercise_codex_sandbox_host_gate():
-    import os, tempfile
     with tempfile.TemporaryDirectory() as tmp:
         setting = os.path.join(tmp, "userns")
         both = {"codex", "claude"}
@@ -373,7 +371,6 @@ def exercise_codex_sandbox_host_gate():
 
 
 def exercise_pi_cooldown_routing():
-    import panel_routing
     from datetime import datetime, timezone, timedelta
 
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -429,7 +426,6 @@ def exercise_pi_cooldown_routing():
 # Exact tier models keep main ownership and judgment on the native pair.
 def exercise_exact_model_routing():
     from panel_routing import valid_route
-    import panel_routing
     load_policy = panel_routing.policy
     original = load_policy()
     for role in ("reviewer", "verifier"):
@@ -799,8 +795,6 @@ exercise_antigravity_read_tiers()
 
 # Third-party tier routing requires a public origin or an explicit opt-in.
 def exercise_public_only_routing():
-    import panel_routing
-    import subprocess
     repo = temporary / "public-route-repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -1078,7 +1072,6 @@ assert saved._scan_admissions(workers, records[:2], {"chain"})[0] == {"chain"}
 # END continuation admission hint
 
 def exercise_continuation_preference():
-    from panel_routing import allocate
     status = {"codex": {"weekly_used": 80}, "claude": {"weekly_used": 10}}
     args = dict(owner="codex", role="builder", tier="routine", access="write",
                 installed={"codex", "claude"}, provider_status=status, check_visibility=False)
@@ -1092,7 +1085,6 @@ def exercise_continuation_preference():
         assert allocate(**dict(args, provider_status=readings), preferred="codex")["provider"] == expected
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    import panel_routing
     model = next(c["model"] for c in panel_routing.policy()["tiers"]["routine"] if c["provider"] == "codex")
     capped = dict(status, codex={"daily_cap": {model: today}})
     assert allocate(**dict(args, provider_status=capped), preferred="codex")["provider"] == "claude"
@@ -1273,7 +1265,6 @@ def run_continuation_fixture(room_repo, work_repo, base, answer=None):
     return note, text
 
 # BEGIN continuation outbound temporary file
-continuation_patch = b"--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-before\n+worker change\n"
 scan_repo, scan_base = continuation_git_repo("continuation-scan-repo")
 real_temp = dispatch.tempfile.NamedTemporaryFile
 real_run = subprocess.run
@@ -1779,7 +1770,6 @@ with patch.dict(os.environ, {"OMS_LOCK_DIR": str(temporary / "graph-locks"), "XD
                             "OMS_HARNESS_CHILD": "0",
                             "OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}):
     tracked_log_fd = os.open(os.devnull, os.O_WRONLY)
-    import types
     launch_subprocess = types.SimpleNamespace(**vars(subprocess))
     launch_subprocess.Popen = lambda *args, **kwargs: FinishedDispatchProcess()
     with patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
@@ -1810,7 +1800,6 @@ with patch.dict(os.environ, {"OMS_LOCK_DIR": str(temporary / "graph-locks"), "XD
                             "OMS_HARNESS_CHILD": "0",
                             "OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}):
     shadow_log_fd = os.open(os.devnull, os.O_WRONLY)
-    import types
     launch_subprocess = types.SimpleNamespace(**vars(subprocess))
     launch_subprocess.Popen = lambda *args, **kwargs: FinishedDispatchProcess()
     with patch.object(panel, "work_repository", side_effect=lambda path: Path(path)), \
@@ -2394,8 +2383,6 @@ assert all(row["panel"]["label"] and row["panel"]["access"] for row in panel_row
            if row["panel"]["role"] != "main")
 # An exact native main filters both live children and recent outcomes. Its
 # supplied title must never be replaced by an unrelated repository goal.
-from copy import deepcopy
-from panel_view import render, inbox_items, needs_strip
 scoped = deepcopy(snapshot)
 scoped["goal"] = {"text": "Unrelated repository goal"}
 main_id = main_attempts["claude"]
@@ -2455,7 +2442,6 @@ for codex_models in ([], ["gpt-6.2-sol", "gpt-6.2-terra", "gpt-6-astra"]):
         assert "claude:model=claude-opus-5-5" in targets, targets
         if codex_models:
             assert "codex:model=gpt-6.2-sol" in targets and "codex:model=gpt-6.2-terra" in targets, targets
-import panel_routing
 for model, family, version in (
         ("gemini-4-argon-high", "argon-high", (4,)),
         ("gemini-4.0-argon-medium", "argon-medium", (4,)),
@@ -3296,7 +3282,6 @@ assert {(row["attempt"], row["pending_reason"]) for row in report["pending"]} ==
 assert settle_apply.call_count == 1
 # If lifecycle evidence cannot be read, an unknown review-entry time must not
 # fall back to creation time and settle work that may have entered review late.
-import runpy
 run_path = runpy.run_path
 def unreadable_events(path, *args, **kwargs):
     loaded = run_path(path, *args, **kwargs)
@@ -3906,7 +3891,6 @@ assert not json.loads(call(legacy_aged_args + ["--apply"]))["applied"]
 assert not json.loads(call(aged_standalone_args + ["--apply"]))["applied"]
 def exercise_landed_standalone_review():
     """A standalone review whose exact patch bytes landed settles as the owner's decision."""
-    import hashlib
     patch_ref = ".oms/artifacts/delegate/settlement-landed.patch"
     (project / patch_ref).parent.mkdir(parents=True, exist_ok=True)
     (project / patch_ref).write_bytes(b"settlement landed patch bytes\n")
@@ -5555,7 +5539,6 @@ try:
 finally:
     (project / "value.txt").write_bytes(evidence_before)
 def exercise_auto_admission_evidence():
-    import tempfile
     with tempfile.TemporaryDirectory() as directory:
         repo = Path(directory)
         reports = repo / ".oms/artifacts/admit"
@@ -6215,7 +6198,6 @@ patch_file.write_text("changed patch bytes\n")
 assert saved._admission(project, [delegated, landed], "test-land", {"attempt_id": "att_worker"}) is None
 
 # A strict full snapshot retains task evidence older than 1000 unrelated rows.
-import runpy
 index_store = runpy.run_path(str(root / "scripts/lib/artifact-index-store.py"))
 index_path = str(project / ".oms/artifacts/index.jsonl")
 index_before = index_store["read_index"](str(project), index_path)
@@ -6317,7 +6299,6 @@ with patch.dict(os.environ, environment, clear=True):
         assert staged["representative_state"] == "review failed" and staged["next_action"] == "retry review"
         page = saved.results(project, offset=0, limit=1)
         assert page["offset"] == 0 and page["omitted"] == 0 and page["omitted_range"] is None
-    exercise_continued_stage_rollup(project)
     review_fixture_repo = temporary / "review-stage-verdict"
     review_fixture_repo.mkdir()
 
@@ -6598,7 +6579,6 @@ with patch.dict(os.environ, environment, clear=True):
     try:
         link.symlink_to(summary)
         try:
-            from contextlib import redirect_stderr
             error_text = io.StringIO()
             with redirect_stderr(error_text):
                 saved.finalize(project, "codex", "bad-result", str(link), "completed")
@@ -6747,7 +6727,6 @@ closed_parent = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str
 assert closed_parent.returncode != 0 and "identity" in closed_parent.stderr
 
 # The finalize verifier takes a slot of the machine-wide verify pool: with the only slot held it must wait.
-import tempfile, threading, time
 with tempfile.TemporaryDirectory() as slot_runtime:
     os.environ["XDG_RUNTIME_DIR"], os.environ["OMS_VERIFY_SLOTS"] = slot_runtime, "1"
     inherited_slot = os.environ.pop("OMS_VERIFY_SLOT_HELD", None)  # a verify wrapper's marker would skip the queue
@@ -6779,8 +6758,6 @@ def exercise_provider_account_routing():
     import provider_accounts as accounts
     import panel_metrics as metrics
     import panel_routing as routing
-    import panel_dispatch as dispatch
-    from contextlib import redirect_stdout
     from datetime import datetime, timezone
     from tempfile import TemporaryDirectory
 
@@ -7339,10 +7316,7 @@ exercise_provider_account_routing()
 # BEGIN Provider account execution
 def exercise_provider_account_execution():
     import provider_accounts as accounts
-    import panel_dispatch as dispatch
     import panel_routing as routing
-    import io
-    from contextlib import redirect_stdout, redirect_stderr
     from datetime import datetime, timezone
     from tempfile import TemporaryDirectory
 
@@ -7688,8 +7662,6 @@ exercise_provider_account_execution()
 
 # BEGIN Provider account retry evidence
 def exercise_account_retry_evidence():
-    import panel_dispatch as dispatch
-    import panel_results
     import provider_accounts as accounts
     from tempfile import TemporaryDirectory
     from types import SimpleNamespace
@@ -7825,7 +7797,6 @@ def exercise_account_retry_evidence():
                 if "non-Codex provider" not in str(error) or "routed to another provider" not in str(error):
                     failures.append((str(error), "incorrect recovery advice"))
         assert not failures, failures
-    from panel_routing import allocate
     route = dict(allocate("claude", role="worker", tier="deep", access="read", installed={"codex"},
                           resolve_accounts=False), account="missing")
     with patch.dict(os.environ, {"OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}), \

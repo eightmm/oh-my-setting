@@ -22,7 +22,7 @@ _ASSURANCE_TEST_PATH_LIMIT = 12
 def _node_index(nodes: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
     index = {}  # type: Dict[str, Mapping[str, Any]]
     for node in nodes:
-        if not isinstance(node, dict):
+        if not isinstance(node, Mapping):
             continue
         node_id = node.get("id")
         if isinstance(node_id, str) and node_id and node_id not in index:

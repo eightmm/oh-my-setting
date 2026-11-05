@@ -41,6 +41,10 @@ OWNER_RE = re.compile(r"^owner_[0-9a-f]{32}$")
 def die(msg):
     sys.stderr.write("error: %s\n" % msg); sys.exit(2)
 
+def state_repo():
+    """The checkout that owns plan state; a parent's scratch worktree shares the main checkout's."""
+    return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+
 _completion_module = None
 _unverified_completions = set()
 _settled_completion_leases = set()
@@ -56,7 +60,7 @@ def load():
     _unverified_completions.clear()
     if not os.path.exists(path):
         return {"schema": SCHEMA, "goal": "", "accept": "", "tasks": {}}
-    state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+    state_root = state_repo()
     canonical = os.path.join(state_root, ".oms", "plan", "tasks.json")
     # Once typed receipts exist, readers must bound the plan read before
     # decoding it; a replaced FIFO cannot reveal its completion fields.
@@ -65,7 +69,7 @@ def load():
     if act in {"accept-research", "approve-main-research", "accept-main-research", "satisfy"} or typed_namespace:
         completion = completion_module()
         try:
-            d = completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
+            d = completion["strict_plan"](state_root, path)
         except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
             die(str(exc))
     else:
@@ -93,9 +97,9 @@ def load():
     if any("completion_kind" in t or "completion_receipt" in t for t in d["tasks"].values()):
         completion = completion_module()
         try:
-            completion["strict_plan"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), path)
+            completion["strict_plan"](state_root, path)
             for task in d["tasks"].values():
-                if completion["validate_done"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")), d, task,
+                if completion["validate_done"](state_root, d, task,
                                                commit_landing_proof, allow_unverified=True) is False:
                     _unverified_completions.add(task["id"])
         except (ValueError, KeyError, TypeError, OSError, subprocess.TimeoutExpired) as exc:
@@ -476,17 +480,10 @@ def warn_unknown_selectors(verify):
               file=sys.stderr)
 
 def clean_rel(value, label):
-    if not isinstance(value, str):
-        die("%s must be a string" % label)
-    reject_controls(value, label)
-    value = value.strip().replace("\\", "/")
-    while value.startswith("./"):
-        value = value[2:]
-    value = value.rstrip("/") or "."
-    if (value.startswith("/") or re.match(r"^[A-Za-z]:", value) or
-            (value != "." and any(part in ("", ".", "..") for part in value.split("/")))):
-        die("%s must be a normalized repo-relative path" % label)
-    return value
+    try:
+        return path_scope["normalize"](value, label)
+    except ValueError as exc:
+        die(str(exc))
 
 def require_id():
     i = env("OMS_ID")
@@ -565,10 +562,6 @@ def marker_json_is_finite(value):
     if isinstance(value, list):
         return all(marker_json_is_finite(item) for item in value)
     return True
-
-def state_repo():
-    """The checkout that owns plan state; a parent's scratch worktree shares the main checkout's."""
-    return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
 
 def panel_accept_record(task_id, task, plan_id, record_input=None, from_task=False,
                         allow_missing_commit=False):
@@ -957,7 +950,7 @@ if needs_retirement_guard:
         if os.path.exists(path):
             completion = completion_module()
             try:
-                state_root = os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
+                state_root = state_repo()
                 retirement_plan = completion["strict_plan"](state_root, path)
                 for task in retirement_plan["tasks"].values():
                     if "completion_kind" in task or "completion_receipt" in task:
@@ -991,7 +984,7 @@ if act in {"accept-research", "approve-main-research", "accept-main-research", "
     completion = completion_module()
     try:
         if env("OMS_COMPLETION_PHASE") == "verify":
-            completion["execute"](os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO")),
+            completion["execute"](state_repo(),
                                   env("OMS_COMPLETION_BUNDLE"), env("OMS_EXPECTED_COMPLETION_BUNDLE_SHA256"),
                                   commit_landing_proof)
         else:
@@ -1033,16 +1026,6 @@ if act == "ensure-lineage":
     sys.exit(0)
 
 if act == "apply-proposal":
-    def sha256_file(filename):
-        digest = hashlib.sha256()
-        with open(filename, "rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest()
-
     envelope = [clean_rel(item, "allowed envelope")
                 for item in split_list(env("OMS_ALLOWED_ENVELOPE"))]
     if not envelope:
@@ -1259,7 +1242,8 @@ if act == "apply-proposal":
 
     expected_plan = env("OMS_EXPECTED_PLAN_SHA256")
     if os.path.exists(path):
-        actual_plan = sha256_file(path)
+        with open(path, "rb") as handle:
+            actual_plan = hashlib.sha256(handle.read()).hexdigest()
         if expected_plan != actual_plan:
             die("plan changed after proposal review")
         if env("OMS_GOAL") and d.get("goal", "") != env("OMS_GOAL"):
@@ -1330,22 +1314,30 @@ if act == "apply-proposal":
     print("plan: proposal applied %s" % ",".join(seen))
     sys.exit(0)
 
-if act == "amend":
-    i = require_id()
+def get_task(i):
     t = tasks.get(i)
-    if not t:
-        die("no such task: %s" % i)
-    canonical = os.path.join(state_repo(), ".oms", "plan", "tasks.json")
+    if not t: die("no such task: %s" % i)
+    return t
+
+def require_canonical_plan(noun, verb):
+    repo_root = state_repo()
+    canonical = os.path.join(repo_root, ".oms", "plan", "tasks.json")
     try:
         parent_info = os.lstat(os.path.dirname(canonical))
         target_info = os.lstat(path)
     except OSError as exc:
-        die("cannot inspect canonical amendment plan: %s" % exc)
+        die("cannot inspect canonical %s plan: %s" % (noun, exc))
     if (not same_absolute_path(path, canonical) or
             not same_absolute_path(os.path.realpath(path), canonical) or
             not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode) or
             not stat.S_ISREG(target_info.st_mode) or stat.S_ISLNK(target_info.st_mode)):
-        die("amend requires the canonical repo-local plan file")
+        die("%s requires the canonical repo-local plan file" % verb)
+    return repo_root
+
+if act == "amend":
+    i = require_id()
+    t = get_task(i)
+    require_canonical_plan("amendment", "amend")
     raw = read_regular_bytes(path, "active plan", 1024 * 1024)
     if hashlib.sha256(raw).hexdigest() != env("OMS_EXPECTED_PLAN_SHA256"):
         die("active plan changed after amendment was reviewed")
@@ -1421,11 +1413,6 @@ if act == "add":
         tasks[i]["role_suggestion"] = json.loads(env("OMS_ROLE_SUGGESTION"))
     save(d); print("plan: added %s (%s)" % (i, title)); sys.exit(0)
 
-def get_task(i):
-    t = tasks.get(i)
-    if not t: die("no such task: %s" % i)
-    return t
-
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):
     batch_cancel = act == "cancel" and env("OMS_CANCEL_ALL_INACTIVE") == "1"
     i = "" if batch_cancel else require_id()
@@ -1434,7 +1421,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         candidate_patch = env("OMS_PATCH") or t.get("patch", "")
         if candidate_patch:
             candidate_path = os.path.abspath(os.path.join(state_repo(), candidate_patch))
-            if os.path.dirname(candidate_path) == os.path.join(os.path.realpath(state_repo()),
+            if os.path.dirname(candidate_path) == os.path.join(state_repo(),
                                                                ".oms", "landing-patches"):
                 # The plan writer lock excludes capture GC. Refuse a new pin
                 # if collection already won; ordinary patch paths are unchanged.
@@ -1444,7 +1431,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
                 # pathname (replacing a final symlink, not following it), so
                 # judge that destination: resolved directory + basename.
                 plan_real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
-                if not any(plan_real.startswith(os.path.join(os.path.realpath(state_repo()), *root.split("/")) + os.sep)
+                if not any(plan_real.startswith(os.path.join(state_repo(), *root.split("/")) + os.sep)
                            for root in capture["REFERENCE_ROOTS"]):
                     die("a managed landing capture can only be referenced by a plan under %s (plan resolves to %s)"
                         % (", ".join(capture["REFERENCE_ROOTS"]), plan_real))
@@ -1492,18 +1479,7 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             selected = {i: t}
         if any("cancellation" in task for task in selected.values()):
             die("task already has cancellation evidence")
-        repo_root = state_repo()
-        canonical = os.path.join(repo_root, ".oms", "plan", "tasks.json")
-        try:
-            parent_info = os.lstat(os.path.dirname(canonical))
-            target_info = os.lstat(path)
-        except OSError as exc:
-            die("cannot inspect canonical cancellation plan: %s" % exc)
-        if (not same_absolute_path(path, canonical) or
-                not same_absolute_path(os.path.realpath(path), canonical) or
-                not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode) or
-                not stat.S_ISREG(target_info.st_mode) or stat.S_ISLNK(target_info.st_mode)):
-            die("cancel requires the canonical repo-local plan file")
+        repo_root = require_canonical_plan("cancellation", "cancel")
         decision_rel = env("OMS_DECISION_ARTIFACT")
         if not isinstance(decision_rel, str) or len(decision_rel) > 240:
             die("decision artifact path must be a bounded repo-relative path")
@@ -1579,14 +1555,12 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
             die("task %s is %s; only a claimed/running task can go to review" % (i, t["state"]))
         require_current_lease(t)
         acceptance = panel_accept_record(i, t, d.get("plan_id"))
-        executor_id = env("OMS_EXECUTOR_ID")
-        executor_soul = env("OMS_EXECUTOR_SOUL_SHA256")
-        if executor_id or executor_soul:
+        if env("OMS_EXECUTOR_ID") or env("OMS_EXECUTOR_SOUL_SHA256"):
             die("Soul executor receipts cannot be created; use the task brief and lease")
         t.update(state="review", artifact=env("OMS_ARTIFACT") or t.get("artifact", ""),
                  patch=env("OMS_PATCH") or t.get("patch", ""),
-                 review_lease_id=t.get("lease_id", ""), executor_id=executor_id,
-                 executor_soul_sha256=executor_soul, repair_artifact="")
+                 review_lease_id=t.get("lease_id", ""), executor_id="",
+                 executor_soul_sha256="", repair_artifact="")
         if acceptance is not None:
             t["panel_accept"] = acceptance
         else:

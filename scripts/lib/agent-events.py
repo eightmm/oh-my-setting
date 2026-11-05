@@ -21,7 +21,6 @@ import os
 import re
 import runpy
 import secrets
-import signal
 import stat
 import shutil
 import subprocess
@@ -30,7 +29,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 trace_context_helpers = runpy.run_path(
     str(Path(__file__).with_name("trace_context.py"))
@@ -1680,7 +1679,7 @@ def event_compact(args: argparse.Namespace) -> int:
     return 0
 
 
-def approval_projection(rows: Sequence[Dict[str, Any]], repo: Path, *, validate: bool = True) -> Dict[str, Dict[str, Any]]:
+def approval_projection(rows: Sequence[Dict[str, Any]], repo: Path) -> Dict[str, Dict[str, Any]]:
     projected: Dict[str, Dict[str, Any]] = {}
     events = set()
     repo_hash = hashlib.sha256(str(repo.resolve()).encode("utf-8")).hexdigest()
@@ -1700,10 +1699,9 @@ def approval_projection(rows: Sequence[Dict[str, Any]], repo: Path, *, validate:
         if state not in APPROVAL_STATES:
             raise OpsError("approval row %d has invalid state" % number)
         event_type = row.get("event_type")
-        trace_fields = {"trace_id", "span_id", "parent_span_id", "trace_flags"}
-        if trace_fields.intersection(row) and persisted_context(row) is None:
+        if not TRACE_FIELDS.isdisjoint(row) and persisted_context(row) is None:
             raise OpsError("approval row %d has invalid persisted trace context" % number)
-        if any(key in row for key in ("traceparent", "tracestate", "baggage")):
+        if not RAW_TRACE_FIELDS.isdisjoint(row):
             raise OpsError("approval row %d stores forbidden raw trace context" % number)
         current = projected.get(approval_id)
         if event_type == "approval.requested":

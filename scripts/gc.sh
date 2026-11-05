@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Retention sweep for repo-local .oms state. Only artifact-index prune reclaims
-# anything today; capsules, task archives, handoff digests, hook
-# telemetry/session state, local checkpoints, supervised runtime logs, frozen
-# landing snapshots, orphaned delegation markers, and resolved failure rows otherwise grow unbounded over a
-# repo's lifetime. This sweeps the SAFE, clearly-transient families by age and
-# never touches live state (open runs, active attempts, the active task,
-# unresolved failures, active claims).
-# --dry-run by default, mirroring cleanup.sh.
+# Retention sweep for repo-local .oms state (--dry-run by default).
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
-ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
@@ -126,18 +118,12 @@ note_remove() {  # note_remove KIND PATH
   fi
 }
 
-# Completion preflights publish immutable captures before all checks finish.
-# Reuse the writer lock order; durable transaction pins retain snapshots while
-# verifiers run outside the locks. Unpinned leases and legacy markers retain the veto.
 completion_capture_gc_locked() {
   python3 - "$ROOT_LIB/plan-completion.py" "$STATE_ROOT" "$DAYS" "$DRY_RUN" <<'PY'
-import runpy
-import sys
-import time
+import runpy, sys, time
 try:
     collect = runpy.run_path(sys.argv[1])["collect_abandoned_prefixes"]
-    paths = collect(sys.argv[2], time.time() - int(sys.argv[3]) * 86400, sys.argv[4] == "1")
-    for path in paths:
+    for path in collect(sys.argv[2], time.time() - int(sys.argv[3]) * 86400, sys.argv[4] == "1"):
         if path.startswith('.oms/plan/completion-pins/'):
             kind = 'completion-pin-temp' if path.rsplit('/', 1)[1].startswith('.') else 'completion-pin'
         elif path.startswith('.oms/plan/completion-pin-leases/'):
@@ -177,17 +163,11 @@ if [ -d "$OMS/plan/completion-captures" ] || [ -d "$OMS/plan/completion-prefixes
   esac
 fi
 
-# 0.5) Validate legacy retention inputs without treating shared terminal rows
-# as ownership. The managed-generation collector below additionally requires
-# the native writer's retained private inode anchor and terminal seal.
+# 0.5) Validate legacy retention inputs without treating shared terminal rows as ownership.
 landing_patch_gc_locked() {
   python3 - "$STATE_ROOT" "$OMS/landings.jsonl" "$OMS/artifacts/index.jsonl" \
     "$DAYS" "$DRY_RUN" <<'PY'
-import json
-import os
-import stat
-import sys
-import time
+import json, os, stat, sys, time
 
 repo, landings_path, index_path, days_raw, dry_raw = sys.argv[1:]
 patch_root = os.path.realpath(os.path.join(repo, ".oms", "landing-patches"))
@@ -314,16 +294,7 @@ if [ -f "$OMS/landings.jsonl" ] && [ -d "$OMS/landing-patches" ]; then
   esac
 fi
 
-# 1) Orphaned delegation markers. The trigger itself is untrusted state. OMS
-#    publishers, normal cleanup, snapshots, recovery predicates, and deletes
-#    share one repo-physical marker-set lock. GC releases it between phases so
-#    a recover verb can take marker set -> plan/meta without nesting. The final
-#    bounded/no-follow digest+identity CAS preserves a generation replaced by
-#    a non-cooperative same-UID writer; OS sandboxing remains the only complete
-#    control for a swap in the final lstat/unlink syscall window.
-# The helper's gc entrypoint takes landings -> marker-set -> plan itself, then
-# lifecycle -> artifact-index. Keep the nonblocking landing-busy result used by
-# the legacy sweep while avoiding nested acquisition of the same outer locks.
+# 1) Orphaned delegation markers and managed landing captures.
 if [ -f "$OMS/landings.jsonl" ]; then
   managed_gc_status=0
   managed_gc_out="$(python3 "$ROOT_LIB/landing-capture.py" gc "$STATE_ROOT" \
@@ -334,7 +305,6 @@ if [ -f "$OMS/landings.jsonl" ]; then
     *) echo "error: managed landing retention refused unknown state" >&2; exit "$managed_gc_status" ;;
   esac
 fi
-
 
 delegation_set_lock="$STATE_ROOT/.oms/delegations/.marker-set-lock-target"
 delegation_dir_is_safe() {  # DIRECTORY
@@ -385,10 +355,9 @@ for entry in sorted(entries, key=lambda item: item.name):
     if not entry.name.endswith(".json"):
         continue
     if not safe_name.fullmatch(entry.name):
-        if strict:
-            sys.stderr.write("warning: gc: unsafe delegation marker name kept\n")
-            raise SystemExit(2)
         sys.stderr.write("warning: gc: unsafe delegation marker name kept\n")
+        if strict:
+            raise SystemExit(2)
         continue
     print(entry.name)
 PY
@@ -718,13 +687,7 @@ EOF_DELEGATION_NAMES
     ;;
 esac
 
-# 1.5) Attempts that stopped reporting. The sweep already compacts the streams
-# of terminal attempts further down, but nothing ever closed a non-terminal one
-# whose owner died mid-flight: it stayed in working forever, `oms state` counted
-# it as active, and no attention row named it, because inbox surfaces
-# blocked/waiting/queued/review and never working. agent-events reconcile was
-# written and tested for exactly this and had no caller anywhere in the product.
-# Liveness is not retention, so it judges on its own clock rather than --days.
+# 1.5) Reconcile non-terminal attempts that stopped reporting.
 lifecycle_events="$OMS/lifecycle/events.jsonl"
 if [ -f "$lifecycle_events" ] && [ ! -L "$lifecycle_events" ]; then
   attempt_stale_seconds="${OMS_ATTEMPT_STALE_SECONDS:-86400}"
@@ -760,9 +723,7 @@ $(find "$OMS/task/archive" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/d
 EOF
 fi
 
-# 2.1) Local tracked-state checkpoints are recovery aids, not durable project
-# history. Their metadata carries a portable UTC creation time; malformed or
-# symlinked entries are never guessed at or deleted.
+# 2.1) Local tracked-state checkpoints older than --days.
 cutoff_epoch=$(( $(date +%s) - DAYS * 86400 ))
 if [ -d "$OMS/checkpoints" ] && [ ! -L "$OMS/checkpoints" ]; then
   for checkpoint_dir in "$OMS/checkpoints"/cp-*; do
@@ -787,23 +748,13 @@ PY
   done
 fi
 
-# 2.2) Hook state is deliberately transient. Compact only parseable old rows;
-# invalid/unparseable rows are preserved for diagnosis. Apply uses a
-# same-directory atomic replace under the shared file lock so a live hook can
-# never observe a truncated file. Hold the marker-set lock across the marker
-# check and both cleanup operations: worker publication uses this lock, so a
-# new worker cannot start between the check and the rewrite/deletion. The
-# nested event-file lock follows marker-set -> events; hook appenders take only
-# the event-file lock.
+# 2.2) Hook state compaction under the marker-set lock.
 hook_events="$OMS/hooks/events.jsonl"
 hook_sessions="$OMS/hooks/sessions"
 compact_hook_events() {
-  local path="$1"
-  local cutoff="$2"
-  local apply="$3"
   local -a compact_args
-  compact_args=(compact-events --path "$path" --cutoff "$cutoff")
-  [ "$apply" = 0 ] || compact_args+=(--apply)
+  compact_args=(compact-events --path "$1" --cutoff "$2")
+  [ "$3" = 0 ] || compact_args+=(--apply)
   python3 "$ROOT_LIB/cached-main.py" "$ROOT_LIB/hook_state.py" "${compact_args[@]}"
 }
 delegations_quiescent() {
@@ -895,24 +846,12 @@ if { [ -f "$hook_events" ] && [ ! -L "$hook_events" ]; } ||
   esac
 fi
 
-# Dispatch logs are recovery inputs until both process exit and owner settlement
-# are proven. Reuse the hook veto under marker-set -> plan so a new delegation
-# or lease cannot appear between eligibility and unlink. Terminal lifecycle
-# states cannot reopen; a changed ledger snapshot defers the remaining pairs.
+# Dispatch logs cleanup under marker-set -> plan locks.
 dispatch_logs_gc_locked() {
-  # 24 is the delegation veto; 75 is reserved for a busy outer writer lock.
-  # Normalize helper failures so they cannot impersonate either expected defer.
   delegations_quiescent || return 24
   python3 - "$ROOT_LIB" "$STATE_ROOT" "$DAYS" "$DRY_RUN" <<'PY_DISPATCH_LOGS' || return 1
-import json
-import os
+import json, os, re, runpy, stat, subprocess, sys, time
 from pathlib import Path
-import re
-import runpy
-import stat
-import subprocess
-import sys
-import time
 
 sys.path.insert(0, sys.argv[1])
 import terminal_panel as panel
@@ -1098,10 +1037,7 @@ $(find "$OMS/handoffs" -maxdepth 1 -type f -name '*.md' -mtime +"$DAYS" 2>/dev/n
 EOF
 fi
 
-# 2.5) Stale open runs: nothing in the harness calls `oms run close`
-#    automatically, so without this an abandoned run stays open forever and
-#    permanently protects its capsule from step 3. A run whose LAST spine
-#    event is older than --days is over; append a terminal close event.
+# 2.5) Stale open runs whose last spine event is older than --days.
 if [ -f "$OMS/runs/spine.jsonl" ]; then
   stale_open="$(OMS_DAYS="$DAYS" python3 - "$OMS/runs/spine.jsonl" <<'PY'
 import calendar, json, os, sys, time
@@ -1121,8 +1057,6 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     if rid not in last:
         order.append(rid)
     try:
-        # timegm, not mktime: the stamps are UTC, and reading them as local
-        # time shifted the cutoff by the host UTC offset.
         ts = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
         ts = None
@@ -1146,11 +1080,7 @@ PY
   done
 fi
 
-# 2.6) Crashed-writer replace scratch: shared-state writers stage
-#      .oms-replace.* beside their target so the swap is a same-directory
-#      rename; a scratch an hour old means its writer died between mktemp and
-#      mv. Minutes, not --days — the file has no value to anyone the moment
-#      its writer is gone.
+# 2.6) Crashed-writer replace scratch older than 60 minutes.
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   note_remove "replace-scratch" "$f"
@@ -1158,10 +1088,7 @@ done <<EOF
 $(find "$OMS" -type f -name '.oms-replace.*' -mmin +60 2>/dev/null)
 EOF
 
-# 3) Run capsules older than --days whose run is NOT open (open = no close event
-#    on the spine). Never GC a capsule for a run still in flight. In apply mode
-#    step 2.5 has already closed stale runs, so their capsules reclaim here;
-#    a dry run reports the close and the capsule sweep of the NEXT gc.
+# 3) Run capsules older than --days whose run is not open.
 open_ids=""
 if [ -f "$OMS/runs/spine.jsonl" ]; then
   open_ids="$(OMS_RUN_INDEX="$OMS/runs/spine.jsonl" "$ROOT/scripts/run.sh" ls --open 2>/dev/null | awk '{print $1}')"
@@ -1181,24 +1108,11 @@ $(find "$OMS/runs" -mindepth 1 -maxdepth 1 -type d -mtime +"$DAYS" 2>/dev/null)
 EOF
 fi
 
-# 4) Retired failure rows older than --days: compact failures.jsonl, keeping
-#    every fingerprint that still reads as open and any row newer than the
-#    threshold. Retirement is fail-ledger's read-time view, not a second
-#    opinion: a fingerprint is retired when it was resolved, or when every
-#    failure still standing is an automatic hook row past its TTL. Without
-#    that second arm the hook rows that read-time expiry retires would sit in
-#    the file forever, and the two mechanisms would not compose.
+# 4) Retired failure rows older than --days.
 fail_ledger="$OMS/failures.jsonl"
 if [ -f "$fail_ledger" ]; then
   hook_fail_ttl="${OMS_HOOK_FAIL_TTL:-86400}"
   case "$hook_fail_ttl" in *[!0-9]*|"") hook_fail_ttl=86400 ;; esac
-  # Snapshot, compaction, and publish run under the writers' own lock: the
-  # old unlocked truncate-publish permanently lost any append that landed
-  # between snapshot and publish, stripped the terminal newline through
-  # command substitution (fusing the next locked append onto the last row),
-  # and silently erased malformed lines — exactly the evidence a refusal
-  # must preserve. Python stages beside the ledger with its newline intact
-  # and the rename is the only publish; JSONL never rides a shell variable.
   failures_gc_locked() {
     local before after stage py_status=0
     before="$(wc -l < "$fail_ledger" | tr -d ' ')"
@@ -1226,25 +1140,18 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         continue
     rows.append(row)
 
-# A ledger with unreadable lines is evidence in an unknown state: publishing
-# any compaction would erase those lines forever. Refuse without writing.
 if malformed:
     raise SystemExit(3)
 
-# Retirement predicate, textually identical in fail-ledger.sh (record repeat
-# count, check, list) and in the gc failure compaction: read-time expiry and
-# gc compose only while all four agree on which rows are retired.
 def hook_expired(r):
     if r.get("kind") != "hook" or r.get("event") != "fail":
         return False
     try:
         t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
-        return False   # an unreadable stamp is never grounds for retirement
+        return False
     return (now - t) >= ttl
 
-# Replay the ledger the way `fail-ledger check` does; a fingerprint whose open
-# count lands on zero is retired.
 open_fails = {}
 for r in rows:
     fp = r.get("fingerprint")
@@ -1260,8 +1167,6 @@ for r in rows:
 retired = {fp: count == 0 for fp, count in open_fails.items()}
 
 def old(r):
-    # timegm, not mktime: the stamps are UTC, and reading them as local time
-    # shifted the retention cutoff by the host's UTC offset.
     try:
         t = calendar.timegm(time.strptime(r.get("ts", ""), "%Y-%m-%dT%H:%M:%SZ"))
     except Exception:
@@ -1271,7 +1176,6 @@ def old(r):
 with open(sys.argv[2], "w", encoding="utf-8") as out:
     for r in rows:
         fp = r.get("fingerprint")
-        # Drop only retired-fingerprint rows that are older than the cutoff.
         if fp and retired.get(fp) and old(r):
             continue
         out.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -1317,11 +1221,7 @@ PY
   esac
 fi
 
-# 4.2) Lifecycle events of long-terminal attempts. Delegated to agent-events,
-#      which owns the stream's schema and lock: whole attempt streams only,
-#      survivors must still project, and an invalid stream refuses to
-#      compact. Without this the append-only ledger grows forever and the
-#      projection every MCP reader consumes outgrows any output budget.
+# 4.2) Lifecycle events of long-terminal attempts.
 if [ -f "$OMS/lifecycle/events.jsonl" ]; then
   lifecycle_gc_args=(--repo "$STATE_ROOT" compact --days "$DAYS")
   [ "$DRY_RUN" = 1 ] || lifecycle_gc_args+=(--apply)
@@ -1335,17 +1235,11 @@ if [ -f "$OMS/lifecycle/events.jsonl" ]; then
   fi
 fi
 
-# 4.4) Retain opt-in and historical usage under OMS_USAGE_TTL. Unreadable
-#      days expire; same-day rows collapse into count rows for diagnostics.
+# 4.4) Retain opt-in and historical usage under OMS_USAGE_TTL.
 usage_file="$OMS/usage.jsonl"
 if [ -f "$usage_file" ] && [ ! -L "$usage_file" ]; then
   usage_ttl="${OMS_USAGE_TTL:-2592000}"
   case "$usage_ttl" in *[!0-9]*|"") usage_ttl=2592000 ;; esac
-  # Same publish discipline as the failure ledger above: the hook appends
-  # under the writers' lock, so compaction snapshots and publishes under
-  # that lock too, staged beside the file with its terminal newline. Rows
-  # that fail this file's own read predicate (unreadable family/day) are
-  # dropped, matching the reader's documented contract.
   usage_gc_locked() {
     local before after stage py_status=0
     before="$(wc -l < "$usage_file" | tr -d ' ')"
@@ -1418,9 +1312,7 @@ PY
   esac
 fi
 
-# 4.5) Abandoned change-guards: a guard whose opt-in owner pid is dead, or
-#    whose snapshot is older than --days, is a corpse from a crashed session —
-#    without this it reads as "Change-guard: ACTIVE" in oms state forever.
+# 4.5) Abandoned change-guards (dead owner pid or aged snapshot).
 guard_file="$OMS/guards/change-guard.tsv"
 if [ -f "$guard_file" ]; then
   guard_pid="$(awk -F'\t' '$1=="pid"{print $2; exit}' "$guard_file")"
@@ -1433,7 +1325,6 @@ if [ -f "$guard_file" ]; then
     now_s="$(date +%s)"
     [ $((now_s - guard_started)) -gt $((DAYS * 86400)) ] && guard_dead=1
   else
-    # Pre-liveness snapshot format: fall back to file age.
     [ -n "$(find "$guard_file" -mtime +"$DAYS" 2>/dev/null)" ] && guard_dead=1
   fi
   if [ "$guard_dead" = 1 ]; then
@@ -1441,13 +1332,11 @@ if [ -f "$guard_file" ]; then
   fi
 fi
 
-# 4b) Recheck age and room mail under the same lock as thread appends. Unknown
-#     enrollment stays live for retention; an explicit leave removes it.
+# 4b) Closed threads and work rooms older than --days.
 gc_thread_unlocked() {
   python3 - "$ROOT_LIB" "$STATE_ROOT" "$1" "$cutoff" "$DRY_RUN" <<'PY'
-import os
+import os, sys
 from pathlib import Path
-import sys
 sys.path.insert(0, sys.argv[1])
 import room
 repo, filename, cutoff, dry_run = Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5] == "1"
@@ -1463,7 +1352,6 @@ try:
         state = room.project(rows)
         if any(message["pending_for"] for message in state["messages"]):
             raise ValueError("unread room mail")
-        # Closing records intent, not that its members ended: a still-joined member keeps the room.
         if any(member["joined"] for member in state["participants"]):
             raise ValueError("joined room")
         if state["closed"]:
@@ -1484,7 +1372,7 @@ try:
         filename.unlink()
     print("- %s: %s" % (kind, filename))
 except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
-    pass  # Incomplete or unsafe evidence never authorizes deletion.
+    pass
 PY
 }
 if [ -d "$OMS/threads" ]; then
@@ -1499,19 +1387,10 @@ if [ -d "$OMS/threads" ]; then
   done
 fi
 
-# 5) Artifacts: use the same planner in dry-run and apply mode. Provider
-# writers can spend minutes on a final-named file before indexing it, so GC
-# applies a grace period before treating an unindexed file as orphaned.
+# 5) Artifacts retention via artifact-index prune.
 if [ -f "$OMS/artifacts/index.jsonl" ]; then
   artifact_keep="${OMS_ARTIFACT_INDEX_KEEP:-1000}"
   artifact_grace="${OMS_ARTIFACT_ORPHAN_GRACE:-86400}"
-  # Rows are retention; files are evidence. Passing --files unconditionally
-  # made one destructive act ride along with the routine sweep: on this
-  # repository a plain `gc --apply` would have deleted seventeen artifact
-  # files, among them the 08-02 council answers a later round still cites,
-  # because an earlier prune at the old row floor had already orphaned them.
-  # An operator who cannot run gc at all also never reaps a dead delegation
-  # marker, so the destructive half is now the one that has to be asked for.
   artifact_args=(--repo "$STATE_ROOT" prune "$artifact_keep")
   [ "$DELETE_ORPHAN_FILES" != 1 ] || artifact_args+=(--files)
   [ "$DRY_RUN" = 0 ] || artifact_args+=(--dry-run)

@@ -1,22 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Shared-state writers must replace files with a same-directory rename. The
-# scratch file used to live under OMS_LIB_TMPDIR, so whenever that was a
-# different filesystem from the repo (tmpfs /tmp against an ext4 checkout —
-# the ordinary case), `mv` degraded to copy+unlink and every concurrent
-# reader had a window where the task packet was empty or truncated.
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-atomic-state.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/home" "$TMP/locks"
-export HOME="$TMP/home"
+export HOME="$TMP/home" XDG_STATE_HOME="$TMP/home/.local/state"
 export OMS_LOCK_DIR="$TMP/locks"
 export OMS_LOCK_FORCE_MKDIR=1
-# FILE-only calls must not publish into an unrelated caller checkout.
 unset REPO
 mkdir -p "$TMP/caller"
 git -C "$TMP/caller" init -q
@@ -30,8 +23,6 @@ fail() {
 # shellcheck source=scripts/lib/agent-task-common.sh
 . "$ROOT/scripts/lib/agent-task-common.sh"
 
-# The contract: replace scratch lands in the target's own directory even when
-# OMS_LIB_TMPDIR points somewhere else entirely.
 mkdir -p "$TMP/elsewhere" "$TMP/repo/.oms/task"
 export OMS_LIB_TMPDIR="$TMP/elsewhere"
 scratch="$(agent_memory_mktemp_beside "$TMP/repo/.oms/task/current.md")"
@@ -41,7 +32,6 @@ case "$scratch" in
 esac
 rm -f "$scratch"
 
-# A real write path round-trips and leaves no scratch behind.
 file="$TMP/repo/.oms/task/current.md"
 agent_task_init_file "$file"
 agent_task_set_metadata "$file" status verified
@@ -50,8 +40,6 @@ agent_task_set_metadata "$file" status verified
 leftovers="$(find "$TMP/repo/.oms/task" -name '.oms-replace.*' | wc -l | tr -d ' ')"
 [ "$leftovers" = 0 ] || fail "replace scratch leaked into the state directory"
 
-# Canary, not proof (same filesystem here): a reader polling during a burst of
-# writes must never observe an empty task file.
 (
   i=1
   while [ "$i" -le 100 ]; do
@@ -86,8 +74,6 @@ for row in created:
 assert not (repo / '.oms/task/.oms').exists()
 PYOPERATIONS
 
-# Generic FILE paths select their Git root or standalone parent. Explicit repo
-# still owns --file semantics, and positional outcome repo beats ambient REPO.
 mkdir -p "$TMP/git-owner/sub" "$TMP/standalone" "$TMP/explicit"
 git -C "$TMP/git-owner" init -q
 agent_task_init_file "$TMP/git-owner/sub/packet.md"
@@ -102,10 +88,6 @@ REPO="$TMP/caller" agent_task_record_outcome "$TMP/repo" fixture local 0 "$TMP/r
   [ ! -e "$TMP/caller/.oms" ] || fail "FILE namespace or explicit repository precedence changed"
 grep -q 'fixture local exit=0' "$file" || fail "positional repository outcome was not recorded"
 
-# The derived memory summary has unlocked prompt readers, so its refresh must
-# also land as one same-directory rename: truncate-then-append exposed a
-# header-only summary to any reader racing the refresh. Canary, not proof,
-# like the task-file leg above.
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 mkdir -p "$TMP/repo/.oms/memory"

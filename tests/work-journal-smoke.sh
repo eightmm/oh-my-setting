@@ -488,14 +488,21 @@ prompt_digest="$(
 )"
 printf '%s' "$prompt_digest" | grep >/dev/null -F '[work-journal]' ||
   fail "first prompt of the day did not surface the bounded journal digest"
+printf '%s' "$prompt_digest" | grep >/dev/null 'run the gate' ||
+  fail "prompt digest missed the open next action"
 second_prompt_digest="$(
   cd "$lifecycle_repo"
   OMS_SKILL_ROUTER_OFF=1 bash "$ROOT/scripts/skill-router.sh" </dev/null
 )"
 [ -z "$second_prompt_digest" ] ||
   fail "journal digest was injected more than once in one local day"
+rm -f "$lifecycle_repo/.oms/work-journal/digest.json"
+digest_opt_out="$(OMS_WORK_JOURNAL_DIGEST=0 work_journal_prompt_tick "$lifecycle_repo")"
+[ -z "$digest_opt_out" ] || fail "digest opt-out still injected output"
+[ ! -f "$lifecycle_repo/.oms/work-journal/digest.json" ] ||
+  fail "digest opt-out advanced the once-per-day marker"
 "$ROOT/scripts/oms" journal show --repo "$lifecycle_repo" --today |
-  grep -F 'Daily Work Journal' > /dev/null ||
+  grep '^# Daily Work Journal — ' > /dev/null ||
   fail "public journal read path did not return today's summary"
 
 # Terminal job reconciliation supplies observed state without parsing raw logs.
@@ -561,10 +568,7 @@ ci = next(row for row in rows if row["event_type"] == "ci")
 assert any(ref["type"] == "pull_request" and ref["id"] == 7 for ref in ci["refs"])
 PY
 
-# The agent read path returns summaries, annotations, and recent events.
-show_today="$("$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --today)"
-printf '%s\n' "$show_today" | grep >/dev/null '^# Daily Work Journal — ' ||
-  fail "journal show --today did not return the daily summary"
+# The agent read path returns annotations and recent events.
 "$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --blockers --json |
   python3 -c 'import json,sys; data = json.load(sys.stdin); assert any(row["text"] == "run the gate" for row in data["next_actions"]), data' ||
   fail "journal show --blockers missed the recorded next action"
@@ -731,24 +735,6 @@ OMS_WORK_JOURNAL_PYTHON="$TMP/counting-journal.py" OMS_TEST_TICK_LOG="$TMP/tick.
   work_journal_finish "$auto_repo"
 [ "$(wc -l < "$TMP/tick.log" | tr -d ' ')" = 2 ] ||
   fail "a Stop tick after a new commit did not run the journal"
-
-# The first prompt of a local day injects one bounded digest; later prompts and
-# the opt-out stay silent. The earlier skill-router call may have consumed
-# today's digest, and the marker is derived state, so reset it explicitly. That
-# router prompt also consumed this repo's distill day, so the tick below carries
-# the digest alone.
-rm -f "$lifecycle_repo/.oms/work-journal/digest.json"
-digest_out="$(OMS_WORK_JOURNAL_DIGEST=0 work_journal_prompt_tick "$lifecycle_repo")"
-[ -z "$digest_out" ] || fail "digest opt-out still injected output"
-[ ! -f "$lifecycle_repo/.oms/work-journal/digest.json" ] ||
-  fail "digest opt-out advanced the once-per-day marker"
-digest_out="$(work_journal_prompt_tick "$lifecycle_repo")"
-printf '%s\n' "$digest_out" | grep >/dev/null '^\[work-journal\]' ||
-  fail "prompt digest did not fire on the first prompt of the day"
-printf '%s\n' "$digest_out" | grep >/dev/null 'run the gate' ||
-  fail "prompt digest missed the open next action"
-digest_out="$(work_journal_prompt_tick "$lifecycle_repo")"
-[ -z "$digest_out" ] || fail "prompt digest fired twice in one local day"
 
 # A broken observer cannot replace the primary command's exit code or ledger row.
 set +e
@@ -1096,34 +1082,5 @@ assert row["pinned_name"] == "identity-repo", row
 "$ROOT/scripts/journal.sh" identity --repo "$idrepo" --adopt-detected |
   grep "already canonical" > /dev/null ||
   fail "a second adoption must be an explicit no-op"
-
-# The rendered language follows the pinned configuration, not the locale of
-# whichever shell a lifecycle hook happened to run in.
-langrepo="$TMP/lang-repo"
-mkdir -p "$langrepo"
-git -C "$langrepo" init -q
-git -C "$langrepo" config user.name "Test"
-git -C "$langrepo" config user.email "test@example.com"
-printf 'seed\n' > "$langrepo/seed.txt"
-git -C "$langrepo" add seed.txt
-git -C "$langrepo" commit -qm "seed"
-(
-  export OMS_WORK_JOURNAL_CONFIG="$TMP/lang-config.json"
-  export LANG=en_US.UTF-8
-  unset OMS_WORK_JOURNAL_LANG LC_ALL LC_MESSAGES
-  "$ROOT/scripts/journal.sh" configure --lang ko | grep "journal language: ko" > /dev/null ||
-    fail "configure --lang did not confirm the pinned language"
-  row="$TMP/lang-row.json"
-  make_row "$row" "lang-one"
-  work_journal_observe "$langrepo" run-ledger "$row"
-  "$ROOT/scripts/journal.sh" show --repo "$langrepo" --period 2026-07-31 |
-    grep '^## 핵심 진전' > /dev/null ||
-    fail "pinned language did not reach the rendered summary"
-  export OMS_WORK_JOURNAL_LANG=en
-  "$ROOT/scripts/journal.sh" rebuild --repo "$langrepo" >/dev/null
-  "$ROOT/scripts/journal.sh" show --repo "$langrepo" --period 2026-07-31 |
-    grep '^## Key progress' > /dev/null ||
-    fail "environment override did not beat the pinned language"
-)
 
 echo "work-journal-smoke: ok"

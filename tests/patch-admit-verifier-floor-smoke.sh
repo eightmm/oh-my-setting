@@ -706,27 +706,28 @@ exit 0' "$repo/tests/feature.sh" > "$TMP/feature.new"
 done
 
 printf -v indirect_assertion 'assert [(open)("%s", "w")]' "$TMP/python-assertion-ran"
-for placement in inserted appended; do
-  for assertion in "$indirect_assertion" 'assert __import__("sys").exit(0)' 'assert exit(0)' \
-    'assert eval("True")' 'assert exec("pass")' 'assert os.path.exists("src/value.txt")' \
-    'assert sys.exit(0)' 'assert subprocess.call(["true"]) == 0' 'assert quit()' \
-    'assert 1 < 2' 'assert 2 > 1' 'assert True & True' 'assert True | False' \
-    'assert True; assert True' 'assert True # `call`' 'assert True # &&' \
-    'assert True # ('; do
-    : > "$repo/tests/feature.py"
-    [ "$placement" != appended ] || printf 'assert True\n' >> "$repo/tests/feature.py"
-    printf '%s\n' "$assertion" >> "$repo/tests/feature.py"
-    [ "$placement" != inserted ] || printf 'assert True\n' >> "$repo/tests/feature.py"
-    git -C "$repo" diff > "$TMP/python-assertion.patch"
-    git -C "$repo" checkout -q -- tests/feature.py
-    rc=0
-    "$ADMIT" --repo "$repo" --patch "$TMP/python-assertion.patch" \
-      --verify 'python3 tests/feature.py' --report "$TMP/python-assertion.md" >/dev/null 2>&1 || rc=$?
-    [ "$rc" = 1 ] || fail "$placement assertion bypassed consent: $assertion"
-    contains "$TMP/python-assertion.md" 'verifier: FAIL'
-    contains "$TMP/python-assertion.md" 'verify: SKIP'
-    [ ! -e "$TMP/python-assertion-ran" ] || fail "rejected Python assertion executed a host-side effect"
-  done
+for entry in "inserted:$indirect_assertion" \
+  "appended:$indirect_assertion" 'appended:assert __import__("sys").exit(0)' 'appended:assert exit(0)' \
+  'appended:assert eval("True")' 'appended:assert exec("pass")' 'appended:assert os.path.exists("src/value.txt")' \
+  'appended:assert sys.exit(0)' 'appended:assert subprocess.call(["true"]) == 0' 'appended:assert quit()' \
+  'appended:assert 1 < 2' 'appended:assert 2 > 1' 'appended:assert True & True' 'appended:assert True | False' \
+  'appended:assert True; assert True' 'appended:assert True # `call`' 'appended:assert True # &&' \
+  'appended:assert True # ('; do
+  placement="${entry%%:*}"
+  assertion="${entry#*:}"
+  : > "$repo/tests/feature.py"
+  [ "$placement" != appended ] || printf 'assert True\n' >> "$repo/tests/feature.py"
+  printf '%s\n' "$assertion" >> "$repo/tests/feature.py"
+  [ "$placement" != inserted ] || printf 'assert True\n' >> "$repo/tests/feature.py"
+  git -C "$repo" diff > "$TMP/python-assertion.patch"
+  git -C "$repo" checkout -q -- tests/feature.py
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/python-assertion.patch" \
+    --verify 'python3 tests/feature.py' --report "$TMP/python-assertion.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "$placement assertion bypassed consent: $assertion"
+  contains "$TMP/python-assertion.md" 'verifier: FAIL'
+  contains "$TMP/python-assertion.md" 'verify: SKIP'
+  [ ! -e "$TMP/python-assertion-ran" ] || fail "rejected Python assertion executed a host-side effect"
 done
 # Sourcing or wrapping the suite still names it as the verifier.
 for wrapped in '. tests/feature.sh' 'timeout 10 bash tests/feature.sh' \
@@ -945,9 +946,6 @@ rc=0
 [ "$rc" = 1 ] || fail "existing smoke selector must still reject broken product"
 # END candidate-only-targets
 
-# Worktree creation/checkouts can invoke worker-planted fsmonitor or content
-# filters under the admitting parent's authority. Refuse executable Git config
-# before the first such Git operation; the marker proves refusal came first.
 cat > "$repo/.git/hostile-fsmonitor" <<EOF
 #!/usr/bin/env bash
 : > "$TMP/admit-fsmonitor-fired"
@@ -964,11 +962,6 @@ rc=0
 [ ! -e "$TMP/admit-fsmonitor-fired" ] ||
   fail "patch admission executed worker-planted fsmonitor"
 
-# --- Proposal admission rejects floor-incompatible verifies ------------------
-# The live 0.6.0 campaign parked on a planner-authored verify that greps a
-# file the task itself modifies: the base floor restores the verifier from
-# HEAD, so such a check can never pass. The generator of that dead state is
-# now refused at the single admission door (three-family council, 2026-08-18).
 floor_repo="$TMP/floor-admission"
 mkdir -p "$floor_repo/tests" "$floor_repo/docs"
 git -C "$floor_repo" init -q -b main
@@ -1004,37 +997,20 @@ PY
     2>&1 | tail -1 || true
 }
 
-out="$(floor_proposal "bash -c 'grep -q endswith tests/suite.sh && bash tests/suite.sh'")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "the field-defect verify shape must be rejected at admission: $out"
-out="$(floor_proposal "python3 - < tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "a redirect read of a modified file must be rejected: $out"
-
-# Hash, text, and binary inspection siblings are content readers too. Keep
-# this static so the regression does not depend on any reader being installed.
 for reader in jq sha256sum md5sum shasum cksum comm join paste nl tac rev xxd hexdump base64 \
   sha1sum sha224sum sha384sum sha512sum b2sum sum base32 basenc; do
   out="$(floor_proposal "$reader tests/suite.sh")"
   printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
     fail "$reader reading a modified file must be rejected: $out"
 done
-out="$(floor_proposal "/usr/bin/jq tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "a path-qualified reader must be rejected: $out"
-out="$(floor_proposal "jq ./tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "a reader using the canonical ./ spelling must be rejected: $out"
-out="$(floor_proposal "python3 - <./tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "a redirect using the canonical ./ spelling must be rejected: $out"
-out="$(floor_proposal "CHECK_MODE=strict sha256sum tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "a reader after an environment assignment must be rejected: $out"
-out="$(floor_proposal "bash -c 'base64 tests/suite.sh'")"
-printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-  fail "a reader inside bash -c must be rejected: $out"
 for verify in \
+  "bash -c 'grep -q endswith tests/suite.sh && bash tests/suite.sh'" \
+  "python3 - < tests/suite.sh" \
+  "/usr/bin/jq tests/suite.sh" \
+  "jq ./tests/suite.sh" \
+  "python3 - <./tests/suite.sh" \
+  "CHECK_MODE=strict sha256sum tests/suite.sh" \
+  "bash -c 'base64 tests/suite.sh'" \
   "command jq tests/suite.sh" \
   "command -p jq tests/suite.sh" \
   "command -- jq tests/suite.sh" \
@@ -1044,27 +1020,23 @@ for verify in \
   "/usr/bin/env jq tests/suite.sh"; do
   out="$(floor_proposal "$verify")"
   printf '%s' "$out" | grep >/dev/null -F 'floor_incompatible_verifier' ||
-    fail "a strict command wrapper must not hide a reader ($verify): $out"
+    fail "floor-incompatible verify must be rejected ($verify): $out"
 done
 
-out="$(floor_proposal "bash tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'proposal applied' ||
-  fail "executing the restored suite must stay admissible: $out"
 for verify in \
+  "bash tests/suite.sh" \
   "command -v jq tests/suite.sh" \
   "command -V jq tests/suite.sh" \
   "command bash tests/suite.sh" \
   "env bash tests/suite.sh" \
   "./env jq tests/suite.sh" \
   "/tmp/command jq tests/suite.sh" \
-  "jq 'tests/*.sh'"; do
+  "jq 'tests/*.sh'" \
+  "grep -q ok docs/other.md && bash tests/suite.sh"; do
   out="$(floor_proposal "$verify")"
   printf '%s' "$out" | grep >/dev/null -F 'proposal applied' ||
-    fail "a non-reader wrapper/query must stay admissible ($verify): $out"
+    fail "admissible verify must be accepted ($verify): $out"
 done
-out="$(floor_proposal "grep -q ok docs/other.md && bash tests/suite.sh")"
-printf '%s' "$out" | grep >/dev/null -F 'proposal applied' ||
-  fail "reading an unmodified path must stay admissible: $out"
 
 # Informational land hint: affected suites absent from --verify are named on
 # stderr; a verify that already names them stays silent. Verdict is unchanged.

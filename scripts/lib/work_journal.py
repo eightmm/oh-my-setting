@@ -135,14 +135,12 @@ _HEADINGS = {
         "digest_review_linked": "%s — 리뷰 %s%s",
         "digest_review_linked_failure": "리뷰 실패: %s%s",
         "digest_ci_for_commit": "- CI %s (커밋 %s)",
-        "digest_ci_line": "- CI %s (커밋 %s)",
         "digest_ci_detail": "- 상세 CI 결과: %s (커밋 %s)",
         "digest_ci_unlinked": "- CI %s",
         "digest_ci_success_line": "- %s (커밋 %s, CI 성공)",
         "digest_commit_note": " (커밋 %s%s)",
         "digest_ci_status_suffix": " (CI %s)",
         "digest_commit_line": "- %s (커밋 %s%s)",
-        "digest_commit_ref": "커밋 %s",
         "digest_status_completed": "완료",
         "digest_status_accepted": "수락",
         "digest_status_failed": "실패",
@@ -207,14 +205,12 @@ _HEADINGS = {
         "digest_review_linked": "%s — review %s%s",
         "digest_review_linked_failure": "Review failed: %s%s",
         "digest_ci_for_commit": "- CI %s for commit %s",
-        "digest_ci_line": "- CI %s for commit %s",
         "digest_ci_detail": "- CI result: %s for commit %s",
         "digest_ci_unlinked": "- CI %s",
         "digest_ci_success_line": "- %s (commit %s, CI passed)",
         "digest_commit_note": " (commit %s%s)",
         "digest_ci_status_suffix": " (CI %s)",
         "digest_commit_line": "- %s (commit %s%s)",
-        "digest_commit_ref": "commit %s",
         "digest_status_completed": "completed",
         "digest_status_accepted": "accepted",
         "digest_status_failed": "failed",
@@ -3432,9 +3428,7 @@ class JournalStore:
                 return line not in _EMPTY_MARKERS
         return False
 
-    def _summary_rows(
-        self, *, include_open: bool = False, include_content: bool = True
-    ) -> List[Dict[str, Any]]:
+    def _summary_rows(self, *, include_open: bool = False) -> List[Dict[str, Any]]:
         rows = []
         current_day, current_week = self._current_periods()
         self._ensure_index_database()
@@ -3472,24 +3466,13 @@ class JournalStore:
                     "period": period,
                     "summary_key": "%s:%s:%s" % (self.project_id, kind, period),
                     "title": "%s Work Journal — %s" % (kind.title(), period),
-                    "content": presentation if include_content else "",
+                    "content": presentation,
                     "content_hash": _sha256_bytes(presentation.encode("utf-8")),
                     "project_name": self.project_name,
                     "has_blocker": bool(has_blocker),
                 }
             )
         return rows
-
-    def _summary_content(self, kind: str, period: str) -> str:
-        self._ensure_index_database()
-        with sqlite3.connect(str(self.index_db_path)) as connection:
-            row = connection.execute(
-                "SELECT content FROM summaries WHERE kind = ? AND period = ?",
-                (kind, period),
-            ).fetchone()
-        if row is None:
-            raise JournalError("indexed Work Journal summary is unavailable")
-        return str(row[0])
 
     def _period_aggregates(self, kind: str, period: str) -> Dict[str, Any]:
         """Mirror-facing counts for one daily period: sessions, commits,
@@ -3849,7 +3832,7 @@ class JournalStore:
             sync_now = sync_now.replace(tzinfo=dt.timezone.utc)
         sync_now = sync_now.astimezone(dt.timezone.utc)
         attempted = 0
-        rows = self._summary_rows(include_open=force, include_content=True)
+        rows = self._summary_rows(include_open=force)
         if today_only:
             current_day, _current_week = self._current_periods()
             rows = [
@@ -4126,7 +4109,6 @@ def _last_section_value(text: str, section: str) -> Optional[str]:
 
 
 def _task_payload(
-    repo: pathlib.Path,
     path: pathlib.Path,
     *,
     operation: str,
@@ -4221,7 +4203,7 @@ def source_payload(
     evidence_path = record_path or source_path
     if source_type == "agent-task":
         payload = _task_payload(
-            repo, source_path, operation=operation, occurred_at=occurred_at or now
+            source_path, operation=operation, occurred_at=occurred_at or now
         )
     elif source_type == "panel-result":
         row = _read_json_source(source_path)

@@ -927,8 +927,7 @@ drop delegate.symlink-race
 unset -f oms_harness_classify_dead_residue
 eval "$(declare -f real_oms_harness_classify_dead_residue | sed '1s/^real_//')"
 
-# A delegate killed by SIGKILL leaves its liveness marker. The next delegate
-# start reaps it only when the pid is proven dead and no plan recovery needs it.
+# A delegate killed by SIGKILL leaves its liveness marker.
 markers="$repo/.oms/delegations"
 mkdir -p "$markers"
 sleep 30 &
@@ -954,11 +953,7 @@ reap_out="$(oms_harness_reap_dead_delegation_markers "$repo" 2>&1)"
 [ -f "$markers/malformed.json" ] || fail "malformed delegation marker was reaped"
 [ -L "$markers/link.json" ] || fail "symlinked delegation marker was reaped"
 
-# The verify heartbeat is a fork of the delegate: before its first command it
-# still carries the delegate's EXIT and signal traps, and a TERM in that window
-# runs the delegate's cleanup in the child, deleting the worktree and verifier
-# output under the live delegate. TERM may follow only the child's ready proof.
-# Every heartbeat fork must go through the shared helpers.
+# TERM may follow only the heartbeat child's ready proof.
 heartbeat_stop="$TMP/stop-verify-heartbeat.sh"
 sed -n '/^ma_heartbeat_stop() {/,/^}/p' "$ROOT/scripts/lib/peer-common.sh" > "$heartbeat_stop"
 [ -s "$heartbeat_stop" ] || fail "peer-common must define ma_heartbeat_stop"

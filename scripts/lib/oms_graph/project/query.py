@@ -6,7 +6,7 @@ import hashlib
 import math
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 from oms_runtime.common import sensitive_text
 
@@ -328,9 +328,6 @@ class Graph:
                 "truncated": bool(node_limit_reached or omitted_edges),
                 "node_limit_reached": node_limit_reached,
                 "omitted_edges": omitted_edges}
-
-    def degree(self, node_id: str) -> int:
-        return len(self.out.get(node_id, [])) + len(self.ins.get(node_id, []))
 
     def map_summary(self) -> Dict[str, Any]:
         by_kind: Dict[str, int] = {}

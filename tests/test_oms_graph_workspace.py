@@ -67,92 +67,80 @@ class WorkspaceFingerprintTest(unittest.TestCase):
         self.assertTrue(cache_allowed(fingerprint), fingerprint)
         return str(fingerprint["digest"])
 
-    def test_clean_repository_is_cacheable_and_stable(self) -> None:
+    def test_clean_and_tracked_edits_and_staging(self) -> None:
         self.assertTrue(self.clean["digest"])
         self.assertEqual(self.clean["unsafe"], "")
         self.assertEqual(self.clean["dirty_count"], 0)
         self.assertTrue(cache_allowed(self.clean))
         self.assertEqual(workspace_fingerprint(self.repo)["digest"], self.clean["digest"])
 
-    def test_uncommitted_edit_changes_the_digest_and_reverting_restores_it(self) -> None:
         self.write("tracked.txt", "two\n")
-        self.assertNotEqual(self.digest(), self.clean["digest"])
+        unstaged = self.digest()
+        self.assertNotEqual(unstaged, self.clean["digest"])
         self.write("tracked.txt", "one\n")
         self.assertEqual(self.digest(), self.clean["digest"])
 
-    def test_staging_the_same_bytes_differs_from_the_unstaged_edit(self) -> None:
         self.write("tracked.txt", "two\n")
-        unstaged = self.digest()
         self.git("add", "tracked.txt")
         staged = self.digest()
         self.assertNotEqual(staged, unstaged)
         self.assertNotEqual(staged, self.clean["digest"])
 
-    def test_staged_blobs_separate_workspaces_whose_worktree_bytes_match(self) -> None:
-        """`MM` with the committed bytes restored: only `staged` tells these apart."""
-        self.write("tracked.txt", "two\n")
-        self.git("add", "tracked.txt")
+        # `MM` with the committed bytes restored: only `staged` tells these apart.
         self.write("tracked.txt", "one\n")
-        first = self.digest()
+        first_mm = self.digest()
         self.write("tracked.txt", "three\n")
         self.git("add", "tracked.txt")
         self.write("tracked.txt", "one\n")
-        self.assertNotEqual(self.digest(), first)
+        self.assertNotEqual(self.digest(), first_mm)
 
-    def test_untracked_file_changes_the_digest_and_removing_it_restores_it(self) -> None:
+    def test_untracked_ignored_oms_state_delete_and_rename(self) -> None:
         self.write("new.txt", "fresh\n")
         self.assertNotEqual(self.digest(), self.clean["digest"])
         (self.repo / "new.txt").unlink()
         self.assertEqual(self.digest(), self.clean["digest"])
 
-    def test_ignored_file_is_not_workspace_content(self) -> None:
         self.write("ignored.txt", "noise\n")
         self.assertEqual(self.digest(), self.clean["digest"])
 
-    def test_oms_state_is_not_workspace_content(self) -> None:
         self.write(".oms/graph/runs/r1/events.jsonl", '{"kind":"node-finished"}\n')
         fingerprint = workspace_fingerprint(self.repo)
         self.assertEqual(fingerprint["digest"], self.clean["digest"])
         self.assertEqual(fingerprint["dirty_count"], 0)
-        self.git("add", ".oms/graph/runs/r1/events.jsonl")  # also invisible once staged
+        self.git("add", ".oms/graph/runs/r1/events.jsonl")
         self.assertEqual(self.digest(), self.clean["digest"])
 
-    def test_symlink_fails_closed(self) -> None:
+        (self.repo / "tracked.txt").unlink()
+        deleted = workspace_fingerprint(self.repo)
+        self.assertEqual((deleted["unsafe"], deleted["dirty_count"]), ("", 1))
+        self.assertNotEqual(deleted["digest"], self.clean["digest"])
+        self.git("checkout", "-q", "--", "tracked.txt")
+
+        self.git("mv", "tracked.txt", "renamed.txt")
+        renamed = workspace_fingerprint(self.repo)
+        self.assertEqual((renamed["unsafe"], renamed["dirty_count"]), ("", 1))
+        self.assertNotEqual(renamed["digest"], self.clean["digest"])
+
+    def test_fail_closed_limits_and_symlinks(self) -> None:
         os.symlink("tracked.txt", str(self.repo / "link.txt"))
-        fingerprint = workspace_fingerprint(self.repo)
-        self.assertTrue(str(fingerprint["unsafe"]).startswith("symlink:"), fingerprint)
-        self.assertEqual(fingerprint["digest"], "")
-        self.assertFalse(cache_allowed(fingerprint))
+        symlink_fp = workspace_fingerprint(self.repo)
+        self.assertTrue(str(symlink_fp["unsafe"]).startswith("symlink:"), symlink_fp)
+        self.assertEqual(symlink_fp["digest"], "")
+        self.assertFalse(cache_allowed(symlink_fp))
+        (self.repo / "link.txt").unlink()
 
-    def test_oversized_file_fails_closed(self) -> None:
         self.write("big.txt", "x" * 64)
-        fingerprint = workspace_fingerprint(self.repo, max_file_bytes=16)
-        self.assertTrue(str(fingerprint["unsafe"]).startswith("large-file:"), fingerprint)
-        self.assertEqual(fingerprint["digest"], "")
-        self.assertFalse(cache_allowed(fingerprint))
+        large_fp = workspace_fingerprint(self.repo, max_file_bytes=16)
+        self.assertTrue(str(large_fp["unsafe"]).startswith("large-file:"), large_fp)
+        self.assertEqual(large_fp["digest"], "")
+        self.assertFalse(cache_allowed(large_fp))
+        (self.repo / "big.txt").unlink()
 
-    def test_too_many_dirty_paths_fails_closed(self) -> None:
         for index in range(4):
             self.write("dirty%d.txt" % index, "%d\n" % index)
-        fingerprint = workspace_fingerprint(self.repo, max_entries=3)
-        self.assertTrue(str(fingerprint["unsafe"]).startswith("too-many-dirty-paths:"), fingerprint)
-        self.assertEqual(fingerprint["dirty_count"], 4)
-        self.assertEqual(fingerprint["digest"], "")
-        self.assertFalse(cache_allowed(fingerprint))
-
-    def test_deleted_tracked_file_changes_the_digest(self) -> None:
-        (self.repo / "tracked.txt").unlink()
-        fingerprint = workspace_fingerprint(self.repo)
-        self.assertEqual(fingerprint["unsafe"], "")
-        self.assertEqual(fingerprint["dirty_count"], 1)
-        self.assertNotEqual(fingerprint["digest"], self.clean["digest"])
-
-    def test_staged_rename_parses_and_changes_the_digest(self) -> None:
-        self.git("mv", "tracked.txt", "renamed.txt")
-        fingerprint = workspace_fingerprint(self.repo)
-        self.assertEqual(fingerprint["unsafe"], "")
-        self.assertEqual(fingerprint["dirty_count"], 1)
-        self.assertNotEqual(fingerprint["digest"], self.clean["digest"])
+        many_fp = workspace_fingerprint(self.repo, max_entries=3)
+        self.assertTrue(str(many_fp["unsafe"]).startswith("too-many-dirty-paths:"), many_fp)
+        self.assertEqual((many_fp["dirty_count"], many_fp["digest"], cache_allowed(many_fp)), (4, "", False))
 
 
 if __name__ == "__main__":

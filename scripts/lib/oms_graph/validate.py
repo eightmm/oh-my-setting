@@ -10,7 +10,6 @@ from . import capabilities
 from .predicates import validate_all
 
 ERROR_CODES = ("invalid_schema", "duplicate_node", "unknown_endpoint", "missing_entry", "unreachable_node", "missing_terminal", "terminal_outgoing_edge", "invalid_outcome", "invalid_repeat_edge", "unbounded_cycle", "unknown_subgraph", "recursive_subgraph", "invalid_fact_reference", "invalid_plan_task_reference", "ambiguous_routes", "invalid_effect", "invalid_kind", "invalid_join", "invalid_command", "invalid_budget", "invalid_gate", "invalid_task_binding", "unknown_task_binding", "duplicate_task_binding_writer", "unreachable_task_binding", "invalid_context", "unknown_tool_capability")
-WARNING_CODES = ("unrouted_outcome", "dead_end", "unverified_effect_declaration")
 
 
 def validate_spec(spec: Mapping[str, Any], *, plan_tasks: Optional[Sequence[str]] = None) -> Dict[str, Any]:

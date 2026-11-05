@@ -26,7 +26,7 @@ ROLE_ALIAS_LETTERS = {"builder":"B", "worker":"W", "reviewer":"R", "verifier":"V
                       "documenter":"D", "integrator":"I", "performance-engineer":"P",
                       "release-engineer":"E", "refactorer":"F", "researcher":"X"}
 
-# Call-local facade imports preserve the public entry point and avoid import cycles.
+
 class PlanBinding(NamedTuple):
     plan_id: str
     task_id: str
@@ -925,7 +925,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
               (inherited_route, route["provider"], route["model"], route.get("effort") or "native-settings"), file=sys.stderr)
     if access == "write":
         _require_assigned_route(repo, task_id, route)
-    if access == "write" and not verify and not scopes and not _plan_task_has_verifier(repo, task_id):
+    if access == "write" and not verify and not scopes and not _plan_task_verifier(repo, task_id):
         print("WARN: write dispatch has neither a verify command nor a declared scope", file=sys.stderr)
     label = safe_label(label)
     alias_pattern = r"[A-Za-z0-9-]{1,8}"
@@ -1207,9 +1207,7 @@ def _plan_task_paths(repo, task_id):
     return paths("allowed_paths"), paths("forbidden_paths")
 
 
-def _plan_task_has_verifier(repo, task_id):
-    """Check only the structured plan task contract; brief prose is not authority."""
-    return bool(_plan_task_verifier(repo, task_id))
+def _plan_task_has_verifier(repo, task_id): return bool(_plan_task_verifier(repo, task_id))
 
 
 def _plan_task_verifier(repo, task_id):
@@ -1277,7 +1275,7 @@ def _require_assigned_route(repo, task_id, route):
 
 def plan_link(repo, owner, task_id, env, caller, access="read"):
     """Bind owned tasks for workers; leave ready read-only tasks informational."""
-    from terminal_panel import ENTRY, PlanBinding, active_mains
+    from terminal_panel import ENTRY, _read, active_mains
     base = ["bash", str(ENTRY), "agent-plan", "--repo", str(repo)]
     plan_env = dict(env, OMS_ROOM_PARTICIPANT=caller) if caller else dict(env)
     for name in ("OMS_LEASE_ID", "OMS_PLAN_LEASE_ID"):
@@ -1288,7 +1286,6 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
                               stdin=subprocess.DEVNULL, env=plan_env, timeout=60)
 
     def read_plan():
-        from terminal_panel import PlanBinding, _read
         raw = _read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
         if not raw and not (repo / ".oms/plan/tasks.json").exists():
             return {"tasks": {}}
@@ -1299,7 +1296,6 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
 
     def snapshot():
         # The core reader is a compatibility reader; fence unsafe files before invoking it.
-        from terminal_panel import PlanBinding
         read_plan()
         result = plan("evidence-snapshot", "--id", task_id)
         if result.returncode:
@@ -1425,7 +1421,7 @@ def _read_dispatch_brief(path):
 
 def _validate_dry_run_inputs(prompt, brief):
     """Use the shared outbound scanner before returning any dispatch plan."""
-    from terminal_panel import MAX_PROMPT, OUTBOUND_SCANNER, _read_dispatch_brief
+    from terminal_panel import MAX_PROMPT, OUTBOUND_SCANNER
     if prompt and (len(prompt.encode("utf-8")) > MAX_PROMPT or "\0" in prompt):
         raise ValueError("prompt exceeds the panel input contract")
     inputs = []
@@ -1468,7 +1464,7 @@ def _task_findings_brief(repo, task_id, brief):
 
 def _rollover_if_needed(repo, room_id, state, caller):
     """Continue a room past its rollover marks as its successor; the capacity check refuses only if this fails."""
-    from terminal_panel import _adopt_successor, clean
+    from terminal_panel import clean
     if (len(state["messages"]) <= room.ROLLOVER_MESSAGES
             and sum(bool(p.get("parent")) for p in state["participants"]) <= room.ROLLOVER_CALLS):
         return None
@@ -1532,7 +1528,7 @@ def _dispatch_group_gone(pid):
 
 
 def _dispatch_exited(process, identity, reaped=False):
-    from terminal_panel import _dispatch_group_gone, _dispatch_leader_gone, _dispatch_session_gone
+    from terminal_panel import _dispatch_group_gone, _dispatch_session_gone
     reaped = reaped or type(process.poll()) is int
     if os.name != "posix":
         # Windows retains its reaped-child check; session teardown cannot be attested here.
@@ -1691,9 +1687,7 @@ def _dispatch_descendants_gone(records):
     return True
 
 
-def _dispatch_recorded_gone(records):
-    from terminal_panel import _dispatch_descendants_gone
-    return _dispatch_descendants_gone(records)
+_dispatch_recorded_gone = _dispatch_descendants_gone
 
 
 def _dispatch_call_path(member, exited=False):
@@ -1703,7 +1697,6 @@ def _dispatch_call_path(member, exited=False):
 
 
 def _dispatch_pending_path(member):
-    from terminal_panel import _dispatch_call_path
     return _dispatch_call_path(member)[:-5] + "-pending.json"
 
 
@@ -1771,7 +1764,7 @@ def _dispatch_verifier(repo, room_id, member, caller, task_id=None):
 
 def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution_repo=None, rework=None,
                            task_id=None, route=None, route_provenance=None):
-    from terminal_panel import DURABLE, _dispatch_call_path, _write_brief_artifact
+    from terminal_panel import DURABLE, _write_brief_artifact
     call = {"schema": 2, "kind": "oms-panel-call", "room": room_id, "participant": member,
             "parent": caller, "nonce": uuid.uuid4().hex,
             "backend": "subreaper" if sys.platform == "linux" else "unsupported"}
@@ -1811,7 +1804,7 @@ def _prepare_dispatch_call(repo, room_id, member, caller, verify=None, execution
 
 
 def _valid_rework_context(context, member):
-    from terminal_panel import TIERS, WRITERS, _dispatch_call_path
+    from terminal_panel import TIERS, WRITERS
     return (isinstance(context, dict) and set(context) == {"role", "scope", "workload", "brief", "brief_sha256"}
             and context.get("role") in WRITERS and context.get("workload") in TIERS
             and isinstance(context.get("scope"), list)
@@ -1822,7 +1815,7 @@ def _valid_rework_context(context, member):
 
 
 def _dispatch_call_record(repo, room_id, member):
-    from terminal_panel import _dispatch_call_path, _read, _valid_rework_context
+    from terminal_panel import _read
     try:
         name = member["participant"]
         path = Path(repo) / _dispatch_call_path(name)
@@ -1869,7 +1862,7 @@ def _dispatch_call_record(repo, room_id, member):
 
 
 def _record_dispatch_pending(repo, call, status, task_id, evidence):
-    from terminal_panel import _dispatch_call_record, _dispatch_exit_record, _dispatch_pending_path, _write
+    from terminal_panel import _dispatch_call_record, _write
     current = _dispatch_call_record(repo, call["room"], call)
     if current != call:
         raise ValueError("dispatch launch changed after launch")
@@ -1892,7 +1885,6 @@ class DispatchEvidenceError(ValueError):
 
 
 def _dispatch_pending(repo, call):
-    from terminal_panel import _dispatch_exit_record
     try:
         pending = dispatch_store.read(repo, call["participant"] + "-pending.json")
     except FileNotFoundError:
@@ -1937,7 +1929,6 @@ def _dispatch_stale_boot(repo, call, suffix):
 
 
 def _dispatch_supervisor_snapshot(repo, call, allow_stale=False):
-    from terminal_panel import _dispatch_exit_record
     if call["schema"] == 2 and call["backend"] != "subreaper":
         return None
     if (not allow_stale and (_dispatch_stale_boot(repo, call, "-process.json")
@@ -2138,7 +2129,6 @@ def _dispatch_call_finished(repo, room_id, member, report_evidence=False):
 
 
 def _dispatch_released(repo, call):
-    from terminal_panel import _dispatch_exit_record
     try:
         released = dispatch_store.read(repo, call["participant"] + "-settled.json")
         return (released.get("released") is True and type(released.get("exit")) is int
@@ -2152,7 +2142,6 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
     from terminal_panel import _dispatch_call_finished, _dispatch_call_record, _dispatch_pending
     from terminal_panel import _dispatch_released, _settlement_delivery_pending, deliver_result, events
     rows = json.loads(events(repo, "list", "--json", output=True))
-    import shlex
     for orphan in dispatch_store.orphan_members(repo):
         reported = getattr(_reconcile_dispatch, "_reported_orphans", set())
         if orphan not in reported:
@@ -2227,26 +2216,22 @@ def _observe_dispatch_session(process, identity, evidence):
 
 def _stop_dispatch_groups(process, identity, evidence, before_force=None, reaped=True):
     """A reaped session leader can leave foreground and detached provider groups alive."""
-    from terminal_panel import _dispatch_exited, _dispatch_recorded_gone
-    if os.name != "posix":
-        return bool(not evidence.get("forced") and _dispatch_exited(process, identity, reaped=reaped)
-                    and not evidence.get("observation_failed")
-                and _dispatch_recorded_gone(evidence.get("descendants")))
-    if type(process.pid) is not int or process.pid <= 0 or process.pid == os.getpid():
-        return False
+    from terminal_panel import _dispatch_descendants_gone, _dispatch_exited, _dispatch_group_gone
 
     def gone():
-        from terminal_panel import _dispatch_exited, _dispatch_recorded_gone
         return (_dispatch_exited(process, identity, reaped=reaped)
                 and not evidence.get("observation_failed")
-                and _dispatch_recorded_gone(evidence.get("descendants")))
+                and _dispatch_descendants_gone(evidence.get("descendants")))
 
+    if os.name != "posix":
+        return bool(not evidence.get("forced") and gone())
+    if type(process.pid) is not int or process.pid <= 0 or process.pid == os.getpid():
+        return False
     if gone():
         return True
     import panel_terminals
 
     def signal_groups(number):
-        from terminal_panel import _dispatch_before_force, _dispatch_group_gone
         groups, pids = set(), []
         caller_group = os.getpgrp()
         current = panel_terminals.process(process.pid)
@@ -2300,8 +2285,8 @@ def _stop_dispatch_groups(process, identity, evidence, before_force=None, reaped
 
 
 def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_force=None, interrupted=False):
-    from terminal_panel import _dispatch_before_force, _dispatch_exited, _dispatch_recorded_gone
-    from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session, _stop_dispatch_groups
+    from terminal_panel import _dispatch_descendants_gone, _dispatch_exited
+    from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
     evidence = evidence if evidence is not None else {}
     if type(process.pid) is not int or process.pid <= 0 or process.pid == os.getpid():
         return False
@@ -2309,7 +2294,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
     if type(process.poll()) is int:
         if (_dispatch_exited(process, identity, reaped=True)
                 and not evidence.get("observation_failed")
-                and _dispatch_recorded_gone(evidence.get("descendants"))):
+                and _dispatch_descendants_gone(evidence.get("descendants"))):
             return True
         if not term_sent and not interrupted:
             return False
@@ -2327,7 +2312,7 @@ def _stop_dispatch(process, identity, term_sent=False, evidence=None, before_for
             return _stop_dispatch_groups(process, identity, evidence, before_force)
         return (_dispatch_exited(process, identity)
                 and not evidence.get("observation_failed")
-                and _dispatch_recorded_gone(evidence.get("descendants")))
+                and _dispatch_descendants_gone(evidence.get("descendants")))
     except subprocess.TimeoutExpired:
         # The delegate's TERM trap owns worktree cleanup; force only its original session after that grace.
         if os.name == "posix":
@@ -2460,11 +2445,10 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  routing_report=None, routing_repo=None, fallback_decision=None, route_provenance=None,
                  account_overflow=True):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
-    from terminal_panel import _dispatch_exit_record, _dispatch_output_log, _dispatch_supervisor_receipt
-    from terminal_panel import _observe_dispatch_descendants, _observe_dispatch_session
-    from terminal_panel import _prepare_dispatch_call, _print_dispatch_next_ready, _read_dispatch_brief
+    from terminal_panel import _dispatch_output_log, _dispatch_supervisor_receipt, _observe_dispatch_descendants
+    from terminal_panel import _observe_dispatch_session, _prepare_dispatch_call, _print_dispatch_next_ready
     from terminal_panel import _reconcile_dispatch, _rollback_dispatch_enrollment, _rollover_if_needed
-    from terminal_panel import _safe_patch_path, _save_dispatch_output, _stop_dispatch, _tee_dispatch_output
+    from terminal_panel import _safe_patch_path, _save_dispatch_output, _stop_dispatch
     from terminal_panel import _validate_dispatch_verifier, _validate_dry_run_inputs, active_mains
     from terminal_panel import child_environment, deliver_result, events, moved_main, native_repository
     from terminal_panel import plan_link, repository, routed_command, scope_overlaps, snapshot
@@ -2736,13 +2720,11 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     saved_handlers = {}
 
     def record_pending():
-        from terminal_panel import _record_dispatch_pending
         if not launch:
             raise ValueError("dispatch process record unavailable")
         _record_dispatch_pending(repo, launch, status, task_id, evidence)
 
     def interrupt(signum, frame):
-        from terminal_panel import NativeShutdown, _observe_dispatch_descendants
         nonlocal term_sent
         for number in saved_handlers:
             signal.signal(number, signal.SIG_IGN)

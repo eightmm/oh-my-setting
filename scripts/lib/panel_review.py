@@ -18,13 +18,8 @@ import threading
 import uuid
 from call_ending import call_ending
 
-# Call-local facade imports preserve the public entry point and avoid import cycles.
 
-
-def _safe_patch_path(value):
-    return (isinstance(value, str) and value and not value.startswith(("/", "\\")) and
-            "\\" not in value and ":" not in value and
-            all(part not in {"", ".", ".."} for part in value.split("/")))
+_safe_patch_path = room._safe_room_path
 
 
 _AUTO_REVIEW_FRONTIER_PATHS = (
@@ -38,7 +33,6 @@ _AUTO_REVIEW_FRONTIER_PATHS = (
 
 def _automatic_review_workload(result_event):
     """Route verified documentation patches routinely and all other patches to deep."""
-    from terminal_panel import _AUTO_REVIEW_FRONTIER_PATHS, _safe_patch_path
     paths = result_event.get("changed_files") if isinstance(result_event, dict) else None
     if (not isinstance(paths, list) or not paths
             or any(not isinstance(path, str) or not _safe_patch_path(path) for path in paths)):
@@ -104,7 +98,6 @@ def _security_audit_paths(changed_files, patch_bytes, frontier_paths=None):
 
 
 def _call_result_event(repo, room_id, member, task_id, status):
-    from terminal_panel import _review_dispatch_context, _safe_patch_path
     import panel_results
     attempts, artifacts = panel_results._records(repo, full=True)
     attempt = next((row for row in reversed(attempts)
@@ -395,8 +388,7 @@ def _prior_gate_findings(repo, room_id, task_id):
 
 def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
     """Draft from verified review bytes and controller-owned dispatch inputs; never launch rework."""
-    from terminal_panel import MAX_PROMPT, WRITERS, _dispatch_call_record, _read, _review_findings
-    from terminal_panel import _review_verdict, _rework_history, _safe_patch_path
+    from terminal_panel import MAX_PROMPT, WRITERS, _dispatch_call_record, _read, _rework_history
     from terminal_panel import _validate_dry_run_inputs, _write_brief_artifact, lineage_ids_from_rows
     import panel_results
     from peer_artifacts import artifact_sections_stream, debate_sections
@@ -525,8 +517,7 @@ def _dispatch_execution_repository(repo, room_id, member, caller):
 
 
 def _completion_inputs(repo, room_id, member, caller, task_id, record, context):
-    from terminal_panel import _review_verifier, _safe_patch_path, _validate_dry_run_inputs
-    from terminal_panel import _write_brief_artifact, caller_owner
+    from terminal_panel import _review_verifier, _validate_dry_run_inputs, _write_brief_artifact, caller_owner
     artifact = record.get("artifact")
     worker = context.get("call_id")
     try:
@@ -610,8 +601,7 @@ SETTLEMENTS_HELD, SETTLEMENTS_HELD_LOCK = set(), threading.Lock()
 
 def _settlement_claim(repo, member, status):
     """Serialize result delivery and allow only its idle owner or a successor."""
-    from terminal_panel import SETTLEMENTS_HELD, SETTLEMENTS_HELD_LOCK, _lock, _settlement_claim_path
-    from terminal_panel import _settlement_owner_gone, _settlement_owner_identity
+    from terminal_panel import _lock
     identity = _settlement_owner_identity(os.getpid())
     if not identity:
         raise ValueError("settlement owner identity unavailable")
@@ -661,7 +651,7 @@ def _settlement_owner_gone(pid, identity):
 
 
 def _settlement_step(repo, member, claim, name, done=True):
-    from terminal_panel import _lock, _settlement_claim_path
+    from terminal_panel import _lock
     with _lock(repo, "panel-call-settle"):
         path = _settlement_claim_path(member)
         current = dispatch_store.read(repo, path)
@@ -675,7 +665,7 @@ def _settlement_step(repo, member, claim, name, done=True):
 
 
 def _settlement_release(repo, member, claim):
-    from terminal_panel import _lock, _settlement_claim_path
+    from terminal_panel import _lock
     with _lock(repo, "panel-call-settle"):
         path = _settlement_claim_path(member)
         current = dispatch_store.read(repo, path)
@@ -685,7 +675,6 @@ def _settlement_release(repo, member, claim):
 
 
 def _settlement_delivery_pending(repo, room_id, member):
-    from terminal_panel import _settlement_claim_path
     try:
         claim = dispatch_store.read(repo, _settlement_claim_path(member))
     except FileNotFoundError:
@@ -732,9 +721,7 @@ def _review_launch_state(repo, member):
 
 def deliver_result(repo, room_id, member, caller, task_id, status):
     """Settle and publish one finished call under its durable per-call claim."""
-    from terminal_panel import SETTLEMENTS_HELD, SETTLEMENTS_HELD_LOCK, _deliver_result_steps
-    from terminal_panel import _dispatch_call_path, _dispatch_call_record, _dispatch_exit_record
-    from terminal_panel import _settle_dispatch, _settlement_claim, _settlement_claim_path
+    from terminal_panel import _dispatch_call_path, _dispatch_call_record, _dispatch_exit_record, _settle_dispatch
     from terminal_panel import _settlement_release, _settlement_step, _write, clean
     try:
         claim = _settlement_claim(repo, member, status)
@@ -775,11 +762,9 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
 
 def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim):
     """Keep the numeric outcome deliverable when a worker summary cannot be shared."""
-    from terminal_panel import ROOT, _automatic_review_workload, _call_result_event, _completion_inputs
-    from terminal_panel import _dispatch_execution_repository, _review_dispatch_context
-    from terminal_panel import _review_fix_notice, _review_launch_state, _review_verdict, _review_verifier
-    from terminal_panel import _safe_patch_path, _settlement_step, _validate_dry_run_inputs, caller_owner
-    from terminal_panel import clean, dispatch, policy, results
+    from terminal_panel import ROOT, _call_result_event, _dispatch_execution_repository, _review_fix_notice
+    from terminal_panel import _review_launch_state, _review_verifier, _settlement_step, _validate_dry_run_inputs
+    from terminal_panel import caller_owner, clean, dispatch, policy, results
     review_context = _review_dispatch_context(repo, room_id, member)
     if review_context and isinstance(review_context.get("task_id"), str):
         task_id = review_context["task_id"]

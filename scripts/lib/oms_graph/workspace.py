@@ -61,10 +61,6 @@ def cache_allowed(fp: Mapping[str, Any]) -> bool:
     return bool(fp.get("digest")) and not str(fp.get("unsafe") or "")
 
 
-# --------------------------------------------------------------------------
-# internals
-# --------------------------------------------------------------------------
-
 def _result(head: str, digest: str, unsafe: str, dirty_count: int) -> Dict[str, Any]:
     return {"schema": SCHEMA, "head": head, "digest": digest, "unsafe": unsafe,
             "dirty_count": dirty_count}

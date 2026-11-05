@@ -9,8 +9,7 @@ set -euo pipefail
 # exit nonzero unless every gate passes. This is the trust boundary between
 # peer-delegate (which produces patches) and landing them.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
-ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
@@ -424,18 +423,7 @@ PY
     fi
 
     # --- Gate 2b: structural floor when no scope constrains the paths -------
-    # The scope gate is the only one that says WHERE a patch may write, and
-    # with no --plan-task it has nothing to enforce, so any layout
-    # change was admitted: a worker patch with malformed headers applied as a
-    # rename and moved two test files to the repo root. When nothing declares
-    # a scope, the changed set must still read as editing this tree rather
-    # than rearranging it — no brand-new top-level file, no move across
-    # directories. Judged from the applied worktree, not the patch headers,
-    # because the headers are what lied.
     if [ -z "$SCOPE_ALLOWED$SCOPE_FORBIDDEN" ]; then
-      # The base listing is repo-sized rather than patch-sized, so it travels
-      # by file: --repo is arbitrary, and a few thousand paths would exceed the
-      # per-string environment limit the other gates never approach.
       base_files="$worktree_parent/base-files.txt"
       GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
         GIT_CONFIG_NOSYSTEM=1 git -c core.fsmonitor=false -c core.quotePath=false \
@@ -540,11 +528,6 @@ EOF
       || record "syntax" "FAIL" "$syntax_detail"
 
     # --- Gate 3a: identify the automatic verification surface ---------------
-    # A candidate verifier is allowed to exercise its own proposed tests, but
-    # it cannot be the only authority over them. The floor below treats paths
-    # executed by VERIFY, common verifier configs, and test/spec paths as
-    # one surface. This scan is independent of both --allow-* flags: overrides
-    # may permit the edit, but they never suppress the base-owned second run.
     verifier_hit=""
     verification_surface=""
     surface_scan=""
@@ -752,12 +735,6 @@ SURFACE_PY
       record "candidate-only" "PASS" "$candidate_only"
     fi
     # --- Gate 3b: the patch must not quietly weaken the tests ---------------
-    # Gate 3a protects the verify *entrypoint*, which leaves the other way to
-    # certify yourself wide open: delete the assertions and the suite passes
-    # honestly. That is the failure this ladder exists to catch, so it is a
-    # gate rather than a note — net-removed assertions or a deleted test file
-    # reject, and --allow-test-reduction is the explicit promotion for the
-    # legitimate case (consolidating or replacing coverage).
     test_reduction=""
     if [ "$ALLOW_TEST_REDUCTION" = 0 ] && command -v python3 >/dev/null 2>&1; then
       test_reduction="$(OMS_PATCH="$PATCH" python3 - <<'PY'
@@ -767,8 +744,6 @@ import re
 TEST_PATH = re.compile(
     r"(^|/)(tests?|spec)/|(^|/)test_[^/]+$|[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$"
 )
-# Language-agnostic on purpose: the assertion vocabularies that matter here are
-# python/bash/js/go, and a line that stops asserting stops protecting.
 ASSERT = re.compile(
     r"\bassert|\bexpect\s*\(|\bshould\b|\bfail\b|t\.(Error|Fatal)|"
     r"\bok\s*\(|\brequire\s*\.|\bXCTAssert"
@@ -784,7 +759,7 @@ try:
 except OSError:
     raise SystemExit(0)
 
-for i, line in enumerate(lines):
+for line in lines:
     if line.startswith("diff --git "):
         parts = line.split(" b/", 1)
         path = parts[1].strip() if len(parts) == 2 else None
@@ -813,9 +788,9 @@ PY
       record "tests" "PASS" "patch does not net-remove test assertions"
     fi
 
-    # Salvage provenance is owner-facing evidence, not a reliable detector:
-    # arbitrary patch formatting can erase its identity. Inspect the hunks
-    # themselves so every patch uses the same content-based encoding check.
+    comma_join() {
+      printf '%s\n' "$1" | awk 'NF { printf "%s%s", separator, $0; separator=", " } END { if (separator != "") print "" }'
+    }
     encoding_loss="$(OMS_PATCH="$PATCH" OMS_SALVAGE_LIB="$ROOT_LIB" python3 - <<'PY' | tr -d '\r'
 import os
 import sys
@@ -831,20 +806,18 @@ for warning in warnings:
         seen.add(item)
 PY
 )"
-    if [ -n "$encoding_loss" ] && [ "$ACCEPT_ENCODING_LOSS" = 0 ]; then
-      encoding_detail="$(printf '%s\n' "$encoding_loss" | awk 'NF { printf "%s%s", separator, $0; separator=", " } END { if (separator != "") print "" }')"
-      record "encoding-loss" "FAIL" "patch hunks lose non-ASCII text: $encoding_detail (override: --accept-encoding-loss)"
-    elif [ -n "$encoding_loss" ]; then
-      encoding_detail="$(printf '%s\n' "$encoding_loss" | awk 'NF { printf "%s%s", separator, $0; separator=", " } END { if (separator != "") print "" }')"
-      record "encoding-loss" "PASS" "encoding loss accepted for: $encoding_detail"
+    if [ -n "$encoding_loss" ]; then
+      encoding_detail="$(comma_join "$encoding_loss")"
+      if [ "$ACCEPT_ENCODING_LOSS" = 0 ]; then
+        record "encoding-loss" "FAIL" "patch hunks lose non-ASCII text: $encoding_detail (override: --accept-encoding-loss)"
+      else
+        record "encoding-loss" "PASS" "encoding loss accepted for: $encoding_detail"
+      fi
     else
       record "encoding-loss" "PASS" "no encoding loss detected in patch hunks"
     fi
 
-    surface_detail="$(printf '%s\n' "$verification_surface" | awk '
-      NF { printf "%s%s", separator, $0; separator=", " }
-      END { if (separator != "") print "" }
-    ')"
+    surface_detail="$(comma_join "$verification_surface")"
     if [ -n "$verifier_hit" ] && [ "$ALLOW_VERIFIER_CHANGE" = 0 ]; then
       record "verifier" "FAIL" "patch modifies its own verifier: $verifier_hit (override: --allow-verifier-change; base floor still required; changed shell/python/json files are already parsed by the syntax gate, so drop bash -n or py_compile checks of them from --verify)"
     elif [ -n "$verifier_hit" ]; then
@@ -855,12 +828,6 @@ PY
       record "verifier" "PASS" "patch leaves the verification surface untouched"
     fi
 
-    # Do not execute candidate-controlled project code after a policy or
-    # integrity gate has already rejected the patch. A modified verifier can
-    # have host-side effects even when the final verdict says REJECT. Explicit
-    # overrides turn their respective gates into PASS and intentionally allow
-    # the candidate run; otherwise both verification projections stay inert.
-    # Match the panel worker verification budget in lib/panel_dispatch.py.
     preverify_failed=0
     case "$ladder" in *"	FAIL	"*) preverify_failed=1 ;; esac
     prefix_failed=0

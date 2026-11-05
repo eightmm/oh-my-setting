@@ -141,8 +141,23 @@ ma_read_source_repo() {
   fi
 }
 
-ma_read_guard_snapshot_source() {
+ma_read_guard_begin() {  # PRIVATE_DIR
   local head_file hooks_dir
+  MA_READ_GUARD_DIR=""
+  if [ -n "${1:-}" ] && [ -d "${1:-}" ] && [ "${1:-}" != "${read_guard_tmp:-}" ]; then
+    OMS_LIB_TMPDIR="$1"
+    export OMS_LIB_TMPDIR
+  fi
+  [ "$REPO" != "$MA_READ_SOURCE_REPO" ] || return 0
+  MA_READ_GUARD_DIR="$1/read-guard"
+  oms_git_assert_safe_execution_config "$REPO" diff-read || return 2
+  oms_git_assert_plain_index "$REPO" || return 2
+  # Only the baseline needs the exclusion: the diff walks baseline rows alone.
+  OMS_WG_SKIP_VOLATILE=1 oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" "$MA_READ_SOURCE_REPO" || return 2
+  MA_READ_STATE_RECEIPTS_SHA="$(oms_worker_gitmeta_receipts_fingerprint "$MA_READ_GUARD_DIR/state")" || return 2
+  MA_READ_STATE_RECEIPTS_SHA="${MA_READ_STATE_RECEIPTS_SHA//$'\r'/}"
+  oms_git_execution_state_snapshot "$REPO" "$MA_READ_GUARD_DIR/state/git-execution-state" || return 2
+  MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
   oms_git_assert_safe_execution_config "$MA_READ_SOURCE_REPO" diff-read || return 2
   oms_git_assert_plain_index "$MA_READ_SOURCE_REPO" || return 2
   # Bind foreign evidence without exempting the source's own managed checkout.
@@ -164,25 +179,6 @@ ma_read_guard_snapshot_source() {
   # are control mutations, unlike concurrent owner records in state A.
   ma_authority_state_snapshot "$MA_READ_SOURCE_REPO" "$MA_READ_GUARD_DIR/source/control-state" strict || return 2
   MA_READ_SOURCE_CONTROL_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/source/control-state")" || return 2
-}
-
-ma_read_guard_begin() {  # PRIVATE_DIR
-  MA_READ_GUARD_DIR=""
-  if [ -n "${1:-}" ] && [ -d "${1:-}" ] && [ "${1:-}" != "${read_guard_tmp:-}" ]; then
-    OMS_LIB_TMPDIR="$1"
-    export OMS_LIB_TMPDIR
-  fi
-  [ "$REPO" != "$MA_READ_SOURCE_REPO" ] || return 0
-  MA_READ_GUARD_DIR="$1/read-guard"
-  oms_git_assert_safe_execution_config "$REPO" diff-read || return 2
-  oms_git_assert_plain_index "$REPO" || return 2
-  # Only the baseline needs the exclusion: the diff walks baseline rows alone.
-  OMS_WG_SKIP_VOLATILE=1 oms_worker_surface_snapshot "$REPO" "$MA_READ_GUARD_DIR/state" "$MA_READ_SOURCE_REPO" || return 2
-  MA_READ_STATE_RECEIPTS_SHA="$(oms_worker_gitmeta_receipts_fingerprint "$MA_READ_GUARD_DIR/state")" || return 2
-  MA_READ_STATE_RECEIPTS_SHA="${MA_READ_STATE_RECEIPTS_SHA//$'\r'/}"
-  oms_git_execution_state_snapshot "$REPO" "$MA_READ_GUARD_DIR/state/git-execution-state" || return 2
-  MA_READ_STATE_EXECUTION_SHA="$(oms_sha256_file "$MA_READ_GUARD_DIR/state/git-execution-state")" || return 2
-  ma_read_guard_snapshot_source
 }
 
 ma_read_guard_rebaseline_source() {
@@ -763,26 +759,6 @@ run_with_timeout() {
   ma_run_bounded "${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}" provider "$@"
 }
 
-# A git read tree registers in the repository's admin directory, where every
-# concurrent write worker's guard must classify it. A guard recognises residue
-# only under its own TMPDIR or the delegate worktree root, so the caller's
-# TMPDIR would turn each tree add or remove into a gitmeta violation for the
-# workers; the root is the one base all of them share. Residue validators accept
-# a root only when it is its own physical path, and the default root is private
-# as delegate makes it. Prints the root, or nothing when it cannot be used
-# (the caller then keeps its TMPDIR, where the tree is still reclaimable).
-ma_agy_read_root() {
-  local root physical
-
-  root="$(oms_harness_delegate_worktree_root)"
-  case "$root" in /*) ;; *) return 0 ;; esac
-  [ -d "$root" ] || (umask 077 && mkdir -p "$root") 2>/dev/null || true
-  physical="$(oms_harness_physical_dir "$root" 2>/dev/null || true)"
-  [ -n "$physical" ] && [ "$physical" = "$root" ] || return 0
-  [ -n "${OMS_DELEGATE_WORKTREE_ROOT:-}" ] || chmod 700 "$root" 2>/dev/null || return 0
-  printf '%s\n' "$root"
-}
-
 # Some transports have no enforceable file-write-blocking read flag. Read
 # passes for Antigravity and custom adapters therefore run from an isolated directory: a
 # detached HEAD worktree when the repo is git (same tree view, writes
@@ -793,11 +769,20 @@ ma_agy_read_dir() {
   local repo="${1:-}"
   local base
   local parent="${TMPDIR:-/tmp}"
-  local root
+  local root physical
 
   if [ -n "$repo" ]; then
-    root="$(ma_agy_read_root)"
-    [ -z "$root" ] || parent="$root"
+    root="$(oms_harness_delegate_worktree_root)"
+    case "$root" in
+      /*)
+        [ -d "$root" ] || (umask 077 && mkdir -p "$root") 2>/dev/null || true
+        physical="$(oms_harness_physical_dir "$root" 2>/dev/null || true)"
+        if [ -n "$physical" ] && [ "$physical" = "$root" ] &&
+          { [ -n "${OMS_DELEGATE_WORKTREE_ROOT:-}" ] || chmod 700 "$root" 2>/dev/null; }; then
+          parent="$root"
+        fi
+        ;;
+    esac
   fi
   # Prefix is oh-my-setting-* and the dir is marked so a worktree leaked by a
   # signal (Ctrl-C mid-call) is still reclaimable by cleanup.sh / doctor, the
@@ -880,21 +865,6 @@ EOF
 # runs it unthrottled with one stderr note. Waiting happens before the verify
 # clock starts. A kill leaves only its own entry, which any waiter removes once
 # the pid is dead.
-oms_verify_slot_count() {
-  local n="${OMS_VERIFY_SLOTS:-}" cpus=""
-  if [ -z "$n" ]; then
-    cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '%s' "${NUMBER_OF_PROCESSORS:-}")"
-    cpus="$(printf '%s' "$cpus" | tr -d '\r')"
-    case "$cpus" in ''|*[!0-9]*) cpus=4 ;; esac
-    n=$((cpus / 4))
-    [ "$n" -ge 2 ] || n=2
-  elif ! [[ "$n" =~ ^[1-9][0-9]{0,5}$ ]]; then
-    echo "error: OMS_VERIFY_SLOTS must be a positive integer (got '$n')" >&2
-    return 2
-  fi
-  printf '%s\n' "$n"
-}
-
 oms_verify_slot_start() {  # PID
   TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//' || true
 }
@@ -914,34 +884,26 @@ oms_verify_self_pid() {
   case "$OMS_VERIFY_SLOT_PID" in ''|*[!0-9]*) OMS_VERIFY_SLOT_PID=""; return 1 ;; esac
 }
 
-# True while the entry's owner pid is alive (and, when recorded, still has the
-# start time the entry was created with, so a recycled pid does not keep it).
-oms_verify_entry_alive() {  # ENTRY_DIR
-  local entry="$1" name pid start="" now=""
-  name="${entry##*/}"
-  pid="${name#*-}"
-  pid="${pid%%-*}"
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  pid=$((10#$pid))
-  kill -0 "$pid" 2>/dev/null || return 1
-  [ -f "$entry/start" ] || return 0
-  read -r start < "$entry/start" 2>/dev/null || true
-  [ -n "$start" ] || return 0
-  now="$(oms_verify_slot_start "$pid")"
-  [ -z "$now" ] || [ "$now" = "$start" ]
-}
-
 # Sets OMS_VERIFY_SLOT to this process's queue entry once admitted (callers
 # refresh OMS_VERIFY_SLOT_PID first: a forked subshell inherits its parent's
 # value). Inside a verify that already holds a slot (OMS_VERIFY_SLOT_HELD names
 # it) nothing is queued, so nested verifiers cannot wait on their own caller.
 oms_verify_slot_acquire() {
-  local n root entry mine="" name entries alive ahead noted=-60 e
+  local n="${OMS_VERIFY_SLOTS:-}" cpus="" root mine="" name entries alive ahead noted=-60 e pid start now
   local PATH="${PATH:-/usr/bin:/bin}"
   if [ -n "${OMS_VERIFY_SLOT_HELD:-}" ] && [ -d "$OMS_VERIFY_SLOT_HELD" ]; then
     return 0
   fi
-  n="$(oms_verify_slot_count)" || return $?
+  if [ -z "$n" ]; then
+    cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || printf '%s' "${NUMBER_OF_PROCESSORS:-}")"
+    cpus="$(printf '%s' "$cpus" | tr -d '\r')"
+    case "$cpus" in ''|*[!0-9]*) cpus=4 ;; esac
+    n=$((cpus / 4))
+    [ "$n" -ge 2 ] || n=2
+  elif ! [[ "$n" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    echo "error: OMS_VERIFY_SLOTS must be a positive integer (got '$n')" >&2
+    return 2
+  fi
   [ -n "${OMS_VERIFY_SLOT_PID:-}" ] || { echo "error: cannot determine own pid for verify slot" >&2; return 1; }
   # Per-user state (same base as tsp-queue), never shared temp. chmod only a
   # directory this call just created: mkdir fails on an existing symlink.
@@ -966,9 +928,18 @@ oms_verify_slot_acquire() {
     entries="$(cd "$root" && ls -1 2>/dev/null | LC_ALL=C sort)"
     for e in $entries; do
       case "$e" in [0-9]*-[0-9]*-*) ;; *) continue ;; esac
-      if [ "$e" != "$name" ] && ! oms_verify_entry_alive "$root/$e"; then
-        rm -rf "${root:?}/$e" 2>/dev/null || true
-        continue
+      if [ "$e" != "$name" ]; then
+        pid="${e#*-}"; pid="${pid%%-*}"
+        start=""; now=""
+        case "$pid" in ''|*[!0-9]*) pid="" ;; *) pid=$((10#$pid)) ;; esac
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || {
+          [ -f "$root/$e/start" ] && { read -r start < "$root/$e/start" 2>/dev/null || true; } &&
+          [ -n "$start" ] && now="$(oms_verify_slot_start "$pid")" &&
+          [ -n "$now" ] && [ "$now" != "$start" ];
+        }; then
+          rm -rf "${root:?}/$e" 2>/dev/null || true
+          continue
+        fi
       fi
       alive=$((alive + 1))
       [ "$e" = "$name" ] && break
@@ -1001,16 +972,6 @@ oms_verify_slot_hold() {
   read -r _ || true
 }
 
-# The caller's INT/TERM traps are kept in a file because Bash 3.2 reports no
-# traps from a command substitution.
-oms_verify_traps_save() {
-  local PATH="${PATH:-/usr/bin:/bin}"
-  OMS_VERIFY_TRAPS="$(mktemp "${TMPDIR:-/tmp}/oms-verify-traps.XXXXXX" 2>/dev/null || true)"
-  [ -z "$OMS_VERIFY_TRAPS" ] || trap -p INT TERM > "$OMS_VERIFY_TRAPS"
-  trap 'oms_verify_slot_signal INT' INT
-  trap 'oms_verify_slot_signal TERM' TERM
-}
-
 oms_verify_traps_restore() {
   local PATH="${PATH:-/usr/bin:/bin}"
   trap - INT TERM
@@ -1032,7 +993,10 @@ run_verify_with_timeout() {
   local rc=0
   OMS_VERIFY_CANCELLED=""
   oms_verify_self_pid || OMS_VERIFY_SLOT_PID=""
-  oms_verify_traps_save
+  OMS_VERIFY_TRAPS="$(PATH="${PATH:-/usr/bin:/bin}" mktemp "${TMPDIR:-/tmp}/oms-verify-traps.XXXXXX" 2>/dev/null || true)"
+  [ -z "$OMS_VERIFY_TRAPS" ] || trap -p INT TERM > "$OMS_VERIFY_TRAPS"
+  trap 'oms_verify_slot_signal INT' INT
+  trap 'oms_verify_slot_signal TERM' TERM
   if oms_verify_slot_acquire; then
     OMS_VERIFY_SLOT_HELD="${OMS_VERIFY_SLOT:-${OMS_VERIFY_SLOT_HELD:-}}" \
       ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@" || rc=$?
@@ -1093,11 +1057,6 @@ ma_validate_outbound_prompt() {
   esac
 }
 
-ma_write_task_context() {
-  local repo="$1"
-  agent_task_emit_context "$repo" "$(agent_task_project_file "$repo")" || true
-}
-
 # Single fenced block for all injected harness context, so providers can
 # tell reference data apart from operator instructions.
 ma_write_harness_context() {
@@ -1113,7 +1072,7 @@ ma_write_harness_context() {
   local include_task="$3"
   local include_ml="$4"
   local recall_query="${5:-}"
-  local tmp ids_file=""
+  local tmp ids_file="" scripts_dir
   local warnings
   MA_READ_ROOM_MAIL_IDS=""
 
@@ -1163,10 +1122,11 @@ ma_write_harness_context() {
       fi
     fi
     if [ "$include_task" -eq 1 ]; then
-      ma_write_task_context "$repo"
+      agent_task_emit_context "$repo" "$(agent_task_project_file "$repo")" || true
     fi
     if [ "$include_ml" -eq 1 ]; then
-      ma_write_ml_context "$repo"
+      scripts_dir="$(ma_scripts_dir)"
+      [ ! -x "$scripts_dir/agent-ml-context.sh" ] || "$scripts_dir/agent-ml-context.sh" --repo "$repo" || true
     fi
   } > "$tmp" || true
   if [ -s "$tmp" ]; then
@@ -1186,15 +1146,6 @@ ma_write_harness_context() {
   fi
 }
 
-ma_write_ml_context() {
-  local repo="$1"
-  local scripts_dir
-
-  scripts_dir="$(ma_scripts_dir)"
-  [ -x "$scripts_dir/agent-ml-context.sh" ] || return 0
-  "$scripts_dir/agent-ml-context.sh" --repo "$repo" || true
-}
-
 ma_artifact_relpath() {
   local repo="$1"
   local path="$2"
@@ -1203,14 +1154,6 @@ ma_artifact_relpath() {
     "$repo"/*) printf '%s\n' "${path#"$repo"/}" ;;
     *) return 1 ;;
   esac
-}
-
-ma_task_goal() {
-  local repo="$1"
-  local task_file
-  task_file="$(agent_task_project_file "$repo")" || return 0
-  [ -s "$task_file" ] || return 0
-  awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null || true
 }
 
 # Mark provider CLIs as harness children so their own prompt hooks cannot
@@ -1854,7 +1797,11 @@ ma_append_artifact_index() {
     prompt_hash="$(oms_sha256_file "$prompt_file" || true)"
     prompt_bytes="$(LC_ALL=C wc -c < "$prompt_file" | tr -d ' ')"
   fi
-  task_goal="$(ma_task_goal "$repo" | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200)"
+  local task_file
+  task_file="$(agent_task_project_file "$repo" 2>/dev/null || true)"
+  if [ -n "$task_file" ] && [ -s "$task_file" ]; then
+    task_goal="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF{print;exit}' "$task_file" 2>/dev/null | tr '\n' ' ' | sed 's/^ *//;s/ *$//' | cut -c1-200 || true)"
+  fi
   # Lineage: the commit the run was based on, and the optional plan/task id
   # (OMS_TASK_ID) that triggered it. Both let a row be traced back to its work.
   local base_sha=""
@@ -2498,17 +2445,6 @@ ma_write_thread_context() {
   printf -- '--- end conversation context ---\n\n'
 }
 
-# Naming a thread is enough to start one: any caller that passes --thread gets
-# the conversation created on first use instead of an error.
-ma_thread_ensure() {
-  local repo="$1" thread="$2"
-
-  [ -n "$thread" ] || return 1
-  [ -f "$repo/.oms/threads/$thread.jsonl" ] && return 0
-  bash "$(ma_scripts_dir)/thread.sh" --repo "$repo" --id "$thread" new \
-    >/dev/null 2>&1
-}
-
 # Append one turn. Sensitive content is refused by agent-thread itself, and a
 # refusal must not fail the call that already succeeded — the artifact still
 # holds the full text.
@@ -2522,7 +2458,8 @@ ma_thread_append() {
   fi
   [ -n "$thread" ] || return 0
   [ -s "$text_file" ] || return 0
-  ma_thread_ensure "$repo" "$thread" || return 0
+  [ -f "$repo/.oms/threads/$thread.jsonl" ] ||
+    bash "$(ma_scripts_dir)/thread.sh" --repo "$repo" --id "$thread" new >/dev/null 2>&1 || return 0
   # An answer turn's quality is derived when the caller did not supply one:
   # thread context replays unmarked turns as if verified, so an unqualified
   # answer would hide a non-answer from every later prompt.
@@ -3551,14 +3488,12 @@ ma_provider_attempt_run() {
       # to the shared plain-text shape after the run. Non-interactive writers
       # keep the stream so their tool-call activity and usage are available;
       # interactive conversations require one JSON result per turn.
-      if [ "$access" != write ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
+      if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
         # Keep earlier assistant evidence when the last result is only a
         # closing remark. Permissions/tools remain the same read-only policy.
-        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && ma_claude_supports_forward_subagent_text; then
+        if [ "$access" != write ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && ma_claude_supports_forward_subagent_text; then
           cmd+=(--forward-subagent-text)
         fi
-        cmd+=(--output-format stream-json --verbose -p)
-      elif [ "$access" = write ] && [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
         cmd+=(--output-format stream-json --verbose -p)
       else
         # The interactive controller validates and extracts a result object
@@ -3676,337 +3611,212 @@ ma_provider_attempt_run() {
         cmd+=(--print "$(cat "$prompt_file")")
       fi
       ;;
-    cursor)
-      binary="$(oms_provider_binary "$provider")"
-      cmd=("$binary" --print --output-format text --workspace "$workdir"
-        --sandbox enabled)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      if [ "$access" = write ]; then
-        cmd+=(--force)
-      else
-        cmd+=(--mode ask)
-      fi
-      ;;
-    grok)
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Grok headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      prompt_arg="$(cat "$prompt_file")"
-      cmd=("$binary" --no-auto-update --cwd "$workdir" --output-format plain)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--effort "$effort")
-      if [ "$access" = write ]; then
-        cmd+=(--always-approve --sandbox workspace
-          --deny 'Bash(git push*)')
-      else
-        cmd+=(--permission-mode dontAsk
-          --allow Read --allow Grep --allow 'Bash(git *)'
-          --deny Edit --deny WebFetch --deny WebSearch
-          --sandbox strict --no-memory --no-subagents --disable-web-search)
-      fi
-      cmd+=(-p "$prompt_arg")
-      ;;
-    gemini)
-      binary="$(oms_provider_binary "$provider")"
-      cmd=("$binary" --output-format text --sandbox)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      if [ "$access" = write ]; then
-        cmd+=(--approval-mode yolo)
-      else
-        cmd+=(--approval-mode plan)
-      fi
-      ;;
-    qwen)
-      binary="$(oms_provider_binary "$provider")"
-      cmd=("$binary" --output-format text --sandbox)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      if [ "$access" = write ]; then
-        cmd+=(--approval-mode yolo)
-      else
-        cmd+=(--safe-mode --approval-mode plan)
-      fi
-      ;;
-    opencode)
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the OpenCode run transport carries it as argv (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      prompt_arg="$(cat "$prompt_file")"
-      cmd=("$binary" run --format default)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      if [ "$access" = write ]; then
-        cmd+=(--agent build --auto)
-      else
-        cmd+=(--agent plan)
-      fi
-      cmd+=("$prompt_arg")
-      ;;
-    deepseek)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the DeepSeek Harness headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      prompt_arg="$(cat "$prompt_file")"
-      permission=read-only
-      [ "$access" != write ] || permission=workspace-write
-      cmd=(env "DSH_PERMISSION_MODE=$permission" DSH_TELEMETRY_DISABLED=1 "$binary"
-        --profile headless "$prompt_arg")
-      ;;
-    vibe)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Vibe programmatic transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      prompt_arg="$(cat "$prompt_file")"
-      # Programmatic mode cannot ask to trust a fresh OMS worktree. Grant
-      # trust only for this invocation so the already reviewed repository can
-      # run without persisting a host-level trusted-folder decision.
-      cmd=("$binary" --trust --max-turns 24 --output text)
-      if [ "$access" = write ]; then
-        cmd+=(--agent accept-edits
-          --enabled-tools read_file --enabled-tools grep
-          --enabled-tools write_file --enabled-tools edit)
-      else
-        cmd+=(--agent plan
-          --enabled-tools read_file --enabled-tools grep)
-      fi
-      cmd+=(--prompt "$prompt_arg")
-      ;;
-    pi)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Pi print transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      prompt_arg="$(cat "$prompt_file")"
-      cmd=(env PI_SKIP_VERSION_CHECK=1 "$binary" --no-session --no-approve
-        --no-extensions --no-skills --no-prompt-templates --mode json)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--thinking "$effort")
-      cmd+=(--tools)
-      if [ "$access" = write ]; then
-        # Pi has no sandbox: admission governs the returned patch; worker guards only check afterwards.
-        cmd+=("read,bash,edit,write,grep,find,ls")
-      else
-        cmd+=("read,grep,find,ls")
-      fi
-      cmd+=(--print "$prompt_arg")
-      ;;
-    copilot)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Copilot programmatic transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      prompt_arg="$(cat "$prompt_file")"
-      cmd=("$binary" -s --no-ask-user --disable-builtin-mcps
-        --disallow-temp-dir)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--effort "$effort")
-      cmd+=(--available-tools)
-      if [ "$access" = write ]; then
-        cmd+=("view,grep,glob,edit,create,apply_patch")
-        cmd+=(--allow-tool)
-        cmd+=("read,write")
-        cmd+=(--deny-tool shell --deny-tool url --deny-tool memory)
-      else
-        cmd+=("view,grep,glob")
-        cmd+=(--deny-tool write --deny-tool shell --deny-tool url
-          --deny-tool memory)
-      fi
-      cmd+=(-p "$prompt_arg")
-      ;;
-    droid)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      cmd=("$binary" exec --cwd "$workdir" --output-format text
-        --disable-builtin-skills)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
-      [ "$access" != write ] || cmd+=(--auto low)
-      cmd+=(-f "$prompt_file")
-      ;;
-    aider)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      provider_scratch="$(mktemp -d "${TMPDIR:-/tmp}/oms-aider.XXXXXX")" || {
-        echo 'error: could not allocate private Aider invocation state' > "$output_file"
-        return 2
-      }
-      chmod 0700 "$provider_scratch" || {
-        rm -rf "$provider_scratch"
-        provider_scratch=""
-        echo 'error: could not protect private Aider invocation state' > "$output_file"
-        return 2
-      }
-      : > "$provider_scratch/empty.env"
-      chmod 0600 "$provider_scratch/empty.env" || {
-        rm -rf "$provider_scratch"
-        provider_scratch=""
-        echo 'error: could not protect private Aider environment file' > "$output_file"
-        return 2
-      }
-      cmd=("$binary" --no-auto-commits --no-dirty-commits --no-gitignore
-        --no-suggest-shell-commands --no-auto-lint --no-auto-test
-        --no-check-update --no-detect-urls --no-pretty --no-stream
-        --no-analytics --no-restore-chat-history
-        --env-file "$provider_scratch/empty.env"
-        --input-history-file "$provider_scratch/input.history"
-        --chat-history-file "$provider_scratch/chat.history")
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
-      if [ "$access" = write ]; then
-        cmd+=(--chat-mode code --yes-always --no-dry-run)
-      else
-        cmd+=(--chat-mode ask --dry-run)
-      fi
-      cmd+=(--message-file "$prompt_file")
-      ;;
-    muse)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Muse headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary" exec)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
-      if [ "$access" = write ]; then
-        cmd+=(--disable-approval)
-      fi
-      cmd+=("$(cat "$prompt_file")")
-      ;;
-    kimi)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Kimi headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary")
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      # Kimi's documented -p mode auto-approves tools and rejects --plan, so
-      # provider access policy refuses read calls before this write transport.
-      cmd+=(-p "$(cat "$prompt_file")")
-      ;;
-    kiro)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Kiro headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary" chat --v3 --no-interactive)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--effort "$effort")
-      [ "$access" != write ] || cmd+=(--trust-all-tools)
-      cmd+=("$(cat "$prompt_file")")
-      ;;
-    continue)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Continue headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary" -p "$(cat "$prompt_file")")
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      if [ "$access" = write ]; then
-        cmd+=(--auto)
-      else
-        cmd+=(--readonly)
-      fi
-      ;;
-    goose)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Goose headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=(env GOOSE_MODE=auto "$binary" run --no-session)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      cmd+=(-t "$(cat "$prompt_file")")
-      ;;
-    cline)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Cline headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary")
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--thinking "$effort")
-      cmd+=(--auto-approve true "$(cat "$prompt_file")")
-      ;;
-    kilo)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Kilo headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary" run --auto)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--variant "$effort")
-      cmd+=("$(cat "$prompt_file")")
-      ;;
-    openhands)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the OpenHands headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=("$binary" --headless -t "$(cat "$prompt_file")")
-      ;;
-    auggie)
-      provider_stdin=/dev/null
-      binary="$(oms_provider_binary "$provider")"
-      prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
-      if [ "$prompt_bytes" -gt 120000 ]; then
-        echo "error: prompt is ${prompt_bytes}B; the Auggie headless transport carries it as one argv element (limit ~128KiB)" > "$output_file"
-        return 2
-      fi
-      cmd=(env AUGMENT_DISABLE_AUTO_UPDATE=1 "$binary" --print)
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      cmd+=(--permission edit:allow --permission write:allow --permission terminal:allow
-        "$(cat "$prompt_file")")
-      ;;
     *)
       binary="$(oms_provider_binary "$provider" 2>/dev/null)" || {
         echo "error: unsupported provider: $provider" > "$output_file"
         return 2
       }
-      cmd=("$binary" run --access "$access" --workdir "$workdir"
-        --prompt-file "$prompt_file")
-      [ "$model" = provider-default ] || cmd+=(--model "$model")
-      [ -z "$effort" ] || cmd+=(--effort "$effort")
+      case "$provider" in
+        deepseek|vibe|pi|copilot|droid|aider|muse|kimi|kiro|continue|goose|cline|kilo|openhands|auggie)
+          provider_stdin=/dev/null ;;
+      esac
+      case "$provider" in
+        grok|opencode|deepseek|vibe|pi|copilot|muse|kimi|kiro|continue|goose|cline|kilo|openhands|auggie)
+          prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
+          if [ "$prompt_bytes" -gt 120000 ]; then
+            echo "error: prompt is ${prompt_bytes}B; the $provider transport carries it as one argv element (limit ~128KiB)" > "$output_file"
+            return 2
+          fi
+          prompt_arg="$(cat "$prompt_file")"
+          ;;
+      esac
+      case "$provider" in
+        cursor)
+          cmd=("$binary" --print --output-format text --workspace "$workdir"
+            --sandbox enabled)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          if [ "$access" = write ]; then cmd+=(--force); else cmd+=(--mode ask); fi
+          ;;
+        grok)
+          cmd=("$binary" --no-auto-update --cwd "$workdir" --output-format plain)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--effort "$effort")
+          if [ "$access" = write ]; then
+            cmd+=(--always-approve --sandbox workspace --deny 'Bash(git push*)')
+          else
+            cmd+=(--permission-mode dontAsk
+              --allow Read --allow Grep --allow 'Bash(git *)'
+              --deny Edit --deny WebFetch --deny WebSearch
+              --sandbox strict --no-memory --no-subagents --disable-web-search)
+          fi
+          cmd+=(-p "$prompt_arg")
+          ;;
+        gemini)
+          cmd=("$binary" --output-format text --sandbox)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          if [ "$access" = write ]; then cmd+=(--approval-mode yolo); else cmd+=(--approval-mode plan); fi
+          ;;
+        qwen)
+          cmd=("$binary" --output-format text --sandbox)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          if [ "$access" = write ]; then cmd+=(--approval-mode yolo); else cmd+=(--safe-mode --approval-mode plan); fi
+          ;;
+        opencode)
+          cmd=("$binary" run --format default)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          if [ "$access" = write ]; then cmd+=(--agent build --auto); else cmd+=(--agent plan); fi
+          cmd+=("$prompt_arg")
+          ;;
+        deepseek)
+          permission=read-only
+          [ "$access" != write ] || permission=workspace-write
+          cmd=(env "DSH_PERMISSION_MODE=$permission" DSH_TELEMETRY_DISABLED=1 "$binary"
+            --profile headless "$prompt_arg")
+          ;;
+        vibe)
+          # Programmatic mode cannot ask to trust a fresh OMS worktree. Grant
+          # trust only for this invocation so the already reviewed repository can
+          # run without persisting a host-level trusted-folder decision.
+          cmd=("$binary" --trust --max-turns 24 --output text)
+          if [ "$access" = write ]; then
+            cmd+=(--agent accept-edits
+              --enabled-tools read_file --enabled-tools grep
+              --enabled-tools write_file --enabled-tools edit)
+          else
+            cmd+=(--agent plan --enabled-tools read_file --enabled-tools grep)
+          fi
+          cmd+=(--prompt "$prompt_arg")
+          ;;
+        pi)
+          cmd=(env PI_SKIP_VERSION_CHECK=1 "$binary" --no-session --no-approve
+            --no-extensions --no-skills --no-prompt-templates --mode json)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--thinking "$effort")
+          cmd+=(--tools)
+          if [ "$access" = write ]; then
+            # Pi has no sandbox: admission governs the returned patch; worker guards only check afterwards.
+            cmd+=("read,bash,edit,write,grep,find,ls")
+          else
+            cmd+=("read,grep,find,ls")
+          fi
+          cmd+=(--print "$prompt_arg")
+          ;;
+        copilot)
+          cmd=("$binary" -s --no-ask-user --disable-builtin-mcps
+            --disallow-temp-dir)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--effort "$effort")
+          cmd+=(--available-tools)
+          if [ "$access" = write ]; then
+            cmd+=("view,grep,glob,edit,create,apply_patch" --allow-tool "read,write"
+              --deny-tool shell --deny-tool url --deny-tool memory)
+          else
+            cmd+=("view,grep,glob" --deny-tool write --deny-tool shell
+              --deny-tool url --deny-tool memory)
+          fi
+          cmd+=(-p "$prompt_arg")
+          ;;
+        droid)
+          cmd=("$binary" exec --cwd "$workdir" --output-format text
+            --disable-builtin-skills)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
+          [ "$access" != write ] || cmd+=(--auto low)
+          cmd+=(-f "$prompt_file")
+          ;;
+        aider)
+          provider_scratch="$(mktemp -d "${TMPDIR:-/tmp}/oms-aider.XXXXXX")" || {
+            echo 'error: could not allocate private Aider invocation state' > "$output_file"
+            return 2
+          }
+          chmod 0700 "$provider_scratch" || {
+            rm -rf "$provider_scratch"
+            provider_scratch=""
+            echo 'error: could not protect private Aider invocation state' > "$output_file"
+            return 2
+          }
+          : > "$provider_scratch/empty.env"
+          chmod 0600 "$provider_scratch/empty.env" || {
+            rm -rf "$provider_scratch"
+            provider_scratch=""
+            echo 'error: could not protect private Aider environment file' > "$output_file"
+            return 2
+          }
+          cmd=("$binary" --no-auto-commits --no-dirty-commits --no-gitignore
+            --no-suggest-shell-commands --no-auto-lint --no-auto-test
+            --no-check-update --no-detect-urls --no-pretty --no-stream
+            --no-analytics --no-restore-chat-history
+            --env-file "$provider_scratch/empty.env"
+            --input-history-file "$provider_scratch/input.history"
+            --chat-history-file "$provider_scratch/chat.history")
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
+          if [ "$access" = write ]; then
+            cmd+=(--chat-mode code --yes-always --no-dry-run)
+          else
+            cmd+=(--chat-mode ask --dry-run)
+          fi
+          cmd+=(--message-file "$prompt_file")
+          ;;
+        muse)
+          cmd=("$binary" exec)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--reasoning-effort "$effort")
+          [ "$access" != write ] || cmd+=(--disable-approval)
+          cmd+=("$prompt_arg")
+          ;;
+        kimi)
+          cmd=("$binary")
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          # Kimi's documented -p mode auto-approves tools and rejects --plan, so
+          # provider access policy refuses read calls before this write transport.
+          cmd+=(-p "$prompt_arg")
+          ;;
+        kiro)
+          cmd=("$binary" chat --v3 --no-interactive)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--effort "$effort")
+          [ "$access" != write ] || cmd+=(--trust-all-tools)
+          cmd+=("$prompt_arg")
+          ;;
+        continue)
+          cmd=("$binary" -p "$prompt_arg")
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          if [ "$access" = write ]; then cmd+=(--auto); else cmd+=(--readonly); fi
+          ;;
+        goose)
+          cmd=(env GOOSE_MODE=auto "$binary" run --no-session)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          cmd+=(-t "$prompt_arg")
+          ;;
+        cline)
+          cmd=("$binary")
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--thinking "$effort")
+          cmd+=(--auto-approve true "$prompt_arg")
+          ;;
+        kilo)
+          cmd=("$binary" run --auto)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--variant "$effort")
+          cmd+=("$prompt_arg")
+          ;;
+        openhands)
+          cmd=("$binary" --headless -t "$prompt_arg")
+          ;;
+        auggie)
+          cmd=(env AUGMENT_DISABLE_AUTO_UPDATE=1 "$binary" --print)
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          cmd+=(--permission edit:allow --permission write:allow --permission terminal:allow
+            "$prompt_arg")
+          ;;
+        *)
+          cmd=("$binary" run --access "$access" --workdir "$workdir"
+            --prompt-file "$prompt_file")
+          [ "$model" = provider-default ] || cmd+=(--model "$model")
+          [ -z "$effort" ] || cmd+=(--effort "$effort")
+          ;;
+      esac
       ;;
   esac
 
@@ -4396,16 +4206,6 @@ PY
       echo "warning: attempt record not written for $(basename "$1")" >&2
     }
   cat "$7" >> "$1"
-}
-
-ma_record_panel_fallback_skip() {
-  local reason="$1" status="$2" state_repo="$3" artifact="$4"
-  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "$status" -ne 0 ] && [ -n "$reason" ] &&
-    [ -n "${OMS_ATTEMPT_ID:-}" ] && [ -n "$state_repo" ]; then
-    "$(ma_scripts_dir)/agent-events.sh" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" \
-      --actor provider-router --ref "panel_fallback_skip=$reason" >/dev/null ||
-      printf 'panel-provider-fallback: skip reason not recorded\n' >> "$artifact"
-  fi
 }
 
 ma_run_routed_provider_inner() {
@@ -5063,7 +4863,11 @@ PY
     elif [ -z "$panel_fallback_skip" ]; then
       panel_fallback_skip="provider-failure"
     fi
-    ma_record_panel_fallback_skip "$panel_fallback_skip" "$provider_status" "$state_repo" "$artifact"
+    if [ -n "$panel_fallback_skip" ] && [ -n "${OMS_ATTEMPT_ID:-}" ] && [ -n "$state_repo" ]; then
+      "$events" --repo "$state_repo" usage --attempt "$OMS_ATTEMPT_ID" \
+        --actor provider-router --ref "panel_fallback_skip=$panel_fallback_skip" >/dev/null ||
+        printf 'panel-provider-fallback: skip reason not recorded\n' >> "$artifact"
+    fi
   fi
   if [ -n "$read_guard_tmp" ]; then
     guard_stderr="$read_guard_tmp/post-check.stderr"
@@ -5248,25 +5052,15 @@ ma_target_label() {
 
 # Validate the call budget before canonicalizing targets and checking duplicates.
 ma_validate_provider_list() {
-  ma_target_budget_check "$PROVIDERS" || exit $?
-  PROVIDERS="$(ma_normalize_provider_list "$PROVIDERS" "${1:-}" "${2:-}")" || exit $?
-}
-
-# Refuse an expansion whose cost the caller probably did not intend.
-ma_target_budget_check() {
-  local targets="$1"
-  local count
-  local rounds="${DEBATE:-0}"
-  local total
-  local budget=12
-
-  count="$(printf '%s' "$targets" | tr ',' '\n' | grep -c .)"
+  local count rounds="${DEBATE:-0}" total
+  count="$(printf '%s' "$PROVIDERS" | tr ',' '\n' | grep -c . || true)"
   total=$((count * (rounds + 1)))
-  if [ "$total" -gt "$budget" ]; then
+  if [ "$total" -gt 12 ]; then
     echo "error: this council would make $total provider calls ($count targets x $((rounds + 1)) rounds)" >&2
     echo "error: narrow --providers" >&2
-    return 2
+    exit 2
   fi
+  PROVIDERS="$(ma_normalize_provider_list "$PROVIDERS" "${1:-}" "${2:-}")" || exit $?
 }
 
 # How many independent model families answered. Two answers from one family are
@@ -5274,16 +5068,8 @@ ma_target_budget_check() {
 # within-family replication as corroboration.
 # A seat that dropped during debate still contributed the answer being
 # synthesized (its last good round rides the synthesis by design).
-ma_seat_dropped_in_debate() {
-  local name="$1" d
-  for d in "${dropped_names[@]+${dropped_names[@]}}"; do
-    [ "$d" = "$name" ] && return 0
-  done
-  return 1
-}
-
 ma_answered_families() {
-  local i provider selected family families=""
+  local i d dropped_seat provider selected family families=""
 
   for i in "${!provider_names[@]}"; do
     [ -z "${seat_optional_failure[i]:-}" ] || continue
@@ -5292,7 +5078,14 @@ ma_answered_families() {
     # about a synthesis that held both families' answers. Round-1 failures
     # and non-answers contributed nothing and stay excluded.
     if [ "${alive[i]}" != 1 ]; then
-      ma_seat_dropped_in_debate "${provider_names[i]}" || continue
+      dropped_seat=0
+      for d in "${dropped_names[@]+${dropped_names[@]}}"; do
+        if [ "$d" = "${provider_names[i]}" ]; then
+          dropped_seat=1
+          break
+        fi
+      done
+      [ "$dropped_seat" = 1 ] || continue
     fi
     provider="$(ma_target_provider "${provider_names[i]}")"
     selected=""
@@ -5808,21 +5601,6 @@ ma_debate_output_contract() {
 # marker binds the directory to this run before anything is removed.
 MA_COUNCIL_MARKER=.oh-my-setting-council
 
-ma_council_context_owned() {  # DIR
-  local dir="$1" root parent marker
-  root="$(cd "$REPO" 2>/dev/null && pwd -P | tr -d '\r')" || return 1
-  [ -n "${MA_COUNCIL_CONTEXT_NONCE:-}" ] || return 1
-  [ ! -L "$REPO/.oms" ] && [ ! -L "$REPO/.oms/delegations" ] && [ ! -L "$dir" ] &&
-    [ -d "$dir" ] || return 1
-  parent="$(cd "$dir/.." 2>/dev/null && pwd -P | tr -d '\r')" || return 1
-  [ "$parent" = "$root/.oms/delegations" ] || return 1
-  marker="$dir/$MA_COUNCIL_MARKER"
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
-  [ "$(oms_harness_read_marker_value "$marker" kind | tr -d '\r')" = oms-council-context ] &&
-    [ "$(oms_harness_read_marker_value "$marker" pid | tr -d '\r')" = "$$" ] &&
-    [ "$(oms_harness_read_marker_value "$marker" nonce | tr -d '\r')" = "$MA_COUNCIL_CONTEXT_NONCE" ]
-}
-
 # Stage the bounded context into a seat's private isolated tree under the
 # prompt's path and the legacy artifacts path older seat tooling reads.
 ma_stage_council_context() {  # ROOT
@@ -5836,12 +5614,22 @@ ma_stage_council_context() {  # ROOT
 }
 
 ma_cleanup_council_context() {
-  case "${MA_COUNCIL_CONTEXT_DIR:-}" in
+  local dir="${MA_COUNCIL_CONTEXT_DIR:-}" root parent marker
+  case "$dir" in
     "$REPO"/.oms/delegations/council-context.*)
-      if ma_council_context_owned "$MA_COUNCIL_CONTEXT_DIR"; then
-        rm -rf "$MA_COUNCIL_CONTEXT_DIR"
+      if root="$(cd "$REPO" 2>/dev/null && pwd -P | tr -d '\r')" &&
+        [ -n "${MA_COUNCIL_CONTEXT_NONCE:-}" ] &&
+        [ ! -L "$REPO/.oms" ] && [ ! -L "$REPO/.oms/delegations" ] &&
+        [ ! -L "$dir" ] && [ -d "$dir" ] &&
+        parent="$(cd "$dir/.." 2>/dev/null && pwd -P | tr -d '\r')" &&
+        [ "$parent" = "$root/.oms/delegations" ] &&
+        marker="$dir/$MA_COUNCIL_MARKER" && [ -f "$marker" ] && [ ! -L "$marker" ] &&
+        [ "$(oms_harness_read_marker_value "$marker" kind | tr -d '\r')" = oms-council-context ] &&
+        [ "$(oms_harness_read_marker_value "$marker" pid | tr -d '\r')" = "$$" ] &&
+        [ "$(oms_harness_read_marker_value "$marker" nonce | tr -d '\r')" = "$MA_COUNCIL_CONTEXT_NONCE" ]; then
+        rm -rf "$dir"
       else
-        echo "warning: kept council context that this run does not own: $MA_COUNCIL_CONTEXT_DIR" >&2
+        echo "warning: kept council context that this run does not own: $dir" >&2
       fi
       ;;
   esac
@@ -6020,15 +5808,6 @@ ma_refresh_council_answers() {
   fi
 }
 
-ma_council_notes() {
-  [ -n "${council_notes_file:-}" ] || return 0
-  # Answers are already quoted per seat. Do not replay the whole transcript
-  # just to receive a correction. All seats see the same round-start snapshot.
-  bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" \
-    context --require-open --notes-only --max-bytes 2048 --turns 8 > "$council_notes_file.raw" || return 2
-  OMS_PROMPT_QUOTE_BYTES=2048 ma_sanitize_quoted_output < "$council_notes_file.raw" > "$council_notes_file"
-}
-
 # Rounds 2..DEBATE+1, each sharing an immutable evidence/notes snapshot.
 ma_run_debate_rounds() {
   local round i j k p p_label peer_label others debate_prompt artifact quality rc
@@ -6042,7 +5821,11 @@ ma_run_debate_rounds() {
   debate_stable_round=""
   for ((round = 2; round <= DEBATE + 1; round++)); do
     ma_refresh_council_answers || return 2
-    ma_council_notes || return 2
+    if [ -n "$council_notes_file" ]; then
+      bash "$(ma_scripts_dir)/thread.sh" --repo "$REPO" --id "$THREAD_ID" \
+        context --require-open --notes-only --max-bytes 2048 --turns 8 > "$council_notes_file.raw" || return 2
+      OMS_PROMPT_QUOTE_BYTES=2048 ma_sanitize_quoted_output < "$council_notes_file.raw" > "$council_notes_file"
+    fi
     active=()
     for i in "${!provider_names[@]}"; do
       [ "${alive[i]}" = 1 ] && active+=("$i")

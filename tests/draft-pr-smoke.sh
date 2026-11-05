@@ -550,12 +550,9 @@ PY
 
 test_remote_and_recovery_hardening() {
   local repo bare intent rc=0
+  fresh_repo() { repo="$TMP/$1"; bare="$TMP/$1.git"; make_repo "$repo" "$bare"; : > "$repo/git.log"; : > "$repo/gh.log"; }
 
-  # Multiple push URLs are rejected before either remote target is touched.
-  repo="$TMP/multiple-push"
-  bare="$TMP/multiple-push.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo multiple-push
   "$REAL_GIT" -C "$repo" config oms.test.extraPush true
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/multiple.out" 2>&1 || rc=$?
@@ -564,12 +561,7 @@ test_remote_and_recovery_hardening() {
     fail "multiple-push refusal still changed the approved remote"
   fi
 
-  # A failed status command is unknown repository state, never an empty/clean
-  # answer that can proceed to verification or intent persistence.
-  repo="$TMP/status-failure"
-  bare="$TMP/status-failure.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo status-failure
   "$REAL_GIT" -C "$repo" config oms.test.statusFail true
   rc=0
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
@@ -577,12 +569,7 @@ test_remote_and_recovery_hardening() {
   [ "$rc" = 3 ] || fail "failed git status should park, got $rc"
   [ ! -d "$repo/.oms/publish" ] || fail "failed git status produced a publication intent"
 
-  # Index visibility flags can make status appear clean while the verifier
-  # reads worktree bytes that differ from the frozen HEAD sent by push.
-  repo="$TMP/hidden-index-path"
-  bare="$TMP/hidden-index-path.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hidden-index-path
   "$REAL_GIT" -C "$repo" update-index --assume-unchanged file.txt
   printf 'working-only fix\n' > "$repo/file.txt"
   [ -z "$("$REAL_GIT" -C "$repo" status --porcelain --untracked-files=all)" ] ||
@@ -597,12 +584,7 @@ test_remote_and_recovery_hardening() {
     fail "verifier-approved hidden worktree bytes reached publication"
   fi
 
-  # The exact object history is outbound payload. Refuse a credential in the
-  # final tree before persisting an intent or creating a remote branch.
-  repo="$TMP/sensitive-final-tree"
-  bare="$TMP/sensitive-final-tree.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo sensitive-final-tree
   printf '\377\376\n' > "$repo/leak.txt"
   printf '%s%s\n' 'ghp_' '12345678901234567890' >> "$repo/leak.txt"
   "$REAL_GIT" -C "$repo" add leak.txt
@@ -620,12 +602,7 @@ test_remote_and_recovery_hardening() {
     fail "sensitive final tree reached the remote"
   fi
 
-  # A new path can reuse a blob already reachable from the base, so object-name
-  # output alone is incomplete. Scan changed path history independently.
-  repo="$TMP/sensitive-reused-path"
-  bare="$TMP/sensitive-reused-path.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo sensitive-reused-path
   local reused_name
   reused_name="$(printf '%s%s' 'ghp_' '12345678901234567890')"
   "$REAL_GIT" -C "$repo" show main:file.txt > "$repo/$reused_name"
@@ -644,12 +621,7 @@ test_remote_and_recovery_hardening() {
     fail "sensitive reused path reached the remote"
   fi
 
-  # A secret removed from the final tree remains in the objects a push sends.
-  # Scan every introduced object, not just the visible diff or final snapshot.
-  repo="$TMP/sensitive-history"
-  bare="$TMP/sensitive-history.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo sensitive-history
   printf '%s%s\n' '/hom' 'e/fixture/private-note' > "$repo/transient.txt"
   "$REAL_GIT" -C "$repo" add transient.txt
   "$REAL_GIT" -C "$repo" commit -qm 'test: add transient outbound fixture'
@@ -665,12 +637,7 @@ test_remote_and_recovery_hardening() {
     fail "sensitive historical object reached the remote"
   fi
 
-  # Replacement refs must not make local inspection see a clean substitute
-  # while the frozen original OID sends a sensitive commit object.
-  repo="$TMP/sensitive-replace-ref"
-  bare="$TMP/sensitive-replace-ref.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo sensitive-replace-ref
   local original_commit clean_commit commit_tree commit_parent sensitive_subject
   sensitive_subject="$(printf '%s%s' 'ghp_' '12345678901234567890')"
   "$REAL_GIT" -C "$repo" commit -q --allow-empty -m "$sensitive_subject"
@@ -690,10 +657,7 @@ test_remote_and_recovery_hardening() {
     fail "sensitive original behind replace ref reached the remote"
   fi
 
-  # A filter failure in a raw object must not collapse into grep's no-match.
-  repo="$TMP/filter-scan-error"
-  bare="$TMP/filter-scan-error.git"
-  make_repo "$repo" "$bare"
+  fresh_repo filter-scan-error
   printf 'FILTER_FAILURE_PAYLOAD\nordinary data\n' > "$repo/filter.txt"
   "$REAL_GIT" -C "$repo" add filter.txt
   "$REAL_GIT" -C "$repo" commit -qm 'test: filter error fixture'
@@ -721,12 +685,7 @@ EOF
     fail "filter failure reached the remote"
   fi
 
-  # Scanner infrastructure is a tri-state gate. A matcher error is unknown,
-  # never equivalent to the matcher's ordinary no-match status.
-  repo="$TMP/sensitive-scan-error"
-  bare="$TMP/sensitive-scan-error.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo sensitive-scan-error
   printf '%s%s\n' 'ghp_' '12345678901234567890' > "$repo/scanner-error.txt"
   "$REAL_GIT" -C "$repo" add scanner-error.txt
   "$REAL_GIT" -C "$repo" commit -qm 'test: scanner error fixture'
@@ -754,16 +713,8 @@ EOF
     fail "scanner error reached the remote"
   fi
 
-  # Object enumeration, individual expansion, aggregate bytes, and elapsed
-  # time are all explicit limits rather than attacker-controlled work.
-  repo="$TMP/payload-resource-bounds"
-  bare="$TMP/payload-resource-bounds.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo payload-resource-bounds
   local topology_started topology_finished topology_elapsed
-  # Each probe injects a 30s TERM-ignoring delay behind a 1s timeout. Finishing
-  # under that delay proves the kill; a tighter wall only measures host load
-  # (a parallel gate alone pushes process start-up past 4s).
   "$REAL_GIT" -C "$repo" config oms.test.mergeBaseDelay true
   topology_started="$(date +%s)"
   rc=0
@@ -845,13 +796,7 @@ EOF
   grep -Fq 'reason=publish-payload-total-too-large' "$repo/total-bytes.out" ||
     fail "total byte cap refusal was not identified"
 
-  # Tree objects carry outbound path bytes too. They count toward both the
-  # individual and aggregate object limits rather than bypassing blob-only
-  # accounting.
-  repo="$TMP/tree-resource-bounds"
-  bare="$TMP/tree-resource-bounds.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo tree-resource-bounds
   mkdir -p "$repo/tree-heavy"
   local tree_i=0
   while [ "$tree_i" -lt 120 ]; do
@@ -910,11 +855,6 @@ EOF
     fail "payload timeout fixture never reached the TERM-ignoring scanner"
   [ ! -f "$repo/.git/scan-delay-completed" ] ||
     fail "TERM-ignoring payload scanner was allowed to finish"
-  # The 3s scan wall plus 1s forced-kill grace is wrapped by bounded Git
-  # setup/cleanup, and integer-second wall-clock samples can add nearly two
-  # boundary seconds. The bound only has to stay below the fixture's 30s
-  # completion, which is what waiting for the scanner would take; a full gate
-  # at load 20-46 measured 10s here.
   [ "$scan_elapsed" -le 20 ] ||
     fail "TERM-ignoring payload scan exceeded hard wall: ${scan_elapsed}s"
   [ -z "$(find "$scan_tmp" -type f -print -quit)" ] ||
@@ -924,13 +864,7 @@ EOF
     fail "resource-limit failures reached the remote"
   fi
 
-  # Grafts can hide a real parent from traversal even with replacement refs
-  # disabled. Refuse deprecated graft metadata instead of inspecting one graph
-  # and publishing another.
-  repo="$TMP/sensitive-graft"
-  bare="$TMP/sensitive-graft.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo sensitive-graft
   local graft_safe_parent graft_secret_commit graft_head graft_file graft_subject
   graft_safe_parent="$("$REAL_GIT" -C "$repo" rev-parse HEAD)"
   graft_subject="$(printf '%s%s' 'ghp_' '12345678901234567890')"
@@ -958,12 +892,7 @@ EOF
     fail "grafted history reached the remote"
   fi
 
-  # An existing selective .oms/.gitignore is not proof that executable intent
-  # state is excluded. Refuse before creating the intent file.
-  repo="$TMP/unignored-intent"
-  bare="$TMP/unignored-intent.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo unignored-intent
   sed -i.bak '\|^/.oms/$|d' "$repo/.gitignore"
   rm -f "$repo/.gitignore.bak"
   mkdir -p "$repo/.oms"
@@ -979,13 +908,7 @@ EOF
     fail "unignored publication intent was persisted"
   fi
 
-  # Re-running prepare for the same deterministic HEAD must not execute a
-  # verifier against an existing intent. The existing bytes remain publishable
-  # only through the dedicated replay path.
-  repo="$TMP/repeated prepare"
-  bare="$TMP/repeated prepare.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo "repeated prepare"
   cat > "$repo/.git/hooks/tamper-on-prepare-replay" <<'EOF'
 #!/usr/bin/env bash
 if [ -f .git/tamper-on-prepare-replay-now ]; then
@@ -1084,40 +1007,27 @@ PY
   run_draft_pr "$repo" publish --intent "$intent" > "$repo/repeat-publish.out" ||
     fail "untouched existing intent did not remain publishable"
 
-  # A verifier cannot add a second push destination in ignored Git config.
-  repo="$TMP/verifier-remote"
-  bare="$TMP/verifier-remote.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo verifier-remote
   rc=0
   run_draft_pr "$repo" prepare --remote origin --base main \
-    --verify "$REAL_GIT -C '$repo' config oms.test.extraPush true" \
+    --verify "$REAL_GIT config oms.test.extraPush true" \
     > "$repo/verifier-remote.out" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "verifier remote mutation should fail closed, got $rc"
   [ ! -d "$repo/.oms/publish" ] ||
     fail "remote mutation still produced a publication intent"
 
-  # PROJECT.md is commonly clone-local/ignored. A verifier cannot replace the
-  # caller-frozen contract while leaving Git HEAD and tree clean.
-  repo="$TMP/spec-mutation"
-  bare="$TMP/spec-mutation.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo spec-mutation
   rc=0
   run_draft_pr "$repo" prepare --remote origin --base main \
     --expected-head "$($REAL_GIT -C "$repo" rev-parse HEAD)" \
     --expected-tree "$($REAL_GIT -C "$repo" rev-parse 'HEAD^{tree}')" \
     --expected-spec-sha256 "$(sha256_file "$repo/PROJECT.md")" \
-    --verify "printf changed > '$repo/PROJECT.md'" \
+    --verify "printf changed > PROJECT.md" \
     > "$repo/spec-mutation.out" 2>&1 || rc=$?
   [ "$rc" = 3 ] || fail "ignored PROJECT.md mutation should park, got $rc"
   [ ! -d "$repo/.oms/publish" ] || fail "spec mutation still produced an intent"
 
-  # gh identity is part of the durable intent, not merely write permission.
-  repo="$TMP/viewer-change"
-  bare="$TMP/viewer-change.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo viewer-change
   OMS_T_GH_VIEWER=alice run_draft_pr "$repo" prepare --remote origin --base main \
     --verify true > "$repo/viewer-prepare.out" || fail "viewer fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/viewer-prepare.out" | tail -n 1)"
@@ -1129,14 +1039,7 @@ PY
     fail "viewer mismatch still created the source branch"
   fi
 
-  # The repository is worker-writable, while publication uses the parent's
-  # GitHub authority. Transport-affecting local config must be rejected before
-  # any remote operation: core.sshCommand and credential helpers are executable
-  # command surfaces even when hooks and signing are disabled at push time.
-  repo="$TMP/hostile-transport-config"
-  bare="$TMP/hostile-transport-config.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hostile-transport-config
   cat > "$repo/.git/hostile-ssh" <<'EOF'
 #!/usr/bin/env bash
 : > .git/hostile-transport-fired
@@ -1156,13 +1059,7 @@ EOF
   [ ! -e "$repo/.git/hostile-credential-fired" ] ||
     fail "repository credential helper executed with publisher authority"
 
-  # With extensions.worktreeConfig enabled, transport commands can also live
-  # in config.worktree. It is just as worker-writable and must not bypass the
-  # repository-local transport scan.
-  repo="$TMP/hostile-worktree-transport-config"
-  bare="$TMP/hostile-worktree-transport-config.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hostile-worktree-transport-config
   "$REAL_GIT" -C "$repo" config --local extensions.worktreeConfig true
   "$REAL_GIT" -C "$repo" config --worktree core.sshCommand .git/hostile-worktree-ssh
   rc=0
@@ -1172,10 +1069,7 @@ EOF
   grep -Fq 'unsafe local Git transport config' "$repo/hostile-worktree-transport.out" ||
     fail "hostile worktree transport refusal was not explained"
 
-  repo="$TMP/hostile-fsmonitor-config"
-  bare="$TMP/hostile-fsmonitor-config.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hostile-fsmonitor-config
   cat > "$repo/.git/hostile-fsmonitor" <<EOF
 #!/usr/bin/env bash
 : > "$repo/.git/hostile-fsmonitor-fired"
@@ -1190,10 +1084,7 @@ EOF
   [ ! -e "$repo/.git/hostile-fsmonitor-fired" ] ||
     fail "repository fsmonitor executed with publisher authority"
 
-  repo="$TMP/hostile-command-config"
-  bare="$TMP/hostile-command-config.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hostile-command-config
   rc=0
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.sshCommand \
     GIT_CONFIG_VALUE_0="$repo/.git/hostile-command" \
@@ -1203,10 +1094,6 @@ EOF
   grep -Fq 'unsafe command-scope Git config' "$repo/hostile-command.out" ||
     fail "command-scope Git config refusal was not explained"
 
-  # The command-scope inspection is pure shell now (it fronts every git call
-  # the harness makes). Each rule keeps the verdict and the message the python
-  # implementation gave: canonical count, complete pairs, only an exact
-  # hooksPath=/dev/null pair, and inherited GIT_CONFIG_PARAMETERS last.
   cs_case() {  # EXPECTED ENV...
     local expected="$1" got=""
     shift
@@ -1237,8 +1124,6 @@ EOF
   cs_case 'unsafe command-scope Git config: GIT_CONFIG_PARAMETERS|rc=2|' GIT_CONFIG_PARAMETERS=x
   cs_case 'unsafe command-scope Git config: GIT_CONFIG_PARAMETERS|rc=2|' \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_PARAMETERS=y
-  # A pass is reused within one process only for byte-identical config: an
-  # unsafe edit after a pass is caught, and a restored config passes again.
   got="$(cd "$repo" && bash -c '. "$1/scripts/lib/oms-common.sh" >/dev/null 2>&1
     oms_git_assert_safe_execution_config "$2" >/dev/null 2>&1; echo "first=$?"
     cp "$2/.git/config" "$2/.git/config.safe"
@@ -1249,13 +1134,7 @@ EOF
   [ "$got" = "first=0 edited=2 restored=0 " ] ||
     fail "a cached Git config pass must not survive a config edit: $got"
 
-  # UI/task cancellation targets the publisher PID. It must synchronously
-  # terminate the whole push group, including a descendant that ignores TERM,
-  # before returning 143; no delayed remote effect may survive cancellation.
-  repo="$TMP/push-cancel"
-  bare="$TMP/push-cancel.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo push-cancel
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/cancel-prepare.out" || fail "push-cancel fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/cancel-prepare.out" | tail -n 1)"
@@ -1272,7 +1151,6 @@ EOF
     exec "$ROOT/scripts/draft-pr.sh" --repo "$repo" publish --intent "$intent"
   ) > "$repo/cancel-publish.out" 2>&1 &
   local cancel_pid=$! cancel_seen=0 cancel_try=0
-  # Breaks as soon as the push starts; the cap only has to outlast a loaded host.
   while [ "$cancel_try" -lt 600 ]; do
     if [ -e "$repo/.git/push-delay-started" ]; then
       cancel_seen=1
@@ -1286,9 +1164,6 @@ EOF
   rc=0
   wait "$cancel_pid" || rc=$?
   [ "$rc" = 143 ] || fail "targeted publisher TERM should exit 143, got $rc"
-  # The fixture's delayed push lands at OMS_T_PUSH_DELAY=3s; a 1s window
-  # closed before the escaped write could ever land, making this assert
-  # vacuous on every machine. Outwait the deadline with margin.
   sleep 4
   [ ! -e "$repo/.git/push-delay-completed" ] ||
     fail "cancelled push descendant survived and completed"
@@ -1296,12 +1171,7 @@ EOF
     fail "cancelled publisher still created the source branch"
   fi
 
-  # A worker-planted local pre-push hook must never execute with the
-  # publisher's authority, so the create-only push suppresses hooks and signing.
-  repo="$TMP/hook-suppress"
-  bare="$TMP/hook-suppress.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hook-suppress
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/hook-prepare.out" || fail "hook-suppress fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/hook-prepare.out" | tail -n 1)"
@@ -1321,12 +1191,7 @@ EOF
   "$REAL_GIT" --git-dir "$bare" show-ref --verify --quiet refs/heads/codex/draft-fixture ||
     fail "hook-suppressed publication did not create the source branch"
 
-  # A remote-side rejection is visible and is not mislabeled as a remote
-  # race; no remote ref is left behind.
-  repo="$TMP/hook-reject"
-  bare="$TMP/hook-reject.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo hook-reject
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/hook-prepare.out" || fail "hook fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/hook-prepare.out" | tail -n 1)"
@@ -1356,12 +1221,7 @@ EOF
   grep -Fq 'reason=published-branch-missing' "$repo/hook-replay.out" ||
     fail "spent intent replay did not explain the terminal branch state"
 
-  # A concurrently created PR with the right refs but different reviewed
-  # content is not adopted as the exact publication.
-  repo="$TMP/pr-content"
-  bare="$TMP/pr-content.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo pr-content
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/content-prepare.out" || fail "content fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/content-prepare.out" | tail -n 1)"
@@ -1376,14 +1236,7 @@ EOF
       --repo "$repo" --path "$intent" --name phase)" = pushed ] ||
     fail "content conflict did not preserve the recoverable pushed phase"
 
-  # The push source is the frozen object id, not mutable HEAD. If a concurrent
-  # clean commit advances the local branch immediately before push, only the
-  # reviewed commit may reach the remote. The pre-effect `pushing` phase then
-  # prevents replay from resurrecting that branch after explicit deletion.
-  repo="$TMP/frozen-push"
-  bare="$TMP/frozen-push.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo frozen-push
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/frozen-prepare.out" || fail "frozen-push prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/frozen-prepare.out" | tail -n 1)"
@@ -1409,13 +1262,7 @@ EOF
     fail "uncertain intent recreated a deliberately deleted branch"
   fi
 
-  # The publish-time verifier is same-UID code. If it rewrites valid immutable
-  # intent fields, their frozen digest must stop before the branch push; later
-  # body extraction also carries the same digest CAS.
-  repo="$TMP/verifier-intent-tamper"
-  bare="$TMP/verifier-intent-tamper.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo verifier-intent-tamper
   cat > "$repo/.git/hooks/tamper-publish-intent" <<'EOF'
 #!/usr/bin/env bash
 python3 - <<'PY'
@@ -1457,12 +1304,7 @@ EOF
   [ "$tamper_gh_calls" = "$(wc -l < "$repo/gh.log" | tr -d ' ')" ] ||
     fail "terminally blocked tamper replay called GitHub"
 
-  # Replacing the intent with an out-of-root symlink must still poison the
-  # original lexical slot. Restoring the reviewed bytes cannot revive it.
-  repo="$TMP/verifier-intent-symlink"
-  bare="$TMP/verifier-intent-symlink.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo verifier-intent-symlink
   cat > "$repo/.git/hooks/symlink-publish-intent" <<'EOF'
 #!/usr/bin/env bash
 if [ -f .git/symlink-publish-now ]; then
@@ -1506,13 +1348,7 @@ EOF
   [ "$symlink_gh_calls" = "$(wc -l < "$repo/gh.log" | tr -d ' ')" ] ||
     fail "terminally blocked symlink replay called GitHub"
 
-  # The parent publication directory can be renamed while preserving a live
-  # symlink view. A pre-verifier directory handle must carry terminal poison
-  # into the original directory that a later operator could restore.
-  repo="$TMP/verifier-publish-dir-symlink"
-  bare="$TMP/verifier-publish-dir-symlink.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo verifier-publish-dir-symlink
   cat > "$repo/.git/hooks/symlink-publish-directory" <<'EOF'
 #!/usr/bin/env bash
 if [ -f .git/symlink-publish-directory-now ]; then
@@ -1553,12 +1389,7 @@ EOF
   [ "$dir_symlink_gh_calls" = "$(wc -l < "$repo/gh.log" | tr -d ' ')" ] ||
     fail "restored publication directory replay called GitHub"
 
-  # A verifier that mutates durable bytes and then exits nonzero is still
-  # checked and poisoned before its ordinary verification failure is handled.
-  repo="$TMP/verifier-tamper-fail"
-  bare="$TMP/verifier-tamper-fail.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo verifier-tamper-fail
   cat > "$repo/.git/hooks/tamper-intent-and-fail" <<'EOF'
 #!/usr/bin/env bash
 if [ -f .git/tamper-intent-and-fail-now ]; then
@@ -1601,13 +1432,7 @@ EOF
   [ "$tamper_fail_gh_calls" = "$(wc -l < "$repo/gh.log" | tr -d ' ')" ] ||
     fail "failed-verifier tamper replay called GitHub"
 
-  # Mutable recovery state is also frozen across verifier execution. Rewinding
-  # a complete intent to prepared cannot make a later branch deletion
-  # recreatable, even though the publication payload itself is unchanged.
-  repo="$TMP/verifier-phase-rewind"
-  bare="$TMP/verifier-phase-rewind.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo verifier-phase-rewind
   cat > "$repo/.git/hooks/rewind-publish-phase" <<'EOF'
 #!/usr/bin/env bash
 if [ -f .git/rewind-publish-now ]; then
@@ -1655,12 +1480,7 @@ EOF
     fail "rewound complete intent recreated a deleted branch"
   fi
 
-  # Canonical intent validation is complete before any effect. A non-string
-  # body cannot satisfy validation by hashing its Python string rendering.
-  repo="$TMP/malformed-intent"
-  bare="$TMP/malformed-intent.git"
-  make_repo "$repo" "$bare"
-  : > "$repo/git.log"; : > "$repo/gh.log"
+  fresh_repo malformed-intent
   run_draft_pr "$repo" prepare --remote origin --base main --verify true \
     > "$repo/malformed-prepare.out" || fail "malformed fixture prepare failed"
   intent="$(sed -n 's/^intent: //p' "$repo/malformed-prepare.out" | tail -n 1)"

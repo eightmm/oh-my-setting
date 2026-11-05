@@ -15,7 +15,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -25,14 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from oms_graph import capabilities, events, runner, commit as exec_commit
+from oms_graph import events, runner, commit as exec_commit
 from oms_graph.adapters import plan as plan_adapter
 from oms_graph.errors import GraphError
-from oms_graph.spec import load_spec
-from test_oms_graph_adapter import FAKE_CODEX, agent_node
+from test_oms_graph_adapter import FAKE_CODEX, HAVE_GIT, agent_node
 from test_oms_graph_integration import GraphRepoFixture, _spec
-
-HAVE_GIT = shutil.which("git") is not None
 
 # `oms agent-plan accept` / `oms graph exec commit` inside a tool node must reach
 # the source checkout under test, never an installed copy.
@@ -94,35 +90,9 @@ class RuntimeFixture(GraphRepoFixture):
 
     TASKS = (("t1", "delegated.txt"), ("t2", "delegated2.txt"))
     ACCEPT = "bash scripts/check.sh all"
+    CHECK = ACCEPT_ALL
     CODEX = FAKE_CODEX
-
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="oms-graph-runtime."))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        self.repo = self.tmp / "repo"
-        self.bin = self.tmp / "bin"
-        self.home = self.tmp / "home"
-        for path in (self.repo, self.bin, self.home):
-            path.mkdir(parents=True)
-        (self.repo / "scripts").mkdir()
-        self._write(self.repo / "scripts" / "check.sh", ACCEPT_ALL)
-        (self.repo / "README.md").write_text("base\n", encoding="utf-8")
-        self._write(self.bin / "codex", self.CODEX)
-        self._write(self.bin / "oms", OMS_SHIM % {"root": ROOT})
-
-        self._saved_env = dict(os.environ)
-        self.addCleanup(self._restore_env)
-
-        self.git("init", "-q")
-        self.git("config", "user.email", "test@example.com")
-        self.git("config", "user.name", "Test")
-        self.git("add", "README.md", "scripts/check.sh")
-        self.git("commit", "-qm", "base")
-
-        self.plan("init", "--goal", "g", "--accept", self.ACCEPT)
-        for task_id, allowed in self.TASKS:
-            self.plan("add", "--id", task_id, "--title", "task %s" % task_id, "--allowed", allowed,
-                      "--verify", "bash scripts/check.sh %s" % task_id)
+    OMS_SHIM_BODY = OMS_SHIM % {"root": ROOT}
 
     def plan_json(self, *args: str):
         argv = ["bash", str(ROOT / "scripts" / "agent-plan.sh"), "--repo", str(self.repo)] + list(args)
@@ -677,19 +647,6 @@ class CapabilityToolTest(RuntimeFixture, unittest.TestCase):
         # A second run replays the cached orientation pack.
         again = self.run_graph(spec, goal="check script")
         self.assertTrue({row["node"]: row for row in self.outcomes(again["run_id"])}["inspect"]["cached"])
-
-
-class BundledSpecShapeTest(unittest.TestCase):
-    def test_bundled_specs_bind_selection_and_commit_exactly(self) -> None:
-        for name in ("goal-drive", "coding-change"):
-            spec = load_spec(name)
-            self.assertEqual(spec["nodes"]["implement"]["bind_task"], "work_item")
-            self.assertEqual(spec["nodes"]["land"]["plan_task_from"], "work_item")
-            self.assertEqual((spec["nodes"]["commit"]["tool"], spec["nodes"]["commit"]["binding"]), ("commit_bound", "work_item"))
-            self.assertEqual(spec["nodes"]["commit"]["effect"], "write")
-            self.assertEqual(spec["nodes"]["acceptance"]["tool"], "plan_acceptance")
-        self.assertEqual(capabilities.render_goal("${goal}", "fix parser", "fallback"), "fix parser")
-        self.assertEqual(capabilities.render_goal("", "", "fallback"), "fallback")
 
 
 if __name__ == "__main__":

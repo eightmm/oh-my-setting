@@ -741,11 +741,8 @@ expired="$($APPROVALS --repo "$REPO" request --action remote-write \
   --object-id remote-one --summary 'Remote mutation' --expires-in 1)"
 approval_store="$($APPROVALS --repo "$REPO" path)"
 python3 - "$approval_store" "$expired" <<'PY'
-import json, os, sys, time
+import json, sys
 path, target = sys.argv[1:]
-rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-row = next(item for item in rows if item.get("approval_id") == target)
-row["expires_at"] = "2000-01-01T00:00:00Z"
 with open(path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps({
         "schema": 1, "event_id": "apevt_test_expire", "ts": "2000-01-01T00:00:01Z",
@@ -767,15 +764,15 @@ approved_expired_grant="$($APPROVALS --repo "$REPO" decide \
   --approval "$approved_expired" --decision approve --expected-version 1 --actor human)"
 requested_expired="$($APPROVALS --repo "$REPO" request --action remote-write \
   --object-id remote-requested-expired --summary 'Requested but expired' --expires-in 120)"
-python3 - "$approval_store" "$approved_expired" "$requested_expired" <<'PY'
+rewrite_approval_rows() {
+  python3 - "$approval_store" "$@" <<'PY'
 import json, os, sys
 
-path, approved, requested = sys.argv[1:]
+path, event_type, field, targets = sys.argv[1], sys.argv[2], sys.argv[3], set(sys.argv[4:])
 rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
 for row in rows:
-    if (row.get("approval_id") in {approved, requested} and
-            row.get("event_type") == "approval.requested"):
-        row["expires_at"] = "2000-01-01T00:00:00Z"
+    if row.get("approval_id") in targets and row.get("event_type") == event_type:
+        row[field] = "2000-01-01T00:00:00Z"
 tmp = path + ".test-rewrite"
 with open(tmp, "w", encoding="utf-8") as handle:
     for row in rows:
@@ -783,6 +780,8 @@ with open(tmp, "w", encoding="utf-8") as handle:
 os.chmod(tmp, 0o600)
 os.replace(tmp, path)
 PY
+}
+rewrite_approval_rows approval.requested expires_at "$approved_expired" "$requested_expired"
 # Durable history still says approved until expire --apply appends an event,
 # but every read path must agree that the unreserved grant is already
 # effectively expired and therefore not pending or consumable.
@@ -868,21 +867,7 @@ stale_grant="$($APPROVALS --repo "$REPO" decide --approval "$stale_consuming" \
   --decision approve --expected-version 1 --actor human)"
 $APPROVALS --repo "$REPO" begin-consume --approval "$stale_consuming" \
   --token "$stale_grant" --expected-version 2 --consumer remote-writer >/dev/null
-python3 - "$approval_store" "$stale_consuming" <<'PY'
-import json, os, sys
-
-path, target = sys.argv[1:]
-rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-for row in rows:
-    if row.get("approval_id") == target and row.get("event_type") == "approval.consuming":
-        row["ts"] = "2000-01-01T00:00:00Z"
-tmp = path + ".test-rewrite"
-with open(tmp, "w", encoding="utf-8") as handle:
-    for row in rows:
-        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-PY
+rewrite_approval_rows approval.consuming ts "$stale_consuming"
 $APPROVALS --repo "$REPO" reconcile --older-than-seconds 60 --json > "$TMP/reconcile-dry.json" ||
   fail "approval reconcile dry-run failed"
 $APPROVALS --repo "$REPO" show --approval "$stale_consuming" --json > "$TMP/stale-before-apply.json"
@@ -944,21 +929,7 @@ landing_grant="$($APPROVALS --repo "$REPO" decide --approval "$landing_consuming
   --decision approve --expected-version 1 --actor human)"
 $APPROVALS --repo "$REPO" begin-consume --approval "$landing_consuming" \
   --token "$landing_grant" --expected-version 2 --consumer patch-land >/dev/null
-python3 - "$approval_store" "$landing_consuming" <<'PY'
-import json, os, sys
-
-path, target = sys.argv[1:]
-rows = [json.loads(line) for line in open(path, encoding="utf-8") if line.strip()]
-for row in rows:
-    if row.get("approval_id") == target and row.get("event_type") == "approval.consuming":
-        row["ts"] = "2000-01-01T00:00:00Z"
-tmp = path + ".test-rewrite"
-with open(tmp, "w", encoding="utf-8") as handle:
-    for row in rows:
-        handle.write(json.dumps(row, separators=(",", ":")) + "\n")
-os.chmod(tmp, 0o600)
-os.replace(tmp, path)
-PY
+rewrite_approval_rows approval.consuming ts "$landing_consuming"
 $APPROVALS --repo "$REPO" reconcile --older-than-seconds 60 --apply --json \
   > "$TMP/landing-reconcile.json" || fail "patch-land approval reconcile failed"
 $APPROVALS --repo "$REPO" show --approval "$landing_consuming" --json \

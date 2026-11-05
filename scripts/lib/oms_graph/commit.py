@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping
 
-from oms_runtime.common import bounded_line, install_root, run_output
+from oms_runtime.common import bounded_line, run_output
 
 from . import events as events_module
 from .adapters import plan as plan_adapter
+from .capabilities import _script
 from .errors import GraphError
 from .facts import receipt_facts
 
@@ -70,7 +71,7 @@ def commit_bound(repo: Path, *, binding: str, run_id: str = "", message: str = "
     subject = bounded_line(" ".join(title.split()), MESSAGE_LIMIT) or ("plan task %s" % task_id)
     try:
         completed = subprocess.run(
-            ["bash", str(install_root() / "scripts/goal-drive.sh"), "--repo", str(repo),
+            ["bash", _script("goal-drive.sh"), "--repo", str(repo),
              "--commit-task", task_id, "--commit-message", subject],
             cwd=str(repo), capture_output=True, text=True, timeout=GIT_TIMEOUT,
         )

@@ -15,8 +15,7 @@ set -euo pipefail
 # completion row after the last write; `--recover` finishes or abandons an
 # interrupted one, and `oms state` shows that one is outstanding.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
-ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
@@ -484,16 +483,21 @@ print(state + "\t" + lease + "\t" + digest)
 ' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r'
 }
 
+read_plan_receipt_values() {
+  local v
+  v="$(plan_receipt_values "$1")" || return 1
+  state="$(printf '%s' "$v" | cut -f1)"
+  lease="$(printf '%s' "$v" | cut -f2)"
+  receipt_sha="$(printf '%s' "$v" | cut -f3)"
+}
+
 plan_complete_receipt_converged() {
-  local values state lease receipt_sha
+  local state="" lease="" receipt_sha=""
   [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$intent_task" ] || return 0
   [ -n "$intent_plan_done_receipt_sha" ] || return 1
-  values="$(plan_receipt_values "$intent_task")" || values=""
-  state="$(printf '%s' "$values" | cut -f1)"
-  lease="$(printf '%s' "$values" | cut -f2)"
-  receipt_sha="$(printf '%s' "$values" | cut -f3)"
-  if [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
+  if read_plan_receipt_values "$intent_task" &&
+    [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
     [ "$receipt_sha" = "$intent_plan_done_receipt_sha" ]; then
     return 0
   fi
@@ -556,57 +560,25 @@ PY
 }
 
 plan_landing_receipt_converged() {
-  local values state lease receipt_sha
+  local state lease receipt_sha
   [ -n "$intent_task" ] || return 0
-  [ -n "$intent_plan_receipt_sha" ] || return 1
-  values="$(plan_receipt_values "$intent_task")" || return 1
-  state="$(printf '%s' "$values" | cut -f1)"
-  lease="$(printf '%s' "$values" | cut -f2)"
-  receipt_sha="$(printf '%s' "$values" | cut -f3)"
-  [ "$state" = "landing" ] && [ "$lease" = "$intent_lease" ] &&
+  [ -n "$intent_plan_receipt_sha" ] && read_plan_receipt_values "$intent_task" &&
+    [ "$state" = "landing" ] && [ "$lease" = "$intent_lease" ] &&
     [ "$receipt_sha" = "$intent_plan_receipt_sha" ]
 }
 
-plan_superseding_landing_receipt_converged() {
-  local values state lease receipt_sha
-  [ -n "$intent_task" ] || return 1
-  [ -n "$intent_plan_receipt_sha" ] || return 1
-  values="$(plan_receipt_values "$intent_task")" || return 1
-  state="$(printf '%s' "$values" | cut -f1)"
-  lease="$(printf '%s' "$values" | cut -f2)"
-  receipt_sha="$(printf '%s' "$values" | cut -f3)"
-  # A same-lease replacement can already own `landing` when recovery reaches
-  # an older intent. Result bytes are not identity: two reviews can produce the
-  # same tree while carrying different artifact/patch receipts.
-  [ "$state" = "landing" ] && [ "$lease" = "$intent_lease" ] &&
-    [ "$receipt_sha" != "$intent_plan_receipt_sha" ]
-}
-
-plan_superseding_done_receipt_converged() {
-  local values state lease receipt_sha
-  [ -n "$intent_task" ] || return 1
-  [ -n "$intent_plan_done_receipt_sha" ] || return 1
-  values="$(plan_receipt_values "$intent_task")" || return 1
-  state="$(printf '%s' "$values" | cut -f1)"
-  lease="$(printf '%s' "$values" | cut -f2)"
-  receipt_sha="$(printf '%s' "$values" | cut -f3)"
-  # `done` alone is not authority for this landing. The same lease can publish
-  # a replacement review and complete that different receipt while an older
-  # intent is outstanding. Preserve that durable winner instead of borrowing
-  # its state to create lineage for the stale intent.
-  [ "$state" = "done" ] && [ "$lease" = "$intent_lease" ] &&
-    [ "$receipt_sha" != "$intent_plan_done_receipt_sha" ]
+plan_superseding_receipt_converged() {  # WANT_STATE WANT_SHA
+  local state lease receipt_sha
+  [ -n "$intent_task" ] && [ -n "$2" ] && read_plan_receipt_values "$intent_task" &&
+    [ "$state" = "$1" ] && [ "$lease" = "$intent_lease" ] &&
+    [ "$receipt_sha" != "$2" ]
 }
 
 plan_abandoned_receipt_converged() {
-  local values state lease receipt_sha
+  local state lease receipt_sha
   [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$intent_task" ] || return 0
-  [ -n "$intent_plan_receipt_sha" ] || return 1
-  values="$(plan_receipt_values "$intent_task")" || return 1
-  state="$(printf '%s' "$values" | cut -f1)"
-  lease="$(printf '%s' "$values" | cut -f2)"
-  receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  [ -n "$intent_plan_receipt_sha" ] && read_plan_receipt_values "$intent_task" || return 1
   if [ "$state" = ready ] && [ -z "$lease" ]; then
     return 0
   fi
@@ -642,14 +614,14 @@ plan_release_recover() {  # plan_release_recover TASK LEASE REVIEW_RECEIPT_SHA [
   local lease="$2"
   local expected_receipt_sha="${3:-}"
   local preserve="${4:-0}"
-  local release_cmd values state current_lease current_receipt_sha
+  local release_cmd state current_lease current_receipt_sha receipt_sha
   [ "$intent_panel_accept" = 0 ] || return 0
   [ -n "$task" ] || return 0
   [ "$preserve" != 1 ] || return 0
-  values="$(plan_receipt_values "$task")" || return 1
-  state="$(printf '%s' "$values" | cut -f1)"
-  current_lease="$(printf '%s' "$values" | cut -f2)"
-  current_receipt_sha="$(printf '%s' "$values" | cut -f3)"
+  read_plan_receipt_values "$task" || return 1
+  current_lease="$lease"
+  current_receipt_sha="$receipt_sha"
+  lease="$2"
 
   case "$state" in
     ready)
@@ -937,7 +909,7 @@ print("VALID\t" + plan_id)
     fi
     if [ "$head_moved" = 0 ]; then
       :
-    elif plan_superseding_done_receipt_converged || plan_superseding_landing_receipt_converged; then
+    elif plan_superseding_receipt_converged "done" "$intent_plan_done_receipt_sha" || plan_superseding_receipt_converged landing "$intent_plan_receipt_sha"; then
       : # A durable superseding receipt decides below, independent of HEAD.
     elif [ -n "$intent_base_sha" ] &&
       git -C "$REPO" merge-base --is-ancestor "$intent_base_sha" HEAD >/dev/null 2>&1 &&
@@ -945,9 +917,6 @@ print("VALID\t" + plan_id)
       git -C "$REPO" apply --binary --check "$intent_patch" >/dev/null 2>&1 &&
       { landing_lineage_exists "$intent_patch" "$current_patch_sha" \
           "$intent_task" "$intent_plan_id" >/dev/null 2>&1; [ "$?" = 1 ]; }; then
-      # The base is still in HEAD's history, the exact bytes are absent from
-      # the current tree and still applicable, and no lineage says it landed:
-      # the interrupted land never applied. Present or unprovable bytes stay manual.
       if finish_not_applied_receipts head-moved-not-applied; then
         echo "patch-land: landing $LANDING_ID never applied (HEAD moved past its base); released and marked abandoned" >&2
         abandoned=$((abandoned + 1))
@@ -963,7 +932,7 @@ print("VALID\t" + plan_id)
       needs_manual=$((needs_manual + 1))
       continue
     fi
-    if plan_superseding_done_receipt_converged; then
+    if plan_superseding_receipt_converged "done" "$intent_plan_done_receipt_sha"; then
       if finish_superseded_plan_receipts superseded-done; then
         echo "patch-land: landing $LANDING_ID superseded by a different exact done receipt" >&2
         abandoned=$((abandoned + 1))
@@ -973,7 +942,7 @@ print("VALID\t" + plan_id)
       fi
       continue
     fi
-    if plan_superseding_landing_receipt_converged; then
+    if plan_superseding_receipt_converged landing "$intent_plan_receipt_sha"; then
       if finish_superseded_plan_receipts superseded-landing; then
         echo "patch-land: landing $LANDING_ID superseded by a different exact landing receipt" >&2
         abandoned=$((abandoned + 1))
@@ -1103,9 +1072,6 @@ if [ -n "$PLAN_TASK" ]; then
     *) fail "plan task has no immutable lineage" ;;
   esac
   export OMS_TASK_ID="$PLAN_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
-  # The receipt digest is over the stored task. plan_id is a top-level value
-  # added only by evidence-snapshot, so strip it from this in-memory copy after
-  # freezing it; do not perform a second, racy task read.
   PLAN_JSON="$(printf '%s' "$PLAN_JSON" |
     python3 -c 'import json,sys;d=json.load(sys.stdin);d.pop("plan_id",None);print(json.dumps(d,ensure_ascii=False))')" ||
     fail "cannot normalize plan task snapshot $PLAN_TASK"

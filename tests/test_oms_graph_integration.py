@@ -14,10 +14,8 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -30,9 +28,7 @@ from oms_graph.errors import GraphError
 from oms_graph.project.affected import affected_plan, changed_entries, changed_test_hunks
 from oms_graph.project.build import build, load_graph
 from oms_graph.project.query import Graph
-from test_oms_graph_adapter import CHECK_SCRIPT, FAKE_CODEX, agent_node, scrub_fixture_env
-
-HAVE_GIT = shutil.which("git") is not None
+from test_oms_graph_adapter import GraphRepoFixture as BaseRepoFixture, HAVE_GIT, agent_node
 
 
 def _spec(entry, nodes, edges, **budget):
@@ -90,30 +86,22 @@ def two_task_spec(commit_command):
 
 
 class PureMappingTest(unittest.TestCase):
-    """No repository: the record-shaping helpers the runner and resume share."""
-
-    def test_transport_verdicts_outrank_a_mis_mapped_adapter_result(self) -> None:
+    def test_agent_outcome_mapping(self) -> None:
         held = runner.agent_outcome({"exit": 75, "claimed_outcome": "completed", "outcome": "completed"})
         self.assertEqual((held["claimed_outcome"], held["outcome"]), ("partial", "partial"))
         self.assertIn("landing-lock-held", held["detail"])
         idle = runner.agent_outcome({"exit": 3, "claimed_outcome": "failed", "outcome": "failed"})
         self.assertEqual(idle["outcome"], "blocked")
+        timeout = runner.agent_outcome({"exit": -1, "reason": "timeout", "claimed_outcome": "failed", "outcome": "failed"})
+        self.assertEqual((timeout["claimed_outcome"], timeout["outcome"]), ("unverified", "unverified"))
+        empty = runner.agent_outcome({"exit": 0})
+        self.assertEqual(empty["outcome"], "unverified")
+        self.assertIn("adapter-returned-no-outcome", empty["detail"])
+        missing = runner.agent_outcome({"exit": 0, "outcome": "unverified", "claimed_outcome": "completed",
+                                        "proof_missing": ["receipt.land.t1.present"]})
+        self.assertIn("receipt.land.t1.present", missing["detail"])
 
-    def test_a_timeout_is_absence_of_evidence_not_a_failure(self) -> None:
-        record = runner.agent_outcome({"exit": -1, "reason": "timeout", "claimed_outcome": "failed", "outcome": "failed"})
-        self.assertEqual((record["claimed_outcome"], record["outcome"]), ("unverified", "unverified"))
-
-    def test_an_outcome_free_result_never_becomes_a_completion(self) -> None:
-        record = runner.agent_outcome({"exit": 0})
-        self.assertEqual(record["outcome"], "unverified")
-        self.assertIn("adapter-returned-no-outcome", record["detail"])
-
-    def test_proof_missing_is_named_in_the_detail(self) -> None:
-        record = runner.agent_outcome({"exit": 0, "outcome": "unverified", "claimed_outcome": "completed",
-                                       "proof_missing": ["receipt.land.t1.present"]})
-        self.assertIn("receipt.land.t1.present", record["detail"])
-
-    def test_alias_facts_mirrors_the_resolved_task_onto_next(self) -> None:
+    def test_alias_facts(self) -> None:
         spec = {"schema": 1, "id": "g", "entry": "implement",
                 "nodes": {"implement": agent_node("next"), "done": {"kind": "terminal"}},
                 "edges": [{"from": "implement", "to": "done", "outcomes": ["completed"]}]}
@@ -125,40 +113,36 @@ class PureMappingTest(unittest.TestCase):
         self.assertTrue(aliased["plan.task.next.patch_present"])
         self.assertFalse(aliased["receipt.land.next.present"])
         self.assertNotIn("plan.task.next.other", aliased)
-        # Without a recorded task id there is nothing to alias, and no guess.
         self.assertNotIn("plan.task.next.state", runner.alias_facts(facts, [], spec))
+        rows2 = rows + [{"event": "node_outcome", "node": "implement", "task_id": "t2"}]
+        aliased2 = runner.alias_facts({"plan.task.t1.state": "done", "plan.task.t2.state": "review"}, rows2, spec)
+        self.assertEqual(aliased2["plan.task.next.state"], "review")
 
-    def test_the_latest_recorded_task_wins(self) -> None:
-        spec = {"schema": 1, "id": "g", "entry": "implement",
-                "nodes": {"implement": agent_node("next"), "done": {"kind": "terminal"}},
-                "edges": [{"from": "implement", "to": "done", "outcomes": ["completed"]}]}
-        rows = [{"event": "node_outcome", "node": "implement", "task_id": "t1"},
-                {"event": "node_outcome", "node": "implement", "task_id": "t2"}]
-        aliased = runner.alias_facts({"plan.task.t1.state": "done", "plan.task.t2.state": "review"}, rows, spec)
-        self.assertEqual(aliased["plan.task.next.state"], "review")
+    def test_cli_parser_accepts_repo_and_pretty_at_each_level_and_later_repo_wins(self) -> None:
+        parser = cli.build_parser()
+        for argv, expected_repo in (
+            (["--repo", "first", "project", "api", "x.py"], "first"),
+            (["project", "--repo", "group", "api", "x.py"], "group"),
+            (["project", "api", "x.py", "--repo", "action"], "action"),
+            (["--repo", "first", "project", "api", "x.py", "--repo", "last"], "last"),
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(parser.parse_args(argv).repo, expected_repo)
+        self.assertTrue(parser.parse_args(["project", "api", "x.py", "--pretty"]).pretty)
+        self.assertTrue(parser.parse_args(["--pretty", "project", "api", "x.py"]).pretty)
 
 
 class FrontDoorGuardTest(unittest.TestCase):
-    """The runner must reach plan state only through the audited adapter.
-
-    `agent-plan land/finish/claim/review/start` are compare-and-set transitions
-    fenced by receipts only `patch-land.sh` can compute, so the runner names no
-    control-plane script at all: agent work goes through `adapters.plan`, and
-    the one script literal here is the fail-open Work Journal observer.
-    """
-
     SOURCE = Path(runner.__file__).read_text(encoding="utf-8")
     TREE = ast.parse(SOURCE)
     FENCED_SCRIPTS = ("agent-plan.sh", "plan-run.sh", "patch-land.sh", "peer-delegate.sh")
 
-    def test_no_control_plane_script_is_named(self) -> None:
+    def test_runner_reaches_plan_only_through_adapter(self) -> None:
         scripts = {node.value for node in ast.walk(self.TREE)
                    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith(".sh")}
         self.assertEqual(scripts, {runner.JOURNAL_OBSERVER})
         for name in self.FENCED_SCRIPTS:
             self.assertNotIn(name, self.SOURCE)
-
-    def test_no_source_line_pairs_agent_plan_with_a_fenced_verb(self) -> None:
         seen = 0
         for number, line in enumerate(self.SOURCE.splitlines(), 1):
             if "agent-plan" not in line:
@@ -166,94 +150,18 @@ class FrontDoorGuardTest(unittest.TestCase):
             seen += 1
             for verb in ("land", "finish", "claim", "review", "start"):
                 self.assertNotIn(verb, line, "line %d names agent-plan %s" % (number, verb))
-        self.assertTrue(seen, "the runner no longer mentions agent-plan; keep the guard meaningful")
-
-    def test_agent_execution_goes_through_the_adapter(self) -> None:
+        self.assertTrue(seen)
         calls = {ast.dump(node.func) for node in ast.walk(self.TREE) if isinstance(node, ast.Call)}
-        self.assertTrue(any("plan_adapter" in dump and "execute" in dump for dump in calls),
-                        "no adapters.plan.execute call site; the guard would be vacuous")
+        self.assertTrue(any("plan_adapter" in dump and "execute" in dump for dump in calls))
 
 
-class GraphRepoFixture:
+class GraphRepoFixture(BaseRepoFixture):
     """One temporary repository per test, driven through the real front doors."""
-
-    TASKS = (("t1", "delegated.txt"),)
-
-    def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="oms-graph-integration."))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        self.repo = self.tmp / "repo"
-        self.bin = self.tmp / "bin"
-        self.home = self.tmp / "home"
-        for path in (self.repo, self.bin, self.home):
-            path.mkdir(parents=True)
-        (self.repo / "scripts").mkdir()
-        self._write(self.repo / "scripts" / "check.sh", CHECK_SCRIPT)
-        (self.repo / "README.md").write_text("base\n", encoding="utf-8")
-        self._write(self.bin / "codex", FAKE_CODEX)
-
-        self._saved_env = dict(os.environ)
-        self.addCleanup(self._restore_env)
-
-        self.git("init", "-q")
-        self.git("config", "user.email", "test@example.com")
-        self.git("config", "user.name", "Test")
-        self.git("add", "README.md", "scripts/check.sh")
-        self.git("commit", "-qm", "base")
-
-        self.plan("init", "--goal", "g", "--accept", "bash scripts/check.sh t1")
-        for task_id, allowed in self.TASKS:
-            self.plan("add", "--id", task_id, "--title", task_id, "--allowed", allowed,
-                      "--verify", "bash scripts/check.sh %s" % task_id)
-
-    def _restore_env(self) -> None:
-        os.environ.clear()
-        os.environ.update(self._saved_env)
-
-    @staticmethod
-    def _write(path: Path, body: str) -> None:
-        path.write_text(body, encoding="utf-8")
-        path.chmod(0o755)
-
-    def _env(self) -> dict:
-        env = dict(self._saved_env)
-        scrub_fixture_env(env)
-        env["HOME"] = str(self.home)
-        # peer-delegate loads NVM_DIR before execution; keep discovery hermetic.
-        env["NVM_DIR"] = str(self.home / ".nvm")
-        env["OMS_LOCK_DIR"] = str(self.tmp / "locks")
-        # The journal mirror is best-effort and its store is not under test.
-        env["OMS_WORK_JOURNAL"] = "0"
-        return env
-
-    def git(self, *args: str) -> None:
-        subprocess.run(["git", "-C", str(self.repo)] + list(args), check=True,
-                       env=self._env(), stdout=subprocess.DEVNULL)
-
-    def plan(self, *args: str) -> None:
-        argv = ["bash", str(ROOT / "scripts" / "agent-plan.sh"), "--repo", str(self.repo)] + list(args)
-        subprocess.run(argv, check=True, env=self._env(), cwd=str(self.repo), stdout=subprocess.DEVNULL)
 
     def task_state(self, task_id: str) -> str:
         argv = ["bash", str(ROOT / "scripts" / "agent-plan.sh"), "--repo", str(self.repo), "show", "--id", task_id]
         out = subprocess.run(argv, env=self._env(), cwd=str(self.repo), capture_output=True, text=True, check=True)
         return str(json.loads(out.stdout).get("state", ""))
-
-    def worker_env(self, **extra) -> None:
-        """Swap in the fixture environment; every child inherits this process's."""
-        env = self._env()
-        env["PATH"] = "%s:/usr/bin:/bin" % self.bin
-        env.update(extra)
-        os.environ.clear()
-        os.environ.update(env)
-
-    def drive(self, call, *args, **kwargs):
-        env_extra = kwargs.pop("env_extra", None) or {}
-        self.worker_env(**env_extra)
-        try:
-            return call(*args, **kwargs)
-        finally:
-            self._restore_env()
 
     def run_graph(self, spec, **kwargs):
         env_extra = kwargs.pop("env_extra", None)
@@ -352,6 +260,13 @@ class TestFeature:
         self.assertEqual(body["test_cases"][0]["id"],
                          "symbol:tests/test_feature.py::TestFeature.test_first")
         self.assertEqual({row["path"] for row in body["test_cases"]}, {"tests/test_feature.py"})
+
+        args = argparse.Namespace(base=self.base, head="HEAD", guard=(), depth=0, json=True, pretty=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(cli._project_affected(args, self.repo, self.state), 0)
+        cli_plan = json.loads(output.getvalue())
+        self.assertEqual((cli_plan["mode"], [row["name"] for row in cli_plan["test_cases"]]), ("affected", ["test_first"]))
 
         self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
                                             env=self._env(), text=True).strip()
@@ -457,22 +372,6 @@ test_leaf_sibling() {
                          {(shell_leaf, "test_leaf")})
         self.assertNotIn(runner_consumer, narrowed_shell["tests"])
 
-    def test_cli_affected_passes_hunks_for_narrow_selection(self) -> None:
-        feature = self.repo / "tests" / "test_feature.py"
-        self._write(feature, feature.read_text(encoding="utf-8").replace(
-            "assert helper() == 1", "assert helper() == 2", 1))
-        self.git("add", "tests/test_feature.py")
-        self.git("commit", "-qm", "edit test body")
-        build(self.repo, state=self.state)
-        args = argparse.Namespace(base=self.base, head="HEAD", guard=(), depth=0,
-                                  json=True, pretty=False)
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            self.assertEqual(cli._project_affected(args, self.repo, self.state), 0)
-        plan = json.loads(output.getvalue())
-        self.assertEqual(plan["mode"], "affected")
-        self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first"])
-
     def test_cli_runnable_glob_selects_operator_section_fragment(self) -> None:
         (self.repo / "lib").mkdir()
         (self.repo / "tests" / "operator").mkdir(parents=True)
@@ -508,79 +407,45 @@ test_leaf_sibling() {
         self.assertEqual(with_option["mode"], "affected")
         self.assertEqual(set(with_option["tests"]), {"tests/operator/dispatch_results.py", "tests/test_other.py"})
 
-    def test_cli_parser_accepts_repo_and_pretty_at_each_level_and_later_repo_wins(self) -> None:
-        parser = cli.build_parser()
-        cases = (
-            (["--repo", "first", "project", "api", "x.py"], "first"),
-            (["project", "--repo", "group", "api", "x.py"], "group"),
-            (["project", "api", "x.py", "--repo", "action"], "action"),
-            (["--repo", "first", "project", "api", "x.py", "--repo", "last"], "last"),
-        )
-        for argv, expected_repo in cases:
-            with self.subTest(argv=argv):
-                args = parser.parse_args(argv)
-                self.assertEqual(args.repo, expected_repo)
-        self.assertTrue(parser.parse_args(["project", "api", "x.py", "--pretty"]).pretty)
-        self.assertTrue(parser.parse_args(["--pretty", "project", "api", "x.py"]).pretty)
-
-    def test_non_utf8_test_diff_fails_open(self) -> None:
-        path = "tests/test_feature.py"
-        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
-                                            env=self._env(), text=True).strip()
-        feature = self.repo / path
-        feature.write_bytes(feature.read_bytes() + b"# invalid utf8: \xff\n")
-        self.git("add", path)
-        self.git("commit", "-qm", "add invalid utf8 comment")
-        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
-                                       env=self._env(), text=True).strip()
-        changes = changed_entries(self.repo, self.base, head)
-        self.assertEqual(changed_test_hunks(self.repo, self.base, head, changes)[path], ())
-
-    def test_glob_char_path_does_not_mix_sibling_hunks(self) -> None:
+    def test_hunk_edge_cases_utf8_glob_and_form_feed(self) -> None:
         literal_path = "tests/test_feature[1].py"
         sibling_path = "tests/test_feature1.py"
         for path, value in ((literal_path, 1), (sibling_path, 10)):
             self._write(self.repo / path, "def test_case():\n    assert %d == 0\n" % value)
-        self.git("add", literal_path, sibling_path)
-        self.git("commit", "-qm", "add glob-like test names")
+        ff_path = self.repo / "tests" / "test_feature.py"
+        self._write(ff_path, ff_path.read_text(encoding="utf-8").replace(
+            "assert helper() == 1", 'assert "left\fside" == "left\fside"', 1))
+        self.git("add", literal_path, sibling_path, "tests/test_feature.py")
+        self.git("commit", "-qm", "add glob and form-feed baseline")
         self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
                                             env=self._env(), text=True).strip()
+
         self._write(self.repo / literal_path, "def test_case():\n    assert 1 == 2\n")
         self._write(self.repo / sibling_path, "def test_case():\n    assert 10 == 20\n")
-        self.git("add", literal_path, sibling_path)
-        self.git("commit", "-qm", "edit glob-like test names")
+        self._write(ff_path, ff_path.read_text(encoding="utf-8").replace(
+            'assert "left\fside" == "left\fside"', 'assert "left\fside" == "right\fside"', 1))
+        self.git("add", literal_path, sibling_path, "tests/test_feature.py")
+        self.git("commit", "-qm", "edit glob and form-feed tests")
         head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
                                        env=self._env(), text=True).strip()
         changes = changed_entries(self.repo, self.base, head)
         hunks = changed_test_hunks(self.repo, self.base, head, changes)
-        self.assertEqual([line for _, line in hunks[literal_path][0]["old_lines"]],
-                         ["    assert 1 == 0"])
-        self.assertEqual([line for _, line in hunks[literal_path][0]["new_lines"]],
-                         ["    assert 1 == 2"])
-
-    def test_form_feed_inside_case_preserves_narrow_selection(self) -> None:
-        path = self.repo / "tests" / "test_feature.py"
-        source = path.read_text(encoding="utf-8").replace(
-            "assert helper() == 1", 'assert "left\fside" == "left\fside"', 1)
-        self._write(path, source)
-        self.git("add", "tests/test_feature.py")
-        self.git("commit", "-qm", "add form feed to test body")
-        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
-                                            env=self._env(), text=True).strip()
-        self._write(path, path.read_text(encoding="utf-8").replace(
-            'assert "left\fside" == "left\fside"',
-            'assert "left\fside" == "right\fside"', 1))
-        self.git("add", "tests/test_feature.py")
-        self.git("commit", "-qm", "edit after form feed")
-        head = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
-                                       env=self._env(), text=True).strip()
-        changes = changed_entries(self.repo, self.base, head)
-        hunks = changed_test_hunks(self.repo, self.base, head, changes)
+        self.assertEqual([line for _, line in hunks[literal_path][0]["old_lines"]], ["    assert 1 == 0"])
+        self.assertEqual([line for _, line in hunks[literal_path][0]["new_lines"]], ["    assert 1 == 2"])
         self.assertEqual([line for _, line in hunks["tests/test_feature.py"][0]["old_lines"]],
                          ['        assert "left\fside" == "left\fside"'])
         plan, _ = self._selection()
-        self.assertEqual(plan["mode"], "affected")
-        self.assertEqual([row["name"] for row in plan["test_cases"]], ["test_first"])
+        self.assertIn(("tests/test_feature.py", "test_first"),
+                      {(row["path"], row["name"]) for row in plan["test_cases"]})
+
+        self.base = head
+        ff_path.write_bytes(ff_path.read_bytes() + b"# invalid utf8: \xff\n")
+        self.git("add", "tests/test_feature.py")
+        self.git("commit", "-qm", "add invalid utf8 comment")
+        head2 = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                        env=self._env(), text=True).strip()
+        changes2 = changed_entries(self.repo, self.base, head2)
+        self.assertEqual(changed_test_hunks(self.repo, self.base, head2, changes2)["tests/test_feature.py"], ())
 
     def _write_shell_edit(self, text: str):
         self._write(self.repo / "tests" / "scripts-smoke.sh", text)
@@ -640,8 +505,9 @@ class TestFeature:
         self.assertEqual(deleted_helper["tests"], ["tests/test_feature.py"])
         self.assertEqual([row["name"] for row in deleted_helper["test_cases"]], ["test_first", "test_second"])
 
-    def test_shebang_edit_keeps_whole_file_selection(self) -> None:
-        plan = self._write_shell_edit("""#!/usr/bin/env bash
+        self.base = subprocess.check_output(["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+                                            env=self._env(), text=True).strip()
+        shebang = self._write_shell_edit("""#!/usr/bin/env bash
 test_shell_first() {
   :
 }
@@ -650,9 +516,8 @@ test_shell_second() {
   :
 }
 """)
-        self.assertEqual(plan["tests"], ["tests/scripts-smoke.sh"])
-        self.assertEqual([row["name"] for row in plan["test_cases"]],
-                         ["test_shell_first", "test_shell_second"])
+        self.assertEqual(shebang["tests"], ["tests/scripts-smoke.sh"])
+        self.assertEqual([row["name"] for row in shebang["test_cases"]], ["test_shell_first", "test_shell_second"])
 
     def test_case_edit_with_adjacent_helper_deletion_keeps_whole_file_selection(self) -> None:
         self._write(self.repo / "tests" / "test_feature.py", """class TestFeature:

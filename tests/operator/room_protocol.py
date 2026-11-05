@@ -1,7 +1,6 @@
 # Ordered integration dependency: provider routing -> native controls -> room protocol
 # -> cross-repository dispatch -> continuation/lineage -> scope/admission.
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -1187,13 +1186,10 @@ ledger = project / ".oms/lifecycle/events.jsonl"
 # The canonical operator suite also covers the room front door and native open contract.
 _operator_block("room-protocol")
 import room
-import codex_app_notify
 # A child can send and acknowledge through its controller's pinned queue even
 # when its own room repository path is unavailable. The queue accepts no
 # alternate sender, event kind, or room from the client.
-import tempfile
 import threading
-import shutil
 def test_room_relay():
     relay_room = room.create(project, "worker-relay", "Sandbox worker relay")
     room.join(project, relay_room, "relay-main", "codex", role="main")
@@ -1834,7 +1830,6 @@ zero_fallback = next(m for m in room.status(project, shared)["messages"] if m["i
 assert "Call exit=0; parent acceptance pending." in zero_fallback["text"]
 assert "Result evidence unavailable" in zero_fallback["text"]
 
-import io
 from contextlib import redirect_stderr
 conflict = io.StringIO()
 with redirect_stderr(conflict):
@@ -2134,7 +2129,6 @@ newer_round = dict(older_round, attempt_id="newer", created_at="2026-10-02T00:00
 assert [row["attempt_id"] for row in panel._rework_history(
     [newer_round, older_round], "ordered-rounds", {"root"})] == ["older", "newer"]
 
-import shutil
 shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan
 # A continued worker resumes its native session in a new run and carries a delta preamble; without a stored
 # session it falls back to a fresh worker, and another main never reaches it.
@@ -2205,7 +2199,6 @@ mismatched = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(pr
 assert mismatched.returncode != 0 and "plan task continue-assigned is reviewed for --to claude" in mismatched.stderr, mismatched
 assert continue_state() == state_before, "a refused continuation changed plan, room or attempt state"
 # Continuation survives retained results that omit the task and never inlines patch bytes it cannot verify.
-import hashlib
 last_round = [a for a in listed() if a["task_id"] == "room-inspection" and a["refs"].get("panel_role") == "worker"][-1]
 patch_dir = project / ".oms/artifacts"
 patch_dir.mkdir(parents=True, exist_ok=True)

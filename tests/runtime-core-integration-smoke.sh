@@ -94,7 +94,6 @@ echo 'runtime-core-integration-smoke: ok'
 # context-manifest digest, and the projection links the row with no manual
 # binding. Malformed coverage fails the append instead of publishing a
 # half-labeled row.
-printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/true.sh"
 (
   cd "$REPO"
   # shellcheck source=/dev/null

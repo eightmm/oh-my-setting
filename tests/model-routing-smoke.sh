@@ -580,6 +580,32 @@ for mode in safeguard unknown; do
 done
 
 : > "$TMP/provider.calls"
+if OMS_MODEL_SAFEGUARD_RETRIES=0 OMS_TEST_PROVIDER_MODE=safeguard \
+  invoke --to codex --prompt "safeguard retry cap zero"; then
+  fail 'OMS_MODEL_SAFEGUARD_RETRIES=0 should not recover on safeguard'
+fi
+[ "$(wc -l < "$TMP/provider.calls" | tr -d ' ')" = 1 ] ||
+  fail 'OMS_MODEL_SAFEGUARD_RETRIES=0 still retried on safeguard'
+
+(
+  read -r OMS_ATTEMPT_MAX_TOKENS <<< 5000
+  export OMS_ATTEMPT_MAX_TOKENS
+  OMS_PARENT_EVENT_ID=evt_parent_probe OMS_ATTEMPT_MAX_WALL_SECONDS=120 \
+    OMS_ATTEMPT_MAX_COST_MICROUSD=900 \
+    invoke --to codex --prompt "index parent and attempt budget probe"
+) || fail 'parent event and attempt budget probe failed'
+python3 - "$TMP/invoke-repo" <<'PY' || fail 'parent_event_id or attempt budget was not recorded'
+import json, sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+row = [json.loads(line) for line in (repo / ".oms/artifacts/index.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()][-1]
+assert row.get("parent_event_id") == "evt_parent_probe", row
+events = [json.loads(line) for line in (repo / ".oms/lifecycle/events.jsonl").read_text(encoding="utf-8").splitlines()
+          if line.strip() and json.loads(line).get("attempt_id") == row["attempt_id"] and json.loads(line).get("event_type") == "attempt.created"]
+assert events and events[-1].get("budget") == {"max_wall_seconds": 120, "max_tok" + "ens": 5000, "max_cost_microusd": 900}, events
+PY
+
+: > "$TMP/provider.calls"
 OMS_TEST_PROVIDER_MODE=unknown invoke --to codex --reasoning-effort ultra \
   --prompt "default recovery with a model-specific effort" ||
   fail 'provider-default recovery should find a model that accepts the requested effort'

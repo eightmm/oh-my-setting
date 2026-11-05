@@ -13,14 +13,18 @@ export XDG_STATE_HOME="$TMP/state"
 export OMS_LOCK_DIR="$TMP/locks"
 mkdir -p "$HOME" "$XDG_STATE_HOME" "$OMS_LOCK_DIR"
 
+init_base_repo() {
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" config user.email test@example.com
+  git -C "$1" config user.name test
+  printf 'base\n' > "$1/file.txt"
+  git -C "$1" add file.txt
+  git -C "$1" commit -qm base
+}
+
 repo="$TMP/repo"
-mkdir -p "$repo"
-git -C "$repo" init -q
-git -C "$repo" config user.email test@example.com
-git -C "$repo" config user.name test
-printf 'base\n' > "$repo/file.txt"
-git -C "$repo" add file.txt
-git -C "$repo" commit -qm base
+init_base_repo "$repo"
 
 patch="$TMP/change.patch"
 printf 'changed\n' > "$repo/file.txt"
@@ -34,13 +38,7 @@ git -C "$repo" restore file.txt
 # An admission usage error has no producer rejection witness. Keep its
 # capture reserved for diagnosis and report the original setup error once.
 usage_repo="$TMP/usage-repo"
-mkdir -p "$usage_repo"
-git -C "$usage_repo" init -q
-git -C "$usage_repo" config user.email test@example.com
-git -C "$usage_repo" config user.name test
-printf 'base\n' > "$usage_repo/file.txt"
-git -C "$usage_repo" add file.txt
-git -C "$usage_repo" commit -qm base
+init_base_repo "$usage_repo"
 printf 'changed\n' > "$usage_repo/file.txt"
 git -C "$usage_repo" diff --binary > "$TMP/usage.patch"
 git -C "$usage_repo" restore file.txt
@@ -240,13 +238,7 @@ grep -Fq 'already complete' "$TMP/recover-consumed-approval.out" ||
 # legitimately run arbitrary project code, so changing the caller-owned patch
 # during admission must not change what is ultimately applied.
 race_repo="$TMP/race-repo"
-mkdir -p "$race_repo"
-git -C "$race_repo" init -q
-git -C "$race_repo" config user.email test@example.com
-git -C "$race_repo" config user.name test
-printf 'base\n' > "$race_repo/file.txt"
-git -C "$race_repo" add file.txt
-git -C "$race_repo" commit -qm base
+init_base_repo "$race_repo"
 approved_patch="$TMP/approved.patch"
 replacement_patch="$TMP/replacement.patch"
 printf 'approved\n' > "$race_repo/file.txt"
@@ -324,7 +316,8 @@ grep -Fxq base "$race_repo/file.txt" ||
 # destination, create an intent, or apply bytes after the successful admission.
 mkdir -p "$TMP/capture-collision"
 collision_verify="for candidate in '$TMP'/capture-collision/oms-landing-capture-*/*.patch; do [ -f \"\$candidate\" ] || exit 9; printf foreign > '$race_repo/.oms/landing-patches/'\$(basename \"\$candidate\"); done"
-collision_lines="$(python3 - "$race_repo/.oms/landings.jsonl" <<'PY'
+count_intents() {
+  python3 - "$1" <<'PY'
 import json, sys
 known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
@@ -333,23 +326,15 @@ unknown = [row.get("event") for row in rows
 assert not unknown, unknown
 print(sum(1 for row in rows if row.get("event") == "intent"))
 PY
-)"
+}
+collision_lines="$(count_intents "$race_repo/.oms/landings.jsonl")"
 if TMPDIR="$TMP/capture-collision" "$LAND" --repo "$race_repo" \
   --patch "$frozen_approved_patch" --verify "$collision_verify" >"$TMP/collision.out" 2>&1; then
   fail "publication overwrote an existing destination"
 fi
 grep -Fq 'cannot publish admitted captured patch' "$TMP/collision.out" ||
   fail "collision did not exercise publication failure"
-[ "$(python3 - "$race_repo/.oms/landings.jsonl" <<'PY'
-import json, sys
-known_capture_events = {"capture-reserved", "capture-terminal", "capture-release-ready", "capture-released"}
-rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
-unknown = [row.get("event") for row in rows
-           if str(row.get("event", "")).startswith("capture-") and row.get("event") not in known_capture_events]
-assert not unknown, unknown
-print(sum(1 for row in rows if row.get("event") == "intent"))
-PY
-)" = "$collision_lines" ] ||
+[ "$(count_intents "$race_repo/.oms/landings.jsonl")" = "$collision_lines" ] ||
   fail "failed publication wrote an intent"
 for collision_capture in "$TMP"/capture-collision/oms-landing-capture-*/*.patch; do
   cmp "$frozen_approved_patch" "$collision_capture" || fail "failed publication lost its admission input"
@@ -358,18 +343,8 @@ for collision_capture in "$TMP"/capture-collision/oms-landing-capture-*/*.patch;
 done
 grep -Fxq base "$race_repo/file.txt" || fail "failed publication changed the tree"
 
-# An approval requested from one lifecycle attempt is not a bearer grant for
-# the same patch outside that attempt. A missing caller attempt must fail just
-# like a different one; otherwise dropping OMS_ATTEMPT_ID silently weakens the
-# action digest that the operator reviewed.
 attempt_repo="$TMP/attempt-bound-repo"
-mkdir -p "$attempt_repo"
-git -C "$attempt_repo" init -q
-git -C "$attempt_repo" config user.email test@example.com
-git -C "$attempt_repo" config user.name test
-printf 'base\n' > "$attempt_repo/file.txt"
-git -C "$attempt_repo" add file.txt
-git -C "$attempt_repo" commit -qm base
+init_base_repo "$attempt_repo"
 attempt_patch="$TMP/attempt-bound.patch"
 printf 'attempt approved\n' > "$attempt_repo/file.txt"
 git -C "$attempt_repo" diff --binary > "$attempt_patch"
@@ -419,13 +394,7 @@ PLAN="$ROOT/scripts/agent-plan.sh"
 
 # Old Soul-bound receipts are preserved, not silently converted into authority.
 legacy_repo="$TMP/legacy-soul"
-mkdir -p "$legacy_repo"
-git -C "$legacy_repo" init -q
-git -C "$legacy_repo" config user.email test@example.com
-git -C "$legacy_repo" config user.name test
-printf 'base\n' > "$legacy_repo/file.txt"
-git -C "$legacy_repo" add file.txt
-git -C "$legacy_repo" commit -qm base
+init_base_repo "$legacy_repo"
 "$PLAN" --repo "$legacy_repo" init --goal legacy >/dev/null
 "$PLAN" --repo "$legacy_repo" add --id old --title old --allowed file.txt --verify true >/dev/null
 "$PLAN" --repo "$legacy_repo" claim --id old --provider codex >/dev/null
@@ -460,18 +429,8 @@ done
 cmp "$TMP/legacy-before.json" "$legacy_repo/.oms/plan/tasks.json" || fail "legacy rejection changed plan evidence"
 grep -Fxq base "$legacy_repo/file.txt" || fail "legacy rejection applied a patch"
 
-# A reviewed plan task binds patch bytes, not a caller-selected pathname. A
-# goal driver may hand landing a private copy, but it must hash exactly like
-# the stored review evidence. Missing, vanished, or unreadable evidence cannot
-# authorize a caller-provided replacement.
 plan_patch_repo="$TMP/plan-patch-receipt-repo"
-mkdir -p "$plan_patch_repo"
-git -C "$plan_patch_repo" init -q
-git -C "$plan_patch_repo" config user.email test@example.com
-git -C "$plan_patch_repo" config user.name test
-printf 'base\n' > "$plan_patch_repo/file.txt"
-git -C "$plan_patch_repo" add file.txt
-git -C "$plan_patch_repo" commit -qm base
+init_base_repo "$plan_patch_repo"
 stored_review_patch="$TMP/stored-plan-review.patch"
 different_review_patch="$TMP/different-plan-review.patch"
 copied_review_patch="$TMP/copied-plan-review.patch"
@@ -586,37 +545,34 @@ case "$relative_request" in apr_*) ;; *) fail "relative patch produced bad appro
 grep -Fxq 'stored review' "$plan_patch_repo/file.txt" ||
   fail "byte-identical plan patch copy applied the wrong content"
 
-# Recovery and live landing share the same non-blocking repository lock. A
-# concurrent recovery must not inspect and abandon an intent still being
-# processed by the live owner.
+write_intent_row() {  # PATH PATCH REPO LANDING_ID [EXTRA]
+  python3 - "$@" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+path, patch, repo, lid = sys.argv[1:5]
+extra = sys.argv[5] if len(sys.argv) > 5 else ""
+row = {
+    "schema": 1, "ts": "2026-08-09T00:00:00Z", "landing_id": lid,
+    "event": "intent", "patch": patch,
+    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
+    "base_sha": subprocess.check_output(["git", "-C", repo, "rev-parse", "HEAD"], text=True).strip(),
+}
+if extra == "approval":
+    row.update(approval="apr_missing", approval_version="3")
+out = json.dumps(row) + "\n"
+if extra in ("complete", "abandoned"):
+    out += json.dumps({"landing_id": lid, "event": extra}) + "\n"
+pathlib.Path(path).write_text(out, encoding="utf-8")
+PY
+}
+
 lock_repo="$TMP/lock-repo"
 mkdir -p "$lock_repo/.oms"
-git -C "$lock_repo" init -q
-git -C "$lock_repo" config user.email test@example.com
-git -C "$lock_repo" config user.name test
-printf 'base\n' > "$lock_repo/file.txt"
-git -C "$lock_repo" add file.txt
-git -C "$lock_repo" commit -qm base
+init_base_repo "$lock_repo"
 lock_patch="$TMP/lock.patch"
 printf 'later\n' > "$lock_repo/file.txt"
 git -C "$lock_repo" diff --binary > "$lock_patch"
 git -C "$lock_repo" restore file.txt
-python3 - "$lock_repo/.oms/landings.jsonl" "$lock_patch" "$lock_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-row = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-live-owner",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-}
-pathlib.Path(path).write_text(json.dumps(row) + "\n", encoding="utf-8")
-PY
+write_intent_row "$lock_repo/.oms/landings.jsonl" "$lock_patch" "$lock_repo" land-live-owner
 cp "$lock_repo/.oms/landings.jsonl" "$TMP/landings-before"
 release_marker="$TMP/release-landing-lock"
 : > "$release_marker"
@@ -643,40 +599,15 @@ wait "$holder_pid" || fail "landing lock holder failed"
 cmp -s "$TMP/landings-before" "$lock_repo/.oms/landings.jsonl" ||
   fail "locked recovery changed the live landing intent"
 
-# If neither forward nor reverse apply is clean, the current tree cannot prove
-# whether an interrupted patch was applied and later edited or was never
-# applied at all. Recovery must preserve the intent for manual resolution,
-# rather than minting a false abandoned/failed receipt.
 ambiguous_repo="$TMP/ambiguous-repo"
 mkdir -p "$ambiguous_repo/.oms/landing-patches"
-git -C "$ambiguous_repo" init -q
-git -C "$ambiguous_repo" config user.email test@example.com
-git -C "$ambiguous_repo" config user.name test
-printf 'base\n' > "$ambiguous_repo/file.txt"
-git -C "$ambiguous_repo" add file.txt
-git -C "$ambiguous_repo" commit -qm base
+init_base_repo "$ambiguous_repo"
 ambiguous_patch="$ambiguous_repo/.oms/landing-patches/land-ambiguous.patch"
 printf 'landed\n' > "$ambiguous_repo/file.txt"
 git -C "$ambiguous_repo" diff --binary > "$ambiguous_patch"
 git -C "$ambiguous_repo" restore file.txt
 printf 'later-edit\n' > "$ambiguous_repo/file.txt"
-python3 - "$ambiguous_repo/.oms/landings.jsonl" "$ambiguous_patch" \
-  "$ambiguous_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-row = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-ambiguous",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-}
-pathlib.Path(path).write_text(json.dumps(row) + "\n", encoding="utf-8")
-PY
+write_intent_row "$ambiguous_repo/.oms/landings.jsonl" "$ambiguous_patch" "$ambiguous_repo" land-ambiguous
 set +e
 "$LAND" --repo "$ambiguous_repo" --recover >"$TMP/recover-ambiguous.out" 2>&1
 ambiguous_rc=$?
@@ -693,17 +624,9 @@ then
   fail "ambiguous recovery wrote a false terminal row"
 fi
 
-# Losing the frozen patch is loss of evidence, not proof that no apply
-# happened. Recovery must keep the intent outstanding for an operator instead
-# of closing it as abandoned.
 missing_repo="$TMP/missing-patch-repo"
 mkdir -p "$missing_repo/.oms"
-git -C "$missing_repo" init -q
-git -C "$missing_repo" config user.email test@example.com
-git -C "$missing_repo" config user.name test
-printf 'base\n' > "$missing_repo/file.txt"
-git -C "$missing_repo" add file.txt
-git -C "$missing_repo" commit -qm base
+init_base_repo "$missing_repo"
 printf '%s\n' \
   '{"schema":1,"ts":"2026-08-09T00:00:00Z","landing_id":"land-missing","event":"intent","patch":"/definitely/missing.patch","patch_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' \
   > "$missing_repo/.oms/landings.jsonl"
@@ -718,44 +641,14 @@ if grep -Eq '"event": ?"(complete|abandoned)"' "$missing_repo/.oms/landings.json
   fail "missing frozen bytes produced a false terminal landing"
 fi
 
-# Terminal rows are appendable evidence, not authority. A provider can append a
-# minimal row to shared JSONL, so a forged `complete` must not hide an unapplied
-# intent and a forged `abandoned` must not hide an applied one. Recovery must
-# converge the external tree/lineage state, append the correct terminal result,
-# and become idempotent rather than growing the journal on every retry.
 forged_unapplied_repo="$TMP/forged-unapplied-repo"
 mkdir -p "$forged_unapplied_repo/.oms/landing-patches"
-git -C "$forged_unapplied_repo" init -q
-git -C "$forged_unapplied_repo" config user.email test@example.com
-git -C "$forged_unapplied_repo" config user.name test
-printf 'base\n' > "$forged_unapplied_repo/file.txt"
-git -C "$forged_unapplied_repo" add file.txt
-git -C "$forged_unapplied_repo" commit -qm base
+init_base_repo "$forged_unapplied_repo"
 forged_unapplied_patch="$forged_unapplied_repo/.oms/landing-patches/land-forged-unapplied.patch"
 printf 'changed\n' > "$forged_unapplied_repo/file.txt"
 git -C "$forged_unapplied_repo" diff --binary > "$forged_unapplied_patch"
 git -C "$forged_unapplied_repo" restore file.txt
-python3 - "$forged_unapplied_repo/.oms/landings.jsonl" \
-  "$forged_unapplied_patch" "$forged_unapplied_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-intent = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-forged-unapplied",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-}
-with open(path, "w", encoding="utf-8") as handle:
-    handle.write(json.dumps(intent) + "\n")
-    handle.write(json.dumps({
-        "landing_id": "land-forged-unapplied", "event": "complete",
-    }) + "\n")
-PY
+write_intent_row "$forged_unapplied_repo/.oms/landings.jsonl" "$forged_unapplied_patch" "$forged_unapplied_repo" land-forged-unapplied complete
 "$LAND" --repo "$forged_unapplied_repo" --recover \
   >"$TMP/recover-forged-unapplied.out" 2>&1 ||
   fail "forged complete prevented unapplied recovery"
@@ -775,37 +668,12 @@ forged_unapplied_lines="$(wc -l < "$forged_unapplied_repo/.oms/landings.jsonl" |
 
 forged_applied_repo="$TMP/forged-applied-repo"
 mkdir -p "$forged_applied_repo/.oms/landing-patches"
-git -C "$forged_applied_repo" init -q
-git -C "$forged_applied_repo" config user.email test@example.com
-git -C "$forged_applied_repo" config user.name test
-printf 'base\n' > "$forged_applied_repo/file.txt"
-git -C "$forged_applied_repo" add file.txt
-git -C "$forged_applied_repo" commit -qm base
+init_base_repo "$forged_applied_repo"
 forged_applied_patch="$forged_applied_repo/.oms/landing-patches/land-forged-applied.patch"
 printf 'changed\n' > "$forged_applied_repo/file.txt"
 git -C "$forged_applied_repo" diff --binary > "$forged_applied_patch"
 git -C "$forged_applied_repo" restore file.txt
-python3 - "$forged_applied_repo/.oms/landings.jsonl" \
-  "$forged_applied_patch" "$forged_applied_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-intent = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-forged-applied",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-}
-with open(path, "w", encoding="utf-8") as handle:
-    handle.write(json.dumps(intent) + "\n")
-    handle.write(json.dumps({
-        "landing_id": "land-forged-applied", "event": "abandoned",
-    }) + "\n")
-PY
+write_intent_row "$forged_applied_repo/.oms/landings.jsonl" "$forged_applied_patch" "$forged_applied_repo" land-forged-applied abandoned
 git -C "$forged_applied_repo" apply --binary "$forged_applied_patch"
 "$LAND" --repo "$forged_applied_repo" --recover \
   >"$TMP/recover-forged-applied.out" 2>&1 ||
@@ -826,18 +694,9 @@ forged_applied_lines="$(wc -l < "$forged_applied_repo/.oms/landings.jsonl" | tr 
 [ "$(wc -l < "$forged_applied_repo/.oms/landings.jsonl" | tr -d ' ')" = "$forged_applied_lines" ] ||
   fail "converged applied recovery kept appending terminal rows"
 
-# Reverse-apply proves only that the bytes are currently present. If HEAD moved
-# after an intent was recorded, a different commit may have introduced those
-# same bytes. An open intent must not claim that commit as OMS lineage or append
-# a terminal receipt; only an exact historical terminal may survive base drift.
 base_drift_repo="$TMP/base-drift-repo"
 mkdir -p "$base_drift_repo/.oms/landing-patches"
-git -C "$base_drift_repo" init -q
-git -C "$base_drift_repo" config user.email test@example.com
-git -C "$base_drift_repo" config user.name test
-printf 'base\n' > "$base_drift_repo/file.txt"
-git -C "$base_drift_repo" add file.txt
-git -C "$base_drift_repo" commit -qm base
+init_base_repo "$base_drift_repo"
 base_drift_base="$(git -C "$base_drift_repo" rev-parse HEAD)"
 base_drift_patch="$base_drift_repo/.oms/landing-patches/land-base-drift.patch"
 printf 'same bytes from another commit\n' > "$base_drift_repo/file.txt"
@@ -903,18 +762,8 @@ if index.exists():
 PY
   fail "base-drift recovery wrote false lineage or a terminal receipt"
 
-# Once a complete terminal is bound to its full intent, durable lineage is the
-# historical proof. A later commit may overlap the same hunk so neither current
-# forward nor reverse apply works; that must not reopen an already completed
-# landing transaction.
 historical_complete_repo="$TMP/historical-complete-repo"
-mkdir -p "$historical_complete_repo"
-git -C "$historical_complete_repo" init -q
-git -C "$historical_complete_repo" config user.email test@example.com
-git -C "$historical_complete_repo" config user.name test
-printf 'base\n' > "$historical_complete_repo/file.txt"
-git -C "$historical_complete_repo" add file.txt
-git -C "$historical_complete_repo" commit -qm base
+init_base_repo "$historical_complete_repo"
 historical_complete_patch="$TMP/historical-complete.patch"
 printf 'first landing\n' > "$historical_complete_repo/file.txt"
 git -C "$historical_complete_repo" diff --binary > "$historical_complete_patch"
@@ -935,40 +784,14 @@ grep -Fq 'already complete' "$TMP/recover-historical-complete.out" ||
 [ "$(wc -l < "$historical_complete_repo/.oms/landings.jsonl" | tr -d ' ')" = "$historical_complete_lines" ] ||
   fail "historical complete recovery appended another terminal row"
 
-# A known-unapplied patch is not fully recovered until its approval and plan
-# receipts are reconciled. If the approval record cannot be read/finalized,
-# keep the intent retryable rather than hiding the broken receipt behind an
-# abandoned terminal row.
 receipt_repo="$TMP/receipt-failure-repo"
 mkdir -p "$receipt_repo/.oms/landing-patches"
-git -C "$receipt_repo" init -q
-git -C "$receipt_repo" config user.email test@example.com
-git -C "$receipt_repo" config user.name test
-printf 'base\n' > "$receipt_repo/file.txt"
-git -C "$receipt_repo" add file.txt
-git -C "$receipt_repo" commit -qm base
+init_base_repo "$receipt_repo"
 receipt_patch="$receipt_repo/.oms/landing-patches/land-receipt-failure.patch"
 printf 'changed\n' > "$receipt_repo/file.txt"
 git -C "$receipt_repo" diff --binary > "$receipt_patch"
 git -C "$receipt_repo" restore file.txt
-python3 - "$receipt_repo/.oms/landings.jsonl" "$receipt_patch" "$receipt_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-row = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-receipt-failure",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-    "approval": "apr_missing",
-    "approval_version": "3",
-}
-pathlib.Path(path).write_text(json.dumps(row) + "\n", encoding="utf-8")
-PY
+write_intent_row "$receipt_repo/.oms/landings.jsonl" "$receipt_patch" "$receipt_repo" land-receipt-failure approval
 set +e
 "$LAND" --repo "$receipt_repo" --recover >"$TMP/recover-receipt.out" 2>&1
 receipt_rc=$?
@@ -982,37 +805,14 @@ grep -Fq '"event": "not-applied-pending-receipt"' "$receipt_repo/.oms/landings.j
 "$ROOT/scripts/run.sh" validate --dir "$receipt_repo/.oms" >/dev/null ||
   fail "state validator rejected a retryable not-applied landing receipt"
 
-# A crash can happen after the lineage append and before the terminal landing
-# receipt. Recovery must recognize that exact frozen patch row and avoid
-# appending a second successful lineage event.
 dedupe_repo="$TMP/lineage-dedupe-repo"
 mkdir -p "$dedupe_repo/.oms/landing-patches"
-git -C "$dedupe_repo" init -q
-git -C "$dedupe_repo" config user.email test@example.com
-git -C "$dedupe_repo" config user.name test
-printf 'base\n' > "$dedupe_repo/file.txt"
-git -C "$dedupe_repo" add file.txt
-git -C "$dedupe_repo" commit -qm base
+init_base_repo "$dedupe_repo"
 dedupe_patch="$dedupe_repo/.oms/landing-patches/land-lineage-dedupe.patch"
 printf 'changed\n' > "$dedupe_repo/file.txt"
 git -C "$dedupe_repo" diff --binary > "$dedupe_patch"
 git -C "$dedupe_repo" restore file.txt
-python3 - "$dedupe_repo/.oms/landings.jsonl" "$dedupe_patch" "$dedupe_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-row = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-lineage-dedupe",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-}
-pathlib.Path(path).write_text(json.dumps(row) + "\n", encoding="utf-8")
-PY
+write_intent_row "$dedupe_repo/.oms/landings.jsonl" "$dedupe_patch" "$dedupe_repo" land-lineage-dedupe
 git -C "$dedupe_repo" apply --binary "$dedupe_patch"
 (
   . "$ROOT/scripts/lib/peer-common.sh"
@@ -1023,37 +823,14 @@ git -C "$dedupe_repo" apply --binary "$dedupe_patch"
 [ "$(grep -c '"kind": "patch-land"' "$dedupe_repo/.oms/artifacts/index.jsonl")" = 1 ] ||
   fail "recovery duplicated an existing exact patch-land lineage row"
 
-# A corrupt artifact index could hide the exact receipt recovery is looking
-# for. Do not append beside unknown state and call the landing complete.
 corrupt_index_repo="$TMP/corrupt-index-recovery-repo"
 mkdir -p "$corrupt_index_repo/.oms/landing-patches" "$corrupt_index_repo/.oms/artifacts"
-git -C "$corrupt_index_repo" init -q
-git -C "$corrupt_index_repo" config user.email test@example.com
-git -C "$corrupt_index_repo" config user.name test
-printf 'base\n' > "$corrupt_index_repo/file.txt"
-git -C "$corrupt_index_repo" add file.txt
-git -C "$corrupt_index_repo" commit -qm base
+init_base_repo "$corrupt_index_repo"
 corrupt_index_patch="$corrupt_index_repo/.oms/landing-patches/land-corrupt-index.patch"
 printf 'changed\n' > "$corrupt_index_repo/file.txt"
 git -C "$corrupt_index_repo" diff --binary > "$corrupt_index_patch"
 git -C "$corrupt_index_repo" restore file.txt
-python3 - "$corrupt_index_repo/.oms/landings.jsonl" "$corrupt_index_patch" \
-  "$corrupt_index_repo" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
-path, patch, repo = sys.argv[1:]
-row = {
-    "schema": 1,
-    "ts": "2026-08-09T00:00:00Z",
-    "landing_id": "land-corrupt-index",
-    "event": "intent",
-    "patch": patch,
-    "patch_sha": hashlib.sha256(pathlib.Path(patch).read_bytes()).hexdigest(),
-    "base_sha": subprocess.check_output(
-        ["git", "-C", repo, "rev-parse", "HEAD"], text=True
-    ).strip(),
-}
-pathlib.Path(path).write_text(json.dumps(row) + "\n", encoding="utf-8")
-PY
+write_intent_row "$corrupt_index_repo/.oms/landings.jsonl" "$corrupt_index_patch" "$corrupt_index_repo" land-corrupt-index
 git -C "$corrupt_index_repo" apply --binary "$corrupt_index_patch"
 printf 'not-json\n' > "$corrupt_index_repo/.oms/artifacts/index.jsonl"
 set +e
@@ -1067,20 +844,10 @@ fi
 [ "$(cat "$corrupt_index_repo/.oms/artifacts/index.jsonl")" = not-json ] ||
   fail "recovery appended beside a corrupt lineage index"
 
-# A same-lease repair can publish a new reviewed receipt while the old patch is
-# still inside its admission verifier. The final review -> landing transition
-# must compare-and-set the exact receipt that admission checked; otherwise the
-# old patch can land over the newer review simply because its lease did not
-# change. A rejected stale fence must preserve the replacement review.
 receipt_cas_repo="$TMP/plan-receipt-cas-repo"
 receipt_cas_barrier="$TMP/plan-receipt-cas-barrier"
-mkdir -p "$receipt_cas_repo" "$receipt_cas_barrier"
-git -C "$receipt_cas_repo" init -q
-git -C "$receipt_cas_repo" config user.email test@example.com
-git -C "$receipt_cas_repo" config user.name test
-printf 'base\n' > "$receipt_cas_repo/file.txt"
-git -C "$receipt_cas_repo" add file.txt
-git -C "$receipt_cas_repo" commit -qm base
+mkdir -p "$receipt_cas_barrier"
+init_base_repo "$receipt_cas_repo"
 receipt_cas_patch_a="$TMP/plan-receipt-cas-a.patch"
 receipt_cas_patch_b="$TMP/plan-receipt-cas-b.patch"
 receipt_cas_artifact_a="$TMP/plan-receipt-cas-a.md"
@@ -1389,21 +1156,17 @@ git -C "$receipt_cas_repo" apply --binary "$receipt_cas_patch_b"
   fail "same-byte superseding landing receipt did not converge"
 "$PLAN" --repo "$receipt_cas_repo" show --id t1 \
   > "$TMP/plan-receipt-cas-superseded-landing-task.json"
-python3 - "$TMP/plan-receipt-cas-newer-landing-task.json" \
-  "$TMP/plan-receipt-cas-superseded-landing-task.json" \
-  "$receipt_cas_repo/.oms/landings.jsonl" \
-  "$receipt_cas_repo/.oms/artifacts/index.jsonl" \
-  "$receipt_cas_stale_landing_patch" "$receipt_cas_repo" <<'PY' ||
+assert_superseded_stale() {
+  python3 - "$@" <<'PY'
 import hashlib, json, pathlib, sys
-
-before_path, after_path, landings_path, index_path, stale_patch, repo = sys.argv[1:]
+before_path, after_path, landings_path, index_path, stale_patch, repo, lid, reason = sys.argv[1:]
 before = json.load(open(before_path, encoding="utf-8"))
 after = json.load(open(after_path, encoding="utf-8"))
 assert after == before, (before, after)
 rows = [json.loads(line) for line in open(landings_path, encoding="utf-8") if line.strip()]
-stale = [row for row in rows if row.get("landing_id") == "land-stale-same-bytes-landing"]
+stale = [row for row in rows if row.get("landing_id") == lid]
 assert [row.get("event") for row in stale] == ["intent", "abandoned"], stale
-assert stale[-1].get("reason") == "superseded-landing", stale[-1]
+assert stale[-1].get("reason") == reason, stale[-1]
 fields = (
     "landing_id", "patch", "patch_sha", "base_sha", "task", "lease",
     "plan_receipt_sha", "plan_done_receipt_sha", "approval", "approval_version",
@@ -1422,6 +1185,13 @@ if index.exists():
                    str(pathlib.Path(stale_patch).relative_to(pathlib.Path(repo)))
                    for row in lineage), lineage
 PY
+}
+assert_superseded_stale "$TMP/plan-receipt-cas-newer-landing-task.json" \
+  "$TMP/plan-receipt-cas-superseded-landing-task.json" \
+  "$receipt_cas_repo/.oms/landings.jsonl" \
+  "$receipt_cas_repo/.oms/artifacts/index.jsonl" \
+  "$receipt_cas_stale_landing_patch" "$receipt_cas_repo" \
+  land-stale-same-bytes-landing superseded-landing ||
   fail "stale same-byte intent rewrote B or minted A lineage/terminal authority"
 receipt_cas_landing_lines="$(wc -l < "$receipt_cas_repo/.oms/landings.jsonl" | tr -d ' ')"
 "$LAND" --repo "$receipt_cas_repo" --recover \
@@ -1496,39 +1266,12 @@ PY
   fail "superseding done receipt did not close stale same-lease intents"
 "$PLAN" --repo "$receipt_cas_repo" show --id t1 \
   > "$TMP/plan-receipt-cas-done-b-after.json"
-python3 - "$TMP/plan-receipt-cas-done-b.json" \
+assert_superseded_stale "$TMP/plan-receipt-cas-done-b.json" \
   "$TMP/plan-receipt-cas-done-b-after.json" \
   "$receipt_cas_repo/.oms/landings.jsonl" \
   "$receipt_cas_repo/.oms/artifacts/index.jsonl" \
-  "$receipt_cas_stale_done_patch" "$receipt_cas_repo" <<'PY' ||
-import hashlib, json, pathlib, sys
-
-before_path, after_path, landings_path, index_path, stale_patch, repo = sys.argv[1:]
-before = json.load(open(before_path, encoding="utf-8"))
-after = json.load(open(after_path, encoding="utf-8"))
-assert after == before, (before, after)
-rows = [json.loads(line) for line in open(landings_path, encoding="utf-8") if line.strip()]
-stale = [row for row in rows if row.get("landing_id") == "land-stale-same-bytes-done"]
-assert [row.get("event") for row in stale] == ["intent", "abandoned"], stale
-assert stale[-1].get("reason") == "superseded-done", stale[-1]
-fields = (
-    "landing_id", "patch", "patch_sha", "base_sha", "task", "lease",
-    "plan_receipt_sha", "plan_done_receipt_sha", "approval", "approval_version",
-)
-canonical = {"schema": 1}
-canonical.update({name: stale[0].get(name, "") for name in fields})
-digest = hashlib.sha256(json.dumps(
-    canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-).encode()).hexdigest()
-assert stale[-1].get("receipt_sha") == digest, stale[-1]
-index = pathlib.Path(index_path)
-if index.exists():
-    lineage = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines()
-               if line.strip()]
-    assert not any(row.get("kind") == "patch-land" and row.get("patch") ==
-                   str(pathlib.Path(stale_patch).relative_to(pathlib.Path(repo)))
-                   for row in lineage), lineage
-PY
+  "$receipt_cas_stale_done_patch" "$receipt_cas_repo" \
+  land-stale-same-bytes-done superseded-done ||
   fail "superseding done recovery changed B or forged A lineage/terminal authority"
 
 # Exact abandoned terminals plus the durable superseding plan outcome remain
@@ -1547,13 +1290,7 @@ git -C "$receipt_cas_repo" commit -qm 'overlap abandoned patches'
 # durable intent must exist before the final review -> landing fence, so a
 # crash or failed fence never leaves an unexplained task stuck in `landing`.
 fence_repo="$TMP/plan-fence-repo"
-mkdir -p "$fence_repo"
-git -C "$fence_repo" init -q
-git -C "$fence_repo" config user.email test@example.com
-git -C "$fence_repo" config user.name test
-printf 'base\n' > "$fence_repo/file.txt"
-git -C "$fence_repo" add file.txt
-git -C "$fence_repo" commit -qm base
+init_base_repo "$fence_repo"
 fence_patch="$TMP/plan-fence.patch"
 fence_artifact="$TMP/plan-fence.md"
 printf 'changed\n' > "$fence_repo/file.txt"
@@ -1594,13 +1331,7 @@ PY
 lineage_swap_repo="$TMP/patch-land-lineage-swap-repo"
 lineage_swap_patch="$TMP/patch-land-lineage-swap.patch"
 lineage_swap_artifact="$TMP/patch-land-lineage-swap.md"
-mkdir -p "$lineage_swap_repo"
-git -C "$lineage_swap_repo" init -q
-git -C "$lineage_swap_repo" config user.email test@example.com
-git -C "$lineage_swap_repo" config user.name test
-printf 'base\n' > "$lineage_swap_repo/file.txt"
-git -C "$lineage_swap_repo" add file.txt
-git -C "$lineage_swap_repo" commit -qm base
+init_base_repo "$lineage_swap_repo"
 printf 'lineage landed\n' > "$lineage_swap_repo/file.txt"
 git -C "$lineage_swap_repo" diff --binary > "$lineage_swap_patch"
 git -C "$lineage_swap_repo" restore file.txt

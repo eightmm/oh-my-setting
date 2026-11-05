@@ -152,9 +152,6 @@ fi
 
 LAND_DIR="$(oms_land_state_dir "$REPO")" ||
   { echo "error: cannot resolve land state directory" >&2; exit 2; }
-# Gate output and receipts share an XDG state directory. A gate purity check
-# inventories .oms, so neither can live in the checkout.
-LOG_DIR="$LAND_DIR"
 
 # rset KEY=VALUE... merges fields into the receipt; dotted keys nest one
 # level, integers stay integers.
@@ -522,7 +519,7 @@ run_job() {
   }
   cd "$REPO"
   mkdir -p "$LAND_DIR"
-  RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LOG_DIR/$STAMP.log"
+  RECEIPT="$LAND_DIR/$STAMP.json" LOG="$LAND_DIR/$STAMP.log"
   SHA="$(git rev-parse HEAD)" SHORT="${SHA:0:7}"
   [ "$STAMP" = "$(request_stamp "$SHA")" ] || {
     note "error: HEAD or destination changed before job started"; return 1;
@@ -762,8 +759,6 @@ run_job() {
       finish passed "pushed $SHORT; ci $conclusion; install needs a full gate or a full-selection CI run: oms land --gate 'bash scripts/check.sh --parallel'"
       return $?
     fi
-  fi
-  if [ "$UPDATE" -eq 1 ] && [ -n "${install:-}" ]; then
     if [ "$conclusion" != success ]; then
       finish blocked "pushed $SHORT; install update requires successful CI (ci $conclusion)"
       return 1
@@ -981,21 +976,10 @@ case "$MODE" in
   job)
     if [ -n "$READY_FILE" ]; then
       printf 'waiting\n' > "$READY_FILE"
-      # A detached launcher can distinguish lock waiting from a failed start.
-      # The EXIT fallback covers signals before run_job writes its admission result.
       trap land_ready_exit EXIT
     fi
     rc=0
     oms_with_file_lock "$LAND_DIR/active" run_job_with_holder || rc=$?
-    if [ -n "$READY_FILE" ] && [ -f "$READY_FILE" ]; then
-      ready_state=""
-      IFS= read -r ready_state < "$READY_FILE" || true
-    else
-      ready_state=""
-    fi
-    if [ "$ready_state" = waiting ]; then
-      printf '%s\n' "$rc" > "$READY_FILE"
-    fi
     [ "$rc" -ne 75 ] || echo "land already active for this repository; use land status" >&2
     exit "$rc"
     ;;

@@ -1,7 +1,8 @@
 # Salvage captures raw checkout bytes with a private index/config and owner-only admission.
 import contextlib
-import shutil
+import panel_dispatch
 import panel_salvage
+import terminal_panel
 from room_repository import harness_residue_parent
 
 for residue, child in (('oh-my-setting-delegate.fixture', 'wt'),
@@ -374,8 +375,6 @@ with patch.dict(os.environ, salvage_env), patch.object(panel_results, '_query', 
             scratch_record['artifact_sha256'] = hashlib.sha256(original_log).hexdigest()
             scratch_attempt['refs']['panel_location'] = original_location
         # A valid empty receipt resumes, but later provenance invalidates it.
-        import panel_dispatch
-        import terminal_panel
         continuation_brief = temporary / 'empty-salvage-brief.md'
         continuation_brief.write_text('Continue safely.\n')
         parent = {'attempt_id': 'empty-parent', 'terminal': False, 'refs': {}}
@@ -739,8 +738,6 @@ subprocess.run(['git', '-C', str(clean_tree), '-c', 'user.email=test@example.com
                 'commit', '-q', '--allow-empty', '-m', 'empty worker commit'], check=True)
 assert drop_clean() == [], 'an empty worker commit changed the clean outcome'
 # --continue stays refused after salvaging a dirty kept worktree; the refusal names the salvage patch.
-import panel_dispatch
-import terminal_panel
 dirty_brief = temporary / 'dirty-salvage-brief.md'
 dirty_brief.write_text('Continue safely.\n')
 dirty_parent = {'attempt_id': 'dirty-parent', 'terminal': False, 'refs': {}}

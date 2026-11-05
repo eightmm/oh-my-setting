@@ -17,14 +17,15 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from oms_runtime.common import CoreError, bounded_line, install_root, parse_path_list, run_json, safe_id
+from oms_runtime.common import CoreError, bounded_line, parse_path_list, run_json, safe_id
 from oms_runtime.evidence import artifact_rows
 
 from .. import AGENT_MODES
 from .. import binding
 from .. import predicates
+from ..capabilities import _script
 from ..errors import GraphError
 
 # A bare `next` is a read (the plan marks it PLAN_READ_ONLY and mints no
@@ -38,10 +39,6 @@ MAX_REPAIR_ROUNDS = 3
 NO_ACTIONABLE_EXIT = 3
 PEEK_TIMEOUT = 60
 TAIL_LIMIT = 2000
-
-
-def _script(name: str) -> str:
-    return str(install_root() / "scripts" / name)
 
 
 def _plan_argv(repo: Path, verb: str, *args: str) -> List[str]:
@@ -78,13 +75,6 @@ def peek_next_task(repo: Path) -> Optional[Dict[str, Any]]:
         raise GraphError("agent-plan next returned no task id")
     _task_id(payload.get("id"))
     return dict(payload)
-
-
-def plan_status(repo: Path) -> Dict[str, Any]:
-    payload = run_json(_plan_argv(repo, "status", "--json"), cwd=repo)
-    if payload is None:
-        raise GraphError("agent-plan status is unavailable for this repository")
-    return payload
 
 
 def task_view(repo: Path, task_id: str) -> Dict[str, Any]:

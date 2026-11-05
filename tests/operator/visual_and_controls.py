@@ -125,7 +125,7 @@ for mode in ("tree", "summary", "list", "compact", "detail"):
 # PANEL_VISUAL_TOKENS_END
 
 # Judge bands use bounded, cached artifact judgments rather than command exits.
-from panel_view import judgment_tag, judge_band, _JUDGMENTS, ROLE_COLORS
+from panel_view import judgment_tag, judge_band, _JUDGMENTS
 import time as judgment_clock
 from copy import deepcopy
 assert judge_band("worker", "verifier") == "gate" and judge_band("researcher") == "counsel"
@@ -238,7 +238,7 @@ assert len(capture.splitlines()) == 30 and capture.isascii(), capture
 (temporary / "judge-board-ascii.txt").write_text(capture + "\n")
 
 # Ending names come from typed result/lifecycle evidence, including a successful worker whose verification failed.
-from panel_view import call_ending, ending_tag, call_tone, attention_header
+from panel_view import call_ending, call_tone
 from room_view import execution_tag, end_words, call_classifier, session_log, past_body, past_calls
 wrapped_past_call = {"participant": "past-wrap", "role": "worker", "model": "gpt-6-luna",
                      "title": "A very long task title that should wrap below its text column",
@@ -392,7 +392,6 @@ title = "작업 내용을 여러 줄로 읽기 쉽게 보여 주고 모델별 �
 parts = wrapped(title, 28, 4)
 assert len(parts) > 1 and all(display_width(line) <= 28 for line in parts), parts
 assert "..." not in " ".join(parts), parts
-from copy import deepcopy
 live = deepcopy(view)
 live["attempts"]["recent"] = []
 live["attempts"]["active_recent"] = [{"attempt_id": "att_display_live", "parent_attempt_id": "att_main",
@@ -405,7 +404,7 @@ assert first != second and "[⟳ running]" in first, first
 assert "worktree example/wt" in render(live, "codex", 100, 60, navigation={"selected": ("result", "att_display_live")})
 # Display hierarchy follows explicit ownership; generic parent links are not
 # native-main relationships. Compact and attention views never alter records.
-from panel_view import hierarchy, worker_rows, render_results
+from panel_view import hierarchy, worker_rows
 tree = deepcopy(live)
 tree["attempts"]["active_recent"] = [
     {"attempt_id": "att_main", "state": "working", "provider": "codex", "tool": "panel-main",
@@ -475,10 +474,8 @@ with tempfile.TemporaryDirectory() as synthesis_dir:
     assert panel_debate.read(synthesis_dir, None, synthesis_report)["synthesis"]["text"] == ""
 # END debate_synthesis_prefix
 import panel_messages
-import panel_chats
 import room_view
 from panel_input import TerminalInput, choose
-from unittest.mock import patch
 from terminal_panel import tab_event
 assert panel_debate._sentence("I'm keeping (a), the `!` marker is cheaper. More.") == "I'm keeping (a), the `!` marker is cheaper."
 assert panel_debate._sentence('He said "stop! now" ok. More') == 'He said "stop! now" ok.'
@@ -919,7 +916,6 @@ assert len(panel_messages.readable_text("x" * (panel_messages.MAX_TEXT + 1))) ==
 assert msg_report == before and msg_log[-1]["text"].startswith("line 29"), "reading changed the report or log"
 # Unread totals use the full pending projection, independent of the loaded message window.
 import room
-from unittest.mock import patch
 from room_view import live_unread, nodes, settler
 def pending_projection(count, consumed=0):
     rows = [{"thread": "r", "text": "T", "seq": 0, "room_event": {"kind": "created"}}]
@@ -990,7 +986,7 @@ for count, expected in ((500, 500), (501, "500+")):
     assert "Messages %s" % expected not in capped_board and not panel_messages.needs_main(capped), capped_board
     assert need_you_numbers(capped, capped_board)[0] == need_you_numbers(capped, capped_board)[1], capped_board
 # A single main needs questions, not worker chatter or result/assignment echoes.
-from room_view import live_readers, live_unread, nodes, settler, who
+from room_view import live_readers, who
 single = deepcopy(msg_report)
 single["attempts"] = {"active_recent": [
     {"attempt_id": "a2", "state": "working", "panel": {"room_id": "r", "room_participant": "m2", "role": "main"}},
@@ -1261,7 +1257,6 @@ last_team["attempts"]["active_recent"] += [
      "panel": {"room_id": "r", "room_participant": "last-worker-%d" % n, "role": "worker"}} for n in range(6)]
 last_team["attempts"]["recent"] = []
 from panel_view import clipped
-from dashboard_projection import use_unicode
 for glyphs in (True, False):
     use_unicode(glyphs)
     folded_nav = {}
@@ -1819,7 +1814,6 @@ for width, height in ((100, 32), (42, 34), (24, 18), (12, 10), (2, 8)):
 # Frames use one cached snapshot. --count still counts collections, and resize
 # triggers one complete redraw rather than leaving stale lines in the pane.
 import io
-from unittest.mock import patch
 with patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "0", "OMS_CLAUDE_NOTIFY": "0"}, clear=True):
     assert "OMS_CLAUDE_NOTIFY=0" in panel.panel_environment()
 for mode in ("animated", "static", "environment", "interrupt"):
@@ -2024,13 +2018,11 @@ with patch.object(panel.sys, "stdout", io.StringIO()) as output:
     panel.draw_frame("first\nchanged", (42, 34), True, last)
     panel.draw_frame("small", (24, 18), True, last)
     assert output.getvalue().count("\033[2J") == 2 and "\033[2;1H\033[2Kchanged" in output.getvalue()
-from unittest.mock import patch
 with patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 5)):
     assert panel.pane_option("@oms_panel_view") == ""
 # A failed collection remains visible and the same watcher recovers on its next
 # refresh. Invalid window selection must not display another room as selected.
 import thread_live
-import room
 for failure in (([], 0), subprocess.TimeoutExpired("dashboard", 5)):
     clock = [0.0]
     responses = [failure, (live, 0)]

@@ -1403,15 +1403,7 @@ if [ "$CONTEXT_MANIFEST" -eq 1 ]; then
     --bundle "$context_bundle_file")
   first_allowed=""
   if [ -n "$PLAN_TASK_ID" ]; then
-    first_allowed="$(printf '%s' "$PLAN_JSON" | python3 -c '
-import json, sys
-try:
-    row = json.load(sys.stdin)
-except ValueError:
-    row = {}
-paths = row.get("allowed_paths") or []
-print(paths[0] if paths else "")
-' | tr -d '\r')"
+    first_allowed="$(printf '%s' "$PLAN_JSON" | python3 -c 'import json,sys; p=(json.load(sys.stdin).get("allowed_paths") or [""]); print(p[0])' 2>/dev/null | tr -d '\r' || true)"
   fi
   # Every direct target is required in the bundle: the task's own first
   # allowed path first, then the pack's files — the pack says where to look,
@@ -2204,59 +2196,6 @@ run_verify() {
   fi
 }
 
-# Repair brief: the original task plus the failure evidence, addressed to the
-# same worker continuing in the same worktree.
-write_repair_prompt() {
-  local output="$1"
-  local patch_bytes=0
-  [ -z "$patch_file" ] || patch_bytes="$(LC_ALL=C wc -c < "$patch_file" | tr -d ' ')"
-
-  {
-    printf 'You are %s, a delegated worker agent, continuing your own previous attempt.\n' "$TO"
-    printf 'Work only inside the current directory; it is the same isolated git worktree and it still contains your changes.\n'
-    printf 'Your previous attempt did not pass. Fix it in place; do not start over unless necessary.\n'
-    printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
-    write_unattended_stop_rule
-    printf 'Do not run git commit, git push, or change git config.\n'
-    printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n'
-    write_minimal_change_doctrine
-    printf '\n'
-    if [ -n "$role_file" ]; then
-      printf '## Role\n\n'; cat "$role_file"; printf '\n\n'
-    fi
-    printf '## Original Brief\n\n'
-    if [ -n "$BRIEF_FILE" ]; then
-      cat "$BRIEF_FILE"
-    else
-      printf '%s\n' "$PROMPT"
-    fi
-    write_context_pack_section
-    write_compiled_context
-    if [ "$worker_status" -ne 0 ]; then
-      printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
-    fi
-    printf '\n## Your Previous Patch (captured, not accepted yet)\n\n'
-    if [ -z "$patch_file" ]; then
-      printf 'None (read-only report).\n'
-    elif [ "$patch_bytes" -le 4096 ]; then
-      quote_head "$patch_file" 4096 "previous patch"
-    else
-      printf 'The %s-byte patch is already staged in this worktree; its body is not repeated here.\n' "$patch_bytes"
-      printf 'Inspect current files and git diff --cached --no-ext-diff --no-textconv --stat, then the relevant path-scoped diff. Preserve unrelated changes.\n'
-    fi
-    if [ -n "$VERIFY_CMD" ] && [ "$verify_status" -ne 0 ]; then
-      timeout_note="$(ma_verify_timeout_note "$verify_status")"
-      printf '\n## Failing Verification\n\n- command: %s\n- exit: %s%s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status" "${timeout_note:+ — $timeout_note}"
-      quote_tail "$verify_out" 4000 "verification output"
-      printf '\n'
-    fi
-    if [ -n "$VERIFY_CMD" ]; then
-      printf '\nAfter you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
-    fi
-    printf '\nWhen done, report What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
-  } > "$output"
-}
-
 worker_status=0
 worker_attempt_id=""
 worker_attempt_owned=0
@@ -2723,7 +2662,54 @@ if [ "$DRY_RUN" != "1" ]; then
       break
     fi
     repair_used=$((repair_used + 1))
-    write_repair_prompt "$repair_prompt_file"
+    # Repair brief: the original task plus the failure evidence, addressed to
+    # the same worker continuing in the same worktree.
+    patch_bytes=0
+    [ -z "$patch_file" ] || patch_bytes="$(LC_ALL=C wc -c < "$patch_file" | tr -d ' ')"
+    {
+      printf 'You are %s, a delegated worker agent, continuing your own previous attempt.\n' "$TO"
+      printf 'Work only inside the current directory; it is the same isolated git worktree and it still contains your changes.\n'
+      printf 'Your previous attempt did not pass. Fix it in place; do not start over unless necessary.\n'
+      printf 'Do not ask questions. If the task is ambiguous or blocked, stop and report the blocker explicitly.\n'
+      write_unattended_stop_rule
+      printf 'Do not run git commit, git push, or change git config.\n'
+      printf 'Do not add dependencies or change the toolchain unless the brief explicitly allows it.\n'
+      write_minimal_change_doctrine
+      printf '\n'
+      if [ -n "$role_file" ]; then
+        printf '## Role\n\n'; cat "$role_file"; printf '\n\n'
+      fi
+      printf '## Original Brief\n\n'
+      if [ -n "$BRIEF_FILE" ]; then
+        cat "$BRIEF_FILE"
+      else
+        printf '%s\n' "$PROMPT"
+      fi
+      write_context_pack_section
+      write_compiled_context
+      if [ "$worker_status" -ne 0 ]; then
+        printf '\n## Previous Worker Exit\n\n- exit %s (interrupted or timed out; finish the remaining work)\n' "$worker_status"
+      fi
+      printf '\n## Your Previous Patch (captured, not accepted yet)\n\n'
+      if [ -z "$patch_file" ]; then
+        printf 'None (read-only report).\n'
+      elif [ "$patch_bytes" -le 4096 ]; then
+        quote_head "$patch_file" 4096 "previous patch"
+      else
+        printf 'The %s-byte patch is already staged in this worktree; its body is not repeated here.\n' "$patch_bytes"
+        printf 'Inspect current files and git diff --cached --no-ext-diff --no-textconv --stat, then the relevant path-scoped diff. Preserve unrelated changes.\n'
+      fi
+      if [ -n "$VERIFY_CMD" ] && [ "$verify_status" -ne 0 ]; then
+        timeout_note="$(ma_verify_timeout_note "$verify_status")"
+        printf '\n## Failing Verification\n\n- command: %s\n- exit: %s%s\n\nOutput tail:\n' "$VERIFY_CMD" "$verify_status" "${timeout_note:+ — $timeout_note}"
+        quote_tail "$verify_out" 4000 "verification output"
+        printf '\n'
+      fi
+      if [ -n "$VERIFY_CMD" ]; then
+        printf '\nAfter you return, the harness runs `%s`. Run focused checks for the behavior you changed; do not run this full command just to confirm completion. Run broader checks only when needed to diagnose a failure. Report the checks you actually ran.\n' "$VERIFY_CMD"
+      fi
+      printf '\nWhen done, report What changed, Why, Evidence, Verification (including skipped checks), Remaining uncertainty, and blockers.\n'
+    } > "$repair_prompt_file"
     [ "$repair_used" -lt 2 ] || advise_after_repeated_failure "$repair_prompt_file"
     if ! ma_validate_outbound_prompt "$repair_prompt_file"; then
       printf '\n\n## Repair %s\n\nSKIPPED: repair context contains sensitive-looking content; repair stopped.\n' "$repair_used" >> "$artifact"

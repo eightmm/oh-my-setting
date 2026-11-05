@@ -75,10 +75,6 @@ DETAIL_LIMIT = 400
 TRANSPORT_EXITS = {3: ("blocked", "no-actionable-task"), 75: ("partial", "landing-lock-held")}
 
 
-# --------------------------------------------------------------------------
-# pure helpers
-# --------------------------------------------------------------------------
-
 def alias_facts(facts: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], spec: Mapping[str, Any]) -> Dict[str, Any]:
     """Mirror the task a `plan_task: next` node resolved onto the `next` alias.
 
@@ -198,10 +194,6 @@ def _artifact_name(node_id: str, attempt: int) -> str:
     return "%s-%d.txt" % (safe or "node", attempt)
 
 
-# --------------------------------------------------------------------------
-# run state
-# --------------------------------------------------------------------------
-
 def _read_state(repo: Path, run_id: str, spec: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
     rows = events_module.read_events(repo, run_id)
     state = events_module.project(rows, spec)
@@ -246,10 +238,6 @@ def _append_outcome(repo: Path, run_id: str, node_id: str, attempt: int, record:
         fields["detail"] = "detail-withheld"
         return events_module.append_event(repo, run_id, "node_outcome", **fields)
 
-
-# --------------------------------------------------------------------------
-# task resolution: selector -> concrete identity
-# --------------------------------------------------------------------------
 
 def _candidates(route: Mapping[str, Any]) -> List[str]:
     names: List[str] = []
@@ -332,10 +320,6 @@ def _active_nodes(state: Mapping[str, Any]) -> List[str]:
                   if isinstance(value, Mapping) and value.get("status") == "active")
 
 
-# --------------------------------------------------------------------------
-# context bridge: project graph -> pack -> plan-run
-# --------------------------------------------------------------------------
-
 def prepare_context(repo: Path, node: Mapping[str, Any], node_id: str, goal: str) -> Optional[Dict[str, Any]]:
     """Build the agent node's context pack; the project graph is a regenerable
     cache, so an absent or stale graph is rebuilt here. Orientation only: the
@@ -372,10 +356,6 @@ def _context_fields(context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         return {"context": {"status": "unavailable", "reason": str(context.get("reason", ""))}}
     return {key: context[key] for key in ("project_graph_revision", "context_pack_sha256", "context_file_count")}
 
-
-# --------------------------------------------------------------------------
-# node execution (thread side: subprocesses only; no event writes)
-# --------------------------------------------------------------------------
 
 def _run_agent(repo: Path, node: Mapping[str, Any], options: Mapping[str, Any], context_pack: str) -> Dict[str, Any]:
     result = plan_adapter.execute(
@@ -506,10 +486,6 @@ def _workspace_digest(repo: Path) -> str:
     return str(fingerprint.get("digest", "")) if cache_allowed(fingerprint) else ""
 
 
-# --------------------------------------------------------------------------
-# a wave: started rows first, then concurrent work, then outcomes
-# --------------------------------------------------------------------------
-
 def _plan_node(repo: Path, run_id: str, spec: Mapping[str, Any], node_id: str, state: Mapping[str, Any],
                facts: Mapping[str, Any], options: Mapping[str, Any], resolution: Mapping[str, Any],
                wave_id: str, wave_index: int, workspace: str) -> Dict[str, Any]:
@@ -622,10 +598,6 @@ def _record_unavailable(repo: Path, run_id: str, spec: Mapping[str, Any], node_i
         "facts": proof_facts(node, facts)}, actor=RUNNER_ACTOR)
 
 
-# --------------------------------------------------------------------------
-# the step loop
-# --------------------------------------------------------------------------
-
 def _mirror_journal(repo: Path, run_id: str, status: str) -> None:
     """Best-effort Work Journal mirror; the events file stays authoritative.
 
@@ -728,10 +700,6 @@ def _loop(repo: Path, run_id: str, spec: Mapping[str, Any], options: Mapping[str
         _project_and_write(repo, run_id, spec)
     return _finish(repo, run_id, spec, route, "exhausted", "step cap of %d reached" % cap)
 
-
-# --------------------------------------------------------------------------
-# front doors
-# --------------------------------------------------------------------------
 
 def _options(worker: str, model: str, reasoning_effort: str, max_steps: Optional[int], jobs: int, goal: str) -> Dict[str, Any]:
     return {"worker": worker, "model": model, "reasoning_effort": reasoning_effort,

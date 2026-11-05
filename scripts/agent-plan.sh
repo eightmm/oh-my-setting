@@ -504,18 +504,22 @@ STATE_REPO="$(oms_state_root "$REPO")" || fail "bad --repo"
 STATE_REPO="$(cd "${STATE_REPO//$'\r'/}" && pwd -P)" || fail "cannot resolve the plan's repository"
 PLAN_FILE="${PLAN_FILE:-$STATE_REPO/.oms/plan/tasks.json}"
 PLAN_LOCK_FILE=""
+reject_sensitive_text() {  # TEXT MESSAGE
+  local scan
+  scan="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n' "$1" > "$scan"
+  if agent_memory_file_has_secret_content "$scan"; then
+    rm -f "$scan"
+    fail "$2"
+  fi
+  rm -f "$scan"
+}
 if [ "$ACTION" = cancel ] || [ "$ACTION" = amend ]; then
   [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
     fail "$ACTION is valid only for the canonical repo-local plan"
   [ -f "$PLAN_FILE" ] && [ ! -L "$PLAN_FILE" ] ||
     fail "$ACTION requires an existing regular canonical plan"
-  scan="$(mktemp)" || fail "mktemp failed"
-  printf '%s\n' "$REASON" > "$scan"
-  if agent_memory_file_has_secret_content "$scan"; then
-    rm -f "$scan"
-    fail "$ACTION reason looks sensitive; keep credentials and machine paths out of shared state"
-  fi
-  rm -f "$scan"
+  reject_sensitive_text "$REASON" "$ACTION reason looks sensitive; keep credentials and machine paths out of shared state"
 fi
 if [ -n "$PROVIDER" ]; then
   PROVIDER="$(oms_normalize_provider "$PROVIDER")" ||
@@ -597,13 +601,8 @@ case "$CLAIM_TTL" in *[!0-9]*|"") CLAIM_TTL=3600 ;; esac
 # The plan file is durable state; a credential in the goal or acceptance
 # command would persist verbatim (same contract as fail-ledger's cmd field).
 if [ -n "$GOAL$ACCEPT" ]; then
-  scan="$(mktemp)" || fail "mktemp failed"
-  printf '%s\n%s\n' "$GOAL" "$ACCEPT" > "$scan"
-  if agent_memory_file_has_secret_content "$scan"; then
-    rm -f "$scan"
-    fail "goal/acceptance text looks sensitive; pass credentials via environment, not command text"
-  fi
-  rm -f "$scan"
+  reject_sensitive_text "$GOAL"$'\n'"$ACCEPT" \
+    "goal/acceptance text looks sensitive; pass credentials via environment, not command text"
 fi
 
 if [ "$ACTION" = retire ]; then
@@ -624,13 +623,8 @@ if [ "$ACTION" = retire ]; then
   fi
   [ "${#REASON}" -le 500 ] || fail "retirement reason exceeds 500 characters"
   if [ -n "$REASON" ]; then
-    scan="$(mktemp)" || fail "mktemp failed"
-    printf '%s\n' "$REASON" > "$scan"
-    if agent_memory_file_has_secret_content "$scan"; then
-      rm -f "$scan"
-      fail "retirement reason looks sensitive; keep credentials and machine paths out of shared state"
-    fi
-    rm -f "$scan"
+    reject_sensitive_text "$REASON" \
+      "retirement reason looks sensitive; keep credentials and machine paths out of shared state"
   fi
   oms_git_assert_safe_execution_config "$REPO" ||
     fail "unsafe executable Git config is active"
@@ -720,23 +714,16 @@ export OMS_AUTOPILOT_OWNER_ID="$OWNER_ID" OMS_PLAN_MARKERS_DIR="$PY_MARKERS_DIR"
 export OMS_TASK_ASSIGNMENT="$ASSIGNMENT"
 
 plan_run() {
-  local entry
-  entry="$ROOT/scripts/lib/agent-plan-engine.py"
+  set -- "$ROOT/scripts/lib/agent-plan-engine.py" "$PROPOSAL" \
+    "$ROOT/scripts/lib/plan-receipt.py" "$ROOT/scripts/lib/verify-floor-lint.py" \
+    "$ROOT/scripts/lib/process_liveness.py" "$ROOT/scripts/lib/plan-retire.py" \
+    "$ROOT/scripts/lib/path_scope.py" "$ROOT/scripts/lib/project-state.py" \
+    "$ROOT/scripts/lib/task-assignment.py"
   if { [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ] || [ "$ACTION" = satisfy ]; } &&
      [ "${OMS_COMPLETION_PHASE:-}" != verify ]; then
-    python3 "$ROOT/scripts/lib/plan-completion.py" --locked-plan "$entry" "$PROPOSAL" \
-      "$ROOT/scripts/lib/plan-receipt.py" "$ROOT/scripts/lib/verify-floor-lint.py" \
-      "$ROOT/scripts/lib/process_liveness.py" "$ROOT/scripts/lib/plan-retire.py" \
-      "$ROOT/scripts/lib/path_scope.py" "$ROOT/scripts/lib/project-state.py" \
-      "$ROOT/scripts/lib/task-assignment.py" </dev/null
-    return $?
+    set -- "$ROOT/scripts/lib/plan-completion.py" --locked-plan "$@"
   fi
-python3 "$entry" "$PROPOSAL" "$ROOT/scripts/lib/plan-receipt.py" \
-  "$ROOT/scripts/lib/verify-floor-lint.py" \
-  "$ROOT/scripts/lib/process_liveness.py" \
-  "$ROOT/scripts/lib/plan-retire.py" \
-  "$ROOT/scripts/lib/path_scope.py" \
-  "$ROOT/scripts/lib/project-state.py" "$ROOT/scripts/lib/task-assignment.py" </dev/null
+  python3 "$@" </dev/null
 }
 
 # Retirement judges the worker-marker set and plan bytes as one authority
@@ -775,22 +762,11 @@ plan_run_with_marker_and_plan_locks() {
 if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ] || [ "$ACTION" = satisfy ]; then
   # Landings -> thread -> marker-set -> plan -> native lifecycle writer lock. No writer
   # takes these locks in reverse; the verifier holds none of them.
-  completion_state_repo="${OMS_STATE_REPO:-$REPO}"
-  completion_state_repo="$(cd "${completion_state_repo//$'\r'/}" && pwd -P)" ||
-    fail "cannot resolve completion state repository"
-  if [ "$PLAN_FILE_SET" = 0 ]; then
-    PLAN_FILE="$completion_state_repo/.oms/plan/tasks.json"
-    PY_PLAN_FILE="$(python_path_for_host "$PLAN_FILE")" || fail "cannot normalize completion plan path"
-    export OMS_PLAN_FILE="$PY_PLAN_FILE"
-  fi
-  completion_py_state_repo="$(python_path_for_host "$completion_state_repo")" ||
-    fail "cannot normalize completion state repository"
-  export OMS_STATE_REPO="$completion_py_state_repo"
   completion_room_id="${OMS_ROOM_ID:-}"
   if { [ "$ACTION" = accept-main-research ] || [ "$ACTION" = approve-main-research ]; } &&
      { [ -n "$MAIN_REVIEW_APPROVAL" ] || [ "$ACTION" = approve-main-research ] || [ -z "$completion_room_id" ]; }; then
     completion_room_id="$(python3 "$ROOT/scripts/lib/plan-completion.py" --main-review-room \
-      "$completion_py_state_repo" "$COMPLETION_BUNDLE" "$EXPECTED_COMPLETION_BUNDLE_SHA256" | tr -d '\r')" ||
+      "$PY_STATE_REPO" "$COMPLETION_BUNDLE" "$EXPECTED_COMPLETION_BUNDLE_SHA256" | tr -d '\r')" ||
       fail "cannot resolve the declared main review room"
     export OMS_ROOM_ID="$completion_room_id"
   fi
@@ -799,25 +775,21 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   else
     [[ "$completion_room_id" =~ ^room-[0-9a-f]{12}$ ]] || fail "invalid completion room identity"
   fi
-  completion_thread_parent="$(cd "$completion_state_repo/.oms/threads" && pwd -P)" ||
+  completion_thread_parent="$(cd "$STATE_REPO/.oms/threads" && pwd -P)" ||
     fail "cannot resolve completion room parent"
   completion_thread_parent="$(printf '%s' "$completion_thread_parent" | tr -d '\r')"
-  [ "$completion_thread_parent" = "$completion_state_repo/.oms/threads" ] ||
+  [ "$completion_thread_parent" = "$STATE_REPO/.oms/threads" ] ||
     fail "completion room parent must be canonical"
-  [ "$PLAN_FILE" = "$completion_state_repo/.oms/plan/tasks.json" ] ||
+  [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
     fail "completion requires the canonical active plan"
   oms_git_assert_safe_execution_config "$REPO" || fail "unsafe executable Git config is active"
   oms_git_assert_plain_index "$REPO" || fail "hidden Git index flags are active"
-  completion_run_with_marker_lock() {
-    oms_with_file_lock "$completion_state_repo/.oms/delegations/.marker-set-lock-target" \
-      plan_run_with_plan_lock
-  }
   completion_run_with_thread_lock() {
     oms_with_file_lock "$completion_thread_parent/$completion_room_id.jsonl" \
-      completion_run_with_marker_lock
+      plan_run_with_marker_and_plan_locks
   }
   completion_run_locked() {
-    oms_with_file_lock "$completion_state_repo/.oms/landings.jsonl" \
+    oms_with_file_lock "$STATE_REPO/.oms/landings.jsonl" \
       completion_run_with_thread_lock
   }
   OMS_COMPLETION_PHASE=preflight
@@ -830,11 +802,11 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
   completion_published=0
   completion_remove_pin() {
     OMS_COMPLETION_PUBLISHED="$completion_published" \
-      python3 "$ROOT/scripts/lib/plan-completion.py" --remove-pin "$completion_py_state_repo"
+      python3 "$ROOT/scripts/lib/plan-completion.py" --remove-pin "$PY_STATE_REPO"
   }
   completion_cleanup() {
     local completion_status="$?"
-    oms_with_file_lock "$completion_state_repo/.oms/plan/tasks.json" completion_remove_pin ||
+    oms_with_file_lock "$STATE_REPO/.oms/plan/tasks.json" completion_remove_pin ||
       completion_status=2
     rm -f "$completion_snapshot_file"
     exit "$completion_status"
@@ -1200,9 +1172,7 @@ PY
   # Only a run-bound row can later be reused, and only a reuse request consumes
   # one; without either, the context proof is unusable, so skip its helpers.
   reuse_context=""
-  reuse_bound=0
-  [ -z "${OMS_GOAL_RUN_ID:-}$REUSE_PASS_RUN" ] || reuse_bound=1
-  if [ "$reuse_bound" = 1 ]; then
+  if [ -n "${OMS_GOAL_RUN_ID:-}$REUSE_PASS_RUN" ]; then
     reuse_context="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" 2>/dev/null || true)"
     reuse_context="${reuse_context//$'\r'/}"
   fi
@@ -1348,7 +1318,7 @@ PY
   git_ref="$(git -C "$REPO" symbolic-ref -q HEAD 2>/dev/null || true)"
   git_ref="${git_ref//$'\r'/}"
   [ -n "$git_ref" ] || git_ref="DETACHED@$base_sha"
-  if [ "$reuse_bound" = 1 ]; then
+  if [ -n "$reuse_context" ]; then
     reuse_after="$(python3 "$ROOT/scripts/lib/acceptance-reuse.py" context "$REPO" "$0" 2>/dev/null || true)"
     reuse_after="${reuse_after//$'\r'/}"
     [ "$reuse_context" = "$reuse_after" ] || reuse_context=""

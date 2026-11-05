@@ -27,13 +27,8 @@ oms_harness_delegate_worktree_root() {
   fi
 }
 
-# Most harness scratch state is under TMPDIR. Delegated worktrees use a private
-# user-local root so provider write permission can be scoped to one stable path.
-# Keep both recovery surfaces explicit and de-duplicate the unusual case where
-# an operator points them at the same directory.
 oms_harness_temp_bases() {
-  local tmp_base
-  local delegate_root
+  local tmp_base delegate_root
 
   tmp_base="$(oms_harness_tmp_base)"
   delegate_root="$(oms_harness_delegate_worktree_root)"
@@ -43,16 +38,10 @@ oms_harness_temp_bases() {
   esac
 }
 
-# The marker's pid is the process whose life bounds the directory: the creating
-# shell by default, or an explicit OWNER_PID for a command that outlives it.
 oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
-  local dir="$1"
-  local repo="$2"
-  local worktree="$3"
-  local owner_pid="${4:-$$}"
+  local dir="$1" repo="$2" worktree="$3" owner_pid="${4:-$$}" process_start=""
 
   [ -d "$dir" ] || return 0
-  local process_start=""
   process_start="$(oms_file_lock_process_start_token "$owner_pid" 2>/dev/null || true)"
   process_start="${process_start//$'\r'/}"
   {
@@ -65,13 +54,8 @@ oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
   } > "$dir/.oh-my-setting-tmp"
 }
 
-# PID liveness alone can mistake a later process for a dead marker owner.
-# Preserve legacy markers and hosts that cannot read a start token.
 oms_harness_marker_owner_alive() {  # MARKER
-  local marker="$1"
-  local pid=""
-  local marker_start=""
-  local current_start=""
+  local marker="$1" pid="" marker_start="" current_start=""
 
   pid="$(oms_harness_read_marker_value "$marker" pid)"
   case "$pid" in ""|*[!0-9]*) return 1 ;; esac
@@ -86,23 +70,17 @@ oms_harness_marker_owner_alive() {  # MARKER
 }
 
 oms_harness_read_marker_value() {
-  local file="$1"
-  local key="$2"
-
-  sed -n "s/^$key=//p" "$file" 2>/dev/null | sed -n '1p'
+  sed -n "s/^$2=//p" "$1" 2>/dev/null | sed -n '1p'
 }
 
 oms_harness_physical_dir() {
-  local dir="$1"
-  local physical=""
+  local dir="$1" physical=""
 
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   physical="$(cd "$dir" && pwd -P)" || return 1
   printf '%s\n' "${physical//$'\r'/}"
 }
 
-# Resolve a managed checkout's residue parent without guessing from a fixed
-# child name. New names must carry the suffix of their own residue directory.
 oms_harness_residue_parent() {  # WORKTREE -> residue parent
   local worktree="$1"
   local parent="${worktree%/*}"
@@ -112,8 +90,7 @@ oms_harness_residue_parent() {  # WORKTREE -> residue parent
 
   [ -n "$suffix" ] || return 1
   case "$leaf" in
-    wt|tree) ;;
-    wt-"$suffix"|tree-"$suffix") ;;
+    wt|tree|wt-"$suffix"|tree-"$suffix") ;;
     *) return 1 ;;
   esac
   case "$parent_name" in
@@ -127,11 +104,7 @@ oms_harness_residue_parent() {  # WORKTREE -> residue parent
 }
 
 oms_harness_git_path_physical() {
-  local repo="$1"
-  local query="$2"
-  local raw=""
-  local candidate=""
-  local physical=""
+  local repo="$1" query="$2" raw="" candidate="" physical=""
 
   raw="$(git -C "$repo" rev-parse "$query" 2>/dev/null || true)"
   raw="${raw//$'\r'/}"
@@ -148,31 +121,11 @@ oms_harness_git_path_physical() {
 OMS_HARNESS_SAFE_RESIDUE_REPO=""
 OMS_HARNESS_SAFE_RESIDUE_WORKTREE=""
 
-# Resolve a marker only as evidence. The removal target itself is derived from
-# the managed residue shape and can therefore never be an arbitrary marker
-# path. Production creates delegate, admission, scratch and land-gate worktrees as
-# <residue>/wt-<suffix> and Antigravity read worktrees as <residue>/tree-<suffix>.
 oms_harness_safe_residue_worktree() {
-  local base="$1"
-  local dir="$2"
-  local marker_repo="$3"
-  local marker_worktree="$4"
-  local base_physical=""
-  local dir_physical=""
-  local relative=""
-  local child=""
-  local suffix=""
-  local leaf=""
-  local expected=""
-  local expected_physical=""
-  local marker_worktree_physical=""
-  local repo_physical=""
-  local repo_common=""
-  local worktree_common=""
-  local worktree_git_dir=""
-  local registered=""
-  local registered_physical=""
-  local found=0
+  local base="$1" dir="$2" marker_repo="$3" marker_worktree="$4"
+  local base_physical="" dir_physical="" relative="" child="" suffix="" leaf=""
+  local expected="" expected_physical="" marker_worktree_physical="" repo_physical=""
+  local repo_common="" worktree_common="" worktree_git_dir="" registered="" registered_physical="" found=0
 
   OMS_HARNESS_SAFE_RESIDUE_REPO=""
   OMS_HARNESS_SAFE_RESIDUE_WORKTREE=""
@@ -849,25 +802,12 @@ oms_harness_lock_residue_count() {
   printf '%s\n' "$count"
 }
 
-# flock-path locks are regular files, and the design never unlinks them: a
-# released flock file cannot be removed safely, because a waiter blocked on the
-# old inode and a new arrival creating a fresh one would both hold the lock.
-# They are therefore permanent by construction. Counting them anyway, because
-# the residue scan above only sees mkdir-path directories — on this machine that
-# meant reporting 0 while 12k files sat there, which reads as "nothing to clean"
-# rather than "this kind is not cleanable". Growth is bounded by the number of
-# distinct state-file paths ever locked; a run that leaks its lock dir into a
-# real HOME (a test without OMS_LOCK_DIR) is what makes that number large.
+# flock-path locks are regular files that cannot be unlinked safely; count them separately.
 oms_harness_lock_file_count() {
-  local lock_root
-  local lock_file
-  local count=0
+  local lock_root lock_file count=0
 
   lock_root="$(oms_file_lock_dir)"
-  [ -d "$lock_root" ] || {
-    printf '0\n'
-    return 0
-  }
+  [ -d "$lock_root" ] || { printf '0\n'; return 0; }
   for lock_file in "$lock_root"/*.lock; do
     [ -f "$lock_file" ] || continue
     count=$((count + 1))
@@ -876,16 +816,12 @@ oms_harness_lock_file_count() {
 }
 
 oms_harness_cleanup_dead_locks() {
-  local dry_run="${1:-0}"
-  local lock_root
-  local lock_dir
-  local pid
+  local dry_run="${1:-0}" lock_root lock_dir pid
 
   lock_root="$(oms_file_lock_dir)"
   [ -d "$lock_root" ] || return 0
   for lock_dir in "$lock_root"/*.lock; do
-    [ -d "$lock_dir" ] || continue
-    [ -f "$lock_dir/pid" ] || continue
+    [ -d "$lock_dir" ] && [ -f "$lock_dir/pid" ] || continue
     pid="$(sed -n '1p' "$lock_dir/pid" 2>/dev/null || true)"
     oms_file_lock_pid_alive "$pid" && continue
     if [ "$dry_run" = "1" ]; then
@@ -899,15 +835,8 @@ oms_harness_cleanup_dead_locks() {
   done
 }
 
-# A residue parent is removable only when it contains the validated checkout,
-# `.oh-my-setting-tmp` and the fixed delegate metadata cleanup removes by name.
-# Unknown siblings may hold unpreserved work, even when the marker-selected
-# checkout is otherwise safe to remove.
-# The remedy cannot be `oms scratch-worktree remove`: that runs git worktree
-# remove, which fails on exactly these dirs.
 oms_harness_keep_unverifiable_residue() {  # DIR [VALIDATED_WORKTREE]
-  local child=""
-  local leaf=""
+  local child="" leaf=""
   for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -e "$child" ] || [ -L "$child" ] || continue
     leaf="${child##*/}"
@@ -932,8 +861,6 @@ oms_harness_keep_unverifiable_residue() {  # DIR [VALIDATED_WORKTREE]
   return 0
 }
 
-# One predicate governs doctor counts and cleanup; its companion flag says
-# whether removal is also authorized to unregister a validated Git worktree.
 OMS_HARNESS_RESIDUE_VALIDATED=0
 oms_harness_residue_is_removable() {  # BASE DIR MARKER
   OMS_HARNESS_RESIDUE_VALIDATED=0
@@ -947,29 +874,18 @@ oms_harness_residue_is_removable() {  # BASE DIR MARKER
 }
 
 oms_harness_tmp_residue_count() {
-  local base
-  local dir
-  local marker
-  local temporary
-  local listings=""
-  local count=0
+  local base dir marker listings="" count=0
 
   listings="$(mktemp -d "$(oms_harness_tmp_base)/oms-residue-listing.XXXXXX" 2>/dev/null)" || listings=""
   while IFS= read -r base; do
     [ -d "$base" ] || continue
     for dir in "$base"/oh-my-setting-*; do
-      [ -d "$dir" ] || continue
-      # Only trust directories this user owns. A planted marker must never
-      # steer worktree removal at a real checkout, regardless of scratch root.
-      [ -O "$dir" ] && [ ! -L "$dir" ] || continue
+      [ -d "$dir" ] && [ -O "$dir" ] && [ ! -L "$dir" ] || continue
       marker="$dir/.oh-my-setting-tmp"
       [ -f "$marker" ] && [ ! -L "$marker" ] || continue
       [ "$(oms_harness_read_marker_value "$marker" kind)" = "oh-my-setting-temp" ] || continue
-      temporary="$(oms_harness_read_marker_value "$marker" temporary)"
-      [ "$temporary" = "1" ] || continue
+      [ "$(oms_harness_read_marker_value "$marker" temporary)" = "1" ] || continue
       oms_harness_marker_owner_alive "$marker" && continue
-      # Kept work is not residue: counting it would warn with a remedy that
-      # cannot act on it.
       if OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_residue_is_removable "$base" "$dir" "$marker"; then
         count=$((count + 1))
       fi
@@ -982,34 +898,20 @@ EOF
 }
 
 oms_harness_cleanup_temp_dirs() {
-  local dry_run="${1:-0}"
-  local base
-  local dir
-  local marker
-  local safe
-  local temporary
-  local proof
-  local marker_text
-  local physical_dir
-  local fixture
-  local listings=""
+  local dry_run="${1:-0}" base dir marker safe proof marker_text physical_dir fixture listings=""
 
   listings="$(mktemp -d "$(oms_harness_tmp_base)/oms-residue-listing.XXXXXX" 2>/dev/null)" || listings=""
   while IFS= read -r base; do
     [ -d "$base" ] || continue
     for dir in "$base"/oh-my-setting-*; do
-      [ -d "$dir" ] || continue
-      # Only act on directories this user owns (see count function).
-      [ -O "$dir" ] && [ ! -L "$dir" ] || continue
+      [ -d "$dir" ] && [ -O "$dir" ] && [ ! -L "$dir" ] || continue
       physical_dir="$(oms_harness_physical_dir "$dir")" || continue
       marker="$dir/.oh-my-setting-tmp"
       [ -f "$marker" ] && [ ! -L "$marker" ] || continue
       [ "$(oms_harness_read_marker_value "$marker" kind)" = "oh-my-setting-temp" ] || continue
-      temporary="$(oms_harness_read_marker_value "$marker" temporary)"
-      [ "$temporary" = "1" ] || continue
+      [ "$(oms_harness_read_marker_value "$marker" temporary)" = "1" ] || continue
       oms_harness_marker_owner_alive "$marker" && continue
 
-      safe=0
       marker_text="$(cat "$marker" 2>/dev/null)"
       OMS_HARNESS_RESIDUE_LISTING_DIR="$listings" oms_harness_residue_is_removable "$base" "$dir" "$marker" || true
       safe="$OMS_HARNESS_RESIDUE_VALIDATED"
@@ -1031,24 +933,11 @@ oms_harness_cleanup_temp_dirs() {
       fi
 
       if [ "$safe" = 1 ]; then
-        # The proof is recomputed at the point of removal: the evidence reads
-        # the lifecycle and patch first and the files last, with no cached
-        # bytes, and the owner must still be dead behind an unchanged marker.
-        # No OMS writer reuses a dead delegate worktree: every delegate run
-        # (including --continue, which applies the preserved patch to a fresh
-        # base) takes a new mktemp directory, and salvage only reads a kept
-        # tree into its own scratch. The comparison refuses changes between
-        # the two scans; it relies on the worktree remaining dead and quiescent
-        # between the final scan and git worktree remove below.
         proof="$OMS_HARNESS_RESIDUE_PROOF"
         if ! oms_harness_residue_is_removable "$base" "$dir" "$marker" ||
             [ "$OMS_HARNESS_RESIDUE_VALIDATED" != 1 ] ||
-            [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ]; then
-          printf 'kept: %s (dead harness temp dir; worktree changed during cleanup)\n' "$dir"
-          OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
-          continue
-        fi
-        if [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ] ||
+            [ -n "$OMS_HARNESS_RESIDUE_KEEP_REASON" ] ||
+            [ "$OMS_HARNESS_RESIDUE_PROOF" != "$proof" ] ||
             [ ! -f "$marker" ] || [ -L "$marker" ] ||
             [ "$(cat "$marker" 2>/dev/null)" != "$marker_text" ] ||
             oms_harness_marker_owner_alive "$marker"; then
@@ -1056,10 +945,6 @@ oms_harness_cleanup_temp_dirs() {
           OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
           continue
         fi
-      fi
-      if [ "$safe" = 1 ]; then
-        # Both arguments are physical paths established above. In particular,
-        # the remove target is the expected residue child, never marker input.
         if ! git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \
             "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >/dev/null 2>&1; then
           printf 'kept: %s (worktree removal failed)\n' "$dir"
@@ -1069,8 +954,7 @@ oms_harness_cleanup_temp_dirs() {
         git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree prune >/dev/null 2>&1 || true
       fi
       if ! (
-        cd "$dir" 2>/dev/null || exit 1
-        [ "$(pwd -P)" = "$physical_dir" ] || exit 1
+        cd "$dir" 2>/dev/null && [ "$(pwd -P)" = "$physical_dir" ] || exit 1
         rm -rf ./worker-guard 2>/dev/null || true
         if [ "$safe" = 1 ] && [ -d ./tmp ] && [ ! -L ./tmp ]; then
           rm -rf ./tmp || exit 1
@@ -1081,8 +965,7 @@ oms_harness_cleanup_temp_dirs() {
         done
         rm -f ./continuation.patch ./continuation-base \
           ./graph-context.json ./graph-context.log \
-          ./worker-guard-snapshot.error 2>/dev/null || true
-        rm -f ./.oh-my-setting-tmp 2>/dev/null || true
+          ./worker-guard-snapshot.error ./.oh-my-setting-tmp 2>/dev/null || true
       ); then
         printf 'kept: %s (directory changed during cleanup)\n' "$dir"
         OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
@@ -1090,11 +973,9 @@ oms_harness_cleanup_temp_dirs() {
       fi
       if ! rmdir "$dir" 2>/dev/null; then
         (
-          cd "$dir" 2>/dev/null || exit 1
-          [ "$(pwd -P)" = "$physical_dir" ] || exit 1
+          cd "$dir" 2>/dev/null && [ "$(pwd -P)" = "$physical_dir" ] || exit 1
           if [ ! -e ./.oh-my-setting-tmp ] && [ ! -L ./.oh-my-setting-tmp ]; then
-            (umask 077; set -C; printf '%s\n' "$marker_text" > ./.oh-my-setting-tmp) \
-              2>/dev/null || true
+            (umask 077; set -C; printf '%s\n' "$marker_text" > ./.oh-my-setting-tmp) 2>/dev/null || true
           fi
         ) || true
         printf 'kept: %s (new entries appeared during cleanup)\n' "$dir"
@@ -1111,8 +992,7 @@ EOF
 }
 
 oms_harness_cleanup_residue() {
-  local repo="${1:-}"
-  local dry_run="${2:-0}"
+  local repo="${1:-}" dry_run="${2:-0}"
 
   oms_harness_residue_reset
   if [ -n "$repo" ] && git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
@@ -1122,13 +1002,7 @@ oms_harness_cleanup_residue() {
   oms_harness_cleanup_temp_dirs "$dry_run"
 }
 
-# A delegate killed by SIGKILL never runs its cleanup trap, so its liveness
-# marker stays and reads as an ORPHAN forever; gc only runs on request. Each
-# delegate start therefore reaps markers whose pid is proven dead and that no
-# recovery path needs: task/lease/executor/autopilot-coupled markers stay for
-# gc's plan recovery. Validation mirrors gc's delegation_marker_snapshot. The
-# set lock is only tried, never waited for, and every entry that is not
-# provably safe is kept, so a delegate run never stalls or fails here.
+# Reap delegation markers whose pid is proven dead and that no recovery path needs.
 oms_harness_reap_dead_delegation_markers() {  # PHYSICAL_REPO
   local repo="$1"
 
@@ -1165,8 +1039,6 @@ with os.scandir(marker_dir) as iterator:
             break
         if safe_name.fullmatch(entry.name):
             names.append(entry.name)
-# Bounded per run but still progressing: a shuffled sample lets successive
-# starts drain a backlog that kept entries at the front would otherwise block.
 random.shuffle(names)
 
 def reapable(path):
@@ -1241,25 +1113,13 @@ oms_harness_count_unindexed_artifacts() {
   local artifacts_dir="$repo/.oms/artifacts"
   local index="$artifacts_dir/index.jsonl"
 
-  [ -d "$artifacts_dir" ] || {
+  [ -d "$artifacts_dir" ] && command -v python3 >/dev/null 2>&1 || {
     printf '0\n'
     return 0
   }
-  command -v python3 >/dev/null 2>&1 || {
-    printf '0\n'
-    return 0
-  }
-  # Count with the same grace window prune --files deletes with. A live
-  # provider call writes its artifact before the index row lands, so counting
-  # age-blind makes doctor warn about in-flight work and then prescribe a
-  # command that correctly deletes nothing — a remedy that cannot act on the
-  # complaint.
   python3 - "$repo" "$artifacts_dir" "$index" \
     "${OMS_ARTIFACT_ORPHAN_GRACE:-86400}" <<'PY'
-import json
-import os
-import sys
-import time
+import json, os, sys, time
 
 repo, artifacts_dir, index, grace_raw = sys.argv[1:]
 try:

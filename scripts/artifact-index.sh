@@ -236,17 +236,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if { [ "$ACTION" = "latest" ] || [ "$ACTION" = "latest-run" ] || [ "$ACTION" = "resolve" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
-  fail "unknown argument: $LIMIT"
-fi
-if { [ "$ACTION" = "validate" ] || [ "$ACTION" = "migrate" ] || [ "$ACTION" = "salvage" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
-  fail "unknown argument: $LIMIT"
-fi
-# The sweep answers every superseded row in the index, so a window would only
-# hide work it already decided is mechanical.
-if { [ "$ACTION" = "resolve-superseded" ] || [ "$ACTION" = "resolve-recovered" ]; } && [ "$LIMIT_SET" -eq 1 ]; then
-  fail "unknown argument: $LIMIT"
-fi
+case "$ACTION" in
+  latest|latest-run|resolve|validate|migrate|salvage|resolve-superseded|resolve-recovered)
+    [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $LIMIT" ;;
+esac
 if [ "$ACTION" = "resolve" ]; then
   [ "$TARGET_EVENT_COUNT" -gt 0 ] || fail "resolve requires --event-id"
 else
@@ -257,18 +250,11 @@ case "$ACTION" in
   list|latest|latest-run|failures|unresolved|telemetry) ;;
   *) [ "$AS_JSON" -eq 0 ] || fail "--json is not supported by $ACTION" ;;
 esac
-if [ "$PRUNE_FILES" -eq 1 ] && [ "$ACTION" != "prune" ]; then
-  fail "--files is only valid with prune"
-fi
-if [ "$PRUNE_STALE" -eq 1 ] && [ "$ACTION" != "prune" ]; then
-  fail "--stale is only valid with prune"
-fi
-if [ "$DRY_RUN" -eq 1 ] && [ "$ACTION" != "prune" ] && [ "$ACTION" != "resolve-superseded" ] && [ "$ACTION" != "resolve-recovered" ]; then
+[ "$PRUNE_FILES" -eq 0 ] || [ "$ACTION" = "prune" ] || fail "--files is only valid with prune"
+[ "$PRUNE_STALE" -eq 0 ] || [ "$ACTION" = "prune" ] || fail "--stale is only valid with prune"
+[ "$DRY_RUN" -eq 0 ] || [ "$ACTION" = "prune" ] || [ "$ACTION" = "resolve-superseded" ] || [ "$ACTION" = "resolve-recovered" ] ||
   fail "--dry-run is only valid with prune, resolve-superseded, or resolve-recovered"
-fi
-if [ "$APPLY" -eq 1 ] && [ "$ACTION" != "salvage" ]; then
-  fail "--apply is only valid with salvage"
-fi
+[ "$APPLY" -eq 0 ] || [ "$ACTION" = "salvage" ] || fail "--apply is only valid with salvage"
 if [ "$LIMIT_SET" -eq 0 ]; then
   case "$ACTION" in
     prune|telemetry) LIMIT="1000" ;;
@@ -303,16 +289,8 @@ fi
 PY_INDEX_FILE="${PY_INDEX_FILE//$'\r'/}"
 INDEX_FILE="$(artifact_index_shell_path "$PY_INDEX_FILE")"
 
-# Telemetry has two exits — empty index and populated — so the argument list is
-# built once; a flag added to one call site only would silently not apply to
-# the other. `set --` rather than an array: Bash 3.2 rejects an empty one.
-artifact_index_telemetry() {
-  command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-  # Telemetry is observational, but it is still a normal index view. Refuse a
-  # partial cohort instead of letting its lenient historical parser skip a
-  # corrupt row and turn incomplete evidence into a plausible-looking rate.
-  MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" \
-    "$PY_STORE_HELPER" <<'PY'
+if [ "$ACTION" = "telemetry" ]; then
+  MSYS2_ARG_CONV_EXCL='*' python3 - "$PY_REPO" "$PY_INDEX_FILE" "$PY_STORE_HELPER" <<'PY'
 import runpy, sys
 repo, index, store_helper = sys.argv[1:]
 runpy.run_path(store_helper)["read_index"](repo, index, missing_ok=True)
@@ -320,7 +298,8 @@ PY
   set -- --repo "$PY_REPO" --index "$PY_INDEX_FILE" --limit "$LIMIT"
   [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
   MSYS2_ARG_CONV_EXCL='*' python3 "$PY_TELEMETRY_HELPER" "$@"
-}
+  exit 0
+fi
 
 if [ "$ACTION" = "salvage" ]; then
   artifact_index_salvage_locked() {
@@ -354,40 +333,21 @@ PY
 fi
 
 if [ ! -s "$INDEX_FILE" ]; then
-  if [ "$ACTION" = "telemetry" ]; then
-    artifact_index_telemetry
-    exit 0
-  fi
-  # Explicit sweeps run wherever the harness runs, including repos that have
-  # produced no artifact yet: nothing recorded is a no-op rather than the error
-  # a hand-typed query deserves.
-  if [ "$ACTION" = "resolve-superseded" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      echo "artifact-index: 0 superseded failure(s) would be resolved (dry run)"
-    else
-      echo "artifact-index: 0 superseded failure(s) resolved"
-    fi
-    exit 0
-  fi
-  if [ "$ACTION" = "resolve-recovered" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-      echo "artifact-index: 0 recovered failure(s) would be resolved (dry run)"
-    else
-      echo "artifact-index: 0 recovered failure(s) resolved"
-    fi
-    exit 0
-  fi
-  # A machine consumer wants an empty view, not an error, when nothing has run
-  # yet; the human path keeps saying where it looked.
+  case "$ACTION" in
+    resolve-superseded|resolve-recovered)
+      kind="${ACTION#resolve-}"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "artifact-index: 0 $kind failure(s) would be resolved (dry run)"
+      else
+        echo "artifact-index: 0 $kind failure(s) resolved"
+      fi
+      exit 0 ;;
+  esac
   if [ "$AS_JSON" -eq 1 ]; then
     printf '{"schema": 1, "action": "%s", "rows": []}\n' "$ACTION"
     exit 0
   fi
   fail "no artifact index at $INDEX_FILE"
-fi
-if [ "$ACTION" = "telemetry" ]; then
-  artifact_index_telemetry
-  exit 0
 fi
 
 if [ "$ACTION" = "resolve" ]; then
@@ -1017,11 +977,7 @@ def complete_schema_event(r):
             exit_value >= 0)
 
 
-# Mechanical supersession, advisory only: a failed patch-admit/delegate row
-# whose exact patch bytes were later admitted or landed. The join is on
-# patch_sha256 and never on the patch path, which gets rewritten in place
-# across delegations. Nothing is claimed across sibling providers inside one
-# operation — a fan-out peer's failure is not superseded by its synthesis.
+# Mechanical supersession (advisory) and seat recovery.
 superseded_by = {}
 nearest_success = {}
 for i in range(len(all_rows) - 1, -1, -1):
@@ -1041,11 +997,6 @@ for i in range(len(all_rows) - 1, -1, -1):
         if winner and isinstance(event_id, str) and event_id:
             superseded_by[event_id] = winner
 
-
-# Seat recovery, advisory until explicitly resolved: an unresolved wall-clock
-# death is answered only by a strictly later complete success from the same
-# provider and the same kind. Physical index order is the audit order; timestamps
-# are descriptive and may collide or arrive with clock skew.
 claimed_resolution_targets = set()
 for r in all_rows:
     if r.get("kind") != "artifact-resolution":
@@ -1073,126 +1024,59 @@ for i in range(len(all_rows) - 1, -1, -1):
             recovered_by[event_id] = winner
 
 
-if action == "resolve-superseded":
-    # Auto-resolution is strictly narrower than the advisory annotation above:
-    # the winner must also carry the same provider string, because supersession
-    # across sibling providers was rejected as a claim a machine may make. No
-    # exit code is swept as a class — a timeout row clears only when its exact
-    # bytes later succeeded, which is the same evidence every other row needs.
+if action in ("resolve-superseded", "resolve-recovered"):
     writer = os.environ.get("OMS_ARTIFACT_PROVIDER", "unknown")
-    # `resolve` refuses a second resolution on the looser test below, so the
-    # sweep has to skip what resolve would refuse: a resolution row with
-    # imperfect lineage leaves status() saying "unresolved" forever, and
-    # answering that every run would append a duplicate every run.
-    claimed = set()
-    for r in all_rows:
-        if r.get("kind") != "artifact-resolution":
-            continue
-        for key in ("resolves_event_id", "parent_event_id"):
-            value = r.get(key)
-            if isinstance(value, str) and value:
-                claimed.add(value)
-
-    def sweepable(r):
-        event_id = r.get("event_id")
-        if not isinstance(event_id, str) or not event_id:
-            return False
-        # A duplicated id never reaches status "resolved", so resolving it
-        # would re-append on every run instead of settling.
-        if id_counts.get(event_id) != 1 or event_id in claimed:
-            return False
-        if r.get("schema") != 1 or status(r) != "unresolved":
-            return False
-        # Rows resolve would reject keep their "run migrate first" triage line
-        # instead of failing the sweep: one unrepaired row is not a reason to
-        # leave every mechanical resolution unwritten.
-        if any(r.get(key) in (None, "") for key in ("operation_id", "artifact_id", "ts", "kind")):
-            return False
-        return isinstance(r.get("provider"), str)
-
-    pending = []
-    for r in all_rows:
-        winner = superseded_by.get(r.get("event_id"))
-        if not winner or not sweepable(r):
-            continue
-        winner_entry = by_id.get(winner)
-        if not winner_entry or winner_entry[1].get("provider") != r.get("provider"):
-            continue
-        pending.append((r.get("event_id"), r, winner))
-
-    if dry_run:
-        for event_id, _target, winner in pending:
-            print("artifact-index: would resolve %s (superseded by %s)" % (event_id, winner))
-        print("artifact-index: %d superseded failure(s) would be resolved (dry run)" % len(pending))
-        sys.exit(0)
-    if not pending:
-        print("artifact-index: 0 superseded failure(s) resolved")
-        sys.exit(0)
-
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    resolutions = []
-    for event_id, target, winner in pending:
-        resolutions.append({
-                "schema": 1,
-                "event_id": "evt_resolve_" + uuid.uuid4().hex,
-                "operation_id": target.get("operation_id"),
-                "artifact_id": target.get("artifact_id"),
-                "ts": now,
-                "kind": "artifact-resolution",
-                "provider": writer,
-                "exit": 0,
-                "parent_event_id": event_id,
-                "resolves_event_id": event_id,
-                "resolution": "resolved",
-                "reason": "superseded by %s (same patch bytes later succeeded)" % winner,
-            })
-    store["append_rows"](repo, path, resolutions, expected=snapshot)
-    for event_id, _target, winner in pending:
-        print("artifact-index: resolved %s (superseded by %s)" % (event_id, winner))
-    print("artifact-index: %d superseded failure(s) resolved" % len(pending))
-    sys.exit(0)
-
-
-if action == "resolve-recovered":
-    writer = os.environ.get("OMS_ARTIFACT_PROVIDER", "unknown")
+    label = "superseded" if action == "resolve-superseded" else "recovered"
     pending = []
     for r in all_rows:
         event_id = r.get("event_id")
-        winner = recovered_by.get(event_id)
-        if winner:
-            pending.append((event_id, r, winner))
+        if action == "resolve-superseded":
+            winner = superseded_by.get(event_id)
+            if (not winner or not isinstance(event_id, str) or not event_id or
+                    id_counts.get(event_id) != 1 or event_id in claimed_resolution_targets or
+                    r.get("schema") != 1 or status(r) != "unresolved" or
+                    any(r.get(k) in (None, "") for k in ("operation_id", "artifact_id", "ts", "kind")) or
+                    not isinstance(r.get("provider"), str)):
+                continue
+            winner_entry = by_id.get(winner)
+            if not winner_entry or winner_entry[1].get("provider") != r.get("provider"):
+                continue
+            reason = "superseded by %s (same patch bytes later succeeded)" % winner
+        else:
+            winner = recovered_by.get(event_id)
+            if not winner:
+                continue
+            reason = "recovered %s by %s (same provider and kind later succeeded)" % (event_id, winner)
+        pending.append((event_id, r, winner, reason))
 
     if dry_run:
-        for event_id, _target, winner in pending:
-            print("artifact-index: would resolve %s (recovered by %s)" % (event_id, winner))
-        print("artifact-index: %d recovered failure(s) would be resolved (dry run)" % len(pending))
+        for event_id, _target, winner, _reason in pending:
+            print("artifact-index: would resolve %s (%s by %s)" % (event_id, label, winner))
+        print("artifact-index: %d %s failure(s) would be resolved (dry run)" % (len(pending), label))
         sys.exit(0)
     if not pending:
-        print("artifact-index: 0 recovered failure(s) resolved")
+        print("artifact-index: 0 %s failure(s) resolved" % label)
         sys.exit(0)
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    resolutions = []
-    for event_id, target, winner in pending:
-        resolutions.append({
-                "schema": 1,
-                "event_id": "evt_resolve_" + uuid.uuid4().hex,
-                "operation_id": target.get("operation_id"),
-                "artifact_id": target.get("artifact_id"),
-                "ts": now,
-                "kind": "artifact-resolution",
-                "provider": writer,
-                "exit": 0,
-                "parent_event_id": event_id,
-                "resolves_event_id": event_id,
-                "resolution": "resolved",
-                "reason": "recovered %s by %s (same provider and kind later succeeded)" %
-                          (event_id, winner),
-            })
+    resolutions = [{
+        "schema": 1,
+        "event_id": "evt_resolve_" + uuid.uuid4().hex,
+        "operation_id": target.get("operation_id"),
+        "artifact_id": target.get("artifact_id"),
+        "ts": now,
+        "kind": "artifact-resolution",
+        "provider": writer,
+        "exit": 0,
+        "parent_event_id": event_id,
+        "resolves_event_id": event_id,
+        "resolution": "resolved",
+        "reason": reason,
+    } for event_id, target, _winner, reason in pending]
     store["append_rows"](repo, path, resolutions, expected=snapshot)
-    for event_id, _target, winner in pending:
-        print("artifact-index: resolved %s (recovered by %s)" % (event_id, winner))
-    print("artifact-index: %d recovered failure(s) resolved" % len(pending))
+    for event_id, _target, winner, _reason in pending:
+        print("artifact-index: resolved %s (%s by %s)" % (event_id, label, winner))
+    print("artifact-index: %d %s failure(s) resolved" % (len(pending), label))
     sys.exit(0)
 
 

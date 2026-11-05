@@ -98,6 +98,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Code and test reduction across the work journal, panel view and dispatch,
+  state, peer, plan, graph and land paths: dead helpers, unused parameters and
+  duplicate test cases are gone (about 1,400 code and 2,400 test lines net)
+  with behaviour and receipt validators unchanged.
+- The four `docs/MIGRATION-0.x.md` notes are one `docs/MIGRATION.md`, newest
+  release first; links and the release-surface guard point at it.
 - `oms patch-admit` runs ShellCheck (warning severity) on changed shell files
   when it is installed and records a skip otherwise; source-context codes
   (SC1090, SC1091, SC2034, SC2148, SC2154) are excluded.

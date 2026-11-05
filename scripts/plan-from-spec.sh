@@ -205,9 +205,12 @@ fi
 validate_proposal() {  # FILE [APPLY] -> prints "ok <count>" or fails with reason
   python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" \
     "$ROOT/scripts/lib/path_scope.py" "$REPO" "$ROOT/scripts/lib/task-assignment.py" "$COLLABORATION" "$WORKER_PROVIDER" "$is_oms_repo" <<'PY'
-import json, os, re, runpy, shlex, sys, unicodedata
+import json, os, re, runpy, shlex, sys
 
-within_envelope = runpy.run_path(sys.argv[7])["within_envelope"]
+path_scope = runpy.run_path(sys.argv[7])
+within_envelope = path_scope["within_envelope"]
+reject_controls = path_scope["_reject_controls"]
+clean_rel = path_scope["normalize"]
 assignment_rules = runpy.run_path(sys.argv[9])
 validate_assignment = assignment_rules["validate"]
 
@@ -485,23 +488,6 @@ def delegating_verifier(verify):
                 if smoke_test_delegates(name):
                     return "tests/run-smoke-shard.sh --only %s" % name
     return None
-
-def reject_controls(value, label):
-    if any(unicodedata.category(ch) in ("Cc", "Cf", "Cs") for ch in value):
-        raise ValueError("%s contains a control or format character" % label)
-
-def clean_rel(value, label):
-    if not isinstance(value, str):
-        raise ValueError("%s must be a string" % label)
-    reject_controls(value, label)
-    value = value.strip().replace("\\", "/")
-    while value.startswith("./"):
-        value = value[2:]
-    value = value.rstrip("/") or "."
-    if (value.startswith("/") or re.match(r"^[A-Za-z]:", value) or
-            (value != "." and any(part in ("", ".", "..") for part in value.split("/")))):
-        raise ValueError("%s must be a normalized repo-relative path" % label)
-    return value
 
 try:
     envelope = [clean_rel(item, "allowed envelope")
@@ -1335,33 +1321,22 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                         return False
                 if not cursor.is_file():
                     return False
-                tree = subprocess.run(
-                    ["git", "-C", repository, "ls-tree", "-r", "-z", "--full-tree",
-                     "HEAD", "--", relative],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-                tree_rows = []
-                for row in tree.stdout.split(b"\0"):
-                    metadata, separator, path = row.partition(b"\t")
-                    if separator:
-                        tree_rows.append((metadata.decode("ascii"), separator,
-                                          path.decode("utf-8")))
-                if tree.returncode or not any(
-                        separator and path == relative and metadata.split()[0] in ("100644", "100755")
-                        for metadata, separator, path in tree_rows):
-                    return False
-                indexed = subprocess.run(
-                    ["git", "-C", repository, "ls-files", "--stage", "-z", "--", relative],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-                index_rows = []
-                for row in indexed.stdout.split(b"\0"):
-                    metadata, separator, path = row.partition(b"\t")
-                    if separator:
-                        index_rows.append((metadata.decode("ascii"), separator,
-                                           path.decode("utf-8")))
-                if indexed.returncode or not any(
-                        separator and path == relative and metadata.split()[0] in ("100644", "100755")
-                        for metadata, separator, path in index_rows):
-                    return False
+                for git_args in (
+                        ("ls-tree", "-r", "-z", "--full-tree", "HEAD"),
+                        ("ls-files", "--stage", "-z"),
+                ):
+                    result = subprocess.run(
+                        ["git", "-C", repository, *git_args, "--", relative],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                    rows = [
+                        (meta.decode("ascii"), sep, path.decode("utf-8"))
+                        for row in result.stdout.split(b"\0")
+                        for meta, sep, path in (row.partition(b"\t"),) if sep
+                    ]
+                    if result.returncode or not any(
+                            path == relative and meta.split()[0] in ("100644", "100755")
+                            for meta, _sep, path in rows):
+                        return False
                 return int(line_text) <= len(cursor.read_bytes().splitlines())
             except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
                 return False
@@ -1537,12 +1512,8 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
         # A repo-wide scope contains every verifier that reads a repo file;
         # the token search below can never see that, because no verify
         # command spells the repo root as a bare dot.
-        if not allow_verifier_change and root == "." and verify.strip():
-            print("    note: verify reads %s, which this task may also change;"
-                  " a patch that touches it is refused without verifier-change"
-                  " consent" % root)
-            break
-        if (not allow_verifier_change and
+        if not allow_verifier_change and (
+                (root == "." and verify.strip()) or
                 re.search(r"(^|[\s'\"=(])%s(/|[\s'\";)]|$)" % re.escape(root), verify)):
             print("    note: verify reads %s, which this task may also change;"
                   " a patch that touches it is refused without verifier-change"

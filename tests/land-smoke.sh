@@ -1605,58 +1605,38 @@ wait_for_queue_notice() {  # OUTPUT_FILE SECOND_PID RELEASE_FILE
   fi
 }
 
-export OMS_TEST_LAND_COUNT="$TMP/queued-head-count" OMS_TEST_LAND_RELEASE="$TMP/queued-head-release"
-gate 'echo head-gate; echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1' # queued HEAD change
-before="$(remote_tip)"
-OMS_LOCK_FORCE_MKDIR=0 "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
-  > "$TMP/queued-head-first.out" 2>&1 &
-first_pid=$!
-for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
-[ -f "$OMS_TEST_LAND_COUNT" ] || fail "queued-HEAD fixture did not start its gate"
-OMS_LOCK_FORCE_MKDIR=0 OMS_LOCK_TIMEOUT=10 "$LAND" --repo "$repo" --no-update --ci-wait 0 \
-  > "$TMP/queued-head-second.out" 2>&1 &
-second_pid=$!
-wait_for_queue_notice "$TMP/queued-head-second.out" "$second_pid" "$OMS_TEST_LAND_RELEASE"
-echo queued-head-change > "$repo/queued-head-change"
-git -C "$repo" add queued-head-change
-git -C "$repo" commit -q -m 'test: move HEAD while land waits'
-touch "$OMS_TEST_LAND_RELEASE"
-first_rc=0 second_rc=0
-wait "$first_pid" || first_rc=$?
-wait "$second_pid" || second_rc=$?
-[ "$first_rc" -ne 0 ] || fail "the active land must reject a HEAD change during its gate"
-[ "$second_rc" -ne 0 ] || fail "the queued land must reject its stale request SHA"
-[ "$(remote_tip)" = "$before" ] || fail "queued HEAD change must not push"
-[ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "queued stale-HEAD land ran the gate"
-! grep -q '^receipt:' "$TMP/queued-head-second.out" || fail "stale-HEAD land advertised a receipt"
-grep -q 'land not started (exit 1)' "$TMP/queued-head-second.out" ||
-  fail "stale-HEAD startup must preserve its failure status: $(cat "$TMP/queued-head-second.out")"
-
-export OMS_TEST_LAND_COUNT="$TMP/queued-tree-count" OMS_TEST_LAND_RELEASE="$TMP/queued-tree-release"
-gate 'echo tree-gate; echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1' # queued tree change
-before="$(remote_tip)"
-OMS_LOCK_FORCE_MKDIR=0 "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
-  > "$TMP/queued-tree-first.out" 2>&1 &
-first_pid=$!
-for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
-[ -f "$OMS_TEST_LAND_COUNT" ] || fail "queued-tree fixture did not start its gate"
-OMS_LOCK_FORCE_MKDIR=0 OMS_LOCK_TIMEOUT=10 "$LAND" --repo "$repo" --no-update --ci-wait 0 \
-  > "$TMP/queued-tree-second.out" 2>&1 &
-second_pid=$!
-wait_for_queue_notice "$TMP/queued-tree-second.out" "$second_pid" "$OMS_TEST_LAND_RELEASE"
-printf '# queued tracked edit\n' >> "$repo/scripts/check.sh"
-touch "$OMS_TEST_LAND_RELEASE"
-first_rc=0 second_rc=0
-wait "$first_pid" || first_rc=$?
-wait "$second_pid" || second_rc=$?
-[ "$first_rc" -ne 0 ] || fail "the active land must reject a tracked-tree change during its gate"
-[ "$second_rc" -ne 0 ] || fail "the queued land must reject its dirty tracked tree"
-[ "$(remote_tip)" = "$before" ] || fail "queued tracked-tree change must not push"
-[ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "queued dirty-tree land ran the gate"
-! grep -q '^receipt:' "$TMP/queued-tree-second.out" || fail "dirty-tree land advertised a receipt"
-grep -q 'land not started (exit 1)' "$TMP/queued-tree-second.out" ||
-  fail "dirty-tree startup must preserve its failure status: $(cat "$TMP/queued-tree-second.out")"
-git -C "$repo" checkout -- scripts/check.sh
+for kind in head tree; do
+  export OMS_TEST_LAND_COUNT="$TMP/queued-$kind-count" OMS_TEST_LAND_RELEASE="$TMP/queued-$kind-release"
+  gate "echo $kind-gate; echo gate >> \"\$OMS_TEST_LAND_COUNT\"; for ((i=0;i<200;i++)); do [ ! -f \"\$OMS_TEST_LAND_RELEASE\" ] || exit 0; sleep 0.05; done; exit 1"
+  before="$(remote_tip)"
+  OMS_LOCK_FORCE_MKDIR=0 "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 \
+    > "$TMP/queued-$kind-first.out" 2>&1 &
+  first_pid=$!
+  for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
+  [ -f "$OMS_TEST_LAND_COUNT" ] || fail "queued-$kind fixture did not start its gate"
+  OMS_LOCK_FORCE_MKDIR=0 OMS_LOCK_TIMEOUT=10 "$LAND" --repo "$repo" --no-update --ci-wait 0 \
+    > "$TMP/queued-$kind-second.out" 2>&1 &
+  second_pid=$!
+  wait_for_queue_notice "$TMP/queued-$kind-second.out" "$second_pid" "$OMS_TEST_LAND_RELEASE"
+  if [ "$kind" = head ]; then
+    echo queued-head-change > "$repo/queued-head-change"
+    git -C "$repo" add queued-head-change
+    git -C "$repo" commit -q -m 'test: move HEAD while land waits'
+  else
+    printf '# queued tracked edit\n' >> "$repo/scripts/check.sh"
+  fi
+  touch "$OMS_TEST_LAND_RELEASE"
+  first_rc=0 second_rc=0
+  wait "$first_pid" || first_rc=$?
+  wait "$second_pid" || second_rc=$?
+  [ "$first_rc" -ne 0 ] && [ "$second_rc" -ne 0 ] || fail "queued-$kind lands must reject ($first_rc, $second_rc)"
+  [ "$(remote_tip)" = "$before" ] || fail "queued-$kind change must not push"
+  [ "$(wc -l < "$OMS_TEST_LAND_COUNT" | tr -d ' ')" = 1 ] || fail "queued-$kind second land ran the gate"
+  ! grep -q '^receipt:' "$TMP/queued-$kind-second.out" || fail "queued-$kind land advertised a receipt"
+  grep -q 'land not started (exit 1)' "$TMP/queued-$kind-second.out" ||
+    fail "queued-$kind startup must preserve its failure status: $(cat "$TMP/queued-$kind-second.out")"
+  [ "$kind" != tree ] || git -C "$repo" checkout -- scripts/check.sh
+done
 
 gate 'echo successful CI and update probe; echo "check: ok"'
 : > "$TMP/events"

@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Mechanical artifact-resolution sweeps share one owner. `resolve-superseded`
-# resolves failures whose exact patch bytes the same provider later landed;
-# `resolve-recovered` resolves exit-124 seat deaths after a strictly newer
-# success from the same provider and kind. The tests fence both bounds and the
-# idempotency needed by a repeating repair pass.
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
@@ -37,12 +31,6 @@ unresolved_count() {
     python3 -c 'import json,sys; print(len(json.load(sys.stdin)["rows"]))'
 }
 
-# The index rows are written by hand for the same reason the existing queue
-# triage test writes them by hand: the join under test is a property of
-# recorded rows, and driving patch-admit into a failure and then into a success
-# over byte-identical patches — under two different providers — is far more
-# machinery than the property needs. `validate` runs against the fixture below
-# so these stay rows the real writers could have produced.
 test_resolve_superseded_answers_exact_bytes_and_leaves_the_rest() {
   local repo="$TMP/sweep"
   local index out before after
@@ -52,9 +40,6 @@ test_resolve_superseded_answers_exact_bytes_and_leaves_the_rest() {
   printf 'diff --git a/file.txt b/file.txt\n' > "$repo/.oms/artifacts/work.patch"
   printf 'diff --git a/other.txt b/other.txt\n' > "$repo/.oms/artifacts/timeout.patch"
 
-  # evt_admit_ok is the winner and comes last, because supersession only ever
-  # looks forward from a failure. evt_other_provider shares its bytes but not
-  # its provider, and evt_timeout_open shares neither.
   cat > "$index" <<'EOF'
 {"schema":1,"event_id":"evt_admit_fail","operation_id":"op_1","artifact_id":"sha256:a1","ts":"2026-08-06T01:00:00Z","kind":"patch-admit","provider":"codex","exit":1,"patch":".oms/artifacts/work.patch","patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 {"schema":1,"event_id":"evt_other_provider","operation_id":"op_2","artifact_id":"sha256:a2","ts":"2026-08-06T01:01:00Z","kind":"patch-admit","provider":"gemini","exit":1,"patch":".oms/artifacts/work.patch","patch_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}

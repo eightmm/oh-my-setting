@@ -201,26 +201,20 @@ peers() {  # [builtin|all]
 }
 
 THREAD_SH="$SCRIPT_DIR/thread.sh"
-
-resolve_thread() {
-  local id
-  if [ -n "$THREAD_ID" ] && [ "$NEW_THREAD" -eq 0 ]; then
-    # Create it on demand so --thread names a conversation, not a precondition.
-    if ! bash "$THREAD_SH" --repo "$REPO" --id "$THREAD_ID" current >/dev/null 2>&1 &&
-      [ ! -f "$REPO/.oms/threads/$THREAD_ID.jsonl" ]; then
-      bash "$THREAD_SH" --repo "$REPO" --id "$THREAD_ID" ${TOPIC:+--topic "$TOPIC"} new >/dev/null
-    fi
-    printf '%s\n' "$THREAD_ID"
-    return 0
+if [ -n "$THREAD_ID" ] && [ "$NEW_THREAD" -eq 0 ]; then
+  # Create it on demand so --thread names a conversation, not a precondition.
+  if ! bash "$THREAD_SH" --repo "$REPO" --id "$THREAD_ID" current >/dev/null 2>&1 &&
+    [ ! -f "$REPO/.oms/threads/$THREAD_ID.jsonl" ]; then
+    bash "$THREAD_SH" --repo "$REPO" --id "$THREAD_ID" ${TOPIC:+--topic "$TOPIC"} new >/dev/null ||
+      fail "could not open a thread"
   fi
-  if [ "$NEW_THREAD" -eq 0 ] && id="$(bash "$THREAD_SH" --repo "$REPO" current 2>/dev/null)"; then
-    printf '%s\n' "$id"
-    return 0
-  fi
-  bash "$THREAD_SH" --repo "$REPO" ${TOPIC:+--topic "$TOPIC"} new
-}
-
-thread="$(resolve_thread)" || fail "could not open a thread"
+  thread="$THREAD_ID"
+elif [ "$NEW_THREAD" -eq 0 ] && thread="$(bash "$THREAD_SH" --repo "$REPO" current 2>/dev/null)"; then
+  :
+else
+  thread="$(bash "$THREAD_SH" --repo "$REPO" ${TOPIC:+--topic "$TOPIC"} new)" ||
+    fail "could not open a thread"
+fi
 
 # Runs one target and writes the artifact path it reported to $2, so a panel
 # that asks one provider twice still tracks each answer exactly instead of

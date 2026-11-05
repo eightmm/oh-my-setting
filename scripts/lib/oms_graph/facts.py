@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, Mapping, Sequence
 
-from oms_runtime.common import install_root, read_json, run_json, run_output
+from oms_runtime.common import run_json, run_output
 from oms_runtime.evidence import artifact_rows
 
+from .capabilities import _script
 from .errors import GraphError
 
 
@@ -41,10 +42,9 @@ def git_facts(repo: Path) -> Dict[str, Any]:
 
 
 def plan_facts(repo: Path) -> Dict[str, Any]:
-    """agent-plan status --json plus show --id per task; never writes."""
     repo = Path(repo).resolve()
-    script = install_root() / "scripts" / "agent-plan.sh"
-    status = run_json(["bash", str(script), "--repo", str(repo), "status", "--json"], cwd=repo)
+    script = _script("agent-plan.sh")
+    status = run_json(["bash", script, "--repo", str(repo), "status", "--json"], cwd=repo)
     if not isinstance(status, Mapping):
         raise GraphError("canonical plan status projection is unavailable")
     result: Dict[str, Any] = {}
@@ -62,12 +62,9 @@ def plan_facts(repo: Path) -> Dict[str, Any]:
         raise GraphError("canonical plan status has invalid contract")
     result["plan.contract.satisfied"] = contract["satisfied"]
 
-    # One `list --json` is the same read view `show --id` computes, for every
-    # task in one agent-plan process; per-task `show` made a route or shadow
-    # cost one interpreter start per plan task.
     if not status.get("present"):
         return dict(sorted(result.items()))
-    listing = run_json(["bash", str(script), "--repo", str(repo), "list", "--json"], cwd=repo)
+    listing = run_json(["bash", script, "--repo", str(repo), "list", "--json"], cwd=repo)
     if not isinstance(listing, Mapping) or not isinstance(listing.get("tasks"), list):
         raise GraphError("canonical plan task projection is unavailable")
     views: Dict[str, Mapping] = {}
@@ -90,7 +87,6 @@ def plan_facts(repo: Path) -> Dict[str, Any]:
 
 
 def receipt_facts(repo: Path, *, head: str = "") -> Dict[str, Any]:
-    """From oms_runtime.evidence.artifact_rows and .oms/plan/progress.jsonl."""
     result: Dict[str, Any] = {}
     latest_admit: Dict[str, str] = {}
     land_tasks: Dict[str, bool] = {}

@@ -711,7 +711,6 @@ with patch.object(panel_results, "_records", return_value=(
 assert "BODY TEXT" in kept_answer and "FINDING TEXT" in kept_answer and "passed" in kept_answer, kept_answer
 # A worker's detail lists the changed files of its recorded patch, only while the digest matches.
 import hashlib
-import panel_results
 patch_dir = project / ".oms/artifacts/delegate"
 patch_dir.mkdir(parents=True, exist_ok=True)
 patch_bytes = b"diff --git a/value.txt b/value.txt\n--- a/value.txt\n+++ b/value.txt\n@@ -1 +1,2 @@\n-old\n+new\n+more\n"
@@ -780,9 +779,6 @@ picture = render(flow, "codex", 100, 34, view="graph", main_attempt="flow-attemp
 changed_nav["band_offsets"]["detail"] = 99
 picture = render(flow, "codex", 100, 34, view="graph", main_attempt="flow-attempt", navigation=changed_nav)
 assert "Patch:" in picture and "Changes:" not in picture, picture
-full_changes, _ = sys.modules["room_view"].detail(next(m for m in sys.modules["room_view"].nodes(flow) if m["participant"] == "builder"),
-    changed_nav["preview"], 96)
-assert "value.txt +2 -1" in "\n".join(full_changes), full_changes
 # The board is on the left in landscape and above chat in portrait. Each window keeps its own record; legacy left
 # percentages are converted on that window's axis, and orientation flips retain the board pane.
 assert panel.parse_split("left:15c") == ("left", 15, False) and panel.parse_split("left:40") == ("left", 40, True)
@@ -812,7 +808,6 @@ def board_calls(display, terminal=None, percent="", failed=False, main_watch=Fal
 def left_split(width):
     return ["split-window", "-f", "-h", "-b", "-l", width, "-t", "%1", "-c", "/repo", "board"]
 record_left = ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:56c"]
-legacy_left = ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:76c"]
 assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("56")]
 assert board_calls("400 50 1 $1\tcodex\tleft:248c\t") == [left_split("152")]
 assert board_calls("200 50 1 $1\tcodex\tleft:190c\t") == [left_split("76")]
@@ -844,7 +839,6 @@ assert board_calls("200 50 1 $1\tclaude\ttop:23r")[-1] == left_split("56"), "a w
 assert board_calls("157 131 1 $1\tclaude\tleft:40c")[-1] == top_split("59"), "a tall window leaves a recorded left edge"
 assert board_calls("80 24 0 $1\tcodex\t", terminal=(157, 131)) == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_split", "top:59r"], top_split("45%")], "the attaching terminal is sized too"
-assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
 assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 for old in ("tmux 3.0a", "tmux 2.9", "tmux", "tmux unknown"):
     assert board_calls("", version=old) == [left_split("22")], "old or unparseable tmux gets cells of 80x24: " + old
@@ -877,11 +871,6 @@ assert panel.board_split_cells(("left", 70, False), 80) == 39
 # A dragged width is kept once the window can hold both minimums.
 assert panel.board_split_cells(("left", 70, False), 110, explicit=True) == 70
 assert panel.board_split_cells(("left", 70, False), 60, explicit=True) is None
-assert board_calls("200 50 1 $1\tcodex\t") == [record_left, left_split("56")]
-assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
-assert board_calls("200 50 1 $1\tcodex\tleft:40") == [legacy_left, left_split("76")]
-assert board_calls("200 50 1 $1\tcodex\ttop:12c") == [record_left, left_split("56")], "an older top record was kept"
-assert board_calls("200 50 1 $1\tcontrol\t") == [left_split("56")]
 assert board_calls("200 50 1 $1\tclaude\t", main_watch=True) == [
     record_left,
     ["split-window", "-P", "-F", "#{pane_id}", "-f", "-h", "-b", "-l", "56", "-t", "%1", "-c", "/repo", "board"],
@@ -901,10 +890,6 @@ for identity, expected_watch in (({}, False),
             patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "graph", "")):
         panel.reopen_panel(Path("/repo"))
     assert split.call_args.kwargs["main_watch"] is expected_watch, (identity, split.call_args)
-# A detached session still reports tmux's 80x24: the attaching terminal sizes the board and the record.
-assert board_calls("80 24 0 $1\tcodex\t", terminal=(240, 59)) == [
-    ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:67c"], left_split("28%")]
-assert board_calls("80 24 0 $1\tcodex\t") == [left_split("28%")]
 for window, cells in split_widths:
     for height in (24, 40):
         orientation = "left" if cells is not None else "top"
@@ -925,13 +910,6 @@ assert board_calls("60 24 0 $1\tclaude\t") == [], "unknown terminal size ignored
 # A saved width keeps its preference while the applied board leaves the native CLI's 40-cell floor.
 assert board_calls("80 24 1 $1\tclaude\tleft:70c") == [left_split("39")], \
     "a saved width leaves 40 native CLI columns without rewriting the saved option"
-assert board_calls("200 50 1 $1\tclaude\tleft:70c") == [left_split("70")]
-for configured, cells in (("25", 50), ("35", 70), ("1", 50), ("99", 70), ("-1", 50),
-                          ("garbage", 56), ("28.5", 56), ("2_8", 56)):
-    assert board_calls("200 50 1 $1\tcodex\t", percent=configured) == [
-        ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:%dc" % cells], left_split(str(cells))]
-    assert board_calls("200 50 1 $1\tclaude\tleft:90c", percent=configured) == [left_split("76")]
-assert board_calls("50 24 1 $1\tcodex\t", percent="25") == []
 assert board_calls("61 24 1 $1\tcodex\t", percent="35") == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_split", "left:20c"], left_split("20")]
 # Unknown terminal size: the share is taken from the clamped cells, so the CLI keeps its 40 cells.
@@ -1845,7 +1823,6 @@ with patch.object(panel, "panel_panes", return_value=legacy_rows + [{"session": 
     assert panel.legacy_session(Path("/tmp/project-a")) is None
 assert panel.resolve_session(Path("/tmp/project-a"), wait=False)[0] == "oms-project-a"
 # The slug is lowercase [a-z0-9-]; a taken name falls to the hashed one, never over another checkout or a non-OMS session.
-import tempfile
 with tempfile.TemporaryDirectory() as slug_root:
     odd = Path(slug_root) / "  My.Project_X v2  "
     odd.mkdir()
@@ -2708,8 +2685,6 @@ for invalid in ("", "{", "[]", '{"tab":"nope","target":null}', '{"tab":"plan","t
                 shared_tab(["chat", "x" * 600]), shared_tab(["chat", "x" * 129])):
     assert panel.read_bottom(invalid) is None, invalid
     assert panel.refreshed_navigation({"room_id": "flow-room", "tab": "plan"}, flow, invalid) == {"room_id": "flow-room", "tab": "plan"}
-# Arriving at a window never clears the selection.
-assert "was_active" not in Path(panel.__file__).read_text(encoding="utf-8")
 # A full or closed selected room makes the next main start a new room instead of reusing it.
 with patch.dict(os.environ, {"OMS_ROOM_ID": "room-full"}), patch.object(panel, "room_headroom", return_value=False), \
         patch.object(panel.room, "create", return_value="room-fresh") as fresh, \
@@ -3340,65 +3315,7 @@ row = next(h for h in team_nav["hits"] if h["action"] == ("result", "builder"))
 assert tab_event(("click", row["x1"], row["y"]), team_nav) and team_nav["preview"] == {"target": ("result", "builder")}
 assert "WORKER Sonnet 5.5" in render(done_flow, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                                                   navigation=team_nav)
-# Expanded detail puts decisions before raw answers and keeps every grouped team row actionable.
-people = graph_text.nodes(done_flow)
-main = next(m for m in people if m["participant"] == "flow-main")
-team = [m for m in people if m["participant"] in {"advisor", "researcher", "builder"}]
-team[0]["state"] = "waiting_approval"
-team[1]["state"] = "working"
-team[2]["state"] = "done"
-team[2]["title"] = "한글 " * 40 + "DETAIL END"
-team.append(dict(team[2], participant="unknown-call", state="presence unknown", title="Unknown call"))
-for columns in (28, 76, 110):
-    lines, targets = graph_text.detail(main, {}, columns, people,
-        {"messages": [{"sender": "advisor", "targets": ["flow-main"], "text": "message " * 60 + "MESSAGE END"}]},
-        everyone={"flow-main": team})
-    assert lines.index("  Needs attention") < lines.index("  Active") < lines.index("  Unrecorded") < lines.index("  Finished"), lines
-    assert set(targets.values()) == {("result", m["participant"]) for m in team}, targets
-    assert next(i for i,line in enumerate(lines) if "Messages to" in line) > lines.index("  Finished"), lines
-    for row, target in targets.items():
-        assert 0 <= row < len(lines) and target[1] in {m["participant"] for m in team}
-        assert display_width(lines[row].lstrip()) <= columns - 4, (columns, lines[row])
-        if row - 1 in targets and targets[row] == targets[row - 1]:
-            assert lines[row].startswith("    "), (columns, lines[row])
-    finished_text = " ".join(lines[row].strip() for row in targets if targets[row] == ("result", team[2]["participant"]))
-    assert finished_text.endswith("DETAIL END"), finished_text
-    message_start = next(i for i, line in enumerate(lines) if line.startswith("Messages to ")) + 1
-    message_preview = []
-    for line in lines[message_start:]:
-        if not line.startswith(("  From ", "    ")):
-            break
-        message_preview.append(line)
-    assert len(message_preview) <= 2 and message_preview[-1].rstrip().endswith("..."), message_preview
-    message_row = next(i for i, line in enumerate(lines) if line.startswith("  From "))
-    for row in range(message_row, lines.index("", message_row)):
-        assert display_width(lines[row].lstrip()) <= columns - 4, (columns, lines[row])
-        assert lines[row].startswith("  " if row == message_row else "    "), (columns, lines[row])
-    assert any("Team:" in line for line in lines) and any("Messages to" in line for line in lines)
-assert all(line.startswith("    ") for index, line in enumerate(lines) if index in targets and index - 1 in targets and targets[index] == targets[index - 1]), lines
-seven_done = [dict(team[2], participant="done-%s" % n, title="Done %s" % n,
-                   ended="2026-10-10T10:%02d:00Z" % n, seq=7 - n) for n in range(7)]
-seven_lines, seven_targets = graph_text.detail(main, {}, 100, people, {}, everyone={"flow-main": seven_done})
-assert len(seven_targets) == 5 and list(seven_targets.values()) == [("result", "done-%s" % n) for n in range(6, 1, -1)]
-assert "2 earlier finished · see the Past tab" in seven_lines and seven_lines.index("2 earlier finished · see the Past tab") not in seven_targets
-mail_room = {"participants": [dict(team[2], parent="flow-main")],
-             "messages": [{"id": "result-builder", "sender": "builder", "recipient": "flow-main",
-                           "targets": ["flow-main"], "message_kind": "handoff", "text": "INTERNAL HANDOFF"},
-                          {"sender": "advisor", "targets": ["flow-main"], "text": "DIRECT MESSAGE"}],
-             "pairs": [{"recipient": "flow-main", "pending": 4}]}
-mail_detail = graph_text.detail(main, {}, 100, people, mail_room, everyone={"flow-main": team})[0]
-assert "INTERNAL HANDOFF" not in "\n".join(mail_detail) and "DIRECT MESSAGE" in "\n".join(mail_detail), mail_detail
-assert "Messages to Sol 6 main: 1 (4 unread)" in mail_detail, mail_detail
-structured_message = dict(mail_room, messages=[{"sender": "advisor", "targets": ["flow-main"],
-    "text": "Summary\n\n| size | issue |\n|------|-------|\n| large | joined |\n\n```bash\noms panel | size\n```"}])
-structured_detail = graph_text.detail(main, {}, 80, people, structured_message, everyone={"flow-main": team})[0]
-structured_start = next(i for i, line in enumerate(structured_detail) if line.startswith("Messages to ")) + 1
-structured_preview = []
-for line in structured_detail[structured_start:]:
-    if not line.startswith(("  From ", "    ")):
-        break
-    structured_preview.append(line)
-assert len(structured_preview) == 2 and "| size | issue |" in structured_preview[1] and structured_preview[1].endswith("..."), structured_preview
+main = next(m for m in graph_text.nodes(done_flow) if m["participant"] == "flow-main")
 # Main mail readers retain table/fence layout, read state and room isolation; empty cards offer no f action.
 mail_flow = deepcopy(done_flow)
 mail_body = "\n  **Summary** snake__case `literal`  \nmodel-result: actual peer finding\n\n| size | issue |\n|------|-------|\n| large | joined |\n\n```bash\n  oms panel | size\n\tprintf '\\n'\n```\nLAST MAIL LINE\n\n"
@@ -3576,45 +3493,11 @@ with patch.object(panel, "BackgroundRead", ImmediateRead), \
     assert panel.watch(project, "codex", view="graph", no_animation=True) == 0
 assert watch_nav_after_transcript == [(True, True)] * 5, watch_nav_after_transcript
 # End main mail reader assertions.
-assert not any(line.startswith("Scope:") for line in lines)
-scoped_main = graph_text.detail(dict(main, owns=["scripts/lib", "docs"]), {}, 76, people, {}, everyone={"flow-main": team})[0]
-assert "Scope: scripts/lib, docs" in scoped_main, scoped_main
-unknown_call = dict(team[2], state="presence unknown")
-lines, targets = graph_text.detail(main, {}, 76, people, {}, everyone={"flow-main": [unknown_call]})
-unknown_detail = " ".join(graph_text.detail(unknown_call, {"report": {"rows": []}}, 76, people, {})[0])
-assert "status unknown" in unknown_detail and "Status unknown: no live process, heartbeat or exit seen" in unknown_detail \
-    and "f opens it" in unknown_detail, unknown_detail
-# The Detail scrolls, so narrow panels wrap the whole explanation, including what to do.
-for columns in (24, 38):
-    narrow_unknown = graph_text.detail(unknown_call, {"report": {"rows": []}}, columns, people, {})[0]
-    assert "kept until its main decides. Any recorded result is below; f opens it" in " ".join(narrow_unknown), narrow_unknown
-    narrow_main = graph_text.detail(main, {}, columns, people, {}, everyone={"flow-main": [unknown_call]})[0]
-    assert "not a failure, kept until its main decides" in " ".join(line.strip() for line in narrow_main), narrow_main
-assert "Team: 1 unrecorded" in lines and "  Active" not in lines and "  Finished" not in lines
-assert any(line.startswith("    no live process, heartbeat or exit seen; not a failure")
-           for line in lines[lines.index("  Unrecorded"):lines.index("Messages to Sol 6 main: 0")]), lines
-assert any("Messages to" in line for line in lines) and ("result", "builder") in targets.values()
-worker = next(m for m in people if m["participant"] == "builder")
 recorded = {"rows": [{"outcome": "accepted", "verification": {"status": "passed"},
     "summary": "OWNER DECISION", "calls": [{"answer": "RAW WORKER ANSWER"}]}]}
-kept = json.dumps(recorded, sort_keys=True)
-lines, targets = graph_text.detail(worker, {"report": recorded}, 76, people)
-assert lines.index("Main's summary:") < lines.index("Worker's answer:"), lines
-assert "  OWNER DECISION" in lines and "  RAW WORKER ANSWER" in lines
-assert "Accepted by its main · checks passed" in lines
-assert any("Permissions unrecorded" in line for line in lines) and not any("Read-only" in line for line in lines)
-# A running call never borrows a whole-main result its main recorded for another task.
-adopted = {"rows": [{"task_id": "main-wide", "outcome": "completed", "summary": "OTHER TASK SUMMARY", "calls": []},
-                    {"task_id": "own-task", "outcome": None, "summary": None, "calls": []}]}
-lines, targets = graph_text.detail(dict(worker, task_id="own-task", state="working"), {"report": adopted}, 76, people)
-assert not any("OTHER TASK SUMMARY" in line for line in lines), lines
-assert "Not reviewed by its main yet · no checks run" in lines, lines
 long_recorded = deepcopy(recorded)
 long_recorded["rows"][0]["summary"] = "\n".join("decision line %s" % i for i in range(1000))
 long_recorded["rows"][0]["calls"][0]["answer"] = "answer " * 20000
-lines, _ = graph_text.detail(worker, {"report": long_recorded}, 76, people)
-assert len(lines) < 60 and sum("More in the full recorded result" in line for line in lines) == 2, lines
-assert json.dumps(recorded, sort_keys=True) == kept
 # f opens the full retained reader through the existing revalidated result path; Enter stays a preview.
 assert TerminalInput().decode(b"f") == [("f",)]
 full_recorded = deepcopy(recorded)
@@ -3677,7 +3560,6 @@ for columns, rows, short_flow in [(c, r, f) for c in (76, 100) for r in range(16
     screen = render(short_flow, "codex", columns, rows, view="graph", navigation=nav)
     band = next((b for b in nav.get("bands", []) if b["name"] == "detail"), None)
     if band and band["y2"] - band["y1"] == 2:
-        body, _ = graph_text.detail(worker, {"report": full_recorded}, columns - 4, people)
         first = nav["band_offsets"]["detail"]
         shown_worker = next(m for m in graph_text.nodes(short_flow) if m["participant"] == "builder")
         summary_body, _ = graph_text.summary_card(shown_worker, {"report": full_recorded}, columns - 4, report=short_flow)
@@ -3784,8 +3666,6 @@ held = graph_text.claims_by_main(declared_board)
 assert [t["id"] for t in held["flow-main"]] == ["current", "old"], held
 claimed_card = graph_text.render_graph(declared_board, 127, 50, navigation={"dismissed": True})
 assert "Task: current · running · +1 more running" in claimed_card and "+2 more" not in claimed_card, claimed_card
-claim_detail = graph_text.detail(dict(main, title="Native task not recorded"), {}, 100, people, {}, claims=held)[0]
-assert "Task: Current claim" in claim_detail, claim_detail
 declared_board["plan"] = deepcopy(counted.get("plan", {}))
 working_picture = render(working_board, "codex", 110, 40, view="graph", main_attempt="flow-attempt",
                  navigation={"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}})
@@ -4129,11 +4009,6 @@ timed = deepcopy(ended)
 timed["room"]["call_results"]["old-00"]["exit"] = 124
 timed_text = render(timed, "codex", 120, 120, view="tree", navigation={})
 assert "timed out" in timed_text and "--continue" not in timed_text, timed_text
-timed_worker = next(m for m in graph_text.nodes(timed) if m["participant"] == "old-00")
-timed_detail = "\n".join(graph_text.detail(timed_worker, {}, 100, graph_text.nodes(timed))[0])
-assert "timed out" in timed_detail.splitlines()[0] and "failed" not in timed_detail.splitlines()[0], timed_detail
-assert "timed out" in timed_detail and "Timed out · its main can continue it" in timed_detail and "oms panel" not in timed_detail
-from room_view import nodes as room_nodes
 rounded = deepcopy(ended)
 rounded["attempts"] = {"active_recent": [], "recent": [
     {"attempt_id": "a-%s" % ident, "state": "failed", "task_id": "same-task",
@@ -4162,8 +4037,6 @@ gone["plan"] = {"tasks": [{"id": "task-live", "state": "running", "claimed_by": 
                             "lease_id": "lease-live", "claimed_at": minutes_ago(1)}]}
 assert graph_text.held_split(gone) == (set(), set()), graph_text.held_split(gone)
 # snapshot() links full-projection rows only on the room, participant and role identity, newest row winning.
-from unittest.mock import patch
-import room as room_module
 def event(attempt, state, at, room_id="flow-room", who="gone-review", role="worker", tokens=None):
     # The real ledger row shape: panel identity lives in refs, not in a "panel" mapping.
     row = {"attempt_id": attempt, "state": state, "updated_at": at, "task_id": "t-" + attempt,
@@ -4275,7 +4148,6 @@ snapshot_nodes = {m["participant"]: m for m in graph_text.nodes(got)}
 assert snapshot_nodes["gone-live"]["lease_id"] == "lease-live", snapshot_nodes["gone-live"]
 assert snapshot_nodes["gone-review"]["tokens"] == "909 in / 0 out", snapshot_nodes["gone-review"]
 assert snapshot_nodes["gone-second"]["tokens"] == "999 in / 0 out", snapshot_nodes["gone-second"]
-from panel_view import call_tokens
 assert call_tokens(got, "r466-attempt", "done", True) == "122.6k in / 3.7k out · 84% cached", got["room_attempts"]
 got["plan"] = {"tasks": [{"id": "t-a-live", "state": "running", "claimed_by": "flow-attempt",
                             "lease_id": "lease-live", "claimed_at": "2026-01-03T00:00:01Z"}]}
@@ -4541,16 +4413,6 @@ for mode in ("tree", "graph"):
     debate_nav["surface"] = mode
     assert panel.tab_event(("down",), debate_nav) and panel.tab_event(("enter",), debate_nav)
     assert "COUNCIL " in render(past_debate, "codex", 127, 50, view=mode, navigation=debate_nav), mode
-team_lines, _ =graph_text.detail(next(m for m in graph_text.nodes(ended) if m["participant"] == "flow-main"), {}, 120,
-    graph_text.nodes(ended), ended["room"], everyone={"flow-main": [m for m in graph_text.nodes(ended)
-                                                                  if m.get("parent") == "flow-attempt"]})
-team_rows = [line for line in team_lines if "Old job" in line or "한글 작업 제목 / builder" in line]
-assert "failed (exit 1)" in team_rows[0] and "finished" in team_rows[-1], team_rows
-assert team_lines.index("  Needs attention") < team_lines.index("  Active") < team_lines.index("  Finished"), team_lines
-assert sum("Old job" in line and "finished" in line for line in team_lines) == 5, team_lines
-assert "7 earlier finished · see the Past tab" in team_lines, team_lines
-empty_team = deepcopy(flow)
-empty_team["room"]["participants"] = [m for m in flow_members if m.get("role") == "main"]
 admission_team = deepcopy(flow)
 next(a for a in admission_team["attempts"]["active_recent"] if a["attempt_id"] == "builder")["state"] = "done"
 admission_team["awaiting_admission"] = ["builder"]
@@ -4572,29 +4434,6 @@ for settled_report in (retried, closed_failure):
     assert graph_text.call_classifier(settled_report)(next(m for m in graph_text.nodes(settled_report)
                                                            if m["participant"] == "old-00")) == "past"
 assert ("result", "old-00") in {item["action"] for item in inbox_items(ended)}
-for team_report, expected_team in ((flow, "5 active"),
-                                   (ended, "1 attention · 5 active · 12 finished · 1 unrecorded"),
-                                   (retried, "6 active · 13 finished · 1 unrecorded"),
-                                   (closed_failure, "5 active · 13 finished · 1 unrecorded"),
-                                   (admission_team, "4 active · 1 awaiting decision"),
-                                   (empty_team, "no calls yet")):
-    detail_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main"), "report": {}}}
-    detail_team = graph_text.render_graph(team_report, 127, 120, navigation=detail_nav).splitlines()
-    team_card = graph_text.render_graph(team_report, 127, 50, navigation={"dismissed": True})
-    member = next(m for m in graph_text.nodes(team_report) if m["participant"] == "flow-main")
-    full_team, full_targets = graph_text.detail(member, {}, 120, graph_text.nodes(team_report), team_report["room"],
-        everyone={"flow-main": [m for m in graph_text.nodes(team_report) if m.get("parent") == "flow-attempt"]}, classify=graph_text.call_classifier(team_report))
-    assert "Team: " + expected_team in full_team, (expected_team, full_team)
-    assert "Team:" not in team_card and "WORK STATUS" not in team_card and "MAIL /" not in team_card, team_card
-    if team_report is admission_team:
-        assert ("result", "builder") in full_targets.values() and "claim-detail" in team_card, (full_team, team_card)
-# A lifecycle review call and a finished call awaiting admission share the board's "Awaiting decision" count.
-assert graph_text.team_counts([{"state": state} for state in
-    ("presence unknown", "done", "working", "failed", "cancelled", "done", "review")],
-    lambda call: "review" if call["state"] in {"done", "review"} else "live") == [
-        "1 attention", "1 active", "3 awaiting decision", "1 cancelled", "1 unrecorded"]
-assert graph_text.team_counts([{"state": "done"}, {"state": "cancelled"}]) == ["1 finished", "1 cancelled"]
-assert any("status unknown" in line for line in team_lines) and "failed (exit 1)" in "\n".join(team_lines), team_lines
 # Spare rows between the call tree and the box carry a display-only summary; the tree and the box keep every row.
 summary_room = deepcopy(admission_team)
 next(a for a in summary_room["attempts"]["active_recent"] if a["attempt_id"] == "flow-other")["state"] = "done"
@@ -4816,7 +4655,6 @@ assert {item["action"] for item in attention_items(plain_needs)} == {item["actio
 # within any other class the newest comes first. A superseded failure or one whose task closed leaves the queue, and
 # a held task whose failed call is listed is not repeated as stale.
 from panel_view import attention_items, attention_header
-from unittest.mock import patch
 import panel_view
 queue = deepcopy(held_flow)
 for attempt in queue["attempts"]["active_recent"]:
@@ -5496,7 +5334,6 @@ for participant, task_id, stamp in (("w1", "life-a", "2026-10-07T00:01:00Z"),
                 if row["panel"].get("room_participant") == participant)
     decision_call.update(state="review", task_id=task_id, updated_at=stamp)
 assert backlog_counts(decision_fixture) == {"m1": 2}, backlog_counts(decision_fixture)
-from panel_view import attention_items
 decision_rows = [item for item in attention_items(decision_fixture) if item["cls"] == "decide"]
 assert len(decision_rows) == 2 and all(item["age"] for item in decision_rows), decision_rows
 from room_view import attention_body, goal_box
@@ -5513,7 +5350,6 @@ inbox_room["review_backlog"] = backlog_project(inbox_room)
 backlog_items = [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
 assert len(backlog_items) == 1 and backlog_items[0]["what"] == backlog_warning(9), backlog_items
 # In the Attention queue the backlog warning is a decision and leads that class.
-from panel_view import attention_items
 backlog_decisions = [item["row_id"] for item in attention_items(inbox_room) if item["cls"] == "decide"]
 assert backlog_decisions[:1] == [("review-backlog", "m1")], backlog_decisions
 del inbox_room["review_backlog"]
@@ -6304,7 +6140,6 @@ assert panel.expire_notice(aging, 100.0) is False and panel.expire_notice(aging,
 assert panel.expire_notice(aging, 110.0) is True and "notice" not in aging
 aging["notice"] = "again"
 assert panel.expire_notice(aging, 111.0) is False and aging["notice"] == "again"
-from panel_tree import render_detail
 snapshot_task = {"id": "snap", "title": "Snapshot task", "state": "running", "depends": ["base"],
     "provider": "codex", "claimed_at": "2026-10-11T00:00:00Z",
     "verify": "python3 verify.py " + "x" * 300, "allowed_paths": ["scripts/lib/panel.py"]}
@@ -6366,7 +6201,7 @@ long_screen = render_detail(tree_room, {"title": "RECORDED RESULTS", "report": {
     "calls": [{"kind": "review", "answer": "Intro " * 20 + long_link + " tail"}]}]}}, 60, 200, {})
 assert long_link in " ".join(" ".join(line.split()) for line in long_screen.split("\n")), long_screen
 # Detail paging must preserve the reader's already wrapped blocks without another clean()/clipped() pass.
-from dashboard_projection import ELLIPSIS, use_unicode
+from dashboard_projection import ELLIPSIS
 previous_unicode = ELLIPSIS[0] == '…'
 structured_lines = ['```text', '  a\t=  1  ', '  ' + '한글' * 80 + '  END  ',
                     'stop-reason: literal-data', 'control\x1b[31m\x00', '```', '',

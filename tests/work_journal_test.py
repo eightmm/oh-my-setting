@@ -206,7 +206,7 @@ class JournalTestCase(unittest.TestCase):
             json.dumps({"id": "rec-1", "ts": "2026-08-22T06:00:00Z", "summary": "a record"}),
             encoding="utf-8",
         )
-        for source_type in ("goal-drive", "run-ledger", "commit"):
+        for source_type in ("goal-drive", "intent", "run-ledger", "commit"):
             payload = wj.source_payload(
                 self.repo, source_type, source,
                 decision="이 경로를 선택했다",
@@ -277,22 +277,16 @@ class JournalTestCase(unittest.TestCase):
         active = self.store.active_events(self.store.load_events())
         self.assertEqual([revised["event_id"]], [event["event_id"] for event in active])
 
-    def test_duplicate_source_and_task_retry_are_idempotent(self):
-        first, created = self.store.record_event(base_event("task-1:verify"))
-        second, created_again = self.store.record_event(base_event("task-1:verify"))
-        self.assertTrue(created)
-        self.assertFalse(created_again)
-        self.assertEqual(first["event_id"], second["event_id"])
-        self.assertEqual(1, len(self.read_events()))
-
     def test_event_id_priority_source_then_operation_then_stable_fields(self):
         source_first = base_event("authoritative")
         changed = base_event("authoritative")
         changed["outcome"]["summary"] = "a changed replay must not fork the source"
-        first, _ = self.store.record_event(source_first)
+        first, created_first = self.store.record_event(source_first)
         replay, created = self.store.record_event(changed)
+        self.assertTrue(created_first)
         self.assertFalse(created)
         self.assertEqual(first["event_id"], replay["event_id"])
+        self.assertEqual(1, len(self.read_events()))
 
         operation = base_event()
         operation["source"] = {"type": "hook"}
@@ -517,8 +511,12 @@ class JournalTestCase(unittest.TestCase):
                 self.assertIn(expected[0]["event_id"], fresh.summary_text("daily", "2026-06-01"))
                 self.assertEqual(2, fresh.rebuild()["event_count"])
                 if wj._cold_manifest(fresh.root).get("pending"):
+                    before = fresh.events_path.read_bytes()
                     with self.assertRaisesRegex(wj.JournalError, "seal --apply"):
                         fresh.record_event(base_event("after-crash"))
+                    self.assertEqual(0, fresh.seal())
+                    self.assertIn("pending", wj._cold_manifest(fresh.root))
+                    self.assertEqual(before, fresh.events_path.read_bytes())
                     fresh.seal(apply=True)
                 fresh.record_event(base_event("after-crash"))
                 self.assertEqual(3, len(fresh.load_events()))
@@ -634,30 +632,6 @@ class JournalTestCase(unittest.TestCase):
                          [row["reason"] for row in quarantine])
         self.assertEqual(1000, len(self.store.load_events()))
         self.assertEqual(0, self.store.seal(apply=True))
-
-    def test_cold_pending_recovery_requires_explicit_apply(self):
-        self.store.record_event(base_event("old", "2026-06-01T02:00:00Z"))
-        write = wj._cold_atomic_write
-
-        def interrupt(path, content):
-            if path == self.store.events_path:
-                raise OSError("interrupted seal")
-            write(path, content)
-
-        with mock.patch.object(wj, "_cold_atomic_write", side_effect=interrupt):
-            with self.assertRaises(OSError):
-                self.store.seal(apply=True)
-        before = self.store.events_path.read_bytes()
-        with self.assertRaisesRegex(wj.JournalError, "seal --apply"):
-            self.store.record_event(base_event("after-crash"))
-        self.assertEqual(1, self.store.materialize()["event_count"])
-        self.assertEqual(1, self.store.rebuild()["event_count"])
-        self.assertEqual(0, self.store.seal())
-        self.assertIn("pending", wj._cold_manifest(self.store.root))
-        self.assertEqual(before, self.store.events_path.read_bytes())
-        self.store.seal(apply=True)
-        self.store.record_event(base_event("after-crash"))
-        self.assertEqual(2, len(self.store.load_events()))
 
     def test_incremental_index_avoids_full_log_scan_and_untouched_rewrite(self):
         self.store.record_event(base_event("old", "2026-07-01T02:00:00Z"))
@@ -789,9 +763,8 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual("system-local", name)
         self.assertIsNone(timezone)
 
-    @unittest.skipUnless(hasattr(__import__("time"), "tzset"), "needs time.tzset")
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset")
     def test_prompt_stamp_expires_at_system_local_midnight_across_dst(self):
-        import time
         saved = os.environ.get("TZ")
         try:
             os.environ["TZ"] = "America/New_York"
@@ -837,26 +810,27 @@ class JournalTestCase(unittest.TestCase):
         self.store.materialize()
         days = sorted(path.name for path in self.store.daily_dir.glob("*.md"))
         self.assertEqual(["2026-07-01.md", "2026-07-04.md", "2026-07-20.md"], days)
-
-    def test_late_event_rematerializes_past_day_and_week(self):
-        self.store.record_event(base_event("new", "2026-07-31T02:00:00Z"))
-        self.store.materialize()
         self.store.record_event(base_event("late", "2026-07-01T02:00:00Z"))
         self.store.materialize()
-        daily = (self.store.daily_dir / "2026-07-01.md").read_text(encoding="utf-8")
-        weekly = (self.store.weekly_dir / "2026-W27.md").read_text(encoding="utf-8")
-        self.assertIn("late", daily)
-        self.assertIn("late", weekly)
+        self.assertIn("late", (self.store.daily_dir / "2026-07-01.md").read_text(encoding="utf-8"))
+        self.assertIn("late", (self.store.weekly_dir / "2026-W27.md").read_text(encoding="utf-8"))
 
     def test_materialization_is_deterministic(self):
         self.store.record_event(base_event("b", "2026-07-31T02:00:00Z"))
         self.store.record_event(base_event("a", "2026-07-31T01:00:00Z"))
-        self.store.materialize()
+        first_report = self.store.materialize()
+        index = self.store.index_path
+        daily = self.store.daily_dir / "2026-07-31.md"
+        stat_before = (index.stat().st_ino, index.stat().st_mtime_ns,
+                       daily.stat().st_ino, daily.stat().st_mtime_ns)
         before = {
             path.relative_to(self.store.root).as_posix(): path.read_bytes()
             for path in sorted(self.store.root.rglob("*.md"))
         }
-        self.store.materialize()
+        self.assertEqual(first_report, self.store.materialize())
+        stat_after = (index.stat().st_ino, index.stat().st_mtime_ns,
+                      daily.stat().st_ino, daily.stat().st_mtime_ns)
+        self.assertEqual(stat_before, stat_after)
         after = {
             path.relative_to(self.store.root).as_posix(): path.read_bytes()
             for path in sorted(self.store.root.rglob("*.md"))
@@ -1122,7 +1096,6 @@ class JournalTestCase(unittest.TestCase):
         self.assertEqual([], leftovers)
 
     def test_head_commit_capture_uses_git_object_as_source(self):
-        subprocess = __import__("subprocess")
         subprocess.run(["git", "-C", str(self.repo), "init", "-q"], check=True)
         subprocess.run(
             ["git", "-C", str(self.repo), "config", "user.name", "Test"], check=True
@@ -1217,6 +1190,7 @@ class JournalTestCase(unittest.TestCase):
         )
         follow_up = next_day.prompt_digest()
         self.assertIn("Last journal day 2026-07-31: 1 events, 1 verified.", follow_up)
+        self.assertIn("recorded no decision", follow_up)
         self.assertEqual("", next_day.prompt_digest())
 
     def test_prompt_digest_points_at_the_newest_recent_handoff(self):
@@ -1245,7 +1219,9 @@ class JournalTestCase(unittest.TestCase):
             project_id="proj_stale",
             project_name="stale",
         )
-        stale_store.record_event(base_event("stale-source"))
+        stale_store.record_event(
+            dict(base_event("stale-source"), decision="landed the sibling-reader sweep")
+        )
         stale_store.materialize()
         stale_handoffs = stale_repo / ".oms" / "handoffs"
         stale_handoffs.mkdir(parents=True)
@@ -1263,6 +1239,7 @@ class JournalTestCase(unittest.TestCase):
         follow_up = next_day.prompt_digest()
         self.assertTrue(follow_up)
         self.assertNotIn("session-handoff", follow_up)
+        self.assertNotIn("recorded no decision", follow_up)
 
     def test_renderer_language_is_configurable_and_blocker_scan_survives(self):
         annotated = base_event("annotated")
@@ -1324,42 +1301,10 @@ class JournalTestCase(unittest.TestCase):
         self.store.materialize()
 
         summary = self.store.summary_text("daily", "2026-07-31")
+        self.assertIn("\n  - 관련 evidence: task:nested-details", summary)
         self.assertIn("\n  - 결과: success", summary)
         self.assertIn("\n  - 해석: token expiry가 해소됨", summary)
-
-    def test_notion_fallback_daily_page_is_unchanged_without_events(self):
-        sha = "0e0390aa95893b50e14bdf78d60f5c5d3090cf8d"
-        handoff = "b" * 64
-        payload = base_event("evidence-leak")
-        payload["evidence"] = [
-            {"type": "git-commit", "ref": sha},
-            {"type": "handoff", "ref": handoff},
-        ]
-        self.store.record_event(payload)
-        self.store.materialize()
-        daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
-        # The local file is the evidence layer and keeps both references,
-        # including the indented bullet the mirror has to drop.
-        self.assertIn("  - 관련 evidence: git-commit:%s" % sha, daily)
-
-        rendered = wj.notion_presentation(daily)
-        self.assertEqual(daily, rendered)
-
-    def test_notion_fallback_daily_page_keeps_all_source_sections(self):
-        alpha = base_event("alpha")
-        alpha["outcome"] = {"summary": "alpha check passed", "status": "success"}
-        beta = base_event("beta", "2026-07-31T02:30:00Z")
-        beta["outcome"] = {"summary": "beta still open", "status": "recorded"}
-        beta["verification_status"] = "not_verified"
-        self.store.record_event(alpha)
-        self.store.record_event(beta)
-        self.store.materialize()
-        daily = (self.store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
-        # Progress and verified/unverified list the same facts locally.
-        self.assertEqual(2, daily.count("- alpha check passed"))
-
-        rendered = wj.notion_presentation(daily)
-        self.assertEqual(daily, rendered)
+        self.assertEqual(2, summary.count("- focused verification passed"))
 
     def test_daily_sessions_section_and_decision_callout_marks(self):
         alpha = base_event("alpha")
@@ -1374,8 +1319,6 @@ class JournalTestCase(unittest.TestCase):
         self.assertIn("## 세션", daily)
         self.assertIn("- sess-alpha-one (2 event(s))", daily)
         self.assertIn("oms session-handoff list", daily)
-
-        self.assertEqual(daily, wj.notion_presentation(daily))
 
     def test_daily_period_aggregates_count_sessions_commits_verified(self):
         alpha = base_event("alpha")
@@ -1438,36 +1381,6 @@ class JournalTestCase(unittest.TestCase):
             {"eightmm/oh-my-setting"},
             {row[1] for row in identities},
         )
-
-
-class IdleMaterializeTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-idle."))
-        self.store = wj.JournalStore(
-            self.tmp / "demo", timezone_name="Asia/Seoul", clock=lambda: NOW,
-            project_id="proj_test", project_name="demo",
-        )
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_materialize_with_nothing_dirty_rewrites_no_view(self):
-        """Every prompt, Stop, and session start ticks the journal; a tick with
-        no new event must not fsync-rewrite the summary index or any view."""
-        self.store.record_event(base_event("first"))
-        self.store.materialize()
-        index = self.store.index_path
-        daily = self.store.daily_dir / "2026-07-31.md"
-        before = (index.stat().st_ino, index.stat().st_mtime_ns,
-                  daily.stat().st_ino, daily.stat().st_mtime_ns)
-        self.assertEqual(self.store.materialize(), self.store.materialize())
-        after = (index.stat().st_ino, index.stat().st_mtime_ns,
-                 daily.stat().st_ino, daily.stat().st_mtime_ns)
-        self.assertEqual(before, after)
-        # A new event still re-renders its period and the index.
-        self.store.record_event(base_event("second"))
-        self.store.materialize()
-        self.assertNotEqual(before[:2], (index.stat().st_ino, index.stat().st_mtime_ns))
 
 
 class NotionFailureBackoffTest(unittest.TestCase):
@@ -2108,7 +2021,6 @@ class JournalLanguageTest(unittest.TestCase):
             store.materialize()
             daily = (store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
             notion = wj.notion_presentation(daily, store.load_events())
-        daily = (store.daily_dir / "2026-07-31.md").read_text(encoding="utf-8")
         self.assertIn("## Key progress", daily)
         self.assertNotIn("핵심 진전", daily)
         self.assertIn("## Completed", notion)
@@ -2384,31 +2296,6 @@ class NotionPresentationTest(unittest.TestCase):
         self.assertIn("CI 실패 (커밋 ccccccc)", failures)
         self.assertIn("review could not be tied to a task", digest)
 
-    def test_daily_fallback_returns_raw_content_without_a_digest(self):
-        content = "\n".join(
-            [
-                "# Daily Work Journal — 2026-08-01",
-                "",
-                "## 핵심 진전",
-                "- Task task-x rejected: unsafe patch",
-                "",
-                "- Commit 0e0390aa9589: test: capture status output [wj_a4b7c0f523496f5d; source git-commit:0e0390aa; evidence git-commit:0e0390aa]",
-                "",
-                "## 의사결정",
-                "",
-                "- decided the thing [wj_0392687b9e2ed75e; source agent-task:ta[REDACTED]:update:b99491a47ec430fa; evidence agent-state:ta[REDACTED]]",
-                "- decided the thing [wj_767833cf7f99e79b; source agent-task:ta[REDACTED]:close:a4026fc73de9baaa; evidence agent-state:ta[REDACTED]]",
-                "- another decision [wj_a9286f0d548fa0aa; source git-commit:abc123; evidence git-commit:abc123]",
-                "",
-                "## 다음 우선순위",
-                "",
-                "- 기록 없음",
-            ]
-        )
-        with mock.patch.dict(os.environ, {"OMS_WORK_JOURNAL_LANG": "ko"}, clear=False):
-            rendered = wj.notion_presentation(content)
-        self.assertEqual(content, rendered)
-
     def test_drops_evidence_bullets_and_labeled_commit_prefixes(self):
         content = "\n".join(
             [
@@ -2488,91 +2375,6 @@ class NotionPresentationTest(unittest.TestCase):
         self.assertEqual(1, rendered.count("- 작업: fix: same subject twice"))
         self.assertIn("  - 결과: success", rendered)
         self.assertNotIn("  - 결과: recorded", rendered)
-
-
-class JudgmentCaptureTest(unittest.TestCase):
-    """The fields that make a summary readable, and the nudge when they are absent."""
-
-    def _store(self, tmp):
-        repo = pathlib.Path(tmp)
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@e.com"],
-                       check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "T"], check=True)
-        (repo / "s.txt").write_text("seed\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(repo), "add", "s.txt"], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
-        return repo, wj.JournalStore(repo)
-
-    def _yesterday(self):
-        return (
-            dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    def test_a_lifecycle_verb_carries_its_own_judgment_fields(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, store = self._store(tmp)
-            # A park states its blocker and the next step; an adopted contract
-            # states the sentence the operator wrote. The adapter carries them
-            # rather than deriving anything.
-            payload = wj.source_payload(
-                repo, "goal-drive", repo / "s.txt", source_id="gd-1:park",
-                outcome="Goal drive parked: verifier-floor-deadlock",
-                outcome_status="parked", blocker="verifier-floor-deadlock",
-                next_action="inspect the typed review outcome",
-            )
-            self.assertEqual("verifier-floor-deadlock", payload["blocker"])
-            self.assertEqual(
-                "inspect the typed review outcome", payload["next_action"]
-            )
-            store.record_event(payload)
-            store.record_event(
-                wj.source_payload(
-                    repo, "intent", repo / "s.txt", source_id="in-1",
-                    outcome="Contract adopted: in-1", outcome_status="confirmed",
-                    verification_status="not_applicable",
-                    decision="adopted contract: block the sibling readers",
-                )
-            )
-            store.materialize()
-            rendered = wj.notion_presentation(
-                store.summary_text("daily", store._current_periods()[0]),
-                store.load_events(),
-            )
-            # All three judgment sections were permanently empty before these
-            # verbs carried anything into them.
-            self.assertIn("> adopted contract: block the sibling readers", rendered)
-            self.assertIn("- verifier-floor-deadlock", rendered)
-            self.assertIn("- inspect the typed review outcome", rendered)
-
-    def test_the_daily_digest_names_a_day_that_recorded_no_decision(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, store = self._store(tmp)
-            store.record_event(
-                wj.source_payload(
-                    repo, "goal-drive", repo / "s.txt", source_id="gd-quiet",
-                    occurred_at=self._yesterday(),
-                    outcome="Goal drive reached acceptance", outcome_status="done",
-                )
-            )
-            store.materialize()
-            self.assertIn("recorded no decision", store.prompt_digest())
-
-    def test_the_digest_stays_quiet_when_the_day_recorded_one(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, store = self._store(tmp)
-            store.record_event(
-                wj.source_payload(
-                    repo, "goal-drive", repo / "s.txt", source_id="gd-loud",
-                    occurred_at=self._yesterday(),
-                    outcome="Goal drive reached acceptance", outcome_status="done",
-                    decision="landed the sibling-reader sweep",
-                )
-            )
-            store.materialize()
-            # The bounded recent-event descriptors drop the judgment fields, so
-            # a digest reading those would call every day decision-less.
-            self.assertNotIn("recorded no decision", store.prompt_digest())
 
 
 if __name__ == "__main__":

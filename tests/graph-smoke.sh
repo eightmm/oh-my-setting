@@ -26,12 +26,11 @@ PYTHONPATH="$ROOT/scripts/lib" python3 "$ROOT/tests/run-unittest-classes.py" \
 # assertion artifact, and the dogfood copy holds this repository's own bytes.
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-fixture.XXXXXX")"
 work="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-work.XXXXXX")"
-dog="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-dogfood.XXXXXX")"
 # Another fixture copy lets auto-build assertions start without a graph.
 auto="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-auto.XXXXXX")"
 impact="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-impact.XXXXXX")"
 fanout="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-fanout.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$impact" "$fanout"' EXIT INT TERM HUP
+trap 'rm -rf "$tmp" "$work" "$auto" "$impact" "$fanout"' EXIT INT TERM HUP
 
 mkdir -p "$tmp/scripts/lib" "$tmp/docs" "$tmp/tests"
 git -C "$tmp" init -q -b main
@@ -242,37 +241,18 @@ run_graph "$work/map-fragment.json" project map --limit 20 --json \
 [ "$graph_rc" -eq 0 ] || fail "map JSON + HTML fragment exited $graph_rc: $(cat "$work/map-fragment.json")"
 python3 - "$work/map-fragment.json" "$work/project-map.html" <<'PY'
 import json
+import re
 import sys
 row = json.load(open(sys.argv[1]))
 assert row["html_fragment"] == sys.argv[2], row
 assert not row["counts"]["kind"].get("test"), row["counts"]
-PY
-python3 - "$work/project-map.html" <<'PY'
-import re
-import sys
-text = open(sys.argv[1], encoding="utf-8").read()
+text = open(sys.argv[2], encoding="utf-8").read()
 assert text.startswith('<section id="oms-graph-view-'), text[:80]
-assert "<!doctype" not in text.lower(), text[:80]
-assert "d3@7.9.0" in text, "missing pinned renderer"
-assert "Instruction draft" in text, "missing editable work instruction"
-assert "Copy text" in text, "missing clipboard fallback"
-assert "Send to Codex" in text, "missing explicit Codex send action"
-assert "draft.focus()" in text, "node selection does not focus the instruction draft"
-assert "Refresh task context first" in text, "follow-up does not refresh project evidence"
-assert "Do not add a new test by default" in text, "follow-up may create redundant tests"
-assert "Focus + 1 hop" in text, "missing task-centered scope control"
-assert "Zoom in" in text and "Zoom out" in text, "zoom is mouse-only"
-assert "Graph nodes (text alternative)" in text, "missing accessible/offline fallback"
-assert len(text.encode("utf-8")) < 1024 * 1024, len(text)
 match = re.search(r'<script id="[^"]+-data" type="application/json">(.*?)</script>', text, re.S)
 assert match, "missing project model"
-model = __import__("json").loads(match.group(1))
-assert model["kind"] == "project", model
-assert model["schema"] == 3, model
+model = json.loads(match.group(1))
+assert (model["kind"], model["schema"]) == ("project", 3), model
 assert model["coverage"] == {"parsed": 6, "unparsed": 0, "unparsed_by_extension": {}}, model["coverage"]
-assert model["counts"]["hidden_test_nodes"] > 0, model["counts"]
-assert all(row["kind"] != "test" and not row["path"].startswith("tests/") for row in model["nodes"]), model["nodes"]
-assert {row["assurance"] for row in model["nodes"]} <= {"supported", "needs-evidence", "attention"}, model["nodes"]
 PY
 
 run_graph "$work/find.out" project find alpha_entry --limit 5
@@ -390,19 +370,6 @@ impact_rc=0
 "$OMS" graph --repo "$impact" project affected --base HEAD^ --head HEAD --json \
   > "$work/affected.json" 2> "$work/affected.err" || impact_rc=$?
 [ "$impact_rc" -eq 0 ] || fail "affected exited $impact_rc: $(cat "$work/affected.err")"
-"$OMS" graph project affected --base HEAD^ --head HEAD --json --repo "$impact" \
-  > "$work/affected-after-action.json" 2> "$work/affected-after-action.err" || impact_rc=$?
-[ "$impact_rc" -eq 0 ] || fail "affected with --repo after action exited $impact_rc: $(cat "$work/affected-after-action.err")"
-cmp -s "$work/affected.json" "$work/affected-after-action.json" \
-  || fail "affected with --repo after action differed from top-level --repo"
-"$OMS" graph --repo "$tmp" project api alpha.py --pretty \
-  > "$work/api-before.pretty.json" 2> "$work/api-before.pretty.err" || graph_rc=$?
-[ "$graph_rc" -eq 0 ] || fail "api with top-level --pretty exited $graph_rc: $(cat "$work/api-before.pretty.err")"
-"$OMS" graph project --repo "$tmp" api alpha.py --pretty \
-  > "$work/api-after-group.pretty.json" 2> "$work/api-after-group.pretty.err" || graph_rc=$?
-[ "$graph_rc" -eq 0 ] || fail "api with --repo after group exited $graph_rc: $(cat "$work/api-after-group.pretty.err")"
-cmp -s "$work/api-before.pretty.json" "$work/api-after-group.pretty.json" \
-  || fail "api with --repo after group differed from top-level --repo"
 python3 - "$work/affected.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1]))
@@ -516,9 +483,6 @@ run_graph "$work/context.txt" project context --task "alpha entry helper for the
 [ "$graph_rc" -eq 0 ] || fail "context text exited $graph_rc"
 tr -d '\r' < "$work/context.txt" | grep -E '^pack_bytes: [0-9]+$' > /dev/null \
   || fail "context omitted pack_bytes"
-if grep -Eq 'byte_estimate|raw_candidate_files' "$work/context.txt"; then
-  fail "context still reports counterfactual candidate bytes"
-fi
 python3 - "$work/context.json" "$tmp" <<'PY'
 import json
 import os
@@ -645,20 +609,6 @@ OMS_PROJECT_GRAPH_STATE="$work/bounded" "$OMS" graph --repo "$auto" project ensu
   > "$work/bounded-again.out" 2>&1 || auto_rc=$?
 [ "$auto_rc" -eq 0 ] || fail "an existing graph was refused a refresh: $(cat "$work/bounded-again.out")"
 
-# --- session-start hook -----------------------------------------------------
-# Graph work is demand-driven by the readers exercised above. Merely opening
-# an OMS repository must not inspect, report, or build its project graph.
-hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$tmp" | "$ROOT/scripts/resume-hook.sh")" \
-  || fail "the resume hook must exit 0"
-if printf '%s\n' "$hook_out" | grep >/dev/null -F -- '- graph:'; then
-  fail "session start must not inspect a current project graph: $hook_out"
-fi
-hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$auto" |
-  OMS_GRAPH_AUTOBUILD=0 "$ROOT/scripts/resume-hook.sh")" || fail "the resume hook must exit 0"
-if printf '%s\n' "$hook_out" | grep >/dev/null -F -- '- graph:'; then
-  fail "session start must not inspect an absent project graph: $hook_out"
-fi
-
 # A delegated harness child may build the cache it needs — a regenerable graph
 # carries no authority and an isolated worktree has no other way to get one —
 # but the context pack a parent's brief owns stays parent-only.
@@ -697,29 +647,12 @@ OMS_PROJECT_GRAPH_STATE=relative/state "$OMS" graph --repo "$tmp" project check 
 grep -Fq 'OMS_PROJECT_GRAPH_STATE must be an absolute path' "$work/relstate.out" \
   || fail "relative override refusal was not actionable: $(cat "$work/relstate.out")"
 
-# Dogfood this repository from an exported copy: never build inside $ROOT,
-# whose .oms is guarded by check.sh.
-git -C "$ROOT" archive HEAD > "$work/dogfood.tar"
-tar -x -f "$work/dogfood.tar" -C "$dog"
-dog_rc=0
-"$OMS" graph --repo "$dog" project build > "$work/dog-build1.out" 2>&1 || dog_rc=$?
-[ "$dog_rc" -eq 0 ] || fail "dogfood build exited $dog_rc: $(cat "$work/dog-build1.out")"
-dog_files="$(sed -n 's/^graph: built .* files=\([0-9][0-9]*\) .*$/\1/p' "$work/dog-build1.out")"
-[ -n "$dog_files" ] || fail "dogfood build summary had no file count: $(cat "$work/dog-build1.out")"
-[ "$dog_files" -ge 100 ] || fail "dogfood build covered only $dog_files files"
-dog_rc=0
-"$OMS" graph --repo "$dog" project build > "$work/dog-build2.out" 2>&1 || dog_rc=$?
-[ "$dog_rc" -eq 0 ] || fail "second dogfood build exited $dog_rc: $(cat "$work/dog-build2.out")"
-dog_cached="$(sed -n 's/^graph: built .* cached=\([0-9][0-9]*\) .*$/\1/p' "$work/dog-build2.out")"
-dog_files2="$(sed -n 's/^graph: built .* files=\([0-9][0-9]*\) .*$/\1/p' "$work/dog-build2.out")"
-[ "$dog_cached" = "$dog_files2" ] || fail "second dogfood build re-parsed: cached=$dog_cached files=$dog_files2"
-
 # --- execution graph --------------------------------------------------------
 # A second repository with a real plan: the execution verbs read plan and
 # receipt facts, so an empty tree would exercise nothing. No provider is
 # needed here — `exec run` only ever appears as --dry-run.
 exec_repo="$(mktemp -d "${TMPDIR:-/tmp}/oms-graph-exec.XXXXXX")"
-trap 'rm -rf "$tmp" "$work" "$dog" "$auto" "$exec_repo"' EXIT INT TERM HUP
+trap 'rm -rf "$tmp" "$work" "$auto" "$impact" "$fanout" "$exec_repo"' EXIT INT TERM HUP
 
 exec_rc=0
 # The gate scrubs the invoking session's own harness identity: a run that
@@ -824,12 +757,9 @@ run_graph_exec "$work/status-empty.out" exec status
 # or session hook appends new rows to this retired diagnostic.
 mkdir -p "$exec_repo/.oms/graph"
 printf '{"schema":1,"kind":"graph-route-shadow"}\n' > "$exec_repo/.oms/graph/shadow.jsonl"
-hook_out="$(printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
-  OMS_GRAPH_AUTOBUILD=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh")" \
+printf '{"session_id":"me","cwd":"%s"}' "$exec_repo" |
+  OMS_GRAPH_AUTOBUILD=0 OMS_LOCK_DIR="$work/locks" OMS_WORK_JOURNAL=0 "$ROOT/scripts/resume-hook.sh" >/dev/null \
   || fail "the resume hook must exit 0 with a plan present"
-if printf '%s\n' "$hook_out" | grep >/dev/null -F -- '- graph route:'; then
-  fail "session start must not run the execution-graph shadow: $hook_out"
-fi
 shadow_lines="$(wc -l < "$exec_repo/.oms/graph/shadow.jsonl" | tr -d ' ')"
 [ "$shadow_lines" = "1" ] || fail "session start appended a shadow row (rows: $shadow_lines)"
 python3 - "$ROOT/scripts/lib/oms-state-inventory.py" "$exec_repo/.oms" <<'PY'

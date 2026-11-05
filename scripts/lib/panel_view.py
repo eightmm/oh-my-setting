@@ -1259,50 +1259,6 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     return "\n".join(lines[:height - 1])
 
 
-def call_groups(groups, width, slots, compact, frame, unicode, limit):
-    """Reserve each role's separator before distributing title space."""
-    result, shown = [], 0
-    content = max(0, slots - len(groups))
-    for index, (name, records) in enumerate(groups):
-        share = content // (len(groups) - index)
-        rows = []
-        wide = compact and width >= 80
-        minimum = 1 if wide else 2 if compact else 3
-        target = min(len(records), share // minimum, limit - shown)
-        remaining = share
-        for offset, row in enumerate(records[:target]):
-            reserve = (target - offset - 1) * minimum
-            title_limit = 1 if compact else min(3 if width < 54 else 2, remaining - reserve - 2)
-            meta = "[%s] %s%s" % (row["state"], row["name"], " / " + row["access"] if row["access"] else "")
-            if wide:
-                meta = clipped(meta, 32)
-                title_width = width - 8 - display_width(meta)
-                text = clipped(row["work"], title_width)
-                rows.append(("%s %s%s  %s" % (activity(row["state"], frame, unicode), text,
-                    " " * max(0, title_width - display_width(text)), meta), tone(row["state"])))
-                remaining -= 1
-                shown += 1
-                continue
-            title = wrapped(row["work"], width - 6, max(1, title_limit))
-            rows.extend(("%s %s" % (activity(row["state"], frame, unicode), line) if n == 0 else "  " + line, None)
-                        for n, line in enumerate(title))
-            rows.append(("  " + meta, tone(row["state"])))
-            if not compact:
-                detail = ("@ " + location_label(row["location"]) + " / " + (row["effort"] or "auto")
-                          if row["location"] else row["model"])
-                if width >= 70:
-                    detail += " | task: " + row["task"]
-                rows.append(("  " + detail, "dim"))
-            remaining -= len(title) + (1 if compact else 2)
-            shown += 1
-        omitted = len(records) - target
-        title = "%s (%s)%s" % (name, len(records), " / +%s hidden" % omitted if omitted else "")
-        result.append((box_edge(title, width, unicode, "divider"), "worker" if name == "WORKERS" else "review"))
-        result.extend((box_row(text, width, unicode), style) for text, style in rows)
-        content -= len(rows)
-    return result, shown
-
-
 def room_unreadable(report):
     """Match only the no-room fallback used when collection fails."""
     return mapping(report.get("collection")) == {"ok": False} and not report.get("room")
@@ -1380,7 +1336,9 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     if menu and view != "graph":
         return render_inbox(report, width, height, color, unicode, managed, previous, navigation)
     if view in ("tree", "summary") or (view == "auto" and mapping(report.get("room")).get("participants")
-                          and width >= 20 and height >= 12):
+                          and width >= 20 and height >= 12) or (
+            view == "graph" and navigation is not None and mapping(report.get("room")).get("participants")
+            and width >= 20 and height >= 8 and not (width >= 76 and height >= 16)):
         from panel_tree import render_tree
         return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
                            main_attempt, navigation, summary=view == "summary", managed=managed,
@@ -1389,11 +1347,6 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         from room_view import render_graph
         return render_graph(report, width, height, color, unicode, frame, menu, attention_only,
                             main_attempt, navigation, managed, previous=previous)
-    if (view == "graph" and navigation is not None and mapping(report.get("room")).get("participants")
-            and width >= 20 and height >= 8):
-        from panel_tree import render_tree
-        return render_tree(report, width, height, color, unicode, frame, menu, attention_only,
-                           main_attempt, navigation, managed=managed, previous=previous)
     lines = []
 
     def add(text="", style=None):
@@ -1507,7 +1460,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
             add(("Swap: " if narrow else "SESSION / ") + swap_line(room), "main")
         if report.get("swap_state"):
             add("SWAP / " + clean(report["swap_state"], 80), "alert")
-        from room_view import main_names, nodes
+        from room_view import main_names
         members = nodes(report)
         mains = [member for member in members if member.get("role") == "main"]
         if mains:

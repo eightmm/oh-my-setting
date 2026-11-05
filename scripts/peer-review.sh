@@ -400,43 +400,6 @@ if [ "${1:-}" = "verdicts" ]; then
   review_verdicts "${1:-$PWD/.oms/artifacts/review}" "" "" "$VERDICTS_JSON_STDOUT"
 fi
 
-validate_provider_list() {
-  local writer_norm
-  local writer_provider
-  local kept
-  local entry
-  local -a entries
-  ma_validate_provider_list
-  # The patch author's family re-judging its own patch is correlated
-  # judgment, not independence. Unless the caller pinned --providers, the
-  # writer sits out of the council; an explicit list is honored but named.
-  if [ -n "$WRITER" ]; then
-    writer_norm="$(ma_normalize_provider_list "$WRITER")" || exit $?
-    case "$writer_norm" in
-      *,*) fail "--writer takes exactly one provider" ;;
-    esac
-    writer_provider="${writer_norm%%:*}"
-    IFS=',' read -r -a entries <<< "$PROVIDERS"
-    if [ "$PROVIDERS_EXPLICIT" -eq 1 ]; then
-      for entry in "${entries[@]}"; do
-        if [ "${entry%%:*}" = "$writer_provider" ]; then
-          echo "warning: writer $writer_provider sits in its own review council — family independence reduced" >&2
-          break
-        fi
-      done
-    else
-      kept=""
-      for entry in "${entries[@]}"; do
-        [ "${entry%%:*}" = "$writer_provider" ] && continue
-        kept="${kept:+$kept,}$entry"
-      done
-      [ -n "$kept" ] || fail "--writer $writer_provider leaves no reviewers; pass --providers explicitly"
-      PROVIDERS="$kept"
-      echo "writer: $writer_provider (excluded from reviewer council)"
-    fi
-  fi
-}
-
 write_prompt() {
   local output="$1"
   local repo="$2"
@@ -621,7 +584,35 @@ if [ -n "$CANDIDATE_PATCH$CANDIDATE_SHA256$CANDIDATE_BASE" ]; then
     [ -n "$VERIFY_CMD" ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ] ||
     fail "candidate review requires an automatic panel gate, a verifier and the complete candidate diff"
 fi
-validate_provider_list
+ma_validate_provider_list
+# The patch author's family re-judging its own patch is correlated
+# judgment, not independence. Unless the caller pinned --providers, the
+# writer sits out of the council; an explicit list is honored but named.
+if [ -n "$WRITER" ]; then
+  writer_norm="$(ma_normalize_provider_list "$WRITER")" || exit $?
+  case "$writer_norm" in
+    *,*) fail "--writer takes exactly one provider" ;;
+  esac
+  writer_provider="${writer_norm%%:*}"
+  IFS=',' read -r -a entries <<< "$PROVIDERS"
+  if [ "$PROVIDERS_EXPLICIT" -eq 1 ]; then
+    for entry in "${entries[@]}"; do
+      if [ "${entry%%:*}" = "$writer_provider" ]; then
+        echo "warning: writer $writer_provider sits in its own review council — family independence reduced" >&2
+        break
+      fi
+    done
+  else
+    kept=""
+    for entry in "${entries[@]}"; do
+      [ "${entry%%:*}" = "$writer_provider" ] && continue
+      kept="${kept:+$kept,}$entry"
+    done
+    [ -n "$kept" ] || fail "--writer $writer_provider leaves no reviewers; pass --providers explicitly"
+    PROVIDERS="$kept"
+    echo "writer: $writer_provider (excluded from reviewer council)"
+  fi
+fi
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?

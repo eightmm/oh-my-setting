@@ -1,21 +1,19 @@
-from __future__ import annotations
 import json
 import os
 import runpy
 import stat
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from oms_graph.project import build, context as graph_context
 from oms_runtime import capsule, context, evidence, experiment, failures, profiles, projection, release
-from oms_runtime.benchmark import record_outcome as record_benchmark_outcome
-from oms_runtime.benchmark import snapshot as benchmark_snapshot
-from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atomic_write_json, canonical_json, git_head, parse_path_list, read_json, read_jsonl, sensitive_text, sha256_bytes, sha256_file, sha256_text
+from oms_runtime.benchmark import _artifact_tokens, _context_modes, _context_rows, _model_table, compare, snapshot as benchmark_snapshot
+from oms_runtime.cli_parser import build_parser
+from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atomic_write_json, canonical_json, file_lock, git_head, parse_path_list, read_json, read_jsonl, sensitive_text, sha256_bytes, sha256_file, sha256_text
 from oms_runtime.execution import check as check_backend
 from oms_runtime.execution import run as run_backend
 
@@ -27,7 +25,6 @@ class ChildRuntimePolicyTest(unittest.TestCase):
 
     def test_policy_classifies_every_runtime_action_fail_closed(self) -> None:
         from oms_runtime.child_policy import child_action_is_read_only
-        from oms_runtime.cli_parser import build_parser
 
         allowed = (
             ['envelope', 'show'],
@@ -92,8 +89,6 @@ class ChildRuntimePolicyTest(unittest.TestCase):
 class RuntimeParserTest(unittest.TestCase):
 
     def test_repo_and_pretty_options_are_available_after_actions(self) -> None:
-        from oms_runtime.cli_parser import build_parser
-
         parser = build_parser()
         cases = (
             (['--repo', 'before', 'envelope'], 'before'),
@@ -597,14 +592,10 @@ class RuntimeFixture(RuntimeFixtureBase):
         with self.assertRaises(CoreError):
             context.plan_context(self.repo, targets=['scripts/sample.py', '../outside.py'], max_bytes=32768)
         # The CLI spells the same thing as a repeatable flag.
-        from oms_runtime.cli_parser import build_parser
         args = build_parser().parse_args(['context', '--target', 'a.py', '--target', 'b.py'])
         self.assertEqual(args.target, ['a.py', 'b.py'])
 
     def test_context_reuses_fresh_graph_without_discovery_or_graph_writes(self) -> None:
-        from oms_graph.project import build
-        from oms_graph.project import context as graph_context
-
         (self.repo / 'scripts/extra.py').write_text('from scripts.helper import value\n')
         built = build.build(self.repo)
         state = build.state_dir(self.repo)
@@ -623,9 +614,6 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(before, {str(path): path.read_bytes() for path in state.rglob('*') if path.is_file()})
 
     def test_context_falls_back_when_graph_is_not_usable(self) -> None:
-        from oms_graph.project import build
-        from oms_graph.project import context as graph_context
-
         state = build.state_dir(self.repo)
         (self.repo / 'guide.md').write_text('Entry point: scripts/sample.py\n')
         (self.repo / 'fallback_only.py').write_text('hint = "calculate"\n')
@@ -777,8 +765,7 @@ class RuntimeFixture(RuntimeFixtureBase):
     def test_producer_covers_and_completion_state_are_evidence_driven(self) -> None:
         # A review-verify row whose covers digest matches the plan acceptance
         # command links automatically; a mismatched digest stays inert.
-        import hashlib
-        accept_digest = hashlib.sha256('python3 -m unittest'.encode('utf-8')).hexdigest()
+        accept_digest = sha256_text('python3 -m unittest')
         append_jsonl(self.repo / '.oms' / 'artifacts' / 'index.jsonl', {
             'schema': 1, 'event_id': 'evt-gate', 'kind': 'review-verify',
             'exit': 0, 'status': 'verified',
@@ -811,9 +798,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(_completion_state({'present': False, 'status': ''}, incomplete), 'none')
 
     def test_receipt_strength_preserves_typed_gates_and_downgrades_advisory_success(self) -> None:
-        import hashlib
-        criterion = 'criterion-plan-acceptance-' + hashlib.sha256(
-            'python3 -m unittest'.encode('utf-8')).hexdigest()[:10]
+        criterion = 'criterion-plan-acceptance-' + sha256_text('python3 -m unittest')[:10]
         index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
         advisory_kinds = (
             'call', 'ask', 'review', 'ask-synthesis', 'review-synthesis',
@@ -922,8 +907,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             'inconclusive')
 
     def test_valid_resolution_downgrades_failure_to_stale_never_verified(self) -> None:
-        import hashlib
-        criterion = 'criterion-plan-acceptance-' + hashlib.sha256('python3 -m unittest'.encode('utf-8')).hexdigest()[:10]
+        criterion = 'criterion-plan-acceptance-' + sha256_text('python3 -m unittest')[:10]
         index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
         failed = {'schema': 1, 'event_id': 'evt-fail', 'kind': 'review-verify', 'exit': 1,
                   'operation_id': 'op-1', 'artifact_id': 'art-1', 'covers': [criterion]}
@@ -1010,14 +994,11 @@ class RuntimeFixture(RuntimeFixtureBase):
         # A changed verifier in the same plan instance invalidates the binding.
         plan['tasks']['t1']['verify'] = 'false'
         atomic_write_json(plan_path, plan)
-        index.write_text(json.dumps(verified) + '\n', encoding='utf-8')
-        current = evidence.build_envelope(self.repo)
-        self.assertEqual(next(c['status'] for c in current['criteria']
-                              if c['id'] == 'plan-task-t1'), 'inconclusive')
-        index.write_text(json.dumps(dict(verified, task_id='', covers=['plan-task-t1'])) + '\n', encoding='utf-8')
-        current = evidence.build_envelope(self.repo)
-        self.assertEqual(next(c['status'] for c in current['criteria']
-                              if c['id'] == 'plan-task-t1'), 'inconclusive')
+        for row_variant in (verified, dict(verified, task_id='', covers=['plan-task-t1'])):
+            index.write_text(json.dumps(row_variant) + '\n', encoding='utf-8')
+            current = evidence.build_envelope(self.repo)
+            self.assertEqual(next(c['status'] for c in current['criteria']
+                                  if c['id'] == 'plan-task-t1'), 'inconclusive')
         plan['tasks']['t1']['verify'] = 'python3 -m unittest'
         atomic_write_json(plan_path, plan)
         index.write_text(original, encoding='utf-8')
@@ -1333,7 +1314,6 @@ class RuntimeFixture(RuntimeFixtureBase):
 
     @unittest.skipUnless(os.name == 'posix', 'holder liveness probing is POSIX-only')
     def test_state_lock_never_displaces_a_live_holder_and_reclaims_dead_ones(self) -> None:
-        from oms_runtime.common import file_lock, sha256_text
         lock_root = Path(self.tmp.name) / 'locks'
         target = self.repo / '.oms' / 'lock-probe.jsonl'
         env = dict(os.environ)
@@ -1518,7 +1498,6 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(failures.classify('verification failed')['code'], 'verifier_failed')
         row = benchmark_snapshot(self.repo)
         self.assertIsNone(row['useful_work_efficiency'])
-        from oms_runtime.benchmark import compare
         comparison = compare(dict(row, useful_work_efficiency=1), dict(row, useful_work_efficiency=2))
         self.assertNotIn('useful_work_efficiency', json.dumps(comparison))
         self.assertIn('human_corrections', row['unknown_metrics'])
@@ -1543,7 +1522,6 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertIsNone(next(item for item in changed_basis['changes'] if item['field'] == 'success_rate')['delta'])
 
         # Digest names and copied-file mtimes do not identify recent context.
-        from oms_runtime.benchmark import _context_rows
         context_root = self.repo / '.oms' / 'runtime' / 'context'
         for number in range(1000):
             atomic_write_json(context_root / ('f%063x.json' % number), {
@@ -1608,7 +1586,6 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertNotIn('antigravity/provider-default', models)
         self.assertFalse(any(key.startswith('antigravity/') for key in models))
 
-        from oms_runtime.benchmark import _context_modes
         common = dict(kind='delegate', provider='codex', selected_model='test-model', base_sha='abc123',
                       context_task_sha256='a' * 64, context_verification='command', verify_exit=0, exit=0)
         result = _context_modes([
@@ -1659,7 +1636,6 @@ class RuntimeFixture(RuntimeFixtureBase):
             self.assertEqual(evidence.outcome(row), expected, row)
             metrics = _context_modes([dict(row, context_mode='direct')])['modes']['direct']
             self.assertEqual(metrics['verified'], int(expected == 'verified'), row)
-        from oms_runtime.benchmark import _model_table
         rows = [dict(common, context_verification=mode) for mode in ('none', 'dry-run', 'command')]
         table = _model_table(rows)['codex/test-model']
         self.assertEqual(table['calls'], 3)
@@ -1669,7 +1645,6 @@ class RuntimeFixture(RuntimeFixtureBase):
                 handle.write(json.dumps(row) + '\n')
         self.assertEqual(benchmark_snapshot(self.repo)['verified_outcomes'], 1)
 
-        from oms_runtime.benchmark import _artifact_tokens
         from peer_artifacts import usage_footer
         usage = {'input_tokens': 10, 'output_tokens': 20,
                  'cache_read_input_tokens': 100, 'cache_creation_input_tokens': 20}

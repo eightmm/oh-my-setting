@@ -444,7 +444,7 @@ predicate holds; otherwise the effective outcome is `unverified` and
 ## Route evaluator (pure)
 
 ```python
-route.evaluate(spec, state, facts, *, authority=None) -> dict
+route.evaluate(spec, state, facts) -> dict
 route.state_from_outcomes(spec, outcomes, *, gates=None, repeats=None) -> state
 route.run_fixture(fixture) -> (ok: bool, detail: dict)
 ```
@@ -570,7 +570,6 @@ the events file stays the only authoritative record.
 `adapters/plan.py`:
 
 ```python
-plan_status(repo) -> dict                       # agent-plan status --json
 task_view(repo, task_id) -> dict                # agent-plan show --id
 peek_next_task(repo) -> dict | None             # agent-plan next --json (read-only; None = nothing actionable)
 scope_of(task_view) -> {"allowed": [...], "forbidden": [...]}

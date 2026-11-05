@@ -20,7 +20,8 @@ HAVE_GIT = shutil.which("git") is not None
 # their shared environment is built directly from a bound worker or reviewer.
 SCRUBBED = (
     "OMS_HARNESS_CHILD", "OMS_HARNESS_ORIGIN", "OMS_HARNESS_PARENT_AGENT",
-    "OMS_HARNESS_CALL_ID", "OMS_STATE_REPO", "OMS_ATTEMPT_ID", "OMS_PLAN_LEASE_ID",
+    "OMS_HARNESS_CALL_ID", "OMS_HARNESS_DELEGATE_DEPTH", "OMS_DELEGATE_DEPTH",
+    "OMS_STATE_REPO", "OMS_ATTEMPT_ID", "OMS_PLAN_LEASE_ID",
     "OMS_LEASE_ID", "OMS_EXECUTOR_ID", "OMS_SOUL_SHA256", "OMS_APPROVAL_ID",
     "OMS_LANDING_ID", "OMS_WORKER_AUTHORITY_EXCLUSIVE",
     "OMS_HOOK_AGENT",
@@ -77,64 +78,29 @@ def agent_node(task_id="implement", mode="run", **extra):
     return node
 
 
-class ConcreteTaskOnlyTest(unittest.TestCase):
-    """The adapter never sees a selector or a binding: identity is frozen upstream."""
-
-    def test_a_selector_or_a_binding_reference_is_refused(self):
-        for node in ({"kind": "agent", "plan_task": "next", "mode": "run"},
-                     {"kind": "agent", "plan_task": "next", "mode": "land"},
-                     {"kind": "agent", "plan_task_from": "work_item", "mode": "land"}):
-            with self.assertRaises(GraphError):
-                plan_adapter.build_command(Path("/repo"), node, provider="codex")
-
-    def test_plan_run_never_receives_next(self):
-        argv = plan_adapter.build_command(Path("/repo"), {"kind": "agent", "plan_task": "t7", "mode": "land"}, provider="codex")
-        self.assertEqual(argv[-3:], ["--id", "t7", "--land"])
-        self.assertNotIn("--next", argv)
-
-    def test_a_context_pack_is_forwarded_as_a_plain_path_only(self):
-        argv = plan_adapter.build_command(Path("/repo"), agent_node("t1"), provider="codex", context_pack="/tmp/pack.json")
-        self.assertEqual(argv[-2:], ["--context-pack", "/tmp/pack.json"])
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(Path("/repo"), agent_node("t1"), provider="codex", context_pack="--land")
-
-    def test_the_peek_can_never_claim(self):
-        with self.assertRaises(GraphError):
-            plan_adapter._plan_argv(Path("/repo"), "next", "--claim", "--provider", "codex")
-        argv = plan_adapter._plan_argv(Path("/repo"), "next", "--json")
-        self.assertEqual(argv[-2:], ["next", "--json"])
-
-
 class ScopeOverlapTest(unittest.TestCase):
     """Conservative by design: an unknown scope conflicts with everything."""
 
-    def test_literal_scopes_overlap_only_when_one_contains_the_other(self) -> None:
+    def test_literal_and_glob_scope_overlap(self) -> None:
         self.assertTrue(scheduler.scopes_overlap(["src"], ["src"]))
         self.assertTrue(scheduler.scopes_overlap(["src"], ["src/app"]))
         self.assertTrue(scheduler.scopes_overlap(["src/app"], ["src"]))
         self.assertFalse(scheduler.scopes_overlap(["src"], ["docs"]))
         self.assertFalse(scheduler.scopes_overlap(["delegated.txt"], ["delegated2.txt"]))
-
-    def test_glob_overlaps_a_literal_it_could_select(self) -> None:
         self.assertTrue(scheduler.scopes_overlap(["src/*.py"], ["src"]))
         self.assertTrue(scheduler.scopes_overlap(["src"], ["src/*.py"]))
         self.assertTrue(scheduler.scopes_overlap(["src/lib/*.py"], ["src/lib/a.py"]))
         self.assertFalse(scheduler.scopes_overlap(["src/*.py"], ["docs"]))
-
-    def test_two_globs_overlap_unless_their_static_prefixes_diverge(self) -> None:
         self.assertTrue(scheduler.scopes_overlap(["src/*.py"], ["src/**"]))
         self.assertFalse(scheduler.scopes_overlap(["src/*.py"], ["docs/*.md"]))
-        # A leading glob has no static prefix and can select anywhere.
         self.assertTrue(scheduler.scopes_overlap(["*.py"], ["docs/*.md"]))
 
-    def test_unknown_or_invalid_scope_conflicts_with_everything(self) -> None:
+    def test_unknown_or_invalid_scope_and_static_prefix(self) -> None:
         self.assertTrue(scheduler.scopes_overlap([], ["src"]))
         self.assertTrue(scheduler.scopes_overlap(["src"], []))
         self.assertTrue(scheduler.scopes_overlap([], []))
         self.assertTrue(scheduler.scopes_overlap(["../etc"], ["src"]))
         self.assertTrue(scheduler.scopes_overlap(["/abs/path"], ["src"]))
-
-    def test_static_prefix_stops_at_the_last_directory_separator(self) -> None:
         self.assertEqual(scheduler._static_prefix("src/lib/*.py"), "src/lib")
         self.assertEqual(scheduler._static_prefix("src/li*b/x"), "src")
         self.assertEqual(scheduler._static_prefix("*.py"), "")
@@ -296,103 +262,80 @@ class BuildCommandTest(unittest.TestCase):
 
     PLAN_RUN = str(ROOT / "scripts" / "plan-run.sh")
 
-    def test_a_run_node_builds_the_plain_plan_run_argv(self) -> None:
+    def test_build_command_flags_and_context_pack(self) -> None:
         argv = plan_adapter.build_command(Path("/tmp/repo"), agent_node("t1"), provider="codex")
-        self.assertEqual(
-            argv,
-            ["bash", self.PLAN_RUN, "--repo", "/tmp/repo", "--to", "codex", "--id", "t1"],
-        )
+        self.assertEqual(argv, ["bash", self.PLAN_RUN, "--repo", "/tmp/repo", "--to", "codex", "--id", "t1"])
+        self.assertNotIn("--next", argv)
 
-    def test_a_land_node_adds_land_and_the_optional_flags(self) -> None:
-        argv = plan_adapter.build_command(
-            Path("/tmp/repo"),
-            agent_node("t1", mode="land"),
-            provider="codex",
-            model="gpt-5.1-codex",
-            reasoning_effort="high",
-            repair=2,
+        land_argv = plan_adapter.build_command(
+            Path("/tmp/repo"), agent_node("t1", mode="land"),
+            provider="codex", model="gpt-5.1-codex", reasoning_effort="high", repair=2,
         )
-        self.assertEqual(
-            argv,
-            [
-                "bash", self.PLAN_RUN, "--repo", "/tmp/repo", "--to", "codex", "--id", "t1",
-                "--land", "--repair", "2", "--model", "gpt-5.1-codex",
-                "--reasoning-effort", "high",
-            ],
-        )
+        self.assertEqual(land_argv, [
+            "bash", self.PLAN_RUN, "--repo", "/tmp/repo", "--to", "codex", "--id", "t1",
+            "--land", "--repair", "2", "--model", "gpt-5.1-codex", "--reasoning-effort", "high",
+        ])
 
-    def test_dry_run_is_plan_runs_own_flag(self) -> None:
-        argv = plan_adapter.build_command(
-            Path("/tmp/repo"), agent_node("t1"), provider="codex", dry_run=True
-        )
-        self.assertEqual(argv[-1], "--dry-run")
+        dry_argv = plan_adapter.build_command(Path("/tmp/repo"), agent_node("t1"), provider="codex", dry_run=True)
+        self.assertEqual(dry_argv[-1], "--dry-run")
 
-    def test_only_a_well_formed_agent_node_builds_a_command(self) -> None:
+        ctx_argv = plan_adapter.build_command(Path("/repo"), agent_node("t1"), provider="codex", context_pack="/tmp/pack.json")
+        self.assertEqual(ctx_argv[-2:], ["--context-pack", "/tmp/pack.json"])
+
+    def test_only_a_well_formed_concrete_agent_node_builds_a_command(self) -> None:
         repo = Path("/tmp/repo")
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, {"kind": "tool", "plan_task": "t1"}, provider="codex")
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, agent_node(""), provider="codex")
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, agent_node("t1", mode="finish-it"), provider="codex")
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, agent_node("t1"), provider="")
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, agent_node("t1"), provider="--land")
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, agent_node("t1"), provider="codex", repair=4)
-        with self.assertRaises(GraphError):
-            plan_adapter.build_command(repo, agent_node("t1"), provider="codex", model="--repo")
+        for bad_node in (
+            {"kind": "tool", "plan_task": "t1"},
+            agent_node(""),
+            agent_node("t1", mode="finish-it"),
+            {"kind": "agent", "plan_task": "next", "mode": "run"},
+            {"kind": "agent", "plan_task": "next", "mode": "land"},
+            {"kind": "agent", "plan_task_from": "work_item", "mode": "land"},
+        ):
+            with self.assertRaises(GraphError):
+                plan_adapter.build_command(repo, bad_node, provider="codex")
+        for kwargs in (
+            {"provider": ""},
+            {"provider": "--land"},
+            {"provider": "codex", "repair": 4},
+            {"provider": "codex", "model": "--repo"},
+            {"provider": "codex", "context_pack": "--land"},
+        ):
+            with self.assertRaises(GraphError):
+                plan_adapter.build_command(repo, agent_node("t1"), **kwargs)
 
 
 class FrontDoorTest(unittest.TestCase):
-    """The adapter must have no code path to a fenced agent-plan lifecycle verb.
-
-    `land`, `finish`, `claim`, `review` and `start` are compare-and-set
-    transitions whose expected-value receipts only `patch-land.sh` can compute.
-    """
+    """The adapter must have no code path to a fenced agent-plan lifecycle verb."""
 
     FENCED = ("land", "finish", "claim", "review", "start")
     SOURCE = Path(plan_adapter.__file__).read_text(encoding="utf-8")
     TREE = ast.parse(SOURCE)
 
-    def test_the_read_verb_allowlist_is_frozen(self) -> None:
+    def test_fenced_verbs_and_front_door_allowlist(self) -> None:
         self.assertEqual(plan_adapter.PLAN_READ_VERBS, ("status", "show", "evidence-snapshot", "next"))
-
-    def test_every_fenced_verb_is_refused_at_runtime(self) -> None:
         for verb in self.FENCED:
             with self.assertRaises(GraphError):
                 plan_adapter._plan_argv(Path("/tmp/repo"), verb, "--id", "t1")
+        with self.assertRaises(GraphError):
+            plan_adapter._plan_argv(Path("/repo"), "next", "--claim", "--provider", "codex")
+        self.assertEqual(plan_adapter._plan_argv(Path("/repo"), "next", "--json")[-2:], ["next", "--json"])
 
-    def test_only_the_two_front_door_scripts_are_named(self) -> None:
         scripts = {
-            node.value
-            for node in ast.walk(self.TREE)
+            node.value for node in ast.walk(self.TREE)
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith(".sh")
         }
         self.assertEqual(scripts, {"agent-plan.sh", "plan-run.sh"})
 
-    def test_every_plan_invocation_passes_a_literal_allowlisted_verb(self) -> None:
         seen = []
         for node in ast.walk(self.TREE):
-            if not isinstance(node, ast.Call):
-                continue
-            name = node.func.id if isinstance(node.func, ast.Name) else ""
-            if name != "_plan_argv":
-                continue
-            self.assertGreaterEqual(len(node.args), 2, "_plan_argv needs a literal verb")
-            verb = node.args[1]
-            self.assertIsInstance(verb, ast.Constant, "the agent-plan verb must be a literal")
-            self.assertIn(verb.value, plan_adapter.PLAN_READ_VERBS)
-            seen.append(verb.value)
-        self.assertTrue(seen, "no agent-plan call sites found; the guard would be vacuous")
-
-    def test_no_source_line_pairs_agent_plan_with_a_fenced_verb(self) -> None:
-        for number, line in enumerate(self.SOURCE.splitlines(), 1):
-            if "agent-plan" not in line:
-                continue
-            for verb in self.FENCED:
-                self.assertNotIn(verb, line, "line %d names agent-plan %s" % (number, verb))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_plan_argv":
+                self.assertGreaterEqual(len(node.args), 2)
+                verb = node.args[1]
+                self.assertIsInstance(verb, ast.Constant)
+                self.assertIn(verb.value, plan_adapter.PLAN_READ_VERBS)
+                seen.append(verb.value)
+        self.assertTrue(seen)
 
 
 class OutcomeMappingTest(unittest.TestCase):
@@ -400,80 +343,70 @@ class OutcomeMappingTest(unittest.TestCase):
     RUN = agent_node("t1")
     LAND = agent_node("t1", mode="land")
 
-    def test_blocked_state_outranks_every_other_reading(self) -> None:
-        task = {"id": "t1", "state": "blocked", "patch": "p.patch", "reason": "parked"}
-        facts = {"receipt.land.t1.present": True}
-        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, task, facts), ("blocked", []))
-        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, task, facts), ("blocked", []))
+    def test_outcome_from_task_states_and_proof(self) -> None:
+        blocked = {"id": "t1", "state": "blocked", "patch": "p.patch", "reason": "parked"}
+        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, blocked, {"receipt.land.t1.present": True}), ("blocked", []))
+        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, blocked, {"receipt.land.t1.present": True}), ("blocked", []))
 
-    def test_a_run_node_completes_on_a_reviewed_patch(self) -> None:
-        task = {"id": "t1", "state": "review", "patch": "p.patch"}
-        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, task, {}), ("completed", []))
-        # review without a stored patch is not evidence of anything finished
-        self.assertEqual(
-            plan_adapter.outcome_from_task(self.RUN, {"id": "t1", "state": "review"}, {}), ("failed", [])
-        )
-        # the same state does not complete a landing node
-        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, task, {}), ("failed", []))
+        reviewed = {"id": "t1", "state": "review", "patch": "p.patch"}
+        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, reviewed, {}), ("completed", []))
+        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, {"id": "t1", "state": "review"}, {}), ("failed", []))
+        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, reviewed, {}), ("failed", []))
 
-    def test_a_land_node_completes_only_with_a_landing_receipt(self) -> None:
-        task = {"id": "t1", "state": "done", "patch": "p.patch"}
-        with_receipt = {"receipt.land.t1.present": True}
-        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, task, with_receipt), ("completed", []))
-        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, task, {}), ("failed", []))
+        done = {"id": "t1", "state": "done", "patch": "p.patch"}
+        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, done, {"receipt.land.t1.present": True}), ("completed", []))
+        self.assertEqual(plan_adapter.outcome_from_task(self.LAND, done, {}), ("failed", []))
+        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, done, {}), ("completed", []))
 
-    def test_a_run_node_accepts_a_task_already_landed_elsewhere(self) -> None:
-        task = {"id": "t1", "state": "done", "patch": "p.patch"}
-        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, task, {}), ("completed", []))
-
-    def test_a_held_claim_is_unverified_not_failed(self) -> None:
         for state in ("claimed", "running"):
-            task = {"id": "t1", "state": state, "patch": ""}
-            self.assertEqual(plan_adapter.outcome_from_task(self.RUN, task, {}), ("unverified", []))
-            self.assertEqual(plan_adapter.outcome_from_task(self.LAND, task, {}), ("unverified", []))
+            held = {"id": "t1", "state": state, "patch": ""}
+            self.assertEqual(plan_adapter.outcome_from_task(self.RUN, held, {}), ("unverified", []))
+            self.assertEqual(plan_adapter.outcome_from_task(self.LAND, held, {}), ("unverified", []))
 
-    def test_a_requeued_task_is_failed(self) -> None:
-        self.assertEqual(
-            plan_adapter.outcome_from_task(self.RUN, {"id": "t1", "state": "ready"}, {}), ("failed", [])
-        )
+        self.assertEqual(plan_adapter.outcome_from_task(self.RUN, {"id": "t1", "state": "ready"}, {}), ("failed", []))
 
-    def test_a_claimed_completion_without_its_proof_is_unverified(self) -> None:
         node = agent_node("t1", proof=["plan.task.t1.patch_present"])
-        task = {"id": "t1", "state": "review", "patch": "p.patch"}
         self.assertEqual(
-            plan_adapter.outcome_from_task(node, task, {"plan.task.t1.patch_present": False}),
+            plan_adapter.outcome_from_task(node, reviewed, {"plan.task.t1.patch_present": False}),
             ("unverified", ["plan.task.t1.patch_present"]),
         )
         self.assertEqual(
-            plan_adapter.outcome_from_task(node, task, {"plan.task.t1.patch_present": True}),
+            plan_adapter.outcome_from_task(node, reviewed, {"plan.task.t1.patch_present": True}),
             ("completed", []),
         )
 
     def test_scope_of_reads_the_plan_declaration(self) -> None:
         task = {"allowed_paths": ["src", "./docs"], "forbidden_paths": "secrets.txt"}
-        self.assertEqual(
-            plan_adapter.scope_of(task), {"allowed": ["docs", "src"], "forbidden": ["secrets.txt"]}
-        )
+        self.assertEqual(plan_adapter.scope_of(task), {"allowed": ["docs", "src"], "forbidden": ["secrets.txt"]})
         self.assertEqual(plan_adapter.scope_of({}), {"allowed": [], "forbidden": []})
 
 
-@unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")
-class AdapterEndToEndTest(unittest.TestCase):
-    """One temporary repository driven through the real plan-run front door."""
+class GraphRepoFixture:
+    """One temporary repository per test, driven through the real front doors."""
+
+    TASKS = (("t1", "delegated.txt"),)
+    ACCEPT = "bash scripts/check.sh t1"
+    CHECK = CHECK_SCRIPT
+    CODEX = FAKE_CODEX
+    OMS_SHIM_BODY = ""
 
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="oms-graph-adapter."))
+        self.tmp = Path(tempfile.mkdtemp(prefix="oms-graph."))
         self.addCleanup(shutil.rmtree, str(self.tmp), True)
         self.repo = self.tmp / "repo"
         self.bin = self.tmp / "bin"
         self.home = self.tmp / "home"
         for path in (self.repo, self.bin, self.home):
             path.mkdir(parents=True)
-
         (self.repo / "scripts").mkdir()
-        self._write(self.repo / "scripts" / "check.sh", CHECK_SCRIPT)
+        self._write(self.repo / "scripts" / "check.sh", self.CHECK)
         (self.repo / "README.md").write_text("base\n", encoding="utf-8")
-        self._write(self.bin / "codex", FAKE_CODEX)
+        self._write(self.bin / "codex", self.CODEX)
+        if self.OMS_SHIM_BODY:
+            self._write(self.bin / "oms", self.OMS_SHIM_BODY)
+
+        self._saved_env = dict(os.environ)
+        self.addCleanup(self._restore_env)
 
         self.git("init", "-q")
         self.git("config", "user.email", "test@example.com")
@@ -481,14 +414,10 @@ class AdapterEndToEndTest(unittest.TestCase):
         self.git("add", "README.md", "scripts/check.sh")
         self.git("commit", "-qm", "base")
 
-        self.plan("init", "--goal", "g", "--accept", "bash scripts/check.sh t1")
-        self.plan("add", "--id", "t1", "--title", "t", "--allowed", "delegated.txt",
-                  "--verify", "bash scripts/check.sh t1")
-        self.plan("add", "--id", "t2", "--title", "t2", "--allowed", "delegated2.txt",
-                  "--verify", "bash scripts/check.sh t2")
-
-        self._saved_env = dict(os.environ)
-        self.addCleanup(self._restore_env)
+        self.plan("init", "--goal", "g", "--accept", self.ACCEPT)
+        for task_id, allowed in self.TASKS:
+            self.plan("add", "--id", task_id, "--title", "task %s" % task_id, "--allowed", allowed,
+                      "--verify", "bash scripts/check.sh %s" % task_id)
 
     def _restore_env(self) -> None:
         os.environ.clear()
@@ -503,8 +432,9 @@ class AdapterEndToEndTest(unittest.TestCase):
         env = dict(self._saved_env) if hasattr(self, "_saved_env") else dict(os.environ)
         scrub_fixture_env(env)
         env["HOME"] = str(self.home)
-        # peer-delegate loads NVM_DIR before execution; keep discovery hermetic.
         env["NVM_DIR"] = str(self.home / ".nvm")
+        env["OMS_LOCK_DIR"] = str(self.tmp / "locks")
+        env["OMS_WORK_JOURNAL"] = "0"
         return env
 
     def git(self, *args: str) -> None:
@@ -515,23 +445,32 @@ class AdapterEndToEndTest(unittest.TestCase):
         argv = ["bash", str(ROOT / "scripts" / "agent-plan.sh"), "--repo", str(self.repo)] + list(args)
         subprocess.run(argv, check=True, env=self._env(), cwd=str(self.repo), stdout=subprocess.DEVNULL)
 
-    def worker_env(self, **extra):
-        """Swap in the fixture environment; plan-run inherits this process's."""
+    def worker_env(self, **extra) -> None:
         env = self._env()
         env["PATH"] = "%s:/usr/bin:/bin" % self.bin
         env.update(extra)
         os.environ.clear()
         os.environ.update(env)
 
-    def execute(self, node, *, env_extra=None, **kwargs):
-        """Run one node with the fixture's private PATH visible to plan-run."""
-        self.worker_env(**(env_extra or {}))
+    def drive(self, call, *args, **kwargs):
+        env_extra = kwargs.pop("env_extra", None) or {}
+        self.worker_env(**env_extra)
         try:
-            options = {"provider": "codex", "timeout": 600}
-            options.update(kwargs)
-            return plan_adapter.execute(self.repo, node, **options)
+            return call(*args, **kwargs)
         finally:
             self._restore_env()
+
+
+@unittest.skipUnless(HAVE_GIT, "git is required to drive plan-run")
+class AdapterEndToEndTest(GraphRepoFixture, unittest.TestCase):
+    """One temporary repository driven through the real plan-run front door."""
+
+    TASKS = (("t1", "delegated.txt"), ("t2", "delegated2.txt"))
+
+    def execute(self, node, *, env_extra=None, **kwargs):
+        options = {"provider": "codex", "timeout": 600}
+        options.update(kwargs)
+        return self.drive(plan_adapter.execute, self.repo, node, env_extra=env_extra, **options)
 
     def test_run_then_land_then_a_failed_worker(self) -> None:
         run_node = agent_node("t1", proof=["plan.task.t1.patch_present"])
@@ -543,7 +482,6 @@ class AdapterEndToEndTest(unittest.TestCase):
         self.assertEqual(result["task"]["state"], "review")
         self.assertTrue(result["facts"]["plan.task.t1.patch_present"])
         self.assertFalse(result["facts"]["receipt.land.t1.present"])
-        # A review-default run never touches the working tree.
         self.assertFalse((self.repo / "delegated.txt").exists())
         self.assertEqual(result["argv"][1], str(ROOT / "scripts" / "plan-run.sh"))
 
@@ -556,8 +494,6 @@ class AdapterEndToEndTest(unittest.TestCase):
         self.assertEqual(landed["facts"]["receipt.admit.t1.latest"], "verified")
         self.assertEqual((self.repo / "delegated.txt").read_text(encoding="utf-8"), "one\n")
 
-        # Landing leaves reviewable working-tree bytes; a later admission must
-        # not stack onto them.
         self.git("add", "delegated.txt")
         self.git("commit", "-qm", "test: commit the landed task")
 
@@ -568,7 +504,7 @@ class AdapterEndToEndTest(unittest.TestCase):
         self.assertEqual(failed["task"]["state"], "ready")
         self.assertFalse(failed["facts"]["plan.task.t2.patch_present"])
 
-    def test_dry_run_asks_plan_run_and_records_no_outcome(self) -> None:
+    def test_dry_run_and_peek_and_task_view(self) -> None:
         result = self.execute(agent_node("t1"), timeout=120, dry_run=True)
         self.assertEqual(result["outcome"], "skipped")
         self.assertEqual(result["claimed_outcome"], "skipped")
@@ -576,34 +512,21 @@ class AdapterEndToEndTest(unittest.TestCase):
         self.assertIn("--dry-run", result["argv"])
         self.assertEqual(result["task"]["state"], "ready")
 
-    def test_plan_status_and_task_view_read_the_real_plan(self) -> None:
-        self.worker_env()
-        try:
-            status = plan_adapter.plan_status(self.repo)
-            view = plan_adapter.task_view(self.repo, "t1")
-            with self.assertRaises(GraphError):
-                plan_adapter.task_view(self.repo, "no-such-task")
-        finally:
-            self._restore_env()
-        self.assertTrue(status["present"])
-        self.assertEqual(sorted(status["actionable"]), ["t1", "t2"])
-        self.assertEqual(view["state"], "ready")
-        self.assertEqual(plan_adapter.scope_of(view)["allowed"], ["delegated.txt"])
-
-    def test_peek_reads_the_next_task_without_a_lease(self) -> None:
         self.worker_env()
         try:
             peeked = plan_adapter.peek_next_task(self.repo)
             again = plan_adapter.peek_next_task(self.repo)
             after = plan_adapter.task_view(self.repo, "t1")
+            with self.assertRaises(GraphError):
+                plan_adapter.task_view(self.repo, "no-such-task")
         finally:
             self._restore_env()
         self.assertEqual(peeked["id"], "t1")
         self.assertEqual(again["id"], "t1")
         self.assertEqual(after["state"], "ready")
         self.assertFalse(after.get("lease_id"))
+        self.assertEqual(plan_adapter.scope_of(after)["allowed"], ["delegated.txt"])
 
-    def test_peek_returns_none_only_for_no_actionable_task(self) -> None:
         self.plan("block", "--id", "t1", "--reason", "parked")
         self.plan("block", "--id", "t2", "--reason", "parked")
         self.worker_env()

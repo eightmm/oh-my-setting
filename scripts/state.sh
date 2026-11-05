@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One read-only view over the repo-local .oms state the three agents share, so
-# any agent resuming a repo can answer "what is active, claimed, stale, pending
-# review, open, or just changed?" in a single command instead of cat-ing five
-# files. Pure query layer: it reads task/plan/board/spine/artifacts/change-guard
-# and prints or emits JSON. It never mutates state and never orchestrates — the
-# design keeps writers independent and coherence here, in the query.
+# Read-only view over the repo-local .oms state.
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
-ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT_LIB/agent-memory-common.sh"
@@ -61,8 +55,6 @@ done
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 
-# ci-status has a `record` mode but nothing calls it automatically; this is
-# the read-side wiring so "oms state --refresh-ci" is one command, not two.
 if [ "$REFRESH_CI" = 1 ]; then
   (cd "$REPO" && "$ROOT/scripts/ci-status.sh" record >/dev/null 2>&1) || true
 fi
@@ -70,8 +62,6 @@ fi
 RS_TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-repo-state.XXXXXX")"
 trap 'rm -rf "$RS_TMP"' EXIT HUP INT TERM
 
-# The read-only collectors below are independent, so they run at once and the
-# state costs the slowest of them, not their sum. Each leaves its exit code.
 rs_collect() {  # NAME COMMAND... -> RS_TMP/NAME.out, started in the background
   local name="$1"
   shift
@@ -89,23 +79,12 @@ rs_rc() {  # NAME -> exit code, or 1 when the collector never ran
   printf '%s\n' "${rc:-1}"
 }
 FAILURE_PHYSICAL=0
-if [ -e "$REPO/.oms/failures.jsonl" ] || [ -L "$REPO/.oms/failures.jsonl" ]; then
-  FAILURE_PHYSICAL=1
-fi
+if [ -e "$REPO/.oms/failures.jsonl" ] || [ -L "$REPO/.oms/failures.jsonl" ]; then FAILURE_PHYSICAL=1; fi
 TASK_PHYSICAL=0
-if [ -e "$REPO/.oms/task/current.md" ] || [ -L "$REPO/.oms/task/current.md" ]; then
-  TASK_PHYSICAL=1
-fi
+if [ -e "$REPO/.oms/task/current.md" ] || [ -L "$REPO/.oms/task/current.md" ]; then TASK_PHYSICAL=1; fi
 PLAN_PHYSICAL=0
-if [ -e "$REPO/.oms/plan/tasks.json" ] || [ -L "$REPO/.oms/plan/tasks.json" ]; then
-  PLAN_PHYSICAL=1
-fi
-# Privacy state comes from project-private itself (one source of truth for what
-# counts as tracked/hidden/exposed) rather than a second copy of the rules here.
+if [ -e "$REPO/.oms/plan/tasks.json" ] || [ -L "$REPO/.oms/plan/tasks.json" ]; then PLAN_PHYSICAL=1; fi
 rs_collect private "$ROOT/scripts/project-private.sh" --repo "$REPO" status --json
-# The shared auto-update verdict rides the state so inbox stays a pure
-# derivation of state while still surfacing a dying updater — the state
-# an agent resuming here most needs to distrust.
 rs_collect autoupdate "$ROOT/scripts/auto-update.sh" attention
 rs_collect lifecycle "$ROOT/scripts/agent-events.sh" --repo "$REPO" list --json
 rs_collect approvals "$ROOT/scripts/approval-inbox.sh" --repo "$REPO" list --json
@@ -388,13 +367,10 @@ def oms(*parts):
     return os.path.join(repo, ".oms", *parts)
 
 
-# Machine consumers key on this the way artifact-index/model-doctor do;
-# bump it only with a deliberate output-contract change.
 state = {"schema": 1}
 state["room_mail"] = pending_room_mail(repo)
 state["work_journal"] = journal_storage(repo)
 
-# --- Durable agent attempts and private approvals ---------------------------
 def load_json_file(path, fallback):
     try:
         value = json.load(open(path, encoding="utf-8"))
@@ -422,17 +398,12 @@ try:
         review_days = max(0.0, configured_review_days)
 except (TypeError, ValueError):
     pass
-now_epoch = time.time()
 aged_reviews = 0
 for item in attempts:
     if item.get("state") != "review" or not isinstance(item.get("attempt_id"), str):
         continue
-    since = item.get("review_entered_at")
-    try:
-        entered_epoch = calendar.timegm(time.strptime(since, "%Y-%m-%dT%H:%M:%SZ"))
-    except (TypeError, ValueError):
-        continue
-    if now_epoch - entered_epoch > review_days * 86400:
+    entered_epoch = epoch(item.get("review_entered_at"))
+    if entered_epoch is not None and now - entered_epoch > review_days * 86400:
         aged_reviews += 1
 attention_states = {"waiting_input", "waiting_approval", "blocked"}
 
@@ -466,10 +437,7 @@ agent_operations = {
         attempt_summary(item)
         for item in attempts[-5:]
     ],
-    # The dashboard's fields of the newest attempts, so it reads the lifecycle
-    # log once through this projection instead of listing it again.
     "recent": [dict(attempt_summary(item), **{key: item[key] for key in ("usage", "usage_reports") if key in item}) for item in attempts[-8:]],
-    # Keep current work visible even when newer completed attempts fill latest.
     "active_latest": [
         attempt_summary(item)
         for item in sorted(attempts, key=lambda row: row["updated_at"])
@@ -489,9 +457,7 @@ for item in approval_rows:
     effective_state = str(item.get("effective_state") or durable_state)
     if effective_state == "expired" and durable_state != "expired":
         effective_expired += 1
-    # Compatibility: this field historically projected only requested rows
-    # through read-time expiry. Keep that shape while naming both explicit
-    # projections additively for new consumers.
+    # Compatibility: by_state projects only requested rows through read-time expiry.
     legacy_state = "expired" if durable_state == "requested" and effective_state == "expired" else durable_state
     approval_by_state[legacy_state] = approval_by_state.get(legacy_state, 0) + 1
     approval_by_durable_state[durable_state] = approval_by_durable_state.get(durable_state, 0) + 1
@@ -514,8 +480,6 @@ state["approvals"] = {
     "latest_pending": pending_approvals[-5:],
 }
 
-# Typed runtime projection: read-only evidence over the same shared state. An
-# unhealthy or schema-mismatched projection is reported, never guessed at.
 runtime_raw = load_json_file(os.environ["OMS_RS_RUNTIME_FILE"], {})
 runtime_healthy = (
     os.environ["OMS_RS_RUNTIME_HEALTHY"] == "1" and runtime_raw.get("schema") == 2
@@ -597,15 +561,11 @@ if plan_healthy and plan["present"] and os.path.isfile(pf):
     except Exception:
         pdata = {}
     plan["goal"] = (pdata.get("goal") or "")[:200]
-    stamps = []
     rows = pdata.get("tasks") or {}
-    for t in (rows.values() if isinstance(rows, dict) else rows):
-        try:
-            stamps.append(calendar.timegm(time.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ")))
-        except (AttributeError, ValueError):
-            pass
+    stamps = [e for t in (rows.values() if isinstance(rows, dict) else rows)
+              if isinstance(t, dict) for e in [epoch(str(t.get("updated")))] if e is not None]
     if stamps:
-        plan["idle_days"] = max(0, int((time.time() - max(stamps)) // 86400))
+        plan["idle_days"] = max(0, int((now - max(stamps)) // 86400))
 retirements = [row for row in read_jsonl(oms("plan", "retirements.jsonl"))
                if row.get("schema") == 1 and row.get("kind") == "plan-retirement"]
 if retirements:
@@ -665,14 +625,12 @@ if os.path.isfile(cur_ptr):
         runs["current"] = {"run_id": rid, "fresh": fresh}
 spine = read_jsonl(oms("runs", "spine.jsonl"))
 if spine:
-    seen, order, closed = {}, [], set()
+    order, closed = {}, set()
     for r in spine:
         rid = r.get("run_id")
         if not rid:
             continue
-        if rid not in seen:
-            seen[rid] = r.get("ts")
-            order.append(rid)
+        order.setdefault(rid, None)
         if r.get("tool") == "oms-run" and r.get("event") == "close":
             closed.add(rid)
     runs["open"] = [rid for rid in order if rid not in closed][-10:]
@@ -691,8 +649,6 @@ for r in arts:
 
 
 def artifact_row_contract_valid(row):
-    # Legacy rows remain visible until `artifact-index migrate`; schema-1 rows
-    # are never allowed to false-green when their envelope is incomplete.
     if row.get("schema") != 1:
         return row.get("kind") != "artifact-resolution"
     if required_artifact_fields - row.keys():
@@ -735,9 +691,7 @@ for i, r in enumerate(arts):
     if (isinstance(resolver_exit, bool) or not isinstance(resolver_exit, int) or
             isinstance(target_exit, bool) or not isinstance(target_exit, int)):
         continue
-    resolver_ok = resolver_exit == 0
-    target_failed = target_exit > 0
-    if (resolver_ok and target_failed and target_i < i and target.get("schema") == 1 and
+    if (resolver_exit == 0 and target_exit > 0 and target_i < i and target.get("schema") == 1 and
             target.get("kind") != "artifact-resolution" and
             r.get("operation_id") == target.get("operation_id") and
             r.get("artifact_id") == target.get("artifact_id")):
@@ -746,18 +700,14 @@ for i, r in enumerate(arts):
 for i, row in enumerate(arts):
     if row.get("kind") == "artifact-resolution" and i not in valid_resolution_indexes:
         artifact_invalid_rows += 1
-resolution_rows = [r for i, r in enumerate(arts) if i in valid_resolution_indexes]
 outcomes = [r for r in arts if r.get("kind") != "artifact-resolution"]
-arts = [r for i, r in enumerate(arts)
-        if r.get("kind") != "artifact-resolution" or i in valid_resolution_indexes]
 
 
 def artifact_status(row):
     exit_value = row.get("exit")
     if isinstance(exit_value, bool) or not isinstance(exit_value, int) or exit_value < 0:
         return "unresolved"
-    failed = exit_value != 0
-    if not failed:
+    if exit_value == 0:
         return "success"
     return "resolved" if row.get("event_id") in resolved_at else "unresolved"
 
@@ -774,11 +724,11 @@ for r in outcomes[-5:]:
         item["resolved_at"] = resolved_at[r.get("event_id")]
     latest_artifacts.append(item)
 state["artifacts"] = {
-    "total": len(arts),
+    "total": len(outcomes) + len(valid_resolution_indexes),
     "invalid_rows": artifact_invalid_rows,
     "healthy": artifact_invalid_rows == 0,
     "outcomes_total": len(outcomes),
-    "resolution_events": len(resolution_rows),
+    "resolution_events": len(valid_resolution_indexes),
     "counts": artifact_counts,
     "latest": latest_artifacts,
 }
@@ -786,9 +736,6 @@ state["artifacts"] = {
 # --- Unresolved failures (canonical fail-ledger projection) -----------------
 failure_doc = load_json_file(os.environ["OMS_RS_FAILURE_FILE"], {})
 failure_rows = failure_doc.get("failures", []) if isinstance(failure_doc, dict) else []
-# Corrupt rows are quarantined by the ledger, not fatal: the valid rows still
-# project here while healthy goes false, which keeps the inbox corruption
-# item alive without bricking the envelope.
 failure_invalid_rows = failure_doc.get("invalid_rows", 0) if isinstance(failure_doc, dict) else 0
 if not isinstance(failure_invalid_rows, int) or isinstance(failure_invalid_rows, bool):
     failure_invalid_rows = 0
@@ -834,10 +781,6 @@ state["install"] = {"auto_update": verdict or "unknown",
                     "auto_update_detail": detail[:160]}
 
 # --- CI for HEAD, keyed by (branch, sha) ------------------------------------
-# A recorded conclusion is evidence about the commit it ran on. Three unlike
-# situations used to collapse into one "stale" nag: a HEAD CI has not been
-# shown yet, a HEAD that was never pushed, and a repo whose push state cannot
-# be determined at all. Only the unpushed one has an action, and it is a push.
 ci = {"present": False, "current_sha": None, "fresh": None, "state": "none",
       "ahead": None, "unpushed": None, "upstream": None, "current_branch": None}
 ahead_raw = (os.environ.get("OMS_RS_AHEAD") or "").strip()
@@ -861,15 +804,11 @@ if ci_rows:
 if ci["fresh"]:
     ci["state"] = "current"
 elif ci["unpushed"]:
-    # Silent in a repo with neither CI history nor workflows: nothing is
-    # waiting on that push, so naming it would be noise, not attention.
     if ci["present"] or os.environ.get("OMS_RS_HAS_WORKFLOWS") == "1":
         ci["state"] = "unpushed"
 elif ci["present"] and ahead == 0:
     ci["state"] = "pending"
 elif ci["present"]:
-    # No upstream to compare against: the recorded run may or may not describe
-    # this commit, and refreshing is the only answer available.
     ci["state"] = "stale"
 state["ci"] = ci
 
@@ -880,22 +819,17 @@ def pid_alive(pid, native_pid=None, native_pid_source=None):
     if isinstance(native_pid, str) and native_pid.isdigit():
         native_pid = int(native_pid)
     if not persisted_native_pid_is_proven(native_pid, native_pid_source):
-        # Read-only state must preserve an owner whose persisted Windows
-        # identity predates provenance; it cannot label that work orphaned.
         return True
     return process_pid_alive(pid, native_pid=native_pid)
 
 delegations = []
 deleg_dir = oms("delegations")
 if os.path.isdir(deleg_dir):
-    import glob as _glob
-    for f in sorted(_glob.glob(os.path.join(deleg_dir, "*.json"))):
+    for f in sorted(glob.glob(os.path.join(deleg_dir, "*.json"))):
         try:
             d = json.load(open(f, encoding="utf-8"))
         except Exception:
             continue
-        # Same-host liveness: a leftover file whose pid is gone is a crashed
-        # orphan (only meaningful when the record was written on this host).
         alive = pid_alive(
             d.get("pid"), d.get("native_pid"), d.get("native_pid_source")
         )
@@ -929,8 +863,6 @@ if os.path.isfile(gf):
             gpid = parts[1]
         if len(parts) >= 2 and parts[0] == "started" and not gstarted:
             gstarted = parts[1]
-    # Stale: dead opt-in owner pid, else started + TTL (the begin process is
-    # short-lived, so age is the default liveness signal).
     if gpid:
         guard["stale"] = not pid_alive(gpid)
     elif gstarted.isdigit():
@@ -938,9 +870,6 @@ if os.path.isfile(gf):
 state["change_guard"] = guard
 
 # --- Interrupted landings ---------------------------------------------------
-# A land is three writes (apply, lineage, plan finish). An intent with no
-# terminal row means one of them never happened, which otherwise looks exactly
-# like "nothing was landed".
 landings = {"outstanding": []}
 for row in read_jsonl(oms("landings.jsonl")):
     lid = row.get("landing_id")
@@ -957,9 +886,7 @@ for lid, row in (landings.pop("_open", {}) or {}).items():
     })
 state["landings"] = landings
 
-# --- Project harness: the rules every agent reads before any .oms state ------
-# Presence and exposure only. Template freshness needs reference blocks
-# regenerated from the install, which is project-doctor's job, not a query's.
+# --- Project harness --------------------------------------------------------
 harness = {"rules": "missing", "styles": [], "spec": "missing", "private": "n/a",
            "exposed": []}
 seen_styles = []
@@ -986,8 +913,6 @@ if rule_files:
     harness["styles"] = seen_styles
     harness["rule_files"] = rule_files
 elif agent_files:
-    # Hand-written agent rules (this repo's own AGENTS.md is one): report them,
-    # do not nag to overwrite them with a template.
     harness["rules"] = "unmanaged"
     harness["rule_files"] = agent_files
 spec_path = os.path.join(repo, "PROJECT.md")
@@ -1008,7 +933,7 @@ if private.get("git"):
     harness["private"] = "exposed" if harness["exposed"] else "hidden"
 state["harness"] = harness
 
-# --- Cross-agent threads: what the agents are actually discussing -----------
+# --- Cross-agent threads ----------------------------------------------------
 threads = {"current": None, "open": 0, "stale_open": 0, "recent": []}
 tdir = oms("threads")
 if os.path.isdir(tdir):
@@ -1027,7 +952,6 @@ if os.path.isdir(tdir):
             continue
         tid = os.path.basename(path)[: -len(".jsonl")]
         closed = any(r.get("role") == "closed" for r in rows)
-        # A rolled-over room segment continues in its successor: not open.
         for r in rows:
             ev = r.get("room_event")
             if (isinstance(ev, dict) and r.get("thread") == tid
@@ -1040,8 +964,6 @@ if os.path.isdir(tdir):
             p = r.get("provider")
             if p and p not in providers:
                 providers.append(p)
-        # Date a thread by its newest turn whose timestamp parses: a malformed
-        # ts cannot age it, and an undatable thread is never called abandoned.
         last_epoch = None
         for r in reversed(rows):
             last_epoch = epoch(r.get("ts"))
@@ -1055,9 +977,6 @@ if os.path.isdir(tdir):
     rows_by_thread.sort(key=lambda t: t["last_ts"] or "", reverse=True)
     open_threads = [t for t in rows_by_thread if not t["closed"]]
     threads["open"] = len(open_threads)
-    # Advisory count only: the current thread is live by definition, and an
-    # open thread is the only record that an exchange happened, so nothing
-    # here (or in gc) closes one — see `oms thread list --stale`.
     threads["stale_open"] = sum(
         1 for t in open_threads
         if t["id"] != threads["current"] and t["age_seconds"] is not None

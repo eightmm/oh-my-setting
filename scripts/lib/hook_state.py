@@ -2306,10 +2306,6 @@ def cmd_route(args: argparse.Namespace) -> int:
 ANSWER_PREVIEW_CHARS = 280
 
 
-def thread_participant(repo: Path, tid: str, consumer: str) -> bool:
-    return thread_relation(repo, tid, consumer)[0]
-
-
 def thread_relation(repo: Path, tid: str, consumer: str) -> tuple[bool, bool]:
     """(acked, asked): whether this session acked the thread, and asked in it."""
     import thread_live

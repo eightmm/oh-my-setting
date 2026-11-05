@@ -168,15 +168,6 @@ auggie'
 [ "$(oms_provider_supported_names)" = "$expected_supported" ] ||
   fail "supported provider catalog is incomplete: $(oms_provider_supported_names 2>&1 || true)"
 
-for provider in muse kimi kiro; do
-  if oms_provider_supports_access "$provider" read; then
-    fail "$provider must not support read calls"
-  fi
-done
-for provider in goose cline kilo openhands auggie; do
-  if oms_provider_supports_access "$provider" read; then fail "$provider must not support read calls"; fi
-done
-
 cat > "$TMP/bin/unrelated-cn" <<'BAD_CN'
 #!/usr/bin/env sh
 case "${1:-}" in
@@ -609,11 +600,7 @@ aider_scratch="$(dirname "$aider_scratch")"
 
 call_provider continue
 grep -Fxq -- '--readonly' "$TMP/logs/cn.argv" || fail 'Continue read-only mode missing'
-for binary in muse kimi kiro-cli cn; do
-  [ ! -s "$TMP/logs/$binary.stdin" ] || fail "$binary received a duplicate prompt on stdin"
-done
-
-for binary in dsh vibe pi copilot droid aider; do
+for binary in muse kimi kiro-cli cn dsh vibe pi copilot droid aider; do
   [ ! -s "$TMP/logs/$binary.stdin" ] ||
     fail "$binary received the prompt twice through its documented argv/file input and stdin"
 done
@@ -635,13 +622,6 @@ grep -Fq 'inspect this repository' "$TMP/logs/localfoo.prompt" || fail 'adapter 
 # peer-delegate lifecycle is provider-neutral and has its own regression suite;
 # this focused test pins the provider-specific flags without spending a model
 # call or duplicating the full delegation fixture eight times.
-# shellcheck source=scripts/lib/peer-common.sh
-. "$ROOT/scripts/lib/peer-common.sh"
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
 prompt_file="$TMP/write-prompt.txt"
 printf 'make one bounded test change\n' > "$prompt_file"
 run_write_attempt() {

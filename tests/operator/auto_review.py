@@ -60,7 +60,6 @@ shared_before_auto, room_env_before_auto = shared, room_env
 shared = room.create(project, "auto-review-room", "Automatic review fixtures")
 room.join(project, shared, room_owner, "claude", "main", model="claude-opus-5-5")
 room_env = dict(room_env, OMS_ROOM_ID=shared)
-import panel_results as panel_result_store
 import panel_review as panel_review_impl
 Path(room_env["XDG_STATE_HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
 Path(room_env["XDG_STATE_HOME"]).chmod(0o700)
@@ -676,8 +675,6 @@ with patch.object(panel_result_store, "_records", return_value=([verify_attempt]
     assert (project / auto_artifact).is_file()
     assert "include verifier diagnostics from the answer artifact in the continuation brief" in verify_mail["text"]
     assert "the failed verifier's tail carries over" not in verify_mail["text"]
-    import io
-    import shlex
     command_text = verify_mail["text"].split("Continue with fixes: ", 1)[1].split(" (Full answer:", 1)[0]
     command_args = shlex.split(command_text)
     try:
@@ -1262,7 +1259,6 @@ assert panel.dispatch_store.read(project, panel._settlement_claim_path(r5_call))
 assert any(message.get("id") == "result-" + r5_call
            for message in room.status(project, shared)["messages"])
 # Concurrent observers share one durable call claim and launch at most one reviewer per digest.
-import threading
 parallel_call = "call-f6f6f6f6f6f6f6f6"
 parallel_attempt = dict(auto_attempt, attempt_id="attempt-settlement-parallel",
     refs=dict(auto_attempt["refs"], panel_room_participant=parallel_call))
@@ -1291,7 +1287,6 @@ with patch.object(panel_result_store, "_records", return_value=([parallel_attemp
     observers = [threading.Thread(target=deliver_parallel) for _ in range(4)]
     for observer in observers:
         observer.start()
-    import time
     join_deadline = time.monotonic() + max(15, int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")) // 6)
     for observer in observers:
         observer.join(timeout=max(0.0, join_deadline - time.monotonic()))

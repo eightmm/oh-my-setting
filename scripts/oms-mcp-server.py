@@ -1479,11 +1479,6 @@ def run_age(run_dir: Path) -> int | None:
     return None
 
 
-def log_thread(log: Path) -> str:
-    """The thread id consult prints when it finishes; empty while it runs."""
-    return log_references(log)[1]
-
-
 def peer_operations(arguments: dict) -> tuple[str, bool]:
     repo, err = resolve_repo(arguments)
     if err:
@@ -1510,7 +1505,7 @@ def peer_operations(arguments: dict) -> tuple[str, bool]:
             "status": status,
             "started_at": meta.get("started_at") or started,
         }
-        if cancellation_is_valid(run_dir):
+        if valid_receipt(run_dir, "cancel-request"):
             row["cancellation_requested"] = True
         if status == "done" and valid_receipt(run_dir, "cancel-observed"):
             row["termination_reason"] = "cancelled"
@@ -1531,7 +1526,7 @@ def peer_operations(arguments: dict) -> tuple[str, bool]:
                 row["context_options"] = selected
         if isinstance(title, str) and title:
             row["title"] = title[:TITLE_LIMIT]
-        thread = log_thread(run_dir / "run.log") or meta.get("thread")
+        thread = log_references(run_dir / "run.log")[1] or meta.get("thread")
         if isinstance(thread, str) and thread:
             row["thread"] = thread
         rows.append(row)
@@ -1627,7 +1622,7 @@ def peer_result(arguments: dict) -> tuple[str, bool]:
             break
         time.sleep(min(1.0, remaining))
         status, code = run_status(run_dir)
-    if cancellation_is_valid(run_dir):
+    if valid_receipt(run_dir, "cancel-request"):
         payload["cancellation_requested"] = True
     if status == "done" and valid_receipt(run_dir, "cancel-observed"):
         payload["termination_reason"] = "cancelled"
@@ -1761,10 +1756,6 @@ def iso_mtime(paths: list[Path], fallback: str) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(max(stamps)))
 
 
-def cancellation_is_valid(run_dir: Path) -> bool:
-    return valid_receipt(run_dir, "cancel-request")
-
-
 def task_snapshot(run_dir: Path) -> dict:
     meta = run_meta(run_dir)
     _kind, inferred_start = operation_start(run_dir.name)
@@ -1785,8 +1776,9 @@ def task_snapshot(run_dir: Path) -> dict:
     if status == "done" and valid_receipt(run_dir, "cancel-observed"):
         return {**base, "status": "cancelled", "statusMessage": "Provider cancellation was observed and the operation exited. Partial artifacts are retained."}
     if status == "running":
-        return {**base, "status": "working", "cancellation_requested": cancellation_is_valid(run_dir),
-                "statusMessage": "Cancellation requested; awaiting provider cleanup." if cancellation_is_valid(run_dir) else "Peer consultation is running."}
+        cancelled = valid_receipt(run_dir, "cancel-request")
+        return {**base, "status": "working", "cancellation_requested": cancelled,
+                "statusMessage": "Cancellation requested; awaiting provider cleanup." if cancelled else "Peer consultation is running."}
     if status == "stalled":
         return {
             **base,

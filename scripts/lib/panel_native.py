@@ -399,7 +399,7 @@ def run_native(provider, repo, resume=None, model=None, task=None):
     from terminal_panel import MAX_LIVE_MAINS, _lock, _main_exit_key, _main_terminal_owner, _main_window
     from terminal_panel import _native_resume_binding, check_legacy_main, clean, live_mains, managed_session
     from terminal_panel import run_single_native, session_stored, tmux_command
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if room._child():
         raise ValueError("workers cannot open native owner sessions")
     if resume:
         # Reject foreign rooms before competing for the process-lifetime lease.
@@ -519,7 +519,7 @@ def _native_resume_binding(provider, repo, resume):
 
 def run_single_native(provider, repo, resume=None, model=None, task=None, _exit_info=None):
     from terminal_panel import _lock, _native_resume_binding, _run_native, ensure_room, main_history
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if room._child():
         raise ValueError("workers cannot open native owner sessions")
     if resume:
         key = hashlib.sha256((provider + "\0" + resume).encode()).hexdigest()[:32]
@@ -639,7 +639,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     saved_handlers = {}
     def native_interrupt(signum, frame):
         # A second hangup must not interrupt child shutdown or lifecycle writes.
-        from terminal_panel import NativeShutdown
         for number in saved_handlers:
             signal.signal(number, signal.SIG_IGN)
         raise NativeShutdown(signum)
@@ -719,7 +718,6 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
             rows = json.loads(events(repo, "list", "--json", output=True))
 
             def screened_label(row):
-                from terminal_panel import safe_label
                 try:
                     return safe_label(row["refs"].get("panel_label")) or ""
                 except (OSError, ValueError, TypeError, subprocess.SubprocessError):
@@ -1035,7 +1033,7 @@ def check_legacy_main(repo):
 
 def spawn_main(repo, provider, task=None, model=None):
     from terminal_panel import _lock, spawn_single_main
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if room._child():
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     with _lock(repo, "panel-main-start", timeout=3):
         return spawn_single_main(repo, provider, task, model)
@@ -1354,7 +1352,7 @@ def spawn_single_main(repo, provider, task=None, model=None):
     from terminal_panel import MAX_LIVE_MAINS, _lock, add_main_window, board_view, check_legacy_main
     from terminal_panel import legacy_session, live_main_refusal, live_mains, main_installed, main_owner
     from terminal_panel import panel_room, resolve_session, session_owner, tmux_command
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if room._child():
         raise ValueError("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
     if not shutil.which("tmux") or not main_installed(provider, model):
         raise ValueError("starting a main needs tmux and the %s CLI on PATH" % provider)

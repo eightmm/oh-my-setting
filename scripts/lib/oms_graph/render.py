@@ -14,6 +14,7 @@ import html
 import json
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from .project.analytics import _node_index
 from .project.analytics import evidence_degrees as _evidence_degrees
 from .project.analytics import structural_assurance as _structural_assurance
 
@@ -331,7 +332,7 @@ def render_project_map_text(summary: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _project_visual_model(
+def project_visual_model(
     nodes: Sequence[Mapping[str, Any]],
     edges: Sequence[Mapping[str, Any]],
     *,
@@ -348,11 +349,7 @@ def _project_visual_model(
     """A deterministic Project Graph slice with tests kept as hidden evidence."""
     cap = max(1, min(int(limit), 200))
     radius = max(0, min(int(depth), 4))
-    all_index: Dict[str, Mapping[str, Any]] = {}
-    for node in nodes:
-        ident = node.get("id") if isinstance(node, Mapping) else None
-        if isinstance(ident, str) and ident and ident not in all_index:
-            all_index[ident] = node
+    all_index = _node_index(nodes)
     test_paths = {
         str(node.get("path", "")) for node in all_index.values()
         if str(node.get("kind", "")) == "test" and str(node.get("path", ""))
@@ -538,15 +535,6 @@ def _project_visual_model(
             "change": dict(sorted(change_counts.items())),
         },
     }
-
-
-def project_visual_model(
-    nodes: Sequence[Mapping[str, Any]],
-    edges: Sequence[Mapping[str, Any]],
-    **options: Any
-) -> Dict[str, Any]:
-    """Public, data-only projection shared by HTML and MCP Apps renderers."""
-    return _project_visual_model(nodes, edges, **options)
 
 
 def _exec_visual_model(
@@ -1169,7 +1157,7 @@ def render_project_html_fragment(
     include_tests: bool = False,
     title: str = "OMS Project Graph",
 ) -> str:
-    return _html_fragment(_project_visual_model(
+    return _html_fragment(project_visual_model(
         nodes, edges, revision=revision, focus_ids=focus_ids, focus_paths=focus_paths,
         changed_paths=changed_paths, impacted_paths=impacted_paths,
         coverage=coverage,

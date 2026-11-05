@@ -17,7 +17,3 @@ AGENT_MODES = ("run", "land")
 GATE_AUTHORITIES = ("parent", "human")
 EVENT_TYPES = ("run_started", "node_started", "node_outcome", "gate_decision", "route_evaluated", "run_finished", "note")
 ROUTE_STATUSES = ("actionable", "waiting", "gate", "blocked", "exhausted", "terminal", "invalid")
-
-CONFIDENCE = ("EXTRACTED", "INFERRED", "AMBIGUOUS")
-RELATIONS = ("contains", "imports", "calls", "references", "depends_on", "uses", "produces", "configures", "validates", "tests", "part_of")
-PROJECT_NODE_KINDS = ("file", "module", "class", "function", "method", "symbol", "test", "config", "document", "concept")

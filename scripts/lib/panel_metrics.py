@@ -624,7 +624,7 @@ def aggregate(repo, since=None, now=None):
     Follow-up task IDs are not linked by any producer record; rework therefore
     counts only additional write rounds for the same task ID.
     """
-    from panel_results import _query, _read, _indexed, outcomes, settled_pending_admissions
+    from panel_results import _read, _indexed, outcomes, settled_pending_admissions
 
     repo = Path(repo)
     now = time.time() if now is None else now

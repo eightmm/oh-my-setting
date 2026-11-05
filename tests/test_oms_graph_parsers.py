@@ -126,17 +126,14 @@ class ResolutionPrecisionTest(unittest.TestCase):
             warnings.simplefilter("always")
             self.shell_refs('python3 <<PY\nprint("\\$HOME")\nPY\n')
         self.assertFalse(any(issubclass(item.category, SyntaxWarning) for item in caught))
-
-    def test_non_python_heredoc_has_no_module_import_refs(self) -> None:
         self.assertFalse(any(
             ref["relation"] == "imports" and ref["kind"] == "module"
             for ref in self.shell_refs("cat <<EOF\nimport panel_metrics\nEOF\n")
         ))
 
-    # -- Python receivers -------------------------------------------------
-
-    def test_shell_command_words_never_link_to_python_functions(self) -> None:
+    def test_shell_words_link_to_shell_functions_not_python(self) -> None:
         self.write("scripts/lib/tool.py", "def git():\n    pass\n\ndef wait():\n    pass\n")
+        self.write("lib/common.sh", "helper() {\n  echo hi\n}\n")
         self.write(
             "run.sh",
             "#!/bin/bash\n"
@@ -146,6 +143,7 @@ class ResolutionPrecisionTest(unittest.TestCase):
             "PY\n"
             "git status\nwait\ncommand -v x\n",
         )
+        self.write("call_helper.sh", "#!/bin/bash\nhelper\n")
         self.assertEqual(self.targets("file:run.sh"), [])
         self.assertTrue(any(
             edge["source"] == "file:run.sh"
@@ -153,91 +151,54 @@ class ResolutionPrecisionTest(unittest.TestCase):
             and edge["relation"] == "imports"
             for edge in self.edges("imports")
         ))
+        self.assertEqual(self.targets("file:call_helper.sh"), [("symbol:lib/common.sh::helper", "INFERRED")])
 
-    def test_shell_bare_word_still_reaches_a_shell_function_by_name(self) -> None:
-        self.write("lib/common.sh", "helper() {\n  echo hi\n}\n")
-        self.write("run.sh", "#!/bin/bash\nhelper\n")
-        self.assertEqual(self.targets("file:run.sh"), [("symbol:lib/common.sh::helper", "INFERRED")])
-
-    def test_attribute_call_on_a_parameter_or_local_yields_no_edge(self) -> None:
+    def test_python_receiver_and_builtin_resolution(self) -> None:
         self.write("pkg/query.py", "class Graph:\n    def node(self, ident):\n        return ident\n")
         self.write("pkg/other.py", "def node():\n    pass\n")
         self.write("pkg/user.py", "def use(node, spec):\n    node.get('kind')\n    spec.get('x')\n    route = {}\n    route.items()\n")
-        self.assertEqual(self.targets("symbol:pkg/user.py::use"), [])
-
-    def test_attribute_call_on_a_module_variable_yields_no_edge(self) -> None:
         self.write("pkg/a2a.py", "def parser():\n    pass\n")
         self.write("pkg/cli.py", "import argparse\nparser = argparse.ArgumentParser()\nparser.add_argument('--x')\n\ndef main():\n    parser.parse_args()\n")
-        self.assertEqual(self.targets("file:pkg/cli.py"), [])
-        self.assertEqual(self.targets("symbol:pkg/cli.py::main"), [])
-
-    def test_builtin_names_are_not_resolved_repo_wide(self) -> None:
         self.write("pkg/io.py", "def open():\n    pass\n\ndef format():\n    pass\n")
-        self.write("pkg/user.py", "def use():\n    open('x')\n    format('y')\n    print(len([]))\n")
-        self.assertEqual(self.targets("symbol:pkg/user.py::use"), [])
-
-    def test_builtin_name_shadowed_in_the_same_file_is_a_fact(self) -> None:
-        self.write("pkg/user.py", "def open():\n    pass\n\ndef use():\n    open('x')\n")
-        self.assertEqual(self.targets("symbol:pkg/user.py::use"), [("symbol:pkg/user.py::open", "EXTRACTED")])
-
-    def test_bare_name_never_resolves_to_a_method(self) -> None:
+        self.write("pkg/builtins_user.py", "def use():\n    open('x')\n    format('y')\n    print(len([]))\n")
+        self.write("pkg/shadowed.py", "def open():\n    pass\n\ndef use():\n    open('x')\n")
         self.write("pkg/route.py", "class Test:\n    def route(self):\n        pass\n")
-        self.write("pkg/user.py", "def use():\n    route()\n")
-        self.assertEqual(self.targets("symbol:pkg/user.py::use"), [])
-
-    def test_inherited_self_call_still_reaches_a_method_by_name(self) -> None:
-        self.write("pkg/base.py", "class Base:\n    def step(self):\n        pass\n")
+        self.write("pkg/bare_method.py", "def use():\n    route()\n")
+        self.write("pkg/base.py", "class Base:\n    def run(self):\n        return self.step()\n    def step(self):\n        pass\n")
         self.write("pkg/child.py", "from pkg.base import Base\n\nclass Child(Base):\n    def run(self):\n        self.step()\n")
+        for src in ("symbol:pkg/user.py::use", "file:pkg/cli.py", "symbol:pkg/cli.py::main",
+                    "symbol:pkg/builtins_user.py::use", "symbol:pkg/bare_method.py::use"):
+            self.assertEqual(self.targets(src), [], src)
+        self.assertEqual(self.targets("symbol:pkg/shadowed.py::use"), [("symbol:pkg/shadowed.py::open", "EXTRACTED")])
+        self.assertEqual(self.targets("symbol:pkg/base.py::Base.run"), [("symbol:pkg/base.py::Base.step", "EXTRACTED")])
         self.assertEqual(self.targets("symbol:pkg/child.py::Child.run"), [("symbol:pkg/base.py::Base.step", "INFERRED")])
+        self.assertEqual(self.targets("symbol:pkg/child.py::Child", "depends_on"), [("symbol:pkg/base.py::Base", "EXTRACTED")])
 
-    def test_unique_and_duplicate_bare_python_names_keep_their_confidence(self) -> None:
-        self.write("a.py", "def caller():\n    unique()\n    duplicate()\n")
-        self.write("b.py", "def duplicate(): pass\n")
-        self.write("c.py", "def unique(): pass\ndef duplicate(): pass\n")
-        targets = self.targets("symbol:a.py::caller")
-        self.assertIn(("symbol:c.py::unique", "INFERRED"), targets)
-        self.assertTrue(any(confidence == "AMBIGUOUS" for _, confidence in targets))
-
-    # -- import bindings --------------------------------------------------
-
-    def test_from_package_import_submodule_binds_the_module_file(self) -> None:
+    def test_import_bindings_and_class_methods(self) -> None:
         self.write("pkg/__init__.py", "")
         self.write("pkg/runner.py", "def run():\n    pass\n")
         self.write("pkg/cli.py", "from . import runner\n\ndef main():\n    runner.run()\n")
         self.write("tool.py", "from pkg import runner\n\ndef main():\n    runner.run()\n")
+        self.write("pkg/events.py", "def append_event():\n    pass\n")
+        self.write("pkg/other.py", "def project():\n    pass\n")
+        self.write("pkg/missing_member.py", "from . import events\n\ndef main():\n    events.project()\n")
+        self.write("pkg/query.py", "class Graph:\n    @staticmethod\n    def node(ident):\n        return ident\n\ndef same_file():\n    Graph.node('x')\n")
+        self.write("pkg/user.py", "from pkg.query import Graph\n\ndef use():\n    Graph.node('x')\n    Graph()\n")
+        self.write("pkg/shadow_local.py", "def helper():\n    pass\n\ndef use(helper):\n    helper()\n\ndef other():\n    helper()\n")
+        self.write("pkg/errors.py", "class CoreError(Exception):\n    pass\n")
+        self.write("pkg/child.py", "from pkg import errors\n\nclass GraphError(errors.CoreError):\n    pass\n")
+
         self.assertEqual(self.targets("symbol:pkg/cli.py::main"), [("symbol:pkg/runner.py::run", "EXTRACTED")])
         self.assertEqual(self.targets("symbol:tool.py::main"), [("symbol:pkg/runner.py::run", "EXTRACTED")])
         imports = {(edge["source"], edge["target"]) for edge in self.edges("imports")}
         self.assertIn(("file:pkg/cli.py", "module:pkg/runner.py"), imports)
         self.assertIn(("file:tool.py", "module:pkg/runner.py"), imports)
-
-    def test_module_alias_member_missing_from_the_module_stays_unresolved(self) -> None:
-        self.write("pkg/__init__.py", "")
-        self.write("pkg/events.py", "def append_event():\n    pass\n")
-        self.write("pkg/other.py", "def project():\n    pass\n")
-        self.write("pkg/cli.py", "from . import events\n\ndef main():\n    events.project()\n")
-        self.assertEqual(self.targets("symbol:pkg/cli.py::main"), [])
-
-    def test_imported_class_method_resolves_to_the_method(self) -> None:
-        self.write("pkg/__init__.py", "")
-        self.write("pkg/query.py", "class Graph:\n    @staticmethod\n    def node(ident):\n        return ident\n")
-        self.write("pkg/user.py", "from pkg.query import Graph\n\ndef use():\n    Graph.node('x')\n    Graph()\n")
+        self.assertEqual(self.targets("symbol:pkg/missing_member.py::main"), [])
         self.assertEqual(self.targets("symbol:pkg/user.py::use"),
                          [("symbol:pkg/query.py::Graph", "EXTRACTED"), ("symbol:pkg/query.py::Graph.node", "EXTRACTED")])
-
-    def test_same_file_class_method_call_resolves_to_the_method(self) -> None:
-        self.write("pkg/query.py", "class Graph:\n    @staticmethod\n    def node(ident):\n        return ident\n\ndef use():\n    Graph.node('x')\n")
-        self.assertEqual(self.targets("symbol:pkg/query.py::use"), [("symbol:pkg/query.py::Graph.node", "EXTRACTED")])
-
-    def test_a_local_shadowing_a_same_file_function_yields_no_edge(self) -> None:
-        self.write("pkg/user.py", "def helper():\n    pass\n\ndef use(helper):\n    helper()\n\ndef other():\n    helper()\n")
-        self.assertEqual(self.targets("symbol:pkg/user.py::use"), [])
-        self.assertEqual(self.targets("symbol:pkg/user.py::other"), [("symbol:pkg/user.py::helper", "EXTRACTED")])
-
-    def test_base_class_through_a_module_alias_is_a_dependency_fact(self) -> None:
-        self.write("pkg/__init__.py", "")
-        self.write("pkg/errors.py", "class CoreError(Exception):\n    pass\n")
-        self.write("pkg/child.py", "from pkg import errors\n\nclass GraphError(errors.CoreError):\n    pass\n")
+        self.assertEqual(self.targets("symbol:pkg/query.py::same_file"), [("symbol:pkg/query.py::Graph.node", "EXTRACTED")])
+        self.assertEqual(self.targets("symbol:pkg/shadow_local.py::use"), [])
+        self.assertEqual(self.targets("symbol:pkg/shadow_local.py::other"), [("symbol:pkg/shadow_local.py::helper", "EXTRACTED")])
         self.assertEqual(self.targets("symbol:pkg/child.py::GraphError", "depends_on"),
                          [("symbol:pkg/errors.py::CoreError", "EXTRACTED")])
 

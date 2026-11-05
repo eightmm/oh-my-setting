@@ -212,18 +212,6 @@ chmod 700 "$DRAFT_TMPDIR" 2>/dev/null || fail "cannot protect publisher scratch"
 OMS_LIB_TMPDIR="$DRAFT_TMPDIR"
 export -n OMS_LIB_TMPDIR 2>/dev/null || true
 
-draft_run_remote() {
-  draft_run_scan 30s "$@"
-}
-
-draft_run_github() {
-  draft_run_scan 30s "$@"
-}
-
-draft_run_push() {
-  draft_run_scan 15m "$@"
-}
-
 draft_init_scan_runner() {
   local candidate python_bin
   [ -z "$SCAN_RUNNER_MODE" ] || return 0
@@ -335,7 +323,7 @@ remote_ref_sha() {  # URL REF -> absent | SHA
   local ref="$2"
   local raw count sha found_ref
   assert_safe_local_transport_config
-  raw="$(draft_run_remote "$GIT" -C "$REPO" ls-remote --heads "$remote_url" \
+  raw="$(draft_run_scan 30s "$GIT" -C "$REPO" ls-remote --heads "$remote_url" \
     "refs/heads/$ref" 2>/dev/null)" ||
     park "remote-unreachable" "check the remote and network"
   raw="${raw//$'\r'/}"
@@ -493,9 +481,9 @@ require_github_write() {  # SLUG
   local raw parsed owner permission expected actual viewer
   command -v "$GH" >/dev/null 2>&1 ||
     park "gh-unavailable" "install GitHub CLI and authenticate it"
-  draft_run_github "$GH" auth status --hostname github.com >/dev/null 2>&1 ||
+  draft_run_scan 30s "$GH" auth status --hostname github.com >/dev/null 2>&1 ||
     park "gh-auth-failed" "run gh auth login"
-  raw="$(GH_HOST=github.com draft_run_github "$GH" repo view "github.com/$slug" \
+  raw="$(GH_HOST=github.com draft_run_scan 30s "$GH" repo view "github.com/$slug" \
     --json nameWithOwner,viewerPermission 2>/dev/null)" ||
     park "github-permission-unreadable" "check repository access"
   parsed="$(OMS_DRAFT_REPO_VIEW="$raw" python3 - <<'PY'
@@ -523,7 +511,7 @@ PY
     WRITE|MAINTAIN|ADMIN) ;;
     *) park "github-write-denied" "request write permission" ;;
   esac
-  viewer="$(GH_HOST=github.com draft_run_github "$GH" api --hostname github.com user \
+  viewer="$(GH_HOST=github.com draft_run_scan 30s "$GH" api --hostname github.com user \
     --jq .login 2>/dev/null)" || park "github-viewer-unreadable" "check gh authentication"
   viewer="${viewer//$'\r'/}"
   case "$viewer" in *[!A-Za-z0-9-]*|"") park "github-viewer-invalid" "check gh authentication" ;; esac
@@ -540,10 +528,6 @@ run_verifier() {  # COMMAND -> verifier exit status
       bash -c "$command_text"
   ) || rc=$?
   return "$rc"
-}
-
-draft_file_has_sensitive_content() {  # FILE -> matcher status
-  agent_memory_file_sensitive_status "$1"
 }
 
 assert_native_git_graph() {
@@ -912,7 +896,7 @@ prepare() {
     park "intent-already-prepared" "inspect the terminal intent slot or use a new branch name"
   fi
   if ! "$GIT" -C "$REPO" cat-file -e "$base_sha^{commit}" 2>/dev/null; then
-    draft_run_remote "$GIT" -C "$REPO" fetch --no-tags "$REMOTE_FETCH_URL" \
+    draft_run_scan 30s "$GIT" -C "$REPO" fetch --no-tags "$REMOTE_FETCH_URL" \
       "$base_sha" >/dev/null 2>&1 ||
       park "base-object-missing" "fetch the remote base"
   fi
@@ -953,7 +937,7 @@ prepare() {
   verifier_scan="$(agent_memory_mktemp)" || fail "cannot allocate verifier scan"
   printf '%s\n' "$VERIFY" > "$verifier_scan"
   verifier_scan_rc=0
-  draft_file_has_sensitive_content "$verifier_scan" || verifier_scan_rc=$?
+  agent_memory_file_sensitive_status "$verifier_scan" || verifier_scan_rc=$?
   rm -f "$verifier_scan"
   case "$verifier_scan_rc" in
     0) fail "verifier contains credential-shaped text or a machine-specific path" ;;
@@ -1006,8 +990,8 @@ prepare() {
   } > "$body_file"
   title_scan_rc=0
   body_scan_rc=0
-  draft_file_has_sensitive_content "$title_file" || title_scan_rc=$?
-  draft_file_has_sensitive_content "$body_file" || body_scan_rc=$?
+  agent_memory_file_sensitive_status "$title_file" || title_scan_rc=$?
+  agent_memory_file_sensitive_status "$body_file" || body_scan_rc=$?
   rm -f "$title_file"
   case "$title_scan_rc:$body_scan_rc" in
     0:*|*:0)
@@ -1056,12 +1040,7 @@ intent_field() {  # NAME
 }
 
 query_prs() {  # SLUG BRANCH OUTPUT
-  # gh rejects "<owner>:<branch>" for pr list --head, and pr create's
-  # owner-qualified form breaks on organization owners; publication is
-  # same-repository only, so the unqualified branch name is the exact form.
-  # A same-named fork PR widening this list is fail-closed downstream:
-  # inspect-pr refuses multiple rows and non-exact/cross-repository rows.
-  GH_HOST=github.com draft_run_github "$GH" pr list --repo "github.com/$1" \
+  GH_HOST=github.com draft_run_scan 30s "$GH" pr list --repo "github.com/$1" \
     --head "$2" --state all --limit 10 \
     --json number,url,state,isDraft,title,body,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository \
     > "$3" 2>/dev/null ||
@@ -1142,7 +1121,7 @@ publish_locked() {
   verifier_scan="$(agent_memory_mktemp)" || fail "cannot allocate verifier scan"
   printf '%s\n' "$verify" > "$verifier_scan"
   verifier_scan_rc=0
-  draft_file_has_sensitive_content "$verifier_scan" || verifier_scan_rc=$?
+  agent_memory_file_sensitive_status "$verifier_scan" || verifier_scan_rc=$?
   rm -f "$verifier_scan"
   case "$verifier_scan_rc" in
     0) fail "intent verifier contains sensitive durable text" ;;
@@ -1242,11 +1221,7 @@ publish_locked() {
     [ "$current_state" = "$state_sha" ] ||
       park "intent-state-raced-before-push" "inspect the publication intent"
     push_rc=0
-    # The worker's legitimate write phase can plant .git/hooks/pre-push or set
-    # push.gpgSign/gpg.program in worker-writable .git/config; both would run
-    # arbitrary code under the publisher's credentials at push time. Suppress
-    # hooks and signing; verification already happened against the frozen tree.
-    draft_run_push "$GIT" -C "$REPO" push --no-verify --no-signed \
+    draft_run_scan 15m "$GIT" -C "$REPO" push --no-verify --no-signed \
       --no-follow-tags --recurse-submodules=no \
       --force-with-lease="refs/heads/$branch:" "$push_url" \
       "$head:refs/heads/$branch" > "$push_out" 2>&1 || push_rc=$?
@@ -1313,7 +1288,7 @@ publish_locked() {
       --expected-immutable-sha256 "$immutable_sha" --expected-state-sha256 "$state_sha"
     create_out="$(agent_memory_mktemp)" || { rm -f "$body_file" "$pr_json"; fail "cannot allocate PR diagnostics"; }
     create_rc=0
-    GH_HOST=github.com draft_run_github "$GH" pr create --repo "github.com/$slug" \
+    GH_HOST=github.com draft_run_scan 30s "$GH" pr create --repo "github.com/$slug" \
       --draft --base "$BASE" --head "$branch" \
       --title "$title" --body-file "$body_file" > "$create_out" 2>&1 || create_rc=$?
     if [ "$create_rc" -ne 0 ]; then

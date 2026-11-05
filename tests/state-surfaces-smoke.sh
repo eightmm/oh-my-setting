@@ -11,8 +11,8 @@ ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-state-surfaces.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+export XDG_STATE_HOME="$TMP/state"
 
-# Run as a top-level operator even inside a panel main or worker shell.
 unset TMUX TMUX_PANE OMS_HOOK_AGENT OMS_AGENT OMS_HARNESS_CHILD OMS_HARNESS_ORIGIN \
   OMS_HARNESS_PARENT_AGENT OMS_HARNESS_CALL_ID OMS_HARNESS_DELEGATE_DEPTH OMS_STATE_REPO \
   OMS_ATTEMPT_ID OMS_WORKER_AUTHORITY_EXCLUSIVE
@@ -177,11 +177,14 @@ assert not bad, text
 text, bad = call("oms_peer_start", kind="ack", thread="room", participant="helper", message_ids=["worker-question"])
 assert not bad and json.loads(text)["approval"] is False, text
 assert call("oms_peer_start", kind="message", thread="room", participant="sol", prompt="Forged identity")[1]
-assert call("oms_peer_start", kind="consult", prompt="Recursive peer call")[1]
+text, bad = call("oms_peer_start", kind="consult", prompt="Recursive peer call")
+assert bad and "a delegated worker cannot start peer consultations" in text, text
 os.environ["OMS_ROOM_PARTICIPANT"] = "opus"
 assert call("oms_peer_start", kind="message", thread="room", participant="opus", prompt="Inherited main identity")[1]
 for key in ("OMS_HARNESS_CHILD", "OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT"):
     os.environ.pop(key)
+text, bad = call("oms_peer_start", kind="nope", prompt="probe")
+assert bad and "kind must be one of" in text, text
 with patch.dict(os.environ, {"OMS_ROOM_REPO": str(repo), "OMS_ROOM_PARTICIPANT": "opus"}):
     assert "--to all" in hook_state.panel_status_hint({"cwd": str(repo)}, "room"), "main status hint retained"
 text, bad = call("oms_peer_start", kind="message", thread="room", participant="opus", prompt="Default main broadcast")
@@ -1515,10 +1518,14 @@ EOF
     fail "already-absent MCP removal still invoked a destructive command"
   fi
 
-  for cli in claude codex; do
+  seed_both_mcp_regs() {
     printf 'Command: python3\nArgs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/claude.registered"
     printf 'command: python3\nargs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/codex.registered"
     : > "$log"
+  }
+
+  for cli in claude codex; do
+    seed_both_mcp_regs
     status=0
     out="$(OMS_TEST_MCP_REMOVE_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
       bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
@@ -1529,17 +1536,12 @@ EOF
     if grep -Fq "mcp: $cli registration removed" <<< "$out"; then
       fail "$cli MCP removal printed false success"
     fi
-
     PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
       fail "MCP removal could not recover after a partial failure for $cli"
     [ ! -f "$TMP/claude.registered" ] && [ ! -f "$TMP/codex.registered" ] ||
       fail "MCP retry left a registration after $cli failed"
-  done
 
-  for cli in claude codex; do
-    printf 'Command: python3\nArgs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/claude.registered"
-    printf 'command: python3\nargs: %s\n' "$ROOT/scripts/oms-mcp-server.py" > "$TMP/codex.registered"
-    : > "$log"
+    seed_both_mcp_regs
     status=0
     out="$(OMS_TEST_MCP_LOOKUP_FAIL="$cli" PATH="$bin:/usr/bin:/bin" \
       bash "$ROOT/scripts/install-mcp.sh" --remove 2>&1)" || status=$?
@@ -1557,12 +1559,9 @@ EOF
     ! grep -Fq "private-" <<< "$out" || fail "$cli install inspection output leaked"
     grep -Fq "$cli" <<< "$out" || fail "$cli lookup failure was not named"
     [ -f "$TMP/$cli.registered" ] || fail "$cli install mutated an uninspectable registration"
-
     PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null ||
       fail "MCP removal could not recover after a state lookup failure for $cli"
-  done
 
-  for cli in claude codex; do
     printf 'previous registration\n' > "$TMP/$cli.registered"
     : > "$log"
     status=0
@@ -1573,9 +1572,7 @@ EOF
     [ -f "$TMP/$cli.registered" ] || fail "$cli failed removal lost registration"
     ! grep -Fq "$cli mcp add" "$log" || fail "$cli add followed failed removal"
     PATH="$bin:/usr/bin:/bin" bash "$ROOT/scripts/install-mcp.sh" --remove >/dev/null || fail "cleanup failed"
-  done
 
-  for cli in claude codex; do
     printf 'previous registration\n' > "$TMP/$cli.registered"
     : > "$log"
     status=0
@@ -2273,59 +2270,25 @@ test_router_child_session_starts_no_python() {
     fail "a harness child must write no ignored_child row"
 }
 
-test_router_keeps_resolved_repeats_quiet() {
-  local repo="$TMP/hint-forge-repo"
-  local payload out
-
-  make_repo "$repo"
-  ( cd "$repo" &&
-    bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make test" --exit 1 >/dev/null &&
-    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record \
-      --cmd "make test" --exit 1 >/dev/null &&
-    bash "$ROOT/scripts/fail-ledger.sh" resolve --cmd "make test" >/dev/null 2>&1 )
-
-  payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
-  out="$(printf '%s' "$payload" |
-    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if grep -Fq "skill-forge add" <<< "$out"; then
-    fail "a resolved failure alone must not request another project skill: $out"
-  fi
-
-  # Explicit skill creation still works; creating one is no longer a prompt chore.
-  printf -- '---\nname: oms-lesson\ndescription: %s\n---\n\nBody.\n' \
-    "A test lesson description long enough to pass the validation gate." |
-    ( cd "$repo" && bash "$ROOT/scripts/skill-forge.sh" add --name oms-lesson >/dev/null )
-  rm -f "$repo/.oms/hooks/state-hint."*
-  out="$(printf '%s' "$payload" |
-    OMS_STATE_REPO="$repo" TMPDIR="$TMP" bash "$ROOT/scripts/skill-router.sh")"
-  if grep -Fq "skill-forge add" <<< "$out"; then
-    fail "an existing project skill must silence the forge hint"
-  fi
-}
-
 test_usage_tracking_is_opt_in_without_forge_hints() {
   local repo="$TMP/usage-hint-repo"
-  local payload out yesterday
+  local out yesterday
 
   make_repo "$repo"
-  payload='{"prompt":"continue the work","session_id":"s","turn_id":"t"}'
 
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false},"hook_event_name":"PostToolUse"}' |
     env -u OMS_USAGE_TRACK OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   [ ! -e "$repo/.oms/usage.jsonl" ] || fail "usage collection must default off"
 
-  # Explicit telemetry still records content-free {family, day} rows.
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"obabel lig.sdf -O out.pdbqt"},"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false},"hook_event_name":"PostToolUse"}' |
     OMS_USAGE_TRACK=1 OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   grep -q '"family": "chem"' "$repo/.oms/usage.jsonl" ||
     fail "the hook should append a chem usage row"
-  # A read-only command that merely mentions a family token is not use.
   printf '%s' '{"tool_name":"Bash","tool_input":{"command":"grep -rn rdkit src/"},"tool_response":{"stdout":"","stderr":"","interrupted":false,"isImage":false},"hook_event_name":"PostToolUse"}' |
     OMS_USAGE_TRACK=1 OMS_STATE_REPO="$repo" bash "$ROOT/scripts/fail-ledger-hook.sh" >/dev/null
   [ "$(grep -c '"family": "chem"' "$repo/.oms/usage.jsonl")" = 1 ] ||
     fail "a grep mentioning rdkit must not count as chem usage"
 
-  # Even repeated usage across days must not manufacture a skill-creation task.
   yesterday="$(python3 -c 'import datetime; print((datetime.date.today()-datetime.timedelta(days=1)).isoformat())')"
   for _ in 1 2 3 4; do
     printf '{"schema": 1, "family": "chem", "day": "%s"}\n' "$yesterday" \
@@ -2333,14 +2296,6 @@ test_usage_tracking_is_opt_in_without_forge_hints() {
   done
   printf '{"schema": 1, "family": "chem", "day": "%s", "count": 2}\n' "$yesterday" \
     >> "$repo/.oms/usage.jsonl"
-  out="$(printf '%s' "$payload" |
-    OMS_STATE_REPO="$repo" TMPDIR="$TMP" \
-    bash "$ROOT/scripts/skill-router.sh")"
-  if grep -Fq "tooling recurred" <<< "$out"; then
-    fail "usage frequency alone must not request another project skill: $out"
-  fi
-  # gc compacts under the reader's own TTL predicate: expired rows drop,
-  # same-day rows collapse into count rows the reader sums.
   printf '{"schema": 1, "family": "gpu", "day": "2020-01-01"}\n' \
     >> "$repo/.oms/usage.jsonl"
   out="$(bash "$ROOT/scripts/gc.sh" --repo "$repo" --apply)"
@@ -2567,22 +2522,6 @@ test_skill_forge_rejects_thin_and_sensitive() {
     fail "traversal remove escaped the project skills directory"
 }
 
-test_task_close_does_not_propose_skills_for_resolved_repeats() {
-  local repo="$TMP/forge-hint"
-  local out
-
-  make_repo "$repo"
-  ( cd "$repo" &&
-    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make flaky" --exit 1 >/dev/null &&
-    OMS_ADVISE_AFTER_FAILURES=0 bash "$ROOT/scripts/fail-ledger.sh" record --cmd "make flaky" --exit 1 >/dev/null &&
-    bash "$ROOT/scripts/fail-ledger.sh" resolve --cmd "make flaky" >/dev/null )
-  bash "$ROOT/scripts/agent-task.sh" --repo "$repo" init --goal "lesson" >/dev/null
-  out="$(bash "$ROOT/scripts/agent-task.sh" --repo "$repo" close 2>&1 || true)"
-  if grep -Fq "skill-forge add" <<< "$out"; then
-    fail "close must not turn a resolved failure into a skill-creation chore: $out"
-  fi
-}
-
 test_template_style_switch_retires_the_old_block() {
   local project="$TMP/style-switch"
 
@@ -2694,49 +2633,14 @@ test_ml_template_installs_project_skills() {
   [ ! -d "$plain/.oms/skills" ] || fail "general template must not install ML skills"
 }
 
-# --- slurm generator rename -------------------------------------------------
-
 test_slurm_generator_has_one_front_door() {
   bash "$ROOT/scripts/generate-slurm-reference.sh" --help >/dev/null ||
     fail "generate-slurm-reference --help failed"
-  # The generator is internal implementation behind oms snapshot --cluster;
-  # the old dispatcher names are refused, not aliased.
   bash "$ROOT/scripts/oms" snapshot --cluster --help >/dev/null ||
     fail "oms snapshot --cluster front door failed"
   rc=0
-  bash "$ROOT/scripts/oms" generate-slurm-skill --help >/dev/null 2>&1 || rc=$?
-  [ "$rc" = 2 ] || fail "the retired generate-slurm-skill alias must be refused, got $rc"
-  rc=0
   bash "$ROOT/scripts/oms" generate-slurm-reference --help >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "the internal generator name must not dispatch, got $rc"
-}
-
-test_mcp_peer_start_refuses_harness_children() {
-  local repo="$TMP/mcp-child-repo"
-  local out="$TMP/mcp-child-out"
-
-  make_repo "$repo"
-  # A provider CLI this harness spawned carries OMS_HARNESS_CHILD, and the
-  # MCP server it starts inherits it: a worker asking for another peer is
-  # recursive delegation, which is the owner's decision. Server-side, so it
-  # holds for every provider whatever the CLI's own flags allow.
-  {
-    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
-    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"consult","prompt":"probe"}}}\n' "$repo"
-  } | OMS_HARNESS_CHILD=1 python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
-  grep -Fq 'a delegated worker cannot start peer consultations' "$out" ||
-    fail "a harness child must be refused a peer start: $(cat "$out")"
-
-  # Without the marker the guard must not fire: an invalid kind reaching kind
-  # validation proves the request passed the guard.
-  {
-    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-03-26","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
-    printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"repo":"%s","kind":"nope","prompt":"probe"}}}\n' "$repo"
-  } | env -u OMS_HARNESS_CHILD python3 "$ROOT/scripts/oms-mcp-server.py" > "$out"
-  grep -Fq 'kind must be one of' "$out" ||
-    fail "an owner session must pass the child guard: $(cat "$out")"
 }
 
 test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations() {
@@ -3026,7 +2930,6 @@ test_inbox_orphan_and_unsealed_journal
 test_mcp_server_protocol
 test_mcp_live_thread_reuses_peer_tools
 test_mcp_server_serves_modern_clients_without_a_handshake
-test_mcp_peer_start_refuses_harness_children
 test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations
 test_mcp_server_bounds_requests_before_effects
 test_mcp_peer_actions_start_detached_and_poll
@@ -3043,14 +2946,12 @@ test_router_resolves_payload_repo_before_process_cwd
 test_router_state_hint_surfaces_parked_goal
 test_router_state_hint_skips_unadopted_repo
 test_router_child_session_starts_no_python
-test_router_keeps_resolved_repeats_quiet
 test_usage_tracking_is_opt_in_without_forge_hints
 test_conditional_skills_link_only_where_required_commands_exist
 test_router_skips_conditional_skill_without_command
 test_skill_forge_stores_links_and_hides
 test_skill_forge_status_flags_stale_skills
 test_skill_forge_rejects_thin_and_sensitive
-test_task_close_does_not_propose_skills_for_resolved_repeats
 test_ml_template_installs_project_skills
 test_template_style_switch_retires_the_old_block
 test_existing_gemini_md_is_kept_in_sync

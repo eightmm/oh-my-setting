@@ -83,7 +83,7 @@ def state_from_outcomes(spec: Mapping[str, Any], outcomes: Mapping[str, str], *,
     }
 
 
-def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[str, Any], *, authority: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[str, Any]) -> Dict[str, Any]:
     """Pure: no subprocess, no disk. Output shape in docs/GRAPH-ENGINEERING.md."""
     validation = validate_spec(spec)
     try:
@@ -347,7 +347,7 @@ def evaluate(spec: Mapping[str, Any], state: Mapping[str, Any], facts: Mapping[s
             child_state = child_states.get(node_id)
             if not isinstance(child_state, Mapping):
                 child_state = state_from_outcomes(child_spec, {})
-            child_route = evaluate(child_spec, child_state, facts, authority=authority)
+            child_route = evaluate(child_spec, child_state, facts)
             for key, value in child_route.get("effective_outcomes", {}).items():
                 effective["%s.%s" % (node_id, key)] = value
             for item in child_route.get("downgrades", []):

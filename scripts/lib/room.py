@@ -2120,7 +2120,7 @@ def predecessor_calls(repo, state, chain=None):
 def publish(repo, ident, retry=False, app="codex", recipient=None, allow_wakeup=False):
     """Durable intent precedes delivery; uncertain sends are never retried implicitly."""
     import codex_app_notify
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if _child():
         raise ValueError("a worker cannot publish room output")
     if app not in {"codex", "claude"} or allow_wakeup and app != "claude":
         raise ValueError("invalid app delivery options")
@@ -2278,7 +2278,7 @@ def main(argv=None):
         if args.id and args.action not in {"new", "rollover"} and not args.exact:
             args.id = resolve(repo, identifier(args.id, "room"))
         if args.action == "new":
-            if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+            if _child():
                 raise ValueError("a worker cannot create a room")
             result = {"id": create(repo, args.id, args.topic, args.task_id, args.participant)}
         elif args.action == "join":
@@ -2298,7 +2298,7 @@ def main(argv=None):
         elif args.action == "send":
             if args.to is None:
                 args.to = "all"
-                if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+                if _child():
                     member = participant(project(records(repo, args.id)), os.environ.get("OMS_ROOM_PARTICIPANT"))
                     args.to = member.get("parent") or "all"
             if bool(args.text) == bool(args.text_file):
@@ -2332,8 +2332,6 @@ def main(argv=None):
         else:
             result = status(repo, args.id, exact=args.exact)
             if args.action == "publish":
-                if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
-                    raise ValueError("a worker cannot publish room output")
                 result = publish(repo, args.id, args.retry, args.app or "codex", args.to, args.allow_wakeup)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

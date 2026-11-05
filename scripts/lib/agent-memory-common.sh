@@ -888,8 +888,9 @@ oms_default_verify_command() {
 }
 
 # Read a single declared command as data; never execute the project text.
-oms_project_verify_command() {
-  awk '
+oms_verify_hint() {
+  local command
+  command="$(awk '
     { sub(/\r$/, "") }
     /^##[[:space:]]/ { section = $0; next }
     section == "## Verification" && /^- Required checks:/ && !required_seen {
@@ -906,12 +907,7 @@ oms_project_verify_command() {
       return value
     }
     END { value = clean(required); if (value == "") value = clean(test); if (value != "") print value }
-  '
-}
-
-oms_verify_hint() {
-  local command
-  command="$(oms_project_verify_command)"
+  ')"
   if [ -n "$command" ]; then
     printf 'no automatic verifier selected; suggested: --verify %q\n' "$command" >&2
   else
@@ -919,9 +915,6 @@ oms_verify_hint() {
   fi
 }
 
-# Pure read intent wins over write nouns ("review the fix" is a read), but a
-# read request explicitly coordinated with an action ("review and fix") is a
-# write. Anything ambiguous stays read — the conservative default.
 agent_memory_init_file_unlocked() {
   local file="$1"
   local scope="$2"
@@ -946,17 +939,6 @@ agent_memory_init_file() {
   oms_with_file_lock "$file" agent_memory_init_file_unlocked "$file" "$scope"
 }
 
-agent_memory_write_summary_header() {
-  local file="$1"
-  local scope="$2"
-  {
-    printf '# Compact Agent Memory\n\n'
-    printf -- '- scope: %s\n' "$scope"
-    printf -- '- generated: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'Recent compact notes generated from shared.md. Keep this short for provider context.\n\n'
-  } > "$file"
-}
-
 agent_memory_refresh_summary_write() {
   local summary_file="$1"
   local scope="$2"
@@ -967,8 +949,13 @@ agent_memory_refresh_summary_write() {
   # rename: truncate-then-append exposed a header-only summary to any reader
   # racing the refresh. The lock above still serializes writers.
   staged="$(agent_memory_mktemp_beside "$summary_file")" || return 1
-  agent_memory_write_summary_header "$staged" "$scope"
-  if ! cat "$body_file" >> "$staged"; then
+  if ! {
+    printf '# Compact Agent Memory\n\n'
+    printf -- '- scope: %s\n' "$scope"
+    printf -- '- generated: %s\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'Recent compact notes generated from shared.md. Keep this short for provider context.\n\n'
+    cat "$body_file"
+  } > "$staged"; then
     rm -f "$staged"
     return 1
   fi

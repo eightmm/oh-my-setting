@@ -2,14 +2,7 @@
 set -euo pipefail
 
 # Durable-writers boundary contract: every path that persists text into .oms
-# state (or refuses to) is exercised with the same two sentinels — a
-# secret-shaped value that must ALWAYS be refused or absent from the artifact,
-# and an absolute home path that must either be normalized to ~ (repo-local
-# git-ignored sinks) or refused (the strict shared-memory store). A new
-# durable writer belongs in this table; a writer that bypasses the scrubber
-# should fail here, not in production. goal-drive's own sinks (progress rows,
-# commit subjects) are covered where cheap; its full delegate loop lives in
-# tests/autonomy-plan-run-smoke.sh.
+# state is exercised with a secret-shaped sentinel and an absolute home path.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/lib/smoke-env.sh
@@ -677,32 +670,6 @@ assert rows[-1]["compacted_rows"] > 0, rows[-1]
 PY
   fail "byte-bounded salvage did not retain its receipt"
 
-# --- artifact index: an ancestry symlink is the host's layout, not an escape
-real_ancestry="$TMP/real-ancestry"
-mkdir -p "$real_ancestry"
-ln -s "$real_ancestry" "$TMP/linked-ancestry"
-ancestry_repo="$TMP/linked-ancestry/repo"
-mk_repo "$ancestry_repo"
-mkdir -p "$ancestry_repo/.oms/artifacts"
-printf 'aliased artifact\n' > "$ancestry_repo/.oms/artifacts/aliased.md"
-(
-  # shellcheck source=scripts/lib/peer-common.sh
-  . "$ROOT/scripts/lib/peer-common.sh"
-  ma_append_artifact_index "$ancestry_repo" call codex 0 \
-    "$ancestry_repo/.oms/artifacts/aliased.md" "" "" "" ""
-) || fail "artifact index append must accept a repo path behind an ancestry symlink"
-python3 - "$real_ancestry/repo/.oms/artifacts/index.jsonl" <<'PY' ||
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as source:
-    rows = [json.loads(line) for line in source]
-assert len(rows) == 1, rows
-assert rows[0]["kind"] == "call", rows
-assert rows[0]["provider"] == "codex", rows
-assert rows[0]["artifact"] == ".oms/artifacts/aliased.md", rows
-assert ".." not in rows[0]["artifact"].split("/"), rows
-PY
-  fail "the ancestry-symlink append must persist exactly one valid row in the physical ledger"
-
 # --- artifact index: a hard-linked ledger inode refuses before mutation ---
 hard_repo="$TMP/artifact-hardlink"; mk_repo "$hard_repo"
 mkdir -p "$hard_repo/.oms/artifacts"
@@ -723,10 +690,6 @@ grep -Fxq 'outside hard untouched' "$outside_hard" ||
 [ "$(wc -l < "$outside_hard")" -eq 1 ] ||
   fail "hard-link refusal must leave the outside file byte-identical"
 
-# A static component check is not enough: if artifacts/ becomes an
-# intermediate symlink between canonicalization and open, a pathname reader
-# can ingest an outside ledger and later quarantine it inside the repo. Force
-# that exact boundary deterministically by swapping at the first open.
 python3 - "$ROOT/scripts/lib/durable-jsonl.py" "$TMP" <<'PY' ||
 import contextlib, io, os, runpy, shutil, sys
 durable_path, temp = sys.argv[1:]
@@ -776,9 +739,6 @@ PY
   fail "artifact raw reader followed a raced intermediate symlink"
 
 # --- artifact index: every mutation shares one repo-bound store ------------
-# A linked .oms component is more dangerous than a linked leaf: the old
-# provider path created both .gitignore and the ledger in the outside tree
-# before the durable leaf check got a chance to run.
 component_repo="$TMP/artifact-component"; mk_repo "$component_repo"
 outside_component="$TMP/outside-component"; mkdir -p "$outside_component"
 ln -s "$outside_component" "$component_repo/.oms"
@@ -794,8 +754,6 @@ printf '%s\n' "$component_error" | grep >/dev/null -F 'artifact index' ||
 [ -z "$(ls -A "$outside_component" 2>/dev/null)" ] ||
   fail "artifact index setup escaped through a symlinked .oms component"
 
-# Hand and mechanical resolvers used separate plain append paths. A planted
-# leaf must be refused by all of them before the outside ledger changes.
 for resolver in resolve resolve-superseded resolve-recovered; do
   resolver_repo="$TMP/artifact-$resolver"; mk_repo "$resolver_repo"
   mkdir -p "$resolver_repo/.oms/artifacts"
@@ -841,21 +799,21 @@ PY
     fail "$resolver mutated an outside symlink target"
 done
 
-# Whole-file rewrites must reject a hard-linked ledger even though replacing
-# the in-repo name would leave the twin bytes intact. A shared inode is not an
-# artifact-store-owned object and therefore is not a legal mutation target.
-for rewriter in migrate prune prune-stale; do
+for rewriter in migrate prune prune-stale resolve-hard; do
   rewriter_repo="$TMP/artifact-$rewriter"; mk_repo "$rewriter_repo"
   mkdir -p "$rewriter_repo/.oms/artifacts"
   rewriter_outside="$TMP/outside-$rewriter.jsonl"
-  printf '{"kind":"legacy","provider":"codex","exit":0,"ts":"2026-08-23T00:00:00Z"}\n' \
+  printf '{"schema":1,"event_id":"evt_failed","operation_id":"op_fixture","artifact_id":"sha256:%064d","ts":"2026-08-23T00:00:00Z","kind":"call","provider":"codex","exit":1}\n' 0 \
     > "$rewriter_outside"
+  [ "$rewriter" != migrate ] ||
+    printf '{"kind":"legacy","provider":"codex","exit":0,"ts":"2026-08-23T00:00:00Z"}\n' > "$rewriter_outside"
   ln "$rewriter_outside" "$rewriter_repo/.oms/artifacts/index.jsonl"
   rewriter_before="$(stat -c '%d:%i:%h' "$rewriter_repo/.oms/artifacts/index.jsonl" 2>/dev/null ||
     stat -f '%d:%i:%l' "$rewriter_repo/.oms/artifacts/index.jsonl")"
   set -- --repo "$rewriter_repo" "$rewriter"
   [ "$rewriter" != prune ] || set -- --repo "$rewriter_repo" prune 1
   [ "$rewriter" != prune-stale ] || set -- --repo "$rewriter_repo" prune 1 --stale
+  [ "$rewriter" != resolve-hard ] || set -- --repo "$rewriter_repo" resolve --event-id evt_failed
   if bash "$ROOT/scripts/artifact-index.sh" "$@" >/dev/null 2>&1; then
     fail "$rewriter must refuse a hard-linked artifact index"
   fi
@@ -863,11 +821,10 @@ for rewriter in migrate prune prune-stale; do
     stat -f '%d:%i:%l' "$rewriter_repo/.oms/artifacts/index.jsonl")"
   [ "$rewriter_before" = "$rewriter_after" ] ||
     fail "$rewriter replaced a hard-linked artifact index"
+  [ "$(wc -l < "$rewriter_outside" | tr -d ' ')" -eq 1 ] ||
+    fail "$rewriter mutated the hard-link twin"
 done
 
-# Orphan cleanup must skip planted child links while still reaching its real
-# delete branch. A repo-bound reference outside .oms/artifacts is legitimate
-# evidence but never becomes a cleanup candidate.
 orphan_repo="$TMP/artifact-orphan-boundary"; mk_repo "$orphan_repo"
 orphan_outside="$TMP/outside-orphan-root"; mkdir -p "$orphan_outside"
 mkdir -p "$orphan_repo/.oms/artifacts/sub" "$orphan_repo/custom"
@@ -1041,6 +998,7 @@ python3 - "$physical_index" <<'PY' ||
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as source:
     rows = [json.loads(line) for line in source]
+assert rows[0]["kind"] == "call" and rows[0]["provider"] == "codex", rows
 assert rows[0]["artifact"] == ".oms/artifacts/body.md", rows
 assert ".." not in rows[0]["artifact"].split("/"), rows
 PY
@@ -1049,10 +1007,6 @@ bash "$ROOT/scripts/artifact-index.sh" --repo "$alias_repo" \
   --file "$alias_index" validate >/dev/null ||
   fail "artifact index written through an ancestry alias must validate"
 
-# Store-internal maintenance must preserve the caller spelling until the
-# canonicalizer has rebased the repo-relative suffix.  Physicalizing the repo
-# first and then comparing it with the still-logical index rejects benign
-# Windows 8.3/junction spellings (and this POSIX ancestry alias) before cleanup.
 printf 'aged alias orphan\n' > "$alias_repo/.oms/artifacts/aged-orphan.md"
 touch -t 200001010000 "$alias_repo/.oms/artifacts/aged-orphan.md" 2>/dev/null ||
   touch "$alias_repo/.oms/artifacts/aged-orphan.md"
@@ -1073,9 +1027,6 @@ PY
 [ ! -e "$alias_repo_real/.oms/artifacts/aged-orphan.md" ] ||
   fail "alias orphan cleanup did not remove the owned physical artifact"
 
-# Salvage has the same repo/index pair boundary. Its plan and apply paths must
-# accept a benign ancestry alias while still publishing only to the physical
-# repository and preserving the exact corrupt source in quarantine.
 salvage_alias_real="$TMP/artifact-salvage-alias-real"; mk_repo "$salvage_alias_real"
 ln -s "$salvage_alias_real" "$TMP/artifact-salvage-alias-link"
 salvage_alias="$TMP/artifact-salvage-alias-link"
@@ -1107,8 +1058,6 @@ mkdir -p "$alias_repo/sub"
     --file "$alias_index" validate >/dev/null
 ) || fail "subdirectory caller lost the logical repo root for a custom index"
 
-# Migration follows the same physical relpath rule. A legacy absolute path
-# supplied through the benign alias becomes one repo-relative spelling.
 migrate_alias_real="$TMP/artifact-migrate-alias-real"; mk_repo "$migrate_alias_real"
 ln -s "$migrate_alias_real" "$TMP/artifact-migrate-alias-link"
 migrate_alias="$TMP/artifact-migrate-alias-link"
@@ -1138,8 +1087,6 @@ PY
 bash "$ROOT/scripts/artifact-index.sh" --repo "$migrate_alias_real" validate >/dev/null ||
   fail "artifact index migrated through an ancestry alias must validate"
 
-# First-use setup is serialized by that same index lock. Neither concurrent
-# provider may lose its receipt to an `.oms/.gitignore` creation race.
 first_repo="$TMP/artifact-concurrent-first"; mk_repo "$first_repo"
 (
   # shellcheck source=scripts/lib/peer-common.sh
@@ -1158,8 +1105,6 @@ wait "$second_pid" || fail "second concurrent artifact append failed"
 grep -Fxq '*' "$first_repo/.oms/.gitignore" ||
   fail "concurrent first append must initialize the .oms ignore"
 
-# A pre-existing ignore is user content and remains a no-op even when it is
-# larger than the helper's creation bound.
 large_ignore_repo="$TMP/artifact-large-ignore"; mk_repo "$large_ignore_repo"
 mkdir -p "$large_ignore_repo/.oms"
 python3 - "$large_ignore_repo/.oms/.gitignore" <<'PY'
@@ -1184,8 +1129,6 @@ PY
 [ "$large_ignore_before" = "$large_ignore_after" ] ||
   fail "artifact append rewrote an existing .oms ignore"
 
-# The legacy setup helper treated existence, not contents, as ownership. An
-# already-present empty ignore therefore remains user-owned and byte-empty.
 empty_ignore_repo="$TMP/artifact-empty-ignore"; mk_repo "$empty_ignore_repo"
 mkdir -p "$empty_ignore_repo/.oms"
 : > "$empty_ignore_repo/.oms/.gitignore"
@@ -1197,22 +1140,6 @@ mkdir -p "$empty_ignore_repo/.oms"
 [ ! -s "$empty_ignore_repo/.oms/.gitignore" ] ||
   fail "artifact append rewrote an existing empty .oms ignore"
 
-# The same central leaf policy covers resolver writes, not only provider rows.
-resolve_hard_repo="$TMP/artifact-resolve-hard"; mk_repo "$resolve_hard_repo"
-mkdir -p "$resolve_hard_repo/.oms/artifacts"
-resolve_hard_outside="$TMP/outside-resolve-hard.jsonl"
-printf '{"schema":1,"event_id":"evt_failed","operation_id":"op_fixture","artifact_id":"sha256:%064d","ts":"2026-08-23T00:00:00Z","kind":"call","provider":"codex","exit":1}\n' 0 \
-  > "$resolve_hard_outside"
-ln "$resolve_hard_outside" "$resolve_hard_repo/.oms/artifacts/index.jsonl"
-if bash "$ROOT/scripts/artifact-index.sh" --repo "$resolve_hard_repo" resolve \
-    --event-id evt_failed >/dev/null 2>&1; then
-  fail "resolve must refuse a hard-linked artifact index"
-fi
-[ "$(wc -l < "$resolve_hard_outside" | tr -d ' ')" -eq 1 ] ||
-  fail "resolve mutated the hard-link twin"
-
-# Copy-on-write does not turn a read-only pending receipt into success merely
-# because its parent directory allows rename.
 readonly_repo="$TMP/artifact-readonly"; mk_repo "$readonly_repo"
 (
   # shellcheck source=scripts/lib/peer-common.sh
