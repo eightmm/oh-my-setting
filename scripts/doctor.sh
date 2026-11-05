@@ -46,7 +46,7 @@ CONTRACT_ONLY=0
 eval "$(declare -f oms_doctor_probe | sed '1s/oms_doctor_probe/doctor_unchecked_probe/')"
 oms_doctor_probe() {
   [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" != 1 ] || return 1
-  doctor_command_digest_ok "$3" || return 1
+  doctor_command_digest_ok "$3" || doctor_agy_vendor_stale "$3" || return 1
   doctor_unchecked_probe "$@"
 }
 
@@ -85,7 +85,9 @@ sidecar; npm versions come from package metadata. Digest status is matched,
 unmarked, invalid or unknown and never grants execution authority. Aliases do
 not add probes. Vendor channels do not need to equal the OMS snapshot
 unless an explicit OH_MY_SETTING_TOOL_LOCK pins the provider.
-Marked tool digests are checked before probes; changed copies are not executed.
+Marked tool digests are checked before probes. A stale selected agy vendor
+sidecar warns and permits probing when its parent directories are physical
+and no explicit tool lock is set.
 Inventory entries with line or field separators are escaped and reported as
 unknown without execution. Disabled version probes are labeled "not probed".
 
@@ -497,8 +499,49 @@ PY_RESOLVE
   if [ "${2:-}" = --require-owner ] && [ "$marked" = 0 ]; then return 2; fi
 }
 
+doctor_agy_vendor_parents_ok() {
+  [ -d "$HOME/.local" ] && [ ! -L "$HOME/.local" ] &&
+    [ -d "$HOME/.local/bin" ] && [ ! -L "$HOME/.local/bin" ]
+}
+
+doctor_agy_vendor_stale() { # COMMAND_OR_PATH
+  local source="$1" resolved owner recorded actual agy_source
+  [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || return 1
+  doctor_agy_vendor_parents_ok || return 1
+  case "$source" in */*|*:*) ;; *) source="$(command -v "$source" 2>/dev/null)" || return 1 ;; esac
+  resolved="$(doctor_provider_inventory --selected agy)" || return 1
+  agy_source="$(command -v agy 2>/dev/null)" || return 1
+  python3 - "$source" "$resolved" "$agy_source" <<'PY_AGY_IDENTITY' || return 1
+import os, sys
+from pathlib import Path
+try:
+    source, resolved, selected = map(Path, sys.argv[1:])
+    if source.absolute() not in (resolved, selected.absolute()):
+        sys.exit(1)
+    entry = source.parent.resolve(strict=True) / source.name
+    if source.resolve(strict=True) != resolved or (entry != resolved and Path(str(source) + '.oh-my-setting-managed').is_symlink()):
+        sys.exit(1)
+    if entry != resolved and Path(str(source) + '.oh-my-setting-managed').exists():
+        sys.exit(1)
+except (OSError, RuntimeError):
+    sys.exit(1)
+PY_AGY_IDENTITY
+  owner="$resolved.oh-my-setting-managed"
+  [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+  [ "$(wc -c < "$owner" | tr -d '[:space:]')" = 72 ] || return 1
+  grep -Eq '^sha256=[0-9a-f]{64}$' "$owner" || return 1
+  recorded="$(sed -n 's/^sha256=//p' "$owner")"
+  actual="$(doctor_sha256_file "$resolved")" || return 1
+  [ -n "$actual" ] && [ "$recorded" != "$actual" ]
+}
+
 doctor_managed_preflight() {
-  local commands selected
+  local commands selected agy_resolved
+  agy_resolved="$(doctor_provider_inventory --selected agy 2>/dev/null)" || agy_resolved=""
+  if [ -n "$agy_resolved" ] && ! doctor_agy_vendor_parents_ok; then
+    report_tool_drift agy "vendor directory is symlinked; unsafe probes skipped"
+    return 1
+  fi
   commands="$(python3 - <<'PY_SELECTED' | tr -d '\r'
 import os
 from pathlib import Path
@@ -527,6 +570,10 @@ PY_SELECTED
     [ -n "$selected" ] || continue
     selected="$(normalize_doctor_npm_path "$selected")" || return 1
     if ! doctor_command_digest_ok "$selected"; then
+      if doctor_agy_vendor_stale "$selected"; then
+        echo "warn: agy digest is stale; run oms update to retire its sidecar"
+        continue
+      fi
       report_tool_drift "${selected##*/}" "managed binary digest changed; unsafe probes skipped"
       return 1
     fi
@@ -537,7 +584,7 @@ PY_SELECTED
       */*|*:*) selected="$(normalize_doctor_npm_path "$selected")" || return 1 ;;
       *) selected="$(command -v "$selected" 2>/dev/null || true)" ;;
     esac
-    if { [ -e "$selected" ] || [ -L "$selected" ]; } && ! doctor_command_digest_ok "$selected"; then
+    if { [ -e "$selected" ] || [ -L "$selected" ]; } && ! doctor_command_digest_ok "$selected" && ! doctor_agy_vendor_stale "$selected"; then
       report_tool_drift agy "managed binary digest changed; provider override probes skipped"
       return 1
     fi
@@ -706,7 +753,7 @@ PY_COPIES
 }
 
 doctor_provider_inventory() { # [--selected PROVIDER]
-  local rows kind name selected channel version path remedy output _copy_id probe_note status digest_status
+  local rows kind name selected channel version path remedy output _copy_id probe_note status digest_status probe_stale
   rows="$(doctor_provider_copies "${1:-}" "${2:-}" "$HOME" "${CODEX_HOME:-$HOME/.codex}" \
     "$(command -v claude 2>/dev/null || true)" "$(command -v codex 2>/dev/null || true)" \
     "$(command -v agy 2>/dev/null || true)" "$(command -v pi 2>/dev/null || true)")" || return 1
@@ -725,7 +772,14 @@ doctor_provider_inventory() { # [--selected PROVIDER]
       continue
     fi
     path="$(normalize_doctor_npm_path "$path")" || return 1
+    if [ "$name" = agy ] && [ "$selected" = selected ] &&
+       { [ "$channel" = vendor ] || [ "$channel" = oms-direct ]; } && ! doctor_agy_vendor_parents_ok; then
+      report_tool_drift agy "vendor directory is symlinked; version probe skipped"
+      echo "provider copy: $name $selected channel=$channel version=unverified path=$path (not executed) digest=unknown"
+      continue
+    fi
     probe_note=""
+    probe_stale=0
     if doctor_command_digest_ok "$path" --require-owner; then
       digest_status=matched
     else
@@ -734,11 +788,15 @@ doctor_provider_inventory() { # [--selected PROVIDER]
         digest_status=unmarked
       else
         digest_status=invalid
-        report_tool_drift "$name" "managed binary digest changed; version probe skipped ($path)"
-        version=unverified
+        if [ "$name" = agy ] && [ "$selected" = selected ] && doctor_agy_vendor_stale "$path"; then
+          probe_stale=1
+        else
+          report_tool_drift "$name" "managed binary digest changed; version probe skipped ($path)"
+          version=unverified
+        fi
       fi
     fi
-    if [ "$selected" != selected ] || [ "$digest_status" = invalid ]; then
+    if [ "$selected" != selected ] || { [ "$digest_status" = invalid ] && [ "$probe_stale" = 0 ]; }; then
       probe_note=" (not executed)"
       [ "$version" != - ] || version=unknown
     elif [ "$version" = - ]; then
@@ -754,7 +812,11 @@ doctor_provider_inventory() { # [--selected PROVIDER]
 check_vendor_provider_version() { # PROVIDER LOCK_FIELD
   local name="$1" field="$2" resolved expected output
   resolved="$(doctor_provider_inventory --selected "$name")" || return 1
-  if ! doctor_command_digest_ok "$resolved"; then
+  if [ "$name" = agy ] && ! doctor_agy_vendor_parents_ok; then
+    report_tool_drift agy "vendor directory is symlinked; version probe skipped"
+    return 0
+  fi
+  if ! doctor_command_digest_ok "$resolved" && ! { [ "$name" = agy ] && doctor_agy_vendor_stale "$resolved"; }; then
     report_tool_drift "$name" "managed binary digest changed; version probe skipped"
     return 0
   fi
@@ -881,13 +943,20 @@ check_locked_direct_version() {  # LABEL COMMAND LOCK_FIELD
   resolved="$(command -v "$command" 2>/dev/null | tr -d '\r')"
   if [ "$command" = agy ]; then
     vendor_resolved="$(doctor_provider_inventory --selected agy)" || vendor_resolved=""
-    if [ -n "$vendor_resolved" ]; then resolved="$vendor_resolved"; fi
+    if [ -n "$vendor_resolved" ]; then
+      if ! doctor_agy_vendor_parents_ok; then
+        report_tool_drift agy "vendor directory is symlinked; version probe skipped"
+        return 0
+      fi
+      resolved="$vendor_resolved"
+    fi
   fi
   owner="$resolved.oh-my-setting-managed"
   if [ -e "$owner" ] || [ -L "$owner" ]; then
     recorded="$(sed -n 's/^sha256=//p' "$owner" 2>/dev/null || true)"
     actual="$(doctor_sha256_file "$resolved" 2>/dev/null || true)"
-    if [ ! -f "$owner" ] || [ -L "$owner" ] || [ -z "$actual" ] || [ "$recorded" != "$actual" ]; then
+    if { [ ! -f "$owner" ] || [ -L "$owner" ] || [ -z "$actual" ] || [ "$recorded" != "$actual" ]; } &&
+       ! { [ "$command" = agy ] && doctor_agy_vendor_stale "$resolved"; }; then
       report_tool_drift "$label" "managed binary digest changed"
       return 0
     fi

@@ -67,13 +67,13 @@ An explicit `OH_MY_SETTING_TOOL_LOCK` pins Claude with `claude install VERSION`
 and requires equality. Native Codex and agy refuse a mismatched pin before
 updating; matching pins leave them unchanged. Pi has no row in the current lock
 schema, so an explicit lock skips Pi refresh with a note and leaves it unchanged.
-For OMS-owned agy, doctor enforces the recorded digest and refresh refuses changed
-bytes before running the binary. Restore the verified binary and marker, or
-preserve both elsewhere and reapply the profile to install a verified payload.
-Only a matching pre-update digest, successful vendor update and verified version
-permit refreshing the ownership digest. The digest records those new bytes
-without authenticating the vendor's update channel; unmarked vendor installs
-keep their own update semantics. An interrupted OMS direct-install transaction
+On the default channel agy is vendor-managed after a lock-verified bootstrap,
+like Claude and Codex: a fresh install leaves no ownership digest, and refresh
+retires a legacy digest sidecar (warning when the bytes no longer match) only
+while `~/.local` and `~/.local/bin` are real directories. Under an explicit
+lock, doctor enforces the recorded digest and refresh refuses changed bytes
+before running the binary. Restore the verified binary and marker, or preserve
+both elsewhere and reapply the profile to install a verified payload. An interrupted OMS direct-install transaction
 with recovery residue first recovers from a checksum-verified locked payload before vendor refresh.
 Without transaction residue, unexpected owned bytes remain refused.
 Doctor verifies marked commands before probes and skips any copy with an invalid

@@ -855,7 +855,7 @@ verify_vendor_provider() { # PROVIDER [PREVIOUS_VERSION]
 }
 
 refresh_vendor_provider() { # PROVIDER
-  local name="$1" resolved previous expected refresh_owner=0
+  local name="$1" resolved previous expected digest
   if [ "$name" = pi ] && [ -n "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
     echo "note: pi refresh skipped (explicit tool lock; OMS does not install pi)"
     return 0
@@ -863,12 +863,21 @@ refresh_vendor_provider() { # PROVIDER
   resolved="$(vendor_provider_path "$name")" || return 1
   if [ "$name" = agy ] &&
      { [ -e "$resolved.oh-my-setting-managed" ] || [ -L "$resolved.oh-my-setting-managed" ]; }; then
-    direct_target_owned "$resolved" || {
+    if [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] &&
+       [ -d "$HOME/.local" ] && [ ! -L "$HOME/.local" ] &&
+       [ -d "$HOME/.local/bin" ] && [ ! -L "$HOME/.local/bin" ] &&
+       direct_target_claimed "$resolved"; then
+      # The vendor owns subsequent updates; an old lock-install digest is no longer authoritative.
+      digest="$(oms_sha256_file "$resolved")" || return 1
+      if [ "$(sed -n '1p' "$resolved.oh-my-setting-managed")" != "sha256=$digest" ]; then
+        echo "warning: agy changed since OMS installed it; vendor self-update assumed; OMS no longer tracks its digest" >&2
+      fi
+      rm -f "$resolved.oh-my-setting-managed" || return 1
+    elif [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ] || ! direct_target_owned "$resolved"; then
       echo "error: agy managed binary digest changed or ownership marker invalid; update was not run" >&2
       echo "error: restore the verified OMS binary and marker, or preserve both elsewhere and rerun to install the locked payload" >&2
       return 1
-    }
-    refresh_owner=1
+    fi
   fi
   previous="$(provider_command_version "$resolved")" || {
     echo "error: cannot read vendor $name version; repair with the vendor installer" >&2; return 1;
@@ -889,9 +898,6 @@ refresh_vendor_provider() { # PROVIDER
     esac
   fi
   verify_vendor_provider "$name" "$previous" || return 1
-  if [ "$refresh_owner" = 1 ] && [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
-    direct_owner_write "$resolved" || return 1
-  fi
 }
 
 refresh_standalone_codex() { refresh_vendor_provider codex; }
@@ -1605,6 +1611,9 @@ install_antigravity() {
     echo "error: Antigravity install is not the locked version $version" >&2
     exit 1
   }
+  if [ -z "${OH_MY_SETTING_TOOL_LOCK:-}" ]; then
+    rm -f "$target.oh-my-setting-managed" || return 1
+  fi
   echo "ok: agy $(agy --version)"
 }
 

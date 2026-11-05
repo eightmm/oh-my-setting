@@ -104,10 +104,12 @@ npm lifecycle 스크립트는 실행될 수 있고 git/URL 의존성에는 이 �
 명시한 `OH_MY_SETTING_TOOL_LOCK`이 있으면 Claude는 `claude install VERSION`으로
 고정하고 정확한 버전을 확인한다. 네이티브 Codex와 agy는 고정 버전과 다르면
 변경 전에 거부한다. 현재 lock에는 Pi 항목이 없어 명시적인 lock이 있으면
-안내 한 줄과 함께 Pi 갱신만 건너뛰고 성공으로 끝낸다. OMS 소유 agy는 갱신
+안내 한 줄과 함께 Pi 갱신만 건너뛰고 성공으로 끝낸다. 기본 채널의 agy는
+lock으로 검증한 첫 설치 뒤 Claude·Codex처럼 vendor가 갱신한다. 새 설치는 소유
+digest를 남기지 않고, 갱신은 `~/.local`과 `~/.local/bin`이 실제 디렉터리일 때만
+예전 digest sidecar를 지운다(바이트가 달라졌으면 경고). 명시적 lock에서는 갱신
 전에 기존 digest가 맞아야 실행하며, doctor도 변경된 바이트를 drift로 보고한다.
 검증된 바이너리와 marker를 복원하거나 둘 다 보존한 뒤 프로필을 다시 적용한다.
-기존 digest 확인, 갱신 성공, 버전 검증을 모두 통과해야 새 digest를 기록한다.
 중단된 OMS 직접 설치의 잔여 상태는 고정 payload의 checksum을 검증한 뒤
 먼저 복구한다. 잔여 상태 없는 변조는 계속 거부한다. doctor는 provider/model
 실행 전에 선택된 관리 도구를 검증하고, digest가 틀린 사본의 버전 실행도 건너뛴다.

@@ -24,6 +24,7 @@ provider_vendor_case() (
   mkdir -p "$HOME/.local/bin" "$TMPDIR"
   set --
   . "$ROOT/scripts/install-tools.sh"
+  eval "$(sed -n '/^doctor_agy_vendor_parents_ok()/,/^}/p' "$ROOT/scripts/doctor.sh")"
   export PATH="$HOME/.local/bin:$PATH"
   npm() { printf 'npm %s\n' "$*" >> "$HOME/unexpected"; return 97; }
   download_locked() { printf 'download %s\n' "$1" >> "$HOME/unexpected"; return 98; }
@@ -297,25 +298,23 @@ EOF_NPM_VENDOR
         ln -s "$HOME/.local/bin/agy" "$HOME/agy-alias/agy"
         export PATH="$HOME/agy-alias:$PATH"
         . "$ROOT/scripts/lib/doctor-probe-memo.sh"
-        for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_sha256_file doctor_provider_copies doctor_provider_inventory check_vendor_provider_version provider_lock_path command_has_locked_version report_tool_drift check_locked_direct_version; do
+        for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_agy_vendor_stale doctor_sha256_file doctor_provider_copies doctor_provider_inventory check_vendor_provider_version provider_lock_path command_has_locked_version report_tool_drift check_locked_direct_version; do
           eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
         done
         INSTALL_ROOT="$ROOT"
         REQUIRE_TOOLS=1
         tool_lock_value() { tool_lock_get "$1"; }
-        for pin_mode in channel pinned; do
-          if [ "$pin_mode" = pinned ]; then export OH_MY_SETTING_TOOL_LOCK="$LOCK"; else unset OH_MY_SETTING_TOOL_LOCK; fi
-          FAILED=0
-          check_locked_direct_version agy agy antigravity.version > "$HOME/agy-doctor"
-          [ "$FAILED" = 1 ] || fail "doctor accepted changed agy bytes in $pin_mode mode"
-          grep -Fq 'managed binary digest changed' "$HOME/agy-doctor" || fail "doctor failed to name agy integrity drift"
-        done
+        export OH_MY_SETTING_TOOL_LOCK="$LOCK"
+        FAILED=0
+        check_locked_direct_version agy agy antigravity.version > "$HOME/agy-doctor"
+        [ "$FAILED" = 1 ] || fail "doctor accepted changed agy bytes in pinned mode"
+        grep -Fq 'managed binary digest changed' "$HOME/agy-doctor" || fail "doctor failed to name agy integrity drift"
         unset OH_MY_SETTING_TOOL_LOCK
         doctor_result=0
         XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache" \
           OMS_INSTALL_RECEIPT="$HOME/.config/oh-my-setting/install.json" \
           OH_MY_SETTING_REQUIRE_TOOLS=1 OH_MY_SETTING_MODEL_DOCTOR=auto \
-          OMS_AGY_BIN="$HOME/.local/bin/agy" OH_MY_SETTING_AGY_PLUGIN=0 \
+          OMS_AGY_BIN="$HOME/.local/bin/agy" OH_MY_SETTING_AGY_PLUGIN=0 OH_MY_SETTING_TOOL_LOCK="$LOCK" \
           bash "$ROOT/scripts/doctor.sh" > "$HOME/complete-doctor" 2>&1 || doctor_result=$?
         [ "$doctor_result" != 0 ] || fail "complete doctor accepted tampered agy"
         grep -Fq 'managed binary digest changed' "$HOME/complete-doctor" || fail "complete doctor omitted integrity drift"
@@ -324,14 +323,14 @@ EOF_NPM_VENDOR
         XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache" \
           OMS_INSTALL_RECEIPT="$HOME/.config/oh-my-setting/install.json" \
           OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=auto \
-          OMS_AGY_BIN="$HOME/.local/bin/agy" OH_MY_SETTING_AGY_PLUGIN=0 \
+          OMS_AGY_BIN="$HOME/.local/bin/agy" OH_MY_SETTING_AGY_PLUGIN=0 OH_MY_SETTING_TOOL_LOCK="$LOCK" \
           bash "$ROOT/scripts/doctor.sh" > "$HOME/optional-doctor" 2>&1 || true
         [ ! -s "$HOME/agy-invocations" ] || fail "warning-only doctor executed tampered agy: $(cat "$HOME/agy-invocations")"
         grep -Fq 'unsafe probes skipped' "$HOME/optional-doctor" || fail "warning-only doctor omitted skipped probes"
         grep -Fq 'tool versions not probed' "$HOME/optional-doctor" || fail "warning-only doctor disguised skipped probes as version failures"
         if grep -Eq 'tool version drift: (node|claude|codex|ntn)|vendor --version failed' "$HOME/optional-doctor"; then fail "skipped probes reported unrelated tool drift"; fi
         before="$(cat "$HOME/.local/bin/agy.oh-my-setting-managed")"
-        if install_antigravity > "$HOME/agy-error" 2>&1; then fail "changed agy bytes reached vendor updater"; fi
+        if OH_MY_SETTING_TOOL_LOCK="$LOCK" install_antigravity > "$HOME/agy-error" 2>&1; then fail "changed pinned agy bytes reached vendor updater"; fi
         grep -Fq 'managed binary digest changed' "$HOME/agy-error" || fail "installer failed to name agy integrity drift"
         grep -Fq 'restore' "$HOME/agy-error" || fail "agy integrity refusal has no recovery"
         [ ! -e "$HOME/calls" ] || fail "tampered agy update was executed"
@@ -391,7 +390,7 @@ PY_AGY_ARCHIVE
         install_antigravity || fail "agy native refresh failed"
         grep -Fxq 'agy update' "$HOME/calls" || fail "agy updater missing"
         [ "$(sha256_file "$HOME/.local/bin/agy")" != "$before" ] || fail "agy fixture did not replace bytes"
-        direct_target_owned "$HOME/.local/bin/agy" || fail "agy updater left stale ownership digest"
+        [ ! -e "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "vendor update retained OMS ownership"
         FAILED=0
         check_locked_direct_version agy agy antigravity.version > "$HOME/agy-updated-doctor"
         [ "$FAILED" = 0 ] || fail "valid updated agy was forced back to snapshot version"
@@ -448,12 +447,163 @@ PY_AGY_ARCHIVE
         export OMS_TEST_NEXT=0.0.0
         if install_antigravity > /dev/null 2>&1; then fail "agy downgrade accepted"; fi
         before="$(cat "$HOME/calls")"
+        export OH_MY_SETTING_TOOL_LOCK="$LOCK"
         for marker_value in '' malformed; do
           printf '%s\n' "$marker_value" > "$HOME/.local/bin/agy.oh-my-setting-managed"
           if install_antigravity > /dev/null 2>&1; then fail "malformed agy ownership marker accepted"; fi
           [ "$(cat "$HOME/calls")" = "$before" ] || fail "invalid agy marker was checked after mutation"
         done
       fi ;;
+    agy-sidecar)
+      add_vendor agy
+      direct_owner_write "$HOME/.local/bin/agy"
+      printf '# self-updated\n' >> "$HOME/.local/bin/agy"
+      before="$(sha256_file "$HOME/.local/bin/agy")"
+      if OH_MY_SETTING_TOOL_LOCK="$LOCK" install_antigravity > "$HOME/pinned-error" 2>&1; then fail "pinned stale marker accepted"; fi
+      [ -f "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "pinned marker removed"
+      [ ! -e "$HOME/calls" ] || fail "pinned stale binary executed"
+      install_antigravity > "$HOME/channel-out" 2>&1 || fail "self-updated vendor agy refused"
+      grep -Fq 'vendor self-update' "$HOME/channel-out" || fail "stale sidecar warning missing"
+      [ ! -e "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "stale sidecar retained"
+      [ "$(sha256_file "$HOME/.local/bin/agy")" = "$before" ] || fail "installer changed vendor binary"
+      grep -Fxq 'agy update' "$HOME/calls" || fail "vendor updater not called"
+      direct_owner_write "$HOME/.local/bin/agy"
+      install_antigravity > "$HOME/matching-out" 2>&1 || fail "matching sidecar refused"
+      if grep -Fq 'warning:' "$HOME/matching-out"; then fail "matching sidecar warned"; fi
+      OH_MY_SETTING_TOOL_LOCK="$LOCK" install_antigravity > "$HOME/unmarked-pin" 2>&1 && fail "unmarked mismatched pin accepted"
+      tool_lock_get antigravity.version > "$HOME/agy.version"
+      OH_MY_SETTING_TOOL_LOCK="$LOCK" install_antigravity || fail "unmarked equal pin refused"
+      [ ! -e "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "unmarked pin acquired marker"
+      for marker_value in '' malformed; do
+        printf '%s\n' "$marker_value" > "$HOME/.local/bin/agy.oh-my-setting-managed"
+        if install_antigravity > /dev/null 2>&1; then fail "malformed sidecar accepted"; fi
+        [ -f "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "malformed sidecar removed"
+      done
+      direct_owner_write "$HOME/.local/bin/agy"
+      if (oms_sha256_file() { return 1; }; install_antigravity) > "$HOME/digest-error" 2>&1; then fail "failed digest accepted"; fi
+      [ -f "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "failed digest removed sidecar"
+      if (rm() { return 1; }; install_antigravity) > "$HOME/remove-error" 2>&1; then fail "sidecar removal failure accepted"; fi
+      [ -f "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "failed removal lost sidecar"
+      rm "$HOME/.local/bin/agy.oh-my-setting-managed"
+      mkdir "$HOME/.local/bin/agy.oh-my-setting-managed"
+      if install_antigravity > "$HOME/directory-error" 2>&1; then fail "directory sidecar accepted"; fi
+      rmdir "$HOME/.local/bin/agy.oh-my-setting-managed"
+      printf 'sentinel\n' > "$HOME/marker-target"
+      ln -s "$HOME/marker-target" "$HOME/.local/bin/agy.oh-my-setting-managed"
+      if install_antigravity > "$HOME/symlink-error" 2>&1; then fail "symlink sidecar accepted"; fi
+      [ -L "$HOME/.local/bin/agy.oh-my-setting-managed" ] && [ "$(cat "$HOME/marker-target")" = sentinel ] || fail "symlink sidecar changed"
+      rm "$HOME/.local/bin/agy.oh-my-setting-managed"
+      ln -s "$HOME/marker-target" "$HOME/.local/bin/agy.oh-my-setting-stage"
+      if install_antigravity > "$HOME/stage-error" 2>&1; then fail "unowned stage symlink accepted"; fi
+      [ -L "$HOME/.local/bin/agy.oh-my-setting-stage" ] && [ "$(cat "$HOME/marker-target")" = sentinel ] || fail "stage symlink changed"
+      rm "$HOME/.local/bin/agy.oh-my-setting-stage"
+      mv "$HOME/.local/bin/agy" "$HOME/foreign-agy"
+      ln -s "$HOME/foreign-agy" "$HOME/.local/bin/agy"
+      : > "$HOME/foreign-agy.oh-my-setting-managed"
+      if refresh_vendor_provider agy > "$HOME/layout-error" 2>&1; then fail "symlink vendor binary accepted"; fi
+      [ -f "$HOME/foreign-agy.oh-my-setting-managed" ] || fail "foreign sidecar removed"
+      for link_part in local bin; do
+        (
+          export HOME="$TMP/parent-$link_part"
+          mkdir -p "$HOME"
+          if [ "$link_part" = local ]; then
+            mkdir -p "$HOME/physical/bin"
+            ln -s "$HOME/physical" "$HOME/.local"
+          else
+            mkdir -p "$HOME/.local" "$HOME/physical"
+            ln -s "$HOME/physical" "$HOME/.local/bin"
+          fi
+          add_vendor agy
+          direct_owner_write "$HOME/.local/bin/agy"
+          export PATH="$HOME/.local/bin:/usr/bin:/bin"
+          if refresh_vendor_provider agy > "$HOME/error" 2>&1; then fail "symlink $link_part parent accepted"; fi
+          [ -f "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "symlink parent sidecar removed"
+          [ ! -e "$HOME/agy-invocations" ] || fail "symlink parent ran agy"
+          for marker_kind in matched stale absent; do
+            case "$marker_kind" in
+              matched) direct_owner_write "$HOME/.local/bin/agy" ;;
+              stale) direct_owner_write "$HOME/.local/bin/agy"; printf '# changed\n' >> "$HOME/.local/bin/agy" ;;
+              absent) rm "$HOME/.local/bin/agy.oh-my-setting-managed" ;;
+            esac
+            XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache" \
+              OH_MY_SETTING_MODEL_DOCTOR=0 OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 \
+              bash "$ROOT/scripts/doctor.sh" > "$HOME/doctor-$marker_kind" 2>&1 || true
+            [ ! -e "$HOME/agy-invocations" ] || fail "doctor ran agy through symlink $link_part with $marker_kind marker"
+          done
+          . "$ROOT/scripts/lib/doctor-probe-memo.sh"
+          for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_agy_vendor_parents_ok doctor_agy_vendor_stale doctor_sha256_file doctor_provider_copies doctor_provider_inventory check_vendor_provider_version check_locked_direct_version; do
+            eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
+          done
+          report_tool_drift() { printf 'drift: %s\n' "$*"; }
+          check_locked_direct_version agy agy antigravity.version > "$HOME/direct-doctor"
+          check_vendor_provider_version agy antigravity.version >> "$HOME/direct-doctor"
+          doctor_provider_inventory >> "$HOME/direct-doctor"
+          [ ! -e "$HOME/agy-invocations" ] || fail "direct doctor path ran agy through symlink $link_part"
+          grep -Fq 'version probe skipped' "$HOME/direct-doctor" || fail "direct doctor path omitted parent refusal"
+        )
+      done ;;
+    agy-doctor)
+      add_vendor agy
+      direct_owner_write "$HOME/.local/bin/agy"
+      printf '# vendor self-update\n' >> "$HOME/.local/bin/agy"
+      export XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache"
+      export OH_MY_SETTING_MODEL_DOCTOR=0 OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0
+      bash "$ROOT/scripts/doctor.sh" > "$HOME/doctor-output" 2>&1 || true
+      grep -Fq 'oms update' "$HOME/doctor-output" || fail "stale agy doctor warning missing"
+      if grep -Fq 'unsafe probes skipped' "$HOME/doctor-output"; then fail "stale vendor agy suppressed probes"; fi
+      ln -s "$HOME" "$TMP/agy-home-alias"
+      HOME="$TMP/agy-home-alias" PATH="$TMP/agy-home-alias/.local/bin:/usr/bin:/bin" \
+        bash "$ROOT/scripts/doctor.sh" > "$HOME/alias-home-doctor" 2>&1 || true
+      [ "$(grep -Fc 'agy digest is stale; run oms update' "$HOME/alias-home-doctor")" = 1 ] || fail "aliased HOME lost stale warning"
+      if grep -Fq 'unsafe probes skipped' "$HOME/alias-home-doctor"; then fail "aliased HOME suppressed probes"; fi
+      [ "$(grep -Fc 'agy digest is stale; run oms update' "$HOME/doctor-output")" = 1 ] || fail "stale agy warning repeated"
+      mkdir -p "$HOME/agy-alias"
+      ln -s "$HOME/.local/bin/agy" "$HOME/agy-alias/agy"
+      : > "$HOME/agy-alias/agy.oh-my-setting-managed"
+      (
+        export PATH="$HOME/agy-alias:$PATH"
+        for function_name in normalize_doctor_npm_path doctor_command_digest_ok doctor_agy_vendor_parents_ok doctor_agy_vendor_stale doctor_sha256_file doctor_provider_copies doctor_provider_inventory; do
+          eval "$(sed -n "/^${function_name}()/,/^}/p" "$ROOT/scripts/doctor.sh")"
+        done
+        if doctor_agy_vendor_stale "$HOME/agy-alias/agy"; then fail "distinct alias sidecar bypassed validation"; fi
+      )
+      OH_MY_SETTING_TOOL_LOCK="$LOCK" bash "$ROOT/scripts/doctor.sh" > "$HOME/pinned-doctor" 2>&1 || true
+      grep -Fq 'unsafe probes skipped' "$HOME/pinned-doctor" || fail "pinned agy did not suppress probes"
+      ln -s "$HOME/.local/bin/agy" "$HOME/.local/bin/node"
+      bash "$ROOT/scripts/doctor.sh" > "$HOME/alias-doctor" 2>&1 || true
+      grep -Fq 'node (managed binary digest changed; unsafe probes skipped' "$HOME/alias-doctor" || fail "non-agy alias bypassed digest preflight"
+      rm "$HOME/.local/bin/node"
+      rm "$HOME/.local/bin/agy.oh-my-setting-managed"
+      bash "$ROOT/scripts/doctor.sh" > "$HOME/unmarked-doctor" 2>&1 || true
+      grep -Fq 'agy selected channel=vendor' "$HOME/unmarked-doctor" || fail "unmarked agy is not vendor channel" ;;
+    agy-fresh)
+      make_vendor_binary "$HOME/source" agy "$(tool_lock_get antigravity.version)"
+      python3 - "$HOME/source" "$HOME/payload.tar.gz" <<'PY_FRESH'
+import sys, tarfile
+with tarfile.open(sys.argv[2], 'w:gz') as archive:
+    archive.add(sys.argv[1], arcname='antigravity')
+PY_FRESH
+      locked_platform() { printf 'linux-amd64\n'; }
+      tool_lock_get() {
+        case "$1" in
+          antigravity.platforms.*.sha512)
+            if [ "${OMS_TEST_BAD_RECOVERY:-0}" = 1 ]; then printf '%0128d\n' 0; else sha512_file "$HOME/payload.tar.gz"; fi ;;
+          antigravity.platforms.*.archive) printf 'tar.gz\n' ;;
+          *) oms_lock_scalar "$TOOL_LOCK" "$1" ;;
+        esac
+      }
+      download_locked() { cp "$HOME/payload.tar.gz" "$2"; }
+      if (export OMS_TEST_BAD_RECOVERY=1; install_antigravity) > "$HOME/bad-fresh" 2>&1; then fail "unverified fresh payload accepted"; fi
+      [ ! -e "$HOME/.local/bin/agy" ] || fail "bad fresh payload installed"
+      install_antigravity || fail "fresh agy install failed"
+      [ ! -e "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "fresh vendor agy retained marker"
+      rm "$HOME/.local/bin/agy"
+      OH_MY_SETTING_TOOL_LOCK="$LOCK" install_antigravity || fail "fresh pinned agy install failed"
+      direct_target_owned "$HOME/.local/bin/agy" || fail "fresh pinned agy lacks marker"
+      cp "$HOME/.local/bin/agy" "$HOME/.local/bin/agy.oh-my-setting-backup"
+      install_antigravity || fail "default recovery failed"
+      [ ! -e "$HOME/.local/bin/agy.oh-my-setting-managed" ] || fail "default recovery retained marker"
+      [ ! -e "$HOME/.local/bin/agy.oh-my-setting-backup" ] || fail "default recovery retained backup" ;;
     vendor-refresh)
       for tool in claude codex agy pi; do add_vendor "$tool"; done
       for tool in npm curl; do
@@ -708,7 +858,7 @@ provider_snapshot_case() (
     fail "explicit lock should bypass release lookup"
 )
 
-vendor_cases='claude-native claude-pin claude-fresh claude-checksum claude-migration claude-local-npm claude-unowned pi agy codex-channel vendor-refresh doctor versions'
+vendor_cases='claude-native claude-pin claude-fresh claude-checksum claude-migration claude-local-npm claude-unowned pi agy agy-sidecar agy-doctor agy-fresh codex-channel vendor-refresh doctor versions'
 # External newer gh is not an OMS-owned drift; pins and owned bytes stay strict.
 (
   mkdir -p "$TMP/gh-bin"

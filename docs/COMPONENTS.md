@@ -250,10 +250,11 @@ with `pi update self`; full-tool installation and profile reapply leave Pi uncha
 OMS verifies working vendor resolution and rejects version decreases, while
 the vendor channel chooses the release. Explicit locks pin native Claude via
 `claude install VERSION`; native Codex and agy refuse mismatches, while Pi is
-skipped with a note because the lock schema has no Pi entry. A successful agy
-update refreshes an existing OMS ownership digest only when the prior bytes
-matched and the resulting version was verified. Doctor reports digest drift;
-the installer refuses to execute changed OMS-owned bytes and names recovery.
+skipped with a note because the lock schema has no Pi entry. On the default
+channel agy is vendor-managed after a lock-verified bootstrap: no ownership
+digest is kept, refresh retires a legacy sidecar, and doctor warns once on a
+stale one. Under an explicit lock, doctor reports digest drift and the
+installer refuses to execute changed OMS-owned bytes and names recovery.
 Doctor checks selected marked tools before provider/model execution and skips
 unverified inventory copies. Existing agy transaction residue is recovered from
 checksum-verified locked bytes before taking the vendor updater path.
