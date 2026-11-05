@@ -23691,6 +23691,8 @@ print(row["hookSpecificOutput"]["additionalContext"])
   mkdir -p "$shadow"
   printf '#!/bin/sh\nexit 1\n' > "$shadow/bash"
   chmod +x "$shadow/bash"
+  # Keep python3 itself off the shadowed Bash (a managed launcher is a Bash script).
+  ln -s "$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.executable))')" "$shadow/python3"
   out="$(cd "$project" && payload_for Edit "$project/fine.sh" | PATH="$shadow:$PATH" "$BASH" "$SH")"
   [ -z "$out" ] || fail "the parser must reuse the hook's Bash: $out"
   out="$(cd "$project" && payload_for Write "$project/broken.sh" | PATH="$shadow:$PATH" "$BASH" "$SH")"
@@ -23897,9 +23899,11 @@ PY
 test_fail_ledger_report_consent_and_url() {
   local bin="$TMP/report-no-gh" out rc arg value
   mkdir -p "$bin"
-  for arg in bash python3 git dirname sed grep tr cat; do
+  for arg in bash git dirname sed grep tr cat; do
     ln -s "$(command -v "$arg")" "$bin/$arg"
   done
+  # A managed-runtime launcher on PATH finds its root from its own path; link the interpreter.
+  ln -s "$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.executable))')" "$bin/python3"
   rc=0
   out="$(PATH="$bin" OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" feature \
     --title 'A better diagnostic' </dev/null 2>&1)" || rc=$?
