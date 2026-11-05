@@ -1,5 +1,6 @@
 """One section manifest and fixture execution path for every operator invocation."""
 from collections import Counter
+from functools import lru_cache
 import ast
 import os
 from pathlib import Path
@@ -72,6 +73,7 @@ def body(name):
     return padding + rest.split("# OPERATOR_SECTION_END dispatch_exit\n", 1)[0], str(SOURCE)
 
 
+@lru_cache(maxsize=1)
 def case_markers(code):
     """Top-level `# BEGIN X` / `# END X` pairs as {case: (begin_line, end_line)}, 1-based."""
     found, open_case = {}, None
@@ -97,6 +99,12 @@ def case_markers(code):
     return found
 
 
+@lru_cache(maxsize=1)
+def parsed(code, filename):
+    # Callers only inspect these trees. Source bytes keep edits at one path distinct.
+    return ast.parse(code, filename)
+
+
 def case_body(name, case):
     if not case:
         raise ValueError("--case requires a non-empty CASE")
@@ -109,7 +117,7 @@ def case_body(name, case):
     # Definitions outside every case stay so a block runs without its predecessors' setup.
     # An assignment stays only if every name it reads is already available.
     always, assigns = [], []
-    for node in ast.parse(code, filename).body:
+    for node in parsed(code, filename).body:
         first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
         if any(first <= close and node.end_lineno >= open_ for open_, close in found.values()):
             continue
@@ -194,11 +202,16 @@ def module_names(code, filename, lines=None):
             return bound, loaded - bound
 
 
+@lru_cache(maxsize=4)
+def fixture_names(code, filename):
+    return module_names(code, filename)[0]
+
+
 def provided_names():
     import builtins
     names = {"root", "temporary", "section", "_operator_block", "fixture_file"} | set(dir(builtins))
     for fixture in ("fixtures.py", "helpers.py", "provider_fixture.py", "pty_fixture.py"):
-        names |= module_names((HERE / fixture).read_text(encoding="utf-8"), fixture)[0]
+        names |= fixture_names((HERE / fixture).read_text(encoding="utf-8"), fixture)
     return names
 
 
@@ -211,6 +224,9 @@ def unresolved_case_names(name, case):
 
 
 def self_check(total):
+    parsed.cache_clear()
+    fixture_names.cache_clear()
+    case_markers.cache_clear()
     shard("1/%s" % total)
     names = [name for name, _, _ in SECTIONS]
     if len(names) != len(set(names)):
@@ -250,6 +266,9 @@ def self_check(total):
     if selected("1/1") != names or requested_sections(",".join(names)) != names:
         raise ValueError("serial and focused section manifests differ")
     execution_contract(total)
+    parsed.cache_clear()
+    fixture_names.cache_clear()
+    case_markers.cache_clear()
     return [(name, bucket % total + 1) for name, bucket, _ in SECTIONS]
 
 
@@ -317,10 +336,27 @@ def execution_contract(total):
     import tempfile
     from unittest.mock import patch
 
+    for filename in ("first.py", "second.py"):
+        parsed("pass\n", filename)
+        try:
+            parsed("def invalid(\n", filename)
+        except SyntaxError as error:
+            assert error.filename == filename, error
+        else:
+            raise AssertionError("invalid source reused a cached tree")
+
     names = [name for name, _, _ in SECTIONS]
     manifests = []
     with tempfile.TemporaryDirectory(prefix="oms-operator-contract-") as directory, \
             patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+        fixtures = Path(directory) / "fixtures"
+        fixtures.mkdir()
+        for filename in ("fixtures.py", "helpers.py", "provider_fixture.py", "pty_fixture.py"):
+            (fixtures / filename).write_text("before_edit = 1\n", encoding="utf-8")
+        with patch.dict(globals(), HERE=fixtures):
+            assert "before_edit" in provided_names() and "after_edit" not in provided_names()
+            (fixtures / "helpers.py").write_text("after_edit = 1\n", encoding="utf-8")
+            assert "after_edit" in provided_names(), "fixture cache reused source from before an edit"
         for mode in ("serial", "sharded", "focused", "failure"):
             observed = {}
             parent = Path(directory) / mode

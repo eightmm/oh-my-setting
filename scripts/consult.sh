@@ -317,6 +317,7 @@ consult_with_failover() {
 }
 
 targets=()
+peer_list=()
 if [ "${#TARGETS_EXPLICIT[@]}" -gt 0 ]; then
   target_seen=","
   for spec in "${TARGETS_EXPLICIT[@]}"; do
@@ -335,9 +336,13 @@ elif [ "$ALL" -eq 1 ]; then
 $(peers all)
 EOF
 else
-  first="$(peers | sed -n '1p')"
-  [ -n "$first" ] || fail "no peer agent CLI found (codex, claude, agy)"
-  targets=("$first")
+  while IFS= read -r peer_name; do
+    [ -z "$peer_name" ] || peer_list+=("$peer_name")
+  done <<EOF
+$(peers)
+EOF
+  [ "${#peer_list[@]}" -gt 0 ] || fail "no peer agent CLI found (codex, claude, agy)"
+  targets=("${peer_list[0]}")
 fi
 [ "${#targets[@]}" -gt 0 ] || fail "no peer agent CLI found (codex, claude, agy)"
 
@@ -373,12 +378,14 @@ if [ "${#targets[@]}" -eq 1 ]; then
     call_one "${targets[0]}" "$artifact_dir_tmp/0" || status=$?
   else
     # Auto-picked: fall back to one other peer if this one cannot answer.
-    peer_list=()
-    while IFS= read -r peer_name; do
-      [ -z "$peer_name" ] || peer_list+=("$peer_name")
-    done <<EOF
+    # A singleton --all may be a custom adapter; its fallback pool stays builtin.
+    if [ "$ALL" -eq 1 ]; then
+      while IFS= read -r peer_name; do
+        [ -z "$peer_name" ] || peer_list+=("$peer_name")
+      done <<EOF
 $(peers)
 EOF
+    fi
     consult_with_failover "${targets[0]}" ${peer_list[@]+"${peer_list[@]}"} || status=$?
   fi
 else

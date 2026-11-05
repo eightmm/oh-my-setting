@@ -55,6 +55,14 @@ git -C "$repo" add file.txt
 git -C "$repo" commit -qm base
 git -C "$repo" worktree add --detach "$victim" HEAD >/dev/null 2>&1
 
+# Status does not need artifact storage; settlement still requires its proof.
+status="$(OMS_HARNESS_RESIDUE_LIB_DIR="$TMP/missing-helpers" \
+  oms_harness_residue_evidence status "" "$victim" "")"
+[ "$status" = clean ] || fail "status depended on settlement helpers: $status"
+status="$(OMS_HARNESS_RESIDUE_LIB_DIR="$TMP/missing-helpers" \
+  oms_harness_residue_evidence settled "$repo" "$victim" 1)"
+case "$status" in 'ok '*) fail 'settlement succeeded without artifact storage' ;; esac
+
 # Reject process-group PIDs before creating a scratch root or registration.
 for invalid_pid in 0 00 000; do
   if OMS_HARNESS_CHILD=0 OMS_HARNESS_DELEGATE_DEPTH=0 \

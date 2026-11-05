@@ -4181,7 +4181,7 @@ PY
       "$state_repo" "$OMS_PANEL_CALL_ID" "$output_file" "$provider" "$access" >/dev/null 2>&1 || true
   fi
   if [ "${OMS_PEER_INTERACTIVE:-0}" != 1 ]; then
-    if [ "$provider" = antigravity ] && grep -Eq '^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$' "$output_file"; then
+    if [ "$provider" = antigravity ] && [ "$status" -ne 0 ] && grep -Eq '^\[agy\] print timeout after .+ with turn in progress; returning partial output[[:space:]]*$' "$output_file"; then
       printf '\nstop-reason: provider=antigravity reason=stream_truncated subtype=print_timeout is_error=0\n' >> "$output_file"
     fi
     [ "$provider" != claude ] || ma_claude_envelope_to_text "$output_file"

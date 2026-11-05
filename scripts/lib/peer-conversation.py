@@ -50,13 +50,19 @@ def control():
     return 0
 
 
-def result(provider, path, expected, include_usage=False):
+def native_lines(path):
     with open(path, "rb") as handle:
         raw = handle.read(1048577)
     if len(raw) > 1048576:
         raise ValueError("provider envelope exceeds 1 MiB")
+    return raw.decode("utf-8").splitlines()
+
+
+def result(provider, path, expected, include_usage=False, lines=None):
+    if lines is None:
+        lines = native_lines(path)
     envelopes = []
-    for line in raw.decode("utf-8").splitlines():
+    for line in lines:
         if not line.lstrip().startswith("{"):
             continue
         try:
@@ -106,19 +112,19 @@ def result(provider, path, expected, include_usage=False):
 
 def agy_text(path):
     from peer_artifacts import usage_footer
-    parsed = result("antigravity", path, "", include_usage=True)
-    raw = Path(path).read_bytes()
+    lines = native_lines(path)
+    parsed = result("antigravity", path, "", include_usage=True, lines=lines)
     usage = dict(parsed["usage"])
     usage.update({"cache_read_input_tokens": usage.get("cache_read_tokens")})
     footer = usage_footer("antigravity", [usage])
     answer = parsed["response"]
     output = answer + ("\n" if answer and not answer.endswith("\n") else "")
     output += "\n".join(footer) + "\n"
-    banners = [line for line in raw.decode("utf-8").splitlines()
+    banners = [line for line in lines
                if re.fullmatch(r"\[agy\] print timeout after .+ with turn in progress; returning partial output\s*", line)]
     if banners:
         output += "\n".join(banners) + "\n"
-    if parsed["timeout"] and not banners:
+    if parsed["timeout"] or banners:
         output += "stop-reason: provider=antigravity reason=stream_truncated subtype=print_timeout is_error=0\n"
     fd, temporary = tempfile.mkstemp(prefix=".agy-output-", dir=os.path.dirname(os.path.abspath(path)))
     try:
@@ -128,6 +134,24 @@ def agy_text(path):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def prepare(provider, path, expected, turn, workdir, scratch):
+    doc = result(provider, path, expected)
+    answer = doc["response"]
+    text = answer + "\n"
+    if doc["permission_denials"]:
+        text += "Permission denials: %d; resolve in a follow-up before finish.\n" % doc["permission_denials"]
+    text += "tokens used\n%d\n" % doc["tokens"]
+    event = {"event": "turn", "turn": int(turn),
+             "response": answer[:12000], "truncated": len(answer) > 12000,
+             "permission_denials": doc["permission_denials"],
+             "worktree": workdir, "verified": False}
+    Path(scratch, "text").write_text(text, encoding="utf-8", newline="")
+    # The shell emits this only after its policy/answer checks have passed.
+    Path(scratch, "event").write_text(json.dumps(event, ensure_ascii=True) + "\n", encoding="utf-8", newline="")
+    print(doc["session_id"])
+    print(doc["permission_denials"])
 
 
 def main():
@@ -154,24 +178,8 @@ def main():
         agy_text(sys.argv[2])
     elif mode == "result":
         print(json.dumps(result(*sys.argv[2:]), ensure_ascii=True))
-    elif mode == "id":
-        print(decode(Path(sys.argv[2]).read_text(encoding="utf-8"))["session_id"])
-    elif mode == "denials":
-        print(decode(Path(sys.argv[2]).read_text(encoding="utf-8"))["permission_denials"])
-    elif mode == "emit":
-        doc = decode(Path(sys.argv[2]).read_text(encoding="utf-8"))
-        answer = doc["response"]
-        print(json.dumps({"event": "turn", "turn": int(sys.argv[3]),
-                          "response": answer[:12000], "truncated": len(answer) > 12000,
-                          "permission_denials": doc["permission_denials"],
-                          "worktree": sys.argv[4],
-                          "verified": False}, ensure_ascii=True))
-    elif mode == "text":
-        doc = decode(Path(sys.argv[2]).read_text(encoding="utf-8"))
-        print(doc["response"])
-        if doc["permission_denials"]:
-            print("Permission denials: %d; resolve in a follow-up before finish." % doc["permission_denials"])
-        print("tokens used\n%d" % doc["tokens"])
+    elif mode == "prepare":
+        prepare(*sys.argv[2:])
     else:
         raise ValueError("unknown conversation operation")
     return 0

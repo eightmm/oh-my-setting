@@ -2124,11 +2124,6 @@ fallback_brief.write_text("scoped brief\n")
 swapped = dispatched_fallback({})
 assert swapped and swapped["provider"] == "codex", swapped
 assert dispatched_fallback({"codex": {"weekly_used": 95}}) is None
-def fixture_selected_route(*args, **kwargs):
-    target = args[5] if len(args) > 5 else kwargs.get("target")
-    catalog = [row for row in (codex_only, claude_candidate) if target is None or row["provider"] == target]
-    with patch.object(panel, "provider_catalog", return_value=catalog):
-        return panel.selected_route(*args, **kwargs)
 with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_candidate]), \
         patch.object(panel, "snapshot", return_value=({"room": {"id": "quota-room"}}, 0)), \
         patch("panel_metrics.collect", return_value=recorded) as metrics:
@@ -2174,11 +2169,6 @@ with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, inst
 with patch.object(panel, "provider_catalog", return_value=[dict(codex_only, models=["gpt-6-luna"],
         catalog_models=["gpt-6-luna"] * 20 + ["gpt-6.2-luna"])]):
     assert panel.selected_route("codex", "researcher", None, "read", None)["model"] == "gpt-6.2-luna"
-def fixture_selected_route(*args, **kwargs):
-    target = kwargs.get("target", args[5] if len(args) > 5 else None)
-    catalog = [row for row in (codex_only, claude_candidate) if target in (None, row["provider"])]
-    with patch.object(panel, "provider_catalog", return_value=catalog):
-        return panel.selected_route(*args, **kwargs)
 try:
     panel.room.declared_scopes("researcher", ["src"])
     raise AssertionError("researcher write scope was accepted")

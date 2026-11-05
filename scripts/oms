@@ -145,9 +145,7 @@ EOF_USAGE
 }
 
 describe() {
-  local desc
-
-  desc="$(awk '
+  awk '
     function first_sentence(text,  rest, off, i, prefix) {
       rest = text
       off = 0
@@ -159,35 +157,23 @@ describe() {
       }
       return text
     }
-    NR <= 2 { next }
-    /^# shellcheck/ { next }
-    /^#/ { sub(/^#+ ?/, ""); buf = buf (buf == "" ? "" : " ") $0; next }
-    buf != "" { exit }
-    /^[[:space:]]*$/ { next }
-    { exit }
-    END { if (buf != "") print first_sentence(buf) }
-  ' "$1")"
-  if [ -z "$desc" ]; then
-    desc="$(awk '
-      function first_sentence(text,  rest, off, i, prefix) {
-        rest = text
-        off = 0
-        while ((i = index(rest, ". ")) > 0) {
-          prefix = substr(text, 1, off + i)
-          if (prefix !~ /(e\.g|i\.e)\.$/) return prefix
-          off += i + 1
-          rest = substr(text, off + 1)
-        }
-        return text
+    NR > 2 && !header_done {
+      if ($0 ~ /^# shellcheck/) {
+      } else if ($0 ~ /^#/) {
+        text = $0
+        sub(/^#+ ?/, "", text)
+        buf = buf (buf == "" ? "" : " ") text
+      } else if (buf != "" || $0 !~ /^[[:space:]]*$/) {
+        header_done = 1
       }
-      /^Usage:/ { in_usage = 1; next }
-      in_usage && /^EOF$/ { exit }
-      in_usage && NF && !/^[[:space:]]/ { buf = buf (buf == "" ? "" : " ") $0; next }
-      in_usage && buf != "" { exit }
-      END { if (buf != "") print first_sentence(buf) }
-    ' "$1")"
-  fi
-  printf '%s\n' "$desc"
+      if (header_done && buf != "") exit
+    }
+    /^Usage:/ { in_usage = 1; next }
+    in_usage && /^EOF$/ { exit }
+    in_usage && NF && !/^[[:space:]]/ { usage = usage (usage == "" ? "" : " ") $0; next }
+    in_usage && usage != "" { exit }
+    END { print first_sentence(buf != "" ? buf : usage) }
+  ' "$1"
 }
 
 OMS_PUBLIC_TOOLS="

@@ -56,20 +56,25 @@ ma_conversation_run() {
       status=125
     fi
     [ "$status" -eq 0 ] || break
-    if ! python3 -B "$helper" result "$provider" "$scratch/native" "$session_id" > "$scratch/result"; then
+    if ! python3 -B "$helper" prepare "$provider" "$scratch/native" "$session_id" \
+        "$turn" "$workdir" "$scratch" > "$scratch/result"; then
       status=2
       break
     fi
-    session_id="$(python3 -B "$helper" id "$scratch/result" | tr -d '\r')" || { status=2; break; }
-    pending_denials="$(python3 -B "$helper" denials "$scratch/result" | tr -d '\r')" || { status=2; break; }
+    if ! { IFS= read -r session_id && IFS= read -r pending_denials; } < "$scratch/result"; then
+      status=2
+      break
+    fi
+    session_id="${session_id//$'\r'/}"
+    pending_denials="${pending_denials//$'\r'/}"
     printf '\nConversation turn %s (not yet verified):\n' "$turn" >> "$output"
-    python3 -B "$helper" text "$scratch/result" >> "$output" || { status=2; break; }
+    cat "$scratch/text" >> "$output" || { status=2; break; }
     if oms_model_is_policy_decline_output "$output" "$prompt" ||
       { [ "$pending_denials" -eq 0 ] && [ "$(ma_answer_quality "$output")" = blocked ]; }; then
       status=4
       break
     fi
-    python3 -B "$helper" emit "$scratch/result" "$turn" "$workdir" >&3 || { status=2; break; }
+    cat "$scratch/event" >&3 || { status=2; break; }
     next_status=0
     python3 -B "$helper" input "$OMS_CONVERSATION_IDLE_SECONDS" <&4 > "$scratch/prompt" || next_status=$?
     if [ "$next_status" -eq 10 ]; then

@@ -23,7 +23,9 @@ fail() {
 }
 
 for cli in codex claude agy; do
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$TMP/bin/$cli"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    '[ -z "${OMS_TEST_PROBE_LOG:-}" ] || printf "%s %s\n" "${0##*/}" "${1:-}" >> "$OMS_TEST_PROBE_LOG"' \
+    'exit 0' > "$TMP/bin/$cli"
   chmod +x "$TMP/bin/$cli"
 done
 export PATH="$TMP/bin:$PATH"
@@ -59,6 +61,7 @@ printf '%s' "$out" | grep >/dev/null '^dry-run: claude ' ||
 out="$(
   cd "$TMP/repo" &&
     env -u CLAUDE_CODE_ENTRYPOINT -u CODEX_SANDBOX CLAUDECODE=1 \
+      OMS_TEST_PROBE_LOG="$TMP/consult-probes" \
       bash "$ROOT/scripts/consult.sh" --prompt "routing probe" \
       --dry-run --quiet 2>&1
 )" || fail "consult dry-run failed: $out"
@@ -67,6 +70,8 @@ if printf '%s' "$out" | grep >/dev/null -E '^dry-run: claude '; then
 fi
 printf '%s' "$out" | grep >/dev/null -E '^dry-run: (codex|antigravity) ' ||
   fail "consult dry-run should have picked a non-claude peer: $out"
+[ "$(grep -c '^agy --version$' "$TMP/consult-probes")" -eq 1 ] ||
+  fail "automatic consult repeated provider discovery: $(cat "$TMP/consult-probes")"
 
 # The documented preference participates only in automatic single-seat
 # selection. An explicit --to remains authoritative over the environment.

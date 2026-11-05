@@ -226,8 +226,8 @@ selected case count. No test coverage is removed. CI cancellation groups
 include the event as well as the ref, so scheduled/manual checks cannot cancel
 a push check awaited by landing; newer pushes still replace obsolete pushes
 ([GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)).
-Native platform checks share the existing lifecycle matrix's macOS/Windows
-runners instead of provisioning two extra jobs. The same checks remain gated;
+Native platform checks share the existing lifecycle matrix's macOS
+runner instead of provisioning an extra job. The same checks remain gated;
 `!cancelled()` lets later checks report failures after an earlier failure
 without continuing a cancelled run
 ([GitHub status functions](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)).
@@ -257,7 +257,7 @@ the installer refuses to execute changed OMS-owned bytes and names recovery.
 Doctor checks selected marked tools before provider/model execution and skips
 unverified inventory copies. Existing agy transaction residue is recovered from
 checksum-verified locked bytes before taking the vendor updater path.
-Fresh Claude uses its SHA-256-verified native installer on Linux/macOS and the npm path on native Windows Git Bash.
+Fresh Claude uses its SHA-256-verified native installer on Linux, WSL2 and macOS.
 The native checksum manifest is trusted over HTTPS without a GPG check.
 Fresh Codex and agy retain their verified installation paths; Pi is not freshly
 installed. OMS-owned Claude shims with native versions migrate through the
@@ -288,12 +288,11 @@ doctor reports digest drift or an interrupted transaction separately from lock
 schema validity. PATH persistence follows Bash's existing login-file priority
 instead of creating a higher-priority profile.
 Optional provider registrations report a warning and remain visible to `oms
-doctor --contract`. Windows Git Bash requires the exact locked native Node
-release before setup when the selected profile needs a Node-backed tool; Linux
-and macOS can install it during setup.
+doctor --contract`. Setup installs Node when the selected profile requires it.
+Native Windows is refused before setup; WSL2 uses the Linux installation path.
 
-Managed rules and skills use symlinks on Linux/macOS and verified copies on
-Windows Git Bash. Existing user files move to timestamped backups and return
+Managed rules and skills use symlinks by default, with verified copies when
+copy mode is selected. Existing user files move to timestamped backups and return
 on `oms uninstall`. Uninstall stops before unlink or purge if any integration
 cannot be removed. It intentionally leaves external CLIs and the user-local
 PATH entry installed.
@@ -760,7 +759,7 @@ It first quarantines a shared pathname inside the private generation directory
 and checks its inode again. A replacement is restored without overwriting a
 new occupant, or preserved in quarantine; it is never deleted as native data.
 Interrupted owned quarantines can resume. Unproven reservations stay charged.
-Windows collection preserves captures until private ACL and quarantine semantics
+Legacy Windows collection preserves captures until private ACL and quarantine semantics
 can be proved; quota and backpressure still apply. Filesystems without native
 hardlinks refuse new managed publication. Ordinary durable-file readers retain
 their single-link rule; only designated landing readers validate native anchors.
@@ -781,8 +780,8 @@ state changes around a worker. It cannot prove what a process read, see a write
 that was undone before exit, or contain writes outside the repository. An
 ordinary provider/verifier shell can leave a background process. On POSIX,
 `agent-supervisor` owns and closes one process group; a process that deliberately
-starts a new session can escape it. On Windows, a kill-on-close Job Object owns
-the launched process tree. Neither boundary is an OS sandbox.
+starts a new session can escape it. Legacy Windows handling uses a kill-on-close
+Job Object to own the launched process tree. Neither boundary is an OS sandbox.
 
 Treat a clean worker result as “no monitored repository surface moved,” not
 “the process was harmless.” Stronger guarantees require OS/container isolation.
@@ -1223,7 +1222,7 @@ running work, another owner, and `review`/`landing` evidence are preserved.
 Its owner and dead claimant come from one receipt-lock judgment token, never a
 later ledger reread. Routine GC CASes the observed state and lease and vetoes
 any exact live worker marker under the plan lock, so a retry or task that
-advances during cleanup cannot be requeued by stale evidence. Windows liveness
+advances during cleanup cannot be requeued by stale evidence. Legacy Windows liveness
 binds the Git Bash PID to its native WINPID and uses a wait-only process handle;
 it never probes by sending signal zero through Python. A missing legacy native
 identity is preserved as unknown. GC treats markers as bounded, no-follow
@@ -1605,7 +1604,7 @@ job for PRs and main pushes. Full selections fan out to the existing Linux
 lint, four focused lanes, four smoke shards and copy lifecycle runner. The
 selector also emits `native=true|false`: install/lifecycle, shell portability,
 Python compatibility, shared runtime/configuration and workflow changes require
-macOS/Windows lifecycle, macOS Bash 3.2/BSD fixtures and real Python 3.11.
+macOS lifecycle, macOS Bash 3.2/BSD fixtures and real Python 3.11.
 Weekly/manual runs and unavailable-base fallbacks require all native jobs.
 The install matrix omits native hosts only on an explicit `native=false` plan;
 the stable `gate` rejects missing, failed or cancelled required results and
@@ -1640,14 +1639,10 @@ declared mechanical gate.
 
 ## Known limits
 
-- Native PowerShell is not a supported shell; Windows support means Git Bash.
+- Native Windows is unsupported, including Git Bash/MSYS2/Cygwin and PowerShell.
+  WSL2 requires the repository and home on the Linux filesystem.
 - Full non-Linux behavior is strongest on the install lifecycle; most public
   tools run their comprehensive suites on Linux plus portability fixtures.
-- On the exercised Windows surface (install, update, doctor, journal status,
-  uninstall), paths cross to python as argv — which Git Bash converts — or
-  base64-encoded where a value must survive the environment
-  (provider-permissions). A new script on that surface must pick one of
-  those two crossings; plain env path values reach native python rewritten.
 - Locked upstream artifacts and the `edge` source ref remain supply-chain
   choices; review the lock and pin the source ref for higher assurance.
 - Policy handling classifies provider text. Unfamiliar or localized refusal

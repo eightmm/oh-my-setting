@@ -268,16 +268,6 @@ DECIDED = ("completed", "accepted", "rejected")
 class Unproven(Exception):
     pass
 try:
-    store = runpy.run_path(os.path.join(lib, "artifact-index-store.py"))
-    durable = runpy.run_path(os.path.join(lib, "durable-jsonl.py"))
-
-    def rows_of(root):
-        body = store["read_index"](root, INDEX, missing_ok=True)
-        return [json.loads(line.decode("utf-8")) for line in body.splitlines(True)]
-
-    def read(root, rel, limit):
-        return durable["read_no_follow"](root, rel, "residue evidence", max_bytes=limit)
-
     env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                GIT_OPTIONAL_LOCKS="0")
     def git(*args, index=None):
@@ -519,14 +509,22 @@ try:
 
     untracked, ignored = inventory()
     # Paths that differ from HEAD on disk.
-    seen, differing = {}, set(untracked)
+    differing = set(untracked)
     for path in head:
-        seen[path] = disk(path)
-        if seen[path] != head[path]:
+        if disk(path) != head[path]:
             differing.add(path)
     if mode == "status":
         print("dirty" if differing or staged != head_tree else "clean")
         raise SystemExit(0)
+
+    store = runpy.run_path(os.path.join(lib, "artifact-index-store.py"))
+
+    def rows_of(root):
+        body = store["read_index"](root, INDEX, missing_ok=True)
+        return [json.loads(line.decode("utf-8")) for line in body.splitlines(True)]
+
+    def read(root, rel, limit):
+        return store["DURABLE"]["read_no_follow"](root, rel, "residue evidence", max_bytes=limit)
 
     def disposable_oms(path):
         # Worker-session telemetry and cache, plus empty lock files; nothing reads

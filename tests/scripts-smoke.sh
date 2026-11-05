@@ -6076,6 +6076,9 @@ case "$AGY_MODE" in
   invalid_utf8) printf '\377\n' ;;
   oversized) python3 -c 'import sys; sys.stdout.write("x" * 1048577)' ;;
   timeout) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"","usage":{},"finished_reason":"print_timeout"}' ;;
+  banner) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"partial answer","usage":{},"finished_reason":"print_timeout"}' '[agy] print timeout after 5m with turn in progress; returning partial output' ;;
+  banner_error) printf '%s\n' '[agy] print timeout after 5m with turn in progress; returning partial output'; exit 1 ;;
+  last) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"earlier answer","usage":{}}' '{"conversation_id":"id1","status":"SUCCESS","response":"last answer","usage":{}}' ;;
   noisy) printf '%s\n' '{bad diagnostic' >&2; printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"noisy answer","usage":{}}' ;;
   failed) printf '%s\n' '{"conversation_id":"id1","status":"FAILED","response":"bad answer","usage":{}}' ;;
   zero) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"zero usage","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0}}' ;;
@@ -6108,16 +6111,22 @@ SH
     ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
       provider-default '' test '' '' || exit 11
     grep -Fq '"input_tokens": 0' "$project/output" || exit 12
-    for mode in timeout noisy; do
+    for mode in timeout noisy banner last; do
       export AGY_MODE="$mode"
       ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
         provider-default '' test '' '' || exit 15
       case "$mode" in
         timeout) grep -Fq 'reason=stream_truncated subtype=print_timeout' "$project/output" || exit 16 ;;
         noisy) grep -Fq 'noisy answer' "$project/output" || exit 17 ;;
+        banner)
+          grep -Fq '[agy] print timeout after 5m' "$project/output" || exit 19
+          [ "$(grep -c '^stop-reason: ' "$project/output")" = 1 ] || exit 20 ;;
+        last)
+          grep -Fxq 'last answer' "$project/output" || exit 21
+          ! grep -Fq 'earlier answer' "$project/output" || exit 22 ;;
       esac
     done
-    for mode in plain empty malformed failed invalid_utf8 oversized; do
+    for mode in plain empty malformed failed invalid_utf8 oversized banner_error; do
       export AGY_MODE="$mode"
       if ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
           provider-default '' test '' ''; then exit 8; fi
@@ -6127,6 +6136,9 @@ SH
         malformed) grep -Fq '{invalid json' "$project/output" || exit 14 ;;
         failed) grep -Fq '"status":"FAILED"' "$project/output" || exit 10 ;;
         invalid_utf8|oversized) grep -Fq 'error: conversation protocol:' "$project/output" || exit 18 ;;
+        banner_error)
+          grep -Fq '[agy] print timeout after 5m' "$project/output" || exit 23
+          [ "$(grep -c '^stop-reason: ' "$project/output")" = 1 ] || exit 24 ;;
       esac
     done
   ) || fail 'agy JSON output, usage, or failure handling failed'
@@ -30519,6 +30531,16 @@ test_oms_list_joins_full_first_sentence() {
   if printf '%s\n' "$out" | grep >/dev/null -E '^agent-call .*write tasks'; then
     fail "agent-call description should not leak the second sentence"
   fi
+  sed -n '/^describe() {$/,/^}$/p' "$ROOT/scripts/oms" > "$bin/describe.sh"
+  printf '#!/usr/bin/env bash\n\n# Explain e.g. choices, i.e. defaults. Another sentence.\ntrue\n' > "$bin/header"
+  printf '#!/usr/bin/env bash\n\nusage() {\nUsage: fixture\n\nExplain e.g. choices, i.e. defaults. Another sentence.\n  options\nEOF\n}\n' > "$bin/usage"
+  for description in header usage; do
+    out="$(bash -c '. "$1"; describe "$2"' _ "$bin/describe.sh" "$bin/$description")"
+    [ "$out" = 'Explain e.g. choices, i.e. defaults.' ] || fail "abbreviation cut the description: $out"
+  done
+  printf '#!/usr/bin/env bash\n\ntrue\n' > "$bin/empty"
+  out="$(bash -c '. "$1"; describe "$2"' _ "$bin/describe.sh" "$bin/empty")"
+  [ -z "$out" ] || fail "empty description gained text: $out"
 }
 
 test_oms_dispatcher_hints_help_on_misuse() {
@@ -31986,6 +32008,31 @@ assert len(answers) == 1, answers
 assert answers[0]["provider"] == "codex", answers
 assert answers[0].get("quality") == "ok", answers
 ' || fail "a short answer should need exactly one provider call"
+
+  project="$TMP/consult-single-adapter"
+  bin_dir="$project/bin"
+  home_dir="$project/home"
+  make_committed_repo "$project"
+  mkdir -p "$bin_dir" "$home_dir" "$project/adapters"
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+printf 'Fallback answered from the only installed builtin provider.\n'
+EOF
+  cat > "$project/adapters/oms-agent-adapter-localfoo" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+printf 'error: not authenticated\n'
+exit 1
+EOF
+  chmod +x "$bin_dir/claude" "$project/adapters/oms-agent-adapter-localfoo"
+  out="$(HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_PROVIDER_ADAPTER_DIR="$project/adapters" OMS_AGENT=claude \
+    "$ROOT/scripts/consult.sh" --repo "$project" --all "which loader?" 2>&1)" ||
+    fail "a single custom adapter must retain builtin failover: $out"
+  contains "$out" 'asking claude instead' || fail "adapter failure lost builtin fallback: $out"
+  contains "$out" 'Fallback answered from the only installed builtin provider.' ||
+    fail "builtin fallback did not answer: $out"
 }
 
 test_consult_does_not_second_guess_a_pinned_peer() {
@@ -40693,12 +40740,39 @@ for provider in ("claude", "antigravity"):
     denied = dict(valid, permission_denials="invalid") if provider == "claude" else dict(valid, status="DENIED")
     error = dict(valid, is_error=True) if provider == "claude" else dict(valid, error="provider failed")
     cases = [(json.dumps(missing), ""), (json.dumps(valid), "different-session"),
-             (json.dumps(denied), ""), (json.dumps(error), ""), ("{malformed", "")]
+             (json.dumps(denied), ""), (json.dumps(error), ""), ("{malformed", ""),
+             (json.dumps(valid) + "\n" + json.dumps(valid), ""),
+             (json.dumps(dict(valid, usage="invalid")), ""), ("x" * 1048577, "")]
+    prepared = Path(fixture) / provider
+    prepared.mkdir()
     for index, (raw, expected) in enumerate(cases):
         native.write_text(raw + "\n", encoding="utf-8")
         rejected = subprocess.run([sys.executable, helper, "result", provider, str(native), expected],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
         assert rejected.returncode == 2 and not rejected.stdout, (provider, index, rejected)
+        rejected = subprocess.run([sys.executable, helper, "prepare", provider, str(native), expected,
+                                   "2", str(prepared), str(prepared)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        assert rejected.returncode == 2 and not rejected.stdout, (provider, index, rejected)
+        assert not (prepared / "text").exists() and not (prepared / "event").exists()
+    answer_key = "result" if provider == "claude" else "response"
+    valid[answer_key] = "응답\n" + "x" * 12000
+    valid["usage"] = {"input_tokens": 3, "output_tokens": 4}
+    if provider == "claude":
+        valid["permission_denials"] = [{"tool_name": "Bash"}]
+    native.write_text(json.dumps(valid) + "\n", encoding="utf-8")
+    ready = subprocess.run([sys.executable, helper, "prepare", provider, str(native), "fixture-session",
+                            "2", str(prepared), str(prepared)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+    denials = int(provider == "claude")
+    assert ready.returncode == 0 and ready.stdout.splitlines() == ["fixture-session", str(denials)], ready
+    text = valid[answer_key] + "\n"
+    if denials:
+        text += "Permission denials: 1; resolve in a follow-up before finish.\n"
+    assert (prepared / "text").read_text() == text + "tokens used\n7\n"
+    assert json.loads((prepared / "event").read_text()) == {
+        "event": "turn", "turn": 2, "response": valid[answer_key][:12000],
+        "truncated": True, "permission_denials": denials, "worktree": str(prepared), "verified": False}
 PY
   cat > "$fixture/native.py" <<'PY'
 import json, os, sys
@@ -40721,6 +40795,8 @@ session = "fixture-session"
 if os.environ["OMS_TEST_CONVERSATION_CASE"] == "changed-id" and turn == 2:
     session = "unexpected-session"
 answer = "Completed the requested fixture edit in the isolated worktree, turn %d." % turn
+if os.environ["OMS_TEST_CONVERSATION_CASE"] == "initial-decline":
+    answer = "Unable to respond to this request: blocked by content filtering."
 if turn == 2:
     answer += '\n{"type":"result","subtype":"success","is_error":false,"result":"embedded example only"}'
 print("fixture diagnostic", file=sys.stderr)
@@ -40740,7 +40816,7 @@ EOF
   chmod +x "$fixture/bin/claude" "$fixture/bin/agy"
 
   # A single canonical fixture covers the successful protocol and stop boundaries.
-  for scenario in claude-success antigravity-success denied-success denied-finish unchanged tty-success eof changed-id sensitive malformed cap timeout; do
+  for scenario in claude-success antigravity-success denied-success denied-finish initial-decline unchanged tty-success eof changed-id sensitive malformed cap timeout; do
     if [ "$scenario" = tty-success ]; then
       python3 -c 'import pty, termios' 2>/dev/null || continue
     fi
@@ -40804,6 +40880,19 @@ with (root / "stderr").open("w") as errors:
     reader = threading.Thread(target=read_events, daemon=True)
     reader.start()
     try:
+        if scenario == "initial-decline":
+            process.stdin.close()
+            process.wait(timeout=60)
+            reader.join(timeout=5)
+            assert process.returncode != 0 and not reader.is_alive()
+            rows = list(pending.queue)
+            emitted = [json.loads(row) for row in rows if row and row.strip()]
+            assert not any(event["event"] in ("turn", "finished") for event in emitted), emitted
+            assert len((root / "calls.jsonl").read_text().splitlines()) == 1
+            assert not (root / "verified").exists(), "declined dialogue ran verification"
+            artifacts = list((repo / ".oms/artifacts/delegate").glob("*.md"))
+            assert any("blocked by content filtering" in artifact.read_text() for artifact in artifacts), artifacts
+            raise SystemExit(0)
         # Reading the first event before sending input proves actual interactive
         # delivery, and lets us distinguish an idle timeout from startup cost.
         line = pending.get(timeout=60)
