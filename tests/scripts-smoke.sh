@@ -37125,6 +37125,39 @@ test \"\$(git -C $bad_kept/wt rev-parse --git-dir)\" = '$bad_metadata' && printf
 # registration. Exercise the review entrypoint with that real capture order,
 # including a second sibling that completes while the review is running.
 test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
+  local strict
+  for strict in 0 1; do
+    (
+      . "$ROOT/scripts/lib/oms-common.sh"
+      . "$ROOT/scripts/lib/peer-common.sh"
+      local project="$TMP/read-source-kept-state-$strict"
+      local source="$TMP/read-source-kept-$strict"
+      local managed_root="$TMP/read-source-kept-root-$strict"
+      local snapshot="$TMP/read-source-kept-snapshot-$strict"
+      local guard_out guard_rc=0 dead_pid
+      make_guard_repo "$project"
+      make_guard_repo "$source"
+      mkdir -p "$managed_root"
+      export OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
+      export OMS_WORKER_GUARD_STRICT="$strict"
+      REPO="$project" MA_READ_SOURCE_REPO="$source"
+      ma_read_guard_begin "$snapshot" || fail "source sibling snapshot failed"
+      make_live_managed_sibling "$source" "$managed_root/oh-my-setting-delegate.source"
+      dead_pid="$(sh -c 'echo $$')"
+      printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+        "$dead_pid" "$source" "$managed_root/oh-my-setting-delegate.source/wt" \
+        > "$managed_root/oh-my-setting-delegate.source/.oh-my-setting-tmp"
+      guard_out="$(ma_read_guard_assert 2>&1)" || guard_rc=$?
+      contains "$guard_out" kept-sibling || fail "source sibling lost its classification: $guard_out"
+      if [ "$strict" = 1 ]; then
+        [ "$guard_rc" = 2 ] || fail "strict review accepted a source sibling: $guard_out"
+      else
+        [ "$guard_rc" = 0 ] || fail "review rejected a validated source sibling: $guard_out"
+        ma_read_guard_assert || fail "repeated review rejected a validated source sibling"
+      fi
+    )
+  done
+
   local scenario
   for scenario in forged altered symlink-proof extra-line-proof kept removed \
     outside-kept outside-removed gitdir commondir config empty-proof zero-proof \

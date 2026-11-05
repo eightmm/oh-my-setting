@@ -441,8 +441,8 @@ ma_read_guard_assert() {
       head -n 8 "$MA_READ_GUARD_DIR/$name/state-detail" | sed 's/^/  /' >&2
     fi
     for surface in $(printf '%s' "$changed" | tr ',' ' '); do
-      # Source content/control changes stay hard; only attributed foreign Git
-      # activity gets the same relief as on the state side. Bare state-side
+      # Source content/control changes stay hard; only validated sibling or
+      # attributed foreign Git activity gets state-side relief. Bare state-side
       # gitmeta is softened only when each replaced slot's gitmeta-now lines
       # match its gitmeta-admin-now lines captured during validation.
       if [ "$name" = state ] && [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ] &&
@@ -452,7 +452,9 @@ ma_read_guard_assert() {
           soft="${soft:+$soft, }gitmeta-managed-replaced"
           replacement_softened=1
         fi
-      elif { [ "$name" = state ] || [ "$surface" = foreign-ref ] || [ "$surface" = foreign-worktree ]; } &&
+      elif { [ "$name" = state ] || [ "$surface" = foreign-ref ] ||
+        [ "$surface" = foreign-worktree ] || [ "$surface" = kept-sibling ] ||
+        [ "$surface" = sibling-cleanup ]; } &&
         oms_worker_surface_is_soft "$surface" &&
         [ "${OMS_WORKER_GUARD_STRICT:-0}" != 1 ]; then
         soft="${soft:+$soft, }$surface"
