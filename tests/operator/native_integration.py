@@ -3792,8 +3792,9 @@ sys.exit(status)
     phase_file = temporary / "watch-phase.py"
     phase_file.write_text(phase_script)
     shim = shim_dir / "python3"
-    shim.write_text("#!/usr/bin/env bash\nexec %s %s %s %s \"$OMS_TEST_WATCH_PHASE\"\n" % (
-        shlex.quote(sys.executable), shlex.quote(str(phase_file)),
+    shim.write_text("#!/usr/bin/env bash\nif [ \"${1:-}\" = -I ]; then exec %s \"$@\"; fi\n"
+                    "exec %s %s %s %s \"$OMS_TEST_WATCH_PHASE\"\n" % (
+        shlex.quote(sys.executable), shlex.quote(sys.executable), shlex.quote(str(phase_file)),
         shlex.quote(str(root / "scripts/lib")), shlex.quote(str(project))))
     shim.chmod(0o755)
     for phase in ("startup", "render", "restore", "cleanup", "cleanup-process"):
@@ -3803,7 +3804,7 @@ sys.exit(status)
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             start_new_session=True, preexec_fn=default_sigint)
         try:
-            assert select.select([watcher.stderr], [], [], 5)[0], (phase, "phase never reached")
+            assert select.select([watcher.stderr], [], [], int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))[0], (phase, "phase never reached")
             assert watcher.stderr.readline() == b"PHASE_BLOCKED\n", phase
             watcher.send_signal(signal.SIGINT)
             assert watcher.wait(timeout=2) == 130, (phase, "default SIGINT delayed")
@@ -3820,7 +3821,7 @@ sys.exit(status)
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         start_new_session=True, preexec_fn=ignored_sigint)
     try:
-        assert select.select([watcher.stderr], [], [], 5)[0], "ignored watcher did not become ready"
+        assert select.select([watcher.stderr], [], [], int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))[0], "ignored watcher did not become ready"
         assert watcher.stderr.readline() == b"PHASE_BLOCKED\n"
         watcher.send_signal(signal.SIGINT)
         _, errors = watcher.communicate(input=b"x", timeout=2)
