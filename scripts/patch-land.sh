@@ -303,7 +303,7 @@ landing_receipt_hash() {
     OMS_LD_PLAN_RECEIPT_SHA="$intent_plan_receipt_sha" \
     OMS_LD_PLAN_DONE_RECEIPT_SHA="$intent_plan_done_receipt_sha" \
     OMS_LD_APPROVAL="$intent_approval" \
-    OMS_LD_APPROVAL_VERSION="$intent_approval_version" python3 <<'PY' | tr -d '\r'
+    OMS_LD_APPROVAL_VERSION="$intent_approval_version" python3 <<'PY'
 import hashlib, json, os
 row = {
     "schema": 1,
@@ -412,8 +412,8 @@ approval_recover_finish() {  # approval_recover_finish ID VERSION consumed|faile
   local row state current_version
   [ -n "$approval" ] && [ -n "$version" ] || return 0
   row="$("$ROOT/scripts/approval-inbox.sh" --repo "$REPO" show --approval "$approval" --json 2>/dev/null)" || return 1
-  state="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))' | tr -d '\r')"
-  current_version="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))' | tr -d '\r')"
+  state="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state",""))')"
+  current_version="$(printf '%s' "$row" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version",""))')"
   [ "$state" != "$result" ] || return 0
   # A crash before begin-consume performed no effect and leaves an approved
   # grant reusable. Only a reserved grant needs a terminal recovery row.
@@ -480,7 +480,7 @@ state=d.get("state", "")
 lease=d.get("lease_id", "")
 digest=runpy.run_path(sys.argv[1])["digest"](d)
 print(state + "\t" + lease + "\t" + digest)
-' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r'
+' "$ROOT/scripts/lib/plan-receipt.py"
 }
 
 read_plan_receipt_values() {
@@ -832,29 +832,29 @@ except (OSError, ValueError, TypeError) as exc:
     sys.stderr.write("unusable plan file %s: %s\n" % (path, exc))
     raise SystemExit(3)
 print("VALID\t" + plan_id)
-' "$STATE_REPO/.oms/plan/tasks.json" | tr -d '\r'; exit "${PIPESTATUS[0]}")" ||
+' "$STATE_REPO/.oms/plan/tasks.json")" ||
     fail "recovery needs a readable shared plan or no plan file: $STATE_REPO/.oms/plan/tasks.json"
   RECOVERY_PLAN_STATE="$(printf '%s' "$RECOVERY_PLAN_RECORD" | cut -f1)"
   RECOVERY_PLAN_ID="$(printf '%s' "$RECOVERY_PLAN_RECORD" | cut -f2)"
   SCOPE_PLAN_ID="$RECOVERY_PLAN_ID"
   while IFS= read -r intent_row; do
     [ -n "$intent_row" ] || continue
-    LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))' | tr -d '\r')"
-    intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))' | tr -d '\r')"
-    intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))' | tr -d '\r')"
-    intent_panel_accept="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("panel_accept") == "true" else 0)' | tr -d '\r')"
-    intent_plan_id="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_id",""))' | tr -d '\r')"
-    intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))' | tr -d '\r')"
-    intent_plan_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_receipt_sha",""))' | tr -d '\r')"
-    intent_plan_done_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_done_receipt_sha",""))' | tr -d '\r')"
-    intent_patch_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch_sha",""))' | tr -d '\r')"
-    intent_base_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("base_sha",""))' | tr -d '\r')"
-    intent_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("_receipt_sha",""))' | tr -d '\r')"
-    intent_has_complete="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_complete") is True else 0)' | tr -d '\r')"
-    intent_verifier_consent="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("verifier_change_consent") == "true" else 0)' | tr -d '\r')"
-    intent_has_abandoned="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_abandoned") is True else 0)' | tr -d '\r')"
-    intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))' | tr -d '\r')"
-    intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))' | tr -d '\r')"
+    LANDING_ID="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("landing_id",""))')"
+    intent_patch="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch",""))')"
+    intent_task="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("task",""))')"
+    intent_panel_accept="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("panel_accept") == "true" else 0)')"
+    intent_plan_id="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_id",""))')"
+    intent_lease="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease",""))')"
+    intent_plan_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_receipt_sha",""))')"
+    intent_plan_done_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("plan_done_receipt_sha",""))')"
+    intent_patch_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("patch_sha",""))')"
+    intent_base_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("base_sha",""))')"
+    intent_receipt_sha="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("_receipt_sha",""))')"
+    intent_has_complete="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_complete") is True else 0)')"
+    intent_verifier_consent="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("verifier_change_consent") == "true" else 0)')"
+    intent_has_abandoned="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(1 if json.load(sys.stdin).get("_has_abandoned") is True else 0)')"
+    intent_approval="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval",""))')"
+    intent_approval_version="$(printf '%s' "$intent_row" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_version",""))')"
     [ -z "$PLAN_TASK" ] || [ "$intent_task" = "$PLAN_TASK" ] || continue
     # Task ids repeat across plans: a scoped recovery owns only the current
     # plan's intents, so an older plan's t1 is neither recovered nor counted.
@@ -902,7 +902,7 @@ print("VALID\t" + plan_id)
     # remove) identical bytes. Historical terminals above have durable external
     # receipts; an open intent has no such authority and must remain untouched
     # for manual recovery rather than claiming the newer commit as its landing.
-    current_intent_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r' || printf 'unborn')"
+    current_intent_base="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || printf 'unborn')"
     head_moved=0
     if [ -z "$intent_base_sha" ] || [ "$current_intent_base" != "$intent_base_sha" ]; then
       head_moved=1
@@ -1041,7 +1041,6 @@ if [ -n "$PANEL_ACCEPT" ]; then
   [ -z "$PLAN_TASK" ] && [ "$RECOVER" = 0 ] && [ "$REQUEST_APPROVAL" = 0 ] ||
     fail "panel acceptance cannot compose public plan finish, recovery or approval requests"
   panel_binding="$(panel_accept_fence)" || fail "panel acceptance preflight failed"
-  panel_binding="${panel_binding//$'\r'/}"
   IFS=$'\t' read -r PLAN_ID PANEL_ACCEPT_TASK PANEL_ACCEPT_LEASE <<< "$panel_binding"
   export OMS_TASK_ID="$PANEL_ACCEPT_TASK" OMS_INDEX_PLAN_ID="$PLAN_ID"
 fi
@@ -1052,8 +1051,7 @@ if [ -n "$PLAN_TASK" ]; then
     fail "cannot read plan task $PLAN_TASK"
   oms_require_current_task_contract "$PLAN_JSON" || exit $?
   PLAN_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
-    tr -d '\r')"
+    python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))')"
   if [ -z "$PLAN_ID" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
       fail "cannot establish plan lineage before landing task $PLAN_TASK"
@@ -1061,8 +1059,7 @@ if [ -n "$PLAN_TASK" ]; then
       evidence-snapshot --id "$PLAN_TASK" 2>/dev/null)" ||
       fail "cannot reread plan task $PLAN_TASK after establishing lineage"
     PLAN_ID="$(printf '%s' "$PLAN_JSON" |
-      python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' |
-      tr -d '\r')"
+      python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))')"
   fi
   case "$PLAN_ID" in
     plan_*)
@@ -1076,13 +1073,13 @@ if [ -n "$PLAN_TASK" ]; then
     python3 -c 'import json,sys;d=json.load(sys.stdin);d.pop("plan_id",None);print(json.dumps(d,ensure_ascii=False))')" ||
     fail "cannot normalize plan task snapshot $PLAN_TASK"
   PLAN_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))' | tr -d '\r')" ||
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("lease_id", ""))')" ||
     fail "cannot read lease for plan task $PLAN_TASK"
   PLAN_REVIEW_LEASE_ID="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("review_lease_id", ""))' | tr -d '\r')" ||
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("review_lease_id", ""))')" ||
     fail "cannot read review lease for plan task $PLAN_TASK"
   PLAN_STATE="$(printf '%s' "$PLAN_JSON" |
-    python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' | tr -d '\r')" ||
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))')" ||
     fail "cannot read state for plan task $PLAN_TASK"
   PLAN_REVIEW_PATCH="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json,sys
@@ -1090,12 +1087,12 @@ value=json.load(sys.stdin).get("patch", "")
 if not isinstance(value, str) or "\x00" in value or "\n" in value or "\r" in value:
     raise SystemExit(1)
 print(value)
-' | tr -d '\r')" || fail "cannot read reviewed patch for plan task $PLAN_TASK"
+')" || fail "cannot read reviewed patch for plan task $PLAN_TASK"
   PLAN_REVIEW_PATCH_STORED="$PLAN_REVIEW_PATCH"
   PLAN_REVIEW_RECEIPT_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json,runpy,sys
 print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
-' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')" ||
+' "$ROOT/scripts/lib/plan-receipt.py")" ||
     fail "cannot hash review receipt for plan task $PLAN_TASK"
   PLAN_REVIEW_EXECUTOR_ID="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json,re,sys
@@ -1103,14 +1100,14 @@ value=json.load(sys.stdin).get("executor_id", "")
 if not isinstance(value, str) or (value and not re.fullmatch(r"[A-Za-z0-9._-]+", value)):
     raise SystemExit(1)
 print(value)
-' | tr -d '\r')" || fail "cannot read executor receipt for plan task $PLAN_TASK"
+')" || fail "cannot read executor receipt for plan task $PLAN_TASK"
   PLAN_REVIEW_EXECUTOR_SOUL_SHA="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json,re,sys
 value=json.load(sys.stdin).get("executor_soul_sha256", "")
 if not isinstance(value, str) or (value and not re.fullmatch(r"[0-9a-f]{64}", value)):
     raise SystemExit(1)
 print(value)
-' | tr -d '\r')" || fail "cannot read executor soul receipt for plan task $PLAN_TASK"
+')" || fail "cannot read executor soul receipt for plan task $PLAN_TASK"
   PLAN_VERIFY_RAW="$(printf '%s' "$PLAN_JSON" | python3 -c '
 import json,sys
 value=json.load(sys.stdin).get("verify", "")
@@ -1175,7 +1172,7 @@ SOURCE_PATCH="$PATCH"
 PATCH_SHA="$(oms_sha256_file "$PATCH" 2>/dev/null || true)"
 [ -n "$PATCH_SHA" ] || fail "cannot hash patch: $PATCH"
 if [ -n "$PANEL_ACCEPT" ]; then
-  expected_panel_sha="$(printf '%s' "$PANEL_ACCEPT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["snapshot"]["candidate"]["patch_sha256"])' | tr -d '\r')" ||
+  expected_panel_sha="$(printf '%s' "$PANEL_ACCEPT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["snapshot"]["candidate"]["patch_sha256"])')" ||
     fail "cannot read expected panel patch digest"
   [ "$PATCH_SHA" = "$expected_panel_sha" ] || fail "panel patch digest drift"
 fi
@@ -1289,7 +1286,6 @@ oms_git_assert_safe_execution_config "$REPO" || fail "unsafe executable Git conf
 oms_git_assert_plain_index "$REPO" || fail "Git index has hidden or unreadable entries before landing admission"
 CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" intake "$STATE_REPO" "$SOURCE_PATCH" "$LANDING_ID" "$PATCH_SHA" "$REPO" "${reuse_parameters[@]}")" ||
   fail "cannot reserve and capture patch bytes before admission"
-CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
 LANDING_ID="$(basename "$CAPTURE_PATCH" .patch)"
 FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"
 PATCH="$CAPTURE_PATCH"
@@ -1319,7 +1315,7 @@ import json,runpy,sys
 d=json.load(sys.stdin)
 d["patch"]=sys.argv[2]
 print(runpy.run_path(sys.argv[1])["digest"](d))
-' "$ROOT/scripts/lib/plan-receipt.py" "$FROZEN_PATCH" | tr -d '\r'
+' "$ROOT/scripts/lib/plan-receipt.py" "$FROZEN_PATCH"
 }
 if [ -n "$PLAN_TASK" ]; then
   PLAN_REVIEW_PATCH_SHA="$(oms_sha256_file "$PLAN_REVIEW_PATCH" 2>/dev/null || true)"
@@ -1432,7 +1428,6 @@ else
   # that earlier witness intact and rerun on a fresh, digest-checked capture.
   CAPTURE_PATCH="$(python3 "$CAPTURE_HELPER" refresh-admission "$STATE_REPO" "$PATCH" "$LANDING_ID-refresh" "$PATCH_SHA" "$REPO")" ||
     fail "cannot refresh stale admission capture"
-  CAPTURE_PATCH="${CAPTURE_PATCH//$'\r'/}"
   PATCH="$CAPTURE_PATCH"
   LANDING_ID="$(basename "$CAPTURE_PATCH" .patch)"
   FROZEN_PATCH="$FROZEN_DIR/$LANDING_ID.patch"

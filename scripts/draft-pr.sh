@@ -31,9 +31,7 @@ if [ "${OMS_DRAFT_PROCESS_SUPERVISED:-0}" != 1 ]; then
   trap 'draft_supervisor_signal HUP 129' HUP
   trap 'draft_supervisor_signal INT 130' INT
   trap 'draft_supervisor_signal TERM 143' TERM
-  # Use the cross-platform supervisor shared with autopilot. Launch through
-  # bash explicitly: native Windows Python cannot CreateProcess a shebang-only
-  # .sh path, while Git Bash itself is the documented Windows runtime.
+  # Use the supervisor shared with autopilot.
   OMS_DRAFT_PROCESS_SUPERVISED=1 python3 \
     "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
     --wall 86400 \
@@ -128,7 +126,7 @@ park() {
 }
 
 draft_shell_join() {  # ARGV...
-  python3 - "$@" <<'PY' | tr -d '\r'
+  python3 - "$@" <<'PY'
 import shlex, sys
 print(" ".join(shlex.quote(value) for value in sys.argv[1:]))
 PY
@@ -289,7 +287,6 @@ PY
     park "git-index-unreadable" "repair the repository index"
   }
   rm -f "$flags_file"
-  flag_state="${flag_state//$'\r'/}"
   [ "$flag_state" = plain ] ||
     park "git-index-hidden-paths" "clear assume-unchanged, skip-worktree, and sparse index flags"
 }
@@ -312,7 +309,6 @@ current_branch() {
   local branch
   branch="$("$GIT" -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
     fail "detached HEAD cannot be published"
-  branch="${branch//$'\r'/}"
   "$GIT" check-ref-format --branch "$branch" >/dev/null 2>&1 ||
     fail "current branch name is invalid"
   printf '%s\n' "$branch"
@@ -373,7 +369,6 @@ else:
         print("GIT_CONFIG_PARAMETERS")
 PY
 )" || fail "cannot inspect command-scope Git config"
-  unsafe_command_key="${unsafe_command_key//$'\r'/}"
   [ -z "$unsafe_command_key" ] ||
     fail "unsafe command-scope Git config: $unsafe_command_key"
   keys_file="$(agent_memory_mktemp)" || fail "cannot allocate Git config scan"
@@ -384,7 +379,6 @@ PY
   worktree_rc=0
   worktree_enabled="$("$GIT" -C "$REPO" config --local --bool --get \
     extensions.worktreeConfig 2>/dev/null)" || worktree_rc=$?
-  worktree_enabled="${worktree_enabled//$'\r'/}"
   case "$worktree_rc:$worktree_enabled" in
     0:true)
       if ! "$GIT" -C "$REPO" config --worktree --null --name-only --list >> "$keys_file"; then
@@ -443,7 +437,6 @@ PY
     fail "cannot validate repository-local Git config"
   }
   rm -f "$keys_file"
-  unsafe_key="${unsafe_key//$'\r'/}"
   [ -z "$unsafe_key" ] ||
     fail "unsafe local Git transport config: $unsafe_key"
 }
@@ -467,8 +460,6 @@ strict_remote() {
     fail "remote $REMOTE is not an accepted GitHub remote"
   push_slug="$(python3 "$REMOTE_PARSER" "$REMOTE_PUSH_URL")" ||
     fail "push URL for $REMOTE is not an accepted GitHub remote"
-  fetch_slug="${fetch_slug//$'\r'/}"
-  push_slug="${push_slug//$'\r'/}"
   fetch_fold="$(printf '%s' "$fetch_slug" | tr '[:upper:]' '[:lower:]')"
   push_fold="$(printf '%s' "$push_slug" | tr '[:upper:]' '[:lower:]')"
   [ "$fetch_fold" = "$push_fold" ] ||
@@ -500,7 +491,6 @@ print(owner)
 print(permission)
 PY
 )" || park "github-permission-unreadable" "check repository access"
-  parsed="${parsed//$'\r'/}"
   owner="$(printf '%s\n' "$parsed" | sed -n 1p)"
   permission="$(printf '%s\n' "$parsed" | sed -n 2p)"
   expected="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')"
@@ -534,7 +524,6 @@ assert_native_git_graph() {
   local graft_path graft_state
   graft_path="$("$GIT" -C "$REPO" rev-parse --git-path info/grafts 2>/dev/null)" ||
     park "git-graph-unreadable" "repair the repository metadata"
-  graft_path="${graft_path//$'\r'/}"
   [ -n "$graft_path" ] || park "git-graph-unreadable" "repair the repository metadata"
   graft_state="$(cd "$REPO" && python3 - "$graft_path" <<'PY'
 import os, stat, sys
@@ -552,7 +541,6 @@ else:
         print("unsafe")
 PY
 )" || park "git-graph-unreadable" "inspect .git/info/grafts"
-  graft_state="${graft_state//$'\r'/}"
   case "$graft_state" in
     absent|empty) ;;
     present) park "git-grafts-present" "remove deprecated grafts before publication" ;;
@@ -565,7 +553,6 @@ scan_remaining() {  # DEADLINE_EPOCH -> remaining positive seconds
   local deadline="$1"
   local current
   current="$(date +%s)" || return 1
-  current="${current//$'\r'/}"
   case "$current" in *[!0-9]*|"") return 1 ;; esac
   [ "$current" -lt "$deadline" ] || return 1
   printf '%s\n' "$((deadline - current))"
@@ -620,7 +607,6 @@ scan_publish_range() {  # BASE_SHA HEAD_SHA
   local started deadline remaining object_count=0 scanned_bytes=0
   draft_init_scan_runner
   started="$(date +%s)" || park "publish-payload-timeout" "restore the local clock"
-  started="${started//$'\r'/}"
   case "$started" in *[!0-9]*|"") park "publish-payload-timeout" "restore the local clock" ;; esac
   deadline="$((started + SCAN_TIMEOUT_S))"
   object_names="$(agent_memory_mktemp)" || fail "cannot allocate publication payload scan"
@@ -687,7 +673,6 @@ scan_publish_range() {  # BASE_SHA HEAD_SHA
       rm -f "$object_names" "$object_ids" "$object_payload"
       park "publish-payload-object-limit" "reduce the branch history or raise the bounded object cap"
     }
-    oid="${oid//$'\r'/}"
     case "$oid" in *[!0-9a-f]*|"")
       rm -f "$object_names" "$object_ids" "$object_payload"
       park "publish-payload-unreadable" "repair the exact local commit range"
@@ -707,7 +692,6 @@ scan_publish_range() {  # BASE_SHA HEAD_SHA
       rm -f "$object_names" "$object_ids" "$object_payload"
       park "publish-payload-unreadable" "restore every object in the exact commit range"
     }
-    object_type="${object_type//$'\r'/}"
     case "$object_type" in
       blob|commit|tag|tree)
         remaining="$(scan_remaining "$deadline")" || {
@@ -719,7 +703,6 @@ scan_publish_range() {  # BASE_SHA HEAD_SHA
           rm -f "$object_names" "$object_ids" "$object_payload"
           park "publish-payload-unreadable" "restore every object in the exact commit range"
         }
-        object_size="${object_size//$'\r'/}"
         case "$object_size" in *[!0-9]*|"")
           rm -f "$object_names" "$object_ids" "$object_payload"
           park "publish-payload-unreadable" "inspect the malformed Git object size"
@@ -743,7 +726,7 @@ scan_publish_range() {  # BASE_SHA HEAD_SHA
           rm -f "$object_names" "$object_ids" "$object_payload"
           park "publish-payload-unreadable" "restore every object in the exact commit range"
         fi
-        actual_size="$(wc -c < "$object_payload" | tr -d ' \r')" || {
+        actual_size="$(wc -c < "$object_payload" | tr -d ' ')" || {
           rm -f "$object_names" "$object_ids" "$object_payload"
           park "publish-payload-unreadable" "inspect the materialized Git object"
         }
@@ -782,7 +765,6 @@ open_publish_dir_guard() {
       exec 9<&-
       fail "cannot bind the publication directory guard"
     }
-  PUBLISH_DIR_GUARD_ID="${PUBLISH_DIR_GUARD_ID//$'\r'/}"
   case "$PUBLISH_DIR_GUARD_ID" in
     *[!0-9a-f:]*|""|:*|*:|*:*:*)
       exec 9<&-
@@ -812,10 +794,8 @@ assert_snapshot() {  # BRANCH HEAD TREE BASE_SHA
   assert_clean
   [ "$(current_branch)" = "$branch" ] || park "branch-changed" "return to $branch"
   current="$("$GIT" -C "$REPO" rev-parse HEAD)"
-  current="${current//$'\r'/}"
   [ "$current" = "$head" ] || park "head-changed" "prepare a new publication intent"
   current="$("$GIT" -C "$REPO" rev-parse 'HEAD^{tree}')"
-  current="${current//$'\r'/}"
   [ "$current" = "$head_tree" ] || park "tree-changed" "prepare a new publication intent"
   current="$(remote_ref_sha "$REMOTE_FETCH_URL" "$BASE")"
   [ "$current" = "$base_sha" ] || park "base-moved" "review against the new remote base"
@@ -862,8 +842,6 @@ prepare() {
     park "unexpected-base" "repeat whole-change review against the current remote base"
   head="$("$GIT" -C "$REPO" rev-parse HEAD)"
   tree="$("$GIT" -C "$REPO" rev-parse 'HEAD^{tree}')"
-  head="${head//$'\r'/}"
-  tree="${tree//$'\r'/}"
   [ -z "$EXPECTED_HEAD" ] || [ "$head" = "$EXPECTED_HEAD" ] ||
     park "unexpected-head" "repeat acceptance and whole-change review"
   [ -z "$EXPECTED_TREE" ] || [ "$tree" = "$EXPECTED_TREE" ] ||
@@ -890,7 +868,6 @@ prepare() {
       resume_cmd="$(draft_shell_join oms draft-pr --repo "$REPO" \
         --intent "$intent_path" publish)" ||
         fail "cannot render the exact publish continuation"
-      resume_cmd="${resume_cmd//$'\r'/}"
       park "intent-already-prepared" "$resume_cmd"
     fi
     park "intent-already-prepared" "inspect the terminal intent slot or use a new branch name"
@@ -922,7 +899,6 @@ prepare() {
       ;;
     *) park "commit-range-invalid" "inspect the bounded branch history" ;;
   esac
-  ahead="${ahead//$'\r'/}"
   case "$ahead" in *[!0-9]*|"") park "commit-range-invalid" "inspect the branch history" ;; esac
   [ "$ahead" -gt 0 ] || fail "source branch has no commit beyond the remote base"
   source_sha="$(remote_ref_sha "$REMOTE_PUSH_URL" "$branch")"
@@ -1029,7 +1005,6 @@ prepare() {
       fail "could not write the exact publication intent"
     }
   rm -f "$body_file"
-  intent_path="${intent_path//$'\r'/}"
   "$GIT" -C "$REPO" check-ignore -q -- "$intent_path" 2>/dev/null ||
     fail "prepared publication intent lost Git-ignore protection"
   echo "intent: $intent_path"
@@ -1057,16 +1032,13 @@ publish_locked() {
   assert_native_git_graph
   blocked="$(python3 "$INTENT_HELPER" blocked --path "$INTENT" --repo "$REPO")" ||
     fail "cannot validate the publication revocation marker"
-  blocked="${blocked//$'\r'/}"
   case "$blocked" in 0) ;; 1)
     park "intent-terminally-blocked" "prepare a new intent with a new branch name"
     ;; *) fail "publication revocation marker returned an invalid state" ;; esac
   immutable_sha="$(python3 "$INTENT_HELPER" immutable --path "$INTENT" --repo "$REPO")" ||
     fail "cannot freeze publication intent"
-  immutable_sha="${immutable_sha//$'\r'/}"
   state_sha="$(python3 "$INTENT_HELPER" state --path "$INTENT" --repo "$REPO")" ||
     fail "cannot freeze publication intent state"
-  state_sha="${state_sha//$'\r'/}"
   phase="$(intent_field phase)"
   head="$(intent_field head_sha)"
   tree="$(intent_field tree_sha)"
@@ -1085,21 +1057,12 @@ publish_locked() {
   body_sha="$(intent_field body_sha256)"
   saved_url="$(intent_field pr_url)"
   saved_number="$(intent_field pr_number)"
-  phase="${phase//$'\r'/}"; head="${head//$'\r'/}"; tree="${tree//$'\r'/}"
-  branch="${branch//$'\r'/}"; base="${base//$'\r'/}"; base_sha="${base_sha//$'\r'/}"
-  remote="${remote//$'\r'/}"; slug="${slug//$'\r'/}"; verify="${verify//$'\r'/}"
-  fetch_url="${fetch_url//$'\r'/}"; push_url="${push_url//$'\r'/}"
-  viewer_login="${viewer_login//$'\r'/}"; spec_sha="${spec_sha//$'\r'/}"
-  title="${title//$'\r'/}"; title_sha="${title_sha//$'\r'/}"; body_sha="${body_sha//$'\r'/}"
-  saved_url="${saved_url//$'\r'/}"; saved_number="${saved_number//$'\r'/}"
   current_immutable="$(python3 "$INTENT_HELPER" immutable --path "$INTENT" --repo "$REPO")" ||
     fail "cannot revalidate publication intent"
-  current_immutable="${current_immutable//$'\r'/}"
   [ "$current_immutable" = "$immutable_sha" ] ||
     fail "publication intent changed while its fields were loaded"
   current_state="$(python3 "$INTENT_HELPER" state --path "$INTENT" --repo "$REPO")" ||
     fail "cannot revalidate publication intent state"
-  current_state="${current_state//$'\r'/}"
   [ "$current_state" = "$state_sha" ] ||
     fail "publication intent state changed while its fields were loaded"
   REMOTE="$remote"
@@ -1135,7 +1098,6 @@ publish_locked() {
     poison_intent
     park "intent-changed-by-verifier" "this intent is terminal; prepare with a new branch name"
   }
-  current_immutable="${current_immutable//$'\r'/}"
   if [ "$current_immutable" != "$immutable_sha" ]; then
     poison_intent
     park "intent-changed-by-verifier" "this intent is terminal; prepare with a new branch name"
@@ -1144,7 +1106,6 @@ publish_locked() {
     poison_intent
     park "intent-state-changed-by-verifier" "this intent is terminal; prepare with a new branch name"
   }
-  current_state="${current_state//$'\r'/}"
   if [ "$current_state" != "$state_sha" ]; then
     poison_intent
     park "intent-state-changed-by-verifier" "this intent is terminal; prepare with a new branch name"
@@ -1154,7 +1115,6 @@ publish_locked() {
     park "intent-revocation-changed-by-verifier" \
       "this intent is terminal; prepare with a new branch name"
   }
-  blocked="${blocked//$'\r'/}"
   case "$blocked" in
     0) close_publish_dir_guard ;;
     1)
@@ -1180,7 +1140,6 @@ publish_locked() {
   scan_publish_range "$base_sha" "$head"
   armed="$(python3 "$INTENT_HELPER" armed --path "$INTENT" --repo "$REPO")" ||
     park "push-attempt-state-invalid" "inspect the exact publication intent and sidecars"
-  armed="${armed//$'\r'/}"
   case "$armed" in 0|1) ;; *) park "push-attempt-state-invalid" "inspect the publication sidecars" ;; esac
   case "$phase" in
     prepared) ;;
@@ -1213,11 +1172,9 @@ publish_locked() {
       --phase pushing --expected-phase prepared \
       --expected-immutable-sha256 "$immutable_sha" --expected-state-sha256 "$state_sha")" ||
       park "intent-state-raced-before-push" "inspect the publication intent"
-    state_sha="${state_sha//$'\r'/}"
     phase=pushing
     current_state="$(python3 "$INTENT_HELPER" state --path "$INTENT" --repo "$REPO")" ||
       park "intent-state-unreadable-before-push" "inspect the publication intent"
-    current_state="${current_state//$'\r'/}"
     [ "$current_state" = "$state_sha" ] ||
       park "intent-state-raced-before-push" "inspect the publication intent"
     push_rc=0
@@ -1254,7 +1211,6 @@ publish_locked() {
       --phase pushing --expected-phase prepared \
       --expected-immutable-sha256 "$immutable_sha" --expected-state-sha256 "$state_sha")" ||
       park "intent-state-raced-after-push" "inspect the publication intent"
-    state_sha="${state_sha//$'\r'/}"
     phase=pushing
   fi
   if [ "$phase" = pushing ]; then
@@ -1262,7 +1218,6 @@ publish_locked() {
       --phase pushed --expected-phase pushing \
       --expected-immutable-sha256 "$immutable_sha" --expected-state-sha256 "$state_sha")" ||
       park "intent-state-raced-after-push" "inspect the publication intent"
-    state_sha="${state_sha//$'\r'/}"
     phase=pushed
   fi
 
@@ -1274,7 +1229,6 @@ publish_locked() {
       rm -f "$pr_json"
       park "existing-pr-conflict" "inspect the source branch's pull requests"
     }
-  pr_state="${pr_state//$'\r'/}"
   if [ "$pr_state" = none ]; then
     # GitHub's create API accepts branch names rather than expected object IDs.
     # Narrow that unavoidable CAS window to the request itself, then validate
@@ -1307,7 +1261,6 @@ publish_locked() {
         rm -f "$pr_json"
         park "draft-pr-not-observable" "retry after GitHub records the Draft PR"
       }
-    pr_state="${pr_state//$'\r'/}"
   fi
   rm -f "$pr_json"
   assert_snapshot "$branch" "$head" "$tree" "$base_sha"
@@ -1333,7 +1286,6 @@ publish_locked() {
       --expected-phase pushed --expected-immutable-sha256 "$immutable_sha" \
       --expected-state-sha256 "$state_sha")" ||
       park "intent-state-raced-after-pr" "inspect the exact Draft PR and local intent"
-    state_sha="${state_sha//$'\r'/}"
   fi
 
   # CI is an observer after publication. Its outage is visible but cannot
@@ -1360,7 +1312,6 @@ case "$ACTION" in
     # the lock key is trusted; a field read is also a complete schema check.
     INTENT="$(python3 "$INTENT_HELPER" canonical --path "$INTENT" --repo "$REPO")" ||
       fail "intent is not a canonical private publication file"
-    INTENT="${INTENT//$'\r'/}"
     "$GIT" -C "$REPO" check-ignore -q -- "$INTENT" 2>/dev/null ||
       fail "publication intents must remain Git-ignored"
     oms_with_file_lock "$INTENT" publish_locked

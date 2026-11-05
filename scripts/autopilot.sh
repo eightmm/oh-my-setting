@@ -322,13 +322,9 @@ done
 [ "$DISCOVER" -eq 0 ] || [ "$ACTION" = propose ] ||
   fail "--discover is only valid with propose"
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
-REPO="${REPO//$'\r'/}"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve the physical repository path"
-REPO="${REPO//$'\r'/}"
 STATE_REPO="$(oms_state_root "$REPO")" || fail "cannot resolve the canonical state repository"
-STATE_REPO="${STATE_REPO//$'\r'/}"
 STATE_REPO="$(cd "$STATE_REPO" && pwd -P)" || fail "cannot resolve the physical state repository path"
-STATE_REPO="${STATE_REPO//$'\r'/}"
 # A verified scratch is the execution checkout (Git, PROJECT.md, work branch)
 # while plan, receipt, proposals and markers stay in the canonical state root.
 # oms_state_root does not check liveness, but the worker guard exempts a
@@ -379,7 +375,6 @@ if row["stage"] != "done" and os.path.realpath(row["repo"]) != os.path.realpath(
     raise SystemExit(3)
 PY
 )" || receipt_admission=$?
-      receipt_bound="${receipt_bound//$'\r'/}"
       case "$receipt_admission" in
         0) ;;
         3) fail "the autopilot receipt is bound to execution checkout $receipt_bound, not $REPO; only status and abandon run from another checkout" ;;
@@ -405,7 +400,6 @@ outer_receipt_abandon_locked() {  # REASON
   fi
   expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" ||
     return $?
-  expected="${expected//$'\r'/}"
   python3 "$RECEIPT_HELPER" abandon "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" \
     --expected "$expected" --reason "$reason" \
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -445,7 +439,6 @@ if [ "$ACTION" = abandon ]; then
   [ -n "${ACTION_REASON:-}" ] || fail "abandon requires --reason"
   record="$(oms_with_file_lock "$OUTER_RECEIPT" \
     outer_receipt_abandon_locked "$ACTION_REASON")" || exit $?
-  record="${record//$'\r'/}"
   echo "autopilot: receipt abandoned; the exact contract is preserved and the exit recorded at $record"
   echo "autopilot: a fresh propose may now bind a new contract"
   if plan_has_open_tasks; then
@@ -480,7 +473,6 @@ validate_duration() {  # VALUE LABEL
     *) fail "$label must be a positive integer duration (s, m, or h)" ;;
   esac
   seconds="$(duration_seconds "$value")" || fail "$label is invalid"
-  seconds="${seconds//$'\r'/}"
   [ "$seconds" -le 86400 ] || fail "$label must be at most 24h"
 }
 
@@ -533,12 +525,11 @@ fi
 validate_duration "$PLANNER_TIMEOUT" "--planner-timeout"
 validate_duration "$WORKER_TIMEOUT" "--worker-timeout"
 validate_duration "$REVIEWER_TIMEOUT" "--reviewer-timeout"
-planner_seconds="$(duration_seconds "$PLANNER_TIMEOUT")"; planner_seconds="${planner_seconds//$'\r'/}"
-worker_seconds="$(duration_seconds "$WORKER_TIMEOUT")"; worker_seconds="${worker_seconds//$'\r'/}"
-reviewer_seconds="$(duration_seconds "$REVIEWER_TIMEOUT")"; reviewer_seconds="${reviewer_seconds//$'\r'/}"
+planner_seconds="$(duration_seconds "$PLANNER_TIMEOUT")"
+worker_seconds="$(duration_seconds "$WORKER_TIMEOUT")"
+reviewer_seconds="$(duration_seconds "$REVIEWER_TIMEOUT")"
 verify_seconds="$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_verify_timeout_seconds' _ "$ROOT")" ||
   fail "OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h"
-verify_seconds="${verify_seconds//$'\r'/}"
 # A routed model call may spend primary + two safeguard recoveries + one
 # catalog alternate + one capacity fallback before returning.
 PLANNER_PHASE_WALL=$((planner_seconds * 5 + 60))
@@ -687,15 +678,12 @@ autopilot_mktemp() {
 
 autopilot_native_pid_prepare() {
   [ -z "$AUTOPILOT_NATIVE_PID" ] || return 0
-  # Pass the logical pid explicitly: the helper may run in command
-  # substitution, but it resolves /proc/<logical>/winpid instead of guessing
-  # from that short-lived substitution process.
+  # Pass the logical pid explicitly so command substitution does not observe a
+  # short-lived subshell pid.
   AUTOPILOT_NATIVE_PID="$(oms_process_native_pid "$$")" ||
     fail "cannot resolve the autopilot native process identity"
-  AUTOPILOT_NATIVE_PID="${AUTOPILOT_NATIVE_PID//$'\r'/}"
   AUTOPILOT_NATIVE_PID_SOURCE="$(oms_process_native_pid_source)" ||
     fail "cannot resolve the autopilot native pid provenance"
-  AUTOPILOT_NATIVE_PID_SOURCE="${AUTOPILOT_NATIVE_PID_SOURCE//$'\r'/}"
   case "$AUTOPILOT_NATIVE_PID" in
     *[!0-9]*|"") fail "autopilot native pid is invalid" ;;
   esac
@@ -709,14 +697,12 @@ autopilot_owner_prepare() {
   if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
     AUTOPILOT_OWNER_ID="$(python3 "$RECEIPT_HELPER" owner-id "$OUTER_RECEIPT")" ||
       fail "cannot read the autopilot owner binding"
-    AUTOPILOT_OWNER_ID="${AUTOPILOT_OWNER_ID//$'\r'/}"
   else
     AUTOPILOT_OWNER_ID="$(python3 - <<'PY'
 import secrets
 print("owner_" + secrets.token_hex(16))
 PY
 )" || fail "cannot create the autopilot owner binding"
-    AUTOPILOT_OWNER_ID="${AUTOPILOT_OWNER_ID//$'\r'/}"
   fi
   if [ -n "$AUTOPILOT_OWNER_ID" ]; then
     case "$AUTOPILOT_OWNER_ID" in owner_*) ;; *) fail "autopilot owner binding is invalid" ;; esac
@@ -727,197 +713,20 @@ PY
   export OMS_AUTOPILOT_OWNER_ID
 }
 
-# OMS_REENTER_ANCHOR_BEGIN
-REENTER_CONTINUATION_PID=""
-REENTER_CONTINUATION_NATIVE_PID=""
-REENTER_PENDING_SIGNAL=""
-REENTER_PENDING_EXIT=""
-
-reenter_continuation_stopped() {  # PID
-  ! kill -0 "$1" 2>/dev/null
-}
-
-reenter_wait_continuation_stop() {  # PID
-  local logical_pid="$1" attempt=0
-  while [ "$attempt" -lt 20 ]; do
-    reenter_continuation_stopped "$logical_pid" && return 0
-    sleep 0.1
-    attempt=$((attempt + 1))
-  done
-  reenter_continuation_stopped "$logical_pid"
-}
-
-reenter_capture_continuation_native_pid() {  # LOGICAL_PID
-  local logical_pid="$1" native_pid=""
-  REENTER_CONTINUATION_NATIVE_PID=""
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      if [ -r "/proc/$logical_pid/winpid" ]; then
-        IFS= read -r native_pid < "/proc/$logical_pid/winpid" || native_pid=""
-        native_pid="${native_pid//$'\r'/}"
-      fi
-      case "$native_pid" in *[!0-9]*|""|0) native_pid="" ;; esac
-      [ -n "$native_pid" ] || return 1
-      [ "$native_pid" -le 4294967295 ] 2>/dev/null || return 1
-      REENTER_CONTINUATION_NATIVE_PID="$native_pid"
-      ;;
-    *) return 1 ;;
-  esac
-}
-
-reenter_uses_windows_process_tree() {
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-reenter_continuation_native_pid_is_current() {  # LOGICAL_PID
-  local logical_pid="$1" current_pid=""
-  [ -n "$REENTER_CONTINUATION_NATIVE_PID" ] || return 1
-  [ -r "/proc/$logical_pid/winpid" ] || return 1
-  IFS= read -r current_pid < "/proc/$logical_pid/winpid" || return 1
-  current_pid="${current_pid//$'\r'/}"
-  [ "$current_pid" = "$REENTER_CONTINUATION_NATIVE_PID" ]
-}
-
-reenter_taskkill_continuation_tree() {  # LOGICAL_PID FORCE(0|1)
-  local logical_pid="$1" force="$2"
-  reenter_continuation_native_pid_is_current "$logical_pid" || return 1
-  python3 - "$REENTER_CONTINUATION_NATIVE_PID" "$force" <<'PY'
-import subprocess
-import sys
-
-argv = ["taskkill.exe", "/PID", sys.argv[1], "/T"]
-if sys.argv[2] == "1":
-    argv.append("/F")
-try:
-    completed = subprocess.run(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=1,
-        check=False,
-    )
-except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit(1)
-raise SystemExit(completed.returncode)
-PY
-}
-
-reenter_forward_signal() {  # SIGNAL EXIT_CODE
-  local signal_name="$1" exit_code="$2" windows_tree=0 tree_stop_proven=1
-  if [ -z "$REENTER_CONTINUATION_PID" ]; then
-    # Bash may run a pending trap between the async spawn and the following
-    # $! assignment. Keep the first signal until the child identity is known;
-    # exiting here would orphan the continuation and its live owner claim.
-    if [ -z "$REENTER_PENDING_SIGNAL" ]; then
-      REENTER_PENDING_SIGNAL="$signal_name"
-      REENTER_PENDING_EXIT="$exit_code"
-    fi
-    return 0
-  fi
-  trap - HUP INT TERM
-  if reenter_uses_windows_process_tree; then
-    windows_tree=1
-    tree_stop_proven=0
-    # Do not send an MSYS signal first: a native root may disappear before
-    # taskkill snapshots its descendants, orphaning the rest of the tree.
-    # Let taskkill request a bounded non-forced tree stop before escalating.
-    if reenter_capture_continuation_native_pid "$REENTER_CONTINUATION_PID" &&
-        reenter_continuation_native_pid_is_current "$REENTER_CONTINUATION_PID" &&
-        reenter_taskkill_continuation_tree "$REENTER_CONTINUATION_PID" 0; then
-      tree_stop_proven=1
-    fi
-  else
-    kill -s "$signal_name" "$REENTER_CONTINUATION_PID" 2>/dev/null || true
-  fi
-  if ! reenter_wait_continuation_stop "$REENTER_CONTINUATION_PID"; then
-    if [ "$windows_tree" = 1 ]; then
-      tree_stop_proven=0
-      if reenter_continuation_native_pid_is_current "$REENTER_CONTINUATION_PID" &&
-          reenter_taskkill_continuation_tree "$REENTER_CONTINUATION_PID" 1; then
-        tree_stop_proven=1
-      fi
-      # Never signal a numeric MSYS pid after its frozen native identity has
-      # disappeared; that number may already identify an unrelated process.
-      if reenter_continuation_native_pid_is_current "$REENTER_CONTINUATION_PID"; then
-        kill -KILL "$REENTER_CONTINUATION_PID" 2>/dev/null || true
-      fi
-    else
-      kill -KILL "$REENTER_CONTINUATION_PID" 2>/dev/null || true
-    fi
-    if ! reenter_wait_continuation_stop "$REENTER_CONTINUATION_PID"; then
-      echo "error: reenter continuation did not stop after $signal_name" >&2
-      REENTER_CONTINUATION_PID=""
-      REENTER_CONTINUATION_NATIVE_PID=""
-      exit 2
-    fi
-  fi
-  if [ "$windows_tree" = 1 ] && [ "$tree_stop_proven" != 1 ]; then
-    echo "error: reenter continuation tree stop was not proven after $signal_name" >&2
-    REENTER_CONTINUATION_PID=""
-    REENTER_CONTINUATION_NATIVE_PID=""
-    exit 2
-  fi
-  wait "$REENTER_CONTINUATION_PID" 2>/dev/null || true
-  REENTER_CONTINUATION_PID=""
-  REENTER_CONTINUATION_NATIVE_PID=""
-  exit "$exit_code"
-}
-
-run_reenter_continuation() {  # COMMAND...
-  local continuation_rc=0 pending_signal pending_exit
-  REENTER_CONTINUATION_PID=""
-  REENTER_CONTINUATION_NATIVE_PID=""
-  REENTER_PENDING_SIGNAL=""
-  REENTER_PENDING_EXIT=""
-  trap 'reenter_forward_signal HUP 129' HUP
-  trap 'reenter_forward_signal INT 130' INT
-  trap 'reenter_forward_signal TERM 143' TERM
-  # A trapped disposition would survive into the continuation on Git Bash.
-  # Reset inside the async subshell, then exec so $! remains its signalable
-  # shell identity while the recorded reentry parent waits as the WINPID anchor.
-  (
-    trap - HUP INT TERM
-    exec "$@"
-  ) &
-  REENTER_CONTINUATION_PID=$!
-  if [ -n "$REENTER_PENDING_SIGNAL" ]; then
-    pending_signal="$REENTER_PENDING_SIGNAL"
-    pending_exit="$REENTER_PENDING_EXIT"
-    REENTER_PENDING_SIGNAL=""
-    REENTER_PENDING_EXIT=""
-    reenter_forward_signal "$pending_signal" "$pending_exit"
-  fi
-  if wait "$REENTER_CONTINUATION_PID"; then
-    continuation_rc=0
-  else
-    continuation_rc=$?
-  fi
-  REENTER_CONTINUATION_PID=""
-  REENTER_CONTINUATION_NATIVE_PID=""
-  trap - HUP INT TERM
-  return "$continuation_rc"
-}
-# OMS_REENTER_ANCHOR_END
-
 # reenter is the audited entrance mirroring abandon's exit: a fresh session
 # re-enters the live run with zero re-explanation. The helper appends the
 # typed record first (refusals included), validates the digests through the
 # same gate every resume passes, and prints the receipt-derived continuation.
-# POSIX execs it; Windows runs it under the recorded waiting parent anchor, so
-# either path derives from typed contract fields, never replayed prose. Runs
-# after the child-authority guard: a harness child cannot re-enter authority.
+# It execs the continuation derived from typed contract fields, never replayed
+# prose. Runs after the child-authority guard: a harness child cannot re-enter
+# authority.
 if [ "$ACTION" = reenter ]; then
   [ -f "$OUTER_RECEIPT" ] ||
     fail "no live autopilot receipt to re-enter; propose starts a new run"
   autopilot_native_pid_prepare
   reenter_out="$(autopilot_mktemp)" || fail "mktemp failed"
-  # POSIX preserves $$ through exec. Windows instead keeps this shell and its
-  # native pid alive as a waiting parent anchor. Either identity therefore
-  # remains checkable for the resumed run; liveness is the claim's expiry.
+  # POSIX preserves $$ through exec, so this process identity remains checkable
+  # for the resumed run; liveness is the claim's expiry.
   oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter \
     "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" --reason "${ACTION_REASON:-}" \
     --pid "$$" --native-pid "$AUTOPILOT_NATIVE_PID" \
@@ -925,7 +734,6 @@ if [ "$ACTION" = reenter ]; then
     --updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$reenter_out" || exit $?
   reenter_judgment=""
   IFS= read -r reenter_judgment < "$reenter_out" || fail "reenter judgment is missing"
-  reenter_judgment="${reenter_judgment//$'\r'/}"
   reenter_judgment_fields="$(OMS_REENTER_JUDGMENT="$reenter_judgment" python3 - <<'PY'
 import json
 import os
@@ -955,7 +763,6 @@ if (isinstance(dead_native_pid, bool) or not isinstance(dead_native_pid, int)
 print("%s\t%d\t%d\t%s" % (predecessor, dead_pid, dead_native_pid, owner))
 PY
 )" || fail "reenter judgment is malformed"
-  reenter_judgment_fields="${reenter_judgment_fields//$'\r'/}"
   IFS=$'\t' read -r reenter_receipt_sha reenter_dead_pid \
     reenter_dead_native_pid AUTOPILOT_OWNER_ID <<EOF
 $reenter_judgment_fields
@@ -971,7 +778,6 @@ EOF
   while IFS= read -r reenter_line; do
     reenter_line_number=$((reenter_line_number + 1))
     [ "$reenter_line_number" -ne 1 ] || continue
-    reenter_line="${reenter_line//$'\r'/}"
     [ -n "$reenter_line" ] || continue
     reenter_cont+=("$reenter_line")
   done < "$reenter_out"
@@ -988,7 +794,6 @@ EOF
       recover-owner --owner-id "$AUTOPILOT_OWNER_ID" \
       --markers-dir "$STATE_REPO/.oms/delegations" --json)" ||
       fail "could not recover the dead session's owned leases"
-    reenter_recovery="${reenter_recovery//$'\r'/}"
     reenter_requeued="$(OMS_REENTER_RECOVERY="$reenter_recovery" python3 - <<'PY'
 import json
 import os
@@ -996,7 +801,6 @@ row = json.loads(os.environ["OMS_REENTER_RECOVERY"])
 print(",".join(row.get("recovered") or []))
 PY
 )" || fail "owner recovery returned malformed output"
-    reenter_requeued="${reenter_requeued//$'\r'/}"
     if [ -n "$reenter_requeued" ]; then
       oms_with_file_lock "$OUTER_RECEIPT" python3 "$RECEIPT_HELPER" reenter-note \
         "$OUTER_RECEIPT" --repo "$REPO" --state-repo "$STATE_REPO" --requeued "$reenter_requeued" \
@@ -1011,19 +815,7 @@ PY
   fi
   trap - EXIT HUP INT TERM
   autopilot_cleanup
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      # An MSYS/Cygwin exec may keep $$ while replacing its backing WINPID.
-      # Keep this recorded claimant alive as the synchronous parent anchor.
-      if run_reenter_continuation bash "$0" "${reenter_cont[@]:2}"; then
-        reenter_continuation_rc=0
-      else
-        reenter_continuation_rc=$?
-      fi
-      exit "$reenter_continuation_rc"
-      ;;
-    *) exec bash "$0" "${reenter_cont[@]:2}" ;;
-  esac
+  exec bash "$0" "${reenter_cont[@]:2}"
 fi
 
 run_phase() {  # LABEL WALL_SECONDS COMMAND...
@@ -1043,7 +835,7 @@ run_phase() {  # LABEL WALL_SECONDS COMMAND...
 }
 
 autopilot_shell_join() {  # ARGV...
-  python3 - "$@" <<'PY' | tr -d '\r'
+  python3 - "$@" <<'PY'
 import shlex, sys
 print(" ".join(shlex.quote(value) for value in sys.argv[1:]))
 PY
@@ -1057,7 +849,6 @@ resolve_review_base_sha() {
   fi
   sha="$(git -C "$REPO" rev-parse --verify "$ref^{commit}" 2>/dev/null)" ||
     fail "cannot resolve --base from refs/remotes/$REMOTE/$BASE or refs/heads/$BASE"
-  sha="${sha//$'\r'/}"
   case "$sha" in *[!0-9a-f]*|"") fail "resolved base commit is invalid" ;; esac
   case "${#sha}" in 40|64) ;; *) fail "resolved base commit has an unsupported object id" ;; esac
   printf '%s\n' "$sha"
@@ -1068,12 +859,12 @@ resolve_review_base_sha() {
 current_branch_or_base() {
   local current head
   if current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
-    printf '%s\n' "${current//$'\r'/}"
+    printf '%s\n' "$current"
     return 0
   fi
   [ -n "$review_base_sha" ] || return 1
   head="$(git -C "$REPO" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)" || return 1
-  [ "${head//$'\r'/}" = "$review_base_sha" ] || return 1
+  [ "$head" = "$review_base_sha" ] || return 1
   printf '%s\n' "$BASE"
 }
 
@@ -1124,7 +915,6 @@ outer_receipt_write_locked() {  # STAGE
   local -a receipt_args
   if [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ]; then
     expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || return $?
-    expected="${expected//$'\r'/}"
   fi
   outer_receipt_binding_args write "$stage" "$expected" || return $?
   if [ "$stage" = parked ]; then
@@ -1144,7 +934,6 @@ outer_receipt_retire_base_moved_locked() {
     return 0
   fi
   expected="$(python3 "$RECEIPT_HELPER" digest "$OUTER_RECEIPT")" || return $?
-  expected="${expected//$'\r'/}"
   outer_receipt_binding_args retire-proposing-base-moved proposing "$expected" || return $?
   python3 "$RECEIPT_HELPER" "${receipt_args[@]}"
 }
@@ -1174,7 +963,6 @@ outer_receipt_write() {  # STAGE
   local value
   autopilot_owner_prepare
   value="$(oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_write_locked "$1")" || return $?
-  value="${value//$'\r'/}"
   OUTER_STAGE="$1"
   OUTER_RECEIPT_READY=1
   printf '%s\n' "$value"
@@ -1184,7 +972,6 @@ outer_receipt_write_discovery_proposing() {
   local value
   autopilot_owner_prepare
   value="$(oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_write_discovery_locked)" || return $?
-  value="${value//$'\r'/}"
   OUTER_STAGE=proposing
   OUTER_RECEIPT_READY=1
   printf '%s\n' "$value"
@@ -1198,7 +985,6 @@ outer_receipt_write_discovery_locked() {
 outer_receipt_archive_done_locked() {
   local metadata stage receipt_sha
   metadata="$(python3 "$RECEIPT_HELPER" metadata "$OUTER_RECEIPT")" || return $?
-  metadata="${metadata//$'\r'/}"
   stage="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $1}')"
   receipt_sha="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $3}')"
   [ "$stage" = "done" ] || return 4
@@ -1210,7 +996,6 @@ outer_receipt_prepare_new() {
   local metadata stage
   [ -e "$OUTER_RECEIPT" ] || [ -L "$OUTER_RECEIPT" ] || return 0
   metadata="$(python3 "$RECEIPT_HELPER" metadata "$OUTER_RECEIPT")" || return $?
-  metadata="${metadata//$'\r'/}"
   stage="$(printf '%s\n' "$metadata" | awk -F '\t' '{print $1}')"
   [ "$stage" = "done" ] || return 0
   oms_with_file_lock "$OUTER_RECEIPT" outer_receipt_archive_done_locked
@@ -1338,11 +1123,10 @@ fi
 plan_view() {  # MODE: all-done|has-r1|accept
   if [ "$1" = all-done ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null | \
-      python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("all_done") else "0")' | \
-      tr -d '\r'
+      python3 -c 'import json,sys; print("1" if json.load(sys.stdin).get("all_done") else "0")'
     return
   fi
-  python3 - "$PLAN_FILE" "$1" <<'PY' | tr -d '\r'
+  python3 - "$PLAN_FILE" "$1" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
@@ -1356,11 +1140,11 @@ PY
 }
 
 normalize_allowed() {  # TEXT
-  python3 "$PATH_SCOPE_HELPER" normalize-list "$1" | tr -d '\r'
+  python3 "$PATH_SCOPE_HELPER" normalize-list "$1"
 }
 
 normalize_scope_default() {  # PROJECT_SCOPE -> normalized allowed envelope
-  python3 "$PATH_SCOPE_HELPER" normalize-scope-default "$1" | tr -d '\r'
+  python3 "$PATH_SCOPE_HELPER" normalize-scope-default "$1"
 }
 
 # A plan file is not the same thing as a plan bound to THIS contract.
@@ -1417,7 +1201,6 @@ print(spec)
 print(",".join(allowed))
 PY
 )" || fail "approved plan lacks a valid PROJECT.md/scope contract; create a reviewed proposal"
-  meta="${meta//$'\r'/}"
   contract_spec="$(printf '%s\n' "$meta" | sed -n 1p)"
   contract_allowed="$(printf '%s\n' "$meta" | sed -n 2p)"
   if [ -n "$ALLOWED" ]; then
@@ -1433,7 +1216,7 @@ PY
 }
 
 proposal_info() {  # FILE -> prefix + presence
-  python3 - "$1" "$PLAN_FILE" <<'PY' | tr -d '\r'
+  python3 - "$1" "$PLAN_FILE" <<'PY'
 import json, os, re, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     proposal = json.load(handle)
@@ -1477,7 +1260,6 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   autopilot_owner_prepare
   retired_record="$(oms_with_file_lock "$OUTER_RECEIPT" \
     outer_receipt_retire_base_moved_locked)" || retired_record=""
-  retired_record="${retired_record//$'\r'/}"
   if [ -n "$retired_record" ]; then
     echo "autopilot: retired stale proposing receipt after base moved; abandon record: $retired_record"
   fi
@@ -1520,7 +1302,6 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
       if retired_record="$(oms_with_file_lock "$OUTER_RECEIPT" \
         outer_receipt_retire_empty_discovery_locked "$discovery_receipt_sha" \
         discovery-no-proposal)"; then
-        retired_record="${retired_record//$'\r'/}"
         echo "autopilot: receipt retired after a discovery that produced no proposal; the next propose may bind a fresh contract ($retired_record)"
       else
         echo "autopilot: receipt was not retired; it changed or no longer matches the discovery retirement conditions" >&2
@@ -1534,7 +1315,6 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
     rm -f "$out"
     if record="$(oms_with_file_lock "$OUTER_RECEIPT" \
       outer_receipt_retire_empty_discovery_locked "$discovery_receipt_sha")"; then
-      record="${record//$'\r'/}"
       echo "autopilot: receipt retired after empty discovery; the next propose may bind a fresh contract ($record)"
     else
       echo "autopilot: receipt was not retired; it changed or no longer matches the empty-discovery retirement conditions" >&2
@@ -1544,11 +1324,9 @@ propose_tasks() {  # PREFIX MAX [DISCOVER]
   proposal_path="$(sed -n 's/^plan-from-spec: proposed .* -> //p' "$out" | tail -n 1)"
   proposal_digest="$(sed -n 's/^plan-from-spec: proposal sha256: //p' "$out" | tail -n 1)"
   rm -f "$out"
-  proposal_path="${proposal_path//$'\r'/}"
-  proposal_digest="${proposal_digest//$'\r'/}"
   [ -n "$proposal_path" ] && [ -n "$proposal_digest" ] ||
     fail "the proposal was generated without a path/digest receipt"
-  proposal_path="$(python3 - "$STATE_REPO" "$proposal_path" <<'PY' | tr -d '\r'
+  proposal_path="$(python3 - "$STATE_REPO" "$proposal_path" <<'PY'
 import os, sys
 value = sys.argv[2]
 if not os.path.isabs(value):
@@ -1589,7 +1367,6 @@ PY
     --expected-proposal-sha256 "$proposal_digest")
   continuation_line="$(autopilot_shell_join "${continuation[@]}")" ||
     fail "cannot render the proposal continuation"
-  continuation_line="${continuation_line//$'\r'/}"
   echo "autopilot: proposal awaits parent-agent review"
   echo "autopilot: parent-agent continuation after review:"
   printf '  %s\n' "$continuation_line"
@@ -1603,7 +1380,6 @@ if [ "$ACTION" = propose ]; then
     fail "--allowed requires paths"
   if [ "$BASE_EXPLICIT" -eq 0 ]; then
     BASE="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
-    BASE="${BASE//$'\r'/}"
     [ -n "$BASE" ] || fail "propose requires --base so its continuation is executable"
     git check-ref-format --branch "$BASE" >/dev/null 2>&1 ||
       fail "propose requires --base so its continuation is executable"
@@ -1629,7 +1405,6 @@ if [ "$ACTION" = propose ]; then
     if [ "$ALLOWED_EXPLICIT" -eq 0 ]; then
       scope="$("$PLAN_FROM_SPEC" --repo "$REPO" --scope-only)" ||
         fail "cannot read PROJECT.md Scope; pass --allowed explicitly"
-      scope="${scope//$'\r'/}"
       scope_rc=0
       ALLOWED="$(normalize_scope_default "$scope")" || scope_rc=$?
       case "$scope_rc" in
@@ -1670,7 +1445,7 @@ fi
 git check-ref-format --branch "$BASE" >/dev/null 2>&1 || fail "--base is not a valid branch name"
 
 if [ -n "$PROPOSAL" ]; then
-  reviewed_proposal_path="$(python3 - "$STATE_REPO" "$PROPOSAL" <<'PY' | tr -d '\r'
+  reviewed_proposal_path="$(python3 - "$STATE_REPO" "$PROPOSAL" <<'PY'
 import os, sys
 value = sys.argv[2]
 if not os.path.isabs(value):
@@ -1703,7 +1478,6 @@ PY
     fail "run options differ from the durable proposal-review receipt"
   PROPOSAL="$proposal_snapshot"
   proposal_meta="$(proposal_info "$PROPOSAL")" || fail "proposal metadata/tasks are invalid"
-  proposal_meta="${proposal_meta//$'\r'/}"
   prefix="$(printf '%s\n' "$proposal_meta" | sed -n 1p)"
   proposal_presence="$(printf '%s\n' "$proposal_meta" | sed -n 2p)"
   [ "$proposal_presence" != partial ] || fail "proposal is partially present in the plan"
@@ -1814,14 +1588,12 @@ ensure_work_branch() {
   recovery_branch="$(git -C "$REPO" for-each-ref --sort=refname \
     --format='%(refname:short)' "refs/heads/$target-r*" |
     while IFS= read -r candidate; do
-      candidate="${candidate//$'\r'/}"
       recovery_suffix="${candidate#"$target-r"}"
       case "$recovery_suffix" in ""|0*|*[!0-9]*) continue ;; esac
       printf '%s\n' "$candidate"
       break
     done)" ||
     park "autopilot-branch-inspection-failed" "inspect the local work branches"
-  recovery_branch="${recovery_branch//$'\r'/}"
   [ -z "$recovery_branch" ] ||
     park "autopilot-recovery-branch-exists" \
       "checkout $recovery_branch and rerun the same autopilot command"
@@ -1900,7 +1672,6 @@ assert_work_branch_scope() {  # PARK_REASON HIDDEN_INDEX_PARK_REASON
 ensure_work_branch
 work_branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
   fail "autopilot requires a branch after work-branch selection"
-work_branch="${work_branch//$'\r'/}"
 outer_receipt_prepare_new || fail "cannot prepare the durable run receipt"
 outer_receipt_write approved >/dev/null ||
   fail "cannot bind this run to the durable outer receipt"
@@ -1909,7 +1680,6 @@ outer_receipt_write driving >/dev/null ||
 assert_work_branch_scope "work-branch-outside-scope" "hidden-index-flags"
 spec_sha="$BOUND_SPEC_SHA"
 accept_cmd="$(plan_view accept)"
-accept_cmd="${accept_cmd//$'\r'/}"
 [ -n "$accept_cmd" ] || fail "approved plan has no acceptance command"
 accept_sha="$(printf '%s' "$accept_cmd" | oms_sha256_stream)" || fail "cannot hash acceptance command"
 
@@ -1950,14 +1720,12 @@ oms_git_assert_plain_index "$REPO" ||
 
 current_work_branch="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
   park "branch-changed-after-drive" "restore $work_branch and inspect the drive"
-current_work_branch="${current_work_branch//$'\r'/}"
 [ "$current_work_branch" = "$work_branch" ] ||
   park "branch-changed-after-drive" "restore $work_branch and inspect the drive"
 
 current_spec_sha="$(oms_sha256_file "$SPEC")" || park "spec-unreadable" "restore PROJECT.md"
 [ "$current_spec_sha" = "$spec_sha" ] || park "spec-changed" "review the changed project contract"
 current_accept="$(plan_view accept)"
-current_accept="${current_accept//$'\r'/}"
 current_accept_sha="$(printf '%s' "$current_accept" | oms_sha256_stream)" ||
   park "acceptance-unhashable" "repair the plan contract"
 [ "$current_accept_sha" = "$accept_sha" ] ||
@@ -1972,7 +1740,7 @@ assert_work_branch_scope "work-branch-outside-scope-after-drive" \
 # it never selects the reason that can spend the bounded replan tranche.
 drive_terminal_result() {  # RUN_ID OUTPUT -> STATUS<TAB>REASON
   [ -f "$PROGRESS_FILE" ] || return 0
-  python3 - "$1" "$2" "$PROGRESS_FILE" <<'PY' | tr -d '\r'
+  python3 - "$1" "$2" "$PROGRESS_FILE" <<'PY'
 import json
 import re
 import sys
@@ -2033,7 +1801,6 @@ PY
 }
 
 drive_result="$(drive_terminal_result "$drive_run_id" "$drive_out")"
-drive_result="${drive_result//$'\r'/}"
 drive_status="$(printf '%s\n' "$drive_result" | awk -F '\t' '{print $1}')"
 drive_reason="$(printf '%s\n' "$drive_result" | awk -F '\t' '{print $2}')"
 if [ "$drive_rc" -ne 0 ]; then
@@ -2089,8 +1856,6 @@ fi
 final_head="$(git -C "$REPO" rev-parse HEAD)"
 final_tree="$(git -C "$REPO" rev-parse 'HEAD^{tree}')"
 final_plan_sha="$(oms_sha256_file "$PLAN_FILE")" || fail "cannot hash the completed plan"
-final_head="${final_head//$'\r'/}"
-final_tree="${final_tree//$'\r'/}"
 git -C "$REPO" merge-base --is-ancestor "$review_base_sha" "$final_head" 2>/dev/null ||
   park "base-not-ancestor-after-drive" "rebase onto the reviewed base and repeat the run"
 assert_work_branch_scope "work-branch-outside-scope-before-review" \
@@ -2103,12 +1868,11 @@ assert_final_snapshot() {
     park "tree-changed-after-acceptance" "inspect the foreign work"
   current="$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null)" ||
     park "branch-changed-after-review" "restore $work_branch and repeat whole-change review"
-  current="${current//$'\r'/}"
   [ "$current" = "$work_branch" ] ||
     park "branch-changed-after-review" "restore $work_branch and repeat whole-change review"
-  current="$(git -C "$REPO" rev-parse HEAD)"; current="${current//$'\r'/}"
+  current="$(git -C "$REPO" rev-parse HEAD)"
   [ "$current" = "$final_head" ] || park "head-changed-after-review" "repeat whole-change review"
-  current="$(git -C "$REPO" rev-parse 'HEAD^{tree}')"; current="${current//$'\r'/}"
+  current="$(git -C "$REPO" rev-parse 'HEAD^{tree}')"
   [ "$current" = "$final_tree" ] || park "tree-changed-after-review" "repeat whole-change review"
   current="$(oms_sha256_file "$PLAN_FILE")" || park "plan-unreadable-after-review" "restore the plan"
   [ "$current" = "$final_plan_sha" ] || park "plan-changed-after-review" "repeat whole-change review"
@@ -2130,7 +1894,6 @@ writers={task.get("provider") or task.get("assignment", {}).get("provider", sys.
 print(",".join(sorted(writers or {sys.argv[2]})))
 PY
 )" || park "review-authorship-unreadable" "inspect the completed task receipts"
-  review_writers="${review_writers//$'\r'/}"
   case ",$review_writers," in
     *",$REVIEWER,"*)
       if [ "$REVIEW_MODE" = gate ]; then

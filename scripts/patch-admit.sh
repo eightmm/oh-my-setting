@@ -190,9 +190,7 @@ REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git repo: $REPO"
 PATCH="$(cd "$(dirname "$PATCH")" && pwd)/$(basename "$PATCH")"
 reference_state="$(oms_state_root "$REPO")" || fail "cannot resolve reference state"
-reference_state="${reference_state//$'\r'/}"
 managed_input="$(python3 "$ROOT_LIB/landing-reference.py" admit "$reference_state" "$PATCH" "${REPORT:-$reference_state/.oms/artifacts/admit/pending.md}")" || fail "unsafe managed admission input"
-managed_input="${managed_input//$'\r'/}"
 # Parent admissions with the default internal report retain the exact private
 # generation for a later landing. Explicit reports and child calls keep their
 # existing input/report contract and simply require fresh landing admission.
@@ -206,7 +204,6 @@ if [ "$managed_input" = 0 ] && [ -z "$REPORT" ] &&
     allocate "$reference_state" "$PATCH" "$intake_id" "$intake_sha" "$REPO")" || capture_rc=$?
   [ "$capture_rc" -ne 3 ] || exit 1
   [ "$capture_rc" -eq 0 ] || fail "cannot capture admission input"
-  PATCH="${PATCH//$'\r'/}"
   managed_input=1
   intake_owned=1
 fi
@@ -230,13 +227,13 @@ if [ -n "$PLAN_TASK" ]; then
   case "$PLAN_TASK" in *[!A-Za-z0-9._-]*|"") fail "--plan-task must match [A-Za-z0-9._-]+" ;; esac
   plan_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" evidence-snapshot --id "$PLAN_TASK")" || fail "cannot read plan task $PLAN_TASK"
   oms_require_current_task_contract "$plan_json" || exit $?
-  PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' | tr -d '\r')"
+  PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))')"
   if [ -z "$PLAN_ID" ]; then
     "$ROOT/scripts/agent-plan.sh" --repo "$REPO" ensure-lineage >/dev/null ||
       fail "cannot establish plan lineage before admitting task $PLAN_TASK"
     plan_json="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" evidence-snapshot --id "$PLAN_TASK")" ||
       fail "cannot reread plan task $PLAN_TASK after establishing lineage"
-    PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))' | tr -d '\r')"
+    PLAN_ID="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("plan_id", ""))')"
   fi
   case "$PLAN_ID" in
     plan_*)
@@ -250,8 +247,6 @@ if [ -n "$PLAN_TASK" ]; then
   SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
   SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
   ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
-  # Windows Python prints CRLF; the LF-only splitters below would keep the CR.
-  ACCEPTANCE_FILES="${ACCEPTANCE_FILES//$'\r'/}"
   read_task_verify() {
     printf '%s' "$plan_json" | python3 -c '
 import json,sys
@@ -281,8 +276,7 @@ prefix_count=0
 if [ -n "$PLAN_TASK" ]; then
   batch_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" ||
     fail "cannot validate batch prefix for admission"
-  batch_prefix="${batch_prefix//$'\r'/}"
-  prefix_count="$(printf '%s' "$batch_prefix" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["checks"]))' | tr -d '\r')" ||
+  prefix_count="$(printf '%s' "$batch_prefix" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)["checks"]))')" ||
     fail "cannot read batch prefix verification count"
 fi
 prefix_field() {
@@ -302,7 +296,6 @@ reuse_parameters=("$VERIFY" "$ML" "$PLAN_TASK" "$ALLOW_VERIFIER_CHANGE" "$ALLOW_
 if [ "$managed_input" = 1 ]; then
   reuse_binding="$(python3 "$ROOT_LIB/landing-capture.py" binding "$reference_state" "$REPO" "${reuse_parameters[@]}")" ||
     reuse_binding=""
-  reuse_binding="${reuse_binding//$'\r'/}"
 fi
 
 # Verdict accumulator.
@@ -390,7 +383,7 @@ if [ "$apply_ok" = 1 ]; then
 
     # --- Gate 2: task path scope ----------------------------------
     scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" \
-      OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY' | tr -d '\r'
+      OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY'
 import os, re, runpy
 scope = runpy.run_path(os.environ["OMS_PATH_SCOPE_HELPER"])
 classify = scope["classify"]
@@ -719,7 +712,6 @@ else:
 SURFACE_PY
       }
       surface_scan="$(scan_surface)"
-      surface_scan="${surface_scan//$'\r'/}"
       surface_tab="$(printf '\t')"
       verifier_hit="$(printf '%s\n' "$surface_scan" | awk -F "$surface_tab" '$1 == "verifier" {print substr($0, length($1) + 2); exit}')"
       verification_surface="$(printf '%s\n' "$surface_scan" | awk -F "$surface_tab" '$1 == "surface" {print substr($0, length($1) + 2)}')"
@@ -791,7 +783,7 @@ PY
     comma_join() {
       printf '%s\n' "$1" | awk 'NF { printf "%s%s", separator, $0; separator=", " } END { if (separator != "") print "" }'
     }
-    encoding_loss="$(OMS_PATCH="$PATCH" OMS_SALVAGE_LIB="$ROOT_LIB" python3 - <<'PY' | tr -d '\r'
+    encoding_loss="$(OMS_PATCH="$PATCH" OMS_SALVAGE_LIB="$ROOT_LIB" python3 - <<'PY'
 import os
 import sys
 sys.path.insert(0, os.environ['OMS_SALVAGE_LIB'])
@@ -912,7 +904,7 @@ for t in tests:
     path = t.get("path") if isinstance(t, dict) else t
     if isinstance(path, str) and path and path not in verify:
         print(path)
-' 2>/dev/null | tr -d '\r')" || hint_tests=""
+' 2>/dev/null)" || hint_tests=""
       fi
       rm -f "$hint_idx"
       if [ -n "$hint_tests" ]; then
@@ -1077,7 +1069,6 @@ record "security" "$security_status" "$security_detail"
 
 if [ -n "$PLAN_TASK" ]; then
   current_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" || current_prefix=""
-  current_prefix="${current_prefix//$'\r'/}"
   if [ "$current_prefix" != "$batch_prefix" ]; then
     record "batch-prefix" "FAIL" "batch prefix changed during admission"
   fi

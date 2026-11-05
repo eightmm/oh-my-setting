@@ -179,7 +179,7 @@ checkpoint_create_raw() {
     id="cp-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM:-0}"
   done
   tmp="$(mktemp -d "$CHECKPOINT_ROOT/.create.XXXXXX")" || return 1
-  head="$(git -C "$REPO" rev-parse HEAD | tr -d '\r')"
+  head="$(git -C "$REPO" rev-parse HEAD)"
   created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   if ! write_index_patch "$tmp/index.patch" ||
@@ -187,10 +187,10 @@ checkpoint_create_raw() {
     rm -rf "$tmp"
     return 1
   fi
-  index_hash="$(oms_sha256_file "$tmp/index.patch" | tr -d '\r')"
-  worktree_hash="$(oms_sha256_file "$tmp/worktree.patch" | tr -d '\r')"
+  index_hash="$(oms_sha256_file "$tmp/index.patch")"
+  worktree_hash="$(oms_sha256_file "$tmp/worktree.patch")"
   untracked_count="$(git -C "$REPO" ls-files --others --exclude-standard -- |
-    awk 'END { print NR + 0 }' | tr -d '\r')"
+    awk 'END { print NR + 0 }')"
 
   if ! python3 - "$tmp/meta.json" "$id" "$created" "$head" "$label" \
       "$index_hash" "$worktree_hash" "$untracked_count" <<'PY'
@@ -234,7 +234,7 @@ checkpoint_verify_raw() {
     echo "error: checkpoint not found or unsafe: $id" >&2
     return 2
   fi
-  head="$(checkpoint_metadata_head "$dir" "$id" | tr -d '\r')" || return 1
+  head="$(checkpoint_metadata_head "$dir" "$id")" || return 1
   git -C "$REPO" cat-file -e "$head^{commit}" 2>/dev/null || {
     echo "error: checkpoint commit is not available locally: $head" >&2
     return 1
@@ -280,10 +280,10 @@ tracked_state_matches() {
   write_index_patch "$tmp/index.patch" || rc=1
   write_worktree_patch "$tmp/worktree.patch" || rc=1
   if [ "$rc" -eq 0 ]; then
-    current_index="$(oms_sha256_file "$tmp/index.patch" | tr -d '\r')"
-    current_worktree="$(oms_sha256_file "$tmp/worktree.patch" | tr -d '\r')"
-    saved_index="$(oms_sha256_file "$dir/index.patch" | tr -d '\r')"
-    saved_worktree="$(oms_sha256_file "$dir/worktree.patch" | tr -d '\r')"
+    current_index="$(oms_sha256_file "$tmp/index.patch")"
+    current_worktree="$(oms_sha256_file "$tmp/worktree.patch")"
+    saved_index="$(oms_sha256_file "$dir/index.patch")"
+    saved_worktree="$(oms_sha256_file "$dir/worktree.patch")"
     [ "$current_index" = "$saved_index" ] &&
       [ "$current_worktree" = "$saved_worktree" ] || rc=1
   fi
@@ -343,8 +343,8 @@ cmd_restore_locked() {
     echo "error: checkpoint not found or unsafe: $id" >&2
     return 2
   fi
-  saved_head="$(checkpoint_metadata_head "$dir" "$id" | tr -d '\r')" || return 1
-  current_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null | tr -d '\r')"
+  saved_head="$(checkpoint_metadata_head "$dir" "$id")" || return 1
+  current_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)"
   [ "$current_head" = "$saved_head" ] || {
     echo "error: checkpoint $id belongs to HEAD $saved_head; current HEAD is $current_head" >&2
     return 1

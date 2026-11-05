@@ -2067,7 +2067,7 @@ PY
 #!/usr/bin/env bash
 set -o pipefail
 if [ "${1:-}" = "$OMS_T_RECEIPT_HELPER" ] && [ "${2:-}" = reenter ]; then
-  "$OMS_T_REAL_PYTHON" "$@" | sed 's/$/\r/'
+  "$OMS_T_REAL_PYTHON" "$@"
   helper_rc=${PIPESTATUS[0]}
   if [ "$helper_rc" = 0 ]; then
     printf '{"schema":1,"kind":"autopilot-reenter-requeue","spec_sha256":"%s","branch":"%s","owner_id":"%s","requeued":["ambient"],"dead_pid":1,"superseded_stale_claim_pid":0,"updated":"2026-08-19T00:00:00Z"}\n' \

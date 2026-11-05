@@ -661,23 +661,6 @@ PY
     fail "legacy checkpoint restore refusal created a backup checkpoint"
 }
 
-# Native Windows Python emits CRLF on stdout; parsed Git IDs must lose CR.
-test_checkpoint_accepts_crlf_python_output() {
-  local shim_dir="$TMP/checkpoint-crlf-bin" real_python="$1"
-  mkdir -p "$shim_dir"
-  python3 - "$shim_dir/python3" "$real_python" <<'PYSHIM'
-import pathlib, shlex, sys
-script = "#!/usr/bin/env bash\n" + shlex.quote(sys.argv[2])
-script += """ "$@" | awk '{printf "%s\\r\\n", $0}'
-exit "${PIPESTATUS[0]}"
-"""
-pathlib.Path(sys.argv[1]).write_bytes(script.encode("utf-8"))
-PYSHIM
-  chmod +x "$shim_dir/python3"
-  PATH="$shim_dir:$PATH" checkpoint_config_roundtrip "$TMP/checkpoint-crlf" diff.noprefix false
-}
-
-
 test_hook_installers_keep_telemetry_off_the_tool_hot_path() {
   local settings="$TMP/claude-settings.json"
   local home_dir="$TMP/claude-home"
@@ -2708,7 +2691,6 @@ test_checkpoint_ignores_diff_prefix_and_color_config
 test_checkpoint_rejects_intent_to_add_without_mutation
 test_checkpoint_restore_refuses_current_intent_to_add_without_mutation
 test_checkpoint_rejects_legacy_intent_to_add_snapshot_without_mutation
-test_checkpoint_accepts_crlf_python_output "$(command -v python3)"
 test_hook_installers_keep_telemetry_off_the_tool_hot_path
 test_gc_bounds_old_checkpoint_and_hook_state
 

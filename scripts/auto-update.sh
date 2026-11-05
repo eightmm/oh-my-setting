@@ -113,9 +113,6 @@ auto_update_receipt_field() {
   local key="$2"
   local value
   [ -f "$receipt" ] || return 1
-  # Windows Python writes CRLF, and this value is compared to a literal and used
-  # as a path. This runs from a timer with no operator watching, so a stray
-  # carriage return here reads as a foreign checkout and silently skips.
   value="$(python3 - "$receipt" "$key" <<'PY'
 import json, sys
 try:
@@ -132,7 +129,7 @@ except Exception:
     raise SystemExit(1)
 PY
 )" || return
-  printf '%s\n' "${value//$'\r'/}"
+  printf '%s\n' "$value"
 }
 
 log_msg() {
@@ -220,8 +217,6 @@ print_attention() {
     if [ -n "$installed_at" ] && [ -n "$last_run" ]; then
       epoch_installed="$(auto_update_timestamp_epoch "$installed_at" || true)"
       epoch_last="$(auto_update_timestamp_epoch "$last_run" || true)"
-      epoch_installed="${epoch_installed//$'\r'/}"
-      epoch_last="${epoch_last//$'\r'/}"
       if [ -n "$epoch_installed" ] && [ -n "$epoch_last" ] &&
          [ "$((epoch_installed / 1000000))" -gt "$((epoch_last / 1000000))" ]; then
         superseded=1
@@ -244,7 +239,6 @@ print_attention() {
   if [ -n "$last_run" ]; then
     now="$(date -u +%s)"
     epoch_last="$(auto_update_timestamp_epoch "$last_run" || true)"
-    epoch_last="${epoch_last//$'\r'/}"
     if [ -n "$epoch_last" ]; then
       age=$((now * 1000000 - epoch_last))
       if [ "$age" -ge "$((overdue * 1000000))" ]; then
@@ -369,11 +363,6 @@ receipt_transaction_context() {
       ;;
     *) return 1 ;;
   esac
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      command -v cygpath >/dev/null 2>&1 && owner="$(cygpath -u "$owner")"
-      ;;
-  esac
   [ -n "$ref" ] || return 1
   [ -n "$owner" ] && [ "$(cd "$owner" 2>/dev/null && pwd -P || true)" = "$(cd "$ROOT" && pwd -P)" ] || return 1
   RECEIPT_TRANSACTION_REF="$ref"
@@ -398,7 +387,6 @@ auto_update_ci_ready() {
   CI_SELECTED_TARGET="$sha"
   destination="$(git -C "$ROOT" remote get-url "$remote" 2>/dev/null)" || destination=""
   result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$sha" 2400 "" test.yml 2>/dev/null)" || query_rc=$?
-  result="${result//$'\r'/}"
   conclusion="${result##* }"
   [ "$query_rc" -eq 0 ] && [ "$conclusion" = success ] && return 0
   case "$conclusion" in
@@ -422,7 +410,6 @@ auto_update_ci_ready() {
     git -C "$ROOT" merge-base --is-ancestor "$installed" "$candidate" 2>/dev/null || continue
     candidate_rc=0
     candidate_result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$candidate" 0 "" test.yml 2>/dev/null)" || candidate_rc=$?
-    candidate_result="${candidate_result//$'\r'/}"
     if [ "$candidate_rc" -eq 0 ] && [ "${candidate_result##* }" = success ]; then
       CI_SELECTED_TARGET="$candidate"
       return 0
@@ -453,7 +440,6 @@ receipt_transaction_upstream() {
   fi
 
   remote_head="$(git -C "$ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
-  remote_head="${remote_head//$'\r'/}"
   case "$remote_head" in
     origin/*) printf '%s (edge: default branch)\n' "${remote_head#origin/}" ;;
     *) printf 'ref:edge\n' ;;
