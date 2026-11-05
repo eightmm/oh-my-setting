@@ -1708,7 +1708,10 @@ PY_LOCKED
     fail "AGY packaging must report one interpreter error"
   rm "$bin/python3"
   mkdir -p "$TMP/agy-writable-host"
-  cp "$(command -v python3)" "$TMP/agy-writable-host/python3"
+  # A managed-runtime launcher on PATH is a script, and its relocatable interpreter
+  # cannot start from another directory; copy a real interpreter that can.
+  cp "$(python3 -I -c 'import os, sys; print(os.path.realpath(sys.executable))')" "$TMP/agy-writable-host/python3"
+  "$TMP/agy-writable-host/python3" -I -c '' 2>/dev/null || cp /usr/bin/python3 "$TMP/agy-writable-host/python3"
   chmod 0775 "$TMP/agy-writable-host/python3"
   if PATH="$TMP/agy-writable-host:$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
       OMS_PYTHON_RUNTIME_ROOT="$TMP/absent-runtime" bash "$ROOT/scripts/install-agy-plugin.sh" \
