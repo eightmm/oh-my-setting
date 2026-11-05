@@ -268,6 +268,9 @@ capabilities add tools without making them core dependencies. See
 and receipts, and [provider installation and updates](INSTALL.md#provider-installation-and-updates)
 for vendor refresh, pins, digest checks, Claude migration and inventory rules.
 
+> **Pi:** Pi refresh runs only through `install-tools.sh --providers`.
+> Full-tool installs and profile reapply leave Pi unchanged.
+
 Default-channel agy is vendor-managed after a lock-verified bootstrap; refresh
 retires a valid legacy sidecar and doctor warns on a stale one. Explicit locks
 retain strict checks for existing OMS-owned digests.
