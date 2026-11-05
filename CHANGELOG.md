@@ -507,6 +507,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `/bin/bash` and reads its markers with shell builtins, so a symlinked
   launcher, `CDPATH` or a shadowed `sed` on PATH can no longer break or
   redirect it.
+- Default-channel agy follows its vendor's self-updates after a lock-verified
+  bootstrap instead of refusing changed bytes: fresh installs keep no
+  ownership digest, refresh retires a legacy sidecar (with a warning when the
+  bytes changed) only under physical `~/.local` and `~/.local/bin`, and doctor
+  warns once instead of skipping probes. An explicit tool lock keeps strict
+  digest checks.
 - Tests that copy or link the host interpreter resolve the real executable
   when a managed-runtime launcher leads PATH, so land gates pass under the
   dispatcher's runtime activation.
