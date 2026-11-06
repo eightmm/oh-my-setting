@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -48,19 +47,11 @@ PROFILE_DEFS = _load_profile_defs()
 def _command_present(name: str) -> bool:
     """PATH resolution first, then the harness's managed shim directory.
 
-    The installer writes provider shims as extensionless bash scripts under
-    ~/.local/bin. Git Bash resolves them fine; Windows-native Python's
-    shutil.which never will (PATHEXT), so a healthy Windows install judged
-    its own provider absent. The managed location is part of the product
-    contract, and HOME arrives in MSYS form (slash, drive letter, slash
-    prefix) when bash spawned
-    this interpreter, so both spellings are honored.
+    HOME is a POSIX path and retains its spelling when PATH omits ~/.local/bin.
     """
     if shutil.which(name):
         return True
     home = os.environ.get("HOME", "")
-    if re.match(r"^/[A-Za-z]/", home):
-        home = home[1].upper() + ":" + home[2:]
     if not home:
         return False
     return os.path.isfile(os.path.join(home, ".local", "bin", name))

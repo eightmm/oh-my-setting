@@ -1450,10 +1450,7 @@ class RuntimeFixture(RuntimeFixtureBase):
             os.environ.pop('OMS_LOCK_DIR', None)
 
     def test_managed_shim_location_counts_as_installed(self) -> None:
-        # Windows-native Python cannot which() an extensionless bash shim, so
-        # a healthy install judged its own provider absent. The managed
-        # ~/.local/bin location is part of the product contract, in both HOME
-        # spellings (POSIX and the MSYS drive form bash hands to Python).
+        # Managed shims remain discoverable when ~/.local/bin is absent from PATH.
         fenced_home = Path(self.tmp.name) / 'shim-home'
         (fenced_home / '.local' / 'bin').mkdir(parents=True)
         shim = fenced_home / '.local' / 'bin' / 'codex'
@@ -1472,6 +1469,24 @@ class RuntimeFixture(RuntimeFixtureBase):
         finally:
             os.environ['PATH'] = old_path
             os.environ['HOME'] = old_home
+
+        with patch.object(profiles.shutil, 'which', return_value=None):
+            for root in ('a', 'Z'):
+                home = '/' + root + '/shim home'
+                expected = os.path.join(home, '.local', 'bin', 'codex')
+                with self.subTest(home=home), patch.dict(os.environ, HOME=home), \
+                        patch.object(profiles.os.path, 'isfile', side_effect=lambda path: path == expected) as found:
+                    self.assertTrue(profiles._command_present('codex'), found.call_args_list)
+                    found.assert_called_once_with(expected)
+            with patch.object(profiles.os.path, 'isfile', return_value=False):
+                self.assertFalse(profiles._command_present('codex'))
+            with patch.dict(os.environ, HOME=''), patch.object(profiles.os.path, 'isfile') as found:
+                self.assertFalse(profiles._command_present('codex'))
+                found.assert_not_called()
+        with patch.object(profiles.shutil, 'which', return_value='path-provider'), \
+                patch.object(profiles.os.path, 'isfile') as found:
+            self.assertTrue(profiles._command_present('codex'))
+            found.assert_not_called()
 
     def test_profiles_are_optional_and_install_plan_is_minimal(self) -> None:
         fake_bin = Path(self.tmp.name) / 'bin'
