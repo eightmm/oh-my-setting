@@ -177,6 +177,66 @@ def exercise_continued_stage_rollup(repo):
     row = rollup([dict(attempts[0], refs=dict(write)), sibling], [failed, ok("round-2")],
                  {"round-1": ["a.txt"], "round-2": ["a.txt", "b.txt"]})
     assert row["stages"]["implement"]["state"] == "passed", row
+    previous = dict(attempts[0], state="failed", refs=dict(write))
+    historical = rollup([previous], [failed])
+    for continued in (False, True):
+        refs = dict(write, **({"panel_continues": "round-1"} if continued else {}))
+        for state in ("starting", "working", "verifying"):
+            current = dict(sibling, state=state, refs=refs)
+            row = rollup([previous, current], [failed])
+            assert row["next_action"] == "inspect current attempt", (continued, state, row)
+            assert row["process_state"] == state, row
+            for key in ("stages", "representative_state", "calls", "outcome", "acceptance"):
+                assert row[key] == historical[key], (key, row)
+            output = io.StringIO()
+            with patch.object(saved, "_records", return_value=([previous, current], [failed])), \
+                    patch.object(saved, "_worker_owns", return_value=["value.txt"]), \
+                    patch.object(panel, "resolve_call_alias", return_value=task), \
+                    patch.object(panel.sys, "stdout", output):
+                assert panel.main(["--repo", str(repo), "--results", "--task-id", task, "--json"]) == 0
+            assert json.loads(output.getvalue())["rows"][0] == row, output.getvalue()
+            for old_scope, new_scope in ((["a.txt"], ["b.txt"]), ([], ["value.txt"]),
+                                         (["value.txt"], []), (["../bad"], ["../bad"]),
+                                         (["value.txt"], [0])):
+                scoped = rollup([previous, current], [failed],
+                                {"round-1": old_scope, "round-2": new_scope})
+                assert scoped["next_action"] == historical["next_action"], scoped
+            for purpose in (None, "", 0, {}, "unknown", "investigate"):
+                unrelated = dict(current, refs=dict(refs, panel_purpose=purpose))
+                assert rollup([previous, unrelated], [failed])["next_action"] == historical["next_action"]
+                if purpose != "investigate":
+                    unknown = dict(previous, refs=dict(write, panel_purpose=purpose))
+                    assert rollup([unknown, unrelated], [failed])["next_action"] == historical["next_action"]
+            for role, access in (("advisor", "read"), ("worker", "read"), ("unknown", "write"),
+                                 ("worker", None), (None, "write")):
+                unrelated = dict(current, refs=dict(refs, panel_role=role, panel_access=access))
+                assert rollup([previous, unrelated], [failed])["next_action"] == historical["next_action"]
+            # A contradictory indexed terminal result wins over a still-active lifecycle label.
+            for terminal in (dict(failed, attempt_id="round-2"),
+                             dict(ok("round-2"), state="failed")):
+                projected = rollup([previous, current], [failed, terminal])
+                assert projected["next_action"] != "inspect current attempt", projected
+            terminal = dict(failed, attempt_id="round-2")
+            buried = [terminal] + [dict(task_id=task, kind="note") for _ in range(30)] + [failed]
+            assert rollup([previous, current], buried)["next_action"] == historical["next_action"]
+            verification = rollup([previous, current], [dict(failed, exit=0)])
+            assert verification["representative_state"] == "verify failed", verification
+            assert verification["next_action"] == "inspect current attempt", verification
+            for outcome in ("accepted", "completed", "rejected", "failed"):
+                result = dict(outcome=outcome, revision="a" * 24, summary="Owner decision", evidence=[])
+                with patch.object(saved, "_load_result", return_value=result), \
+                        patch.object(saved, "_last_delivery", return_value=None):
+                    decided = rollup([previous, current], [failed, dict(task_id=task, kind="panel-result")])
+                assert decided["next_action"] == "none", decided
+                assert decided["representative_state"] == "main_decision " + outcome, decided
+    for state in ("done", "failed", "cancelled", "timed_out", "abandoned", "review", "blocked",
+                  "waiting_input", "waiting_approval", None, "unknown"):
+        current = dict(sibling, state=state)
+        assert rollup([previous, current], [failed])["next_action"] == historical["next_action"]
+    for ident in (None, "", 0, "bad/id", "round-1"):
+        current = dict(sibling, attempt_id=ident, state="verifying")
+        assert rollup([previous, current], [failed])["next_action"] == historical["next_action"]
+    assert rollup([dict(previous, state="verifying")], [failed])["next_action"] == historical["next_action"]
     # Round 1 failed and salvaged, round 2 fresh, round 3 continues round 2: accept sees round 3 only.
     def worker(n, state="done", refs=None):
         return dict(task_id=task, attempt_id="round-%s" % n, parent_attempt_id="main", state=state,

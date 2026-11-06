@@ -27,7 +27,7 @@ from peer_artifacts import artifact_sections_stream, debate_sections
 from work_journal import sanitize_multiline
 from path_scope import classify
 import room
-from panel_routing import MAIN_OWNERS
+from panel_routing import MAIN_OWNERS, WRITERS
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / 'scripts/oms'
@@ -2705,6 +2705,29 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
                 'abandoned': 'salvage or re-dispatch',
                 'timed_out': timeout_action,
             }[last['state']]
+        current, previous = last.get('attempt_id'), failed_call.get('attempt_id')
+        purpose = metadata.get('panel_purpose')
+        if (not result_rows and failed_stage in ('implement', 'verify') and failed_call.get('kind') == 'delegate'
+                and last.get('state') in ('starting', 'working', 'verifying')
+                and all(isinstance(value, str) and ID.fullmatch(value) for value in (current, previous))
+                and current in order and previous in order and order[current] > order[previous]
+                and all(sum(a.get('attempt_id') == value for a in matching) == 1 for value in (current, previous))
+                and writer(current) and writer(previous)
+                and isinstance(purpose, str) and purpose in (WRITERS - {'worker'}) | {'implement', 'investigate'}
+                and matching[order[previous]].get('refs', {}).get('panel_purpose') == purpose
+                and not any(row.get('attempt_id') == current and (
+                    row.get('exit') is not None or row.get('verify_exit') is not None
+                    or row.get('state') in tuple(TERMINAL_STATES)) for row in indexed)):
+            try:
+                old_scope, new_scope = owns(previous), owns(current)
+                if old_scope and new_scope:
+                    room.declared_scopes('worker', old_scope)
+                    room.declared_scopes('worker', new_scope)
+                    if all(path in new_scope for path in old_scope):
+                        # Lifecycle evidence can lag the process; inspection grants no retry authority.
+                        action = 'inspect current attempt'
+            except (OSError, ValueError, TypeError):
+                pass
         round_delta = _round_delta(repo, matching, indexed) if task_id else None
         output.append({'task_id': ident, 'title': clean(metadata.get('panel_label') or
                        ((result or {}).get('summary') or '').split('\n')[0], 160),

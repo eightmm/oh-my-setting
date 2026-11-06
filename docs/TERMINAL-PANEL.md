@@ -2074,6 +2074,12 @@ A registered goal with zero tasks awaits them: use `oms agent-plan add`, never `
 Each word names one stage. Board groups, the goal box, the main card's `Team:`
 line, Detail, Attention and Plan use the same vocabulary.
 
+Results retain failed stages from earlier attempts while a newer matching write
+attempt is starting, working or verifying without an indexed terminal call. With
+the same declared purpose and a valid covering scope, the next action is
+`inspect current attempt`. Lifecycle state alone does not prove that its process
+is live; this guidance grants no retry, admission or acceptance authority.
+
 | State | Meaning |
 |---|---|
 | `running` / `active` | The call's process is live. |
