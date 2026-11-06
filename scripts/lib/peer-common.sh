@@ -3541,7 +3541,20 @@ ma_provider_attempt_run() {
       # agy cuts itself off at --print-timeout regardless of the outer wall, so
       # its default must track the verb default or a raised wall changes nothing
       # for this seat: agy would still stop at its own five minutes.
-      cmd+=(--sandbox --print-timeout "${OMS_PEER_PRINT_TIMEOUT:-${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}}")
+      # agy rejects a bare number; the documented OMS_PEER_TIMEOUT seconds form
+      # gets its unit here. Unit-bearing values pass through untouched, and a
+      # bare zero is refused rather than becoming an unbounded native call.
+      local agy_print_timeout="${OMS_PEER_PRINT_TIMEOUT:-${OMS_PEER_TIMEOUT:-$(ma_peer_timeout_default)}}"
+      case "$agy_print_timeout" in
+        ''|*[!0-9.]*|*.*.*|.*|*.) ;;
+        *)
+          if [ -z "${agy_print_timeout//[0.]/}" ]; then
+            echo "error: print timeout must be positive, got $agy_print_timeout" > "$output_file"
+            return 2
+          fi
+          agy_print_timeout="${agy_print_timeout}s" ;;
+      esac
+      cmd+=(--sandbox --print-timeout "$agy_print_timeout")
       cmd+=(--output-format json)
       prompt_bytes="$(wc -c < "$prompt_file" | tr -d ' ')"
       if [ "${OMS_PEER_INTERACTIVE:-0}" = 1 ]; then

@@ -5938,6 +5938,18 @@ test_peer_review_print_timeout() {
 #!/usr/bin/env bash
 case "${1:-}" in --version|--help) echo 'agy stub'; exit 0 ;; esac
 printf '%s\n' "$@" > "$AGY_ARGS"
+printf 'x\n' >> "$AGY_ARGS.runs"
+# agy's duration grammar: a bare number is a usage error before any model call.
+prev=''
+for a in "$@"; do
+  if [ "$prev" = --print-timeout ]; then
+    case "$a" in
+      [0-9]*s|[0-9]*m|[0-9]*h) ;;
+      *) echo "agy: invalid --print-timeout $a" >&2; exit 2 ;;
+    esac
+  fi
+  prev="$a"
+done
 case "$AGY_MODE" in
   plain) printf 'plain provider failure\n' ;;
   empty) : ;;
@@ -5976,6 +5988,30 @@ SH
     OMS_PEER_TIMEOUT=77m ma_provider_attempt antigravity write "$project/prompt" "$project/output" "$project" \
       provider-default '' test '' '' || exit 9
     grep -Fxq 77m "$project/args" || exit 10
+    # Documented bare seconds gain a unit at the agy boundary; text and
+    # precedence (print override > wall > default) are otherwise preserved.
+    OMS_PEER_TIMEOUT=2400 ma_provider_attempt antigravity write "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 30
+    grep -Fxq 2400s "$project/args" || exit 31
+    OMS_PEER_TIMEOUT=90.5 ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 32
+    grep -Fxq 90.5s "$project/args" || exit 33
+    OMS_PEER_TIMEOUT=2400 OMS_PEER_PRINT_TIMEOUT=300 ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 34
+    grep -Fxq 300s "$project/args" || exit 35
+    OMS_PEER_TIMEOUT=2400 OMS_PEER_PRINT_TIMEOUT=0.5s ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 36
+    grep -Fxq 0.5s "$project/args" || exit 37
+    OMS_PEER_TIMEOUT='' OMS_PEER_PRINT_TIMEOUT='' ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 38
+    grep -Eqx '[0-9.]+[smh]' "$project/args" || exit 39
+    rm -f "$project/args" "$project/args.runs"
+    for zero in 0 00 0.0; do
+      if OMS_PEER_TIMEOUT=$zero ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+          provider-default '' test '' ''; then exit 40; fi
+      grep -Fq 'must be positive' "$project/output" || exit 41
+      [ ! -e "$project/args.runs" ] || exit 42
+    done
     export AGY_MODE=zero
     ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
       provider-default '' test '' '' || exit 11
@@ -6017,6 +6053,11 @@ SH
     fail 'agy review failed'
   assert_one_artifact_contains "$project/live" 'antigravity-review-json-response-*.md' 'Answer: hello'
   assert_one_artifact_contains "$project/live" 'antigravity-review-json-response-*.md' '"cache_read_tokens": 4'
+  PATH="$bin:$PATH" HOME="$project/home" AGY_ARGS="$project/args" AGY_MODE=success OMS_PEER_TIMEOUT=2400 \
+    "$ROOT/scripts/oms" peer-review --repo "$project" --artifact-dir "$project/live-numeric" \
+    --providers antigravity --no-diff --prompt 'Review numeric wall' > "$project/review-numeric.out" 2>&1 ||
+    fail "agy review with numeric OMS_PEER_TIMEOUT failed: $(cat "$project/review-numeric.out")"
+  grep -Fxq 2400s "$project/args" || fail 'numeric wall did not reach agy as seconds'
 }
 
 # smoke-weight: 20
