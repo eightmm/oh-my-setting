@@ -1032,27 +1032,6 @@ def declared_status(room, participant, width, activity_since=None):
     return lines
 
 
-def detail(member, preview, width, members=(), room=None, teams=None, everyone=None, labels=None, claims=None, classify=None):
-    """Selected block content in plain words; reading mail here never acknowledges it."""
-    names = {m["participant"]: who(m, labels) for m in members}
-    title = clean(member.get("title")) or ""
-    title = "" if title in ("Native task not recorded", "Task unrecorded") else title
-    if member.get("_native"):
-        done = member["state"] == "done"
-        model = MODEL_NAMES.get(member.get("model"), member.get("model")) or "Advisor"
-        state = ("answered %s" % (member.get("_finished") or member["_native"]) if done
-                 else "asked %s · running" % member["_native"])
-        stats = advisor_stats(member)
-        return ["%s advisor · %s%s" % (model, state, " · " + stats if stats else ""),
-                ("Recent: " + advisor_total(member) + " · Claude Code's built-in advisor" if advisor_total(member)
-                 else "Claude Code's built-in advisor"),
-                "Its answer stays inside the main's chat"], {}
-    owner = names.get(member.get("parent"), "")
-    lines = wrapped("%s%s · %s%s" % (who(member), " for " + owner if owner else "",
-                                     end_words(member, said(main_state(member))), " · " + title if title else ""), width, 3)
-    return lines, {}
-
-
 FINISHED = {"done", "cancelled"}
 
 

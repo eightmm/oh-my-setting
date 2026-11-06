@@ -623,12 +623,9 @@ for columns, rows in ((110, 44), (100, 24), (76, 18), (76, 21)):
                 assert len(picture.splitlines()) <= rows - int(menu), picture
                 assert all(display_width(line) <= columns for line in picture.splitlines()), picture
                 target = next(hit for hit in nav["hits"] if hit["action"] == ("result", "builder"))
-                # A call's content shows in the board's detail area; clicking again opens no other screen.
+                # A call's content shows in the board's detail area.
                 assert choose(("click", target["x1"], target["y"]), nav) is None
                 assert nav["preview"] == {"target": ("result", "builder")}
-                assert choose(("click", target["x1"], target["y"]), nav) is None
-                nav["surface"] = "graph"
-                assert choose(("enter",), nav) is None and nav["preview"]["target"] == ("result", "builder")
                 nav.pop("preview")
                 # Keys reach only this board's main and its calls, never an earlier main's.
                 assert all(item[1] not in ("flow-other", "foreign-child") for item in nav["items"]), nav["items"]
@@ -3519,6 +3516,9 @@ assert "FINAL RETAINED LINE" not in tree_preview, tree_preview
 assert choose(("f",), tree_full_nav) == ("result", "builder"), tree_full_nav
 assert choose(("enter",), full_nav) is None and full_nav["preview"]["report"] is full_recorded
 same_hit = {"y": 1, "x1": 1, "x2": 9, "action": ("result", "builder"), "preview": True}
+same_pending_nav = dict(full_nav, hits=[same_hit], preview={"target": ("result", "builder")})
+assert choose(("click", 2, 1), same_pending_nav) is None and same_pending_nav["preview"] == {"target": ("result", "builder")}
+assert choose(("enter",), same_pending_nav) is None and same_pending_nav["preview"] == {"target": ("result", "builder")}
 same_nav = dict(full_nav, hits=[same_hit])
 assert choose(("click", 2, 1), same_nav) is None and same_nav["preview"]["report"] is full_recorded
 assert choose(("click", 2, 1), dict(same_nav, hits=[dict(same_hit, action=("result", "other"))],
@@ -3911,7 +3911,7 @@ full_tree_order = full_tree_nav["items"]
 traversal = {}
 render(flow, "codex", 42, 24, view="tree", navigation=traversal)
 reached = set()
-for unused in range(30):
+for unused in range(len(full_tree_order) + 1):
     choose(("down",), traversal)
     traversed = render(flow, "codex", 42, 24, view="tree", navigation=traversal)
     assert traversal["items"] == full_tree_order, traversal

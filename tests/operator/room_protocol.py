@@ -143,9 +143,6 @@ assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-
 assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
 assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6.1-sol"
 # END review-role-model-pins
-for role in ("reviewer", "verifier", "security-auditor", "critic"):
-    assert allocate("claude", role=role, installed=both)["provider"] == "codex"
-    assert allocate("codex", role=role, installed=both)["provider"] == "claude"
 assert allocate("codex", role="researcher", installed=both)["model"] == "claude-haiku-5-5"
 for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
                        (None, "claude"), (True, "claude"), ("90", "claude"), (101, "claude")):

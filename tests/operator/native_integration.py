@@ -1805,9 +1805,6 @@ finished_nav = {"tab": "detail", "selected": ("chat", "adv-main"), "preview": {"
 finished_detail = graph_view.render_graph(dict(board, native_advisors=answered_call), 100, 40, navigation=finished_nav)
 assert "Built-in advisor: last answered " + answered_call["adv-main"]["finished"] in finished_detail, finished_detail
 finished_advisor = graph_view.native_advisors({"native_advisors": answered_call}, [claude_main])[-1]
-advisor_words = " ".join(graph_view.detail(finished_advisor, {}, 120)[0])
-assert "1m12s" in advisor_words and "249.5k in" in advisor_words and "4.3k out" in advisor_words, advisor_words
-assert "19% cached" in advisor_words, advisor_words
 assert graph_view.lingering(finished_advisor)
 for token_count, rendered in ((40, "40 out"), (50, "50 out"), (999, "999 out"),
                               (1049, "1.0k out"), (249548, "249.5k out")):
@@ -3614,14 +3611,12 @@ for mark in ("completed", "accepted"):
         live_nav = {"dismissed": True}
         live_picture = render(undecided, "codex", 120, 80, view=mode, navigation=live_nav)
         assert ("result", "attemptless-reviewer") in live_nav["items"], (mode, live_picture)
-    # A review call whose task its main decided reads "decided" in its Detail, the main's Detail and Past alike.
+    # A decided review call leaves the main board and retains its decision in Past.
     decided_board = deepcopy(handled)
     next(a for a in decided_board["attempts"]["recent"] if a["attempt_id"] == "review-call")["task_id"] = "adv-task"
     decided_people = graph_view.nodes(decided_board)
     decided_call = next(m for m in decided_people if m["participant"] == "review-call")
     assert decided_call["state"] == "review" and graph_view.call_classifier(decided_board)(decided_call) == "past"
-    decided_head = graph_view.detail(decided_call, {"report": {"rows": []}}, 100, decided_people, {})[0][0]
-    assert "· decided" in decided_head and "awaiting decision" not in decided_head, decided_head
     decided_nav = {"preview": {"target": ("chat", "adv-main"), "report": {}}, "dismissed": True}
     decided_main = graph_view.render_graph(decided_board, 127, 80, navigation=decided_nav)
     assert "review-call" not in decided_main and "Past" in decided_main, decided_main
