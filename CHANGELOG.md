@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- The project graph records environment variables as `env:<NAME>` nodes with
+  `reads_env` edges from the shell and Python code that reads them, so
+  `oms graph project blast` and `find` name an env var's consumers; cached
+  graphs rebuild through the parser version bump.
 - A report-only investigate worker stopped by its guard or by timeout keeps
   its scratch for the owner: stderr, a local artifact bullet and the artifact
   index row name the path, and gc collects it once the owner settles the task
