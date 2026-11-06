@@ -44,7 +44,7 @@ STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 # and --no-auto-update opts out.
 AUTO_UPDATE="${OH_MY_SETTING_AUTO_UPDATE:-1}"
 CODEX_PLUGIN="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
-PEER_PERMISSIONS="${OH_MY_SETTING_PEER_PERMISSIONS:-0}"
+PEER_PERMISSIONS="${OH_MY_SETTING_PEER_PERMISSIONS:-1}"
 NOTION_DATA_SOURCE_ID="${OH_MY_SETTING_NOTION_DATA_SOURCE_ID:-${OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID:-}}"
 # Re-exec protocol marker. A standalone source installer holds the lifecycle
 # lock itself when the selected ref predates this protocol; current checkouts
@@ -81,12 +81,10 @@ Options:
   --notion-data-source ID
                       Select the Work Journal Notion mirror. Authentication is
                       owned by ntn and is never persisted by oh-my-setting.
-  --peer-permissions  Grant Antigravity the standing consult permissions
-                      (read_file(*), command(*)) in its user-global
-                      settings so headless council calls are not auto-denied.
-                      All-MCP wildcard access stays approval-gated.
-                      Tracks only newly added rules for surgical uninstall and
-                      keeps a one-time .bak. Without this flag, only reports.
+  --peer-permissions  Enable the default Antigravity delegate grants:
+                      read_file(*), command(*), worktree writes and installed
+                      toolchain exceptions. All-MCP stays approval-gated.
+                      Newly added rules are tracked for uninstall.
   --star              Offer the optional GitHub star prompt.
   --no-star           Skip the star prompt (compatibility; default).
   --help              Show this help.
@@ -97,7 +95,7 @@ Environment:
   OH_MY_SETTING_PROFILE=NAME       Receipt profile: minimal, full, or custom.
   OH_MY_SETTING_CLAUDE_HOOKS=0     Skip Claude Code hooks and usage HUD.
   OH_MY_SETTING_CODEX_PLUGIN=0|1|auto  Skip, require, or auto-detect Codex plugin setup.
-  OH_MY_SETTING_PEER_PERMISSIONS=1 Grant Antigravity consult permissions.
+  OH_MY_SETTING_PEER_PERMISSIONS=0 Skip Antigravity permission grants.
   OH_MY_SETTING_GENERATE_MACHINE=0 Skip the machine snapshot (default: auto).
   OH_MY_SETTING_GENERATE_SLURM=1   Generate a Slurm snapshot.
   OH_MY_SETTING_CONNECT_SERVICES=auto|required|0
@@ -1084,19 +1082,9 @@ fi
 "$DEST/scripts/install-agy-plugin.sh" ||
   echo "warning: antigravity plugin import failed (install continues)" >&2
 
-# Antigravity is the one provider whose headless calls are auto-denied without
-# standing permissions; codex and claude carry authority per invocation. The
-# grant widens what another program may do, so it stays behind an explicit
-# flag — a default install only reports what a headless peer would be denied,
-# instead of leaving that to be discovered after the first silent council.
-if command -v agy >/dev/null 2>&1; then
-  if [ "$PEER_PERMISSIONS" = "1" ]; then
-    echo "granting Antigravity user-global consult permissions: read_file(*), command(*) (all-MCP access remains approval-gated)"
-    "$DEST/scripts/provider-permissions.sh" --apply --profile consult ||
-      echo "warning: peer permission grant failed (install continues)" >&2
-  elif ! "$DEST/scripts/provider-permissions.sh" --check; then
-    echo "note: peer permissions not granted; rerun with --peer-permissions to allow headless antigravity councils"
-  fi
+if [ "$PEER_PERMISSIONS" = 1 ] && command -v agy >/dev/null 2>&1; then
+  "$DEST/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains ||
+    echo 'warning: permission grant failed; run oms provider-permissions --apply --profile delegate --allow-toolchains' >&2
 fi
 
 if [ "$GENERATE_SLURM" = "1" ] || { [ "$GENERATE_SLURM" = "auto" ] && command -v sinfo >/dev/null 2>&1; }; then

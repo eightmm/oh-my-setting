@@ -1530,7 +1530,7 @@ install_uv_binaries() {  # SOURCE_UV SOURCE_UVX TARGET_UV TARGET_UVX SHA_UV SHA_
   rm -f "$backup_uv" "$backup_uvx"
 }
 
-install_antigravity() {
+install_antigravity_impl() {
   local platform="" version url expected archive tmp source target source_expected native recovering=0
   native="$(vendor_provider_path agy)" || native=""
   if [ -n "$native" ]; then
@@ -1615,6 +1615,14 @@ install_antigravity() {
     rm -f "$target.oh-my-setting-managed" || return 1
   fi
   echo "ok: agy $(agy --version)"
+}
+
+install_antigravity() {
+  install_antigravity_impl || return $?
+  if [ "${OH_MY_SETTING_PEER_PERMISSIONS:-1}" != 0 ] && command -v agy >/dev/null 2>&1; then
+    "$ROOT/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains ||
+      echo 'warning: permission grant failed; run oms provider-permissions --apply --profile delegate --allow-toolchains' >&2
+  fi
 }
 
 # The GitHub CLI is a harness dependency, not a convenience: ci-status.sh

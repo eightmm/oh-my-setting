@@ -779,6 +779,11 @@ if ! refresh_tools; then
   echo "error: core update succeeded; provider/tool refresh failed (tools were not rolled back)" >&2
   exit 1
 fi
+if [ "$TOOLS_REFRESHED" = 1 ] && [ "${OH_MY_SETTING_PEER_PERMISSIONS:-1}" != 0 ] &&
+   command -v agy >/dev/null 2>&1 && [ -x "$ROOT/scripts/provider-permissions.sh" ]; then
+  "$ROOT/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains ||
+    echo 'warning: permission grant failed; run oms provider-permissions --apply --profile delegate --allow-toolchains' >&2
+fi
 if [ "$TOOLS_REFRESHED" = 1 ]; then
   if [ "$SKIP_DOCTOR" = 1 ]; then
     echo "note: core update succeeded; provider integration health was not checked (--no-doctor)"

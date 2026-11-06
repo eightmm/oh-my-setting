@@ -627,7 +627,7 @@ install_status=0
 printf '%s\n' 999999 > "$lifecycle_lock/pid"
 printf '%s\n' 0 > "$lifecycle_lock/started"
 printf '%s\n' "fixture-dead-owner" > "$lifecycle_lock/owner"
-(cd "$HOME" && bash "$standalone_installer" --peer-permissions \
+(cd "$HOME" && bash "$standalone_installer" \
   --notion-data-source "$notion_data_source_id") > "$TMP/install-out.txt" 2>&1 ||
   { cat "$TMP/install-out.txt" >&2; fail "install failed"; }
 [ ! -e "$lifecycle_lock" ] || {
@@ -676,12 +676,8 @@ esac
 export PATH="$HOME/.local/bin:$PATH"
 command -v python3 >/dev/null 2>&1 ||
   fail "installer did not expose a python3 command"
-# --peer-permissions is the explicit opt-in: exact user-global grants are
-# disclosed, only newly added rules are owned, and the prior state is retained.
-[ -f "$antigravity_settings" ] ||
-  fail "--peer-permissions did not write the Antigravity settings"
-grep -Fq 'granting Antigravity user-global consult permissions: read_file(*), command(*) (all-MCP access remains approval-gated)' \
-  "$TMP/install-out.txt" || fail "--peer-permissions did not disclose its exact grants"
+# The default install applies delegate grants and retains user-owned rules.
+[ -f "$antigravity_settings" ] || fail "install did not write Antigravity settings"
 if ! python3 - "$antigravity_settings" <<'PY'
 import json
 import sys
@@ -689,11 +685,11 @@ import sys
 settings = sys.argv[1]
 cfg = json.load(open(settings, encoding="utf-8"))
 assert cfg["theme"] == "user-before", cfg
-assert cfg["permissions"]["allow"] == [
-    "read_file(*)", "user(existing)", "command(*)"
-], cfg
+allow = cfg["permissions"]["allow"]
+assert allow[:3] == ["read_file(*)", "user(existing)", "command(*)"], cfg
+assert any(rule.startswith("write_file(") for rule in allow), cfg
 state = json.load(open(settings + ".oh-my-setting-permissions.json", encoding="utf-8"))
-assert state == {"schema": 1, "rules": ["command(*)"]}, state
+assert state == {"schema": 1, "rules": allow[2:]}, state
 backup = json.load(open(settings + ".bak", encoding="utf-8"))
 assert backup["permissions"]["allow"] == ["read_file(*)", "user(existing)"], backup
 PY
@@ -713,6 +709,12 @@ then
   find /c/c /c/tmp "$TMP/../c" -maxdepth 12 -name "settings.json*" 2>/dev/null >&2 || true
   fail "--peer-permissions did not track only its new consult grants"
 fi
+# Re-applying a satisfied profile leaves the settings bytes unchanged.
+permissions_before="$(cksum < "$antigravity_settings")"
+"$dest/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains >/dev/null ||
+  fail "repeated delegate permission apply failed"
+[ "$permissions_before" = "$(cksum < "$antigravity_settings")" ] ||
+  fail "repeated permission apply rewrote satisfied settings"
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" ||
   fail "required tool install did not persist ~/.local/bin on PATH"
 for shell_rc in .profile .zshrc .zprofile; do
@@ -863,7 +865,19 @@ printf 'retired prompt\n' > "$dest/prompts/SOUL.md"
 printf 'user prompt\n' > "$HOME/.oh-my-setting-prompts.backup.20260914000000/user.md"
 oms_install_materialize "$dest/prompts" "$HOME/.oh-my-setting-prompts"
 rm -rf "$dest/prompts" "$dest/scripts/lib/__pycache__"
+# A no-tools update must not heal settings or create permission state.
+python3 - "$antigravity_settings" <<'PY_RESET'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path))
+row['permissions']['allow'] = ['read_file(*)', 'user(existing)']
+with open(path, 'w') as handle:
+    json.dump(row, handle)
+PY_RESET
+permissions_before="$(cksum < "$antigravity_settings")"
 (cd "$HOME" && "$dest/scripts/update.sh" --no-tools)
+[ "$permissions_before" = "$(cksum < "$antigravity_settings")" ] ||
+  fail "no-tools update changed provider settings"
 assert_lib_pyc_current "update"
 grep -Fxq 'user prompt' "$HOME/.oh-my-setting-prompts/user.md" ||
   fail "update did not restore displaced user prompts"
@@ -918,6 +932,8 @@ rm -f "$HOME/.codex/AGENTS.md"
   OH_MY_SETTING_GENERATE_MACHINE=1 OH_MY_SETTING_GENERATE_SLURM=1 \
   "$dest/scripts/doctor.sh" --repair) > "$TMP/hydrated-repair.txt" 2>&1 ||
   { cat "$TMP/hydrated-repair.txt" >&2; fail "receipt-hydrated doctor repair failed"; }
+"$dest/scripts/provider-permissions.sh" --check --profile delegate --allow-toolchains >/dev/null ||
+  fail "repair did not restore the delegate profile"
 oms_install_target_matches "$dest/rules/global-AGENTS.md" "$HOME/.codex/AGENTS.md" ||
   fail "receipt-hydrated repair did not relink the managed rules"
 if grep -Fq 'skill-router.sh' "$HOME/.claude/settings.json" 2>/dev/null; then
@@ -1318,12 +1334,10 @@ PY_RUNTIME
   fail "oms list must answer after a default install"
 grep -Eq '^runtime( |$)' "$TMP/tools-frontdoor.txt" ||
   fail "the front-door catalog must include the runtime after install"
-# Without the opt-in flag a default install must not widen Antigravity's
-# authority — it reports the denial and names the flag instead.
-grep -Fq 'rerun with --peer-permissions' "$TMP/tools-install.txt" ||
-  fail "the default install did not report ungranted peer permissions"
-[ ! -f "$tools_home/.gemini/antigravity-cli/settings.json" ] ||
-  fail "a default install silently granted Antigravity permissions"
+# The default install grants the delegate profile even without the old flag.
+HOME="$tools_home" XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
+  "$tools_dest/scripts/provider-permissions.sh" --check --profile delegate --allow-toolchains >/dev/null ||
+  fail "default install did not grant the delegate profile"
 # The documented behaviour: every complete install makes user-local tools
 # available in later shells.
 grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$tools_home/.bashrc" ||

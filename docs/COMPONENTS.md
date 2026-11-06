@@ -1769,11 +1769,13 @@ replacement evidence or malformed/linked config leaves the file untouched.
 
 Shared rules, skills, MCP, and provider calls. Hooks are enabled
 only after the installed binary passes a live surface probe; otherwise it is
-intentionally MCP-only. `--peer-permissions` grants `read_file(*)`,
-and sandboxed `command(*)` globally; all-MCP access remains approval-gated.
-Delegate exceptions accept only an exact command token and normalized
-absolute worktree parent. A sidecar lets uninstall remove only rules this
-install added.
+intentionally MCP-only. Install and provider refresh grant `read_file(*)`,
+sandboxed `command(*)`, delegate worktree writes, and exceptions for installed
+toolchains by default; all-MCP access remains approval-gated. Set
+`OH_MY_SETTING_PEER_PERMISSIONS=0` to skip grants. Delegate exceptions accept
+only an exact command token and normalized absolute worktree parent. A sidecar
+lets uninstall remove only recorded rules. An interrupted grant can leave an
+unrecorded rule, which uninstall preserves.
 HUD/session-capture parity is not claimed.
 
 ### Optional CLI transports

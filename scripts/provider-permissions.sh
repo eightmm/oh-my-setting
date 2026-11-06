@@ -808,13 +808,13 @@ try:
         for rule in added:
             if rule not in owned:
                 owned.append(rule)
-        if not state_existed or owned != state["rules"]:
-            state["rules"] = owned
-            # Ownership lands first. If the settings write then fails, a retry
-            # can safely finish adding the still-missing rule.
-            atomic_json(managed, state)
         assert_settings_unchanged(settings_target, settings_raw)
         atomic_json(settings_target, cfg)
+        if not state_existed or owned != state["rules"]:
+            state["rules"] = owned
+            # A crash before this write leaves an unowned grant; recording it
+            # first could instead revoke a later user grant on uninstall.
+            atomic_json(managed, state)
 
     for rule in added:
         print(rule)

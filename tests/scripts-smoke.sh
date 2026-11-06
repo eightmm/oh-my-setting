@@ -17479,6 +17479,7 @@ test_update_refreshes_providers_by_default_and_tools_on_request() {
   local bin="$project/bin"
   local receipt="$TMP/update-tools-opt-in-receipt.json"
   local marker="$TMP/update-tools-called"
+  local permission_marker="$TMP/update-permissions-called"
   local branch legacy_target
 
   make_committed_repo "$project"
@@ -17499,6 +17500,13 @@ test_update_refreshes_providers_by_default_and_tools_on_request() {
 printf '%s\n' "$*" > "$OMS_TEST_TOOLS_MARKER"
 EOF
   chmod +x "$project/scripts/install-tools.sh"
+  cat > "$project/scripts/provider-permissions.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$OMS_TEST_PERMISSION_MARKER"
+exit "${OMS_TEST_PERMISSION_STATUS:-0}"
+EOF
+  printf '#!/bin/sh\nexit 0\n' > "$bin/agy"
+  chmod +x "$project/scripts/provider-permissions.sh" "$bin/agy"
   cat > "$bin/git" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
@@ -17533,15 +17541,30 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     }, handle)
 PY
 
+  export OMS_TEST_PERMISSION_MARKER="$permission_marker"
   PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
     "$project/scripts/update.sh" --no-tools --no-doctor >/dev/null
   assert_not_exists "$marker"
+  assert_not_exists "$permission_marker"
 
   PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
     "$project/scripts/update.sh" --no-doctor >/dev/null
   assert_file_contains "$marker" '--providers'
+  assert_file_contains "$permission_marker" '--apply --profile delegate --allow-toolchains'
+
+  rm -f "$permission_marker"
+  PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
+    OH_MY_SETTING_PEER_PERMISSIONS=0 OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --no-doctor >/dev/null
+  assert_not_exists "$permission_marker"
+
+  PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
+    OMS_TEST_PERMISSION_STATUS=1 OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+    "$project/scripts/update.sh" --no-doctor > "$TMP/update-permission-warning" 2>&1 ||
+    fail "provider permission failure aborted update"
+  assert_file_contains "$TMP/update-permission-warning" 'oms provider-permissions --apply --profile delegate --allow-toolchains'
 
   PATH="$bin:/usr/bin:/bin" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_TOOLS_MARKER="$marker" \
     OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
@@ -31665,6 +31688,19 @@ EOF
   [ ! -e "$extra_dir" ] || fail "staged prompt directory must be removed when caller receives TERM: $extra_dir"
 
   rm -f "$ready"
+  # Refuse before the provider can stage a prompt when grants are missing.
+  local preflight_rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_DELEGATE_WORKTREE_ROOT="$TMP/agy-delegate-wt" \
+    "$ROOT/scripts/peer-delegate.sh" --to antigravity --repo "$project" \
+    --brief-file "$limit_prompt" >"$project/preflight" 2>&1 || preflight_rc=$?
+  [ "$preflight_rc" = 2 ] || fail "missing delegate grant must exit 2"
+  grep -Fq 'oms provider-permissions --apply --profile delegate' "$project/preflight" ||
+    fail "missing delegate grant must name its remedy"
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" \
+    OMS_DELEGATE_WORKTREE_ROOT="$TMP/agy-delegate-wt" \
+    "$ROOT/scripts/provider-permissions.sh" --apply --profile delegate >/dev/null ||
+    fail "could not prepare delegate permissions for transport fixture"
   OMS_TEST_AGY_READY_FILE="$ready" OMS_TEST_AGY_SLEEP=1 OMS_TEST_AGY_SLEEP_SEC=30 \
     OMS_LIB_TMPDIR="$TMP" OMS_DELEGATE_WORKTREE_ROOT="$TMP/agy-delegate-wt" \
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
@@ -38458,6 +38494,59 @@ PY
   out="$(PATH="$bin:$PATH" "$ROOT/scripts/provider-permissions.sh" --check --profile delegate \
     --allow-command '*' --settings "$settings" 2>&1)" || rc=$?
   [ "$rc" = 2 ] || fail "a wildcard sandbox escape should be refused: $out"
+
+  # Refuse before creating a worktree, artifact, or running a verifier.
+  local project="$dir/repo" mode preflight_rc
+  make_committed_repo "$project"
+  for mode in normal interactive malformed; do
+    mkdir -p "$dir/empty-home"
+    if [ "$mode" = malformed ]; then printf '{broken\n' > "$dir/bad.json"; fi
+    preflight_rc=0
+    if [ "$mode" = interactive ]; then
+      PATH="$bin:$PATH" HOME="$dir/empty-home" XDG_CACHE_HOME="$dir/cache" \
+        OMS_ANTIGRAVITY_SETTINGS="$dir/bad.json" OMS_DELEGATE_WORKTREE_ROOT="$dir/worktrees" \
+        "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to antigravity \
+        --prompt test --interactive >"$dir/stdout" 2>"$dir/stderr" || preflight_rc=$?
+    else
+      PATH="$bin:$PATH" HOME="$dir/empty-home" XDG_CACHE_HOME="$dir/cache" \
+        OMS_ANTIGRAVITY_SETTINGS="$dir/bad.json" OMS_DELEGATE_WORKTREE_ROOT="$dir/worktrees" \
+        "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to antigravity \
+        --prompt test --verify "touch $dir/verified" --repair 2 >"$dir/stdout" 2>"$dir/stderr" || preflight_rc=$?
+    fi
+    [ "$preflight_rc" = 2 ] || fail "delegate preflight must exit 2 ($mode): $preflight_rc"
+    grep -Fq 'oms provider-permissions --apply --profile delegate' "$dir/stderr" ||
+      fail "delegate preflight must print its remedy ($mode)"
+    [ ! -e "$dir/worktrees" ] && [ ! -e "$dir/verified" ] && [ ! -e "$project/.oms" ] ||
+      fail "delegate preflight changed state ($mode)"
+  done
+  mkdir -p "$dir/empty-home/.local/bin"
+  cp "$bin/agy" "$dir/empty-home/.local/bin/agy"
+  preflight_rc=0
+  PATH="/usr/bin:/bin" HOME="$dir/empty-home" XDG_CACHE_HOME="$dir/cache" \
+    OMS_ANTIGRAVITY_SETTINGS="$dir/bad.json" OMS_DELEGATE_WORKTREE_ROOT="$dir/worktrees" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to antigravity \
+    --prompt test --no-verify >"$dir/stdout" 2>"$dir/stderr" || preflight_rc=$?
+  [ "$preflight_rc" = 2 ] || fail "preflight missed provider in user-local bin"
+  grep -Fq 'oms provider-permissions --apply --profile delegate' "$dir/stderr" ||
+    fail "user-local provider refusal did not name its remedy"
+  # Exercise the provider-install wrapper without downloading a CLI.
+  (
+    set --
+    . "$ROOT/scripts/install-tools.sh"
+    install_antigravity_impl() { return 0; }
+    export PATH="$bin:$PATH" OMS_DELEGATE_WORKTREE_ROOT="$dir/worktrees"
+    export OMS_ANTIGRAVITY_SETTINGS="$dir/install-settings.json"
+    printf '{broken\n' > "$OMS_ANTIGRAVITY_SETTINGS"
+    install_antigravity > "$dir/install-out" 2>&1 || exit 1
+    grep -Fq 'oms provider-permissions --apply --profile delegate --allow-toolchains' "$dir/install-out" || exit 2
+    grep -Fxq '{broken' "$OMS_ANTIGRAVITY_SETTINGS" || exit 3
+    printf '%s\n' '{}' > "$OMS_ANTIGRAVITY_SETTINGS"
+    OH_MY_SETTING_PEER_PERMISSIONS=0 install_antigravity > "$dir/install-out" 2>&1 || exit 4
+    grep -Fxq '{}' "$OMS_ANTIGRAVITY_SETTINGS" || exit 5
+    install_antigravity > "$dir/install-out" 2>&1 || exit 6
+    "$ROOT/scripts/provider-permissions.sh" --check --profile delegate --allow-toolchains >/dev/null || exit 7
+  ) || fail "provider install permission handling failed"
+
 }
 
 test_peer_delegate_uses_managed_private_worktree_root() {
@@ -38649,6 +38738,28 @@ test_provider_permissions_tracks_and_revokes_only_managed_rules() {
   mkdir -p "$bin"
   printf '#!/bin/sh\nexit 0\n' > "$bin/agy"
   chmod +x "$bin/agy"
+  # Interrupt the ownership write and ensure no user rule is claimed.
+  mkdir -p "$dir/inject"
+  cat > "$dir/inject/sitecustomize.py" <<'PY_INTERRUPT'
+import os
+original_replace = os.replace
+def interrupt(source, target, *args, **kwargs):
+    if str(target).endswith('.oh-my-setting-permissions.json'):
+        raise OSError('simulated interrupted ownership write')
+    return original_replace(source, target, *args, **kwargs)
+os.replace = interrupt
+PY_INTERRUPT
+  printf '%s\n' '{"permissions":{"allow":["read_file(*)"]}}' > "$dir/interrupted.json"
+  if PATH="$bin:$PATH" PYTHONPATH="$dir/inject" "$ROOT/scripts/provider-permissions.sh" \
+    --apply --profile consult --settings "$dir/interrupted.json" > /dev/null 2>&1; then
+    fail "interrupted ownership write should fail"
+  fi
+  [ ! -e "$dir/interrupted.json.oh-my-setting-permissions.json" ] ||
+    fail "interrupted apply recorded rules it did not safely own"
+  python3 - "$dir/interrupted.json" <<'PY_INTERRUPT_CHECK' || fail "interrupted apply lost settings"
+import json, sys
+assert json.load(open(sys.argv[1]))['permissions']['allow'] == ['read_file(*)', 'command(*)']
+PY_INTERRUPT_CHECK
   cat > "$settings" <<'EOF'
 {
   "theme": "user-before",

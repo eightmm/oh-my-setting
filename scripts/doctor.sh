@@ -1083,6 +1083,11 @@ repair_install() {
   plugin_mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   echo "repairing canonical links from: $repair_root"
   "$repair_root/scripts/link.sh"
+  if [ "${OH_MY_SETTING_PEER_PERMISSIONS:-1}" != 0 ] && PATH="$HOME/.local/bin:$PATH" command -v agy >/dev/null 2>&1 &&
+     [ -x "$repair_root/scripts/provider-permissions.sh" ]; then
+    PATH="$HOME/.local/bin:$PATH" "$repair_root/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains ||
+      echo 'warning: permission grant failed; run oms provider-permissions --apply --profile delegate --allow-toolchains' >&2
+  fi
   if [ -x "$repair_root/scripts/install-claude-hooks.sh" ]; then
     if [ "${OH_MY_SETTING_CLAUDE_HOOKS:-1}" = "1" ]; then
       "$repair_root/scripts/install-claude-hooks.sh"

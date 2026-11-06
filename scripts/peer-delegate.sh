@@ -538,6 +538,14 @@ if [ "$TO" = codex ] && [ "$WORKER_ACCESS" = write ] && oms_provider_codex_sandb
   echo "error: this host restricts unprivileged user namespaces, so Codex's workspace-write sandbox (bwrap) cannot start; route to another provider or run oms doctor for the remedy" >&2
   exit 2
 fi
+if [ "$TO" = antigravity ] && [ "$WORKER_ACCESS" = write ] && [ "$DRY_RUN" != 1 ]; then
+  delegate_permission_root="${OMS_DELEGATE_WORKTREE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/oh-my-setting/worktrees}"
+  if ! PATH="$HOME/.local/bin:$PATH" "$(ma_scripts_dir)/provider-permissions.sh" --check --profile delegate \
+      --worktree-parent "$delegate_permission_root" >/dev/null 2>&1; then
+    echo 'error: Antigravity delegate permissions are missing or unreadable; run oms provider-permissions --apply --profile delegate' >&2
+    exit 2
+  fi
+fi
 if [ "$INTERACTIVE" = 1 ]; then
   case "$TO" in claude|antigravity) ;; *) fail "--interactive supports claude and antigravity" ;; esac
   [ "$WORKER_ACCESS" = write ] && [ "$REPAIR" = 0 ] && [ "$APPLY" = 0 ] &&
