@@ -16,7 +16,36 @@ def counts(report):
     finalized = mapping(report.get("finalized"))
     classify = call_classifier(report)
     counted_tasks = set()
+    handled_tasks = set()
     awaiting = set(listing(report.get("awaiting_admission")))
+    # Prefer arranged copies, then restore supersession for predecessors hidden by rollover.
+    seen_participants = {m.get("participant") for m in members if isinstance(m, dict) and m.get("participant")}
+    all_calls = [m for m in members if isinstance(m, dict)] + [
+        c for c in (getattr(report, "memo", {}).get("calls") or [])
+        if isinstance(c, dict) and c.get("participant") not in seen_participants]
+    room = mapping(report.get("room"))
+    depth = {old: -n for n, old in enumerate(listing(room.get("lineage")), 1)}
+    origins = mapping(room.get("call_origins"))
+    order = lambda m: tuple(origins.get(m.get("participant")) or (
+        depth.get(m.get("_predecessor"), -1) if m.get("_predecessor") else 0, m.get("seq", 0)))
+    superseded = {id(m) for m in all_calls if m.get("superseded")}
+    latest = {}
+    for member in sorted(all_calls, key=order):
+        if member.get("role") != "main" and member.get("task_id"):
+            key = (member.get("role"), member["task_id"])
+            if key in latest:
+                superseded.add(id(latest[key]))
+            latest[key] = member
+    for member in all_calls:
+        owner = mains.get(member.get("parent"))
+        state = member.get("state")
+        if (owner and member.get("task_id") and member.get("role") == "worker"
+                and member.get("access") != "read" and member.get("purpose") != "investigate"
+                and id(member) not in superseded
+                and (state == "cancelled" or state == "done"
+                     and report.get("awaiting_admission") is not None
+                     and member.get("participant") not in awaiting)):
+            handled_tasks.add((owner, member["task_id"]))
     # Count actionable calls as the inbox does, including a review call whose plan
     # row has not advanced yet. A task review is the fallback when no call represents it.
     for member in members:
@@ -33,10 +62,11 @@ def counts(report):
     for task in listing(mapping(report.get("plan")).get("tasks")):
         task = mapping(task)
         if (task.get("state") != "review" or task.get("id") in counted_tasks
-                or finalized.get(task.get("id")) in DECIDED):
+                or finalized.get(task.get("id")) in DECIDED
+                or task.get("panel_accept") or task.get("landing")):
             continue
         owner = mains.get(task.get("claimed_by_participant") or task.get("claimed_by"))
-        if owner:
+        if owner and (owner, task.get("id")) not in handled_tasks:
             totals[owner] = totals.get(owner, 0) + 1
     return totals
 

@@ -1706,12 +1706,16 @@ def commit_product(repo, bundle, task):
             if (path.decode('utf-8') != item['path'] or kind != 'blob' or mode != item['mode'] or
                     sha(git(repo, 'cat-file', 'blob', oid)) != item['sha256']):
                 fail('source content/mode differs from committed product')
-    artifact = {'path': legacy_relative(repo, task.get('artifact', '')),
-                'sha256': sha(read(repo, legacy_relative(repo, task.get('artifact', ''))))}
-    if not any(artifact in requirement['evidence'] for requirement in bundle['requirements']):
+    artifact = ({'path': legacy_relative(repo, task['artifact']),
+                 'sha256': sha(read(repo, legacy_relative(repo, task['artifact'])))}
+                if task.get('artifact') else None)
+    if artifact and not any(artifact in requirement['evidence'] for requirement in bundle['requirements']):
         fail('actual committed successor evidence missing from obligation map')
-    return {'product_kind': 'commit', 'landing': wanted, 'receipt_name': name,
-            'receipt': receipt, 'receipt_raw_sha256': sha(raw), 'artifact': artifact}
+    product = {'product_kind': 'commit', 'landing': wanted, 'receipt_name': name,
+               'receipt': receipt, 'receipt_raw_sha256': sha(raw)}
+    if artifact:
+        product['artifact'] = artifact
+    return product
 
 
 def review_contract(state_repo, bundle, task, plan_id, action, unavailable_evidence=None):

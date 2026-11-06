@@ -7922,12 +7922,8 @@ print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
     fail "commit finish from claimed must be rejected"
   fi
   assert_file_contains "$d/err" 'requires review'
-  # A review without evidence is not stuck: the commit finish names the flags that supply it.
+  # The land receipt supplies evidence for a review without an artifact.
   "$SH" --repo "$d" review --id integrated >/dev/null
-  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
-    fail "commit finish without review evidence must be rejected"
-  fi
-  assert_file_contains "$d/err" 'pass --artifact'
   before="$(cat "$d/.oms/plan/tasks.json")"
   if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --artifact artifact.md >"$d/err" 2>&1; then
     fail "commit finish without receipt must be rejected"
@@ -7935,16 +7931,6 @@ print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
   assert_file_contains "$d/err" 'no passed oms land receipt'
   assert_file_contains "$d/err" 'head SHA that oms land pushed'
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "evidence on a rejected finish changed plan"
-  "$SH" --repo "$d" release --id integrated >/dev/null
-  "$SH" --repo "$d" claim --id integrated --provider codex >/dev/null
-  "$SH" --repo "$d" review --id integrated --artifact artifact.md >/dev/null
-  before="$(cat "$d/.oms/plan/tasks.json")"
-  if "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" >"$d/err" 2>&1; then
-    fail "commit finish without receipt must be rejected"
-  fi
-  assert_file_contains "$d/err" 'no passed oms land receipt'
-  [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "missing proof changed plan"
-
   # Obtain the directory from land status itself, rather than duplicate its
   # identity calculation in a fixture that could hide a lookup mismatch.
   out="$("$ROOT/scripts/land.sh" status --repo "$d" 2>/dev/null || true)"
@@ -8011,7 +7997,7 @@ t = json.load(open(sys.argv[1], encoding="utf-8"))
 landing = {"kind": "commit", "sha": sys.argv[2],
            "receipt_sha256": hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest()}
 assert t["state"] == "done" and t["landing"] == landing, t
-assert t["artifact"] == "artifact.md" and t["patch"] == "", t
+assert t["artifact"] == "" and t["patch"] == "", t
 assert t["history"][-1]["kind"] == "finish" and t["history"][-1]["landing"] == landing, t
 PY
   "$SH" --repo "$d" status --json | python3 -c '
@@ -8032,6 +8018,25 @@ assert s["stale_review"] == [], s
   "$SH" --repo "$d" finish --id integrated --landed-commit "$sha" --lease-id "$lease" >/dev/null ||
     fail "a finalize retry failed after the land rewrote its receipt"
   [ "$before" = "$(cat "$d/.oms/plan/tasks.json")" ] || fail "finish retry changed the done task"
+
+  # Explicit artifacts survive both review-time and finish-time evidence entry.
+  local artifact_route
+  for artifact_route in review finish; do
+    "$SH" --repo "$d" add --id "artifact-$artifact_route" --title "Explicit artifact $artifact_route" >/dev/null
+    "$SH" --repo "$d" claim --id "artifact-$artifact_route" --provider codex >/dev/null
+    if [ "$artifact_route" = review ]; then
+      "$SH" --repo "$d" review --id "artifact-$artifact_route" --artifact artifact.md >/dev/null
+      "$SH" --repo "$d" finish --id "artifact-$artifact_route" --landed-commit "$sha" >/dev/null
+    else
+      "$SH" --repo "$d" review --id "artifact-$artifact_route" >/dev/null
+      "$SH" --repo "$d" finish --id "artifact-$artifact_route" --landed-commit "$sha" --artifact artifact.md >/dev/null
+    fi
+    "$SH" --repo "$d" show --id "artifact-$artifact_route" | python3 -c '
+import json, sys
+task = json.load(sys.stdin)
+assert task["state"] == "done" and task["artifact"] == "artifact.md", task
+' || fail "explicit artifact was lost on $artifact_route"
+  done
 
   # A receipt proves a landing, not which task it landed: a scoped task needs
   # the landed range, back to the previous pushed receipt, to touch its paths.
@@ -9555,7 +9560,7 @@ commit_patch = '.oms/artifacts/commit-product.patch'
 (repo / commit_patch).write_bytes(subprocess.check_output(['git', '-C', str(repo), 'diff', '--binary', base]))
 commit_artifact = '.oms/artifacts/commit-product.md'
 (repo / commit_artifact).write_text('Reviewed complete committed replacement product\n')
-ap('review', '--id', 'commit-successor', '--artifact', commit_artifact, '--patch', commit_patch)
+ap('review', '--id', 'commit-successor', '--patch', commit_patch)
 subprocess.run(['git', '-C', str(repo), 'add', '-u'], check=True)
 subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'fixture committed product'], env=env, check=True)
 commit = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
@@ -9569,6 +9574,7 @@ passed = {'schema': 1, 'state': 'passed', 'sha': commit, 'remote': 'origin', 'ta
 commit_receipt.write_text(json.dumps(passed))
 ap('finish', '--id', 'commit-successor', '--landed-commit', commit)
 current = plan(); original_commit = current['tasks']['commit-original']; successor_commit = current['tasks']['commit-successor']
+assert successor_commit['artifact'] == '' and successor_commit['landing']['sha'] == commit
 committed = copy.deepcopy(satisfied)
 committed.update(task_id='commit-original', state=original_commit['state'], lease_id=original_commit['lease_id'],
                  task_sha256=engine['digest'](original_commit), original_contract=engine['projection'](original_commit),

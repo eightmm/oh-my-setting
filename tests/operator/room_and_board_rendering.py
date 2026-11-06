@@ -1,3 +1,5 @@
+# BEGIN room rendering integration
+shared: str
 assert room_view["room"]["id"] == shared
 room_view["attempts"]["active_recent"].append({"attempt_id": "graph-example-child", "state": "working",
     "task_id": "graph-sample", "panel": {"role": "worker", "room_id": shared,
@@ -6517,3 +6519,132 @@ for rows in (None, "malformed", {}, [], [None, ""]):
     with patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((76, 20))):
         frame_text, _, _ = panel.frame_view(bg_root, "codex", dict(room_view, background=rows), menu=False)
     assert "Autopilot:" not in frame_text and len(frame_text.splitlines()) <= 20, frame_text
+
+# END room rendering integration
+
+# BEGIN settled review backlog
+def exercise_settled_review_backlog():
+    from unittest.mock import patch
+    from panel_view import freeze_report
+    from review_backlog import counts, project, warning_for
+    from room_view import nodes
+    main = {"role": "main", "participant": "main"}
+    worker = {"role": "worker", "participant": "worker", "parent": "main", "state": "done", "task_id": "task"}
+    task = {"id": "task", "state": "review", "claimed_by": "main"}
+    report = {"plan": {"tasks": [task]}, "awaiting_admission": []}
+    members = [main, worker]
+    with patch("room_view.nodes", return_value=members), patch("room_view.call_classifier", return_value=lambda m: "live"):
+        assert counts(report) == {}, counts(report)
+        report["review_backlog"] = project(report)
+        assert warning_for(report, "main") is None
+        for state in ("done", "cancelled"):
+            for change in ({"role": "reviewer"}, {"role": "advisor"}, {"access": "read"},
+                           {"purpose": "investigate"}, {"superseded": True}, {"task_id": ""}):
+                with patch.dict(worker, dict(change, state=state)):
+                    assert counts(report) == {"main": 1}, (state, change, counts(report))
+        report.pop("awaiting_admission")
+        assert counts(report) == {"main": 1}, counts(report)
+        with patch.dict(worker, state="cancelled"):
+            assert counts(report) == {}, counts(report)
+        report["awaiting_admission"] = ["worker"]
+        assert counts(report) == {"main": 1}, counts(report)
+        worker["parent"] = "other"
+        assert counts(report) == {"main": 1}, counts(report)
+        for field in ("panel_accept", "landing"):
+            with patch.dict(task, {field: {"sha": "fixture"}}):
+                assert counts(report) == {}, counts(report)
+            with patch.dict(task, {field: None}):
+                assert counts(report) == {"main": 1}, counts(report)
+        # Arranging a rollover drops settled predecessors from members but retains its calls projection.
+        members[:] = [main]
+        worker["parent"] = "main"
+        report["awaiting_admission"] = []
+        rendered = freeze_report(report)
+        rendered.memo["calls"] = [worker]
+        assert counts(rendered) == {}, counts(rendered)
+        with patch.dict(worker, superseded=True):
+            assert counts(rendered) == {"main": 1}, counts(rendered)
+        rendered.memo["calls"] = []
+        assert counts(rendered) == {"main": 1}, counts(rendered)
+        report["plan"]["tasks"] = [None, {}, "malformed"]
+        assert counts(report) == {}, counts(report)
+
+    # Raw calls lack the supersession flag that arranging adds to copies; exercise both projections together.
+    failures = []
+    for predecessor, ordering in ((False, "sequence"), (True, "sequence"),
+                                  (False, "origin"), (True, "origin"), (True, "lineage")):
+        for state in ("done", "cancelled"):
+            for newer in (True, False):
+                old = {"participant": "old", "role": "worker", "parent": "main", "joined": True,
+                       "seq": 1 if ordering == "sequence" else 9}
+                current = {"participant": "new", "role": "worker", "parent": "main", "joined": True, "seq": 2}
+                room = {"id": "room-1", "lineage": ["room-0"], "participants": [dict(main, joined=True)]}
+                if predecessor:
+                    room["predecessor_calls"] = [dict(old, _predecessor="room-0")]
+                else:
+                    room["participants"].append(old)
+                if ordering == "origin":
+                    room["call_origins"] = {"old": [-1, 1], "new": [0, 2]}
+                if ordering == "lineage":
+                    room.update(id="room-2", lineage=["room-1", "room-0"])
+                if newer:
+                    if ordering == "lineage":
+                        room["predecessor_calls"].append(dict(current, _predecessor="room-1"))
+                    else:
+                        room["participants"].append(current)
+                rendered = freeze_report({"room": room, "awaiting_admission": [], "plan": {"tasks": [
+                    {"id": "task", "state": "review", "claimed_by": "main"}]}, "room_attempts": {
+                        "old": {"attempt_id": "old-attempt", "task_id": "task", "state": state, "access": "write"},
+                        "new": {"attempt_id": "new-attempt", "task_id": "task", "state": "failed", "access": "write"}}})
+                expected = {"main": 1} if newer else {}
+                actual = counts(rendered)
+                arranged = {m["participant"]: m for m in nodes(rendered)}
+                assert ("old" not in arranged) == predecessor, arranged
+                if not predecessor and newer:
+                    assert arranged["old"].get("superseded"), arranged
+                raw = next(c for c in rendered.memo["calls"] if c["participant"] == "old")
+                assert not raw.get("superseded"), raw
+                if actual != expected:
+                    failures.append((predecessor, ordering, state, newer, actual, expected))
+    assert not failures, failures
+    rendered.memo["calls"].extend([None, "malformed", {}])
+    assert counts(rendered) == expected, counts(rendered)
+
+exercise_settled_review_backlog()
+# END settled review backlog
+
+# BEGIN settled review snapshot
+def exercise_settled_review_snapshot():
+    from copy import deepcopy
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    import subprocess
+    import room
+    import terminal_panel as panel
+    import panel_results
+    source = {"repo": {"name": "fixture"}, "attempts": {"recent": [
+        {"task_id": "done-task", "state": "done"}, {"task_id": "cancelled-task", "state": "cancelled"}]},
+        "plan": {"tasks": [{"id": "rolled-task", "state": "review"}, None, {}]}}
+    expected = {"done-task": "accepted", "cancelled-task": "rejected", "rolled-task": "admitted"}
+    with TemporaryDirectory() as directory:
+        with patch.object(panel, "read_shared", side_effect=lambda repo, key, collect, **kw: collect()), \
+                patch.object(panel, "dashboard", side_effect=lambda *a, **kw: (deepcopy(source), 0)), \
+                patch.object(room, "resolve", return_value="fixture-room"), \
+                patch.object(room, "status", return_value={"id": "fixture-room", "participants": [
+                    {"participant": "main", "role": "main", "joined": True}]}), \
+                patch.object(room, "lineage", return_value=[]), \
+                patch.object(panel, "managed_session", return_value=False), \
+                patch.object(panel, "main_activity", return_value={}), \
+                patch.object(panel, "awaiting_admission", return_value=[]), \
+                patch.object(panel, "outcomes", side_effect=lambda repo, ids, **kw: {
+                    key: value for key, value in expected.items() if key in ids and value != "admitted"}) as outcomes, \
+                patch.object(panel_results, "admitted_awaiting_land", side_effect=lambda repo, ids, **kw: {"rolled-task"} & ids), \
+                patch.object(panel_results, "_records", return_value=([], [])), \
+                patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")):
+            report, status = panel.snapshot(Path(directory), "fixture-room")
+    assert status == 0 and report.get("finalized") == expected, report
+    assert outcomes.call_args.args[1] == set(expected), outcomes.call_args
+
+exercise_settled_review_snapshot()
+# END settled review snapshot

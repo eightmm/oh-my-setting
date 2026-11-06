@@ -705,7 +705,10 @@ def snapshot(repo, room_id=None, _tick=None):
                     waiting = {row.get("task_id") for row in [r for key in ("active_recent", "recent")
                                                               for r in state.get("attempts", {}).get(key) or []]
                                + list((state.get("room_attempts") or {}).values())
-                               if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked"}}
+                               if row.get("state") in {"failed", "timed_out", "abandoned", "orphaned", "review", "blocked", "done", "cancelled"}}
+                    # Settled attempts and rolled-over plan reviews still need their owner's admission/decision.
+                    waiting.update(t.get("id") for t in state.get("plan", {}).get("tasks") or []
+                                   if isinstance(t, dict) and t.get("state") == "review")
                     if waiting:
                         state["finalized"] = {ident: outcome for ident, outcome in outcomes(repo, waiting, _shared=True, _tick=_tick).items()
                                               if outcome in DECIDED | {"failed"}}
