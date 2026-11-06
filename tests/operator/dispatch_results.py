@@ -575,9 +575,11 @@ def exercise_exact_model_routing():
                 assert allocate(owner, installed={"claude"})["provider"] == "claude"
                 assert allocate(owner, installed=providers, catalogs=dict(catalogs, **{provider: ["other/model"]}))["provider"] != provider
                 for role in ("reviewer", "verifier", "security-auditor", "critic", "advisor", "architect"):
-                    judge = allocate(owner, role=role, tier="routine", installed=providers, writer=provider)
+                    writer = dispatch.JudgedWriter(provider, "anthropic/claude-opus-5-5")
+                    judge = allocate(owner, role=role, tier="routine", installed=providers, writer=writer)
                     assert judge["provider"] in panel.PROVIDERS, judge
-            assert allocate("codex", role="reviewer", installed=providers, writer=provider,
+            assert allocate("codex", role="reviewer", installed=providers,
+                            writer=dispatch.JudgedWriter(provider, "anthropic/claude-opus-5-5"),
                             provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "codex"
             with_exact_route_light = deepcopy(panel.policy())
             with_exact_route_light["tiers"]["light"].insert(0, dict(configured, effort="low"))
@@ -707,7 +709,7 @@ def exercise_antigravity_read_tiers():
             route = choose(tier, role=role, writer="claude", provider_status=exhausted)
             assert route["provider"] == "antigravity" and route["access"] == "read", route
             if role in routing.INDEPENDENT:
-                assert choose(tier, role=role, writer="antigravity")["provider"] != "antigravity"
+                assert choose(tier, role=role, writer=dispatch.JudgedWriter("antigravity", "google/gemini-4-argon-high"))["provider"] != "antigravity"
                 assert choose(tier, role=role, installed={"claude", "antigravity"}, writer="claude",
                               provider_status={"claude": {"weekly_used": 0}})["provider"] == "antigravity"
                 with patch.object(routing, "model_family", return_value="google"):
@@ -786,6 +788,21 @@ def exercise_antigravity_read_tiers():
                     assert fallback["provider"] == "antigravity" and fallback["model"] == "gemini-4.10-argon-high"
                 else:
                     assert fallback is None and decision == "alternate-not-routable", (fallback, decision)
+            agy["exact_model_override"] = True
+            primary = dict(provider="codex", model="gpt-6.1-terra", effort="medium", role="reviewer",
+                           kind="reviewer", owner="pi", workload="routine", access="read", purpose="review",
+                           judged_family="openai")
+            with patch.object(panel, "selected_route", return_value=primary), \
+                    patch.object(panel, "child_environment", return_value={}), \
+                    patch.object(dispatch.room, "resolve", return_value=None), \
+                    patch.object(panel, "routing_status", return_value=exhausted), \
+                    patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
+                fallback = panel.dispatch(project, "pi", "reviewer", "routine", "read", None,
+                                          prompt="Inspect source.")
+            if available == catalogs["antigravity"]:
+                assert fallback["provider"] == "antigravity", fallback
+            else:
+                assert fallback is None, fallback
 
 # BEGIN tier routing
 with patch.dict(os.environ, {"OMS_PANEL_PUBLIC_ROUTE_OPT_IN": "1"}):
@@ -2044,14 +2061,21 @@ assert newest_route_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna
 assert newest_route_model("codex", "gpt-6-astra", ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.1-terra"]) == "gpt-6.2-astra"
 assert newest_route_model("codex", "gpt-6.1-terra", ["gpt-5.6-terra", "gpt-6.1-terra", "gpt-6.1-sol"]) == "gpt-6.1-terra"
 assert newest_route_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
+# BEGIN sole writer review refusal
 codex_only = {"provider": "codex", "binary": "codex", "installed": True, "exact_model_override": True, "access": ["read", "write"], "models": ["gpt-6-sol"],
               "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-astra"]}
 with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "worker", "deep", "read", "investigate")["model"] == "gpt-6.2-sol"
     assert panel.selected_route("codex", "worker", "light", "read", "explain")["model"] == "gpt-6-luna"
-    assert panel.selected_route("codex", "reviewer", None, "read", None)["provider"] == "codex"
+    try:
+        panel.selected_route("codex", "reviewer", None, "read", None)
+    except ValueError as error:
+        assert "independent review unavailable" in str(error), error
+    else:
+        raise AssertionError("self-review was selected")
     explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
     assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6.1-terra" and explicit["effort"] == "medium"
+# END sole writer review refusal
 # Like the shell's routable set, a family whose newest member is a major generation behind the newest
 # Codex family model in the catalog is not routed: the tier's other provider serves, or dispatch is refused.
 from panel_routing import routable_route_model
@@ -2131,6 +2155,38 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only, claude_ca
                                 repo=project, room_id="quota-room")["provider"] == "claude"
 with patch.object(panel, "provider_catalog", return_value=[seven_row, dict(claude_candidate, installed=True)]):
     assert panel.selected_route("claude", "worker", None, "read", None)["model"] == "claude-sonnet-5-5"
+# BEGIN pinned judge result label
+pinned_task = "pinned-judge-result"
+# A word boundary at the cut must not leave a double space: room.join refuses unclean labels.
+pinned_label = "Inspect " + "x" * 76 + " " + "y" * 120
+pinned_env = dict(environment, OMS_AGENT="codex")
+for key in ("OMS_ROOM_ID", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT"):
+    pinned_env.pop(key, None)
+request = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--dispatch", "reviewer",
+           "--owner", "codex", "--to", "codex", "--prompt", "Inspect source.",
+           "--task-id", pinned_task, "--label", pinned_label, "--verify", "true"]
+call(request, pinned_env)
+rows = panel_results.results(project, pinned_task)["rows"]
+assert rows and "same-family judge (owner-pinned)" in rows[0]["title"], rows
+pinned_refs = next(row["refs"] for row in json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo",
+                   str(project), "list", "--json"])) if row.get("task_id") == pinned_task)
+assert pinned_refs["panel_label"] == " ".join(pinned_refs["panel_label"].split())[:120], pinned_refs
+assert "same-family judge (owner-pinned)" in __import__("panel_view").render_results({"rows": rows}, 200)
+# END pinned judge result label
+# BEGIN explicit judge families
+import panel_dispatch as judge_dispatch
+for provider, model, expected in (("pi", "openai/gpt-6.1-sol", True),
+                                  ("pi", "anthropic/claude-opus-5-5", False),
+                                  ("antigravity", "openai/gpt-6.1-sol", True),
+                                  ("antigravity", "claude-opus-5-5", False)):
+    peer = {"provider": provider, "binary": provider, "installed": True, "exact_model_override": True,
+            "access": ["read"], "models": [model]}
+    with patch.object(panel, "provider_catalog", return_value=[peer]), \
+            patch.object(judge_dispatch, "room_history", return_value=(None, None)):
+        route = judge_dispatch.selected_route("codex", "reviewer", None, "read", None,
+                                               target=provider, model=model, repo=project)
+    assert bool(route.get("judge_note")) == expected, route
+# END explicit judge families
 # BEGIN family exclusion quota
 seven_row = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
                  access=["read", "write"], models=["gpt-6-sol"],
@@ -6916,6 +6972,19 @@ def exercise_provider_account_routing():
                 raise AssertionError("exhausted sole Codex provider was selected")
             except ValueError as error:
                 assert "weekly quota" in str(error), error
+            for default in (None, 0, 95, "malformed"):
+                try:
+                    routing.allocate("claude", role="reviewer", writer="claude", installed={"claude", "codex"},
+                                     provider_status={"codex": {"weekly_used": default}}, repo=base)
+                except ValueError as error:
+                    assert "independent review unavailable" in str(error) and "quota" in str(error), error
+                else:
+                    raise AssertionError("saturated accounts were selected for review")
+            quota(1, 15)
+            independent = routing.allocate("claude", role="reviewer", writer="claude", installed={"claude", "codex"},
+                                           provider_status={"codex": {"weekly_used": 95}}, repo=base)
+            assert independent["account"] == "pro", independent
+            quota(1, 99)
             explicit_peer = dict(provider="codex", binary="codex", installed=True, exact_model_override=True,
                                  access=["read", "write"], models=["gpt-6.1-sol"])
             with patch("terminal_panel.provider_catalog", return_value=[explicit_peer]):

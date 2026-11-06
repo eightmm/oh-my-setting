@@ -337,7 +337,7 @@ def codex_sandbox_blocked():
 
 def allocate(owner, role="worker", tier=None, access="read", purpose=None, installed=None, provider_status=None,
              recent=None, writer=None, catalogs=None, owner_model=None, repo=None, check_visibility=True,
-             preferred=None, resolve_accounts=True):
+             preferred=None, resolve_accounts=True, explicit_target=False):
     """Availability, quota left, then independent judgment; explicit targets narrow installed.
 
     recent maps provider -> dispatches in this room and writer is the provider that wrote the reviewed task.
@@ -360,6 +360,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     else:
         purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research", "scholar": "research"}.get(role, role)
     candidates = routes["tiers"][tier]
+    if role in INDEPENDENT and tier == "routine":
+        candidates = candidates + [c for c in routes["tiers"]["deep"] if c["provider"] == "antigravity"]
     if access == "write":
         candidates = [c for c in candidates if c.get("access") != "read"]
     if role in INDEPENDENT or KINDS[role] == "advisor":
@@ -369,6 +371,44 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             raise ValueError("researchers use the light tier")
         candidates = [c for c in candidates if route_family(c["provider"], c["model"])
                       and route_family(c["provider"], c["model"])[0] in RESEARCH_FAMILIES]
+    judged_family = None
+    if role in INDEPENDENT:
+        judged = writer or owner
+        judged_model = getattr(writer, "model", None) if writer else owner_model
+        judged_family = {"codex": "openai", "claude": "anthropic"}.get(judged)
+        if judged_family is None:
+            judged_family = model_family(judged, judged_model)
+        if not judged_family or judged_family == "unknown":
+            raise ValueError("independent review unavailable for unknown family (%s model family unverified)" % judged)
+    families = {"codex": "openai", "claude": "anthropic", "antigravity": "google"}
+    excluded_family = bool(judged_family and not explicit_target)
+    reasons = {}
+    if excluded_family:
+        independent = []
+        for candidate in candidates:
+            provider = candidate["provider"]
+            if families.get(provider) == judged_family:
+                continue
+            if installed is not None and provider not in installed:
+                reasons[provider] = "not installed"
+            elif daily_capped(provider_status, candidate):
+                reasons[provider] = "cooldown"
+            elif provider != "codex" and (weekly_used(provider_status, provider) or 0) >= 90:
+                reasons[provider] = "quota"
+            elif check_visibility and not public_candidates([candidate], repo):
+                reasons[provider] = "sandbox or visibility"
+            else:
+                try:
+                    if catalogs is not None or provider == "antigravity":
+                        routable_route_model(provider, candidate["model"], (catalogs or {}).get(provider, []))
+                except ValueError:
+                    reasons[provider] = "model unavailable"
+                    continue
+                independent.append(candidate)
+        if not independent:
+            detail = ", ".join("%s: %s" % item for item in sorted(reasons.items())) or "no other family configured"
+            raise ValueError("independent review unavailable for %s family (%s)" % (judged_family, detail))
+        candidates = independent
     usable = [c for c in candidates if installed is None or c["provider"] in installed]
     skipped_codex = False
     if access == "write" and any(c["provider"] == "codex" for c in usable) and codex_sandbox_blocked():
@@ -407,7 +447,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             raise refused
         usable = eligible
     # Family and sandbox exclusions still count; unroutable catalogs do not.
-    several = len(usable) + excluded_codex > 1
+    several = len(usable) + excluded_codex > 1 or excluded_family
     account_usage = {}
     if resolve_accounts and any(candidate["provider"] == "codex" for candidate in usable):
         from provider_accounts import account_weekly_used, load_accounts
@@ -442,6 +482,10 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                         row["accounts"].get(resolved["account"], {}))
                 eligible.append(resolved)
             if not eligible:
+                if excluded_family:
+                    reasons["codex"] = "quota or no eligible account"
+                    detail = ", ".join("%s: %s" % item for item in sorted(reasons.items()))
+                    raise ValueError("independent review unavailable for %s family (%s)" % (judged_family, detail))
                 raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left or no eligible account; %s"
                                  % (tier, refused))
             usable = eligible
@@ -458,6 +502,10 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                 available.append(candidate)
                 used_by[provider] = used
         if not available:
+            if excluded_family:
+                reasons.update({c["provider"]: "quota" for c in usable})
+                detail = ", ".join("%s: %s" % item for item in sorted(reasons.items()))
+                raise ValueError("independent review unavailable for %s family (%s)" % (judged_family, detail))
             raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
         natives = [c for c in available if c["provider"] in used_by]
         if used_by and None not in used_by.values():
@@ -482,29 +530,16 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         if non_pi:
             usable = non_pi
         # else: keep list as is (degraded beats refused)
-    if role in INDEPENDENT:
-        # Aggregator mains require a known family to establish independence.
-        judged = writer if writer in MODEL_IDS or writer in EXACT_MODEL_PROVIDERS or writer == "antigravity" else owner
-        if judged in MODEL_IDS:
-            usable = [c for c in usable if c["provider"] != "antigravity"
-                      or weekly_used(provider_status, "antigravity") is None
-                      or weekly_used(provider_status, "antigravity") < 90]
-            if not usable:
-                raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
-            usable = sorted(usable, key=lambda c: (c["provider"] == judged,
-                                                   c["provider"] != "antigravity"))
-        if judged == owner and judged in ("pi", "antigravity"):
-            family = model_family(judged, owner_model)
-            if family == "unknown":
-                raise ValueError("recorded main model family is unknown; independence is unverified")
-            native_families = {"codex": "openai", "claude": "anthropic", "antigravity": "google"}
-            usable = sorted(usable, key=lambda c: native_families[c["provider"]] == family)
-        else:
-            usable = sorted(usable, key=lambda c: c["provider"] == judged)
+    if role in INDEPENDENT and judged_family in ("openai", "anthropic"):
+        usable = sorted(usable, key=lambda c: c["provider"] != "antigravity")
     if role not in INDEPENDENT and preferred:
         usable = sorted(usable, key=lambda c: c["provider"] != preferred)
     route = dict(usable[0], effort="low") if role == "researcher" else dict(usable[0])
     route = dict(route, role=role, kind=KINDS[role], owner=owner, workload=tier, access=access, purpose=purpose)
+    if judged_family:
+        route["judged_family"] = judged_family
+        if explicit_target and families.get(route["provider"]) == judged_family:
+            route["judge_note"] = "same-family judge (owner-pinned)"
     if skipped_codex:
         route["route_reason"] = "Codex skipped: host restricts unprivileged user namespaces (bwrap sandbox); see oms doctor"
     return route
@@ -524,12 +559,19 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
     tier = route.get("workload")
     if tier not in TIERS:
         return None
-    candidates = [candidate for candidate in policy()["tiers"][tier]
+    routes = policy()
+    tier_candidates = routes["tiers"][tier]
+    if route.get("role") in INDEPENDENT and tier == "routine":
+        tier_candidates = tier_candidates + [c for c in routes["tiers"]["deep"] if c["provider"] == "antigravity"]
+    candidates = [candidate for candidate in tier_candidates
                   if candidate["provider"] != route.get("provider")
                   and (route.get("access") != "write" or candidate.get("access") != "read")
                   and (installed is None or candidate["provider"] in installed)
                   and (candidate["provider"] == "codex" or (weekly_used(provider_status, candidate["provider"]) or 0) < 90)
                   and not daily_capped(provider_status, candidate)]
+    if route.get("role") in INDEPENDENT and route.get("judged_family"):
+        families = {"codex": "openai", "claude": "anthropic", "antigravity": "google"}
+        candidates = [c for c in candidates if families.get(c["provider"]) != route["judged_family"]]
     if route.get("access") == "write" and any(c["provider"] == "codex" for c in candidates) and codex_sandbox_blocked():
         candidates = [c for c in candidates if c["provider"] != "codex"]
     if route.get("role") in INDEPENDENT or KINDS.get(route.get("role")) == "advisor":
@@ -556,14 +598,13 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
         eligible.append(candidate)
     candidates = _defer_antigravity(eligible, {c["provider"]: weekly_used(provider_status, c["provider"])
                                              for c in eligible if c["provider"] in MODEL_IDS})
-    if route.get("role") in INDEPENDENT and route.get("owner") in MODEL_IDS:
-        candidates = sorted(candidates, key=lambda c: (c["provider"] == route["owner"],
-                                                       c["provider"] != "antigravity"))
+    if route.get("role") in INDEPENDENT and route.get("judged_family") in ("openai", "anthropic"):
+        candidates = sorted(candidates, key=lambda c: c["provider"] != "antigravity")
     if not candidates:
         return None
     return dict(candidates[0], effort=route.get("effort"), role=route.get("role"),
                 kind=route.get("kind"), owner=route.get("owner"), workload=tier,
-                access=route.get("access"), purpose=route.get("purpose"))
+                access=route.get("access"), purpose=route.get("purpose"), judged_family=route.get("judged_family"))
 
 
 def command(entry, repo, route, prompt=None, brief=None, verify=None, task_id=None, resume=None):

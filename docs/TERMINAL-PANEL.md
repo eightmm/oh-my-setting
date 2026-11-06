@@ -383,13 +383,15 @@ their own identities. Pi's default model and effort come from the Codex main pre
 explicit model in the full Codex catalog resolves to the gateway with owner `codex`. Any
 other exact Pi model resolves to direct transport with owner `pi`. The `agy` harness
 resolves to registry owner `antigravity`. Deep and frontier tiers also offer read-only
-Antigravity routes after native providers with known weekly quota.
+Antigravity routes after native providers with known weekly quota. Routine independent
+judges can also use the deep-tier Antigravity route.
 
 Reviewers, verifiers, security auditors and critics of Codex or Claude work take
 Antigravity first while it is installed, not in daily cooldown and below 90% of any
-recorded weekly quota; the judged provider stays last. Independent review of Pi or
-Antigravity uses the recorded main model's registry family; an unknown family cannot
-establish independence. Existing Pi rows with owner `codex` remain readable. Swap events
+recorded weekly quota; the judged family is excluded unless the owner pins it. Independent
+review uses the linked writer's recorded model family, or the main model family when no
+writer is linked. Matching retries from one provider can share a resolved family; links
+across providers or families are ambiguous. An unknown linked family cannot establish independence. Existing Pi rows with owner `codex` remain readable. Swap events
 and restart ownership validate the recorded owner/harness pair without consulting the
 current model cache; Pi permits recorded owners `codex` and `pi`, while `agy` uses
 `antigravity`.
@@ -959,9 +961,10 @@ that is not the main's; configured tier order settles what remains.
 
 Weekly quota comes from the provider's available local reading; Codex uses `rate_limits`
 records in its local CLI session logs. Missing, stale or malformed readings stay
-unknown. Reviewer, verifier, security-auditor and critic prefer a provider other than
-the reviewed patch's writer (an automatic review whose patch links to one write attempt)
-or else the main's, when one remains. Researchers are pinned to the light tier at low
+unknown. Reviewer, verifier, security-auditor and critic exclude the reviewed patch's
+writer family, or the main's when no writer is known. If no independent family is
+usable, the result records `review unavailable` and remains pending. An owner-pinned
+same-family judge is labelled on the result, including standalone results. Researchers are pinned to the light tier at low
 effort. Only security-auditor defaults to frontier; other roles use deep or below. An
 explicit `--workload frontier` remains available.
 
@@ -1523,7 +1526,7 @@ The same role and tier routing works from any Claude Code, Codex or Pi session
 without a panel: `oms panel --repo . --dispatch ROLE --prompt TEXT` (or
 `--access write --brief-file PATH --verify COMMAND` for a write role). The caller
 is detected from `OMS_AGENT`, else Claude Code's or Codex's own environment, so
-reviewer independence still prefers the other provider. Without a room the call
+reviewer independence excludes the judged family. Without a room the call
 is recorded as a standalone result: read it with `oms panel --results --task-id
 ID`. `--dry-run` prints the chosen route and argv without running a model.
 

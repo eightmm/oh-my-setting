@@ -140,7 +140,13 @@ assert allocate("claude", role="documenter", installed={"codex"})["model"] == "g
 # BEGIN review-role-model-pins
 assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6.1-sol"
 assert allocate("claude", role="advisor", installed={"codex"})["model"] == "gpt-6.1-sol"
-assert allocate("claude", role="verifier", installed={"claude"})["model"] == "claude-opus-5-5"
+try:
+    allocate("claude", role="verifier", installed={"claude"})
+except ValueError as error:
+    assert "anthropic family" in str(error), error
+else:
+    raise AssertionError("a verifier judged its owner's family")
+assert allocate("claude", role="verifier", installed=both)["provider"] == "codex"
 assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6.1-sol"
 # END review-role-model-pins
 assert allocate("codex", role="researcher", installed=both)["model"] == "claude-haiku-5-5"
@@ -148,8 +154,15 @@ for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
                        (None, "claude"), (True, "claude"), ("90", "claude"), (101, "claude")):
     readings = {"claude": {"weekly_used": used}}
     assert allocate("codex", installed=both, provider_status=readings)["provider"] == expected
-assert allocate("claude", role="reviewer", installed=both,
-                provider_status={"codex": {"weekly_used": 90}})["provider"] == "claude"
+# BEGIN exhausted independent reviewer
+try:
+    allocate("claude", role="reviewer", installed=both,
+             provider_status={"codex": {"weekly_used": 90}})
+except ValueError as error:
+    assert "anthropic family" in str(error) and "quota" in str(error), error
+else:
+    raise AssertionError("a reviewer used the writer family after quota exhaustion")
+# END exhausted independent reviewer
 # With both readings, more weekly quota left wins; missing readings put the owner last.
 for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude")):
     readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
@@ -178,14 +191,21 @@ for recent in (None, {"claude": 3, "codex": 3}, {"codex": 1}):
     assert allocate("claude", role="builder", installed=both, provider_status=low,
                     recent=recent)["provider"] == "claude", recent
 assert policy()["tie_band"] == {"gap": 15}
+# BEGIN independent reviewer family
 # Independent judges avoid the reviewed task's writer; without a known writer the main's opposite decides.
 for role in ("reviewer", "verifier", "security-auditor", "critic"):
     for owner in both:
         for writer in both:
             judge = allocate(owner, role=role, installed=both, writer=writer)["provider"]
             assert judge != writer, (role, owner, writer)
-        assert allocate(owner, role=role, installed=both, writer="unknown")["provider"] != owner
-assert allocate("claude", role="reviewer", installed={"codex"}, writer="codex")["provider"] == "codex"
+        assert allocate(owner, role=role, installed=both, writer=None)["provider"] != owner
+try:
+    allocate("claude", role="reviewer", installed={"codex"}, writer="codex")
+except ValueError as error:
+    assert "openai family" in str(error), error
+else:
+    raise AssertionError("a reviewer judged its writer's family")
+# END independent reviewer family
 for readings in ({}, {"claude": {"weekly_used": 60}}, {"codex": {"weekly_used": 20}}):
     for owner in both:
         assert allocate(owner, role="builder", installed=both, provider_status=readings)["provider"] != owner
@@ -384,7 +404,7 @@ for owner in panel.PROVIDERS:
         "model-routing.md": (
             "--workload light|routine|deep|frontier", "ordering candidates by weekly quota left",
             "a free Pi route without weekly quota is overflow after native providers",
-            "Reviewer/verifier/security-auditor/critic routes prefer a provider other than",
+            "Reviewer/verifier/security-auditor/critic routes exclude the linked writer's recorded",
             "Ordinary role dispatches omit", "Profile-controlled CLIs omit", "explicit routes omit",
             "routine for a bounded reversible choice", "deep by default for debate", "frontier only for",
             "security-auditor or an explicit workload choice", "high effort for trust-boundary", "low for mechanical edits"),
@@ -1060,6 +1080,7 @@ for action in ("native", "council"):
             panel.council(project, "codex", "heartbeat-council", "Inspect source", "Compare options")
         assert status == 0 and not process.terminate.called and not process.kill.called
 
+# BEGIN linked writer family
 # The reviewed writer follows recorded linkage, not attempt recency: late telemetry advances an earlier
 # Claude write's updated_at past the Codex write that produced the reviewed patch.
 def history_row(attempt, provider, task="task-a"):
@@ -1090,12 +1111,44 @@ with patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps(histor
     assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_claude", "c" * 64))[1] == "claude"
     patch_rows.append(dict(patch_row("att_claude", "c" * 64), patch=linked("att_codex", "c" * 64)["patch"]))
     assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))[1] is None
+    history_rows[:] = [history_row("att_codex", "codex"), history_row("att_codex2", "codex")]
+    history_rows[1]["refs"]["panel_model"] = "gpt-6-astra"
+    patch_rows[:] = [patch_row("att_codex", "c" * 64),
+                     dict(patch_row("att_codex2", "c" * 64), patch=linked("att_codex", "c" * 64)["patch"])]
+    _, writer = panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))
+    assert writer == "codex" and allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "claude"
+    history_rows[:] = [history_row("att_codex", "codex"), history_row("att_pi", "pi")]
+    history_rows[1]["refs"]["panel_model"] = "openai/gpt-6.1-sol"
+    patch_rows[:] = [patch_row("att_codex", "c" * 64),
+                     dict(patch_row("att_pi", "c" * 64), patch=linked("att_codex", "c" * 64)["patch"])]
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))[1] is None
+    history_rows[:] = [history_row("att_pi", "pi"), history_row("att_pi2", "pi")]
+    history_rows[0]["refs"]["panel_model"] = "openai/gpt-6.1-sol"
+    history_rows[1]["refs"]["panel_model"] = "openai/gpt-6-astra"
+    patch_rows[:] = [dict(patch_row(name, "c" * 64), patch=linked("att_codex", "c" * 64)["patch"])
+                     for name in ("att_pi", "att_pi2")]
+    _, writer = panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))
+    assert writer == "pi" and allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "claude"
+    history_rows[1]["refs"]["panel_model"] = "anthropic/claude-opus-5-5"
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))[1] is None
+    history_rows[1]["refs"]["panel_model"] = None
+    assert panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))[1] is None
+    history_rows[:] = [history_row("att_pi", "pi")]
+    patch_rows[:] = [dict(patch_row("att_pi", "c" * 64), patch=linked("att_codex", "c" * 64)["patch"])]
+    _, writer = panel_dispatch.room_history(project, "claude", "task-a", linked("att_codex", "c" * 64))
+    try:
+        allocate("claude", role="reviewer", installed=both, writer=writer)
+    except ValueError as error:
+        assert "unverified" in str(error), error
+    else:
+        raise AssertionError("unknown linked writer family was accepted")
     # A task with one writing provider but no candidate linkage keeps the owner-opposite fallback.
     history_rows[:] = [history_row("att_codex", "codex")]
     _, writer = panel_dispatch.room_history(project, "claude", "task-a")
     assert writer is None, writer
     assert allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "codex"
 
+# END linked writer family
 for owner in panel.PROVIDERS:
     plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                            "--launch", owner, "--resume", "exact-session-id", "--dry-run"]))

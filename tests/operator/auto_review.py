@@ -24,9 +24,74 @@ for owner in ("pi", "antigravity"):
     capped = dict(readings, antigravity={"daily_cap": {"gemini-4-argon-high": today}})
     assert allocate(owner, role="reviewer", installed=providers, writer="codex",
                     provider_status=capped, catalogs=catalogs)["provider"] == "claude"
-    assert allocate(owner, role="reviewer", installed={"claude", "codex"}, writer=owner,
+    assert allocate(owner, role="reviewer", installed={"claude", "codex"}, writer=__import__("panel_dispatch").JudgedWriter(owner, "anthropic/claude-opus-5-5"),
                     owner_model="anthropic/claude-opus-5-5")["provider"] == "codex"
+# A writer family is excluded even when it is the only installed provider.
+for writer in ("codex", "claude"):
+    try:
+        allocate(writer, role="reviewer", installed={writer}, writer=writer)
+    except ValueError as error:
+        assert "independent review unavailable" in str(error) and "not installed" in str(error), error
+    else:
+        raise AssertionError("writer judged its own work")
+assert allocate("codex", role="reviewer", tier="routine", installed={"codex", "antigravity"},
+                writer="codex", catalogs={"antigravity": ["gemini-4-argon-high"]})["provider"] == "antigravity"
+assert allocate("codex", role="reviewer", installed={"codex"}, writer="codex",
+                explicit_target=True)["judge_note"] == "same-family judge (owner-pinned)"
+for used in (90, 99):
+    try:
+        allocate("antigravity", role="reviewer", installed={"codex", "claude", "antigravity"},
+                 writer=__import__("panel_dispatch").JudgedWriter("antigravity", "google/gemini-4-argon-high"), owner_model="google/gemini-4-argon-high",
+                 provider_status={"codex": {"weekly_used": used}, "claude": {"weekly_used": used}},
+                 catalogs={"antigravity": ["gemini-4-argon-high"]})
+    except ValueError as error:
+        assert "quota" in str(error), error
+    else:
+        raise AssertionError("saturated alternatives allowed self-review")
+route = allocate("antigravity", role="reviewer", installed={"codex", "antigravity"},
+                 writer=__import__("panel_dispatch").JudgedWriter("antigravity", "google/gemini-4-argon-high"), owner_model="google/gemini-4-argon-high",
+                 catalogs={"antigravity": ["gemini-4-argon-high"]})
+assert route["provider"] == "codex"
+assert __import__("panel_routing").alternate_route(route, {"codex", "antigravity"}) is None
 # END independent-antigravity-preference
+# BEGIN writer-model-independence
+import panel_dispatch as judge_dispatch
+import panel_routing as judge_routing
+for provider in ("pi", "opencode", "antigravity"):
+    for model in (None, "", "malformed"):
+        try:
+            allocate("claude", role="reviewer", installed={"claude", "codex"},
+                     writer=judge_dispatch.JudgedWriter(provider, model))
+        except ValueError as error:
+            assert "family unverified" in str(error), error
+        else:
+            raise AssertionError("unknown writer family was accepted")
+    writer = judge_dispatch.JudgedWriter(provider, "anthropic/claude-opus-5-5")
+    assert allocate("codex", role="reviewer", installed={"claude", "codex"}, writer=writer)["provider"] == "codex"
+    writer = judge_dispatch.JudgedWriter(provider, "openai/gpt-6.1-sol")
+    assert allocate("claude", role="reviewer", installed={"claude", "codex"}, writer=writer)["provider"] == "claude"
+    if provider in ("pi", "antigravity"):
+        assert allocate(provider, role="reviewer", installed={"claude", "codex"}, writer=writer,
+                        owner_model="anthropic/claude-opus-5-5")["provider"] == "claude"
+for owner in ("pi", "antigravity"):
+    primary = {"role": "reviewer", "owner": owner, "provider": "codex", "workload": "routine",
+               "access": "read", "judged_family": "openai"}
+    alternate = judge_routing.alternate_route(primary, {"claude", "antigravity"},
+        {"claude": {"weekly_used": 10}}, resolve_accounts=False)
+    assert alternate["provider"] == "antigravity", alternate
+attempt = {"attempt_id": "writer", "task_id": "task", "provider": "pi", "refs": {
+    "panel_alias": "W1", "panel_access": "write", "panel_room_id": "room",
+    "panel_model": "openai/gpt-6.1-sol"}}
+artifact = {"attempt_id": "writer", "patch": "patch.diff", "patch_sha256": "digest", "base_sha": "base"}
+with patch.object(judge_dispatch.room, "resolve", return_value="room"), \
+        patch.object(judge_dispatch.room, "same_room", return_value=True), \
+        patch.object(panel, "events", return_value=json.dumps([attempt])), \
+        patch.object(panel_result_store, "_records", return_value=([attempt], [artifact])):
+    _, writer = judge_dispatch.room_history(project, "claude", "task",
+        {"patch": "patch.diff", "sha256": "digest", "base": "base"}, "room")
+    assert writer == "pi" and writer.model == "openai/gpt-6.1-sol", writer
+    assert allocate("claude", role="reviewer", installed={"codex", "claude"}, writer=writer)["provider"] == "claude"
+# END writer-model-independence
 # BEGIN independent-antigravity-boundaries
 import panel_routing as judge_routing
 providers = {"claude", "codex", "antigravity"}
@@ -1473,6 +1538,36 @@ for label, exit_code, reason, missing, possible in (
         messages = room.status(project, provider_room)["messages"]
         assert any("manual review is needed" in m["text"] for m in messages if m.get("sender") == member)
         assert panel.dispatch_store.read(project, panel._settlement_claim_path(member))["steps"]["auto_review"] is True
+member = "call-" + hashlib.sha256(b"independent-refusal").hexdigest()[:16]
+room.join(project, provider_room, member, "codex", "worker", parent=room_owner)
+panel._prepare_dispatch_call(project, provider_room, member, room_owner, "true", project)
+event = {"role": "worker", "access": "write", "needs_review": True, "verify_status": "passed",
+         "verify_exit": 0, "patch_sha256": "b" * 64, "patch": ".oms/artifacts/fixture/change.patch",
+         "changed_files": ["scripts/fixture.py"]}
+record = {"exit": 0, "base_sha": "b" * 40}
+reason = "independent review unavailable for openai family (claude: not installed)"
+with patch.object(panel, "_call_result_event", return_value=(event, record)), \
+        patch.object(panel, "_dispatch_verifier", return_value="true"), \
+        patch.object(panel, "_review_verifier", return_value="true"), \
+        patch.object(panel, "_dispatch_execution_repository", return_value=project), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "done"}]}]}), \
+        patch.object(panel, "dispatch", side_effect=ValueError(reason)) as dispatched, \
+        patch.dict(os.environ, provider_env, clear=True):
+    assert panel.deliver_result(project, provider_room, member, room_owner, "provider-task", 0)
+assert dispatched.call_count == 1 and dispatched.call_args.kwargs["dry_run"] is True
+handoff = next(m for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)
+assert "review unavailable: " + reason in handoff["text"], handoff
+reviewer = "call-" + hashlib.sha256(b"pinned-review").hexdigest()[:16]
+room.join(project, provider_room, reviewer, "codex", "reviewer", parent=room_owner,
+          label="review (same-family judge (owner-pinned))")
+panel._prepare_dispatch_call(project, provider_room, reviewer, room_owner)
+review_event = {"role": "reviewer", "access": "read", "needs_review": False, "verify_status": "passed"}
+with patch.object(panel, "_call_result_event", return_value=(review_event, {"exit": 0})), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "한" * 3000}]}]}), \
+        patch.dict(os.environ, provider_env, clear=True):
+    panel.deliver_result(project, provider_room, reviewer, room_owner, "provider-task", 0)
+handoff = next(m for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + reviewer)
+assert "same-family judge (owner-pinned)" in handoff["text"] and len(handoff["text"].encode("utf-8")) <= 4000, handoff
 with patch.object(panel_result_store, "_records", return_value=([], [])), \
         patch.object(panel, "_review_verifier", return_value="true"), \
         patch.object(panel, "_write_brief_artifact") as draft, \
@@ -1491,3 +1586,24 @@ with patch.object(panel_result_store, "_records", return_value=([], [])), \
                                       {"artifact": ".oms/artifacts/fixture/review.md"}, {"call_id": "worker"})
     assert "After admission and editing the summary" in notice and "--outcome accepted" in notice
 # END provider-error-review
+# BEGIN pinned judge handoff boundary
+provider_room = room.create(project, "pinned-boundary", "Pinned judge boundary")
+room_owner = "pinned-owner"
+room.join(project, provider_room, room_owner, "claude", "main")
+provider_env = dict(environment, OMS_ROOM_REPO=str(project), OMS_ROOM_PARTICIPANT=room_owner, OMS_ROOM_ID=provider_room)
+review_event = {"role": "reviewer", "access": "read", "needs_review": False, "verify_status": "passed"}
+for size in (0, 1, 4000, 4001, "malformed"):
+    member = "call-" + hashlib.sha256(("pinned-boundary-" + str(size)).encode()).hexdigest()[:16]
+    room.join(project, provider_room, member, "codex", "reviewer", parent=room_owner,
+              label="review (same-family judge (owner-pinned))")
+    panel._prepare_dispatch_call(project, provider_room, member, room_owner)
+    answer = "x" * size if isinstance(size, int) else {"invalid": True}
+    with patch.object(panel, "_call_result_event", return_value=(review_event, {"exit": 0})), \
+            patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": answer}]}]}), \
+            patch.dict(os.environ, provider_env, clear=True):
+        assert panel.deliver_result(project, provider_room, member, room_owner, "provider-task", 0)
+    message = next(m for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)["text"]
+    assert "same-family judge (owner-pinned)" in message and len(message.encode("utf-8")) <= 4000, size
+    if size == 4001:
+        assert len(message.encode("utf-8")) == 4000, len(message.encode("utf-8"))
+# END pinned judge handoff boundary

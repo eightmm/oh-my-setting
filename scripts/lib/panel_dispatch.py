@@ -182,6 +182,13 @@ def routing_status(repo, room_id=None, main=None, snapshot_sink=None):
     return readings
 
 
+class JudgedWriter(str):
+    def __new__(cls, provider, model):
+        value = super().__new__(cls, provider)
+        value.model = model
+        return value
+
+
 def room_history(repo, owner, task_id=None, candidate=None, room_id=None):
     """Dispatches per provider in this room and the provider that wrote the reviewed work; empty when unknown.
 
@@ -203,7 +210,7 @@ def room_history(repo, owner, task_id=None, candidate=None, room_id=None):
             recent[ran] = recent.get(ran, 0) + 1
             rows.append(attempt)
             if task_id and attempt.get("task_id") == task_id and refs.get("panel_access") == "write":
-                writers[attempt.get("attempt_id")] = ran
+                writers[attempt.get("attempt_id")] = (ran, refs.get("panel_model"))
         linkage = candidate if isinstance(candidate, dict) else {}
         if not (writers and all(linkage.get(key) for key in ("patch", "sha256", "base"))):
             return recent, None
@@ -214,7 +221,14 @@ def room_history(repo, owner, task_id=None, candidate=None, room_id=None):
                   and a.get("base_sha") == linkage["base"]}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return None, None
-    return recent, next(iter(owners)) if len(owners) == 1 else None
+    if len(owners) == 1:
+        return recent, JudgedWriter(*next(iter(owners)))
+    if owners and len({provider for provider, _ in owners}) == 1:
+        from panel_routing import model_family
+        families = {model_family(provider, model) for provider, model in owners}
+        if len(families) == 1 and "unknown" not in families and "" not in families:
+            return recent, JudgedWriter(*sorted(owners, key=lambda item: (item[0], str(item[1])))[0])
+    return recent, None
 
 
 def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candidate=None):
@@ -257,15 +271,15 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         rows = provider_catalog(target or ",".join(sorted({c["provider"] for tier in policy()["tiers"].values()
                                                            for c in tier})))
         readings, recent, writer = ((routing_readings or {}, *room_history(repo, owner, task_id, candidate, room_id))
-                                    if routing_readings is not None else
-                                    ({}, None, None) if target else route_inputs(
+                                    if routing_readings is not None or target and role in ("reviewer", "verifier", "security-auditor", "critic") else
+                                    ({}, None, None) if target and role not in ("reviewer", "verifier", "security-auditor", "critic") else route_inputs(
                                         owner, repo, room_id, main, task_id, candidate))
         catalogs = {row["provider"]: tier_catalog(row) for row in rows}
         visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         route = allocate(owner, role, workload, access, purpose,
                          {row["provider"] for row in rows if row["installed"]}, readings, recent, writer, catalogs,
                          owner_model=owner_model, repo=visibility_repo_resolved, preferred=preferred,
-                         resolve_accounts=not bool(target))
+                         resolve_accounts=not bool(target), explicit_target=bool(target))
         peer = next(row for row in rows if row["provider"] == route["provider"])
         route.update(binary=peer["binary"], model=routable_route_model(
             route["provider"], route["model"], catalogs[route["provider"]]))
@@ -277,8 +291,9 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
         # A role route keeps its tier's model; the main may raise or lower effort for one harder or simpler subtask.
         return dict(route, effort=effort) if effort else route
     visibility_repo_resolved = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
-    route = allocate(owner, role, None, access, purpose, owner_model=owner_model, repo=visibility_repo_resolved,
-                     check_visibility=not bool(model), resolve_accounts=False)
+    _, explicit_writer = room_history(repo, owner, task_id, candidate, room_id) if role in ("reviewer", "verifier", "security-auditor", "critic") else (None, None)
+    route = allocate(owner, role, None, access, purpose, writer=explicit_writer, owner_model=owner_model, repo=visibility_repo_resolved,
+                     check_visibility=not bool(model), resolve_accounts=False, explicit_target=True)
     route.pop("route_reason", None)
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", target) or ".." in target:
         raise ValueError("--to selects one registered provider")
@@ -295,7 +310,11 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     if peer["provider"] == "codex" and model not in MODEL_IDS["codex"] and not (
             route_family("codex", model) and model in peer.get("catalog_models", peer.get("models", []))):
         raise ValueError("Codex workers require a known versioned Astra, Sol, Terra or Luna model")
-    from panel_routing import resolve_provider_account
+    from panel_routing import model_family, resolve_provider_account
+    if route.get("judged_family") and model_family(peer["provider"], model) == route["judged_family"]:
+        route["judge_note"] = "same-family judge (owner-pinned)"
+    else:
+        route.pop("judge_note", None)
     return resolve_provider_account(dict(route, provider=peer["provider"], binary=peer["binary"],
                                        model=model, effort=effort), routing_readings, repo, explicit=True)
 
@@ -990,6 +1009,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
         fallback_decision = "explicit-target" if target else "no-eligible-alternate"
         if not target:
             remaining = {candidate["provider"] for candidate in policy()["tiers"][route["workload"]]}
+            if role in ("reviewer", "verifier", "security-auditor", "critic") and route["workload"] == "routine":
+                remaining.update(c["provider"] for c in policy()["tiers"]["deep"] if c["provider"] == "antigravity")
             while remaining:
                 fallback = alternate_route(route, installed=remaining, provider_status=readings or {}, repo=repo,
                                            resolve_accounts=False)
@@ -2387,7 +2408,7 @@ def _rollback_dispatch_enrollment(repo, room_id, member):
 
 def route_label(route):
     return route["provider"] + (" account=" + route["account"] + " (runs under its own home)"
-                                if route.get("account") else "")
+                                if route.get("account") else "") + (" (" + route["judge_note"] + ")" if route.get("judge_note") else "")
 
 
 def _new_dispatch_attempt(attempts, task_id, before, member):
@@ -2548,8 +2569,12 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     else:
         for name in ("OMS_PANEL_FALLBACK_PROVIDER", "OMS_PANEL_FALLBACK_MODEL", "OMS_PANEL_FALLBACK_EFFORT"):
             env.pop(name, None)
-    if label:
-        env["OMS_PANEL_LABEL"] = label
+    result_label = label
+    if route.get("judge_note"):
+        suffix = " (" + route["judge_note"] + ")"
+        result_label = (label or route["purpose"])[:120 - len(suffix)].rstrip() + suffix
+    if result_label:
+        env["OMS_PANEL_LABEL"] = result_label
     else:
         env.pop("OMS_PANEL_LABEL", None)
     if alias:
@@ -2679,7 +2704,8 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                          and room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)]
             alias = _reserve_alias(repo, room_id, role, alias, call_rows)
         member = member_id or "call-" + uuid.uuid4().hex[:16]
-        room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], label or route["purpose"],
+        room_label = result_label or route["purpose"]
+        room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], room_label,
                   owns=owned, parent=caller, dispatch_role=route["role"], purpose=route["purpose"], state="queued",
                   alias=alias)
         try:

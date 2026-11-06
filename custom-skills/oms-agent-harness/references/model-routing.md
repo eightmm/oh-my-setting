@@ -42,8 +42,12 @@ go to fewer room dispatches, then away from the main. Installed
 candidates with recorded weekly usage at 90% or above are skipped when another
 is installed; unknown readings remain available,
 a sole installed candidate is retained, and all saturated alternatives fail.
-Reviewer/verifier/security-auditor/critic routes prefer a provider other than the
-reviewed patch's writer (automatic review), else the main's, when one remains. `--to codex|claude`
+Reviewer/verifier/security-auditor/critic routes exclude the linked writer's recorded
+model family, or the main's when no writer is linked. Matching retries from one
+provider may share a family; links across providers or families are ambiguous. An unknown
+linked writer family is unverified. If no independent family is usable, review remains pending; an owner-pinned
+same-family judge is labelled on the result. Routine judges may use the deep-tier
+Antigravity route. `--to codex|claude`
 without `--model` pins that provider's tier candidate and effort; explicit models
 remain exact, and other model-selecting transports still require `--model`.
 `--routes` shows tiers and chosen candidates; owner detection follows

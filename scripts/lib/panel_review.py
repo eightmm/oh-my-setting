@@ -1043,13 +1043,16 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
             # Completion needs the durable manual-review notice; without it the claim stays retryable.
             auto_review_done = manual_notice
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-            if attempt is None or attempt >= 2:
+            if isinstance(error, ValueError) and str(error).startswith("independent review unavailable for "):
+                auto_review_done = review_judgment("review unavailable: " + clean(str(error), 500))
+            elif attempt is None or attempt >= 2:
                 # A first launch failure is retried by the next reconcile; mail only when none remains.
                 review_judgment(unconfirmed)
             print("OMS automatic review unavailable for task %s: %s" % (task_id, clean(str(error), 180)),
                   file=sys.stderr)
             # Preflight/dispatch failures with no launch evidence retain their bounded retry.
-            auto_review_done = False
+            if review_notice is None:
+                auto_review_done = False
     # Manual review is settled only with the same durable handoff as its judgment.
     manual_review = review_notice is not None and role != "reviewer" and bool(
         result_event and result_event.get("needs_review") and status == 0 and not verify_failed and not guard_stop
@@ -1064,6 +1067,15 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
     prefix = "Call exit=%d; parent acceptance pending.\n" % status
     verification = "Verification: %s. " % (result_event or {}).get("verify_status", "unavailable")
     full_message = (prefix + verification + str(summary)).encode("utf-8")
+    judge_suffix = ""
+    if role == "reviewer" or dispatched_role in {"verifier", "security-auditor", "critic"}:
+        try:
+            participants = room.status(repo, room_id).get("participants", [])
+            member_label = next((p.get("label", "") for p in participants if p.get("participant") == member), "")
+            if member_label.endswith(" (same-family judge (owner-pinned))"):
+                judge_suffix = " same-family judge (owner-pinned)."
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     answer_artifact = result_record.get("artifact")
     if (not _safe_patch_path(answer_artifact) or
             not answer_artifact.startswith(".oms/artifacts/") or
@@ -1071,7 +1083,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         answer_artifact = None
     evidence_pointer = ("Full answer: " + answer_artifact if answer_artifact else
                         "Full answer artifact unavailable")
-    pointer = (" %s. Results overview: oms panel --results --task-id %s --participant %s" %
+    pointer = (judge_suffix + " %s. Results overview: oms panel --results --task-id %s --participant %s" %
                (evidence_pointer, task_id, member))
     if len(full_message) + len(pointer.encode("utf-8")) > 4000:
         pointer = " [Summary truncated.]" + pointer
@@ -1083,7 +1095,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         artifact = result_record.get("artifact")
         full = (" Full answer: " + artifact + "." if _safe_patch_path(artifact)
                 and artifact.startswith(".oms/artifacts/") and len(artifact.encode("utf-8")) <= 1000 else "")
-        pointer = " Read findings: oms panel --results --task-id " + task_id + " --participant " + member + "." + full
+        pointer = judge_suffix + " Read findings: oms panel --results --task-id " + task_id + " --participant " + member + "." + full
         review_notice = prefix.strip() + " " + verification + review_notice
         if not answer_artifact:
             review_notice += " " + str(summary)
