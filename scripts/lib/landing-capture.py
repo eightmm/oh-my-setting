@@ -530,7 +530,7 @@ def intake(repo, source, landing, expected, execution_repo, *parameters):
     # parent exists (fresh repos and redirected state retain their old guards).
     try:
         binding = admission_binding(repo, execution_repo, *parameters)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, ImportError, subprocess.SubprocessError):
         binding = None  # Binding is an optimization, never a new admission gate.
     for item in reversed(list(reservations(repo).values())) if binding else ():
         if item['sha256'] != expected:

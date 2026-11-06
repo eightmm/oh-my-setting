@@ -232,6 +232,57 @@ after_add = binding(*args)
 helper.write_text('changed\n')
 after_edit = binding(*args)
 assert len({v['harness_sha256'] for v in (before, after_add, after_edit)}) == 3
+
+# Exercise the public intake dispatch with isolated stand-ins for state writes.
+import contextlib, io, os
+os.environ.pop('OMS_HARNESS_CHILD', None)
+os.environ.pop('OMS_HARNESS_DELEGATE_DEPTH', None)
+intake = module['intake']
+g = intake.__globals__
+original = {name: g[name] for name in ('admission_binding', 'reservations', 'admission_is_current', 'allocate')}
+calls = []
+item = dict(sha256='expected', directory='old', landing_id='prior')
+g['reservations'] = lambda repo: calls.append('reservations') or {'prior': item}
+g['admission_is_current'] = lambda repo, candidate, value: calls.append('current') or True
+g['allocate'] = lambda *args: calls.append('allocate') or 'fresh.patch'
+def dispatch():
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        module['main'](['intake', sys.argv[3], 'source', 'landing', 'expected', sys.argv[3]])
+    return output.getvalue().strip()
+for error in (OSError, KeyError, ImportError):
+    def fail_binding(*args, error=error):
+        raise error('binding unavailable')
+    g['admission_binding'] = fail_binding
+    calls.clear()
+    assert dispatch() == 'fresh.patch'
+    assert calls == ['allocate'], calls
+g['admission_binding'] = lambda *args: {'valid': True}
+calls.clear()
+assert dispatch() == 'old/prior.patch'
+assert calls == ['reservations', 'current'], calls
+for error in (RuntimeError, SystemExit, KeyboardInterrupt):
+    g['admission_binding'] = lambda *args, error=error: (_ for _ in ()).throw(error('unexpected'))
+    calls.clear()
+    try:
+        dispatch()
+    except error:
+        pass
+    else:
+        raise AssertionError('unexpected binding failure suppressed')
+    assert not calls
+# Allocation failures remain refusals and never fall back to a prior verdict.
+g['admission_binding'] = lambda *args: (_ for _ in ()).throw(KeyError('missing task'))
+g['allocate'] = lambda *args: (_ for _ in ()).throw(ValueError('allocation refused'))
+calls.clear()
+try:
+    dispatch()
+except ValueError as exc:
+    assert str(exc) == 'allocation refused'
+else:
+    raise AssertionError('allocation refusal suppressed')
+assert not calls
+g.update(original)
 PY_REUSE_HARNESS
 rc=0
 "$ADMIT" --repo "$repo" --patch "$TMP/bypass.patch" --verify 'bash scripts/check.sh' \
