@@ -985,10 +985,11 @@ source shows no evidence that they need the same namespace, so that stays unveri
 Register another entitled Codex account with:
 
 ```bash
-oms connect-services --codex-account credits --first
+oms connect-services --account codex:credits --first
 ```
 
-The command creates `~/.codex-credits` with mode 0700. Use `--home PATH` for another
+The command creates `~/.codex/accounts/credits` with mode 0700 (under `CODEX_HOME`
+when set). Previously registered homes remain in place. Use `--home PATH` for another
 location; relative paths are resolved physically from the current directory. The home
 must differ from the main Codex home and be outside Git repositories. If your home
 directory is versioned, use `--home PATH` outside that repository. Existing account
@@ -1013,6 +1014,10 @@ or reads, copies, links, or prints login data. Each home keeps its own login,
 model cache, sessions, and other CLI state. After login, the registered account
 is available to routing without editing JSON.
 
+`oms connect-services --account codex:credits --verify` checks `codex login
+status` for every registered Codex home, including the main home. It fails if
+any home or login cannot be verified, and does not make a model call.
+
 `--first` places the account ahead of existing accounts; the default `--last`
 appends it. The ID `default` is reserved for the main home. A fresh registry
 retains the main home as `default` after a
@@ -1020,7 +1025,7 @@ retains the main home as `default` after a
 changes it. To unregister and remove only links created by this command:
 
 ```bash
-oms connect-services --codex-account credits --remove
+oms connect-services --account codex:credits --remove
 ```
 
 The home, login, model cache, sessions, private files, and pre-existing links remain. A
@@ -1049,8 +1054,8 @@ include changed or unmanaged entries and recorded links whose directory identity
 safety, target or unlink checks prevented removal.
 
 `--dry-run` prints the projected summary without changing account state. When links or
-receipt rows stay, recovery guidance names `oms connect-services --codex-account ID
---remove` or `oms connect-services --codex-account ID --repair`; replace `ID` with the
+receipt rows stay, recovery guidance names `oms connect-services --account codex:ID
+--remove` or `oms connect-services --account codex:ID --repair`; replace `ID` with the
 account to unregister or repair. Registry and receipt writes use atomic replacement
 under one shared writer lock; an interrupted operation can leave partial links or an
 older registry, and is safe to rerun. `oms doctor` reports each registered home's

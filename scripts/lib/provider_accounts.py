@@ -514,7 +514,7 @@ def _retire_stale_account_home(rows, receipt, row):
     rows.remove(row)
     atomic_write_json(receipt, rows)
     print("warn: Codex account %s %s; stale receipt removed, links kept" % (row["id"], reason))
-    print("recovery: oms connect-services --codex-account %s --home %s" %
+    print("recovery: oms connect-services --account codex:%s --home %s" %
           (shlex.quote(row["id"]), shlex.quote(row["home"])))
     return True
 
@@ -523,7 +523,7 @@ def _account_recovery(ident="ID"):
     import shlex
     main = ident == "default"
     ident = "ID" if main else ident
-    command = "oms connect-services --codex-account " + shlex.quote(ident)
+    command = "oms connect-services --account " + shlex.quote("codex:" + ident)
     print("recovery: " + ("restore the main Codex home; for other accounts: " if main else "") +
           command + " --remove; or " + command + " --repair")
 
@@ -627,7 +627,7 @@ def _drop_account_links(rows, receipt, ident=None, root=None, dry_run=False):
 def connect_codex_account(args):
     from oms_runtime.common import atomic_write_json, file_lock
     ident = args.codex_account
-    if ident == "default":
+    if ident == "default" and not getattr(args, "verify", False):
         raise ValueError("Codex account id default is reserved for the main home; choose another id")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident):
         raise ValueError("invalid provider account id")
@@ -638,6 +638,36 @@ def connect_codex_account(args):
         settings = value["providers"].get("codex")
         entries = settings["accounts"] if settings else []
         existing = next((row for row in entries if row["id"] == ident), None)
+        if getattr(args, "verify", False):
+            import subprocess
+            if existing is None:
+                raise ValueError("Codex account is not registered: " + ident)
+            failed = False
+            main = default_account("codex")
+            verify_entries = list(entries)
+            if not any(Path(entry["home"]).resolve() == Path(main["home"]) for entry in entries):
+                main["id"] = "main"
+                verify_entries.insert(0, main)
+            for entry in verify_entries:
+                error = account_home_error(entry)
+                if error:
+                    failed = True
+                    print("warn: codex account " + entry["id"] + " home unavailable")
+                    continue
+                env = dict(os.environ, CODEX_HOME=entry["home"])
+                try:
+                    result = subprocess.run(["codex", "login", "status"], env=env,
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL, timeout=15, check=False)
+                    logged_in = result.returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    logged_in = False
+                print(("ok: " if logged_in else "warn: ") + "codex account " + entry["id"] +
+                      (" logged in" if logged_in else " login unverified"))
+                failed |= not logged_in
+            if failed:
+                raise ValueError("Codex account login verification failed")
+            return
         if args.remove:
             _drop_account_links(rows, receipt, ident=ident)
             if existing:
@@ -648,7 +678,7 @@ def connect_codex_account(args):
             print("Codex account removed: " + ident + "; home, login and sessions kept")
             return
         raw_home = args.home if args.home is not None else (
-            existing["home"] if existing else str(Path.home() / (".codex-" + ident)))
+            existing["home"] if existing else str(Path(default_account("codex")["home"]) / "accounts" / ident))
         if not raw_home or "\0" in raw_home:
             raise ValueError("Codex account home must not be empty")
         home = Path(raw_home).expanduser().resolve()
@@ -669,7 +699,15 @@ def connect_codex_account(args):
             print("skipped: platform lacks safe unlink: " + str(home))
         if owner is None:
             _account_parent_private(home.parent)
-            home.mkdir(mode=0o700, parents=True, exist_ok=True)
+            missing = []
+            parent = home.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for parent in reversed(missing):
+                parent.mkdir(mode=0o700, exist_ok=True)
+            _account_parent_private(home.parent)
+            home.mkdir(mode=0o700, exist_ok=True)
         with _account_directory(home, owner) as (descriptor, info):
             if owner is None:
                 owner = {"id": ident, "home": str(home), "links": {}, "st_dev": info.st_dev, "st_ino": info.st_ino}
@@ -767,7 +805,7 @@ def _account_command():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     connect = commands.add_parser("connect")
-    connect.add_argument("--codex-account", required=True)
+    connect.add_argument("--account", required=True)
     connect.add_argument("--home")
     order = connect.add_mutually_exclusive_group()
     order.add_argument("--first", action="store_true")
@@ -775,6 +813,7 @@ def _account_command():
     action = connect.add_mutually_exclusive_group()
     action.add_argument("--repair", action="store_true")
     action.add_argument("--remove", action="store_true")
+    action.add_argument("--verify", action="store_true")
     commands.add_parser("doctor")
     cleanup = commands.add_parser("cleanup")
     cleanup.add_argument("--root", type=Path, required=True)
@@ -782,6 +821,11 @@ def _account_command():
     args = parser.parse_args()
     try:
         if args.command == "connect":
+            if not args.account.startswith("codex:"):
+                raise ValueError("account must have the form codex:ID; other providers are not supported yet")
+            if args.verify and (args.home is not None or args.first or args.last):
+                raise ValueError("--verify cannot be combined with --home, --first or --last")
+            args.codex_account = args.account[len("codex:"):]
             connect_codex_account(args)
         elif args.command == "doctor":
             doctor_codex_accounts()

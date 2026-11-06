@@ -4,6 +4,10 @@ Host requirements, profiles and maintenance for Linux, macOS and Windows via WSL
 For the one-line install and a summary of changed files, see the [README](../README.md).
 [한국어](INSTALL.ko.md)
 
+To register or verify another Codex login, use `oms connect-services --account
+codex:ID`; see [provider accounts](TERMINAL-PANEL.md#provider-accounts) for
+home isolation, login, verification, and removal.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```

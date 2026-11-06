@@ -4,6 +4,9 @@ Linux, macOS, Windows via WSL2의 호스트 요구 사항, 프로필과 유지�
 한 줄 설치 명령과 바뀌는 파일의 요약은 [README](../README.ko.md)를 참고한다.
 [English](INSTALL.md)
 
+추가 Codex 로그인을 등록하거나 확인하려면 `oms connect-services --account
+codex:ID`를 사용한다. 홈 격리, 로그인, 확인 및 제거는 [provider accounts](TERMINAL-PANEL.md#provider-accounts)를 참고한다.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```

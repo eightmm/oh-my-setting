@@ -23,8 +23,8 @@ usage() {
   cat <<'EOF'
 Usage: connect-services.sh [--auto|--required] [--data-source-id ID]
                            [--no-github] [--no-notion] [-h|--help]
-       connect-services.sh --codex-account ID [--home PATH] [--first|--last]
-                           [--repair|--remove]
+       connect-services.sh --account codex:ID [--home PATH] [--first|--last]
+                           [--repair|--remove|--verify]
 
 Authenticate GitHub with `gh auth login` and Notion with `ntn login`, then
 discover and configure the existing Work Journal data source. Credentials stay
@@ -34,7 +34,8 @@ Notion data-source id and authentication mode.
 --auto continues a non-interactive install with exact follow-up commands.
 --required fails unless every selected service is connected.
 
---codex-account registers an independent Codex home (default ~/.codex-ID).
+--account codex:ID registers an independent Codex home (default CODEX_HOME/accounts/ID,
+or ~/.codex/accounts/ID when CODEX_HOME is unset).
 The id default is reserved for the main home. Use --home PATH outside the
 repository when the default account home would be inside a repository.
 It shares AGENTS.md, config.toml, hooks.json, .hook-trust, plugins, rules and
@@ -42,6 +43,7 @@ skills with the parent CODEX_HOME or ~/.codex. Existing files are kept;
 --repair replaces conflicting links only. --first prioritizes the account;
 --last is the default. --remove unregisters it and removes only recorded links,
 keeping its home, login and sessions. Login is always left to the user.
+--verify checks login status for the main home and every registered Codex home.
 Existing homes must belong to the current user and must not be group/other
 writable. Every ancestor through the filesystem root must belong to the current
 user or root; writable ancestors need the sticky bit. Refusals name a fix; permissions
@@ -69,14 +71,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-github) CONNECT_GITHUB=0; SERVICE_OPTIONS=1 ;;
     --no-notion) CONNECT_NOTION=0; SERVICE_OPTIONS=1 ;;
-    --codex-account|--home)
+    --account|--home)
       [ "$#" -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
-      [ "$1" != --codex-account ] || ACCOUNT_SELECTED=1
+      [ "$1" != --account ] || ACCOUNT_SELECTED=1
       ACCOUNT_OPTIONS=1
       ACCOUNT_ARGS+=("$1" "$2")
       shift
       ;;
-    --first|--last|--repair|--remove) ACCOUNT_ARGS+=("$1"); ACCOUNT_OPTIONS=1 ;;
+    --first|--last|--repair|--remove|--verify) ACCOUNT_ARGS+=("$1"); ACCOUNT_OPTIONS=1 ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "error: unknown option: $1" >&2
@@ -95,7 +97,7 @@ if [ "$ACCOUNT_SELECTED" = 1 ]; then
   command -v python3 >/dev/null 2>&1 || { echo "error: Python 3 is required" >&2; exit 2; }
   exec python3 "$ROOT/scripts/lib/provider_accounts.py" connect "${ACCOUNT_ARGS[@]}"
 fi
-[ "$ACCOUNT_OPTIONS" = 0 ] || { echo "error: account options require --codex-account ID" >&2; exit 2; }
+[ "$ACCOUNT_OPTIONS" = 0 ] || { echo "error: account options require --account codex:ID" >&2; exit 2; }
 
 case "${OMS_CONNECT_INTERACTIVE:-auto}" in
   1) INTERACTIVE=1; LOGIN_USES_TTY=0 ;;

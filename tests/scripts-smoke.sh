@@ -3119,18 +3119,30 @@ def run(args, ok=True, public=False):
     return result.stdout + result.stderr
 
 def register(ident, *args, ok=True):
-    return run(["--codex-account", ident, *map(str, args)], ok=ok)
+    return run(["--account", "codex:" + ident, *map(str, args)], ok=ok)
 
 def registry():
     return json.loads(config.read_text())
 
-secondary = user / ".codex-credits"
-out = run(["--codex-account", "credits", "--first"], public=True)
+secondary = main / "accounts" / "credits"
+old_umask = os.umask(0o002)
+try:
+    out = run(["--account", "codex:credits", "--first"], public=True)
+finally:
+    os.umask(old_umask)
 assert "registered, login pending" in out, out
 assert "CODEX_HOME=" + shlex.quote(str(secondary)) + " codex login" in out, out
 assert secondary.is_dir() and stat.S_IMODE(secondary.stat().st_mode) == 0o700
+assert stat.S_IMODE(secondary.parent.stat().st_mode) == 0o700
+secondary.parent.chmod(0o770)
+try:
+    unsafe = register("unsafe-accounts", ok=False)
+    assert "chmod go-w" in unsafe and not (secondary.parent / "unsafe-accounts").exists()
+finally:
+    secondary.parent.chmod(0o700)
 assert stat.S_IMODE(config.stat().st_mode) == 0o600
 assert not (secondary / "auth.json").exists()
+assert not (secondary / "accounts").exists()
 for name in links:
     assert (secondary / name).is_symlink() and os.readlink(secondary / name) == str(main / name), name
 assert registry()["providers"]["codex"]["accounts"][0] == {"id": "credits", "home": str(secondary)}
@@ -3140,8 +3152,33 @@ register("credits", "--first")
 assert config.read_bytes() == before
 assert [(secondary / name).lstat().st_ino for name in links] == inodes
 
+bin_dir = base / "bin"
+bin_dir.mkdir()
+stub = bin_dir / "codex"
+stub.write_text('#!/bin/sh\n[ "$1" = login ] && [ "$2" = status ] && [ -f "$CODEX_HOME/logged" ]\n')
+stub.chmod(0o700)
+env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+(main / "logged").touch()
+out = register("credits", "--verify", ok=False)
+assert "codex account default logged in" in out and "codex account credits login unverified" in out, out
+(secondary / "logged").touch()
+out = register("credits", "--verify")
+assert "codex account default logged in" in out and "codex account credits logged in" in out, out
+register("default", "--verify")
+assert "not registered" in register("missing", "--verify", ok=False)
+register("credits", "--verify", "--first", ok=False)
+register("credits", "--verify", "--home", secondary, ok=False)
+for invalid in ("", "codex:", "codex:bad:id", "claude:a", "codex"):
+    run(["--account", invalid], ok=False)
+
+sibling = user / ".codex-legacy"
+register("legacy", "--home", sibling)
+register("legacy")
+assert any(row == {"id": "legacy", "home": str(sibling)} for row in registry()["providers"]["codex"]["accounts"])
+
 sys.path.insert(0, str(root / "scripts/lib"))
 import provider_accounts as accounts
+assert "accounts" not in accounts.CODEX_SHARED_ENTRIES
 with patch.dict(os.environ, env):
     loaded = accounts.load_accounts()
 assert not accounts.account_home_error(loaded["providers"]["codex"]["accounts"][0])
@@ -3243,7 +3280,7 @@ with patch.object(Path, "stat", foreign_ancestor):
 
 # A new directory at an old path cannot inherit the old directory's receipt.
 register("recreated")
-recreated = user / ".codex-recreated"
+recreated = main / "accounts" / "recreated"
 moved = user / "moved-account"
 recreated.rename(moved)
 recreated.mkdir(mode=0o700)
@@ -3264,14 +3301,14 @@ with patch.object(os, "lstat", side_effect=PermissionError("fixture stat refusal
 assert receipt.read_bytes() == saved_receipt
 out = register("recreated", "--remove")
 assert "directory identity" in out, out
-assert "recovery: oms connect-services --codex-account recreated --home " + shlex.quote(str(recreated)) in out, out
+assert "recovery: oms connect-services --account codex:recreated --home " + shlex.quote(str(recreated)) in out, out
 assert all((recreated / name).is_symlink() and (moved / name).is_symlink() for name in links)
 assert all(row["id"] != "recreated" for row in json.loads(receipt.read_text()))
 register("recreated")
 assert all((recreated / name).is_symlink() for name in links)
 
 register("missing-home")
-missing_home = user / ".codex-missing-home"
+missing_home = main / "accounts" / "missing-home"
 for name in links:
     (missing_home / name).unlink()
 missing_home.rmdir()
@@ -3283,7 +3320,7 @@ assert missing_home.is_dir() and (missing_home / "skills").is_symlink()
 
 # Simulate an entry changing after readlink but before removal.
 register("entry-swap")
-swap_home = user / ".codex-entry-swap"
+swap_home = main / "accounts" / "entry-swap"
 swap_path = swap_home / "config.toml"
 readlink = os.readlink
 swapped = []
@@ -3303,7 +3340,7 @@ assert swapped and swap_path.is_file() and swap_path.read_text() == "keep concur
 
 # Partial cleanup retires removed and absent names before a later pass.
 register("unlink-retry")
-retry_home = user / ".codex-unlink-retry"
+retry_home = main / "accounts" / "unlink-retry"
 (retry_home / "plugins").unlink()
 unlink = os.unlink
 def deny_unlink(path, *args, **kwargs):
@@ -3325,14 +3362,14 @@ for name in ("AGENTS.md", "plugins"):
     (retry_home / name).symlink_to(main / name, target_is_directory=name == "plugins")
 with patch.dict(os.environ, env):
     accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="unlink-retry")
-assert not (user / ".codex-unlink-retry/skills").is_symlink()
+assert not (main / "accounts" / "unlink-retry/skills").is_symlink()
 assert (retry_home / "AGENTS.md").is_symlink() and (retry_home / "plugins").is_symlink()
 assert not (retry_home / "config.toml").is_symlink()
 
 # Unsupported unlink APIs preserve conflicts during repair and all cleanup links.
 from types import SimpleNamespace
 register("platform")
-platform_home = user / ".codex-platform"
+platform_home = main / "accounts" / "platform"
 (platform_home / "config.toml").unlink()
 (platform_home / "config.toml").symlink_to(main / "hooks.json")
 output = io.StringIO()
@@ -3342,12 +3379,12 @@ with patch.dict(os.environ, env), patch.object(accounts, "_ACCOUNT_SAFE_UNLINK",
     accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="platform", root=root)
 assert "skipped: platform lacks safe unlink" in output.getvalue()
 assert "kept 7 links (safe unlink unavailable: 7); kept 1 receipt rows; registry kept" in output.getvalue(), output.getvalue()
-assert "recovery: oms connect-services --codex-account ID --remove; or oms connect-services --codex-account ID --repair" in output.getvalue()
+assert "recovery: oms connect-services --account codex:ID --remove; or oms connect-services --account codex:ID --repair" in output.getvalue()
 assert os.readlink(platform_home / "config.toml") == str(main / "hooks.json")
 assert (platform_home / "skills").is_symlink()
 
 register("repair-swap")
-swap_path = user / ".codex-repair-swap/config.toml"
+swap_path = main / "accounts" / "repair-swap/config.toml"
 swap_path.unlink()
 swap_path.symlink_to(main / "hooks.json")
 swapped.clear()
@@ -3364,7 +3401,7 @@ legacy = next(row for row in rows if row["id"] == "legacy-receipt")
 del legacy["st_dev"], legacy["st_ino"]
 receipt.write_text(json.dumps(rows))
 out = register("legacy-receipt", "--remove")
-assert "directory identity" in out and (user / ".codex-legacy-receipt/skills").is_symlink(), out
+assert "directory identity" in out and (main / "accounts" / "legacy-receipt/skills").is_symlink(), out
 receipt.write_bytes(saved)
 
 # Refusal never rewrites malformed state or creates the requested home.
@@ -3375,7 +3412,7 @@ for malformed in ("", "{", "[]", '{"schema":0,"providers":{}}',
                   '{"schema":1,"providers":{"codex":{"accounts":[]}}}'):
     config.write_text(malformed)
     register("invalid-state", ok=False)
-    assert config.read_text() == malformed and not (user / ".codex-invalid-state").exists()
+    assert config.read_text() == malformed and not (main / "accounts" / "invalid-state").exists()
 config.write_bytes(valid)
 
 # Ownership state is also validated before any account mutation.
@@ -3384,7 +3421,7 @@ saved_receipt = receipt.read_bytes()
 for malformed in ("", "0", "{}", "[{}]"):
     receipt.write_text(malformed)
     register("invalid-receipt", ok=False)
-    assert receipt.read_text() == malformed and not (user / ".codex-invalid-receipt").exists()
+    assert receipt.read_text() == malformed and not (main / "accounts" / "invalid-receipt").exists()
 receipt.write_bytes(saved_receipt)
 for field, invalid in (("st_dev", -1), ("st_ino", None), ("st_ino", True), ("st_ino", "")):
     rows = json.loads(saved_receipt)
@@ -3392,7 +3429,7 @@ for field, invalid in (("st_dev", -1), ("st_ino", None), ("st_ino", True), ("st_
     receipt.write_text(json.dumps(rows))
     before = receipt.read_bytes()
     register("invalid-identity", ok=False)
-    assert receipt.read_bytes() == before and not (user / ".codex-invalid-identity").exists()
+    assert receipt.read_bytes() == before and not (main / "accounts" / "invalid-identity").exists()
 receipt.write_bytes(saved_receipt)
 rows = json.loads(saved_receipt)
 credits_row = next(row for row in rows if row["id"] == "credits")
@@ -3408,9 +3445,9 @@ for ident in ("", "UPPER", "../bad", "default", "x" * 65):
     assert config.read_bytes() == valid
 register("0")
 register("x" * 64)
-for args in (["--home"], ["--codex-account"], ["--first"], ["--remove"], ["--repair"],
-             ["--codex-account", "a", "--first", "--last"],
-             ["--codex-account", "a", "--no-notion"], ["--codex-account", "a", "--required"]):
+for args in (["--home"], ["--account"], ["--first"], ["--remove"], ["--repair"],
+             ["--account", "codex:a", "--first", "--last"],
+             ["--account", "codex:a", "--no-notion"], ["--account", "codex:a", "--required"]):
     run(args, ok=False)
 alias = user / "main-alias"
 alias.symlink_to(main, target_is_directory=True)
@@ -3445,7 +3482,7 @@ assert changed["providers"]["codex"]["extension"] == [1, 2]
 config.write_bytes(valid)
 
 # Concurrent callers cannot lose either registry entry.
-commands = [entry + ["--codex-account", name] for name in ("parallel-a", "parallel-b")]
+commands = [entry + ["--account", "codex:" + name] for name in ("parallel-a", "parallel-b")]
 calls = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for command in commands]
 for call in calls:
     output = call.communicate(timeout=timeout)
@@ -3463,7 +3500,7 @@ config.write_text(json.dumps(value))
 before = (config.read_bytes(), receipt.read_bytes())
 out = health()
 assert "warn: codex account gone home missing" in out, out
-assert "recovery: oms connect-services --codex-account gone --remove; or oms connect-services --codex-account gone --repair" in out, out
+assert "recovery: oms connect-services --account codex:gone --remove; or oms connect-services --account codex:gone --repair" in out, out
 assert (config.read_bytes(), receipt.read_bytes()) == before and not (user / "gone").exists()
 config.write_bytes(valid)
 main.rename(user / "moved-main")
@@ -3471,7 +3508,7 @@ try:
     out = health()
     assert "warn: codex account default home missing" in out, out
     assert "recovery: restore the main Codex home; for other accounts:" in out, out
-    assert "--codex-account default --remove" not in out, out
+    assert "--account codex:default --remove" not in out, out
 finally:
     (user / "moved-main").rename(main)
 (secondary / "auth.json").touch(mode=0o600)
@@ -3509,7 +3546,7 @@ for home in (user / "moving-before", user / "moving-after"):
 
 # Uninstall previews without writes, then removes only recorded, unchanged links.
 register("cleanup")
-cleanup = user / ".codex-cleanup"
+cleanup = main / "accounts" / "cleanup"
 (cleanup / "skills").unlink()
 (cleanup / "skills").symlink_to(user / "unrelated")
 receipt = config.with_name("codex-account-links.json")
@@ -3521,20 +3558,20 @@ assert result.returncode == 0 and receipt.read_bytes() == saved
 assert "Codex account cleanup: would remove " in result.stdout, result.stdout
 assert "would keep " in result.stdout and "changed or unmanaged:" in result.stdout, result.stdout
 assert "receipt rows; registry would be kept" in result.stdout, result.stdout
-assert "recovery: oms connect-services --codex-account ID --remove; or oms connect-services --codex-account ID --repair" in result.stdout, result.stdout
+assert "recovery: oms connect-services --account codex:ID --remove; or oms connect-services --account codex:ID --repair" in result.stdout, result.stdout
 assert (cleanup / "plugins").is_symlink()
 result = subprocess.run(["bash", str(root / "scripts/uninstall.sh"), "--dry-run", "--yes"],
     env=env, capture_output=True, text=True, timeout=timeout)
 assert result.returncode == 0 and "would remove Codex account link" in result.stdout, result
 assert "Codex account cleanup: would remove " in result.stdout and "registry would be kept" in result.stdout, result.stdout
-assert "recovery: oms connect-services --codex-account ID --remove" in result.stdout, result.stdout
+assert "recovery: oms connect-services --account codex:ID --remove" in result.stdout, result.stdout
 assert receipt.read_bytes() == saved and (cleanup / "plugins").is_symlink()
 result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
     capture_output=True, text=True, timeout=timeout)
 assert result.returncode == 0, result.stderr
 assert "Codex account cleanup: removed " in result.stdout and "changed or unmanaged:" in result.stdout, result.stdout
 assert "receipt rows; registry kept" in result.stdout, result.stdout
-assert "recovery: oms connect-services --codex-account ID --remove; or oms connect-services --codex-account ID --repair" in result.stdout, result.stdout
+assert "recovery: oms connect-services --account codex:ID --remove; or oms connect-services --account codex:ID --repair" in result.stdout, result.stdout
 assert config.read_bytes() == saved_registry
 assert metadata in (login_file.stat(),)
 assert not (cleanup / "plugins").is_symlink() and (cleanup / "skills").is_symlink()
@@ -3552,16 +3589,16 @@ output = io.StringIO()
 with patch.dict(os.environ, dict(env, CODEX_HOME=str(user / "other-main"))), redirect_stdout(output):
     accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="partial", root=root)
 assert "removed 0 links; kept 7 links (outside cleanup targets: 7); kept 1 receipt rows; registry kept" in output.getvalue(), output.getvalue()
-assert (user / ".codex-partial/skills").is_symlink()
+assert (main / "accounts" / "partial/skills").is_symlink()
 assert any(row["id"] == "partial" for row in accounts._link_receipt(receipt))
 saved = receipt.read_bytes()
 output = io.StringIO()
 with patch.dict(os.environ, env), patch.object(accounts, "_unlink_account_entry", return_value=False), redirect_stdout(output):
     accounts._drop_account_links(accounts._link_receipt(receipt), receipt, ident="partial", root=root, dry_run=True)
 assert "would remove 0 links; would keep 7 links (unlink refused: 7); would keep 1 receipt rows" in output.getvalue(), output.getvalue()
-assert receipt.read_bytes() == saved and (user / ".codex-partial/skills").is_symlink()
+assert receipt.read_bytes() == saved and (main / "accounts" / "partial/skills").is_symlink()
 register("partial", "--remove")
-assert not (user / ".codex-partial/skills").is_symlink()
+assert not (main / "accounts" / "partial/skills").is_symlink()
 uninstall = (root / "scripts/uninstall.sh").read_text()
 assert 'provider_accounts.py" cleanup' in uninstall
 
@@ -3581,14 +3618,14 @@ with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side
         raise AssertionError("injected interruption did not fail")
     except OSError as error:
         assert "injected" in str(error)
-assert (user / ".codex-interrupted/skills").is_symlink()
+assert (main / "accounts" / "interrupted/skills").is_symlink()
 assert all(row["id"] != "interrupted" for row in registry()["providers"]["codex"]["accounts"])
 before = (config.read_bytes(), receipt.read_bytes())
 out = health()
 assert "warn: codex account interrupted receipt home is not registered" in out, out
-assert "recovery: oms connect-services --codex-account interrupted --remove; or oms connect-services --codex-account interrupted --repair" in out, out
+assert "recovery: oms connect-services --account codex:interrupted --remove; or oms connect-services --account codex:interrupted --repair" in out, out
 assert (config.read_bytes(), receipt.read_bytes()) == before
-assert (user / ".codex-interrupted/skills").is_symlink()
+assert (main / "accounts" / "interrupted/skills").is_symlink()
 config.unlink()
 out = health()
 assert "warn: codex account interrupted receipt home is not registered" in out, out
@@ -3596,7 +3633,7 @@ assert receipt.read_bytes() == before[1] and not config.exists()
 config.write_bytes(before[0])
 result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
     capture_output=True, text=True, timeout=timeout)
-assert result.returncode == 0 and not (user / ".codex-interrupted/skills").is_symlink()
+assert result.returncode == 0 and not (main / "accounts" / "interrupted/skills").is_symlink()
 register("interrupted")
 
 # Empty and malformed receipts retain the same warning/error boundaries.
