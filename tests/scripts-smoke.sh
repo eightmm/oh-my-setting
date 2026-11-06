@@ -31517,11 +31517,11 @@ test_state_validator_accepts_healthy_state() {
     > "$project/.oms/threads/t1.jsonl"
   printf '{"schema":1,"landing_id":"l1","event":"intent"}\n{"schema":1,"landing_id":"l1","event":"complete"}\n' \
     > "$project/.oms/landings.jsonl"
-  printf '{"tasks":{"a":{"state":"done"},"b":{"state":"ready","depends":["a"]}}}\n' \
+  printf '{"tasks":{"a":{"state":"done"},"b":{"state":"ready","depends":["a"]},"c":{"state":"running","depends":["a"]}}}\n' \
     > "$project/.oms/plan/tasks.json"
 
   rc=0
-  "$ROOT/scripts/run.sh" validate --dir "$project/.oms" >/dev/null 2>&1 || rc=$?
+  "$ROOT/scripts/oms" run validate --dir "$project/.oms" >/dev/null 2>&1 || rc=$?
   [ "$rc" = 0 ] || fail "healthy state must not be reported invalid (exit $rc)"
 }
 

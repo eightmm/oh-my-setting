@@ -481,7 +481,7 @@ ENUMS = {
 # Threads are per-conversation files, so they are matched by directory.
 THREAD_REQUIRED = ("thread", "seq", "role")
 THREAD_ROLES = {"topic", "question", "answer", "note", "decision", "summary", "closed"}
-PLAN_STATES = {"ready", "claimed", "review", "landing", "done", "failed", "blocked", "cancelled"}
+PLAN_STATES = {"ready", "claimed", "running", "review", "landing", "done", "failed", "blocked", "cancelled"}
 files = sorted(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
 bad = 0
 drift = 0
