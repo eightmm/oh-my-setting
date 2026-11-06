@@ -125,6 +125,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   parents are created 0700); registered homes elsewhere keep working and are
   never moved. `--verify` reports whether the main home and every registered
   Codex home are logged in, without a model call.
+- A worker guard stop on changed refs now names the refs in its diagnostic:
+  a fresh failure capture replaces a stale one, and the ref details go
+  through the same 12-line formatter instead of an "unavailable" placeholder.
 - Code and test reduction across the work journal, panel view and dispatch,
   state, peer, plan, graph and land paths: dead helpers, unused parameters and
   duplicate test cases are gone (about 1,400 code and 2,400 test lines net)
