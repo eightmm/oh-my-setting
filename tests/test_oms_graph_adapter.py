@@ -435,6 +435,7 @@ class GraphRepoFixture:
         env["NVM_DIR"] = str(self.home / ".nvm")
         env["OMS_LOCK_DIR"] = str(self.tmp / "locks")
         env["OMS_WORK_JOURNAL"] = "0"
+        env["OMS_DOCTOR_USERNS_SYSCTL_PATH"] = "/nonexistent/oms-test-userns"
         return env
 
     def git(self, *args: str) -> None:
@@ -475,7 +476,7 @@ class AdapterEndToEndTest(GraphRepoFixture, unittest.TestCase):
     def test_run_then_land_then_a_failed_worker(self) -> None:
         run_node = agent_node("t1", proof=["plan.task.t1.patch_present"])
         result = self.execute(run_node)
-        self.assertEqual(result["outcome"], "completed", result["stderr_tail"])
+        self.assertEqual(result["outcome"], "completed", (result["stdout_tail"], result["stderr_tail"]))
         self.assertEqual(result["claimed_outcome"], "completed")
         self.assertEqual(result["proof_missing"], [])
         self.assertEqual(result["exit"], 0)
