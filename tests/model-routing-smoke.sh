@@ -359,6 +359,13 @@ printf '%s\n' '{"conversation_id": "stub", "status": "SUCCESS", "response": "stu
 EOF
 chmod +x "$TMP/bin/codex" "$TMP/bin/claude" "$TMP/bin/agy"
 mkdir -p "$TMP/invoke-repo/.oms" "$TMP/locks" "$TMP/home"
+# agy write delegations refuse up front without the standing delegate rules.
+# Pin settings and the worktree parent inside the fake HOME so no inherited
+# override reaches the real ones.
+unset OMS_ANTIGRAVITY_SETTINGS OMS_DELEGATE_WORKTREE_ROOT
+export XDG_CACHE_HOME="$TMP/home/.cache"
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/provider-permissions.sh" --apply --profile delegate >/dev/null ||
+  fail 'delegate permissions fixture failed'
 git -C "$TMP/invoke-repo" init -q
 git -C "$TMP/invoke-repo" config user.name test
 git -C "$TMP/invoke-repo" config user.email test@example.com
