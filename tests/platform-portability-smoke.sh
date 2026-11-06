@@ -74,12 +74,23 @@ EOF_GIT
       [ "$output" = "$message" ] || fail "wrong native Windows refusal: $output"
       [ -z "$(find "$fixture/home" -mindepth 1 -print)" ] || fail "native Windows entry wrote home"
     done
+    # Directly documented tool entries refuse before reading the lock, so
+    # even --help cannot reach a lock, download or provider command.
+    for entry in "$ROOT/scripts/install-tools.sh" "$ROOT/scripts/doctor.sh"; do
+      output="$(HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/home/.config" \
+        OH_MY_SETTING_DIR="$fixture/home/.oh-my-setting" OMS_PLATFORM_OVERRIDE='' \
+        OMS_TEST_UNAME="$platform" PATH="$fixture/bin:$PATH" \
+        bash "$entry" --help 2>&1)" && fail "native Windows tool entry succeeded: $entry ($platform)"
+      [ "$output" = "$message" ] || fail "wrong native Windows tool refusal: $output"
+      [ -z "$(find "$fixture/home" -mindepth 1 -print)" ] || fail "native Windows tool entry wrote home"
+    done
   done
   # An override can add Windows, but cannot hide either native host signal.
   for platform in MINGW64_NT-10.0 MSYS_NT-10.0 CYGWIN_NT-10.0; do
     for override in Linux linux macos 0 malformed; do
       for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
-        "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+        "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh" \
+        "$ROOT/scripts/install-tools.sh" "$ROOT/scripts/doctor.sh"; do
         output="$(HOME="$fixture/home" OMS_PLATFORM_OVERRIDE="$override" OSTYPE=linux-gnu \
           OMS_TEST_UNAME="$platform" PATH="$fixture/bin:$PATH" \
           bash "$entry" --help 2>&1)" && fail "override hid native uname: $entry ($override)"
@@ -89,7 +100,8 @@ EOF_GIT
   done
   for platform in msys msys2 cygwin cygwin_nt win32; do
     for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
-      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh" \
+      "$ROOT/scripts/install-tools.sh" "$ROOT/scripts/doctor.sh"; do
       output="$(HOME="$fixture/home" OMS_PLATFORM_OVERRIDE=Linux OSTYPE="$platform" \
         OMS_TEST_UNAME=Linux PATH="$fixture/bin:$PATH" \
         bash "$entry" --help 2>&1)" && fail "Linux signals hid native OSTYPE: $entry ($platform)"
@@ -99,14 +111,16 @@ EOF_GIT
   (
     unset OMS_PLATFORM_OVERRIDE
     for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
-      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh" \
+      "$ROOT/scripts/install-tools.sh" "$ROOT/scripts/doctor.sh"; do
       OSTYPE=linux-gnu OMS_TEST_UNAME=Linux PATH="$fixture/bin:$PATH" \
         bash "$entry" --help >/dev/null || fail "Linux without override refused: $entry"
     done
   )
   for platform in '' 0 malformed; do
     for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
-      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh" \
+      "$ROOT/scripts/install-tools.sh" "$ROOT/scripts/doctor.sh"; do
       OMS_PLATFORM_OVERRIDE=Linux OSTYPE="$platform" OMS_TEST_UNAME=Linux PATH="$fixture/bin:$PATH" \
         bash "$entry" --help >/dev/null || fail "non-Windows OSTYPE refused: $entry ($platform)"
     done
@@ -123,7 +137,8 @@ EOF_GIT
   [ -z "$(find "$fixture/home" -mindepth 1 -print)" ] || fail "Windows refusal wrote home"
   for platform in linux macos '' 0 malformed; do
     for entry in "$ROOT/install.sh" "$ROOT/scripts/oms" "$ROOT/scripts/link.sh" \
-      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh"; do
+      "$ROOT/scripts/python-runtime.sh" "$ROOT/scripts/update.sh" \
+      "$ROOT/scripts/install-tools.sh" "$ROOT/scripts/doctor.sh"; do
       OMS_PLATFORM_OVERRIDE="$platform" bash "$entry" --help >/dev/null || fail "supported help failed: $entry"
     done
   done
@@ -538,6 +553,29 @@ done
   fail "Windows platform override was not detected"
 [ "$(OMS_PLATFORM_OVERRIDE=windows oms_install_link_mode)" = copy ] ||
   fail "Windows must default to copy mode"
+# Native Windows has no locked payloads: never fall back to another target.
+if OMS_PLATFORM_OVERRIDE=windows oms_tool_platform > "$TMP/tool-platform.out" 2>&1; then
+  fail "native Windows selected a locked tool payload: $(cat "$TMP/tool-platform.out")"
+fi
+grep -Fqx 'error: unsupported tool platform: native Windows' "$TMP/tool-platform.out" ||
+  fail "wrong native Windows tool platform refusal: $(cat "$TMP/tool-platform.out")"
+for kernel in Linux Darwin; do
+  for machine in x86_64 amd64 aarch64 arm64; do
+    selected="$(OMS_PLATFORM_OVERRIDE='' OMS_PLATFORM_KERNEL="$kernel" OMS_PLATFORM_MACHINE="$machine" oms_tool_platform)" ||
+      fail "supported tool platform refused: $kernel $machine"
+    case "$kernel:$machine:$selected" in
+      Linux:x86_64:linux-amd64|Linux:amd64:linux-amd64|Linux:aarch64:linux-arm64|Linux:arm64:linux-arm64) ;;
+      Darwin:x86_64:darwin-amd64|Darwin:amd64:darwin-amd64|Darwin:aarch64:darwin-arm64|Darwin:arm64:darwin-arm64) ;;
+      *) fail "wrong tool platform for $kernel $machine: $selected" ;;
+    esac
+  done
+done
+for case_value in 'FreeBSD:x86_64' 'Linux:riscv64' ':x86_64' 'Linux:'; do
+  if OMS_PLATFORM_OVERRIDE='' OMS_PLATFORM_KERNEL="${case_value%%:*}" OMS_PLATFORM_MACHINE="${case_value#*:}" \
+      oms_tool_platform >/dev/null 2>&1; then
+    fail "unsupported tool platform selected a payload: $case_value"
+  fi
+done
 [ "$(OMS_PLATFORM_OVERRIDE=linux oms_install_link_mode)" = symlink ] ||
   fail "Linux must keep the existing symlink default"
 [ "$(OMS_PLATFORM_OVERRIDE=macos oms_install_link_mode)" = symlink ] ||
@@ -1006,10 +1044,19 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo "error: fixture runtime unavailable" >
   > "$runtime_repo/scripts/python-runtime.sh"
 runtime_state="$TMP/runtime-auto.status"
 printf 'status=up_to_date\n' > "$runtime_state"
-if OMS_AUTO_UPDATE_MANAGED=1 OMS_PYTHON_RUNTIME_ROOT="$TMP/missing-runtime" \
+if (
+  # Only this copied updater runs as the fixture's own parent scheduler: a
+  # worker's inherited child authority would refuse before the runtime stub.
+  export HOME="$TMP/runtime-auto-home"
+  mkdir -p "$HOME"
+  export TMPDIR="$HOME"
+  # shellcheck source=tests/lib/smoke-env.sh
+  . "$ROOT/tests/lib/smoke-env.sh"
+  OMS_AUTO_UPDATE_MANAGED=1 OMS_PYTHON_RUNTIME_ROOT="$TMP/missing-runtime" \
     OH_MY_SETTING_AUTO_UPDATE_STATE="$runtime_state" \
     OH_MY_SETTING_AUTO_UPDATE_LOG="$TMP/runtime-auto.log" \
-    "$runtime_repo/scripts/auto-update.sh" apply > "$TMP/runtime-auto.out" 2>&1; then
+    "$runtime_repo/scripts/auto-update.sh" apply
+) > "$TMP/runtime-auto.out" 2>&1; then
   fail "scheduled update ignored runtime setup failure"
 fi
 grep -Fq 'status=failed' "$runtime_state" &&

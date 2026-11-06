@@ -57,16 +57,6 @@
         "url": "https://github.com/astral-sh/uv/releases/download/0.12.24/uv-aarch64-unknown-linux-gnu.tar.gz",
         "sha256": "5231be65f496304623895dacdbf1de8504fec90303684bdf05805aa34414dd21",
         "archive": "tar.gz"
-      },
-      "windows-amd64": {
-        "url": "https://github.com/astral-sh/uv/releases/download/0.12.24/uv-x86_64-pc-windows-msvc.zip",
-        "sha256": "7c38608c8a18ee137d748a1773053b07ec8f3a30fab49aebaa6f4e4efeceb019",
-        "archive": "zip"
-      },
-      "windows-arm64": {
-        "url": "https://github.com/astral-sh/uv/releases/download/0.12.24/uv-aarch64-pc-windows-msvc.zip",
-        "sha256": "4b783bda5cc44bbae0651a837223873a7acee31152381aef5fc86ef6bef25997",
-        "archive": "zip"
       }
     }
   },
@@ -112,18 +102,6 @@
           "package": "@anthropic-ai/claude-code-linux-arm64-musl",
           "version": "2.1.226",
           "integrity": "sha512-neGXBM0tHY7GZ1ZIXZgN3gIUcpLOl0fEONJ9MccpmPKViuUeBQTBKdJQCqCbFwJbIr/XDzaSVifhUdfoUkRdlA=="
-        },
-        "windows-amd64": {
-          "alias": "@anthropic-ai/claude-code-win32-x64",
-          "package": "@anthropic-ai/claude-code-win32-x64",
-          "version": "2.1.226",
-          "integrity": "sha512-GKsVA35zgwzoYNjZIlw09aaiBwlRp6e/EJxsGX6sTv2HQQ8r3JicQy1RS1bJUoMgb/J6c8W5lY25kEQQkbv/2g=="
-        },
-        "windows-arm64": {
-          "alias": "@anthropic-ai/claude-code-win32-arm64",
-          "package": "@anthropic-ai/claude-code-win32-arm64",
-          "version": "2.1.226",
-          "integrity": "sha512-gTvIQfzZLUjscoZsGyrPVdzJwTOB2NduBIcQ0tPp2JTm5nGKhc8RubE02O1kCZwF2WkdClMdobLr3bNqLg4XuA=="
         }
       }
     },
@@ -156,18 +134,6 @@
           "package": "@openai/codex",
           "version": "0.147.0-linux-arm64",
           "integrity": "sha512-SLC1JXw2TYfr/c3HhrJubyyLelq7vTOLWVmiThFA+z0+WgzCPmaseJ/kzDD3Gge/TO7fCnnj7UcPmC0d2c8XAg=="
-        },
-        "windows-amd64": {
-          "alias": "@openai/codex-win32-x64",
-          "package": "@openai/codex",
-          "version": "0.147.0-win32-x64",
-          "integrity": "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4KFZAM+pRz9JbM4Rr498CjtbNgTOjWvDJ+DXvIBSfOPA=="
-        },
-        "windows-arm64": {
-          "alias": "@openai/codex-win32-arm64",
-          "package": "@openai/codex",
-          "version": "0.147.0-win32-arm64",
-          "integrity": "sha512-e2ZstJ8zT8Rm1nvR7CUVO+Gr3cTChE41+VfOzGhynzDXEoW0wfbjUQbc2bWbh1arG94LMm4y3dqBtUIbSrfeGA=="
         }
       }
     },
@@ -200,16 +166,6 @@
         "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/linux-arm/cli_linux_arm64.tar.gz",
         "sha512": "fb1acacdbde606a60a8002b6dc0a8c9800bb84aef3add069f843f6ffa3efaafe4a52fce440505c6f16aebd6b1257cce5ecfaec2dbab21732c625943422318cdb",
         "archive": "tar.gz"
-      },
-      "windows-amd64": {
-        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/windows-x64/cli_windows_x64.exe",
-        "sha512": "d8725d28d5e4d1e8fe17d6646da2ea02620d56a292e682201dce60b965856e5b8e220f17ea72ff44f3ae38ae8137a18b56786a54fbbae02fe30c452fc5dadda1",
-        "archive": "binary"
-      },
-      "windows-arm64": {
-        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.1.11-4956531888881664/windows-arm/cli_windows_arm64.exe",
-        "sha512": "3f3eafd9b9c3097774606beb6fddf702323c1a3cb7d3b54c3c325427e6094009988093f05302868bbdc5eee8d87c96588a0d4d4601a318d0e4ce0e3003c457c2",
-        "archive": "binary"
       }
     }
   },
@@ -235,16 +191,6 @@
         "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_arm64.tar.gz",
         "sha256": "7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484",
         "archive": "tar.gz"
-      },
-      "windows-amd64": {
-        "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_windows_amd64.zip",
-        "sha256": "ae64e556ecc240b200f7eba60d550e4bb60d78e860e69dd88c449405b86067f4",
-        "archive": "zip"
-      },
-      "windows-arm64": {
-        "url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_windows_arm64.zip",
-        "sha256": "5dcf12aa8525eabd0c46ec414f323ab6cf65229fc2cd46543cc705001bbaf223",
-        "archive": "zip"
       }
     }
   }

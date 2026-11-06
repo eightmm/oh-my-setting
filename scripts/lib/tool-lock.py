@@ -36,9 +36,11 @@ PLATFORMS = {
     "darwin-arm64",
     "linux-amd64",
     "linux-arm64",
-    "windows-amd64",
-    "windows-arm64",
 }
+# Native Windows is retired. Locks written before then (the private provider
+# snapshot, an explicit OH_MY_SETTING_TOOL_LOCK copy) still carry these rows;
+# load() drops exactly them as inert data. Any other key stays fail-closed.
+RETIRED_PLATFORMS = ("windows-amd64", "windows-arm64")
 CLAUDE_PLATFORMS = PLATFORMS | {"linux-amd64-musl", "linux-arm64-musl"}
 DRIVE_RELATIVE = re.compile(r"^[A-Za-z]:")
 
@@ -53,24 +55,18 @@ UV_ARTIFACTS = {
     "darwin-arm64": "uv-aarch64-apple-darwin.tar.gz",
     "linux-amd64": "uv-x86_64-unknown-linux-gnu.tar.gz",
     "linux-arm64": "uv-aarch64-unknown-linux-gnu.tar.gz",
-    "windows-amd64": "uv-x86_64-pc-windows-msvc.zip",
-    "windows-arm64": "uv-aarch64-pc-windows-msvc.zip",
 }
 ANTIGRAVITY_ARTIFACTS = {
     "darwin-amd64": "darwin-x64/cli_mac_x64.tar.gz",
     "darwin-arm64": "darwin-arm/cli_mac_arm64.tar.gz",
     "linux-amd64": "linux-x64/cli_linux_x64.tar.gz",
     "linux-arm64": "linux-arm/cli_linux_arm64.tar.gz",
-    "windows-amd64": "windows-x64/cli_windows_x64.exe",
-    "windows-arm64": "windows-arm/cli_windows_arm64.exe",
 }
 GH_ARTIFACTS = {
     "darwin-amd64": "macOS_amd64.zip",
     "darwin-arm64": "macOS_arm64.zip",
     "linux-amd64": "linux_amd64.tar.gz",
     "linux-arm64": "linux_arm64.tar.gz",
-    "windows-amd64": "windows_amd64.zip",
-    "windows-arm64": "windows_arm64.zip",
 }
 
 
@@ -146,7 +142,7 @@ def integrity(value: Any, label: str) -> str:
 def npm_platform_suffix(platform: str) -> str:
     os_name, arch, *variant = platform.split("-")
     npm_arch = "x64" if arch == "amd64" else arch
-    suffix = "%s-%s" % ("win32" if os_name == "windows" else os_name, npm_arch)
+    suffix = "%s-%s" % (os_name, npm_arch)
     if variant:
         suffix += "-" + "-".join(variant)
     return suffix
@@ -174,8 +170,7 @@ def validate(lock: Dict[str, Any]) -> None:
     exact_keys(node, ("version", "platforms"), "node")
     node_version = version(node.get("version"), "node.version")
     node_platforms = mapping(node.get("platforms"), "node.platforms")
-    unix_platforms = {name for name in PLATFORMS if not name.startswith("windows-")}
-    if set(node_platforms) != unix_platforms:
+    if set(node_platforms) != PLATFORMS:
         raise LockError("node must lock all four supported Unix platforms")
     for platform, raw in node_platforms.items():
         row = mapping(raw, "node.platforms.%s" % platform)
@@ -214,7 +209,7 @@ def validate(lock: Dict[str, Any]) -> None:
     uv_version = version(uv.get("version"), "uv.version")
     uv_platforms = mapping(uv.get("platforms"), "uv.platforms")
     if set(uv_platforms) != PLATFORMS:
-        raise LockError("uv must lock all six supported platforms")
+        raise LockError("uv must lock all four supported platforms")
     for platform, raw in uv_platforms.items():
         row = mapping(raw, "uv.platforms.%s" % platform)
         exact_keys(row, ("url", "sha256", "archive"), "uv.platforms.%s" % platform)
@@ -222,8 +217,7 @@ def validate(lock: Dict[str, Any]) -> None:
         if uv_version not in uv_url or not HEX64.fullmatch(str(row.get("sha256", ""))):
             raise LockError("uv %s is not version- and digest-pinned" % platform)
         url_path_endswith(uv_url, UV_ARTIFACTS[platform], "uv %s URL" % platform)
-        expected_archive = "zip" if platform.startswith("windows-") else "tar.gz"
-        if row.get("archive") != expected_archive:
+        if row.get("archive") != "tar.gz":
             raise LockError("uv %s has invalid archive type" % platform)
 
     npm = mapping(lock.get("npm"), "npm")
@@ -291,7 +285,7 @@ def validate(lock: Dict[str, Any]) -> None:
         family_version = version(section.get("version"), "%s.version" % family)
         platforms = mapping(section.get("platforms"), "%s.platforms" % family)
         if set(platforms) != PLATFORMS:
-            raise LockError("%s must lock all six supported platforms" % family)
+            raise LockError("%s must lock all four supported platforms" % family)
         for platform, raw in platforms.items():
             row = mapping(raw, "%s.platforms.%s" % (family, platform))
             exact_keys(
@@ -314,12 +308,25 @@ def validate(lock: Dict[str, Any]) -> None:
             url_path_endswith(url, suffix, "%s %s URL" % (family, platform))
             if not digest_re.fullmatch(str(row.get(digest_name, ""))):
                 raise LockError("%s %s has invalid %s" % (family, platform, digest_name))
-            if family == "antigravity":
-                expected_archive = "binary" if platform.startswith("windows-") else "tar.gz"
+            if family == "antigravity" or platform.startswith("linux-"):
+                expected_archive = "tar.gz"
             else:
-                expected_archive = "tar.gz" if platform.startswith("linux-") else "zip"
+                expected_archive = "zip"
             if row.get("archive") != expected_archive:
                 raise LockError("%s %s has invalid archive type" % (family, platform))
+
+
+def drop_retired_platforms(lock: Dict[str, Any]) -> None:
+    """Discard retired rows from the parsed value only; never from the file."""
+    rows = [("uv", "platforms"), ("antigravity", "platforms"), ("gh", "platforms")]
+    rows += [("npm", name, "native") for name in ("claude", "codex")]
+    for path in rows:
+        current: Any = lock
+        for part in path:
+            current = current.get(part) if isinstance(current, dict) else None
+        if isinstance(current, dict):
+            for platform in RETIRED_PLATFORMS:
+                current.pop(platform, None)
 
 
 def unique_keys(pairs):
@@ -337,6 +344,7 @@ def load(path: Path) -> Dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise LockError("cannot read tool lock: %s" % path) from exc
     value = mapping(value, "tool lock")
+    drop_retired_platforms(value)
     validate(value)
     return value
 

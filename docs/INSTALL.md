@@ -44,7 +44,9 @@ for `bwrap` in an AppArmor profile or set
 Use **WSL2**, not WSL1. Keep both the repository and `~/.oh-my-setting`
 on the Linux filesystem, along with your WSL home; do not use `/mnt/c`.
 Install and run provider CLIs inside WSL, using the Linux requirements above.
-Native Windows (Git Bash/MSYS2/Cygwin) is unsupported and OMS refuses to run.
+Native Windows (Git Bash/MSYS2/Cygwin) is unsupported and OMS refuses to run;
+`scripts/install-tools.sh` and `scripts/doctor.sh` also refuse it when run
+directly, and `tools.lock.json` pins no Windows payloads.
 
 <details>
 <summary>Remove a legacy native Windows installation</summary>
@@ -102,7 +104,9 @@ on `oms update` changes the recorded choice. Antigravity also accepts `auto`
 Only installing a missing Git, tar, gzip or find needs root. Managed bootstrap
 versions, platform URLs and integrity values are pinned in `tools.lock.json`.
 Fresh provider installs resolve a stable release into the private
-`provider-tools.lock.json` snapshot. On Linux/macOS, fresh Claude downloads its
+`provider-tools.lock.json` snapshot. Locked payloads cover Linux and macOS on
+amd64/arm64; rows for the retired Windows targets in an older snapshot or
+explicit lock are ignored. Fresh Claude downloads its
 native binary and verifies SHA-256 from the vendor HTTPS manifest before
 running `install VERSION`; OMS does not verify the manifest’s GPG signature.
 Fresh Codex and agy keep their existing verified installation paths. The

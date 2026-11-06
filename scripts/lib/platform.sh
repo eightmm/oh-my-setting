@@ -108,18 +108,18 @@ oms_install_link_mode() {
   esac
 }
 
-# The locked tool archive for this host, e.g. linux-amd64.
+# The locked tool archive for this host, e.g. linux-amd64. Native Windows has
+# no locked payloads; an override naming it fails rather than picking Linux.
 oms_tool_platform() {
   local os arch
   if oms_platform_is_windows; then
-    os=windows
-  else
-    case "$OMS_PLATFORM_KERNEL" in
-      Linux) os=linux ;;
-      Darwin) os=darwin ;;
-      *) echo "error: unsupported tool platform: $OMS_PLATFORM_KERNEL" >&2; return 1 ;;
-    esac
+    echo "error: unsupported tool platform: native Windows" >&2; return 1
   fi
+  case "$OMS_PLATFORM_KERNEL" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) echo "error: unsupported tool platform: $OMS_PLATFORM_KERNEL" >&2; return 1 ;;
+  esac
   case "$OMS_PLATFORM_MACHINE" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;

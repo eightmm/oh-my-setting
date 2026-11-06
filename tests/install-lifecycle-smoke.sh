@@ -581,14 +581,6 @@ printf '%s\\n' 'codex 0.147.0'
         body = "#!/usr/bin/env bash\necho '%s %s'\n" % (row["binary"], row["version"])
     binary.write_text(body, encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    # Real npm puts binaries under PREFIX/bin on POSIX but at the PREFIX root
-    # on Windows, and managed_npm_binary looks only in the platform's place.
-    # Write both so the reuse decision finds the managed binary on every
-    # host; the extra copy is inert where unused.
-    windows_binary = prefix / row["binary"]
-    windows_binary.write_text(body, encoding="utf-8")
-    windows_binary.chmod(
-        windows_binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 PY
 {
   printf '%s\n' '#!/usr/bin/env bash'
@@ -1272,14 +1264,6 @@ printf '%s\\n' 'codex 0.147.0'
         body = "#!/usr/bin/env bash\necho '%s %s'\n" % (row["binary"], row["version"])
     binary.write_text(body, encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    # Real npm puts binaries under PREFIX/bin on POSIX but at the PREFIX root
-    # on Windows, and managed_npm_binary looks only in the platform's place.
-    # Write both so the reuse decision finds the managed binary on every
-    # host; the extra copy is inert where unused.
-    windows_binary = prefix / row["binary"]
-    windows_binary.write_text(body, encoding="utf-8")
-    windows_binary.chmod(
-        windows_binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 PY
 {
   printf '%s\n' '#!/usr/bin/env bash'
@@ -1365,7 +1349,7 @@ mv "$TMP/managed-codex-shim" "$tools_home/.local/bin/codex"
 native_alias="$($PYTHON - "$upstream/tools.lock.json" <<'PY'
 import json, platform, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
-os_name = {"Darwin": "darwin", "Linux": "linux", "Windows": "windows"}[platform.system()]
+os_name = {"Darwin": "darwin", "Linux": "linux"}[platform.system()]
 machine = platform.machine().lower()
 arch = "amd64" if machine in ("amd64", "x86_64") else "arm64"
 print(row["npm"]["codex"]["native"][os_name + "-" + arch]["alias"])

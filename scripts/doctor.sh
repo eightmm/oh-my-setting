@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Overrides can add a Windows signal, never hide the host identity.
+# Refuse before any lock, cache, download, state write or provider command.
+oms_host_kernel="$(uname -s 2>/dev/null)" || oms_host_kernel=unknown
+case "${OMS_PLATFORM_OVERRIDE:-$oms_host_kernel}" in
+  windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+case "$oms_host_kernel:${OSTYPE:-}" in
+  MINGW*|MSYS*|CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+# platform.sh reuses this probe rather than starting uname again.
+[ -n "${OMS_PLATFORM_KERNEL:-}" ] || OMS_PLATFORM_KERNEL="$oms_host_kernel"
+
 # Verify managed target identity, tools, skills, and manifest sync for all
 # three agent CLIs.
 
@@ -42,7 +60,7 @@ CONTRACT_ONLY=0
 # shellcheck source=scripts/lib/platform.sh
 . "$ROOT/scripts/lib/platform.sh"
 
-# Retain the shared cache/Windows implementation behind one integrity gate.
+# Retain the shared cache implementation behind one integrity gate.
 eval "$(declare -f oms_doctor_probe | sed '1s/oms_doctor_probe/doctor_unchecked_probe/')"
 oms_doctor_probe() {
   [ "${DOCTOR_SKIP_TOOL_PROBES:-0}" != 1 ] || return 1
@@ -190,8 +208,6 @@ doctor_probe_cache_cleanup() {
 }
 
 doctor_probe_cache_start() {
-  # Windows Git Bash keeps the uncached shell path (see doctor-probe-memo.sh).
-  case "${OSTYPE:-}" in msys*|cygwin*|win32*) return 0 ;; esac
   if [ -z "${OMS_DOCTOR_PROBE_DIR:-}" ] || [ ! -d "$OMS_DOCTOR_PROBE_DIR" ]; then
     OMS_DOCTOR_PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/oms-doctor-probe.XXXXXX")" || return 1
     OMS_DOCTOR_PROBE_OWNER_PID="$$"
@@ -390,10 +406,6 @@ if isinstance(value, str):
 
 normalize_doctor_npm_path() {  # PATH_FROM_NATIVE_NPM
   local value="${1//$'\r'/}"
-  if oms_platform_is_windows; then
-    command -v cygpath >/dev/null 2>&1 || return 1
-    value="$(cygpath -u "$value" | tr -d '\r')"
-  fi
   if [ -d "$value" ]; then
     (cd "$value" && pwd -P)
   else
@@ -405,11 +417,7 @@ doctor_npm_global_bin() {
   local prefix
   prefix="$(oms_doctor_probe 0 split npm prefix -g 2>/dev/null | tr -d '\r')" || return 1
   prefix="$(normalize_doctor_npm_path "$prefix")" || return 1
-  if oms_platform_is_windows; then
-    printf '%s\n' "$prefix"
-  else
-    printf '%s/bin\n' "$prefix"
-  fi
+  printf '%s/bin\n' "$prefix"
 }
 
 doctor_npm_global_root() {
@@ -420,10 +428,8 @@ doctor_npm_global_root() {
 
 doctor_locked_platform() {
   local os arch
-  if oms_platform_is_windows; then os=windows
-  else
-    case "$OMS_PLATFORM_KERNEL" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
-  fi
+  oms_platform_is_windows && return 1
+  case "$OMS_PLATFORM_KERNEL" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
   case "$OMS_PLATFORM_MACHINE" in
     x86_64|amd64) arch=amd64 ;;
     aarch64|arm64) arch=arm64 ;;

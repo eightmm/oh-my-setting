@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Overrides can add a Windows signal, never hide the host identity.
+# Refuse before any lock, cache, download, state write or provider command.
+oms_host_kernel="$(uname -s 2>/dev/null)" || oms_host_kernel=unknown
+case "${OMS_PLATFORM_OVERRIDE:-$oms_host_kernel}" in
+  windows|Windows|WINDOWS|MINGW*|MSYS*|CYGWIN*)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+case "$oms_host_kernel:${OSTYPE:-}" in
+  MINGW*|MSYS*|CYGWIN*|*:msys*|*:cygwin*|*:win32)
+    echo 'native Windows (Git Bash/MSYS2/Cygwin) is not supported; install inside WSL2 with the repository and home on the Linux filesystem (not /mnt/c).' >&2
+    exit 1
+    ;;
+esac
+# platform.sh reuses this probe rather than starting uname again.
+[ -n "${OMS_PLATFORM_KERNEL:-}" ] || OMS_PLATFORM_KERNEL="$oms_host_kernel"
+
 # Bootstrap tools remain pinned; providers resolve stable releases at install
 # time. Downloaded bytes are verified before extraction or execution.
 
@@ -34,8 +52,8 @@ Install Node (via nvm), uv, gh, and ntn from tools.lock.json.
 Recognized vendor installations use claude update, codex update and agy update.
 Only --providers refreshes installed Pi, using pi update self.
 Their channels choose the version; OMS rejects downgrades.
-Fresh Claude uses its checksum-verified native installer; native Windows Git
-Bash keeps the npm path. Fresh Codex and agy keep their verified install paths.
+Fresh Claude uses its checksum-verified native installer. Fresh Codex and agy
+keep their verified install paths.
 --providers also refreshes installed optional npm CLIs to stable releases at
 least 14 days old. Pi is never freshly installed by OMS.
 An explicit OH_MY_SETTING_TOOL_LOCK retains reproducible pinned installs and
@@ -206,12 +224,6 @@ install_nvm() {
     return 0
   fi
 
-  if oms_platform_is_windows; then
-    echo "error: automatic nvm setup is disabled on Windows Git Bash" >&2
-    echo "error: install Node.js v$NODE_VERSION for Windows, reopen Git Bash, and rerun" >&2
-    exit 1
-  fi
-
   echo "installing nvm $NVM_VERSION"
   url="$(tool_lock_get nvm.url)"
   expected="$(tool_lock_get nvm.sha256)"
@@ -274,11 +286,6 @@ install_nvm() {
 install_locked_node() {
   local platform url expected archive tmp extracted target installed stage marker
 
-  if oms_platform_is_windows; then
-    echo "error: automatic Node setup is disabled on Windows Git Bash" >&2
-    echo "error: install native Node.js v$NODE_VERSION for Windows, reopen Git Bash, and rerun" >&2
-    exit 1
-  fi
   platform="$(locked_platform)"
   url="$(tool_lock_get "node.platforms.$platform.url")"
   expected="$(tool_lock_get "node.platforms.$platform.sha256")"
@@ -367,12 +374,6 @@ ensure_node() {
     return 0
   fi
 
-  if oms_platform_is_windows; then
-    echo "error: Windows Git Bash requires native Node.js v$NODE_VERSION and npm" >&2
-    echo "error: install the exact locked release, reopen Git Bash, and rerun" >&2
-    exit 1
-  fi
-
   install_nvm
   install_locked_node
   activate_locked_node
@@ -381,13 +382,6 @@ ensure_node() {
 
 normalize_npm_path() {  # PATH_FROM_NATIVE_NPM
   local value="${1//$'\r'/}"
-  if oms_platform_is_windows; then
-    has_cmd cygpath || {
-      echo "error: cygpath is required with native npm in Windows Git Bash" >&2
-      return 1
-    }
-    value="$(cygpath -u "$value" | tr -d '\r')"
-  fi
   if [ -d "$value" ]; then
     (cd "$value" && pwd -P)
   else
@@ -404,16 +398,9 @@ ensure_writable_npm_global() {
   fi
 
   echo "npm global prefix not writable: $prefix"
-  if oms_platform_is_windows; then
-    # Windows npm places command shims directly in its prefix (rather than
-    # PREFIX/bin). Keep that prefix in the already managed user-local bin so
-    # provider CLIs install without Administrator privileges.
-    user_prefix="$HOME/.local/bin"
-  else
-    # An exact active Node does not imply that an unrelated ~/.nvm is trusted.
-    # Use npm's supported user prefix instead of sourcing or replacing it.
-    user_prefix="$HOME/.local"
-  fi
+  # An exact active Node does not imply that an unrelated ~/.nvm is trusted.
+  # Use npm's supported user prefix instead of sourcing or replacing it.
+  user_prefix="$HOME/.local"
   mkdir -p "$user_prefix"
   user_prefix="$(normalize_npm_path "$user_prefix")"
   npm config set prefix "$user_prefix"
@@ -457,23 +444,14 @@ npm_global_bin_dir() {
   local prefix
   prefix="$(npm_global_prefix)"
   [ -n "$prefix" ] || return 1
-  if oms_platform_is_windows; then
-    printf '%s\n' "$prefix"
-  else
-    printf '%s/bin\n' "$prefix"
-  fi
+  printf '%s/bin\n' "$prefix"
 }
 
 managed_npm_binary() {  # BINARY
-  local directory candidate
+  local directory
   directory="$(npm_global_bin_dir)" || return 1
-  for candidate in "$directory/$1" "$directory/$1.exe" "$directory/$1.cmd"; do
-    if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 1
+  [ -f "$directory/$1" ] || return 1
+  printf '%s\n' "$directory/$1"
 }
 
 npm_native_platform() {  # LOCK NAME
@@ -767,8 +745,6 @@ try:
                  and (root / "install/releases").is_dir())
     elif name == "agy":
         launcher = home / ".local/bin/agy"
-        if not launcher.exists():
-            launcher = home / ".local/bin/agy.exe"
         valid = not launcher.is_symlink() and path == launcher.resolve(strict=True)
     else:
         valid = False
@@ -932,7 +908,6 @@ claude_migration_pending() {
 
 preflight_claude_vendor() {
   local target="$HOME/.local/bin/claude" root identity
-  oms_platform_is_windows && return 0
   if { [ -e "$target" ] || [ -L "$target" ]; } &&
      ! npm_shim_owned "$target" && ! vendor_provider_path claude "$target" >/dev/null; then
     if [ ! -L "$target" ] || ! has_cmd npm ||
@@ -1101,14 +1076,14 @@ PY_MANIFEST
 install_npm_global() {
   local name="$1"
   if [ "$name" = claude ]; then preflight_claude_vendor || return 1; fi
-  if [ "$name" = claude ] && ! oms_platform_is_windows && claude_migration_pending; then
+  if [ "$name" = claude ] && claude_migration_pending; then
     migrate_claude_vendor; return $?
   fi
   case "$name" in
     claude|codex)
       if vendor_provider_path "$name" >/dev/null; then refresh_vendor_provider "$name"; return $?; fi ;;
   esac
-  if [ "$name" = claude ] && ! oms_platform_is_windows; then
+  if [ "$name" = claude ]; then
     if ! has_cmd claude && [ ! -e "$HOME/.local/bin/claude" ] && [ ! -L "$HOME/.local/bin/claude" ]; then
       install_native_claude; return $?
     fi
@@ -1242,7 +1217,7 @@ preflight_npm_shim() {  # BINARY
   case "$binary" in
     claude|codex) vendor_provider_path "$binary" >/dev/null && return 0 ;;
   esac
-  if [ "$binary" = claude ] && ! oms_platform_is_windows; then
+  if [ "$binary" = claude ]; then
     if claude_migration_pending; then
       claude_migration_source >/dev/null || {
         echo "error: cannot prove Claude migration ownership; restore the OMS npm copy or use the vendor installer" >&2; return 1;
@@ -1309,7 +1284,7 @@ verify_resolved_npm_binary() {  # NAME
   resolved="${resolved//$'\r'/}"
   target="$HOME/.local/bin/$binary"
   case "$resolved" in
-    "$target"|"$global_bin/$binary"|"$global_bin/$binary.exe"|"$global_bin/$binary.cmd") ;;
+    "$target"|"$global_bin/$binary") ;;
     *) echo "error: resolved $binary is not the locked npm-managed command: ${resolved:-missing}" >&2; return 1 ;;
   esac
   npm_package_is_current "$name" && command_has_version "$resolved" "$version"
@@ -1536,8 +1511,8 @@ install_antigravity_impl() {
   if [ -n "$native" ]; then
     target="$native"
   else
-    platform="$(locked_platform)"
-    case "$platform" in windows-*) target="$HOME/.local/bin/agy.exe" ;; *) target="$HOME/.local/bin/agy" ;; esac
+    platform="$(locked_platform)" || return 1
+    target="$HOME/.local/bin/agy"
   fi
   if [ -e "$target.oh-my-setting-backup" ] || [ -L "$target.oh-my-setting-backup" ] ||
      [ -e "$target.oh-my-setting-stage" ] || [ -L "$target.oh-my-setting-stage" ]; then
@@ -1577,10 +1552,6 @@ install_antigravity_impl() {
       fi
       source="$tmp/extracted/antigravity"
       target="$HOME/.local/bin/agy"
-      ;;
-    binary)
-      source="$tmp/payload"
-      target="$HOME/.local/bin/agy.exe"
       ;;
     *) rm -rf "$tmp"; echo "error: unsupported Antigravity archive: $archive" >&2; exit 1 ;;
   esac
@@ -1630,9 +1601,9 @@ install_antigravity() {
 # a setup script that needs root is a setup script that gets run as root.
 install_gh() {
   local platform version url expected archive tmp source target source_expected
-  platform="$(locked_platform)"
+  platform="$(locked_platform)" || exit 1
   version="$(tool_lock_get gh.version)"
-  case "$platform" in windows-*) target="$HOME/.local/bin/gh.exe" ;; *) target="$HOME/.local/bin/gh" ;; esac
+  target="$HOME/.local/bin/gh"
   if direct_locked_command_is_current gh "$target" "$version"; then
     echo "ok: gh $version"
     return 0
@@ -1654,15 +1625,13 @@ install_gh() {
         exit 1
       fi
       source="$(find "$tmp/extracted" -type f -path '*/bin/gh' -print | sed -n '1p')"
-      target="$HOME/.local/bin/gh"
       ;;
     zip)
       if ! extract_locked zip "$tmp/archive" "$tmp/extracted"; then
         rm -rf "$tmp"
         exit 1
       fi
-      source="$(find "$tmp/extracted" -type f \( -name gh -o -name gh.exe \) -print | sed -n '1p')"
-      case "$platform" in windows-*) target="$HOME/.local/bin/gh.exe" ;; *) target="$HOME/.local/bin/gh" ;; esac
+      source="$(find "$tmp/extracted" -type f -name gh -print | sed -n '1p')"
       ;;
     *) rm -rf "$tmp"; echo "error: unsupported gh archive: $archive" >&2; exit 1 ;;
   esac
@@ -1701,11 +1670,9 @@ ensure_uv() {
   export PATH="$uv_bin_dir:$HOME/.local/bin:$PATH"
   mkdir -p "$uv_bin_dir"
 
-  platform="$(locked_platform)"
-  case "$platform" in
-    windows-*) target_uv="$uv_bin_dir/uv.exe"; target_uvx="$uv_bin_dir/uvx.exe" ;;
-    *) target_uv="$uv_bin_dir/uv"; target_uvx="$uv_bin_dir/uvx" ;;
-  esac
+  platform="$(locked_platform)" || exit 1
+  target_uv="$uv_bin_dir/uv"
+  target_uvx="$uv_bin_dir/uvx"
   version="$(tool_lock_get uv.version)"
   if direct_locked_command_is_current uv "$target_uv" "$version" &&
      direct_locked_command_is_current uvx "$target_uvx" "$version"; then
@@ -1726,20 +1693,8 @@ ensure_uv() {
     rm -rf "$tmp"
     exit 1
   fi
-  case "$platform" in
-    windows-*)
-      source_uv="$(find "$tmp/extracted" -type f -name uv.exe -print | sed -n '1p')"
-      source_uvx="$(find "$tmp/extracted" -type f -name uvx.exe -print | sed -n '1p')"
-      target_uv="$uv_bin_dir/uv.exe"
-      target_uvx="$uv_bin_dir/uvx.exe"
-      ;;
-    *)
-      source_uv="$(find "$tmp/extracted" -type f -name uv -print | sed -n '1p')"
-      source_uvx="$(find "$tmp/extracted" -type f -name uvx -print | sed -n '1p')"
-      target_uv="$uv_bin_dir/uv"
-      target_uvx="$uv_bin_dir/uvx"
-      ;;
-  esac
+  source_uv="$(find "$tmp/extracted" -type f -name uv -print | sed -n '1p')"
+  source_uvx="$(find "$tmp/extracted" -type f -name uvx -print | sed -n '1p')"
   [ -n "$source_uv" ] && [ -f "$source_uv" ] &&
     [ -n "$source_uvx" ] && [ -f "$source_uvx" ] || {
       rm -rf "$tmp"
@@ -1782,60 +1737,16 @@ ensure_uv() {
 # Resolve the actual executable and require its package identity to match its
 # physical location directly under the global root, including scoped names.
 optional_npm_identity() { # ROOT BINARY
-  local prefix="" windows=0
-  if oms_platform_is_windows; then
-    windows=1
-    prefix="$(npm_global_prefix)" || return 1
-  fi
-  python3 - "$1" "$2" "${3:-}" "$windows" "$prefix" <<'PY_ID' | tr -d '\r'
+  python3 - "$1" "$2" "${3:-}" <<'PY_ID' | tr -d '\r'
 import json, pathlib, re, sys
 try:
     root = pathlib.Path(sys.argv[1]).resolve(strict=True)
     binary = pathlib.Path(sys.argv[2]).resolve(strict=True)
-    is_shim = False
-    try:
-        parts = binary.relative_to(root).parts
-        count = 2 if parts and parts[0].startswith('@') else 1
-        if len(parts) <= count:
-            raise ValueError('binary is outside a package')
-        package = root.joinpath(*parts[:count])
-    except ValueError:
-        is_shim = True
-        if sys.argv[4] != '1' or binary.parent != pathlib.Path(sys.argv[5]).resolve(strict=True):
-            raise
-        if binary.name.lower() not in (sys.argv[3].lower(), sys.argv[3].lower() + '.cmd'):
-            raise ValueError('not the requested shim')
-        shim = binary.read_text(encoding='utf-8').replace('\\', '/').lower()
-        candidates = list(root.glob('*/package.json')) + list(root.glob('@*/*/package.json'))
-        matches = []
-        for manifest in candidates:
-            try:
-                data = json.loads(manifest.read_text(encoding='utf-8'))
-                name = data['name']
-                bins = data.get('bin', {})
-                if isinstance(bins, str):
-                    bins = {name.split('/')[-1]: bins}
-                target = bins.get(sys.argv[3])
-                if not isinstance(target, str):
-                    continue
-                pkg = manifest.parent
-                target_path = (pkg / target).resolve(strict=True)
-                target_path.relative_to(pkg.resolve(strict=True))
-                rel = target_path.relative_to(root).as_posix().lower()
-                needle = '"$basedir/node_modules/' + rel + '"'
-                cmd_needle = '"%dp0%/node_modules/' + rel + '"'
-                lines = [line.strip() for line in shim.splitlines()]
-                shell_line = re.compile(r'^exec (?:"\$basedir/node(?:\.exe)?"|node)\s+' + re.escape(needle) + r'\s+"\$@"$')
-                cmd_line = re.compile(r'^endlocal & goto #_undefined_# 2>nul \|\| title %comspec% & "%_prog%"\s+' + re.escape(cmd_needle) + r'\s+%\*$')
-                if any(shell_line.fullmatch(line) or cmd_line.fullmatch(line) for line in lines):
-                    matches.append(pkg)
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                continue
-        if len(matches) != 1:
-            raise ValueError('shim does not identify one package')
-        package = matches[0]
-        parts = package.relative_to(root).parts
-        count = len(parts)
+    parts = binary.relative_to(root).parts
+    count = 2 if parts and parts[0].startswith('@') else 1
+    if len(parts) <= count:
+        raise ValueError('binary is outside a package')
+    package = root.joinpath(*parts[:count])
     if package.resolve(strict=True) != package:
         raise ValueError('package is not physically under root')
     row = json.loads((package / 'package.json').read_text(encoding='utf-8'))
@@ -1851,7 +1762,7 @@ try:
         raise ValueError('missing declared binary')
     target_path = (package / target).resolve(strict=True)
     target_path.relative_to(package)
-    if not is_shim and binary != target_path:
+    if binary != target_path:
         raise ValueError('binary does not match package declaration')
     if not isinstance(version, str) or not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version):
         raise ValueError('invalid installed version')

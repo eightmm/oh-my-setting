@@ -40,7 +40,7 @@ class ProviderLatestTests(unittest.TestCase):
                 result = LATEST.resolve(self.lock, providers)
                 self.assertEqual(result, self.lock)
                 self.assertIsNot(result, self.lock)
-                self.assertEqual(fetch.call_count, 22 if len(providers) == 3 else 7)
+                self.assertEqual(fetch.call_count, 16 if len(providers) == 3 else 5)
         def newer(url):
             row = self.metadata(url.replace("99.1.0", self.lock["npm"]["codex"]["version"]))
             old = self.lock["npm"]["codex"]["version"]

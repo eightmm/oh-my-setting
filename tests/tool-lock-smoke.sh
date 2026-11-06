@@ -1495,22 +1495,20 @@ EOF
   refresh_optional_providers > "$TMP/optional-out" 2>&1
   grep -Fq 'cursor: skipped' "$TMP/optional-out" || fail "non-npm provider was not skipped"
   [ ! -s "$TMP/optional-log" ] || fail "non-npm provider was installed"
-  # A Windows npm shim lives in the prefix, while its target is in node_modules.
+  # Native Windows npm shims (prefix-root launchers naming node_modules) are
+  # retired: a launcher outside the package tree never identifies a package.
   mkdir -p "$TMP/win-prefix/node_modules/cursor-pkg"
   printf '%s\n' '{"name":"cursor-pkg","version":"1.0.0","bin":{"cursor-agent":"cli.js"}}' > "$TMP/win-prefix/node_modules/cursor-pkg/package.json"
-  printf '%s\n' '#!/bin/sh' 'exec node "$basedir/node_modules/cursor-pkg/cli.js" "$@"' > "$TMP/win-prefix/cursor-agent"
-  chmod +x "$TMP/win-prefix/cursor-agent"
   touch "$TMP/win-prefix/node_modules/cursor-pkg/cli.js"
-  oms_platform_is_windows() { return 0; }
   npm_global_prefix() { printf '%s\n' "$TMP/win-prefix"; }
-  identity="$(optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent" cursor-agent)" || fail "Windows npm shim not recognized"
-  [ "$identity" = "$(printf 'cursor-pkg\t1.0.0')" ] || fail "Windows shim identity incorrect"
+  printf '%s\n' '#!/bin/sh' 'exec node "$basedir/node_modules/cursor-pkg/cli.js" "$@"' > "$TMP/win-prefix/cursor-agent"
   printf '%s\n' '@ECHO off' 'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%" "%dp0%\node_modules\cursor-pkg\cli.js" %*' > "$TMP/win-prefix/cursor-agent.cmd"
-  optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent.cmd" cursor-agent >/dev/null || fail "Windows cmd shim not recognized"
-  printf '%s\n' '#!/bin/sh' '# exec node "$basedir/node_modules/cursor-pkg/cli.js"' 'exit 0' > "$TMP/win-prefix/cursor-agent"
-  if optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent" cursor-agent >/dev/null; then fail "comment-only Windows shim accepted"; fi
-  printf '%s\n' '#!/bin/sh' 'exit 0' > "$TMP/win-prefix/cursor-agent"
-  if optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/cursor-agent" cursor-agent >/dev/null; then fail "unrelated Windows shim accepted"; fi
+  chmod +x "$TMP/win-prefix/cursor-agent" "$TMP/win-prefix/cursor-agent.cmd"
+  for shim in cursor-agent cursor-agent.cmd; do
+    if optional_npm_identity "$TMP/win-prefix/node_modules" "$TMP/win-prefix/$shim" cursor-agent >/dev/null; then
+      fail "retired Windows npm shim accepted: $shim"
+    fi
+  done
   npm() { case "$*" in *versions) printf '%s\n' '[]' ;; *) printf '%s\n' '{}' ;; esac; }
   [ -z "$(optional_npm_target fixture 0.0.0)" ] || fail "empty release list selected a version"
   npm() { case "$*" in *versions) printf '%s\n' '["bad","0.0.0"]' ;; *) printf '%s\n' '{"bad":"2020-01-01T00:00:00Z","0.0.0":"2020-01-01T00:00:00Z"}' ;; esac; }
@@ -1594,6 +1592,77 @@ if python3 "$HELPER" --lock "$TMP/invalid-platform-lock.json" validate \
   fail "tool lock accepted a payload archive type bound to the wrong platform"
 fi
 
+# Locks written before native Windows retirement (the private provider
+# snapshot, an explicit pin copy) still carry Windows rows. They load as inert
+# data no lookup reaches, while a retired row cannot stand in for a supported
+# target and every other unknown platform stays fail-closed.
+mkdir "$TMP/legacy"
+python3 - "$LOCK" "$TMP/legacy" <<'PY'
+import copy, json, sys
+from pathlib import Path
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+out = Path(sys.argv[2])
+legacy = copy.deepcopy(row)
+for section in (legacy["uv"]["platforms"], legacy["antigravity"]["platforms"], legacy["gh"]["platforms"],
+                legacy["npm"]["claude"]["native"], legacy["npm"]["codex"]["native"]):
+    for platform in ("windows-amd64", "windows-arm64"):
+        section[platform] = copy.deepcopy(section["linux-amd64"])
+json.dump(legacy, open(out / "six.json", "w", encoding="utf-8"))
+def variant(name, mutate):
+    lock = copy.deepcopy(legacy)
+    mutate(lock)
+    json.dump(lock, open(out / (name + ".json"), "w", encoding="utf-8"))
+variant("stand-in", lambda lock: lock["uv"]["platforms"].pop("linux-arm64"))
+variant("node-windows", lambda lock: lock["node"]["platforms"].update(
+    {"windows-amd64": copy.deepcopy(lock["node"]["platforms"]["linux-amd64"])}))
+variant("unknown", lambda lock: lock["gh"]["platforms"].update(
+    {"windows-x86": copy.deepcopy(lock["gh"]["platforms"]["linux-amd64"])}))
+variant("empty", lambda lock: lock["uv"].update(platforms={}))
+variant("malformed", lambda lock: lock["uv"].update(platforms=["linux-amd64"]))
+PY
+cp "$TMP/legacy/six.json" "$TMP/legacy/six.orig"
+python3 "$HELPER" --lock "$TMP/legacy/six.json" validate >/dev/null ||
+  fail "a lock written before Windows retirement no longer loads"
+if python3 "$HELPER" --lock "$TMP/legacy/six.json" get uv.platforms.windows-amd64.url \
+    >/dev/null 2>"$TMP/legacy/get.err"; then
+  fail "a retired Windows payload is still selectable"
+fi
+grep -Fq 'unknown tool lock field' "$TMP/legacy/get.err" || fail "retired row lookup failed for the wrong reason"
+cmp -s "$TMP/legacy/six.json" "$TMP/legacy/six.orig" || fail "loading rewrote a legacy lock"
+for name in stand-in node-windows unknown empty malformed; do
+  if python3 "$HELPER" --lock "$TMP/legacy/$name.json" validate >/dev/null 2>&1; then
+    fail "tool lock accepted the $name platform set"
+  fi
+done
+codex_version="$(python3 "$HELPER" --lock "$LOCK" get npm.codex.version)"
+mkdir -p "$TMP/legacy/npm/package"
+printf '{"name":"@openai/codex","version":"%s"}\n' "$codex_version" > "$TMP/legacy/npm/package/package.json"
+python3 "$HELPER" --lock "$TMP/legacy/six.json" verify-installed-npm --path "$TMP/legacy/npm/package" \
+  --name @openai/codex --version "$codex_version" >/dev/null ||
+  fail "doctor cannot verify npm packages against a legacy provider snapshot"
+# install-tools.sh hands the old snapshot to the resolver as --previous; the
+# refreshed snapshot keeps only supported targets.
+python3 - "$ROOT" "$LOCK" "$TMP/legacy/six.json" "$TMP/legacy/out/snapshot.json" <<'PY' || fail "a legacy provider snapshot broke provider refresh"
+import importlib.util, json, sys
+from pathlib import Path
+from unittest.mock import patch
+root, lock, previous, output = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("provider_latest", Path(root) / "scripts/lib/provider-latest.py")
+latest = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(latest)
+pinned = json.load(open(lock, encoding="utf-8"))
+def release(package, wanted):
+    for row in pinned["npm"].values():
+        for item in [row, *row.get("native", {}).values()]:
+            if item["package"] == package and wanted in ("latest", item["version"]):
+                return item["version"], item["integrity"]
+    raise AssertionError((package, wanted))
+argv = ["provider-latest", "--lock", lock, "--previous", previous, "--output", output, "--provider", "codex"]
+with patch.object(latest, "npm_release", side_effect=release), patch.object(sys, "argv", argv):
+    assert latest.main() == 0
+assert json.load(open(output, encoding="utf-8")) == pinned, "refreshed snapshot kept retired rows"
+PY
+
 python3 - "$LOCK" "$TMP/swapped-platform-url-lock.json" <<'PY'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -1646,20 +1715,19 @@ for platform, item in row["node"]["platforms"].items():
     assert re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), item
 assert re.fullmatch(r"[0-9a-f]{64}", row["nvm"]["sha256"]), row["nvm"]
 assert re.fullmatch(r"[0-9a-f]{64}", row["nvm"]["script_sha256"]), row["nvm"]
-assert set(row["uv"]["platforms"]) == {
-    "darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64",
-    "windows-amd64", "windows-arm64",
-}
+supported = {"darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64"}
+for family in ("uv", "antigravity", "gh"):
+    assert set(row[family]["platforms"]) == supported, family
 for platform, item in row["uv"]["platforms"].items():
     assert re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), (platform, item)
 for name, item in row["npm"].items():
     assert re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", item["version"]), (name, item)
     assert item["integrity"].startswith("sha512-"), (name, item)
-for name, expected in (("codex", 6), ("claude", 8)):
+musl = {"linux-amd64-musl", "linux-arm64-musl"}
+for name, expected in (("codex", supported), ("claude", supported | musl)):
     native = row["npm"][name]["native"]
-    assert len(native) == expected, (name, native)
+    assert set(native) == expected, (name, native)
     for platform, item in native.items():
-        assert platform.startswith(("darwin-", "linux-", "windows-")), platform
         assert item["integrity"].startswith("sha512-"), (platform, item)
         assert item["alias"].startswith("@"), (platform, item)
 assert "native" not in row["npm"]["ntn"]

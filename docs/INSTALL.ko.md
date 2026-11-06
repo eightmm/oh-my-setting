@@ -44,6 +44,8 @@ WSL1이 아닌 **WSL2**를 사용한다. 저장소와 `~/.oh-my-setting`, WSL �
 모두 Linux 파일시스템 안에 둔다. `/mnt/c`는 사용하지 않는다. provider CLI도
 WSL 안에 설치하고 실행하며 위 Linux 요구 사항을 따른다.
 네이티브 Windows(Git Bash/MSYS2/Cygwin)는 지원하지 않으며 OMS 실행을 거부한다.
+`scripts/install-tools.sh`와 `scripts/doctor.sh`를 직접 실행해도 거부하며,
+`tools.lock.json`에는 Windows 페이로드가 고정되어 있지 않다.
 
 <details>
 <summary>기존 네이티브 Windows 설치 제거 절차</summary>
@@ -95,7 +97,9 @@ bash scripts/uninstall.sh
 없는 Git·tar·gzip·find를 설치할 때를 빼면 root가 필요 없다. 관리 도구의
 부트스트랩 버전, 플랫폼 URL, 무결성 값은 `tools.lock.json`에 고정되어 있다.
 새 provider 설치는 안정판을 찾아 비공개 `provider-tools.lock.json` 스냅샷에
-기록한다. Linux/macOS의 새 Claude는 공식 HTTPS manifest의 SHA-256으로
+기록한다. 고정 페이로드는 amd64/arm64의 Linux와 macOS를 다룬다. 이전
+스냅샷이나 명시적 lock에 남은 퇴역 Windows 대상 행은 무시한다. 새 Claude는
+공식 HTTPS manifest의 SHA-256으로
 네이티브 바이너리를 검증한 뒤 `install VERSION`을 실행한다. manifest에
 OMS가 GPG 서명을 별도로 검증하지는 않는다. 새 Codex와 agy도 기존 검증 설치
 경로를 유지한다.
