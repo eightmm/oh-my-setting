@@ -55,10 +55,7 @@ ensure_runtime() {
   if [ -z "$uv_bin" ] || ! command_has_version "$uv_bin" "$uv_version"; then
     export OMS_UV_BIN_DIR="$uv_bin_dir"
     ensure_uv
-    case "$(uname -s 2>/dev/null || true)" in
-      MINGW*|MSYS*|CYGWIN*) uv_bin="$uv_bin_dir/uv.exe" ;;
-      *) uv_bin="$uv_bin_dir/uv" ;;
-    esac
+    uv_bin="$uv_bin_dir/uv"
   fi
   version="$(tool_lock_get python.version)"
   oms_python_runtime_ensure "$uv_bin" "$version"

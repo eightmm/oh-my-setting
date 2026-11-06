@@ -894,6 +894,78 @@ chmod +x "$runtime_uv"
   PYTHONPATH="$TMP/runtime-module" python3 -c 'import oms_runtime_probe; assert oms_runtime_probe.value == 42' ||
     fail "runtime launcher stripped an explicit OMS module path"
 
+  # Both POSIX interpreter names must work through every public entry point.
+  runtime_env="$runtime_root/envs/$runtime_version"
+  for spelling in python3 python; do
+    if [ "$spelling" = python ]; then mv "$runtime_env/bin/python3" "$runtime_env/bin/python"; fi
+    [ "$(oms_python_runtime_env_python "$runtime_env")" = "$runtime_env/bin/$spelling" ] ||
+      fail "runtime selector rejected bin/$spelling"
+    for launcher in "$runtime_root/launchers/$runtime_version/python3" \
+      "$runtime_root/launchers/$runtime_version/python" "$runtime_root/bin/python3"; do
+      [ "$("$launcher" -c 'import sys; print(sys.argv[1])' forwarded)" = forwarded ] ||
+        fail "launcher rejected bin/$spelling or lost arguments: $launcher"
+    done
+    "$runtime_repo/scripts/python-runtime.sh" status > "$TMP/runtime-status.out" || fail "status rejected bin/$spelling"
+    [ "$("$runtime_repo/scripts/python-runtime.sh" path)" = "$runtime_root/launchers/$runtime_version" ] || fail "path rejected bin/$spelling"
+    [ "$("$runtime_repo/scripts/python-runtime.sh" python)" = "$runtime_env/bin/$spelling" ] || fail "python rejected bin/$spelling"
+    [ "$("$runtime_repo/scripts/python-runtime.sh" run python3 -c 'import sys; print(sys.argv[1])' forwarded)" = forwarded ] || fail "run rejected bin/$spelling"
+  done
+  mv "$runtime_env/bin/python" "$runtime_env/bin/python3"
+
+  # A version-valid Windows-only executable must never be selected or run.
+  mv "$runtime_env/bin/python3" "$TMP/runtime-posix-python"
+  mkdir -p "$runtime_env/Scripts"
+  printf '%s\n' '#!/usr/bin/env bash' "echo called >> \"$TMP/windows-runtime-called\"" \
+    "exec \"$real_python3\" \"\$@\"" > "$runtime_env/Scripts/python.exe"
+  chmod +x "$runtime_env/Scripts/python.exe"
+  oms_python_runtime_python_matches "$runtime_env/Scripts/python.exe" "$runtime_version" || fail "Windows fixture is not version-valid"
+  rm "$TMP/windows-runtime-called"
+  for launcher_name in python3 python; do
+    oms_python_runtime_write_launcher "$runtime_root" "$runtime_version" "$launcher_name" || fail "could not generate launcher"
+  done
+  oms_python_runtime_write_launcher "$runtime_root" "$runtime_version" python3 bin || fail "could not generate stable launcher"
+  if oms_python_runtime_env_python "$runtime_env" > "$TMP/runtime-invalid.out" 2>&1; then fail "selector accepted Windows-only runtime"; fi
+  for launcher in "$runtime_root/launchers/$runtime_version/python3" \
+    "$runtime_root/launchers/$runtime_version/python" "$runtime_root/bin/python3"; do
+    set +e
+    "$launcher" -c 'exit(0)' > "$TMP/runtime-invalid.out" 2>&1
+    result=$?
+    set -e
+    [ "$result" = 1 ] || fail "launcher returned $result for Windows-only runtime: $launcher"
+    grep -Fq 'OMS Python runtime is incomplete' "$TMP/runtime-invalid.out" || fail "launcher omitted incomplete diagnostic"
+  done
+  for form in status path python run; do
+    set +e
+    if [ "$form" = run ]; then
+      "$runtime_repo/scripts/python-runtime.sh" "$form" python3 -c 'exit(0)' > "$TMP/runtime-invalid.out" 2>&1
+    else
+      "$runtime_repo/scripts/python-runtime.sh" "$form" > "$TMP/runtime-invalid.out" 2>&1
+    fi
+    result=$?
+    set -e
+    [ "$result" = 1 ] || fail "$form returned $result for Windows-only runtime"
+    case "$form" in status) diagnostic='python-runtime: missing or invalid' ;; *) diagnostic='OMS Python runtime does not match' ;; esac
+    grep -Fq "$diagnostic" "$TMP/runtime-invalid.out" || fail "$form omitted invalid diagnostic"
+  done
+  cp "$runtime_root/launchers/$runtime_version/python3" "$TMP/runtime-launcher3.before"
+  cp "$runtime_root/launchers/$runtime_version/python" "$TMP/runtime-launcher.before"
+  cp "$runtime_root/bin/python3" "$TMP/runtime-stable.before"
+  cp "$runtime_uv_log" "$TMP/runtime-uv.before"
+  cp "$runtime_root/current" "$TMP/runtime-current.before"
+  cp "$runtime_env/.oh-my-setting-python-env" "$TMP/runtime-env.before"
+  cp "$runtime_root/.oh-my-setting-python-runtime" "$TMP/runtime-root.before"
+  if oms_python_runtime_ensure "$runtime_uv" "$runtime_version" > "$TMP/runtime-invalid.out" 2>&1; then fail "ensure accepted Windows-only runtime"; fi
+  grep -Fq 'existing environment is invalid; preserved for repair' "$TMP/runtime-invalid.out" || fail "ensure omitted repair diagnostic"
+  cmp -s "$runtime_uv_log" "$TMP/runtime-uv.before" && cmp -s "$runtime_root/current" "$TMP/runtime-current.before" &&
+    cmp -s "$runtime_env/.oh-my-setting-python-env" "$TMP/runtime-env.before" &&
+    cmp -s "$runtime_root/.oh-my-setting-python-runtime" "$TMP/runtime-root.before" &&
+    cmp -s "$runtime_root/launchers/$runtime_version/python3" "$TMP/runtime-launcher3.before" &&
+    cmp -s "$runtime_root/launchers/$runtime_version/python" "$TMP/runtime-launcher.before" &&
+    cmp -s "$runtime_root/bin/python3" "$TMP/runtime-stable.before" &&
+    [ -x "$runtime_env/Scripts/python.exe" ] || fail "ensure changed invalid owned runtime"
+  [ ! -e "$TMP/windows-runtime-called" ] || fail "Windows-only interpreter was executed"
+  mv "$TMP/runtime-posix-python" "$runtime_env/bin/python3"
+
   # A different checkout changing the bootstrap hint must not break rollback.
   printf '0.0.1\n' > "$runtime_root/current"
   "$runtime_repo/scripts/python-runtime.sh" run python3 -c 'import sys; assert sys.version_info.major == 3' ||

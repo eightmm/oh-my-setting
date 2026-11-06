@@ -99,8 +99,7 @@ oms_python_runtime_candidate_valid() {
 oms_python_runtime_env_python() {
   local env_dir="$1" candidate root
   root="$(oms_python_runtime_root)"
-  for candidate in "$env_dir/bin/python3" "$env_dir/bin/python" \
-      "$env_dir/Scripts/python.exe"; do
+  for candidate in "$env_dir/bin/python3" "$env_dir/bin/python"; do
     if oms_python_runtime_candidate_valid "$root" "$candidate"; then
       printf '%s\n' "$candidate"
       return 0
@@ -166,7 +165,7 @@ oms_python_runtime_root_owned "$root" && [ ! -L "$root/envs" ] &&
   [ ! -L "$root/bin" ] && [ ! -L "$root/launchers" ] && [ ! -L "$root/launchers/$version" ] &&
   oms_python_runtime_env_owned "$root/envs/$version" "$version" || exit 1
 for candidate in "$root/envs/$version/bin/python3" \
-    "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do
+    "$root/envs/$version/bin/python"; do
   if oms_python_runtime_candidate_valid "$root" "$candidate"; then exec "$candidate" "$@"; fi
 done
 echo "error: OMS Python runtime is incomplete: $root/envs/$version" >&2
