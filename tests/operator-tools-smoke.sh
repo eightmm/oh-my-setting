@@ -162,6 +162,7 @@ case "${1:-}" in
   -h|--help)
     echo 'usage: operator-tools-smoke.sh [--shard I/N | --section NAME[,NAME...] | --list-sections | --section NAME --case CASE | --jobs N | --list [N] | --self-check [N]] (N=1..4)'
     echo 'OMS_OPERATOR_SHARD=I/N also selects a shard; no selector runs every section.'
+    echo '--case selects marked cases in Python sections; shell sections use --section NAME without --case.'
     exit 0 ;;
   '') ;;
   *) fail "unknown argument: $1" ;;

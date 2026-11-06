@@ -806,8 +806,9 @@ esac
 EOF
 cp "$ROOT/tests/run-smoke-shard.sh" "$repo/tests/run-smoke-shard.sh"
 mkdir -p "$repo/tests/operator"
-printf 'SECTIONS = [("unit", 0, "cases.py")]\n' > "$repo/tests/operator/runner.py"
+printf 'SECTIONS = [("unit", 0, "cases.py"), ("shell", 0, "cases.sh")]\n' > "$repo/tests/operator/runner.py"
 printf '# BEGIN old case\n# END old case\n' > "$repo/tests/operator/cases.py"
+printf '# BEGIN old shell case\n# END old shell case\n' > "$repo/tests/operator/cases.sh"
 cat > "$repo/tests/operator-tools-smoke.sh" <<'EOF'
 #!/usr/bin/env bash
 set -eu
@@ -912,6 +913,7 @@ contains "$TMP/target-late.md" 'verify-floor: FAIL'
 printf '# BEGIN new case\n# END new case\n' >> "$repo/tests/operator/cases.py"
 python3 - "$ROOT/scripts/lib" "$repo" <<'PYCASE'
 import sys
+from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from verify_selectors import candidate_only_targets
 repo = sys.argv[2]
@@ -922,6 +924,14 @@ for command in ("bash tests/operator-tools-smoke.sh --section unit --case 'old c
                 "bash tests/operator-tools-smoke.sh --section missing --case 'new case'",
                 "bash tests/operator-tools-smoke.sh --section unit --case ''"):
     assert not candidate_only_targets(repo, command, changed), command
+shell_case = Path(repo) / "tests/operator/cases.sh"
+original = shell_case.read_text(encoding="utf-8")
+try:
+    shell_case.write_text(original + "# BEGIN new shell case\n# END new shell case\n", encoding="utf-8")
+    command = "bash tests/operator-tools-smoke.sh --section shell --case 'new shell case'"
+    assert not candidate_only_targets(repo, command, {"tests/operator/cases.sh"}), command
+finally:
+    shell_case.write_text(original, encoding="utf-8")
 PYCASE
 git -C "$repo" diff > "$TMP/target-operator.patch"
 git -C "$repo" checkout -q -- tests/operator/cases.py

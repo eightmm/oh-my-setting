@@ -108,6 +108,9 @@ def parsed(code, filename):
 def case_body(name, case):
     if not case:
         raise ValueError("--case requires a non-empty CASE")
+    filename = next(filename for section, _, filename in SECTIONS if section == name)
+    if filename and filename.endswith(".sh"):
+        raise ValueError("--case supports Python sections only; run --section %s without --case" % name)
     code, filename = body(name)
     found = case_markers(code)
     if case not in found:
@@ -273,12 +276,13 @@ def self_check(total):
 
 
 def execute(name, temporary, case=None):
+    # Refuse unsupported selectors before initializing section fixtures.
+    code, filename = case_body(name, case) if case is not None else body(name)
     os.chdir(temporary)
     namespace = {"root": ROOT, "temporary": temporary, "section": name}
     fixture = HERE / "fixtures.py"
     exec(compile(fixture.read_text(encoding="utf-8"), str(fixture), "exec"), namespace)
     namespace["_operator_block"] = lambda phase: print("operator-integration: " + phase, flush=True)
-    code, filename = case_body(name, case) if case is not None else body(name)
     if name == "dispatch-exit" and case is None:
         code += "\nexercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner, room_env)\n"
     elif name == "worker-leases" and case is None:
@@ -376,6 +380,21 @@ def execution_contract(total):
             assert results == ([1] if mode == "failure" else [0] * len(groups)), (mode, results)
             manifests.append(observed)
     assert all(manifest == manifests[0] for manifest in manifests), "fixture launches depend on selection mode"
+    shell_source = "# BEGIN shell case\nprintf 'must not execute'\n# END shell case\n"
+    with patch.dict(globals(), body=lambda _: (shell_source, "fixture.sh"), self_check=lambda _: None), \
+            patch.object(ast, "parse", side_effect=AssertionError("shell case parsed as Python")), \
+            patch.object(subprocess, "run", side_effect=AssertionError("shell case launched")), \
+            patch("builtins.exec", side_effect=AssertionError("shell case initialized fixtures")):
+        for name, _, filename in SECTIONS:
+            if not filename or not filename.endswith(".sh"):
+                continue
+            for mode in ("--run-sections", "--execute"):
+                try:
+                    main([mode, ".", name, "--case", "shell case"])
+                except ValueError as error:
+                    assert str(error) == "--case supports Python sections only; run --section %s without --case" % name, error
+                else:
+                    raise AssertionError("shell case selector was accepted: " + name)
     with tempfile.TemporaryDirectory(prefix="oms-operator-contract-") as directory, \
             patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
         for name, _, filename in SECTIONS:

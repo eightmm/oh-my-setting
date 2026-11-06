@@ -23,10 +23,12 @@ def operator_sections(root, read=None):
 
 
 def operator_section_cases(root, section, sections, read=None):
-    """Case names of a section, in order; None when unreadable. Mirrors
+    """Python case names in order; no shell cases, None when unreadable. Mirrors
     tests/operator/runner.py body() and case_markers() `# BEGIN X` handling."""
     try:
         filename = dict(sections)[section]
+        if filename and filename.endswith(".sh"):
+            return []
         if filename:
             path = os.path.join(root, "tests", "operator", filename)
         else:

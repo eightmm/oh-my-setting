@@ -6246,6 +6246,8 @@ test_delegate_dry_run() {
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'Save a git diff of non-test changes to a temporary patch, apply it in reverse'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'do not use git stash'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' '--section S --case NAME'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'For a Python operator section run only its marked case'
+  assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'For a shell operator section run bash tests/operator-tools-smoke.sh --section S without --case'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'For each new branch or limit, exercise its failure exit and its edge'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'For each file, ref or record your change writes'
   assert_one_artifact_contains "$artifact_dir" 'codex-add-a-helper-*.md' 'verify: `bash scripts/check.sh fast`'
@@ -12856,6 +12858,7 @@ test_agent_plan_lint_verify_matches_admission_floor() {
   cp "$ROOT/tests/operator/runner.py" "$ROOT/tests/operator/dispatch_results.py" "$project/tests/operator/"
   cp "$ROOT/tests/scripts-smoke.sh" "$project/tests/scripts-smoke.sh"
   cp "$ROOT/tests/operator-tools-smoke.sh" "$project/tests/operator-tools-smoke.sh"
+  printf '# BEGIN shell fixture case\n# END shell fixture case\n' > "$project/tests/operator/shared-cache.sh"
   # Planning only warns (the task may create the selector it names). Run from
   # outside the repo so --repo (OMS_REPO), not the cwd, selects the tree.
   sel_add() {
@@ -12888,6 +12891,8 @@ test_agent_plan_lint_verify_matches_admission_floor() {
   assert_file_contains "$project/sel9-err" "did you mean: core/room-protocol"
   sel_add sel10 'bash tests/scripts-smoke.sh --only test_status_shows_active_task_stat'
   assert_file_contains "$project/sel10-err" "did you mean: test_status_shows_active_task_state"
+  sel_add sel11 "bash tests/operator-tools-smoke.sh --section shared-cache --case 'shell fixture case'"
+  assert_file_contains "$project/sel11-err" "warning: unknown verify selector: unknown --case value(s): shell fixture case; valid names:"
   # Drift guard: the static parse must agree with the runner's own markers.
   python3 -B - "$ROOT" <<'PY' || fail "static operator case names drifted from runner.case_markers"
 import importlib.util, os, sys
@@ -12901,9 +12906,14 @@ lint = load("verify_selectors", os.path.join(root, "scripts/lib/verify_selectors
 runner = load("runner", os.path.join(root, "tests/operator/runner.py"))
 sections = lint.operator_sections(root)
 assert [n for n, _ in sections] == [n for n, _, _ in runner.SECTIONS], "sections"
-for name, _ in sections:
+for name, filename in sections:
     static = lint.operator_section_cases(root, name, sections)
-    assert static == list(runner.case_markers(runner.body(name)[0])), name
+    if filename and filename.endswith(".sh"):
+        assert static == [], name
+        assert lint.operator_section_cases(root, name, sections,
+            read=lambda _: "# BEGIN shell case\n# END shell case\n") == [], name
+    else:
+        assert static == list(runner.case_markers(runner.body(name)[0])), name
 assert "reviewed-result acceptance composition" in lint.operator_section_cases(
     root, "dispatch-results", sections)
 PY
