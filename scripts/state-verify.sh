@@ -131,6 +131,7 @@ import json
 import os
 import re
 import runpy
+import stat
 import sys
 
 process_liveness = runpy.run_path(sys.argv[1])
@@ -338,7 +339,41 @@ if orphans:
 if not os.path.isfile(os.path.join(oms, ".gitignore")):
     finding("fail", "oms", ".oms/.gitignore is missing; harness state could reach git",
             "printf '*\\n' > %s/.gitignore" % oms)
-locks = [p for p in glob.glob(os.path.join(oms, "**", "*.lock"), recursive=True)]
+# These names are emitted by the panel and room advisory-lock callers.  Their
+# inodes persist after release and must not be removed while another user waits.
+def managed_lock(path):
+    relative = os.path.relpath(path, oms)
+    parts = relative.split(os.sep)
+    if len(parts) != 2 or parts[0] != "artifacts":
+        return False
+    name = parts[1]
+    fixed = {"panel-results.lock", "panel-main-start.lock", "panel-main-session.lock",
+             "panel-pi-registration.lock", "panel-aliases.lock", "panel-call-settle.lock",
+             "panel-cache-plan-list.lock", "panel-cache-dashboard.lock",
+             "panel-cache-land-status.lock", "panel-cache-result-records.lock",
+             "panel-cache-attempts.lock"}
+    if not (name in fixed or re.fullmatch(r"panel-accept-[0-9a-f]{24}\.lock", name)
+            or re.fullmatch(r"panel-native-[0-9a-f]{32}\.lock", name)
+            or re.fullmatch(r"room-rollover-[A-Za-z0-9_][A-Za-z0-9._-]{0,145}\.lock", name)):
+        return False
+    try:
+        parent = os.lstat(os.path.join(oms, "artifacts"))
+        info = os.lstat(path)
+        return (stat.S_ISDIR(parent.st_mode) and stat.S_ISREG(info.st_mode)
+                and info.st_nlink == 1 and not (info.st_mode & 0o077)
+                and info.st_uid == os.geteuid())
+    except OSError:
+        return False
+
+locks = []
+for directory, dirs, files in os.walk(oms, followlinks=False):
+    for name in dirs + files:
+        if directory == oms and name == "artifacts" and os.path.islink(os.path.join(directory, name)):
+            locks.append(os.path.join(directory, name))
+        if name.endswith(".lock"):
+            path = os.path.join(directory, name)
+            if not managed_lock(path):
+                locks.append(path)
 if locks:
     finding("fail", "oms", "%d lock entr(ies) live inside .oms; locks belong in OMS_LOCK_DIR"
             % len(locks), "oms cleanup --apply  # after checking %s" % locks[0])

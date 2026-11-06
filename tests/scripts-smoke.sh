@@ -40733,6 +40733,34 @@ test_state_verify_clean_and_unadopted() {
     fail "a minimal adopted repo must verify clean: $out"
   printf '%s\n' "$out" | grep >/dev/null 'state-verify: ok' ||
     fail "missing ok verdict: $out"
+
+  PYTHONPATH="$ROOT/scripts/lib" python3 - "$project" <<'PYLOCK'
+import sys
+from panel_results import _lock
+with _lock(sys.argv[1]):
+    pass
+PYLOCK
+  out="$("$ROOT/scripts/oms" state-verify --repo "$project" 2>&1)" ||
+    fail "released advisory lock must verify clean: $out"
+  [ -f "$project/.oms/artifacts/panel-results.lock" ] || fail "lock inode did not persist"
+
+  PYTHONPATH="$ROOT/scripts/lib" python3 - "$project" <<'PYLOCK'
+import sys
+from panel_results import _lock
+names = ['panel-main-start', 'panel-main-session', 'panel-pi-registration',
+         'panel-aliases', 'panel-call-settle', 'panel-cache-plan-list',
+         'panel-cache-dashboard', 'panel-cache-land-status', 'panel-cache-result-records',
+         'panel-cache-attempts', 'panel-accept-' + 'a' * 24,
+         'panel-native-' + 'f' * 32, 'room-rollover-a', 'room-rollover-' + 'r' * 146]
+for name in names:
+    with _lock(sys.argv[1], name):
+        pass
+PYLOCK
+  mkdir -p "$TMP/sv-external"
+  : > "$TMP/sv-external/unrelated.lock"
+  ln -s "$TMP/sv-external" "$project/.oms/external"
+  out="$("$ROOT/scripts/oms" state-verify --repo "$project" --json 2>&1)" ||
+    fail "managed names or an untraversed directory link failed: $out"
 }
 
 test_state_verify_reports_unpublished_journal_summaries() {
@@ -40788,8 +40816,35 @@ test_state_verify_reports_cross_family_findings() {
 
 ## Goal
 EOF
-  # A lock entry inside .oms, which the locking contract forbids.
-  mkdir -p "$project/.oms/task/current.md.1234-56.lock"
+  # Unknown and unsafe entries remain findings, even at managed names.
+  mkdir -p "$project/.oms/task/current.md.1234-56.lock" "$project/.oms/artifacts"
+  : > "$project/.oms/artifacts/arbitrary.lock"
+  (umask 077; : > "$project/.oms/artifacts/panel-main-start.lock")
+  ln -s arbitrary.lock "$project/.oms/artifacts/panel-results.lock"
+  : > "$project/.oms/artifacts/panel-aliases.lock"
+  chmod 0644 "$project/.oms/artifacts/panel-aliases.lock"
+  mkdir "$project/.oms/artifacts/panel-main-session.lock"
+  python3 - "$project/.oms" <<'PYLOCK'
+import os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+artifacts = root / 'artifacts'
+invalid = ['panel-accept-' + 'a' * n for n in (0, 23, 25)]
+invalid += ['panel-accept-' + 'g' * 24, 'panel-accept-' + 'A' * 24]
+invalid += ['panel-native-' + 'a' * n for n in (0, 31, 33)]
+invalid += ['panel-native-' + 'g' * 32, 'panel-native-' + 'A' * 32]
+invalid += ['room-rollover-', 'room-rollover-.bad', 'room-rollover--bad',
+            'room-rollover-' + 'r' * 147, 'room-rollover-bad:room',
+            'activity-' + 'a' * 24, 'heartbeat-bench', '.codex-notify']
+for name in invalid:
+    fd = os.open(str(artifacts / (name + '.lock')), os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(fd)
+(root / 'other').mkdir()
+(root / 'other' / 'panel-results.lock').touch(mode=0o600)
+(artifacts / 'nested').mkdir()
+(artifacts / 'nested' / 'panel-results.lock').touch(mode=0o600)
+os.link(str(artifacts / 'panel-main-start.lock'), str(artifacts / 'hardlink-target'))
+PYLOCK
 
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$project" 2>&1)" || rc=$?
@@ -40798,7 +40853,7 @@ EOF
     fail "dangling thread pointer not reported: $out"
   printf '%s\n' "$out" | grep >/dev/null 'fail: task: packet is active but carries closed_at' ||
     fail "task contradiction not reported: $out"
-  printf '%s\n' "$out" | grep >/dev/null 'fail: oms: .*lock' ||
+  printf '%s\n' "$out" | grep >/dev/null 'fail: oms: 26 lock' ||
     fail "in-tree lock not reported: $out"
   printf '%s\n' "$out" | grep >/dev/null 'remedy:' ||
     fail "findings must carry remedies: $out"
@@ -40812,6 +40867,17 @@ assert report["schema"] == 1, report
 assert report["summary"]["fail"] >= 3, report
 assert all(f["remedy"] for f in report["findings"]), report
 ' || fail "json report malformed: $out"
+
+  local linked="$TMP/sv-linked-artifacts"
+  make_committed_repo "$linked"
+  mkdir -p "$linked/.oms" "$TMP/sv-linked-target"
+  printf '*\n' > "$linked/.oms/.gitignore"
+  ln -s "$TMP/sv-linked-target" "$linked/.oms/artifacts"
+  rc=0
+  out="$("$ROOT/scripts/oms" state-verify --repo "$linked" --json 2>&1)" || rc=$?
+  [ "$rc" = 1 ] || fail "linked artifacts directory must be reported (rc=$rc): $out"
+  printf '%s\n' "$out" | grep >/dev/null 'lock entr' ||
+    fail "linked artifacts directory missing from findings: $out"
 }
 
 # smoke-weight: 6
