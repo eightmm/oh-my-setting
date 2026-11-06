@@ -126,6 +126,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   WSL2; an override cannot hide the real host identity. The Windows CI job is
   removed, and `oms-windows-final` tags the last release with native Windows
   support for uninstalling existing installs.
+- The remaining native Windows branches are gone from the durable writers,
+  locks, liveness and deletion paths, the plan, state and check paths, and the
+  workflow, panel and peer commands, with their Windows-only tests and the CI
+  Windows lanes; behaviour on Linux, WSL2 and macOS is unchanged.
 - Codex account selection ranks eligible accounts by fresh measured weekly
   quota for both policies, judging freshness by each reading's own timestamp,
   and a capacity overflow re-picks across the remaining accounts.
@@ -497,6 +501,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The worker guard relieves a live `patch-admit` worktree that registers
+  between its baseline scan and receipt capture, when its live admit marker
+  proves it, instead of stopping the worker on hard Git metadata; dead or
+  malformed markers still stop it.
+- The review read guard accepts validated source-side kept-sibling and
+  sibling-cleanup changes outside strict mode, as the worker guard does;
+  strict mode and gitdir, commondir, config or forged-receipt changes are
+  still rejected.
+- `oms land` and `oms sync-shared` cleanliness probes skip optional index
+  locks, and the land intake fetch takes only the target branch, without
+  tags, submodules, automatic maintenance or commit-graph writes, so a
+  running land no longer trips concurrent read-only review guards.
 - `oms update` and the install step of `oms land` defer (exit 76) while panel
   calls are registered in the install checkout, the current checkout or a
   checkout the land names (its repository, state root, receipt handoff and
