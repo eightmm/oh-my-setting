@@ -2,6 +2,7 @@
 
 import argparse
 import difflib
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -752,6 +753,7 @@ def salvage(repo, task=None, selected_repo=None, attempt_id=None, artifact=None)
     if not patch:
         raise ValueError('kept worktree has no changes')
     metadata = {'schema': 1, 'kind': 'oms-salvaged-patch', 'base_sha': base,
+                'salvaged_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
                 'salvaged_from': {'task': task, 'attempt': attempt, 'kept_path': str(path), 'stop_reason': reason,
                                  **({'recovered_from_artifact': True} if recovered else {})},
                 'files': files, 'encoding_warnings': warnings,

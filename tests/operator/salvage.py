@@ -5,6 +5,7 @@ import panel_salvage
 import terminal_panel
 from room_repository import harness_residue_parent
 
+# BEGIN salvage-continuation
 for residue, child in (('oh-my-setting-delegate.fixture', 'wt'),
                        ('oh-my-setting-admit.fixture', 'wt'),
                        ('oh-my-setting-scratch.fixture', 'wt'),
@@ -737,11 +738,11 @@ assert drop_clean() == clean_evidence, 'a dirtied checkout stopped counting as r
 subprocess.run(['git', '-C', str(clean_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test',
                 'commit', '-q', '--allow-empty', '-m', 'empty worker commit'], check=True)
 assert drop_clean() == [], 'an empty worker commit changed the clean outcome'
-# --continue stays refused after salvaging a dirty kept worktree; the refusal names the salvage patch.
+# Continuation materializes verified salvage; changed checkouts still require another salvage.
 dirty_brief = temporary / 'dirty-salvage-brief.md'
 dirty_brief.write_text('Continue safely.\n')
 dirty_parent = {'attempt_id': 'dirty-parent', 'terminal': False, 'refs': {}}
-def continue_dirty(attempt=committed_attempt, record=committed_record):
+def continue_dirty(attempt=committed_attempt, record=committed_record, reference=None, materialize=True):
     worker = dict(attempt, parent_attempt_id='dirty-parent',
                   refs=dict(attempt['refs'], panel_access='write', panel_provider='codex',
                             native_session='fixture-session'))
@@ -754,19 +755,206 @@ def continue_dirty(attempt=committed_attempt, record=committed_record):
             patch.object(terminal_panel, 'results', return_value={'rows': [{'calls': []}]}), \
             patch.object(terminal_panel, 'session_stored', return_value=True):
         try:
-            panel_dispatch.continuation(
+            result = panel_dispatch.continuation(
                 salvage_repo, 'codex', 'main', attempt['task_id'], {'provider': 'codex'}, dirty_brief,
                 {'OMS_ROOM_REPO': str(salvage_repo)},
-                work_repo=salvage_execution_repo, patch_reference={})
+                work_repo=salvage_execution_repo,
+                patch_reference=(reference if reference is not None else {}) if materialize else None)
         except ValueError as error:
             return str(error)
+    if not materialize:
+        try:
+            assert '# oms-salvage:' not in result[0].read_text(), result[0].read_text()
+        finally:
+            result[0].unlink()
+    if reference is not None:
+        return result
     raise AssertionError('continue resumed stopped write work')
-dirty_message = continue_dirty()
 dirty_patch = committed['patch']
+ref = {}
+result = continue_dirty(reference=ref)
+assert ref == {'patch': dirty_patch, 'sha256': committed['patch_sha256'], 'base': launch_base,
+               'attempt': committed_attempt['attempt_id']}, ref
+assert 'verified patch carried forward' in result[2], result
+result[0].unlink()
+committed_head = subprocess.run(git_worker + ['rev-parse', 'HEAD'], check=True,
+                                capture_output=True, text=True).stdout.strip()
+reset_reference = {}
+try:
+    subprocess.run(git_worker + ['reset', '--hard', launch_base], check=True, stdout=subprocess.DEVNULL)
+    (committed_tree / 'dirty.md').unlink()
+    reset_result = continue_dirty(reference=reset_reference)
+    if not isinstance(reset_result, str):
+        reset_result[0].unlink()
+    assert isinstance(reset_result, str), reset_result
+    assert not reset_reference, reset_reference
+    assert reset_result.startswith('already salvaged as ' + dirty_patch), reset_result
+    assert 'registered worktree: ' + str(committed_tree) in reset_result, reset_result
+    assert '--salvage committed-task --attempt att_committed' in reset_result, reset_result
+finally:
+    subprocess.run(git_worker + ['reset', '--hard', committed_head], check=True, stdout=subprocess.DEVNULL)
+    (committed_tree / 'dirty.md').write_text('left uncommitted\n')
+(committed_tree / 'dirty.md').write_text('changed after salvage\n')
+dirty_message = continue_dirty()
 assert dirty_message.startswith('already salvaged as ' + dirty_patch), dirty_message
 assert 'registered worktree: ' + str(committed_tree) in dirty_message, dirty_message
 assert 'already salvaged as ' + dirty_patch in dirty_message and 'fresh dispatch' in dirty_message, dirty_message
 assert dirty_message.index('fresh dispatch') < dirty_message.index('registered worktree: '), dirty_message
+# A second capture supersedes the first by recorded time, independent of filesystem timestamps.
+first_patch = dirty_patch
+first_sidecar = salvage_repo / (first_patch + '.json')
+first_metadata = json.loads(first_sidecar.read_bytes())
+earlier_patch = '.oms/artifacts/delegate/codex-committed-earlier.patch'
+earlier_body = panel_salvage._payload((salvage_repo / first_patch).read_bytes())
+(salvage_repo / earlier_patch).write_bytes(earlier_body)
+committed_record.update(patch=earlier_patch, patch_sha256=hashlib.sha256(earlier_body).hexdigest())
+first_ns = 2_000_000_000_000_000_000
+os.utime(first_sidecar, ns=(first_ns, first_ns))
+committed = kept_salvage(committed_tree, committed_attempt, committed_record)
+dirty_patch = committed['patch']
+assert isinstance(committed.get('salvaged_at'), str), committed
+assert committed['salvaged_at'] > first_metadata['salvaged_at'], committed
+new_sidecar = salvage_repo / (dirty_patch + '.json')
+os.utime(new_sidecar, ns=(0, 0))
+assert panel_dispatch._newest_salvage_patch(
+    salvage_repo, committed_attempt['task_id'], committed_attempt['attempt_id']) == dirty_patch
+for other_attempt in ('', 0, 'att_elsewhere'):
+    assert panel_dispatch._newest_salvage_patch(
+        salvage_repo, committed_attempt['task_id'], other_attempt) is None
+saved_first_sidecar = first_sidecar.read_bytes()
+saved_new_sidecar = new_sidecar.read_bytes()
+saved_bodies = {path: (salvage_repo / path).read_bytes() for path in (first_patch, dirty_patch)}
+legacy_paths = {first_patch: '.oms/artifacts/delegate/salvage-committed-task-legacy-z.patch',
+                dirty_patch: '.oms/artifacts/delegate/salvage-committed-task-legacy-a.patch'}
+saved_kept_dirty = (committed_tree / 'dirty.md').read_bytes()
+kept_removed = False
+try:
+    tied_metadata = dict(first_metadata, salvaged_at=committed['salvaged_at'])
+    first_sidecar.write_text(json.dumps(tied_metadata))
+    os.utime(first_sidecar, ns=(first_ns, first_ns))
+    ordered = sorted((first_sidecar, new_sidecar), reverse=True)
+    with patch.object(Path, 'glob', return_value=iter(ordered)):
+        tied = panel_dispatch._newest_salvage_patch(
+            salvage_repo, committed_attempt['task_id'], committed_attempt['attempt_id'])
+    assert tied == json.loads(ordered[0].read_bytes())['patch'], tied
+    first_sidecar.write_bytes(saved_first_sidecar)
+    for invalid in ('', 0, None, [], 'not-a-time', '2026-02-30T00:00:00.000000Z'):
+        invalid_metadata = dict(json.loads(saved_new_sidecar), salvaged_at=invalid)
+        new_sidecar.write_text(json.dumps(invalid_metadata))
+        assert panel_dispatch._newest_salvage_patch(
+            salvage_repo, committed_attempt['task_id'], committed_attempt['attempt_id']) is None
+    new_sidecar.write_bytes(saved_new_sidecar)
+    subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'remove', '--force', str(committed_tree)], check=True)
+    kept_removed = True
+    assert not committed_tree.exists()
+    with patch.dict(os.environ, salvage_env):
+        dated = panel_dispatch._verified_salvage_continuation(
+            salvage_repo, salvage_execution_repo, committed_attempt['task_id'], committed_attempt['attempt_id'],
+            [first_metadata['provenance'], committed['provenance']])
+    assert dated['patch'] == dirty_patch, dated['patch']
+    assert dated['payload_sha256'] == committed['payload_sha256']
+    legacy = json.loads(saved_first_sidecar)
+    legacy.pop('salvaged_at')
+    first_sidecar.write_text(json.dumps(legacy))
+    legacy = json.loads(saved_new_sidecar)
+    legacy.pop('salvaged_at')
+    new_sidecar.write_text(json.dumps(legacy))
+    assert panel_dispatch._newest_salvage_patch(
+        salvage_repo, committed_attempt['task_id'], committed_attempt['attempt_id']) == \
+        json.loads(max(first_sidecar, new_sidecar).read_bytes())['patch']
+    for path, body in saved_bodies.items():
+        header, payload = body.split(b'\n', 1)
+        legacy_header = json.loads(header[len(panel_salvage.PREFIX):])
+        legacy_header.pop('salvaged_at')
+        legacy_body = panel_salvage.PREFIX + json.dumps(legacy_header).encode() + b'\n' + payload
+        (salvage_repo / path).write_bytes(legacy_body)
+        sidecar = salvage_repo / (path + '.json')
+        legacy = json.loads(sidecar.read_bytes())
+        legacy['patch_sha256'] = hashlib.sha256(legacy_body).hexdigest()
+        sidecar.write_text(json.dumps(legacy))
+    for path, alias in legacy_paths.items():
+        (salvage_repo / path).rename(salvage_repo / alias)
+        (salvage_repo / (path + '.json')).rename(salvage_repo / (alias + '.json'))
+        sidecar = salvage_repo / (alias + '.json')
+        legacy = json.loads(sidecar.read_bytes())
+        legacy['patch'] = alias
+        sidecar.write_text(json.dumps(legacy))
+    old_alias, new_alias = legacy_paths[first_patch], legacy_paths[dirty_patch]
+    os.utime(salvage_repo / (old_alias + '.json'), ns=(0, 0))
+    os.utime(salvage_repo / (new_alias + '.json'), ns=(first_ns, first_ns))
+    assert old_alias > new_alias
+    assert panel_dispatch._newest_salvage_patch(
+        salvage_repo, committed_attempt['task_id'], committed_attempt['attempt_id']) == old_alias
+    assert first_metadata['payload_sha256'] != committed['payload_sha256']
+    retained = {salvage_repo / (alias + suffix): (salvage_repo / (alias + suffix)).read_bytes()
+                for alias in legacy_paths.values() for suffix in ('', '.json')}
+    with patch.dict(os.environ, salvage_env):
+        ambiguous = panel_dispatch._verified_salvage_continuation(
+            salvage_repo, salvage_execution_repo, committed_attempt['task_id'], committed_attempt['attempt_id'],
+            [first_metadata['provenance'], committed['provenance']])
+        assert ambiguous is None, ambiguous['patch']
+    legacy_ref = {}
+    legacy_result = continue_dirty(reference=legacy_ref)
+    if not isinstance(legacy_result, str):
+        legacy_result[0].unlink()
+    assert isinstance(legacy_result, str), legacy_result
+    assert not legacy_ref, legacy_ref
+    assert '--salvage committed-task --attempt att_committed' in legacy_result, legacy_result
+    assert all(path.read_bytes() == body for path, body in retained.items())
+    for suffix in ('', '.json'):
+        path = salvage_repo / (new_alias + suffix)
+        path.rename(path.with_name(path.name + '.hidden'))
+    with patch.dict(os.environ, salvage_env):
+        single = panel_dispatch._verified_salvage_continuation(
+            salvage_repo, salvage_execution_repo, committed_attempt['task_id'], committed_attempt['attempt_id'],
+            [first_metadata['provenance']])
+    assert single['patch'] == old_alias
+    assert single['payload_sha256'] == first_metadata['payload_sha256']
+    for suffix in ('', '.json'):
+        path = salvage_repo / (new_alias + suffix)
+        path.with_name(path.name + '.hidden').rename(path)
+    (salvage_repo / new_alias).write_bytes((salvage_repo / old_alias).read_bytes())
+    identical_metadata = dict(json.loads((salvage_repo / (old_alias + '.json')).read_bytes()), patch=new_alias)
+    (salvage_repo / (new_alias + '.json')).write_text(json.dumps(identical_metadata))
+    with patch.dict(os.environ, salvage_env):
+        identical = panel_dispatch._verified_salvage_continuation(
+            salvage_repo, salvage_execution_repo, committed_attempt['task_id'], committed_attempt['attempt_id'],
+            [first_metadata['provenance']])
+    assert identical['patch'] == old_alias
+    assert identical['payload_sha256'] == first_metadata['payload_sha256']
+finally:
+    for alias in legacy_paths.values():
+        for suffix in ('', '.json', '.hidden', '.json.hidden'):
+            path = salvage_repo / (alias + suffix)
+            if path.exists():
+                path.unlink()
+    for path, body in saved_bodies.items():
+        (salvage_repo / path).write_bytes(body)
+    first_sidecar.write_bytes(saved_first_sidecar)
+    new_sidecar.write_bytes(saved_new_sidecar)
+    os.utime(first_sidecar, ns=(first_ns, first_ns))
+    os.utime(new_sidecar, ns=(0, 0))
+    if kept_removed:
+        subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'add', '--detach',
+                        str(committed_tree), committed_head], check=True, stdout=subprocess.DEVNULL)
+        (committed_tree / 'dirty.md').write_bytes(saved_kept_dirty)
+ref = {}
+with patch.object(panel_salvage, '_launch_base', wraps=panel_salvage._launch_base) as resolve_base:
+    result = continue_dirty(reference=ref)
+assert any(call.args == (salvage_execution_repo, {'base_sha': launch_base})
+           for call in resolve_base.call_args_list), resolve_base.call_args_list
+assert ref == {'patch': dirty_patch, 'sha256': committed['patch_sha256'], 'base': launch_base,
+               'attempt': committed_attempt['attempt_id']}, ref
+assert 'verified patch carried forward' in result[2], result
+result[0].unlink()
+inline_message = continue_dirty(materialize=False)
+assert inline_message.startswith('already salvaged as ' + dirty_patch), inline_message
+assert 'fresh dispatch' in inline_message, inline_message
+with patch.dict(os.environ, dict(salvage_env, GIT_DIR=str(temporary / 'missing-git-directory'))):
+    assert panel_dispatch._verified_salvage_continuation(
+        salvage_repo, salvage_execution_repo, committed_attempt['task_id'], committed_attempt['attempt_id'],
+        [committed['provenance'], first_metadata['provenance'], earlier_patch,
+         'registered worktree: ' + str(committed_tree)])
 # Without a salvage record the refusal is unchanged.
 for path in (salvage_repo / '.oms/salvage-provenance').glob('*.json'):
     path.rename(path.with_suffix('.hidden'))
@@ -802,6 +990,170 @@ gone_patch = panel_dispatch._newest_salvage_patch(salvage_repo, 'scratch-task', 
 assert gone_patch and 'already salvaged as ' + gone_patch in gone_message and 'fresh dispatch' in gone_message, gone_message
 assert gone_message.startswith('already salvaged as ' + gone_patch), gone_message
 assert gone_message.index('fresh dispatch') < gone_message.index('recoverable delegate evidence'), gone_message
+# The same verified salvage remains usable after the kept checkout is removed.
+subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'remove', '--force', str(committed_tree)], check=True)
+ref = {}
+result = continue_dirty(reference=ref)
+assert ref == {'patch': dirty_patch, 'sha256': committed['patch_sha256'], 'base': launch_base,
+               'attempt': committed_attempt['attempt_id']}, ref
+assert 'verified patch carried forward' in result[2], result
+result[0].unlink()
+provenance_item = committed['provenance']
+evidence = [provenance_item, first_metadata['provenance']]
+def refuse_stale(attempt=committed_attempt, record=committed_record):
+    reference = {}
+    result = continue_dirty(attempt, record, reference=reference)
+    if not isinstance(result, str):
+        result[0].unlink()
+        raise AssertionError('continued with superseded patch: %r' % reference)
+    assert not reference, reference
+    assert 'recoverable delegate evidence' in result, result
+    return result
+
+prefixed_tree, prefixed_attempt = kept_fixture('committed-task-extra')
+(prefixed_tree / 'other.md').write_text('another task with a shared prefix\n')
+kept_salvage(prefixed_tree, prefixed_attempt, {'kind': 'delegate', 'task_id': prefixed_attempt['task_id'],
+             'attempt_id': prefixed_attempt['attempt_id'], 'exit': 124, 'base_sha': launch_base})
+prefixed_ref = {}
+prefixed_result = continue_dirty(reference=prefixed_ref)
+assert prefixed_ref.get('patch') == dirty_patch, prefixed_result
+prefixed_result[0].unlink()
+
+clean_continuation = continue_dirty(clean_attempt, clean_record, reference={})
+assert isinstance(clean_continuation, tuple), clean_continuation
+clean_continuation[0].unlink()
+orphan = salvage_repo / '.oms/artifacts/delegate/salvage-clean-task-unpaired.patch'
+orphan.write_bytes(b'interrupted artifact\n')
+try:
+    refuse_stale(clean_attempt, clean_record)
+finally:
+    orphan.unlink()
+
+# Recovery must inspect the published salvage files, without injected artifact-index rows.
+try:
+    for invalid in (b'', b'0', b'[]', b'{'):
+        new_sidecar.write_bytes(invalid)
+        refuse_stale()
+    for invalid in ('', 0, None, [], 'not-a-time', '2026-02-30T00:00:00.000000Z'):
+        new_sidecar.write_text(json.dumps(dict(json.loads(saved_new_sidecar), salvaged_at=invalid)))
+        refuse_stale()
+    missing_time = json.loads(saved_new_sidecar)
+    missing_time.pop('salvaged_at')
+    new_sidecar.write_text(json.dumps(missing_time))
+    refuse_stale()
+    new_sidecar.write_text(json.dumps(dict(json.loads(saved_new_sidecar),
+                                          salvaged_at=first_metadata['salvaged_at'])))
+    refuse_stale()
+    for invalid in ({'patch': first_patch}, {'salvaged_from': {}},
+                    {'salvaged_from': {'task': committed_attempt['task_id'], 'attempt': 0}},
+                    {'salvaged_from': {'task': '', 'attempt': committed_attempt['attempt_id']}},
+                    {'salvaged_from': {'task': 'other-task', 'attempt': committed_attempt['attempt_id']}},
+                    {'salvaged_from': {'task': committed_attempt['task_id'], 'attempt': ''}}):
+        new_sidecar.write_text(json.dumps(dict(json.loads(saved_new_sidecar), **invalid)))
+        refuse_stale()
+finally:
+    new_sidecar.write_bytes(saved_new_sidecar)
+try:
+    for invalid in (b'no salvage header\n', panel_salvage.PREFIX + b'0\n', panel_salvage.PREFIX + b'{\n'):
+        damaged = invalid + panel_salvage._payload(saved_bodies[dirty_patch])
+        (salvage_repo / dirty_patch).write_bytes(damaged)
+        new_sidecar.write_text(json.dumps(dict(json.loads(saved_new_sidecar),
+                                              patch_sha256=hashlib.sha256(damaged).hexdigest())))
+        refuse_stale()
+finally:
+    (salvage_repo / dirty_patch).write_bytes(saved_bodies[dirty_patch])
+    new_sidecar.write_bytes(saved_new_sidecar)
+for path in (salvage_repo / dirty_patch, salvage_repo / first_patch):
+    saved = path.read_bytes()
+    try:
+        for invalid in (b'', b'corrupted patch\n'):
+            path.write_bytes(invalid)
+            refuse_stale()
+    finally:
+        path.write_bytes(saved)
+for path in (new_sidecar, salvage_repo / dirty_patch, first_sidecar, salvage_repo / first_patch):
+    hidden = path.with_name(path.name + '.hidden')
+    path.rename(hidden)
+    try:
+        refuse_stale()
+        path.symlink_to(hidden.name)
+        refuse_stale()
+    finally:
+        if path.is_symlink():
+            path.unlink()
+        hidden.rename(path)
+
+interrupted_tree, interrupted_attempt = kept_fixture('repeat-cut')
+(interrupted_tree / 'edit.md').write_text('first capture\n')
+interrupted_record = {'kind': 'delegate', 'task_id': interrupted_attempt['task_id'],
+                      'attempt_id': interrupted_attempt['attempt_id'], 'exit': 124, 'base_sha': launch_base}
+kept_salvage(interrupted_tree, interrupted_attempt, interrupted_record)
+(interrupted_tree / 'edit.md').write_text('second capture\n')
+publish = panel_results.DURABLE['atomic_mutate']
+def interrupt_resalvage(*args, **kwargs):
+    if kwargs.get('label') == 'salvage patch':
+        raise OSError('interrupted second capture before publishing its patch')
+    return publish(*args, **kwargs)
+with patch.dict(panel_results.DURABLE, {'atomic_mutate': interrupt_resalvage}):
+    try:
+        kept_salvage(interrupted_tree, interrupted_attempt, interrupted_record)
+    except OSError:
+        pass
+    else:
+        raise AssertionError('second salvage survived interrupted publication')
+subprocess.run(['git', '-C', str(salvage_execution_repo), 'worktree', 'remove', '--force', str(interrupted_tree)], check=True)
+refuse_stale(interrupted_attempt, interrupted_record)
+
+with patch.dict(os.environ, salvage_env):
+    select = lambda items: panel_dispatch._verified_salvage_continuation(
+        salvage_repo, salvage_execution_repo, committed_attempt['task_id'], committed_attempt['attempt_id'], items)
+    assert select(evidence)
+    assert select([]) is None
+    assert select(evidence + ['unreadable provenance: invalid']) is None
+    assert select(evidence + ['unexpected evidence']) is None
+    assert select(evidence + [clean_receipt.relative_to(salvage_repo).as_posix()]) is None
+    assert select(evidence + ['registered worktree: ' + str(committed_tree)]) is None
+    assert select(evidence + [first_metadata['provenance'], earlier_patch])
+    assert select(evidence + [first_metadata['provenance'], first_patch])
+    assert select([provenance_item, first_patch]) is None
+    try:
+        for invalid in (b'', b'0', b'[]', b'{'):
+            first_sidecar.write_bytes(invalid)
+            assert select(evidence + [first_metadata['provenance'], first_patch]) is None
+        for invalid in ({'salvaged_from': {}}, {'patch_sha256': '0' * 64}, {'payload_sha256': '0' * 64}):
+            first_sidecar.write_text(json.dumps(dict(first_metadata, **invalid)))
+            assert select(evidence + [first_metadata['provenance'], first_patch]) is None
+    finally:
+        first_sidecar.write_bytes(saved_first_sidecar)
+    historical = salvage_repo / first_metadata['provenance']
+    saved_historical = historical.read_bytes()
+    try:
+        for invalid in (b'', b'0', b'{'):
+            historical.write_bytes(invalid)
+            assert select(evidence + [first_metadata['provenance']]) is None
+        foreign = json.loads(saved_historical)
+        for row in foreign['records']:
+            row['salvaged_from']['task'] = 'another-task'
+        historical.write_text(json.dumps(foreign))
+        assert select(evidence + [first_metadata['provenance']]) is None
+    finally:
+        historical.write_bytes(saved_historical)
+    sidecar = salvage_repo / (dirty_patch + '.json')
+    saved_sidecar = sidecar.read_bytes()
+    meta = json.loads(saved_sidecar)
+    meta['salvaged_from']['recovered_from_artifact'] = True
+    sidecar.write_text(json.dumps(meta))
+    assert select(evidence + [earlier_patch]) is None
+    assert select(evidence + [dirty_patch])
+    for invalid in ('', '0', 'g' * 40, 'a' * 6, 'a' * 65):
+        meta = json.loads(saved_sidecar)
+        meta['base_sha'] = invalid
+        sidecar.write_text(json.dumps(meta))
+        assert select(evidence) is None, invalid
+    sidecar.write_bytes(saved_sidecar)
+
+# END salvage-continuation
+
 # A salvage that died after its provenance but before its patch leaves evidence no patch backs: --continue
 # says so and points at a re-run, and names a fresh dispatch once the kept worktree is gone.
 cut_tree, cut_attempt = kept_fixture('cut')

@@ -1497,14 +1497,16 @@ HEAD that resumes the worker's native session (recorded as `refs.native_session`
 attempt, never in room text).
 
 A continuation transfers native conversation history only when that provider session is
-still available. Files and the old worktree never transfer. Only an exact exit-zero
-result contributes its verified patch inline, plus a bounded recorded summary for a
-fresh session. Stderr names what actually transferred. An oversized patch refuses
-continuation instead of pointing at artifacts absent from the new worktree. Inspect and
-admit that patch in the owner checkout first, or include a bounded recovery in a fresh
-dispatch brief. Stopped writes with a recorded worktree must first go through `oms panel
---salvage TASK_ID --attempt ATTEMPT_ID`; inspect the recovery and include the recovered
-work in a fresh dispatch brief.
+still available. A write continuation materializes its verified patch in a new worktree
+at the recorded base; a fresh session can also receive a bounded recorded summary.
+Stderr names what actually transferred. Stopped writes with a recorded worktree must
+first go through `oms panel --salvage TASK_ID --attempt ATTEMPT_ID`. Inspect the recovery,
+then use `--continue TASK_ID --access write` to carry the newest verified salvage patch
+at its recorded base. The kept worktree must still match that capture, or have been
+removed. If it changed, including being reset to its recorded base, salvage it again
+before continuing; older complete captures remain recorded and do not prevent using
+the new capture. Salvaged patches are never embedded inline in a prompt; continuation
+without write materialization refuses.
 
 A timed-out write result card advises salvage first; a timed-out read keeps the
 `--continue` hint. Salvage of an attempt with nothing to recover reports
@@ -2861,8 +2863,21 @@ Selection keeps the same room-owner, stopped-state and worktree identity checks;
 attempt from another task is refused. It preserves that checkout and index, and reports
 changed paths, before/after byte sizes, the patch path and its `.patch.json` metadata
 under `.oms/artifacts/delegate/`. Metadata and the patch header carry `salvaged_from`
-(task, attempt, kept path and stop reason), base and payload hashes, file sizes and
-`encoding_warnings` for display.
+(task, attempt, kept path and stop reason), base and payload hashes, the UTC
+`salvaged_at` timestamp, file sizes and `encoding_warnings` for display. Continuation
+selects the newest salvage for the same task and attempt by `salvaged_at`, then filename,
+independently of filesystem timestamps. Its timestamp must match the verified patch
+header. Legacy captures without that field in either file sort before dated captures.
+If every capture is legacy, materialization requires a single distinct payload across
+all verified captures. Different legacy payloads refuse continuation because filenames
+cannot establish recency; inspect the retained captures and include the intended recovery
+in a fresh dispatch brief. A single legacy capture or several identical-payload legacy
+captures remain selectable.
+
+Continuation verifies every capture for the attempt and requires each controller
+provenance entry to have an intact patch and sidecar. Interrupted publication, damaged
+files or invalid timestamps refuse continuation instead of falling back to an older
+capture. Unreadable artifacts that cannot be attributed to another attempt also refuse.
 
 Admission uses controller records in `.oms/salvage-provenance/`, keyed by the diff
 payload hash; editing headers, sidecars or warning lists cannot change those records.

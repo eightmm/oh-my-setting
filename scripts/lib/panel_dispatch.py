@@ -394,30 +394,140 @@ def _codex_resume_usage_baseline(usage):
     return json.dumps(dict(zip(fields, values)), separators=(",", ":"))
 
 
-def _newest_salvage_patch(repo, task_id, attempt_id):
-    """Repo-relative path of the newest published salvage patch of this attempt, or None."""
+def _salvage_candidates(repo, task_id, attempt_id):
+    from datetime import datetime
     import panel_salvage
-    newest = None
+    candidates = []
+    paired = set()
+    root = Path(repo)
+    directory = root / ".oms/artifacts/delegate"
     try:
-        for sidecar in (Path(repo) / ".oms/artifacts/delegate").glob("salvage-%s-*.patch.json" % task_id):
+        for sidecar in sorted(directory.glob("salvage-%s-*.patch.json" % task_id)):
             if sidecar.is_symlink() or not sidecar.is_file():
+                return None
+            meta = json.loads(panel_salvage._read(
+                root, sidecar.relative_to(root).as_posix(), panel_salvage.MAX_EVIDENCE))
+            origin = meta.get("salvaged_from") if isinstance(meta, dict) else None
+            if (not isinstance(origin, dict) or not isinstance(origin.get("task"), str) or not origin["task"]
+                    or not isinstance(origin.get("attempt"), str) or not origin["attempt"]):
+                return None
+            if not sidecar.name.startswith("salvage-%s-" % origin["task"]):
+                return None
+            relative = sidecar.relative_to(root).as_posix()[:-5]
+            patch = root / relative
+            paired.add(patch)
+            if origin["task"] != task_id or origin["attempt"] != attempt_id:
                 continue
-            try:
-                meta = json.loads(panel_salvage._read(
-                    Path(repo), sidecar.relative_to(repo).as_posix(), panel_salvage.MAX_EVIDENCE))
-                origin = meta.get("salvaged_from") if isinstance(meta, dict) else None
-                patch = meta.get("patch") if isinstance(meta, dict) else None
-                if (isinstance(origin, dict) and origin.get("task") == task_id
-                        and origin.get("attempt") == attempt_id and isinstance(patch, str)
-                        and patch.startswith(".oms/artifacts/delegate/") and (Path(repo) / patch).is_file()):
-                    stamp = sidecar.stat().st_mtime
-                    if newest is None or stamp >= newest[0]:
-                        newest = (stamp, patch)
-            except (OSError, ValueError, TypeError):
-                continue
-    except OSError:
+            if meta.get("patch") != relative or patch.is_symlink() or not patch.is_file():
+                return None
+            if "salvaged_at" in meta:
+                salvaged_at = meta["salvaged_at"]
+                if not isinstance(salvaged_at, str) or not salvaged_at:
+                    return None
+                stamp = datetime.strptime(salvaged_at, "%Y-%m-%dT%H:%M:%S.%fZ")
+            else:
+                # Legacy sidecars remain selectable, ordered before dated captures.
+                stamp = datetime.min
+            candidates.append(((stamp, sidecar.name), relative))
+        if any(path not in paired for path in directory.glob("salvage-%s-*.patch" % task_id)):
+            return None
+        return candidates
+    except (OSError, ValueError, TypeError):
         return None
-    return newest[1] if newest else None
+
+
+def _newest_salvage_patch(repo, task_id, attempt_id):
+    """Newest paired salvage of this attempt, or None when publication is incomplete."""
+    candidates = _salvage_candidates(repo, task_id, attempt_id)
+    return max(candidates)[1] if candidates else None
+
+
+def _verified_salvage_patch(repo, task, attempt, patch, evidence):
+    from terminal_panel import verified_patch
+    import panel_salvage
+    try:
+        meta = json.loads(panel_salvage._read(Path(repo), patch + ".json", panel_salvage.MAX_EVIDENCE))
+        if not isinstance(meta, dict):
+            return None
+        origin = meta.get("salvaged_from")
+        if not isinstance(origin, dict) or origin.get("task") != task or origin.get("attempt") != attempt:
+            return None
+        base = meta.get("base_sha")
+        digest = meta.get("payload_sha256")
+        if (meta.get("patch") != patch or not re.fullmatch(r"[0-9a-f]{7,64}", str(base))
+                or not re.fullmatch(r"\.oms/artifacts/delegate/salvage-[^/]+\.patch", patch)):
+            return None
+        body = verified_patch(repo, {"patch": patch, "patch_sha256": meta.get("patch_sha256")})
+        if not body.startswith(panel_salvage.PREFIX):
+            return None
+        header = json.loads(body[len(panel_salvage.PREFIX):].split(b"\n", 1)[0])
+        if not isinstance(header, dict) or header.get("salvaged_at") != meta.get("salvaged_at"):
+            return None
+        if hashlib.sha256(panel_salvage._payload(body)).hexdigest() != digest:
+            return None
+        provenance_path = panel_salvage._provenance_path(digest)
+        if provenance_path not in evidence:
+            return None
+        provenance = panel_salvage._provenance(
+            panel_salvage._read(Path(repo), provenance_path, panel_salvage.MAX_EVIDENCE), digest)
+        if not any(row["salvaged_from"].get("task") == task
+                   and row["salvaged_from"].get("attempt") == attempt
+                   and row.get("base_sha") == base for row in provenance["records"]):
+            return None
+        return meta
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _verified_salvage_continuation(repo, head_repo, task, attempt, evidence):
+    import panel_salvage
+    candidates = _salvage_candidates(repo, task, attempt)
+    if not candidates:
+        return None
+    published = {}
+    covered = set()
+    for _, patch in candidates:
+        metadata = _verified_salvage_patch(repo, task, attempt, patch, evidence)
+        if not metadata:
+            return None
+        published[patch] = metadata
+        covered.add(panel_salvage._provenance_path(metadata["payload_sha256"]))
+    # Random filenames cannot establish which legacy payload is newest.
+    if (not any("salvaged_at" in metadata for metadata in published.values())
+            and len({metadata["payload_sha256"] for metadata in published.values()}) > 1):
+        return None
+    patch = max(candidates)[1]
+    meta = published[patch]
+    base = meta["base_sha"]
+    digest = meta["payload_sha256"]
+    try:
+        for item in evidence:
+            if item.startswith(".oms/salvage-provenance/"):
+                # Unpaired provenance can be a newer capture interrupted before publication.
+                if item not in covered:
+                    return None
+            elif item.startswith("registered worktree: "):
+                path = item[len("registered worktree: "):]
+                kept, common, head = panel_salvage._managed(head_repo, path)
+                resolved = panel_salvage._launch_base(head_repo, {"base_sha": base})
+                captured, _, _ = panel_salvage._capture(kept, common, resolved, head)
+                if (hashlib.sha256(panel_salvage._payload(captured)).hexdigest() != digest
+                        or panel_salvage._managed(head_repo, path) != (kept, common, head)):
+                    return None
+            elif item in published:
+                continue
+            elif item.startswith(".oms/artifacts/"):
+                if Path(item).name.startswith("salvage-"):
+                    return None
+                raw = panel_salvage._read(Path(repo), item, panel_salvage.MAX_EVIDENCE)
+                if (hashlib.sha256(panel_salvage._payload(raw)).hexdigest() != digest
+                        and meta["salvaged_from"].get("recovered_from_artifact")):
+                    return None
+            else:
+                return None
+        return meta
+    except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        return None
 
 
 def _stopped_write_continuation(last, eligible_result):
@@ -601,15 +711,22 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                        and call.get("reason_code") != "worker_authority_violation"
                        and (successful_call or verified_failure))
     empty_salvage = False
+    salvaged_meta = None
     stopped_write = _stopped_write_continuation(last, eligible_result)
     if stopped_write:
         import panel_salvage
         recovery_evidence = panel_salvage._attempt_recovery_evidence(
             repo, task_id, last.get("attempt_id"), call, last, head_repo)
-        # A registered checkout that still matches its recorded base needs no recovery.
-        recovery_evidence = panel_salvage._without_clean_worktrees(
+        # A clean checkout alone needs no recovery. Durable evidence still requires
+        # comparing every registered worktree with the salvaged payload.
+        remaining_evidence = panel_salvage._without_clean_worktrees(
             repo, task_id, last.get("attempt_id"), head_repo, recovery_evidence)
-        if recovery_evidence:
+        if not remaining_evidence:
+            recovery_evidence = remaining_evidence
+        if recovery_evidence and patch_reference is not None:
+            salvaged_meta = _verified_salvage_continuation(
+                repo, head_repo, task_id, last.get("attempt_id"), recovery_evidence)
+        if recovery_evidence and not salvaged_meta:
             if all(item.startswith(".oms/salvage-provenance/") for item in recovery_evidence):
                 if _newest_salvage_patch(repo, task_id, last.get("attempt_id")) is None:
                     # Provenance precedes the patch, so a salvage cut short leaves only this file behind.
@@ -645,6 +762,9 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                                "--attempt %s and inspect: %s" %
                                (task_id, task_id, last.get("attempt_id"), ", ".join(recovery_evidence)))
             panel_salvage._raise_recovery_evidence(recovery_evidence, message)
+        if not recovery_evidence and _salvage_candidates(repo, task_id, last.get("attempt_id")) != []:
+            raise ValueError("recoverable delegate evidence exists for task %s; salvage artifacts cannot be verified; "
+                             "inspect this task's salvage artifacts before continuing" % task_id)
         payload_sha = panel_salvage._empty_provenance_identity(task_id, last.get("attempt_id"))
         relative = panel_salvage._empty_provenance_path(task_id, last.get("attempt_id"))
         try:
@@ -657,18 +777,18 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                 for row in provenance["records"])
         except (OSError, ValueError, TypeError):
             empty_salvage = False
-        if not empty_salvage:
+        if not empty_salvage and not salvaged_meta:
             raise ValueError("stopped write work is not transferred by --continue; first run oms panel --salvage %s "
                              "--attempt %s, inspect the recovery, then include recovered work in a fresh dispatch brief"
                              % (task_id, last["attempt_id"]))
-    patch = call.get("patch") if eligible_result else None
+    patch = salvaged_meta["patch"] if salvaged_meta else (call.get("patch") if eligible_result else None)
     where = " The previous stopped attempt was recorded as having no patch to recover." if empty_salvage else ""
     drift_note = ""
     if patch:
         # Pass write continuations a verified artifact reference. Legacy callers
         # without a materialization channel retain the bounded inline context.
         try:
-            body = verified_patch(repo, call)
+            body = verified_patch(repo, {"patch": patch, "patch_sha256": salvaged_meta["patch_sha256"]} if salvaged_meta else call)
         except (OSError, ValueError, TypeError):
             body = None
         name = os.path.relpath(Path(repo) / patch, repo)
@@ -677,13 +797,16 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                 raise ValueError("previous patch could not be verified; continuation refused")
             where = " The previous patch could not be verified and is not included."
         elif body and patch_reference is not None:
-            import panel_results
-            _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
-            record = next((row for row in reversed(artifacts)
-                           if row.get("attempt_id") == last["attempt_id"] and row.get("kind") == "delegate"
-                           and row.get("patch") == patch and row.get("patch_sha256") == call.get("patch_sha256")
-                           and row.get("event_id") == call.get("event_id")), {})
-            base = record.get("base_sha")
+            if salvaged_meta:
+                base = salvaged_meta["base_sha"]
+            else:
+                import panel_results
+                _, artifacts = panel_results._records(repo, _attempts=rows, task_id=task_id)
+                record = next((row for row in reversed(artifacts)
+                               if row.get("attempt_id") == last["attempt_id"] and row.get("kind") == "delegate"
+                               and row.get("patch") == patch and row.get("patch_sha256") == call.get("patch_sha256")
+                               and row.get("event_id") == call.get("event_id")), {})
+                base = record.get("base_sha")
             if not re.fullmatch(r"[0-9a-f]{7,64}", str(base)):
                 raise ValueError("previous patch has no recorded base; continuation refused")
             if _patch_in_head(head_repo, body):
@@ -691,7 +814,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
                          % name)
             else:
                 drift_note = _continuation_base_note(head_repo, base, body, allow_stale_base)
-                patch_reference.update(patch=patch, sha256=call.get("patch_sha256"), base=base,
+                patch_reference.update(patch=patch, sha256=salvaged_meta["patch_sha256"] if salvaged_meta else call.get("patch_sha256"), base=base,
                                        attempt=last["attempt_id"])
                 where = (" The harness applies your previous patch (%s) at its original base before this round. "
                          "Continue from the applied changes; do not reapply it. The patch you return is against "
