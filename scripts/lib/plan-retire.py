@@ -108,24 +108,15 @@ def bounded_regular(filename, label, maximum, absent_ok=False):
         descriptor = os.open(filename, flags)
     except OSError as exc:
         die("cannot open %s safely: %s" % (label, exc))
-    try:
+    with os.fdopen(descriptor, "rb") as handle:
         opened = os.fstat(descriptor)
         if (not stat.S_ISREG(opened.st_mode) or is_reparse(opened) or
                 opened.st_nlink != 1 or
                 (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
             die("%s changed while opening" % label)
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > maximum:
-                die("%s exceeds %d bytes" % (label, maximum))
-    finally:
-        os.close(descriptor)
+        raw = handle.read(maximum + 1)
+    if len(raw) > maximum:
+        die("%s exceeds %d bytes" % (label, maximum))
     try:
         after = os.lstat(filename)
     except OSError:
@@ -133,22 +124,16 @@ def bounded_regular(filename, label, maximum, absent_ok=False):
     if ((after.st_dev, after.st_ino, after.st_size) !=
             (opened.st_dev, opened.st_ino, opened.st_size)):
         die("%s changed while reading" % label)
-    return b"".join(chunks), file_generation(opened)
+    return raw, file_generation(opened)
+
+
+_FSYNC_DIR = __import__("runpy").run_path(
+    os.path.join(os.path.dirname(__file__), "durable-jsonl.py")
+)["_fsync_directory_path"]
 
 
 def fsync_directory(directory):
-    if os.name == "nt":
-        return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(directory, flags)
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as exc:
-            if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EBADF}:
-                raise
-    finally:
-        os.close(descriptor)
+    _FSYNC_DIR(directory, "plan retirement")
 
 
 def plan_from_payload(payload):

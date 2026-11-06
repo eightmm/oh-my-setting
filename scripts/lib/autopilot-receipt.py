@@ -65,35 +65,25 @@ def regular_bytes(path: Path, limit: int, label: str) -> bytes:
     if before.st_size > limit:
         raise ReceiptError("%s exceeds its size limit" % label)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         descriptor = os.open(str(path), flags)
     except OSError as exc:
         raise ReceiptError("%s cannot be opened safely" % label) from exc
-    try:
+    with os.fdopen(descriptor, "rb") as handle:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (
-            opened.st_dev,
-            opened.st_ino,
-        ) != (before.st_dev, before.st_ino):
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             raise ReceiptError("%s changed while it was opened" % label)
-        chunks = bytearray()
-        while len(chunks) <= limit:
-            chunk = os.read(descriptor, min(65536, limit + 1 - len(chunks)))
-            if not chunk:
-                break
-            chunks.extend(chunk)
-        if len(chunks) > limit:
-            raise ReceiptError("%s exceeds its size limit" % label)
-        after = path.lstat()
-        if not stat.S_ISREG(after.st_mode) or (
-            after.st_dev,
-            after.st_ino,
-        ) != (opened.st_dev, opened.st_ino):
-            raise ReceiptError("%s changed while it was read" % label)
-        return bytes(chunks)
-    finally:
-        os.close(descriptor)
+        payload = handle.read(limit + 1)
+    if len(payload) > limit:
+        raise ReceiptError("%s exceeds its size limit" % label)
+    after = path.lstat()
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or (after.st_dev, after.st_ino, after.st_size) != (opened.st_dev, opened.st_ino, len(payload))
+    ):
+        raise ReceiptError("%s changed while it was read" % label)
+    return payload
 
 
 def digest(payload: bytes) -> str:
@@ -1077,21 +1067,13 @@ def atomic_write(path: Path, payload: bytes) -> None:
         raise
 
 
+_FSYNC_DIR = __import__("runpy").run_path(
+    str(Path(__file__).with_name("durable-jsonl.py"))
+)["_fsync_directory_path"]
+
+
 def fsync_directory(path: Path) -> None:
-    # POSIX directory fsync makes os.replace durable. Native Windows Python
-    # cannot open directories this way; os.replace remains atomic there and
-    # the file itself was already flushed above.
-    if os.name != "posix":
-        return
-    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError as exc:
-            if exc.errno not in {errno.EBADF, errno.EINVAL, errno.ENOTSUP}:
-                raise
-    finally:
-        os.close(descriptor)
+    _FSYNC_DIR(str(path), "autopilot receipt")
 
 
 def supervise_phase(args: argparse.Namespace) -> int:

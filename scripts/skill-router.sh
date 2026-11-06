@@ -31,8 +31,7 @@ fi
 # Deferred Stop publishing and periodic maintenance own network work. On the first
 # prompt of a local day it also prints a bounded journal digest — hook stdout
 # becomes agent context, which is what makes the journal self-referencing.
-if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] &&
-  [ -n "$state_repo" ] && git -C "$state_repo" rev-parse --git-dir >/dev/null 2>&1; then
+if [ -n "$state_repo" ] && git -C "$state_repo" rev-parse --git-dir >/dev/null 2>&1; then
   work_journal_prompt_tick "$state_repo" resolved
 fi
 
@@ -128,7 +127,7 @@ if len(rows) >= 2:
 PY
 }
 
-if [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_STATE_HINTS:-1}" = "1" ] &&
+if [ "${OMS_STATE_HINTS:-1}" = "1" ] &&
   [ -n "$state_repo" ] && [ -d "$state_repo/.oms" ]; then
   state_hint "$state_repo" || true
 fi

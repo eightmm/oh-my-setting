@@ -610,19 +610,6 @@ def write_all(fd: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
-def fsync_directory(path: Path) -> None:
-    # Windows does not support opening directories through os.open. POSIX
-    # platforms used by the supported lifecycle do, including macOS Bash 3.2.
-    if os.name == "nt":
-        return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    fd = os.open(str(path), flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _recent_identity_row(
     fd: int, identity_key: str, identity: Any, *, max_bytes: int = 131072
 ) -> Optional[Dict[str, Any]]:
@@ -690,7 +677,11 @@ def write_json_atomic(path: Path, value: Dict[str, Any], mode: int = 0o600) -> N
             os.fsync(handle.fileno())
         os.chmod(temp_name, mode)
         os.replace(temp_name, path)
-        fsync_directory(path.parent)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except Exception:
         try:
             os.unlink(temp_name)

@@ -3612,20 +3612,17 @@ class JournalStore:
         the digest never inlines another artifact's content.
         """
 
-        handoffs = self.repo / ".oms" / "handoffs"
-        newest: Optional[pathlib.Path] = None
-        newest_mtime = 0.0
         try:
-            for path in handoffs.iterdir():
-                if path.suffix != ".md" or not path.is_file():
-                    continue
-                mtime = path.stat().st_mtime
-                if mtime > newest_mtime:
-                    newest, newest_mtime = path, mtime
+            candidates = [
+                (p.stat().st_mtime, p)
+                for p in (self.repo / ".oms" / "handoffs").glob("*.md")
+                if p.is_file()
+            ]
         except OSError:
             return None
-        if newest is None:
+        if not candidates:
             return None
+        newest_mtime, newest = max(candidates, key=lambda item: item[0])
         now = self.clock()
         if now.tzinfo is None:
             now = now.replace(tzinfo=dt.timezone.utc)

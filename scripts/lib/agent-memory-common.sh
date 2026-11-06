@@ -119,6 +119,33 @@ oms_normalize_provider() {
   oms_provider_normalize "${1:-}" 2>/dev/null || return 1
 }
 
+oms_duration_seconds() {  # VALUE
+  local val="${1:-}" mult=1
+  case "$val" in
+    *s) val="${val%s}"; mult=1 ;;
+    *m) val="${val%m}"; mult=60 ;;
+    *h) val="${val%h}"; mult=3600 ;;
+  esac
+  case "$val" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#val}" -le 5 ] && [ "$((val * mult))" -le 86400 ] || return 2
+  printf '%s\n' "$((val * mult))"
+}
+
+oms_git_disable_hooks_env() {
+  local count="${GIT_CONFIG_COUNT:-0}" max="${1:-63}" key_var val_var
+  case "$count" in
+    ''|*[!0-9]*|0[0-9]*) echo "error: GIT_CONFIG_COUNT must be a canonical non-negative integer" >&2; return 2 ;;
+  esac
+  [ "${#count}" -le 2 ] && [ "$count" -le "$max" ] || { echo "error: GIT_CONFIG_COUNT is too large" >&2; return 2; }
+  key_var="GIT_CONFIG_KEY_$count"
+  val_var="GIT_CONFIG_VALUE_$count"
+  printf -v "$key_var" '%s' core.hooksPath
+  printf -v "$val_var" '%s' /dev/null
+  export "${key_var?}" "${val_var?}"
+  GIT_CONFIG_COUNT=$((count + 1))
+  export GIT_CONFIG_COUNT
+}
+
 agent_memory_project_file() {
   local repo="$1"
   repo="$(oms_repo_root "$repo")" || return 1

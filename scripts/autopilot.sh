@@ -467,23 +467,10 @@ if [ "$ACTION" = shadow ]; then
 fi
 
 validate_duration() {  # VALUE LABEL
-  local value="$1" label="$2" seconds
-  case "$value" in
-    [1-9]|[1-9][0-9]*|[1-9]s|[1-9][0-9]*s|[1-9]m|[1-9][0-9]*m|[1-9]h|[1-9][0-9]*h) ;;
-    *) fail "$label must be a positive integer duration (s, m, or h)" ;;
+  oms_duration_seconds "$1" >/dev/null || case "$?" in
+    2) fail "$2 must be at most 24h" ;;
+    *) fail "$2 must be a positive integer duration (s, m, or h)" ;;
   esac
-  seconds="$(duration_seconds "$value")" || fail "$label is invalid"
-  [ "$seconds" -le 86400 ] || fail "$label must be at most 24h"
-}
-
-duration_seconds() {  # VALUE
-  python3 - "$1" <<'PY'
-import re, sys
-match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", sys.argv[1])
-if not match:
-    raise SystemExit(2)
-print(int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)])
-PY
 }
 
 SUPERVISOR_PHASE_WALL_MAX=$((56 * 24 * 60 * 60))
@@ -525,9 +512,9 @@ fi
 validate_duration "$PLANNER_TIMEOUT" "--planner-timeout"
 validate_duration "$WORKER_TIMEOUT" "--worker-timeout"
 validate_duration "$REVIEWER_TIMEOUT" "--reviewer-timeout"
-planner_seconds="$(duration_seconds "$PLANNER_TIMEOUT")"
-worker_seconds="$(duration_seconds "$WORKER_TIMEOUT")"
-reviewer_seconds="$(duration_seconds "$REVIEWER_TIMEOUT")"
+planner_seconds="$(oms_duration_seconds "$PLANNER_TIMEOUT")"
+worker_seconds="$(oms_duration_seconds "$WORKER_TIMEOUT")"
+reviewer_seconds="$(oms_duration_seconds "$REVIEWER_TIMEOUT")"
 verify_seconds="$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_verify_timeout_seconds' _ "$ROOT")" ||
   fail "OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h"
 # A routed model call may spend primary + two safeguard recoveries + one
@@ -572,19 +559,7 @@ if [ "$ACTION" != status ]; then
   # The wrapper itself checks out the deterministic work branch. Disable
   # mutable repository hooks before that top-level Git effect, then let every
   # descendant inherit the same command-scope guard.
-  AUTOPILOT_GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-0}"
-  case "$AUTOPILOT_GIT_CONFIG_COUNT" in
-    0|[1-9]|[1-9][0-9]*) ;;
-    *) fail "GIT_CONFIG_COUNT must be a canonical non-negative integer" ;;
-  esac
-  [ "$AUTOPILOT_GIT_CONFIG_COUNT" -lt 64 ] || fail "GIT_CONFIG_COUNT is too large"
-  AUTOPILOT_HOOK_KEY="GIT_CONFIG_KEY_$AUTOPILOT_GIT_CONFIG_COUNT"
-  AUTOPILOT_HOOK_VALUE="GIT_CONFIG_VALUE_$AUTOPILOT_GIT_CONFIG_COUNT"
-  printf -v "$AUTOPILOT_HOOK_KEY" '%s' core.hooksPath
-  printf -v "$AUTOPILOT_HOOK_VALUE" '%s' /dev/null
-  export "${AUTOPILOT_HOOK_KEY?}" "${AUTOPILOT_HOOK_VALUE?}"
-  GIT_CONFIG_COUNT=$((AUTOPILOT_GIT_CONFIG_COUNT + 1))
-  export GIT_CONFIG_COUNT
+  oms_git_disable_hooks_env || exit $?
 fi
 
 if [ "$ACTION" = status ]; then
@@ -1002,87 +977,37 @@ outer_receipt_prepare_new() {
 }
 
 snapshot_regular_proposal() {  # SOURCE DEST
-  python3 - "$1" "$2" <<'PY'
-import os
-import stat
-import sys
-
-source, destination = sys.argv[1:]
-limit = 1024 * 1024
-source_fd = None
-destination_fd = None
-destination_created = False
-
-class ProposalError(Exception):
-    pass
-
-def identity(value):
-    return (value.st_dev, value.st_ino)
-
+  python3 - "$RECEIPT_HELPER" "$1" "$2" <<'PY'
+import os, runpy, sys
+from pathlib import Path
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+rules = runpy.run_path(sys.argv[1])
+fd = None
 try:
-    before = os.lstat(source)
-    if not stat.S_ISREG(before.st_mode):
-        raise ProposalError("proposal must be a regular non-symlink file")
-    if before.st_size > limit:
-        raise ProposalError("proposal exceeds the 1 MiB snapshot limit")
-
-    flags = os.O_RDONLY
-    for name in ("O_BINARY", "O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
-        flags |= getattr(os, name, 0)
-    source_fd = os.open(source, flags)
-    opened = os.fstat(source_fd)
-    if not stat.S_ISREG(opened.st_mode) or identity(before) != identity(opened):
-        raise ProposalError("proposal changed while its snapshot was opened")
-    if opened.st_size > limit:
-        raise ProposalError("proposal exceeds the 1 MiB snapshot limit")
-
-    payload = bytearray()
-    while len(payload) <= limit:
-        chunk = os.read(source_fd, min(65536, limit + 1 - len(payload)))
-        if not chunk:
-            break
-        payload.extend(chunk)
-    if len(payload) > limit:
-        raise ProposalError("proposal exceeds the 1 MiB snapshot limit")
-
-    after = os.lstat(source)
-    if (not stat.S_ISREG(after.st_mode) or
-            identity(opened) != identity(after)):
-        raise ProposalError("proposal changed while it was snapshotted")
-
-    output_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    output_flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
-    destination_fd = os.open(destination, output_flags, 0o600)
-    destination_created = True
+    payload = rules["regular_bytes"](Path(sys.argv[2]), 1024 * 1024, "proposal")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(sys.argv[3], flags, 0o600)
     view = memoryview(payload)
     while view:
-        written = os.write(destination_fd, view)
+        written = os.write(fd, view)
         if written <= 0:
             raise OSError("short snapshot write")
         view = view[written:]
-except ProposalError as exc:
-    print("error: %s" % exc, file=sys.stderr)
-    if destination_created:
+except Exception as exc:
+    msg = "cannot safely snapshot the proposal file" if isinstance(exc, (OSError, ValueError)) or exc.__cause__ else (
+        str(exc).replace("its size limit", "the 1 MiB snapshot limit")
+        .replace("while it was opened", "while its snapshot was opened")
+        .replace("while it was read", "while it was snapshotted"))
+    print("error: %s" % msg, file=sys.stderr)
+    if fd is not None:
         try:
-            os.unlink(destination)
-        except OSError:
-            pass
-    raise SystemExit(2)
-except (OSError, ValueError):
-    print("error: cannot safely snapshot the proposal file", file=sys.stderr)
-    if destination_created:
-        try:
-            os.unlink(destination)
+            os.unlink(sys.argv[3])
         except OSError:
             pass
     raise SystemExit(2)
 finally:
-    for descriptor in (destination_fd, source_fd):
-        if descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+    if fd is not None:
+        os.close(fd)
 PY
 }
 

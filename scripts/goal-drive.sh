@@ -203,17 +203,8 @@ esac
 oms_model_validate_name "$MODEL" || exit $?
 oms_model_validate_name "$FALLBACK_MODEL" || exit $?
 oms_reasoning_validate "$REASONING_EFFORT" || exit $?
-PROVIDER_TIMEOUT_SECONDS="$(python3 - "$PROVIDER_TIMEOUT" <<'PY' | tr -d '\r'
-import re, sys
-match = re.fullmatch(r"([1-9][0-9]*)([smh]?)", sys.argv[1])
-if not match:
-    raise SystemExit(2)
-seconds = int(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
-if seconds > 24 * 60 * 60:
-    raise SystemExit(2)
-print(seconds)
-PY
-)" || fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
+PROVIDER_TIMEOUT_SECONDS="$(oms_duration_seconds "$PROVIDER_TIMEOUT")" ||
+  fail "--provider-timeout must be a positive duration up to 24h (for example 15m)"
 VERIFY_TIMEOUT_SECONDS="$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_verify_timeout_seconds' _ "$ROOT")" ||
   fail "OMS_PEER_VERIFY_TIMEOUT must be a positive finite duration up to 24h"
 VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS//$'\r'/}"
@@ -246,22 +237,8 @@ fi
 
 # Repository hooks are mutable code outside the reviewed task/verifier
 # contract. Disable them for this process and every Git subprocess launched by
-# plan delegation, admission, landing, and exact ref publication. Preserve any
-# caller-supplied command-scope Git config entries and append the stronger
-# hooksPath setting last.
-GOAL_GIT_CONFIG_COUNT="${GIT_CONFIG_COUNT:-0}"
-case "$GOAL_GIT_CONFIG_COUNT" in
-  0|[1-9]|[1-9][0-9]*) ;;
-  *) fail "GIT_CONFIG_COUNT must be a canonical non-negative integer" ;;
-esac
-[ "$GOAL_GIT_CONFIG_COUNT" -le 64 ] || fail "GIT_CONFIG_COUNT is too large"
-GOAL_HOOK_KEY="GIT_CONFIG_KEY_$GOAL_GIT_CONFIG_COUNT"
-GOAL_HOOK_VALUE="GIT_CONFIG_VALUE_$GOAL_GIT_CONFIG_COUNT"
-printf -v "$GOAL_HOOK_KEY" '%s' core.hooksPath
-printf -v "$GOAL_HOOK_VALUE" '%s' /dev/null
-export "${GOAL_HOOK_KEY?}" "${GOAL_HOOK_VALUE?}"
-GIT_CONFIG_COUNT=$((GOAL_GIT_CONFIG_COUNT + 1))
-export GIT_CONFIG_COUNT
+# plan delegation, admission, landing, and exact ref publication.
+oms_git_disable_hooks_env 64 || exit $?
 
 PLAN_FILE="$STATE_REPO/.oms/plan/tasks.json"
 PROGRESS="$STATE_REPO/.oms/plan/progress.jsonl"
@@ -572,29 +549,6 @@ $fps
 EOF
 }
 
-# `status --porcelain` and ordinary diffs intentionally trust index hints.
-# skip-worktree and assume-unchanged can therefore hide tracked bytes from the
-# clean-tree, scope, and acceptance fences. Autonomous publication requires a
-# plain index; reject the hint itself before inspecting or consuming work.
-guard_plain_index() {
-  if ! python3 - "$REPO" <<'PY'
-import subprocess, sys
-
-raw = subprocess.check_output(
-    ["git", "-C", sys.argv[1], "ls-files", "-v", "-z"],
-    stderr=subprocess.DEVNULL)
-for entry in raw.split(b"\0"):
-    if not entry:
-        continue
-    flag = entry[:1]
-    if flag == b"S" or b"a" <= flag <= b"z":
-        raise SystemExit(2)
-PY
-  then
-    park "hidden-index-flags" "clear every skip-worktree/assume-unchanged bit, inspect the real tracked bytes, then retry"
-  fi
-}
-
 guard_git_authority() {
   command -v oms_git_assert_safe_execution_config >/dev/null 2>&1 ||
     fail "installed Git execution guard is unavailable"
@@ -604,9 +558,6 @@ guard_git_authority() {
     park "unsafe-git-execution-config" "remove executable local/worktree/command-scope Git config, then retry"
   oms_git_assert_plain_index "$REPO" ||
     park "hidden-index-flags" "clear every skip-worktree/assume-unchanged bit, inspect the real tracked bytes, then retry"
-  # Keep the local parser as defense in depth and as an explicit Bash 3.2 /
-  # older-install compatibility assertion for this commit-capable boundary.
-  guard_plain_index
 }
 
 guard_expected_ref() {
@@ -745,9 +696,9 @@ try:
 except Exception:
     raise SystemExit(6)
 
-def text(row, name):
+def text(row, name, pat=None):
     value = row.get(name, "")
-    if not isinstance(value, str) or "\x00" in value:
+    if not isinstance(value, str) or "\x00" in value or (pat and not pat.fullmatch(value)):
         raise ValueError(name)
     return value
 
@@ -790,39 +741,20 @@ def expected_tree(base, patch):
             stderr=subprocess.DEVNULL, text=True).strip()
 
 def validate(row):
-    if row.get("schema") != 1 or isinstance(row.get("schema"), bool):
-        raise ValueError("schema")
-    if row.get("kind") != "commit-intent":
-        raise ValueError("kind")
-    intent_id = text(row, "intent_id")
-    task_id = text(row, "task_id")
-    phase = text(row, "phase")
-    provider = text(row, "provider")
-    lease = text(row, "lease_id")
-    base = text(row, "base_sha")
+    if row.get("schema") != 1 or isinstance(row.get("schema"), bool) or row.get("kind") != "commit-intent":
+        raise ValueError("schema/kind")
+    intent_id, task_id = text(row, "intent_id", ident), text(row, "task_id", ident)
+    phase, provider = text(row, "phase"), text(row, "provider", ident)
+    lease, base = text(row, "lease_id", ident), text(row, "base_sha", base_re)
     head_ref = row.get("head_ref")
     # A historical row does not prove which same-SHA branch owned publication
     # authority. Never infer it from whichever checkout happens to resume.
     head_ref_missing = head_ref is None
-    if head_ref_missing:
-        head_ref = ""
-    elif not isinstance(head_ref, str) or "\x00" in head_ref:
-        raise ValueError("head_ref")
-    patch_sha = text(row, "patch_sha256")
-    verify_sha = text(row, "verify_sha256")
-    patch_rel = text(row, "patch")
-    text(row, "title")
-    if not ident.fullmatch(intent_id) or not ident.fullmatch(task_id):
-        raise ValueError("id")
-    if phase not in open_phases or not ident.fullmatch(provider):
-        raise ValueError("phase/provider")
-    if (not ident.fullmatch(lease) or not base_re.fullmatch(base) or
-            (not head_ref_missing and
-             (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", head_ref) or
-              ".." in head_ref or head_ref.endswith("/") or "//" in head_ref))):
-        raise ValueError("lease/base")
-    if not sha.fullmatch(patch_sha) or not sha.fullmatch(verify_sha):
-        raise ValueError("hash")
+    head_ref = "" if head_ref_missing else text(row, "head_ref", re.compile(r"refs/heads/[A-Za-z0-9._/-]+"))
+    if phase not in open_phases or (not head_ref_missing and (".." in head_ref or head_ref.endswith("/") or "//" in head_ref)):
+        raise ValueError("phase/ref")
+    patch_sha, verify_sha = text(row, "patch_sha256", sha), text(row, "verify_sha256", sha)
+    patch_rel, _ = text(row, "patch"), text(row, "title")
 
     relative = pathlib.PurePosixPath(patch_rel)
     if (relative.is_absolute() or relative.parts[:3] != (".oms", "plan", "commit-patches")
@@ -837,17 +769,14 @@ def validate(row):
             or not os.path.isfile(patch) or digest(patch) != patch_sha):
         raise ValueError("patch receipt")
     recorded_paths = row.get("paths")
-    if (not isinstance(recorded_paths, list) or not recorded_paths
-            or not all(isinstance(value, str) and value and "\x00" not in value
-                       for value in recorded_paths)):
+    if not isinstance(recorded_paths, list) or not recorded_paths:
         raise ValueError("paths")
-    normalized_paths = []
-    for value in recorded_paths:
-        parsed = pathlib.PurePosixPath(value)
-        if parsed.is_absolute() or any(part in ("", ".", "..") for part in parsed.parts):
-            raise ValueError("path")
-        normalized_paths.append(value)
-    normalized_paths = sorted(set(normalized_paths))
+    normalized_paths = sorted({
+        value for value in recorded_paths
+        if isinstance(value, str) and value and "\x00" not in value
+        and not pathlib.PurePosixPath(value).is_absolute()
+        and not any(part in ("", ".", "..") for part in pathlib.PurePosixPath(value).parts)
+    })
     derived_paths, tree = patch_paths(base, patch)
     if normalized_paths != recorded_paths or derived_paths != normalized_paths:
         raise ValueError("patch paths")
@@ -1157,52 +1086,22 @@ load_intent() {  # JSON
   esac
   values="$(printf '%s' "$1" | python3 -c '
 import json, pathlib, re, shlex, sys
-d=json.load(sys.stdin)
-ident=re.compile(r"^[A-Za-z0-9._-]+$")
-sha=re.compile(r"^[0-9a-f]{64}$")
-base=re.compile(r"^[0-9a-f]{40,64}$")
-def text(name):
-    value=d.get(name, "")
-    if not isinstance(value, str) or "\x00" in value: raise ValueError(name)
-    return value
-intent_id=text("intent_id"); task_id=text("task_id")
-base_sha=text("base_sha"); patch=text("patch")
-head_ref=text("head_ref")
-patch_sha=text("patch_sha256"); title=text("title")
-lease=text("lease_id"); verify_sha=text("verify_sha256")
-provider=text("provider"); phase=text("phase")
-if not ident.fullmatch(intent_id) or not ident.fullmatch(task_id): raise ValueError("id")
-if not base.fullmatch(base_sha) or not sha.fullmatch(patch_sha) or not sha.fullmatch(verify_sha):
-    raise ValueError("hash")
-if not ident.fullmatch(lease): raise ValueError("lease")
-if (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", head_ref) or
-        ".." in head_ref or head_ref.endswith("/") or "//" in head_ref):
-    raise ValueError("head_ref")
-if not ident.fullmatch(provider): raise ValueError("provider")
-if phase not in ("prepared", "repairing", "landed"): raise ValueError("phase")
-p=pathlib.PurePosixPath(patch)
-if p.is_absolute() or p.parts[:3] != (".oms", "plan", "commit-patches") or len(p.parts) != 4:
-    raise ValueError("patch")
-if any(part in ("", ".", "..") for part in p.parts): raise ValueError("patch")
-paths=d.get("paths")
-if not isinstance(paths, list) or not paths: raise ValueError("paths")
-normalized=[]
-for value in paths:
-    if not isinstance(value, str) or not value or "\x00" in value: raise ValueError("path")
-    path_value=pathlib.PurePosixPath(value)
-    if path_value.is_absolute() or any(part in ("", ".", "..") for part in path_value.parts):
-        raise ValueError("path")
-    normalized.append(value)
-normalized=sorted(set(normalized))
-assignments={
- "INTENT_ID":intent_id,"INTENT_TASK":task_id,"INTENT_BASE":base_sha,
- "INTENT_REF":head_ref,
- "INTENT_PATCH":patch,"INTENT_PATCH_SHA":patch_sha,
- "INTENT_PATHS":json.dumps(normalized,ensure_ascii=True,separators=(",",":")),
- "INTENT_TITLE":title,"INTENT_LEASE":lease,"INTENT_VERIFY_SHA":verify_sha,
- "INTENT_PROVIDER":provider,"INTENT_PHASE":phase,
-}
-for key,value in assignments.items(): print("%s=%s" % (key,shlex.quote(value)))
+d = json.load(sys.stdin)
+ident, sha, base = re.compile(r"^[A-Za-z0-9._-]+$"), re.compile(r"^[0-9a-f]{64}$"), re.compile(r"^[0-9a-f]{40,64}$")
+def s(k, pat=None):
+    v = d.get(k, "")
+    if not isinstance(v, str) or "\x00" in v or (pat and not pat.fullmatch(v)): raise ValueError(k)
+    return v
+p = pathlib.PurePosixPath(s("patch"))
+if p.is_absolute() or p.parts[:3] != (".oms", "plan", "commit-patches") or len(p.parts) != 4 or any(x in ("", ".", "..") for x in p.parts): raise ValueError("patch")
+ref = s("head_ref", re.compile(r"refs/heads/[A-Za-z0-9._/-]+"))
+if ".." in ref or ref.endswith("/") or "//" in ref or s("phase") not in ("prepared", "repairing", "landed"): raise ValueError("ref/phase")
+raw_paths = d.get("paths")
+if not isinstance(raw_paths, list) or not raw_paths: raise ValueError("paths")
+paths = sorted({v for v in raw_paths if isinstance(v, str) and v and "\x00" not in v and not pathlib.PurePosixPath(v).is_absolute() and not any(x in ("", ".", "..") for x in pathlib.PurePosixPath(v).parts)})
+if len(paths) != len(set(raw_paths)): raise ValueError("path")
+for k, v in [("INTENT_ID", s("intent_id", ident)), ("INTENT_TASK", s("task_id", ident)), ("INTENT_BASE", s("base_sha", base)), ("INTENT_REF", ref), ("INTENT_PATCH", s("patch")), ("INTENT_PATCH_SHA", s("patch_sha256", sha)), ("INTENT_PATHS", json.dumps(paths, ensure_ascii=True, separators=(",", ":"))), ("INTENT_TITLE", s("title")), ("INTENT_LEASE", s("lease_id", ident)), ("INTENT_VERIFY_SHA", s("verify_sha256", sha)), ("INTENT_PROVIDER", s("provider", ident)), ("INTENT_PHASE", s("phase"))]:
+    print("%s=%s" % (k, shlex.quote(v)))
 ' | tr -d '\r')" || park "invalid-commit-intent" "inspect .oms/plan/progress.jsonl"
   eval "$values" || park "invalid-commit-intent" "inspect .oms/plan/progress.jsonl"
 }
@@ -1495,13 +1394,7 @@ intent_tree_matches() {  # PATCH
   # without depending on Git's rename-reporting presentation.
   if expected_tree="$(intent_expected_tree "$patch_abs")" &&
     GIT_INDEX_FILE="$actual_index" git -C "$REPO" read-tree "$INTENT_BASE" &&
-    OMS_GD_REPO="$REPO" GIT_INDEX_FILE="$actual_index" python3 <<'PY'
-import os, subprocess
-repo = os.environ["OMS_GD_REPO"]
-subprocess.check_call([
-    "git", "-c", "core.hooksPath=/dev/null", "-C", repo, "add", "-A", "--", ".",
-])
-PY
+    GIT_INDEX_FILE="$actual_index" git -c core.hooksPath=/dev/null -C "$REPO" add -A -- .
   then
     actual_tree="$(GIT_INDEX_FILE="$actual_index" git -C "$REPO" write-tree 2>/dev/null | tr -d '\r' || true)"
     if [ -n "$expected_tree" ] && [ "$expected_tree" = "$actual_tree" ]; then
@@ -2542,24 +2435,25 @@ goal_integrate_current() {
     ${ALLOW_FLOOR_CHANGE_REASON:+--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON"} \
     --plan-task "$task_id" --verify "$verify" >"$land_log" 2>&1 || land_rc=$?
 
-  if [ "$land_rc" -ne 0 ] &&
-    git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
-    intent_tree_matches "$patch_abs"; then
-    recover_landing_receipts "$task_id" || {
-      printf '%s\n' "$(tail -n 8 "$land_log")" >&2
-      rm -f "$land_log"
-      park "landing-recovery-failed" "run oms patch-land --recover; the exact outer commit intent remains open"
-    }
-    load_task_receipt "$task_id" ||
-      park "landing-recovery-failed" "the recovered landing task receipt could not be read"
-    [ "$TASK_RECEIPT_STATE" = "done" ] ||
-      park "landing-recovery-incomplete" "the applied patch is exact but its task receipt is $TASK_RECEIPT_STATE; keep the outer intent and recover it"
-    land_rc=0
-  elif [ "$land_rc" -ne 0 ] && [ -n "$(git_status_porcelain)" ]; then
-    printf '%s\n' "$(tail -n 8 "$land_log")" >&2
-    rm -f "$land_log"
-    park "landing-tree-ambiguous" "landing failed with a dirty non-exact tree; the outer intent remains open for manual recovery"
-  fi
+  reconcile_land_outcome() {
+    [ "$land_rc" -ne 0 ] || return 0
+    if git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
+      intent_tree_matches "$patch_abs"; then
+      recover_landing_receipts "$task_id" || {
+        printf '%s\n' "$(tail -n 8 "$land_log")" >&2; rm -f "$land_log"
+        park "landing-recovery-failed" "run oms patch-land --recover; the ${1:-exact} outer commit intent remains open"
+      }
+      load_task_receipt "$task_id" ||
+        park "landing-recovery-failed" "the recovered ${1:-landing} task receipt could not be read"
+      [ "$TASK_RECEIPT_STATE" = "done" ] ||
+        park "landing-recovery-incomplete" "the ${1:-applied} patch is exact but its task receipt is $TASK_RECEIPT_STATE; keep the outer intent and recover it"
+      land_rc=0
+    elif [ -n "$(git_status_porcelain)" ]; then
+      printf '%s\n' "$(tail -n 8 "$land_log")" >&2; rm -f "$land_log"
+      park "landing-tree-ambiguous" "${1:+$1 }landing failed with a dirty non-exact tree; the outer intent remains open$2"
+    fi
+  }
+  reconcile_land_outcome "" " for manual recovery"
 
   if [ "$land_rc" -ne 0 ] && [ "$AUTO_REPAIR" -eq 1 ]; then
     echo "goal-drive: landing failed; one fenced repair of the reviewed patch"
@@ -2612,24 +2506,7 @@ goal_integrate_current() {
       intent_write prepared "repair-transition-failed"
     fi
   fi
-  if [ "$land_rc" -ne 0 ] &&
-    git -C "$REPO" apply --reverse --check --binary "$patch_abs" >/dev/null 2>&1 &&
-    intent_tree_matches "$patch_abs"; then
-    recover_landing_receipts "$task_id" || {
-      printf '%s\n' "$(tail -n 8 "$land_log")" >&2
-      rm -f "$land_log"
-      park "landing-recovery-failed" "run oms patch-land --recover; the repaired outer commit intent remains open"
-    }
-    load_task_receipt "$task_id" ||
-      park "landing-recovery-failed" "the recovered repaired-task receipt could not be read"
-    [ "$TASK_RECEIPT_STATE" = "done" ] ||
-      park "landing-recovery-incomplete" "the repaired patch is exact but its task receipt is $TASK_RECEIPT_STATE; keep the outer intent and recover it"
-    land_rc=0
-  elif [ "$land_rc" -ne 0 ] && [ -n "$(git_status_porcelain)" ]; then
-    printf '%s\n' "$(tail -n 8 "$land_log")" >&2
-    rm -f "$land_log"
-    park "landing-tree-ambiguous" "repaired landing failed with a dirty non-exact tree; the outer intent remains open"
-  fi
+  reconcile_land_outcome "repaired" ""
   if [ "$land_rc" -ne 0 ]; then
     # A failed repair worker releases its claim, and recovery may also
     # terminalize a failed landing fence. In either case the frozen patch no

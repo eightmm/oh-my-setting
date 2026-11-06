@@ -1337,10 +1337,14 @@ cp "$tools_home/.local/bin/codex" "$TMP/managed-codex-shim"
 printf '%s\n' '#!/usr/bin/env bash' "echo 'codex 0.147.0'" \
   > "$tools_home/.local/bin/codex"
 chmod +x "$tools_home/.local/bin/codex"
-HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
-  XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
-  OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
-  bash "$upstream/scripts/doctor.sh" > "$TMP/tool-shadow-doctor.txt" 2>&1 || true
+# Keep tool-integrity checks outside the caller's adopted project state.
+(
+  cd "$tools_home" || exit 1
+  HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
+    XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
+    bash "$upstream/scripts/doctor.sh" > "$TMP/tool-shadow-doctor.txt" 2>&1 || true
+)
 grep -Fq 'tool version drift: codex (PATH command is not the managed npm package)' \
   "$TMP/tool-shadow-doctor.txt" ||
   fail "doctor accepted a same-version PATH shadow as the managed Codex package"
@@ -1365,10 +1369,13 @@ row = json.load(open(path, encoding="utf-8"))
 row["version"] = "0.0.0"
 json.dump(row, open(path, "w", encoding="utf-8"))
 PY
-HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
-  XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
-  OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
-  bash "$upstream/scripts/doctor.sh" > "$TMP/native-drift-doctor.txt" 2>&1 || true
+(
+  cd "$tools_home" || exit 1
+  HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
+    XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
+    bash "$upstream/scripts/doctor.sh" > "$TMP/native-drift-doctor.txt" 2>&1 || true
+)
 grep -Fq 'platform-native payload does not match the lock' \
   "$TMP/native-drift-doctor.txt" ||
   fail "doctor accepted a mismatched Codex native payload manifest"
@@ -1376,10 +1383,13 @@ mv "$TMP/native-manifest.backup" "$native_manifest"
 
 transaction_marker="$npm_prefix/lib/node_modules/@openai/codex.oh-my-setting-transaction"
 printf 'schema=1\n' > "$transaction_marker"
-HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
-  XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
-  OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
-  bash "$upstream/scripts/doctor.sh" > "$TMP/npm-residue-doctor.txt" 2>&1 || true
+(
+  cd "$tools_home" || exit 1
+  HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
+    XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
+    bash "$upstream/scripts/doctor.sh" > "$TMP/npm-residue-doctor.txt" 2>&1 || true
+)
 grep -Fq 'interrupted npm transaction residue is present' \
   "$TMP/npm-residue-doctor.txt" ||
   fail "doctor ignored interrupted npm transaction residue"
@@ -1393,10 +1403,13 @@ PY
 uv_digest="${uv_digest//$'\r'/}"
 printf 'sha256=%s\n' "$uv_digest" > "$tools_bin/uv.oh-my-setting-managed"
 printf '# changed after managed install\n' >> "$tools_bin/uv"
-HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
-  XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
-  OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
-  bash "$upstream/scripts/doctor.sh" > "$TMP/direct-digest-doctor.txt" 2>&1 || true
+(
+  cd "$tools_home" || exit 1
+  HOME="$tools_home" XDG_CONFIG_HOME="$tools_home/.config" \
+    XDG_CACHE_HOME="$tools_home/.cache" PATH="$tools_bin:$PATH" \
+    OH_MY_SETTING_REQUIRE_TOOLS=0 OH_MY_SETTING_MODEL_DOCTOR=0 \
+    bash "$upstream/scripts/doctor.sh" > "$TMP/direct-digest-doctor.txt" 2>&1 || true
+)
 grep -Fq 'tool version drift: uv (managed binary digest changed' \
   "$TMP/direct-digest-doctor.txt" ||
   fail "doctor accepted a changed managed direct-tool binary"

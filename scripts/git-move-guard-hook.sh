@@ -51,67 +51,8 @@ MOVING = frozenset(("merge", "pull", "checkout", "switch", "reset", "commit",
 OPTION_VALUE = frozenset(("-c", "--git-dir", "--work-tree", "--namespace",
                           "--super-prefix", "--config-env"))
 WRAPPERS = frozenset(("command", "exec", "time", "nohup", "sudo", "env"))
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-
-
-def drop_heredocs(text):
-    out, end = [], None
-    for line in text.split("\n"):
-        if end is not None:
-            if line.strip() == end:
-                end = None
-            continue
-        out.append(line)
-        match = HEREDOC.search(line.replace("<<<", ""))
-        if match:
-            end = match.group(2)
-    return "\n".join(out)
-
-
-def split(text):
-    segments, words, buf, has, quote, i = [], [], [], False, "", 0
-    while i < len(text):
-        c = text[i]
-        if quote == "'":
-            if c == "'":
-                quote = ""
-            else:
-                buf.append(c)
-        elif quote == '"':
-            if c == '"':
-                quote = ""
-            elif c == "\\" and i + 1 < len(text) and text[i + 1] in '"\\$`':
-                i += 1
-                buf.append(text[i])
-            else:
-                buf.append(c)
-        elif c in "'\"":
-            quote, has = c, True
-        elif c == "\\" and i + 1 < len(text):
-            i += 1
-            if text[i] != "\n":
-                buf.append(text[i])
-                has = True
-        elif c in ";&|\n()":
-            if has:
-                words.append("".join(buf))
-            buf, has = [], False
-            if words:
-                segments.append(words)
-            words = []
-        elif c in " \t":
-            if has:
-                words.append("".join(buf))
-            buf, has = [], False
-        else:
-            buf.append(c)
-            has = True
-        i += 1
-    if has:
-        words.append("".join(buf))
-    if words:
-        segments.append(words)
-    return segments
+sys.path.insert(0, sys.argv[1])
+from hook_state import direct_shell_segments
 
 
 def resolve(base, target):
@@ -136,7 +77,8 @@ def moving(sub, rest):
 
 def targets(text, cwd):
     found, cur = [], cwd
-    for words in split(drop_heredocs(text)):
+    for segment in direct_shell_segments(text):
+        words = [w for w, is_op in segment if not is_op]
         i = 0
         while i < len(words) and (words[i] in WRAPPERS or
                                   re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[i])):
@@ -183,7 +125,7 @@ except Exception:
     pass
 PY
 
-targets="$(printf '%s' "$payload" | python3 -I -c "$parser" 2>/dev/null || true)"
+targets="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" 2>/dev/null || true)"
 [ -n "$targets" ] || exit 0
 
 # Past this point a moving git verb is present; resolve whether it lands in the

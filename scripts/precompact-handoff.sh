@@ -29,30 +29,32 @@ command -v python3 >/dev/null 2>&1 || exit 0
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
+# Keep the payload cwd for transcript matching, but use the physical Git root
+# for adoption and all repository-scoped handoff state. A non-Git adopted
+# directory continues to work when the payload points at that directory.
 parsed="$(printf '%s' "$payload" | python3 -X utf8 -I -B -c '
-import json, sys
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from hook_repo import root
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+cwd = (data.get("cwd") if isinstance(data, dict) else None) or os.getcwd()
+repo = root(os.path.realpath(cwd)) if isinstance(data, dict) and os.path.isdir(cwd) else None
+if not repo:
+    sys.exit(0)
 print(data.get("session_id", "") or "")
-print(data.get("cwd", "") or "")
+print(cwd)
 print(data.get("hook_event_name", "") or "")
-' 2>/dev/null | tr -d '\r')" || parsed=""
+print(repo.as_posix())
+' "$ROOT/scripts/lib" 2>/dev/null | tr -d '\r')" || exit 0
 session="$(printf '%s\n' "$parsed" | sed -n 1p)"
 cwd="$(printf '%s\n' "$parsed" | sed -n 2p)"
 event="$(printf '%s\n' "$parsed" | sed -n 3p)"
+repo="$(printf '%s\n' "$parsed" | sed -n 4p)"
 [ -n "$cwd" ] || cwd="$PWD"
-
-# Keep the payload cwd for transcript matching, but use the physical Git root
-# for adoption and all repository-scoped handoff state. A non-Git adopted
-# directory continues to work when the payload points at that directory.
-cwd_physical="$(cd "$cwd" 2>/dev/null && pwd -P)" || exit 0
-repo="$cwd_physical"
-git_root="$(git -C "$cwd_physical" rev-parse --show-toplevel 2>/dev/null | tr -d '\r')" || git_root=""
-if [ -n "$git_root" ]; then
-  repo="$(cd "$git_root" 2>/dev/null && pwd -P)" || exit 0
-fi
+[ -n "$repo" ] && repo="$(cd "$repo" 2>/dev/null && pwd -P)" || exit 0
 
 # The payload's event names the capture; $1 stays the agent name. An absent or
 # unknown event keeps the original pre-compact wording, which is what the Codex

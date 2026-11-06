@@ -106,7 +106,7 @@ from hook_repo import native_path, resolve
 repo = resolve(row)
 if repo is None or not (repo / ".oms").is_dir():
     raise SystemExit(0)
-from hook_state import live_thread_hint
+from hook_state import apply_patch_paths, live_thread_hint
 
 collaboration = live_thread_hint(row, repo)
 findings = []
@@ -149,36 +149,14 @@ def patch_path(name):
 
 
 def patch_paths(command):
-    names = []
-    update_index = None
-    for line in command.splitlines():
-        if line.startswith("*** Add File: "):
-            names.append(line[len("*** Add File: "):])
-            update_index = None
-        elif line.startswith("*** Update File: "):
-            names.append(line[len("*** Update File: "):])
-            update_index = len(names) - 1
-        elif line.startswith("*** Delete File: "):
-            update_index = None
-        elif line.startswith("*** Move to: ") and update_index is not None:
-            names[update_index] = line[len("*** Move to: "):]
-            update_index = None
-        elif line.startswith("*** "):
-            update_index = None
-
-    paths = []
-    seen = set()
-    for name in names:
-        path = patch_path(name)
-        if path is None:
-            continue
+    paths, seen = [], set()
+    for path in filter(None, map(patch_path, apply_patch_paths(command))):
         key = os.path.normcase(os.path.normpath(path))
-        if key in seen:
-            continue
-        seen.add(key)
-        paths.append(path)
-        if len(paths) == MAX_FILES:
-            break
+        if key not in seen:
+            seen.add(key)
+            paths.append(path)
+            if len(paths) == MAX_FILES:
+                break
     return paths
 
 

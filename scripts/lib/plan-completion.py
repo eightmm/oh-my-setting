@@ -1398,13 +1398,15 @@ def main_research(repo, bundle, task, reviewer):
     info = bundle['main_research']
     keys(info, ('classification', 'provenance', 'artifact', 'index_event_id', 'original_deliverable',
                 'read_only_contract', 'original_producer_status'), ('failed_producer_review',))
-    if (info['classification'] != 'research-only' or info['provenance'] not in
-            ('main-authored', 'main-reviewed-external') or task.get('patch') or task.get('landing')
-            or task.get('landed_commit') or task.get('role') not in
-            ('researcher', 'scholar', 'analysis-worker', 'advisor', 'reviewer') or
+    if (info['classification'] != 'research-only' or
+            info['provenance'] not in ('main-reviewed-external', 'main-authored') or
+            task.get('patch') or task.get('landing') or task.get('landed_commit') or
+            task.get('role') not in ('researcher', 'scholar', 'analysis-worker', 'advisor', 'reviewer') or
             info['original_deliverable'] != task.get('title') or info['read_only_contract'] != 'original-report-only' or
             re.search(r'(?i)\b(implement|fix|repair|build|deploy|install|publish|push|merge)\b', task.get('title', ''))):
         fail('main research cannot replace an original product or landing obligation')
+    if info['provenance'] == 'main-authored':
+        fail('main authorship provenance is unsupported; use explicit main-reviewed-external review')
     artifact = info['artifact']
     reference(repo, artifact)
     if task.get('artifact') != artifact['path']:
@@ -1422,11 +1424,7 @@ def main_research(repo, bundle, task, reviewer):
     status = {key: row.get(key) for key in ('kind', 'exit', 'attempt_id', 'task_id', 'plan_id', 'base_sha')}
     if info['original_producer_status'] != status:
         fail('original producer facts must be preserved exactly')
-    if info['provenance'] == 'main-authored':
-        fail('main authorship provenance is unsupported; use explicit main-reviewed-external review')
     if row['exit']:
-        if info['provenance'] != 'main-reviewed-external':
-            fail('failed producer can only be reviewed as external historical evidence')
         text(info.get('failed_producer_review'), 'explicit failed producer review')
     elif 'failed_producer_review' in info:
         fail('failed producer review contradicts recorded producer status')
@@ -1646,21 +1644,9 @@ def satisfaction(repo, bundle, tasks, plan_id):
 
 def canonical_land_directory(repo):
     # Match the existing shell land-state resolver.
-    script = r'''set -eu
-common_dir="$(git -C "$1" rev-parse --git-common-dir | tr -d '\r')"
-case "$common_dir" in /*) ;; *) common_dir="$1/$common_dir" ;; esac
-common_dir="$(cd "$common_dir" && pwd -P)"
-common_root="$(cd "$common_dir/.." && pwd -P)"
-name="$(basename "$common_root")"
-name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
-name="${name//../_}"
-case "$name" in ''|.|..) name=repo ;; esac
-checksum="$(printf '%s' "$common_root" | cksum | awk '{print $1 "-" $2}')"
-case "$checksum" in ''|*[!0-9-]*) exit 2 ;; esac
-value="${XDG_STATE_HOME:-$HOME/.local/state}/oh-my-setting/land/$name-$checksum"
-printf '%s\n' "$value"
-'''
-    result = subprocess.run(['bash', '-c', script, 'completion-land-state', repo],
+    helper = os.path.join(os.path.dirname(__file__), 'land-receipts.sh')
+    script = '. "$1" && value="$(oms_land_state_dir "$2")" || exit 2\nprintf "%s\\n" "$value"'
+    result = subprocess.run(['bash', '-c', script, 'completion-land-state', helper, repo],
                             env=git_environment(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             timeout=30, check=False)
     if result.returncode or len(result.stdout) > 4096:

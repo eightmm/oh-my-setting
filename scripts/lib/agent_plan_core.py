@@ -195,25 +195,14 @@ def read_regular_bytes(filename, label, maximum):
         fd = os.open(filename, flags)
     except OSError as exc:
         die("cannot open %s: %s" % (label, exc))
-    try:
+    with os.fdopen(fd, "rb") as handle:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             die("%s must be a regular file" % label)
-        if info.st_size > maximum:
-            die("%s exceeds %d bytes" % (label, maximum))
-        chunks = []
-        total = 0
-        while True:
-            chunk = os.read(fd, min(1024 * 1024, maximum + 1 - total))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > maximum:
-                die("%s exceeds %d bytes" % (label, maximum))
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
+        raw = handle.read(maximum + 1)
+    if len(raw) > maximum:
+        die("%s exceeds %d bytes" % (label, maximum))
+    return raw
 
 def receipt_directories(directory):
     """The checkout's own receipt directory, then sibling land state directories.
@@ -617,17 +606,13 @@ def panel_accept_record(task_id, task, plan_id, record_input=None, from_task=Fal
         elif found.returncode != 1 or not allow_missing_commit:
             die("panel acceptance commit is unavailable")
         with tempfile.TemporaryDirectory(prefix="oms-plan-panel-accept-") as directory:
-            index = os.path.join(directory, "index")
-            patch_file = os.path.join(directory, "candidate.patch")
-            with open(patch_file, "wb") as handle:
-                handle.write(patch)
-            git_env = dict(os.environ, GIT_INDEX_FILE=index)
+            git_env = dict(os.environ, GIT_INDEX_FILE=os.path.join(directory, "index"))
             subprocess.check_call(["git", "-C", repo, "read-tree", record["base"]],
                                   env=git_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL, timeout=30)
-            subprocess.check_call(["git", "-C", repo, "apply", "--cached", "--binary", patch_file],
-                                  env=git_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=30)
+            subprocess.run(["git", "-C", repo, "apply", "--cached", "--binary", "-"],
+                           env=git_env, input=patch, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30, check=True)
             expected_tree = subprocess.check_output(["git", "-C", repo, "write-tree"], env=git_env,
                                                    stderr=subprocess.DEVNULL, timeout=30).decode().strip()
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:

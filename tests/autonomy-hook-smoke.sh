@@ -414,6 +414,41 @@ assert "escaped-key-mail" in proc.stdout, proc.stdout
 call("ack", "--id", "live", "--after", first.rsplit("--after ", 1)[1].strip(),
      "--consumer", hook_state.session_hash(payload("codex")))
 call("append", "--id", "live", "--role", "answer", "--text", "가" * 300 + "tail-of-answer")
+stray = repo.parent / "stray-repo"
+(stray / ".oms/threads").mkdir(parents=True)
+(stray / ".oms/threads/x.jsonl").write_text('["receipt"]\n{"receipt": "ack", "consumer": "c1", "after": "z"}\n')
+assert hook_state.thread_relation(stray, "x", "c1")[0], "a stray non-object row must not break the ack scan"
+assert not hook_state.thread_relation(stray, "x", "c2")[0] and not hasattr(hook_state, "thread_participant")
+assert hook_state.apply_patch_paths("*** Update File: a.py\n*** Move to: b.py\n*** Delete File: c.py\n") == ["b.py"]
+assert hook_state.apply_patch_paths("*** Update File: a.py\n*** Move to: b.py\n*** Delete File: c.py\n", True) == ["a.py", "b.py", "c.py"]
+assert hook_state.apply_patch_paths("") == []
+helper_probe = subprocess.run(
+    ["bash", "-c", """
+set -euo pipefail
+. "$1/scripts/lib/agent-memory-common.sh"
+[ "$(oms_duration_seconds 1s)" = 1 ] && [ "$(oms_duration_seconds 24h)" = 86400 ] && [ "$(oms_duration_seconds 86400)" = 86400 ]
+rc=0; oms_duration_seconds "" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 1 ]
+rc=0; oms_duration_seconds 0 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 1 ]
+rc=0; oms_duration_seconds "12+3" >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 1 ]
+rc=0; oms_duration_seconds 86401 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 2 ]
+rc=0; oms_duration_seconds 25h >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 2 ]
+(GIT_CONFIG_COUNT=0; oms_git_disable_hooks_env && [ "$GIT_CONFIG_COUNT" = 1 ])
+(GIT_CONFIG_COUNT=63; oms_git_disable_hooks_env && [ "$GIT_CONFIG_COUNT" = 64 ])
+(GIT_CONFIG_COUNT=64; ! oms_git_disable_hooks_env 2>/dev/null && oms_git_disable_hooks_env 64 && [ "$GIT_CONFIG_COUNT" = 65 ])
+(GIT_CONFIG_COUNT=65; ! oms_git_disable_hooks_env 64 2>/dev/null)
+(GIT_CONFIG_COUNT=01; ! oms_git_disable_hooks_env 2>/dev/null)
+(GIT_CONFIG_COUNT="1+1"; ! oms_git_disable_hooks_env 2>/dev/null)
+""", "_", str(root)],
+    capture_output=True, text=True,
+)
+assert helper_probe.returncode == 0, helper_probe.stderr or helper_probe.stdout
+resume_env = dict(os.environ, OMS_STATE_REPO=str(repo))
+resume_probe = subprocess.run(
+    ["bash", str(root / "scripts/resume-hook.sh")],
+    input=json.dumps({"cwd": str(elsewhere)}),
+    env=resume_env, capture_output=True, text=True, check=True,
+)
+assert resume_probe.stdout == "", resume_probe.stdout
 real_relation = hook_state.thread_relation
 def broken(*args):
     raise ValueError("thread identity changed")

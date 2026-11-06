@@ -594,20 +594,11 @@ def task_metadata(path: Path) -> dict[str, str]:
 
 def task_goal(path: Path) -> str:
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return ""
-    in_goal = False
-    goal: list[str] = []
-    for raw in lines:
-        if raw == "## Goal":
-            in_goal = True
-            continue
-        if in_goal and raw.startswith("## "):
-            break
-        if in_goal and raw.strip():
-            goal.append(raw.strip())
-    return " ".join(goal)
+    match = re.search(r"^## Goal\r?\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return " ".join(line.strip() for line in match.group(1).splitlines() if line.strip()) if match else ""
 
 
 def normalized_goal(value: str) -> str:
@@ -1490,6 +1481,9 @@ def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
         if ch in " \t\r":
             flush()
         elif ch == "\\":
+            if index < len(text) and text[index] == "\n":
+                index += 1
+                continue
             if index < len(text):
                 value += text[index]
                 index += 1
@@ -1507,6 +1501,20 @@ def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
     return segments
 
 
+def apply_patch_paths(command: str, include_deleted: bool = False) -> list[str]:
+    names, update = [], False
+    for line in command.splitlines():
+        if line.startswith(("*** Add File: ", "*** Update File: ")) or (include_deleted and line.startswith(("*** Delete File: ", "*** Move to: "))):
+            names.append(line.split(": ", 1)[1])
+            update = line.startswith("*** Update File: ")
+        elif line.startswith("*** Move to: ") and update:
+            names[-1] = line[13:]
+            update = False
+        elif line.startswith("*** "):
+            update = False
+    return names
+
+
 def classify_direct_work(payload: dict[str, Any], repo: Path) -> tuple[str, str] | None:
     from hook_repo import native_path
     tool, data = payload.get("tool_name"), payload.get("tool_input")
@@ -1517,12 +1525,10 @@ def classify_direct_work(payload: dict[str, Any], repo: Path) -> tuple[str, str]
         name = direct_repo_file(data.get("file_path") or data.get("notebook_path"), repo, cwd)
         return ("edit", name) if name else None
     if tool == "apply_patch":
-        command = data.get("command")
-        if isinstance(command, str):
-            for header in re.finditer(r"^\*\*\* (?:Add File|Update File|Move to|Delete File): ([^\r\n]+)\r?$", command, re.MULTILINE):
-                name = direct_repo_file(header.group(1), repo, cwd)
-                if name:
-                    return ("edit", name)
+        for target in apply_patch_paths(data.get("command") if isinstance(data.get("command"), str) else "", True):
+            name = direct_repo_file(target, repo, cwd)
+            if name:
+                return ("edit", name)
         return None
     if tool != "Bash" or not isinstance(data.get("command"), str):
         return None

@@ -136,19 +136,10 @@ case "$REASONING_EFFORT" in
   *) fail "--reasoning-effort must be auto, low, medium, high, xhigh, max, or ultra" ;;
 esac
 WORKER_PROVIDER="$(oms_normalize_provider "$WORKER_PROVIDER")" || fail "unknown worker provider"
-printf '%s\n' "$PROVIDER_TIMEOUT" | grep -E '^[1-9][0-9]*([smh])?$' > /dev/null ||
-  fail "--provider-timeout must be a positive duration such as 15m"
-python3 - "$PROVIDER_TIMEOUT" <<'PY' ||
-import re, sys
-match = re.fullmatch(r"([1-9][0-9]*)(s|m|h)?", sys.argv[1])
-if not match:
-    raise SystemExit(1)
-value = int(match.group(1))
-unit = match.group(2) or "s"
-milliseconds = value * {"s": 1000, "m": 60000, "h": 3600000}[unit]
-raise SystemExit(0 if milliseconds <= 24 * 60 * 60 * 1000 else 1)
-PY
-  fail "--provider-timeout must not exceed 24h"
+oms_duration_seconds "$PROVIDER_TIMEOUT" >/dev/null || case "$?" in
+  2) fail "--provider-timeout must not exceed 24h" ;;
+  *) fail "--provider-timeout must be a positive duration such as 15m" ;;
+esac
 
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
 is_oms_repo=0

@@ -1456,7 +1456,26 @@ for lock_kind in 0 1; do
   export OMS_TEST_LAND_COUNT="$TMP/count-$lock_kind" OMS_TEST_LAND_RELEASE="$TMP/release-$lock_kind"
   # flock leaves a file; mkdir uses a directory at that path. Model separate hosts.
   export OMS_LOCK_DIR="$TMP/locks-$lock_kind"
-  gate 'echo gate >> "$OMS_TEST_LAND_COUNT"; for ((i=0;i<1200;i++)); do [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0; sleep 0.05; done; exit 1'" # lock $lock_kind"
+  export OMS_TEST_LAND_OBSERVE="$TMP/observe-$lock_kind" \
+    OMS_TEST_LAND_OBSERVED="$TMP/observed-$lock_kind" OMS_TEST_LAND_SECOND_OUTPUT="$TMP/second.out"
+  # Observe from the gate while its parent owns the lock; waiting output is historical.
+  gate 'echo gate >> "$OMS_TEST_LAND_COUNT"
+for ((i=0;i<1200;i++)); do
+  if [ -f "$OMS_TEST_LAND_OBSERVE" ] && [ ! -f "$OMS_TEST_LAND_OBSERVED" ]; then
+    receipt_rc=0
+    grep -q "^receipt:" "$OMS_TEST_LAND_SECOND_OUTPUT" || receipt_rc=$?
+    case "$receipt_rc" in
+      0) observation=receipt ;;
+      1) observation=clear ;;
+      *) exit 1 ;;
+    esac
+    printf "%s\n" "$observation" > "$OMS_TEST_LAND_OBSERVED.tmp" || exit 1
+    mv "$OMS_TEST_LAND_OBSERVED.tmp" "$OMS_TEST_LAND_OBSERVED" || exit 1
+  fi
+  [ ! -f "$OMS_TEST_LAND_RELEASE" ] || exit 0
+  sleep 0.05
+done
+exit 1'" # lock $lock_kind"
   OMS_LOCK_FORCE_MKDIR="$lock_kind" "$LAND" --repo "$repo" --wait --no-update --ci-wait 0 > "$TMP/first.out" 2>&1 &
   first_pid=$!
   for _ in $(seq 1 100); do [ ! -f "$OMS_TEST_LAND_COUNT" ] || break; sleep 0.05; done
@@ -1571,7 +1590,18 @@ PYTEST
     wait "$second_pid" || true
     fail "detached contender must report bounded lock waiting: $(cat "$TMP/second.out")"
   }
-  ! grep -q '^receipt:' "$TMP/second.out" || {
+  touch "$OMS_TEST_LAND_OBSERVE"
+  for _ in $(seq 1 100); do
+    [ ! -s "$OMS_TEST_LAND_OBSERVED" ] || break
+    sleep 0.05
+  done
+  [ -s "$OMS_TEST_LAND_OBSERVED" ] || {
+    touch "$OMS_TEST_LAND_RELEASE"
+    wait "$first_pid" || true
+    wait "$second_pid" || true
+    fail "held gate did not acknowledge receipt observation: $(cat "$TMP/first.out") / $(cat "$TMP/second.out")"
+  }
+  [ "$(cat "$OMS_TEST_LAND_OBSERVED")" = clear ] || {
     touch "$OMS_TEST_LAND_RELEASE"
     wait "$first_pid" || true
     wait "$second_pid" || true

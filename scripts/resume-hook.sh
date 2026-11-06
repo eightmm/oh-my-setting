@@ -19,24 +19,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v python3 >/dev/null 2>&1 || exit 0
 
 payload="$(cat 2>/dev/null || true)"
-cwd="$(printf '%s' "$payload" | python3 -X utf8 -I -B -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-print(data.get("cwd", "") or "")
-' 2>/dev/null)" || cwd=""
-cwd="${cwd//$'\r'/}"
-[ -n "$cwd" ] || cwd="$PWD"
-
 # Only a harness-adopted repo has state worth resuming; a random directory
 # must not produce noise (or a .oms tree) because a session started there.
-repo="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || repo=""
-repo="${repo//$'\r'/}"
-[ -z "$repo" ] || cwd="$repo"
-cwd="$(cd "$cwd" && pwd -P)" || exit 0
-[ -d "$cwd/.oms" ] || exit 0
+cwd="$(OMS_STATE_REPO='' OMS_HOOK_PAYLOAD="$payload" python3 -X utf8 "$ROOT/scripts/lib/hook_repo.py" 2>/dev/null | tr -d '\r')" || exit 0
+[ -n "$cwd" ] && cwd="$(cd "$cwd" 2>/dev/null && pwd -P)" && [ -d "$cwd/.oms" ] || exit 0
 
 out=""
 append() { out="${out}${1}
