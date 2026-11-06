@@ -36603,7 +36603,8 @@ test \"\$(git -C $bad_kept/wt rev-parse --git-dir)\" = '$bad_metadata' && printf
 
 # A baseline can see a sibling's receipt after its gitmeta scan missed the
 # registration. Exercise the review entrypoint with that real capture order,
-# including a second sibling that completes while the review is running.
+# including a second sibling that completes while the review is running and
+# live admit worktrees outside the delegate root, marked from a linked checkout.
 test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
   local strict
   for strict in 0 1; do
@@ -36639,7 +36640,7 @@ test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
   done
 
   local scenario
-  for scenario in forged altered symlink-proof extra-line-proof kept removed \
+  for scenario in admit-live admit-dead admit-malformed forged altered symlink-proof extra-line-proof kept removed \
     outside-kept outside-removed gitdir commondir config empty-proof zero-proof \
     malformed-proof missing-proof duplicate fifo-proof directory-proof \
     source-forged empty-digest zero-digest short-digest long-digest malformed-digest; do
@@ -36657,6 +36658,16 @@ test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
       local anchor="$managed_root/oh-my-setting-delegate.anchor"
       local kept="$sibling_root/oh-my-setting-delegate.$scenario"
       local gone="$sibling_root/oh-my-setting-delegate.gone-$scenario"
+      local linked="$TMP/read-admin-linked-$scenario" checkout=wt
+      case "$scenario" in
+        admit-*)
+          export TMPDIR="$TMP/read-admin-temp-$scenario"
+          mkdir -p "$TMPDIR"
+          kept="$TMPDIR/oh-my-setting-admit.$scenario"
+          checkout="wt-$scenario"
+          git -C "$project" worktree add --quiet --detach "$linked" HEAD
+          ;;
+      esac
       make_live_managed_sibling "$project" "$anchor"
       export OMS_DELEGATE_WORKTREE_ROOT="$managed_root"
       REPO="$project" MA_READ_SOURCE_REPO="$source"
@@ -36665,7 +36676,15 @@ test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
       oms_worker_surface_capture_one() {
         read_admin_real_capture "$@" || return
         if [ "$1" = "$project" ] && [ "$2" = hooks ] && [ ! -d "$kept" ]; then
-          make_live_managed_sibling "$project" "$kept"
+          case "$scenario" in
+            admit-*)
+              mkdir -p "$kept"
+              git -C "$linked" worktree add --quiet --detach "$kept/$checkout" HEAD
+              printf 'kind=oh-my-setting-temp\npid=%s\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+                "$$" "$linked" "$kept/$checkout" > "$kept/.oh-my-setting-tmp"
+              ;;
+            *) make_live_managed_sibling "$project" "$kept" ;;
+          esac
           case "$scenario" in *removed) make_live_managed_sibling "$project" "$gone" ;; esac
         fi
       }
@@ -36673,13 +36692,19 @@ test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
       local state_sha="${MA_READ_STATE_RECEIPTS_SHA:-}" source_sha="${MA_READ_SOURCE_RECEIPTS_SHA:-}"
       [ "${#state_sha}" = 64 ] && [ "${#source_sha}" = 64 ] ||
         fail "review did not freeze both receipt digests in parent memory"
-      metadata="$(git -C "$kept/wt" rev-parse --git-dir | tr -d '\r')"
+      metadata="$(git -C "$kept/$checkout" rev-parse --git-dir | tr -d '\r')"
       slot="${metadata##*/}"
       ! grep -Fq "worktrees/$slot/" "$MA_READ_GUARD_DIR/state/gitmeta" ||
         fail "late sibling unexpectedly entered the gitmeta baseline"
       [ -f "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot/physical" ] ||
         fail "late sibling receipt was not captured"
       case "$scenario" in
+        admit-dead)
+          # The receipt remains valid, but its owner must still be live now.
+          printf 'kind=oh-my-setting-temp\npid=2147483647\nrepo=%s\nworktree=%s\ntemporary=1\n' \
+            "$linked" "$kept/$checkout" > "$kept/.oh-my-setting-tmp"
+          ;;
+        admit-malformed) printf 'temporary=0\n' > "$kept/.oh-my-setting-tmp" ;;
         source-forged)
           cp -R "$MA_READ_GUARD_DIR/state/foreign-worktrees/$slot" \
             "$MA_READ_GUARD_DIR/source/foreign-worktrees/$slot"
@@ -36727,7 +36752,7 @@ test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
       esac
       guard_out="$(ma_read_guard_assert 2>&1)" || guard_rc=$?
       case "$scenario" in
-        kept|removed)
+        admit-live|kept|removed)
           [ "$guard_rc" = 0 ] || fail "review rejected managed sibling admin changes ($scenario): $guard_out"
           # Each assertion recaptures metadata; the first proof must not be
           # required for a second read of the same surviving registration.
@@ -36750,6 +36775,12 @@ test_review_read_guard_accepts_managed_sibling_admin_lifecycle() {
         *)
           [ "$guard_rc" = 2 ] || fail "review accepted unproven admin changes ($scenario): $guard_out"
           contains "$guard_out" 'gitmeta' || fail "admin rejection lost its surface ($scenario)"
+          ;;
+      esac
+      case "$scenario" in
+        admit-*)
+          git -C "$project" worktree remove --force "$kept/$checkout"
+          rm -rf "$kept"
           ;;
       esac
       # Structural validation is independent of the digest mismatch: even a

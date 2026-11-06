@@ -2572,14 +2572,22 @@ PY
         [ -f "$receipt" ] || continue
         # A sibling may register after the baseline gitmeta scan but before
         # receipt capture. Its own slot is not a duplicate: the reciprocal
-        # identity above and managed root still have to prove that checkout.
+        # identity above and managed root (or live admit marker) must prove it.
         if [ "$receipt" = "$before/foreign-worktrees/$entry/physical" ]; then
           oms_worker_gitmeta_receipts_assert_unchanged "$before" "${OMS_WG_RECEIPTS_SHA:-}" || return 1
           baseline_path="$(sed -n '1p' "$receipt")"
           baseline_path="${baseline_path//$'\r'/}"
-          [ "$baseline_path" = "$physical" ] &&
-            oms_worker_path_is_managed_foreign_worktree "$physical" "$worker" &&
-            cmp -s "${receipt%/*}/gitdir" "$common/worktrees/$entry/gitdir" || return 1
+          [ "$baseline_path" = "$physical" ] || return 1
+          if ! oms_worker_path_is_managed_foreign_worktree "$physical" "$worker"; then
+            case "$physical" in
+              */oh-my-setting-admit.*/wt-*)
+                oms_worker_gitmeta_is_live_managed_worktree "$repo" \
+                  "$common/worktrees/$entry/gitdir" "$worker" || return 1
+                ;;
+              *) return 1 ;;
+            esac
+          fi
+          cmp -s "${receipt%/*}/gitdir" "$common/worktrees/$entry/gitdir" || return 1
           baseline_identity="$(cat "${receipt%/*}/commondir-identity" 2>/dev/null)" || return 1
           baseline_identity="${baseline_identity//$'\r'/}"
           current_identity="$(oms_worker_gitmeta_admin_file_identity "$common/worktrees/$entry/commondir")" || return 1
