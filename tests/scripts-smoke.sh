@@ -40075,6 +40075,11 @@ EOF
     project="$case_dir/repo"
     make_committed_repo "$project"
     mkdir -p "$case_dir/home"
+    # agy write delegations refuse up front without the standing delegate rules.
+    [ "$provider" != antigravity ] ||
+      HOME="$case_dir/home" PATH="$fixture/bin:$PATH" env -u OMS_ANTIGRAVITY_SETTINGS \
+        bash "$ROOT/scripts/provider-permissions.sh" --apply --profile delegate >/dev/null ||
+      fail "delegate permissions fixture failed"
     HOME="$case_dir/home" PATH="$fixture/bin:$PATH" \
       OMS_TEST_CONVERSATION_FIXTURE="$fixture" \
       OMS_TEST_CONVERSATION_DIR="$case_dir" \
