@@ -102,6 +102,29 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Install, provider install, update and repair apply the Antigravity delegate
+  permissions (`provider-permissions.sh --apply --profile delegate
+  --allow-toolchains`) whenever agy is present, so a new host or a vendor
+  settings reset no longer leaves headless agy workers auto-denied.
+  `--no-tools` and dry runs stay side-effect free, and
+  `OH_MY_SETTING_PEER_PERMISSIONS=0` opts out. Settings are written before
+  the ownership record, so an interrupted run never marks a user's own rule
+  as OMS-added. `oms peer-delegate` to agy refuses before creating any
+  worktree or record when a required rule is missing and names
+  `oms provider-permissions --apply --profile delegate`; interactive mode is
+  not exempt.
+- Independent judgment routes (reviewer, verifier, security-auditor, critic)
+  drop candidates from the writer's model family instead of ranking them
+  last. When no other family is usable, routing refuses with one line naming
+  the judged family and why each other family was unavailable, and the
+  automatic review records "review unavailable" with the result left awaiting
+  review. An owner `--to` pin to the same family is still allowed and is
+  labelled `same-family judge (owner-pinned)` on the result.
+- `oms connect-services --account codex:ID` replaces `--codex-account ID`.
+  New Codex account homes default to `~/.codex/accounts/<id>/` (missing
+  parents are created 0700); registered homes elsewhere keep working and are
+  never moved. `--verify` reports whether the main home and every registered
+  Codex home are logged in, without a model call.
 - Code and test reduction across the work journal, panel view and dispatch,
   state, peer, plan, graph and land paths: dead helpers, unused parameters and
   duplicate test cases are gone (about 1,400 code and 2,400 test lines net)
