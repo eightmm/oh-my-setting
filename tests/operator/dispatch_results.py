@@ -4811,6 +4811,147 @@ def prepare_accept_clone(label):
         subprocess.run(["git", "-C", str(clone), "config", key, value], check=True)
     return clone, dict(accept_env, OMS_ROOM_REPO=str(clone))
 
+# Dispatch anchors, rather than the room's mutable owns list, grant extra admission paths.
+accept_extension_failures = []
+for extension in ("scope", "outside", "comma", "space", "empty", "tests", "removed", "runner"):
+    extension_repo, extension_env = prepare_accept_clone("accept continued " + extension)
+    extension_id = "extension-" + extension
+    extension_path = ("extra.txt" if extension in ("scope", "outside", "comma", "space", "empty") else
+                      "tests/run-checks.sh" if extension == "runner" else "tests/test_extension.sh")
+    extension_verify = "test -f extra.txt" if extension in ("scope", "outside", "comma", "space", "empty") else "bash " + extension_path
+    if extension in ("tests", "removed", "runner"):
+        (extension_repo / "tests").mkdir()
+        (extension_repo / extension_path).write_text("test -f value.txt\n")
+        subprocess.run(["git", "-C", str(extension_repo), "add", extension_path], check=True)
+        subprocess.run(["git", "-C", str(extension_repo), "commit", "-qm", "test baseline"], check=True)
+    accept_call("agent-plan", "add", "--id", extension_id, "--title", "Continued fixture",
+                "--allowed", "value.txt" + ("," + extension_path if extension in ("tests", "removed", "runner") else ""),
+                "--verify", extension_verify, execution=extension_repo, env=extension_env)
+    accept_call("agent-plan", "claim", "--id", extension_id, "--provider", "codex",
+                execution=extension_repo, env=extension_env)
+    extension_task = json.loads(accept_call("agent-plan", "evidence-snapshot", "--id", extension_id,
+                                           execution=extension_repo, env=extension_env).stdout)
+    accept_call("agent-plan", "start", "--id", extension_id, "--lease-id", extension_task["lease_id"],
+                execution=extension_repo, env=extension_env)
+    grant = {"outside": ["different.txt"], "comma": ["extra.txt,ungranted.txt"],
+             "space": ["extra.txt ungranted.txt"], "empty": []}.get(extension, [extension_path])
+    previous = None
+    for round_number in (1, 2):
+        member = "call-" + uuid.uuid4().hex[:16]
+        with patch.dict(os.environ, extension_env, clear=True):
+            room.join(extension_repo, "accept-room", member, "codex", "worker", parent="accept-main", owns=["."])
+            dispatch._prepare_dispatch_call(extension_repo, "accept-room", member, "accept-main",
+                extension_verify, rework=dict(role="builder", scope=grant if round_number == 2 else [],
+                                             workload="routine", brief="Extend the reviewed result."), task_id=extension_id)
+        options = ["--ref", "panel_continues=" + previous] if previous else []
+        previous = accept_call("agent-events", "start", "--provider", "local", "--tool", "peer-delegate",
+            "--task-id", extension_id, "--parent-attempt-id", extension_env["OMS_PANEL_MAIN_ATTEMPT"],
+            "--ref", "panel_role=worker", "--ref", "panel_access=write",
+            "--ref", "panel_lease_id=" + extension_task["lease_id"], "--ref", "panel_room_id=accept-room",
+            "--ref", "panel_room_participant=" + member, *options,
+            "--then", "starting", "--then", "working", "--then", "verifying", "--then", "review",
+            execution=extension_repo, env=extension_env).stdout.strip()
+        if round_number == 1:
+            with patch.dict(os.environ, extension_env, clear=True):
+                first_round = next(row for row in saved._records(extension_repo, full=True)[0]
+                                   if row["attempt_id"] == previous)
+            deadline = time.monotonic() + int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90"))
+            while time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) <= first_round["created_at"]:
+                assert time.monotonic() < deadline, "continuation timestamp did not advance"
+                time.sleep(0.02)
+    extension_artifact = extension_repo / (".oms/artifacts/fixture/" + extension_id + ".md")
+    extension_artifact.write_text(accept_artifact.read_text())
+    extension_patch = extension_artifact.with_suffix(".patch")
+    (extension_repo / "value.txt").write_text("old\naccepted\n")
+    if extension in ("scope", "outside", "comma", "space", "empty"):
+        (extension_repo / extension_path).write_text("granted\n")
+        subprocess.run(["git", "-C", str(extension_repo), "add", "-N", extension_path], check=True)
+    else:
+        if extension == "removed":
+            (extension_repo / extension_path).write_text("test -e value.txt\n")
+        with (extension_repo / extension_path).open("a") as stream:
+            stream.write('test "$(tail -1 value.txt)" = accepted\n')
+    extension_patch.write_bytes(subprocess.check_output(["git", "-C", str(extension_repo), "diff", "--binary"]))
+    subprocess.run(["git", "-C", str(extension_repo), "reset", "--hard", "-q", "HEAD"], check=True)
+    extension_digest = hashlib.sha256(extension_patch.read_bytes()).hexdigest()
+    extension_index_env = dict(extension_env, OMS_TASK_ID=extension_id, OMS_ATTEMPT_ID=previous,
+                               OMS_INDEX_PLAN_ID=extension_task["plan_id"])
+    for kind in ("delegate", "review-outcome"):
+        arguments = [str(extension_patch)] if kind == "delegate" else []
+        indexed_env = dict(extension_index_env)
+        if kind == "review-outcome":
+            indexed_env["OMS_INDEX_REVIEW_OUTCOME_JSON"] = json.dumps(
+                dict(gate_verify_exit=0, candidate=dict(patch_sha256=extension_digest), seats=[dict(verdict="pass")]))
+        call(["bash", "-c", '. "$1"; shift; ma_append_artifact_index "$@"', "extension-fixture",
+              str(root / "scripts/lib/peer-common.sh"), str(extension_repo), kind, "local", "0",
+              str(extension_artifact), *arguments], indexed_env)
+    if extension == "scope":
+        with patch.dict(os.environ, extension_env, clear=True):
+            scope_attempts, _ = saved._records(extension_repo, full=True)
+            expected_paths = ["extra.txt", "value.txt"]
+            assert saved.effective_allowed_paths(extension_repo, extension_task, scope_attempts) == expected_paths
+            for bad_lease in (None, "", 0, "malformed", "lease_" + "0" * 32):
+                assert saved.effective_allowed_paths(extension_repo, dict(extension_task, lease_id=bad_lease),
+                                                     scope_attempts) == ["value.txt"]
+            final_refs = next(row["refs"] for row in scope_attempts if row["attempt_id"] == previous)
+            for changed in (dict(task_id="another-task"), dict(parent_attempt_id="missing"),
+                            dict(refs=dict(final_refs, panel_access="read"))):
+                altered = [dict(row, **changed) if row["attempt_id"] == previous else row for row in scope_attempts]
+                assert saved.effective_allowed_paths(extension_repo, extension_task, altered) == ["value.txt"]
+            for invalid_call in (None, {"schema": 1, "task_id": extension_id}, {"schema": 2, "task_id": "other"}):
+                with patch.object(dispatch, "_dispatch_call_record", return_value=invalid_call):
+                    assert saved.effective_allowed_paths(extension_repo, extension_task, scope_attempts) == ["value.txt"]
+            scope_snapshot = saved._accept_preflight(extension_repo, extension_repo, "codex", extension_id, extension_verify)
+            capture_helper = runpy.run_path(str(root / "scripts/lib/landing-capture.py"))
+            scope_parameters = (extension_verify, "0", extension_id, "0", "0", "", "0", "0")
+            first_binding = capture_helper["admission_binding"](extension_repo, extension_repo, *scope_parameters)
+            launch = dispatch.dispatch_store.read(extension_repo, member + "-launch.json")
+            for invalid_scope in ([], [0], ["../bad"]):
+                invalid_launch = deepcopy(launch)
+                invalid_launch["rework"]["scope"] = invalid_scope
+                dispatch.dispatch_store.write(extension_repo, member + "-launch.json", invalid_launch)
+                try:
+                    assert saved.effective_allowed_paths(extension_repo, extension_task, scope_attempts) == ["value.txt"]
+                finally:
+                    dispatch.dispatch_store.write(extension_repo, member + "-launch.json", launch)
+            widened = deepcopy(launch)
+            widened["rework"]["scope"].append("additional.txt")
+            dispatch.dispatch_store.write(extension_repo, member + "-launch.json", widened)
+            try:
+                next_binding = capture_helper["admission_binding"](extension_repo, extension_repo, *scope_parameters)
+                assert first_binding["parameters_sha256"] != next_binding["parameters_sha256"]
+                try:
+                    saved._accept_recheck(extension_repo, extension_repo, "codex", extension_id, extension_verify,
+                                          extension_digest, scope_snapshot)
+                    raise AssertionError("changed dispatch scope passed the acceptance fence")
+                except saved._AcceptAuthorityChanged:
+                    pass
+            finally:
+                dispatch.dispatch_store.write(extension_repo, member + "-launch.json", launch)
+    extension_options = ("--accept", extension_id, "--message", "fix: continued fixture", "--verify", extension_verify)
+    mismatched = accept_call("panel", *extension_options, "--verify", "true",
+                             execution=extension_repo, env=extension_env, check=False)
+    assert mismatched.returncode != 0 and "verify contract" in mismatched.stderr, mismatched.stderr
+    if extension == "tests":
+        unconsented = accept_call("panel", *extension_options, execution=extension_repo, env=extension_env, check=False)
+        unconsented_reports = [report.read_text() for report in (extension_repo / ".oms/artifacts/admit").glob("*.md")]
+        assert unconsented.returncode != 0 and any("verifier: FAIL" in report and "verify: SKIP" in report
+                                                  for report in unconsented_reports), unconsented_reports
+        assert not subprocess.check_output(["git", "-C", str(extension_repo), "status", "--porcelain"])
+        extension_options += ("--allow-verifier-change",)
+    extended = accept_call("panel", *extension_options, execution=extension_repo, env=extension_env, check=False)
+    reports = [report.read_text() for report in (extension_repo / ".oms/artifacts/admit").glob("*.md")]
+    if extension in ("outside", "comma", "space", "empty", "removed", "runner"):
+        gate = "verifier: FAIL" if extension in ("removed", "runner") else "scope: FAIL"
+        assert extended.returncode != 0 and any(gate in report for report in reports), (extended.stderr, reports)
+        assert not subprocess.check_output(["git", "-C", str(extension_repo), "status", "--porcelain"])
+    elif extended.returncode:
+        accept_extension_failures.append((extension, extended.stderr, reports))
+    else:
+        assert "committed locally" in extended.stdout, extended.stdout
+        assert (extension_repo / extension_path).exists()
+assert not accept_extension_failures, accept_extension_failures
+
 # A reviewed patch that changes its own verifier needs explicit owner consent.
 consent_repo, consent_env = prepare_accept_clone("accept verifier consent")
 consent_verify = "awk -f value.txt /dev/null"

@@ -82,7 +82,7 @@ Options:
                  an existing check.sh requires an explicit --verify CMD.
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
   --report FILE  Write the admission report here (default: .oms/artifacts/admit/).
-  --plan-task ID  Enforce this agent-plan task's allowed/forbidden paths.
+  --plan-task ID  Enforce plan paths plus authenticated dispatch grants for its lease.
   --covers ID    Acceptance criterion this admission proves (repeatable).
                  Ids are validated against the runtime envelope before any
                  work; the receipt records executed verification separately
@@ -244,8 +244,15 @@ if [ -n "$PLAN_TASK" ]; then
   esac
   [ -z "$COVERS_PLAN_ID" ] || [ "$COVERS_PLAN_ID" = "$PLAN_ID" ] ||
     fail "plan changed between criterion validation and task snapshot"
-  SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("allowed_paths",[])))')"
-  SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("forbidden_paths",[])))')"
+  SCOPE_ALLOWED="$(printf '%s' "$plan_json" | python3 -c '
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from panel_results import effective_allowed_paths
+allowed = effective_allowed_paths(Path(sys.argv[2]), json.load(sys.stdin))
+print(json.dumps(allowed) if allowed else "")
+' "$ROOT_LIB" "$reference_state")" || fail "cannot read dispatch scope for plan task $PLAN_TASK"
+  SCOPE_FORBIDDEN="$(printf '%s' "$plan_json" | python3 -c 'import json,sys;paths=json.load(sys.stdin).get("forbidden_paths",[]);print(json.dumps(paths) if paths else "")')"
   ACCEPTANCE_FILES="$(printf '%s' "$plan_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); c=d.get("project_contract") or {}; print("\n".join(c.get("acceptance_files") or d.get("acceptance_files") or []))')"
   read_task_verify() {
     printf '%s' "$plan_json" | python3 -c '
@@ -384,16 +391,15 @@ if [ "$apply_ok" = 1 ]; then
     # --- Gate 2: task path scope ----------------------------------
     scope_detail="$(OMS_CHANGED="$changed_files" OMS_ALLOWED="$SCOPE_ALLOWED" OMS_FORBIDDEN="$SCOPE_FORBIDDEN" \
       OMS_PATH_SCOPE_HELPER="$ROOT_LIB/path_scope.py" python3 - <<'PY'
-import os, re, runpy
+import json, os, runpy
 scope = runpy.run_path(os.environ["OMS_PATH_SCOPE_HELPER"])
 classify = scope["classify"]
 normalize = scope["normalize"]
 # Split on LF only: str.splitlines() also breaks on U+2028/U+0085, which
 # unquoted git paths may contain, turning one name into two scope-clean ones.
 changed=[x for x in os.environ.get("OMS_CHANGED","").split("\n") if x]
-def split(v): return [x for x in re.split(r"[,\s]+",v) if x]
-allowed = [normalize(x) for x in split(os.environ.get("OMS_ALLOWED", ""))]
-forbidden = [normalize(x) for x in split(os.environ.get("OMS_FORBIDDEN", ""))]
+allowed = [normalize(x) for x in json.loads(os.environ.get("OMS_ALLOWED") or "[]")]
+forbidden = [normalize(x) for x in json.loads(os.environ.get("OMS_FORBIDDEN") or "[]")]
 bad=[]
 for path in changed:
     # quotePath=false leaves only control characters, quotes and backslashes

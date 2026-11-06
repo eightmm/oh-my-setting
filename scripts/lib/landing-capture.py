@@ -480,9 +480,14 @@ def admission_binding(repo, execution_repo, *parameters):
         config = os.path.join(execution_repo, config)
     if not os.path.isabs(common):
         common = os.path.join(execution_repo, common)
+    allowed = []
+    if parameters[2]:
+        from panel_results import _read, effective_allowed_paths
+        plan = json.loads(_read(Path(repo), '.oms/plan/tasks.json', 4 * 1024 * 1024))
+        allowed = effective_allowed_paths(Path(repo), plan['tasks'][parameters[2]])
     return dict(version=1, execution_repo=execution_repo,
                 base=git('rev-parse', 'HEAD').decode(), tree=git('rev-parse', 'HEAD^{tree}').decode(),
-                parameters_sha256=digest(encoded(parameters)),
+                parameters_sha256=digest(encoded([parameters, allowed])),
                 environment_sha256=digest(encoded(environment)),
                 harness_sha256=digest(encoded(harness)),
                 seeds={name: optional(os.path.join(execution_repo, name))

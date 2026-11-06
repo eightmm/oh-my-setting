@@ -1259,6 +1259,36 @@ def _owned_task(repo, execution, owner, task_id):
     return task
 
 
+def effective_allowed_paths(repo, task, attempts=None):
+    """Plan paths plus owner grants from authenticated dispatches of this lease."""
+    from panel_dispatch import _dispatch_call_record, dispatch_store
+    allowed = list(task.get('allowed_paths') or [])
+    lease = task.get('lease_id')
+    if not isinstance(lease, str) or not re.fullmatch(r'lease_[0-9a-f]{32}', lease):
+        return sorted(set(allowed))
+    if attempts is None:
+        attempts, _ = _records(repo, full=True, task_id=task['id'])
+    parents = {row['attempt_id']: row for row in attempts if row.get('tool') == 'panel-main'}
+    for row in attempts:
+        refs = row.get('refs', {})
+        if (row.get('task_id') != task['id'] or refs.get('panel_lease_id') != lease
+                or refs.get('panel_access') != 'write' or refs.get('panel_role') != 'worker'):
+            continue
+        parent = parents.get(row.get('parent_attempt_id'), {})
+        caller = parent.get('refs', {}).get('panel_room_participant', parent.get('attempt_id'))
+        member, ident = refs.get('panel_room_participant'), refs.get('panel_room_id')
+        if not all(isinstance(value, str) and value for value in (member, ident, caller)):
+            continue
+        call = _dispatch_call_record(repo, ident, {'participant': member, 'parent': caller})
+        if not call or call.get('schema') != 2 or call.get('task_id') != task['id']:
+            continue
+        anchor = dispatch_store.read(repo, member + '-launch.json')
+        original = anchor.get('rework')
+        if isinstance(original, dict):
+            allowed.extend(original['scope'])
+    return sorted(set(allowed))
+
+
 def _accept_preflight(repo, execution, owner, task_id, verify, expected=None, applied=False):
     task = _owned_task(repo, execution, owner, task_id)
     if task.get('state') not in ('claimed', 'running'):
@@ -1266,7 +1296,7 @@ def _accept_preflight(repo, execution, owner, task_id, verify, expected=None, ap
     if not verify or verify.replace('\r', '') != task.get('verify', '').replace('\r', ''):
         raise ValueError('--verify does not match the plan task verify contract')
     main_id = os.environ['OMS_PANEL_MAIN_ATTEMPT']
-    _, _, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
+    _, attempts, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
     if len(workers) != 1 or workers[0].get('task_id') != task_id:
         raise ValueError('accept requires one unique worker candidate for this task')
     worker = workers[0]
@@ -1285,7 +1315,8 @@ def _accept_preflight(repo, execution, owner, task_id, verify, expected=None, ap
     _indexed(repo, candidate, 1024 * 1024)
     if any(admissions) and not applied:
         raise ValueError('candidate already applied; reconcile existing Git/receipt evidence; never reapply blindly')
-    return {'task': task, 'candidate': candidate, 'worker': worker, 'review_gate': passing_gates[0]}
+    return {'task': task, 'candidate': candidate, 'worker': worker, 'review_gate': passing_gates[0],
+            'allowed_paths': effective_allowed_paths(repo, task, attempts)}
 
 
 def _accept_authority(snapshot):
@@ -1295,7 +1326,9 @@ def _accept_authority(snapshot):
     candidate_fields = ('event_id', 'attempt_id', 'task_id', 'plan_id', 'artifact', 'patch',
                         'patch_sha256', 'exit')
     return {
-        'task_hash': hashlib.sha256(json.dumps(task, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+        'task_hash': hashlib.sha256(json.dumps(
+            [task, snapshot.get('allowed_paths', task.get('allowed_paths', []))],
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
         'lease_id': task.get('lease_id'),
         'candidate': {key: candidate.get(key) for key in candidate_fields},
         'patch_sha256': candidate.get('patch_sha256'),

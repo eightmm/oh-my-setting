@@ -104,6 +104,62 @@ contains "$TMP/r6.md" "forbidden: 비밀/k.txt"
   fail "a patch into an allowed non-ASCII directory should be admitted"
 contains "$TMP/r7.md" "scope: PASS"
 
+# Retained structured plans may contain literal scope entries the current CSV
+# CLI cannot create. Keep these snapshots inside this disposable fixture.
+for literal_kind in space comma; do
+  case "$literal_kind" in
+    space) literal_path='docs/secret file.txt' ;;
+    comma) literal_path='docs/secret,file.txt' ;;
+  esac
+  mkdir -p "$repo/docs"
+  printf 'x\n' > "$repo/$literal_path"
+  capture_patch "$repo" "literal-$literal_kind" "$TMP/literal-$literal_kind.patch"
+  for scope_mode in broad literal deny-only positive; do
+    literal_task="literal-$literal_kind-$scope_mode"
+    verify_marker="$TMP/$literal_task.ran"
+    literal_verify="printf ran > \"$verify_marker\""
+    "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id "$literal_task" \
+      --title literal-scope --allowed docs/ --verify "$literal_verify" >/dev/null
+    python3 - "$repo/.oms/plan/tasks.json" "$literal_task" "$literal_path" "$scope_mode" <<'PY'
+import json, sys
+from pathlib import Path
+path, task_id, name, mode = sys.argv[1:]
+snapshot = Path(path)
+plan = json.loads(snapshot.read_text())
+task = plan['tasks'][task_id]
+task['allowed_paths'] = [] if mode == 'deny-only' else ['docs/'] if mode == 'broad' else [name]
+task['forbidden_paths'] = ['docs/unrelated.txt'] if mode == 'positive' else [name]
+snapshot.write_text(json.dumps(plan, ensure_ascii=False) + '\n')
+PY
+    literal_report="$TMP/$literal_task.md"
+    rc=0
+    "$ADMIT" --repo "$repo" --patch "$TMP/literal-$literal_kind.patch" \
+      --plan-task "$literal_task" --report "$literal_report" >/dev/null 2>&1 || rc=$?
+    if [ "$scope_mode" = positive ]; then
+      [ "$rc" = 0 ] || fail "a valid literal $literal_kind path should be admitted, got exit $rc"
+      contains "$literal_report" 'scope: PASS'
+      contains "$literal_report" 'verify: PASS'
+      [ -f "$verify_marker" ] || fail "valid literal scope skipped its verifier"
+    else
+      [ "$rc" = 1 ] || fail "literal deny $literal_kind/$scope_mode should reject before verification, got exit $rc"
+      contains "$literal_report" 'scope: FAIL'
+      contains "$literal_report" "forbidden: $literal_path"
+      contains "$literal_report" 'verify: SKIP'
+      [ ! -e "$verify_marker" ] || fail "a forbidden literal path executed its verifier"
+    fi
+  done
+done
+
+"$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id empty-scope \
+  --title empty-scope --verify true >/dev/null
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/rename.patch" --plan-task empty-scope \
+  --report "$TMP/empty-scope.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "empty task scope bypassed the structural floor, got exit $rc"
+contains "$TMP/empty-scope.md" 'scope: SKIP'
+contains "$TMP/empty-scope.md" 'structure: FAIL'
+contains "$TMP/empty-scope.md" 'verify: SKIP'
+
 # (7) U+2028 inside a name must not split it into two allowed-looking paths.
 "$ROOT/scripts/agent-plan.sh" --repo "$repo" add --id t5 --title ls-split \
   --allowed 'docs/' --forbidden 'docs/*/private.md' --verify true >/dev/null

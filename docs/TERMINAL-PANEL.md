@@ -1822,7 +1822,14 @@ repository resolver are supported. Accepted outcomes still require matching land
 evidence and a passing review gate. `--landed-commit` is allowed only with `--outcome
 accepted` or `completed`. The post-apply fence compares the candidate identity and
 digest, plan task hash and lease, and passing review gate; heartbeat, usage and
-settlement updates alone do not invalidate it.
+settlement updates alone do not invalidate it. Admission allows the plan task's paths
+plus scope grants in authenticated dispatch/continue launch records for that same task
+and lease; room declarations and brief text do not widen admission. The effective scope
+also binds admission reuse and is re-read by the acceptance fence.
+
+Changes to an existing test selected by the verify command, including assertion-only
+insertions, require the owning main's explicit `--allow-verifier-change`. Both candidate
+verification and the restored base verification floor must still pass.
 
 Acceptance records its exact commit and tree with the task, lease, candidate digest and
 review gate. Publication must contain that commit or a rebased candidate whose tree
