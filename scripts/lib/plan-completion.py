@@ -450,10 +450,11 @@ def legacy_completion_veto(repo, leases):
 def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
     """Collect aged unreferenced captures under the completion/plan writer locks.
 
-    Transaction pins protect verifiers between preflight and finalize. An
-    unsettled lease without a pin or with a legacy worker marker retains the veto.
-    Approval markers and receipts remain roots, including receipts whose plan
-    publication failed. Unknown or unsafe input aborts before any deletion.
+    Transaction pins protect verifiers between preflight and finalize.
+    Legacy plans require every unsettled lease to have a pin. Legacy worker
+    markers retain the veto for all plans. Receipts from the current or unknown
+    plan remain roots, including failed publications; aged retired-plan receipts
+    need a plan or pin reference. Unknown or unsafe input aborts before deletion.
     """
     if os.unlink not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
         return []  # Keep everything where descriptor-relative deletion is unavailable.
@@ -469,9 +470,15 @@ def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
         leases = {task['lease_id'] for task in tasks.values()
                   if task.get('lease_id') and task.get('state') not in ('done', 'cancelled')}
         known_leases = {task['lease_id'] for task in tasks.values() if task.get('lease_id')}
+    raw_plan_id = plan.get('plan_id')
+    if raw_plan_id not in (None, '') and not (
+            isinstance(raw_plan_id, str) and re.fullmatch(r'plan_[0-9a-f]{32}', raw_plan_id)):
+        fail('invalid completion collection plan')
+    current_plan_id = raw_plan_id if isinstance(raw_plan_id, str) and raw_plan_id else None
     temporary = {}
     pins, pin_parents = completion_pins(repo, cutoff, temporary)
-    if leases and (leases - {value['lease_id'] for info, value in pins.values()} or
+    if leases and ((not current_plan_id and
+                    leases - {value['lease_id'] for info, value in pins.values()}) or
                    legacy_completion_veto(repo, leases)):
         return []
     objects, values, roots, parents = {}, {}, set(), {}
@@ -493,7 +500,7 @@ def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
                 fail('unsafe completion collection object')
             path = rel + '/' + entry.name
             objects[path] = info
-            if directory == 'completions' or info.st_mtime >= cutoff:
+            if info.st_mtime >= cutoff:
                 roots.add(path)
             if directory in ('completion-captures', 'completions'):
                 raw = reference(repo, {'path': path, 'sha256': entry.name.split('.')[0]})
@@ -504,6 +511,13 @@ def collect_abandoned_prefixes(repo, cutoff, dry_run=True):
                 if not isinstance(value, dict):
                     fail('invalid completion collection metadata')
                 values[path] = value
+                if directory == 'completions':
+                    bundle = value.get('bundle')
+                    receipt_plan_id = bundle.get('plan_id') if isinstance(bundle, dict) else None
+                    if not (current_plan_id and isinstance(receipt_plan_id, str)
+                            and re.fullmatch(r'plan_[0-9a-f]{32}', receipt_plan_id)
+                            and receipt_plan_id != current_plan_id):
+                        roots.add(path)
                 if directory == 'completion-captures' and set(value) != {
                         'schema', 'repository_sha256', 'room_id', 'room', 'lifecycle'}:
                     roots.add(path)  # Bearer approvals and unknown captures are never transient.

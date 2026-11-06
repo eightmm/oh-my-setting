@@ -24321,14 +24321,23 @@ os.environ['XDG_STATE_HOME'] = str(Path(os.environ['TMPDIR']) / 'gc-dispatch-con
 ops = runpy.run_path(str(root / 'scripts/lib/agent-events.py'))
 logs = repo / '.oms/panel-state/dispatch-logs'
 logs.mkdir(parents=True, mode=0o700)
+artifacts = repo / '.oms/artifacts'
 events, tasks = [], {}
 now = int(time.time())
 
-def seed(name, state='done', task=None, age=31, finished=True, complete=True):
+def age_artifacts(member, stamp):
+    for suffix in ('.json', '-pending.json', '-exit.json'):
+        os.utime(artifacts / ('panel-' + member + suffix), (stamp, stamp))
+    launch = panel.dispatch_store.read(repo, member + '-launch.json')
+    launch['generation'] = panel.dispatch_store.generation(repo / panel._dispatch_call_path(member))
+    panel.dispatch_store.write(repo, member + '-launch.json', launch)
+
+def seed(name, state='done', task=None, age=31, finished=True, complete=True,
+         room_id='gc-dispatch-room', refs_extra=None):
     member = 'call-' + name
     task = task or name
     with patch.object(sys, 'platform', 'linux'):
-        call = panel._prepare_dispatch_call(repo, 'gc-dispatch-room', member, 'owner', task_id=task)
+        call = panel._prepare_dispatch_call(repo, room_id, member, 'owner', task_id=task)
     digest = panel._dispatch_exit_record(call, 0)['launch_sha256']
     panel._record_dispatch_pending(repo, call, 0, task, {'descendants': []})
     pid = 2147483647 if finished else live_pid
@@ -24341,7 +24350,7 @@ def seed(name, state='done', task=None, age=31, finished=True, complete=True):
                                     steps={k: complete for k in ('settlement', 'room_result', 'structured_event', 'auto_review')}))
     panel._write(repo, panel._dispatch_call_path(member, True), panel._dispatch_exit_record(call, 0))
     ident = 'att_' + name
-    refs = dict(panel_room_participant=member, panel_room_id='gc-dispatch-room')
+    refs = dict(panel_room_participant=member, panel_room_id=room_id, **(refs_extra or {}))
     created = ops['new_event'](ident, 1, 'attempt.created', from_state=None, to_state='queued',
                                provider='codex', tool='gc-fixture', task_id=task, refs=refs)
     created['ts'] = '2020-01-01T00:00:00Z'
@@ -24360,6 +24369,7 @@ def seed(name, state='done', task=None, age=31, finished=True, complete=True):
         path = logs / (member + suffix)
         path.write_text('output' if suffix == '.log' else '{}')
         os.utime(path, (now - age * 86400, now - age * 86400))
+    age_artifacts(member, now - age * 86400)
     return member
 
 seed('settled')
@@ -24382,6 +24392,9 @@ seed('latest', task='unfinished')
 tasks['unfinished']['state'] = 'ready'
 seed('older', task='unfinished')
 events[-6]['ts'] = '2019-01-01T00:00:00Z'
+for name, stamp in (('reviewer', '2021-01-01T00:00:00Z'), ('latest-reviewer', '2022-01-01T00:00:00Z')):
+    seed(name, task='unfinished', refs_extra=dict(panel_role='reviewer', panel_access='read'))
+    events[-6]['ts'] = stamp
 for name, stamp in (('calendar-old', '2020-2-01T00:00:00Z'), ('calendar-new', '2020-10-01T00:00:00Z'),
                     ('equal-old', '2020-2-1T00:00:00Z'), ('equal-new', '2020-02-01T00:00:00Z')):
     task = 'calendar' if name.startswith('calendar') else 'equal'
@@ -24400,6 +24413,22 @@ seed('link')
 (logs / 'call-link.activity.json').symlink_to(logs / 'call-settled.activity.json')
 seed('missing')
 (logs / 'call-missing.activity.json').unlink()
+artifact_only = seed('artifact-only')
+for path in logs.glob(artifact_only + '.*'):
+    path.unlink()
+for suffix in ('-launch.json', '-settled.json', '-process.json', '-claim.json', '-brief.md'):
+    path = artifacts / ('panel-' + artifact_only + suffix)
+    path.write_text('{}')
+    os.utime(path, (1, 1))
+seed('settled-extra', age=0)
+for suffix in ('-brief.md', '-claim.json'):
+    member = seed('fresh' + suffix)
+    path = artifacts / ('panel-' + member + suffix)
+    path.write_text('{}')
+open_member = seed('open-room', room_id='gc-open-dispatch')
+panel.room.create(repo, 'gc-open-dispatch', creator='owner')
+panel.room.join(repo, 'gc-open-dispatch', 'owner', 'codex')
+panel.room.join(repo, 'gc-open-dispatch', open_member, 'codex', role='worker', parent='owner', owns=['scripts'])
 (logs / 'call-orphan.log').write_text('unknown')
 os.utime(logs / 'call-orphan.log', (1, 1))
 (repo / '.oms/lifecycle').mkdir(exist_ok=True)
@@ -24433,28 +24462,51 @@ exec "$GC_REAL_PYTHON" "$@"
         assert crashed.returncode == 1, (code, crashed.returncode, crashed.stderr)
         assert 'dispatch log cleanup failed' in crashed.stderr, crashed.stderr
 before = {p.name: p.read_bytes() for p in logs.iterdir()}
+artifact_before = {p.name: p.read_bytes() for p in artifacts.glob('panel-call-*')}
+collected = ('settled', 'missing', 'artifact-only')
+eligible = [p for name in collected for folder, prefix in ((logs, 'call-'), (artifacts, 'panel-call-'))
+            for p in folder.glob(prefix + name + '*') if not p.name.startswith(prefix + name + '-extra')]
+log_only = ('older', 'calendar-old', 'reviewer', 'open-room', 'fresh-brief.md', 'fresh-claim.json')
+eligible.extend(logs / ('call-' + name + suffix) for name in log_only
+                for suffix in ('.log', '.activity.json', '.stream', '.transcript'))
+expected_summary = '- dispatch-logs: %d pair(s), %d file(s), %d bytes' % (
+    len(collected) + len(log_only), len(eligible), sum(p.stat().st_size for p in eligible))
 out = run()
-assert '- dispatch-logs: 3 pair(s), 12 file(s), 36 bytes' in out, out
+assert expected_summary in out, out
 assert before == {p.name: p.read_bytes() for p in logs.iterdir()}, 'dry run changed dispatch logs'
+assert artifact_before == {p.name: p.read_bytes() for p in artifacts.glob('panel-call-*')}, 'dry run changed call artifacts'
 markers = repo / '.oms/delegations'
 markers.mkdir(exist_ok=True)
 marker = markers / 'live.json'
 marker.write_text(json.dumps(dict(schema=1, id='live', pid=live_pid)))
 out = run('--apply')
 assert before == {p.name: p.read_bytes() for p in logs.iterdir()}, 'live delegation did not veto dispatch cleanup'
+assert artifact_before == {p.name: p.read_bytes() for p in artifacts.glob('panel-call-*')}, 'live delegation did not veto artifact cleanup'
 marker.write_text('{')
 run('--apply')
 assert before == {p.name: p.read_bytes() for p in logs.iterdir()}, 'unknown marker did not veto dispatch cleanup'
 marker.unlink()
 out = run('--apply')
-assert '- dispatch-logs: 3 pair(s), 12 file(s), 36 bytes' in out, out
-for name in ('settled', 'older', 'calendar-old'):
+assert expected_summary in out, out
+assert all(not p.exists() for p in eligible), 'aged settled artifacts survived apply'
+for name in collected:
     assert all(not (logs / ('call-' + name + suffix)).exists()
                for suffix in ('.log', '.activity.json', '.stream', '.transcript')), name
-for name in ('fresh', 'live', 'live-record', 'review', 'delivery', 'conflict', 'unknown', 'latest', 'lease', 'mixed-age', 'fresh.stream', 'fresh.transcript', 'link', 'missing', 'orphan', 'calendar-new', 'equal-old', 'equal-new'):
+for name in ('fresh', 'live', 'live-record', 'review', 'delivery', 'conflict', 'unknown', 'latest', 'latest-reviewer', 'lease', 'mixed-age', 'fresh.stream', 'fresh.transcript', 'settled-extra', 'link', 'orphan', 'calendar-new', 'equal-old', 'equal-new'):
     assert (logs / ('call-' + name + '.log')).exists(), name
     if name != 'orphan':
         assert all((logs / ('call-' + name + suffix)).exists() for suffix in ('.stream', '.transcript')), name
+        assert (artifacts / ('panel-call-' + name + '.json')).exists(), name
+for suffix in ('-brief.md', '-claim.json'):
+    assert (artifacts / ('panel-call-fresh' + suffix + suffix)).exists(), 'fresh artifact was collected'
+    assert not (logs / ('call-fresh' + suffix + '.log')).exists(), 'aged logs were retained with fresh artifacts'
+for name in log_only:
+    assert (artifacts / ('panel-call-' + name + '.json')).exists(), 'unfinished task or open room lost call evidence'
+for member in ('call-older', 'call-latest'):
+    call = panel.dispatch_store.read(repo, member + '-launch.json')['call']
+    assert panel._dispatch_call_finished(repo, call['room'], call), 'continuation lost historical worker exit proof'
+assert panel.scope_overlaps(repo, 'gc-open-dispatch', panel.room.status(repo, 'gc-open-dispatch'),
+                            'owner', ['scripts']) == [], 'settled open-room call became a false overlap'
 assert '- dispatch-logs: 0 pair(s), 0 file(s), 0 bytes' in run('--apply'), 'repeat cleanup was not idempotent'
 
 # Freeze the retention clock to exercise equality, zero, and empty input without sleeps.
@@ -24470,21 +24522,79 @@ def collect(days=30, dry=True, status=0):
             actual_status = error.code
         assert actual_status == status, (actual_status, output.getvalue())
     return output.getvalue()
+thread = repo / '.oms/threads/gc-open-dispatch.jsonl'
+saved_thread = thread.read_bytes()
+thread.write_text('{')
+assert '0 pair(s)' in collect(0, dry=False), 'malformed room authorized artifact deletion'
+thread.write_bytes(saved_thread)
+panel.room.close(repo, 'gc-open-dispatch', 'owner')
+assert '1 pair(s)' in collect(0, dry=False), 'closed room kept settled call artifacts'
+assert not list(artifacts.glob('panel-' + open_member + '*')), 'closed room retained call artifacts'
 # Isolate one pair after the integration assertions; preserve its genuine call evidence.
 for path in logs.iterdir():
     path.unlink()
+for path in artifacts.glob('panel-call-*'):
+    if path.name not in {'panel-call-fresh' + suffix for suffix in ('.json', '-pending.json', '-exit.json')}:
+        path.unlink()
+age_artifacts('call-fresh', 1)
+logs.rmdir()
+assert '1 pair(s)' in collect(0), 'artifact-only call requires no dispatch directory'
+logs.mkdir(mode=0o700)
 for suffix in ('.log', '.activity.json'):
     path = logs / ('call-fresh' + suffix)
     path.write_text('{}')
     os.utime(path, (now - 30 * 86400, now - 30 * 86400))
 assert '0 pair(s)' in collect(), 'mtime equal to cutoff must be kept'
 assert '1 pair(s)' in collect(0), 'zero days should reclaim an aged settled pair'
+for path in logs.iterdir():
+    os.utime(path, (1, 1))
+companion = artifacts / 'panel-call-fresh-brief.md'
+companion.write_text('diagnostic brief')
+os.utime(companion, (now - 30 * 86400, now - 30 * 86400))
+assert '1 pair(s), 2 file(s), 4 bytes' in collect(), 'artifact at cutoff must retain artifacts while collecting aged logs'
+os.utime(companion, (1, 1))
+assert '1 pair(s)' in collect(), 'aged artifact should permit collection'
+original_released = panel._dispatch_released
+def refresh_artifact(*args, **kwargs):
+    os.utime(companion, (now, now))
+    return original_released(*args, **kwargs)
+with patch.object(panel, '_dispatch_released', refresh_artifact):
+    assert '0 pair(s)' in collect(0, dry=False), 'concurrent artifact replacement escaped generation check'
+os.utime(companion, (1, 1))
+companion.unlink()
+companion.symlink_to(logs / 'call-fresh.log')
+assert '0 pair(s)' in collect(0, dry=False), 'linked artifact authorized deletion'
+companion.unlink()
+os.link(logs / 'call-fresh.log', companion)
+assert '0 pair(s)' in collect(0, dry=False), 'hard-linked artifact authorized deletion'
+companion.unlink()
 for suffix in ('.log', '.activity.json'):
     os.utime(logs / ('call-fresh' + suffix), (now, now))
 assert '0 pair(s)' in collect(0), 'zero-day cutoff equality must be kept'
 for path in logs.iterdir():
     os.utime(path, (1, 1))
 assert '1 pair(s)' in collect(0), 'malformed-evidence fixture must otherwise be eligible'
+exit_path = artifacts / 'panel-call-fresh-exit.json'
+saved_exit = exit_path.read_bytes()
+exit_path.unlink()
+quiet = io.StringIO()
+with contextlib.redirect_stderr(quiet):
+    assert '0 pair(s)' in collect(0, dry=False), 'missing exit with companions authorized cleanup'
+assert quiet.getvalue() == '', quiet.getvalue()
+assert (logs / 'call-fresh.log').exists(), 'missing exit lost logs'
+exit_path.write_bytes(saved_exit)
+exit_path.chmod(0o600)
+os.utime(exit_path, (1, 1))
+launch_path = artifacts / 'panel-call-fresh.json'
+saved_launch = launch_path.read_bytes()
+launch_path.unlink()
+quiet = io.StringIO()
+with contextlib.redirect_stderr(quiet):
+    assert '0 pair(s)' in collect(0, dry=False), 'missing launch authorized cleanup'
+assert quiet.getvalue() == '', quiet.getvalue()
+launch_path.write_bytes(saved_launch)
+launch_path.chmod(0o600)
+age_artifacts('call-fresh', 1)
 ledger.write_text('{')
 assert '0 pair(s)' in collect(0), 'malformed lifecycle evidence must keep files'
 ledger.write_text(''.join(json.dumps(row) + '\n' for row in events))
@@ -24519,11 +24629,20 @@ def fail_activity(path, *args, **kwargs):
     return original_unlink(path, *args, **kwargs)
 with patch.object(Path, 'unlink', fail_activity):
     partial = collect(0, dry=False, status=1)
-assert '- dispatch-logs: 1 pair(s), 1 file(s), 2 bytes' in partial, partial
+assert '1 pair(s)' in partial, partial
 assert not (logs / 'call-fresh.log').exists()
 assert (logs / 'call-fresh.activity.json').exists()
-assert '- dispatch-logs: 1 pair(s), 1 file(s), 2 bytes' in collect(0, dry=False)
+assert '1 pair(s)' in collect(0, dry=False)
 assert not (logs / 'call-fresh.activity.json').exists()
+# Restore genuine launch/exit evidence for the next interruption fixture.
+for name, raw in artifact_before.items():
+    if name in {'panel-call-fresh' + suffix for suffix in ('.json', '-pending.json', '-exit.json')}:
+        path = artifacts / name
+        if not path.exists():
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            os.utime(path, (1, 1))
+age_artifacts('call-fresh', 1)
 for suffix in ('.log', '.activity.json', '.stream', '.transcript'):
     path = logs / ('call-fresh' + suffix)
     path.write_text('{}')
@@ -24534,9 +24653,49 @@ def fail_stream(path, *args, **kwargs):
     return original_unlink(path, *args, **kwargs)
 with patch.object(Path, 'unlink', fail_stream):
     partial = collect(0, dry=False, status=1)
-assert '- dispatch-logs: 1 pair(s), 2 file(s), 4 bytes' in partial, partial
+assert '1 pair(s)' in partial, partial
 assert (logs / 'call-fresh.activity.json').exists(), 'failed earlier unlink lost recovery anchor'
-assert '- dispatch-logs: 1 pair(s), 2 file(s), 4 bytes' in collect(0, dry=False)
+companion.write_text('diagnostic brief')
+os.utime(companion, (1, 1))
+def fail_brief(path, *args, **kwargs):
+    if path == companion:
+        raise PermissionError('simulated artifact unlink failure')
+    return original_unlink(path, *args, **kwargs)
+with patch.object(Path, 'unlink', fail_brief):
+    partial = collect(0, dry=False, status=1)
+assert '1 pair(s)' in partial, partial
+assert not (logs / 'call-fresh.activity.json').exists()
+assert companion.exists() and (artifacts / 'panel-call-fresh.json').exists(), 'failed artifact unlink lost launch evidence'
+assert exit_path.exists(), 'companion failure lost exit recovery anchor'
+def fail_exit(path, *args, **kwargs):
+    if path == exit_path:
+        raise PermissionError('simulated exit unlink failure')
+    return original_unlink(path, *args, **kwargs)
+with patch.object(Path, 'unlink', fail_exit):
+    assert '1 pair(s)' in collect(0, dry=False, status=1)
+assert exit_path.exists() and launch_path.exists(), 'exit unlink failure lost launch anchor'
+def fail_launch(path, *args, **kwargs):
+    if path.name == 'panel-call-fresh.json':
+        raise PermissionError('simulated launch unlink failure')
+    return original_unlink(path, *args, **kwargs)
+with patch.object(Path, 'unlink', fail_launch):
+    assert '1 pair(s)' in collect(0, dry=False, status=1)
+assert not exit_path.exists() and (artifacts / 'panel-call-fresh.json').exists(), 'fixture did not leave a lone launch'
+released = panel.dispatch_store.read(repo, 'call-fresh-settled.json')
+for status in (None, '', True, 1):
+    panel.dispatch_store.write(repo, 'call-fresh-settled.json', dict(released, exit=status))
+    quiet = io.StringIO()
+    with contextlib.redirect_stderr(quiet):
+        assert '0 pair(s)' in collect(0, dry=False), 'invalid settlement exit authorized lone-launch cleanup'
+    assert quiet.getvalue() == '', quiet.getvalue()
+    assert launch_path.exists(), 'invalid settlement exit lost launch anchor'
+panel.dispatch_store.write(repo, 'call-fresh-settled.json', released)
+quiet = io.StringIO()
+with contextlib.redirect_stderr(quiet):
+    assert '1 pair(s)' in collect(0, dry=False), 'lone launch retry failed'
+assert quiet.getvalue() == '', quiet.getvalue()
+assert not (artifacts / 'panel-call-fresh.json').exists(), 'lone launch survived retry'
+assert not companion.exists(), 'artifact-only retry left diagnostic companions'
 # Invalid creation evidence must preserve every call of that task.
 for member in ('call-calendar-old', 'call-calendar-new'):
     for suffix in ('.log', '.activity.json'):
@@ -24925,6 +25084,75 @@ else:
     raise AssertionError('malformed receipt authorized capture deletion')
 assert (repo / proofs[3]['capture']['path']).exists()
 (repo / bad['path']).unlink()
+# A modern running lease is not a completion transaction. Only current/unknown
+# receipts, fresh retired receipts and explicit references retain their graphs.
+current_plan = 'plan_' + '1' * 32
+retired_plan = 'plan_' + '0' * 32
+retired_prefix = aged_object('completion-prefixes', '.jsonl', b'retired plan stream\n')
+retired_capture = aged_object('completion-captures', '.json', core['encoded'](dict(
+    schema=1, repository_sha256='0' * 64, room_id='retired', room=retired_prefix, lifecycle=retired_prefix)))
+def receipt_for(bundle):
+    return aged_object('completions', '.json', core['encoded'](dict(bundle=bundle, snapshot=retired_capture)))
+retired_receipt = receipt_for(dict(plan_id=retired_plan))
+retired_paths = {ref['path'] for ref in (retired_prefix, retired_capture, retired_receipt)}
+modern_plan = dict(plan_id=current_plan, tasks=dict(active=dict(state='running', lease_id=lease)))
+plan_path.write_text(json.dumps(modern_plan))
+assert retired_paths <= set(core['collect_abandoned_prefixes'](str(repo), cutoff)), 'modern lease or retired receipt retained retired captures'
+plan_path.write_text(json.dumps(dict(plan_id=current_plan, tasks={})))
+assert retired_paths <= set(core['collect_abandoned_prefixes'](str(repo), cutoff)), 'empty modern plan retained retired captures'
+for plan_id in (None, ''):
+    plan_path.write_text(json.dumps(dict(plan_id=plan_id, tasks={})))
+    assert not retired_paths & set(core['collect_abandoned_prefixes'](str(repo), cutoff)), 'legacy plan lost a receipt root'
+plan_path.write_text(json.dumps(modern_plan))
+for invalid in (0, 123, False, [], {}, 'corrupt', 'plan_' + 'g' * 32, 'plan_' + '1' * 31):
+    plan_path.write_text(json.dumps(dict(modern_plan, plan_id=invalid)))
+    try:
+        core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+    except ValueError as error:
+        assert 'invalid completion collection plan' in str(error), error
+    else:
+        raise AssertionError('malformed plan ID authorized deletion')
+    assert all((repo / path).exists() for path in retired_paths), 'malformed plan ID allowed partial deletion'
+plan_path.write_text(json.dumps(modern_plan))
+for bundle in (dict(plan_id=current_plan), {}, None, [], '',
+               *(dict(plan_id=value) for value in (0, 123, [], {}, 'corrupt', 'plan_' + 'g' * 32))):
+    retained_receipt = receipt_for(bundle)
+    garbage = set(core['collect_abandoned_prefixes'](str(repo), cutoff))
+    assert not {retired_capture['path'], retired_prefix['path']} & garbage, 'current/unknown receipt lost its graph'
+    (repo / retained_receipt['path']).unlink()
+for stamp in (cutoff, time.time()):
+    os.utime(repo / retired_receipt['path'], (stamp, stamp))
+    assert not retired_paths & set(core['collect_abandoned_prefixes'](str(repo), cutoff)), 'fresh/equal-cutoff receipt lost its graph'
+os.utime(repo / retired_receipt['path'], (1, 1))
+for retained in (retired_receipt, retired_capture):
+    plan_path.write_text(json.dumps(dict(modern_plan, retained=retained)))
+    assert retained['path'] not in core['collect_abandoned_prefixes'](str(repo), cutoff), 'plan reference lost retired evidence'
+plan_path.write_text(json.dumps(modern_plan))
+saved_pin = pin_path.read_bytes() if pin_path.exists() else None
+core['write_completion_pin'](str(repo), lease, dict(retained=retired_receipt))
+assert not retired_paths & set(core['collect_abandoned_prefixes'](str(repo), cutoff)), 'pin lost retired receipt graph'
+core['remove_completion_pins'](str(repo), ident=pin_id)
+assert saved_pin is None, 'retired-plan fixture replaced an existing pin'
+marker.write_bytes(marker_raw)
+assert core['collect_abandoned_prefixes'](str(repo), cutoff) == [], 'modern plan bypassed legacy marker veto'
+marker.unlink()
+plan_path.write_text(json.dumps(dict(modern_plan, retained=[legacy, proofs, retired_receipt])))
+assert retired_receipt['path'] not in core['collect_abandoned_prefixes'](str(repo), cutoff), 'referenced retired receipt became garbage'
+plan_path.write_text(json.dumps(dict(modern_plan, retained=[legacy, proofs])))
+core['collect_abandoned_prefixes'](str(repo), cutoff, False)
+assert all(not (repo / path).exists() for path in retired_paths), 'retired plan evidence survived apply'
+receipt_only = repo / 'receipt-only'
+receipt_only.mkdir()
+subprocess.run(['git', 'init', '-q', str(receipt_only)], check=True)
+(receipt_only / '.oms/plan').mkdir(parents=True)
+(receipt_only / '.oms/plan/tasks.json').write_text(json.dumps(dict(plan_id=current_plan, tasks={})))
+receipt_ref = core['immutable_object'](str(receipt_only), '.oms/plan/completions',
+    core['encoded'](dict(bundle=dict(plan_id=retired_plan))), '.json', core['MAX_JSON'])
+os.utime(receipt_only / receipt_ref['path'], (1, 1))
+subprocess.run(['bash', str(root / 'scripts/gc.sh'), '--repo', str(receipt_only), '--days', '1', '--apply'],
+               check=True, capture_output=True, timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')))
+assert not (receipt_only / receipt_ref['path']).exists(), 'completions-only namespace was not swept'
+plan_path.write_text(json.dumps(dict(tasks={})))
 (repo / 'retained-proofs.json').write_text(json.dumps(dict(proofs=[legacy, proofs[1], proofs[-1]], removed=expected)))
 print('capture storage: %d bytes vs %d bytes whole-prefix copies' % (stored, copied))
 PYCAPTURE

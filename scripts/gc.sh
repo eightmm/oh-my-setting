@@ -53,15 +53,23 @@ fail-ledger reads with), closed conversation threads, closed work rooms and empt
 rooms without joined participants (unread room mail is always retained),
 unreferenced completion captures/prefixes/segments outside plan, receipt and
 transaction-pin roots (pins include validated requirement evidence; an unsettled
-lease without a pin or with a legacy worker marker defers collection);
+lease in a legacy plan without a pin, or any matching legacy worker marker,
+defers collection). Aged retired-plan receipts need a plan or pin reference;
 stale transaction pins and unused lease indexes after --days, retaining pinned
 objects for that sweep;
 interrupted pin-write temporary files after --days (unknown entries defer collection);
-dispatch-log/activity pairs with recorded exits, stopped processes and settled
-terminal attempts, excluding the latest attempt of unfinished plan tasks.
+dispatch-log/activity pairs and their panel-call artifacts with recorded exits,
+stopped processes and settled terminal attempts, excluding both the latest
+attempt and latest write worker of unfinished plan tasks. Call artifacts remain
+for all attempts of unfinished tasks and for open rooms with joined members.
 Dispatch cleanup reports pair/file counts and bytes, and defers while delegation
-evidence is live or unknown. Existing log/activity/stream/transcript files must
-all be older than --days. A lone activity file can finish interrupted cleanup;
+evidence is live or unknown. Existing log/activity/stream/transcript files and
+call artifacts must all be older than --days before reclaiming call artifacts;
+aged logs may be collected while newer call artifacts remain. Calls with only
+artifacts remaining are checked against the same settlement evidence. A lone
+activity file can finish interrupted cleanup. Missing exit evidence is kept
+silently; a lone launch left by an interrupted final unlink is retried against
+settlement evidence;
 unknown evidence is kept. Missing lifecycle evidence is noted once in dry-run
 and stays silent in apply mode. Unexpected helper failures fail the sweep.
 Panel-result files are retained because
@@ -143,6 +151,7 @@ completion_capture_gc_marker_lock() {
 }
 if [ -d "$OMS/plan/completion-captures" ] || [ -d "$OMS/plan/completion-prefixes" ] ||
    [ -d "$OMS/plan/completion-segments" ] || [ -d "$OMS/plan/completion-pins" ] ||
+   [ -d "$OMS/plan/completions" ] ||
    [ -d "$OMS/plan/completion-pin-leases" ]; then
   completion_gc_out=""
   completion_gc_status=0
@@ -870,9 +879,30 @@ def optional_generation(path):
     except FileNotFoundError:
         return None
 
+def directory_snapshot(path, label):
+    absent = []
+    while not os.path.lexists(path):
+        absent.append(path)
+        path = path.parent
+    return panel.DURABLE["component_snapshot"](str(repo), str(path / "probe"), label), absent
+
+def room_open(room_id):
+    if not isinstance(room_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", room_id):
+        return True
+    thread = repo / ".oms/threads" / (room_id + ".jsonl")
+    if not os.path.lexists(thread):
+        return False
+    try:
+        state = panel.room.status(repo, room_id)
+        return not state.get("closed") and any(m.get("joined") for m in state.get("participants", []))
+    except (Exception, SystemExit):
+        return True
+
 try:
     directory = repo / ".oms/panel-state/dispatch-logs"
-    ancestry = panel.DURABLE["component_snapshot"](str(repo), str(directory / "probe"), "dispatch logs")
+    ancestry, missing_logs = directory_snapshot(directory, "dispatch logs")
+    artifacts = repo / ".oms/artifacts"
+    artifact_ancestry, missing_artifacts = directory_snapshot(artifacts, "dispatch artifacts")
     ledger = repo / ".oms/lifecycle/events.jsonl"
     try:
         ledger_generation = generation(ledger)
@@ -901,16 +931,33 @@ try:
     for attempt in attempts:
         by_call.setdefault(attempt["refs"].get("panel_room_participant"), []).append(attempt)
         by_task.setdefault(attempt["task_id"], []).append(attempt)
-    for activity in sorted(directory.glob("call-*.activity.json")):
-        member = activity.name[:-len(".activity.json")]
+    members = {path.name[:-len(".activity.json")] for path in directory.glob("call-*.activity.json")}
+    members.update(path.name[len("panel-"):-len("-settled.json")]
+                   for path in artifacts.glob("panel-call-*-settled.json"))
+    members.update(member for member in by_call if isinstance(member, str)
+                   and os.path.lexists(artifacts / ("panel-" + member + ".json")))
+    for member in sorted(members):
         if not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", member):
             continue
-        # Keep activity last: any interruption or failed earlier unlink leaves
-        # the next sweep an anchor, including after the output log is gone.
-        paths = [directory / (member + suffix) for suffix in (".log", ".stream", ".transcript")] + [activity]
+        activity = directory / (member + ".activity.json")
+        # Exact suffixes avoid collecting a different call sharing this prefix.
+        # Keep launch/exit evidence until logs and diagnostic companions are gone.
+        log_paths = [directory / (member + suffix) for suffix in (".log", ".stream", ".transcript")]
+        launch_path = artifacts / ("panel-" + member + ".json")
+        exit_path = artifacts / ("panel-" + member + "-exit.json")
+        artifact_paths = [artifacts / ("panel-" + member + suffix) for suffix in (
+            "-brief.md", "-claim.json", "-process.json", "-supervisor.json",
+            "-pending.json", "-settled.json", "-launch.json")] + [exit_path, launch_path]
+        paths = log_paths + [activity] + artifact_paths
         try:
             before = {path: optional_generation(path) for path in paths}
-            if before[activity] is None or any(item[3] >= cutoff * 1000000000 for item in before.values() if item):
+            if not any(before.values()):
+                continue
+            all_aged = all(item[3] < cutoff * 1000000000 for item in before.values() if item)
+            logs_aged = before[activity] is not None and all(
+                before[path] is None or before[path][3] < cutoff * 1000000000
+                for path in log_paths + [activity])
+            if not (all_aged or logs_aged):
                 continue
             linked = by_call.get(member, [])
             if not linked or any(a["terminal"] is not True for a in linked):
@@ -919,25 +966,59 @@ try:
             if any(not a["terminal"] for own in linked for a in by_task[own["task_id"]]):
                 continue
             protected = False
+            task_unfinished = False
             for own in linked:
                 task = tasks.get(own["task_id"])
                 if task is None:
                     # A loaded plan that omits this task cannot prove its disposition.
                     protected = bool(raw_plan)
+                    task_unfinished = task_unfinished or bool(raw_plan)
                 elif task["state"] not in {"done", "cancelled"}:
+                    task_unfinished = True
                     latest = max(ops["parse_ts"](a["created_at"]) for a in by_task[own["task_id"]])
+                    # A later reviewer cannot supersede the worker needed for continuation.
+                    latest_worker = max((ops["parse_ts"](a["created_at"]) for a in by_task[own["task_id"]]
+                                         if a["refs"].get("panel_role") != "reviewer"
+                                         and a["refs"].get("panel_access") != "read"), default=0)
                     protected = (task["state"] in {"claimed", "running", "review", "landing"}
-                                 or ops["parse_ts"](own["created_at"]) >= latest)
+                                 or ops["parse_ts"](own["created_at"]) >= latest
+                                 or own["refs"].get("panel_role") != "reviewer"
+                                 and own["refs"].get("panel_access") != "read"
+                                 and ops["parse_ts"](own["created_at"]) >= latest_worker)
                 if protected:
                     break
             if protected:
                 continue
-            launch = json.loads(panel._read(repo, panel._dispatch_call_path(member), 4096))
+            if before[launch_path] is None:
+                continue
+            raw_launch = panel._read(repo, panel._dispatch_call_path(member), 4096, missing=True)
+            if not raw_launch:
+                continue
+            launch = json.loads(raw_launch)
             call = panel._dispatch_call_record(repo, launch["room"], launch)
             if (not call or any(a["refs"].get("panel_room_id") != call["room"] for a in linked)
                     or call.get("task_id") and any(a["task_id"] != call["task_id"] for a in linked)):
                 continue
-            exited = json.loads(panel._read(repo, panel._dispatch_call_path(member, True), 8192))
+            if all_aged and not task_unfinished and not room_open(call["room"]):
+                selected = paths
+            elif logs_aged:
+                selected = log_paths + [activity]
+            else:
+                continue
+            if before[exit_path] is None:
+                if any(before[p] is not None for p in paths if p not in (exit_path, launch_path)):
+                    continue
+                # Only the final unlink can leave a lone launch. Its private
+                # settlement receipt supplies the exit for the same proof checks.
+                released = panel.dispatch_store.read(repo, member + "-settled.json")
+                if type(released.get("exit")) is not int:
+                    continue
+                exited = panel._dispatch_exit_record(call, released["exit"])
+            else:
+                raw_exit = panel._read(repo, panel._dispatch_call_path(member, True), 8192, missing=True)
+                if not raw_exit:
+                    continue
+                exited = json.loads(raw_exit)
             if (type(exited.get("exit")) is not int
                     or exited != panel._dispatch_exit_record(call, exited["exit"])
                     or not panel._dispatch_call_finished(repo, call["room"], call)
@@ -959,14 +1040,17 @@ try:
                            for step in ("settlement", "room_result", "structured_event", "auto_review"))):
                 continue
             panel.DURABLE["components_unchanged"](ancestry, "dispatch logs")
+            panel.DURABLE["components_unchanged"](artifact_ancestry, "dispatch artifacts")
+            if any(os.path.lexists(path) for path in missing_logs + missing_artifacts):
+                continue
             if generation(ledger) != ledger_generation:
                 break
             if before != {path: optional_generation(path) for path in paths}:
                 continue
             group_failed = False
             before_files = files
-            for path in paths:
-                if before[path] is None or path == activity and group_failed:
+            for path in selected:
+                if before[path] is None or group_failed and path in (activity, exit_path, launch_path):
                     continue
                 if not dry:
                     try:
@@ -993,7 +1077,17 @@ PY_DISPATCH_LOGS
 dispatch_logs_gc_plan_lock() {
   oms_try_file_lock "$OMS/plan/tasks.json" dispatch_logs_gc_locked
 }
-if [ -d "$OMS/panel-state/dispatch-logs" ]; then
+# Unrelated artifacts must not create a persistent plan lock.
+has_panel_call_artifacts() {
+  local p
+  for p in "$OMS/artifacts"/panel-call-*.json; do
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+if [ -d "$OMS/panel-state/dispatch-logs" ] || has_panel_call_artifacts; then
   dispatch_gc_status=0
   dispatch_gc_out="$(oms_try_file_lock "$delegation_set_lock" dispatch_logs_gc_plan_lock)" || dispatch_gc_status=$?
   case "$dispatch_gc_status" in
