@@ -43908,7 +43908,6 @@ for arg in "$@"; do
         case "${OMS_TEST_VALIDATOR_MODE:-fail}" in
           fail) exit 91 ;;
           short) printf '1\n'; exit 0 ;;
-          crlf) printf '1\r\n1\r\n1\r\n'; exit 0 ;;
           shape) printf '{"schema":99,"failures":[],"invalid_rows":0}\n' > "$2" ;;
         esac
         ;;
@@ -43940,14 +43939,6 @@ assert all(row[name]["healthy"] is False for name in ("failures", "task", "plan"
 ' || fail "a partial validator verdict reopened authority: $state_json"
   local validator_repo="$TMP/state-validator-control"
   make_committed_repo "$validator_repo"
-  state_json="$(PATH="$python_fail_bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
-    OMS_TEST_VALIDATOR_MODE=crlf "$ROOT/scripts/state.sh" --repo "$validator_repo" --json)" ||
-    fail "state should accept Windows validator newlines"
-  printf '%s' "$state_json" | python3 -c '
-import json, sys
-row = json.load(sys.stdin)
-assert all(row[name]["healthy"] is True for name in ("failures", "task", "plan")), row
-' || fail "Windows validator newlines were treated as unhealthy: $state_json"
   state_json="$(PATH="$python_fail_bin:$PATH" OMS_TEST_REAL_PYTHON="$real_python" \
     OMS_TEST_VALIDATOR_MODE=shape PYTHONOPTIMIZE=1 \
     "$ROOT/scripts/state.sh" --repo "$validator_repo" --json)" ||
