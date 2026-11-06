@@ -8,6 +8,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
+# Quota fixtures assert native defaults; operator capacity overrides belong to
+# the outer admission, while each limit case below supplies its own override.
+unset OMS_LANDING_CAPTURE_COUNT OMS_LANDING_CAPTURE_BYTES
 ADMIT="$ROOT/scripts/patch-admit.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-admit-verifier-floor.XXXXXX")"
 cleanup() {
