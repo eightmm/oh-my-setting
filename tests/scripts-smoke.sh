@@ -34682,15 +34682,49 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   local project="$TMP/guard-foreign-ref"
   local sibling="$TMP/guard-foreign-ref-sibling"
   local ready="$TMP/guard-foreign-ref-ready" done="$TMP/guard-foreign-ref-done"
-  local next result pid branch strict
+  local next result pid branch strict old artifact
   make_guard_repo "$project"
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    . "$ROOT/scripts/lib/oms-common.sh"
+    local snapshot="$TMP/guard-refs-report-freshness" current future report changed capture
+    oms_worker_surface_snapshot "$project" "$snapshot" "$project" || exit 1
+    current="$(git -C "$project" rev-parse HEAD)"
+    future="$(git -C "$project" commit-tree -p HEAD -m diagnostic 'HEAD^{tree}')"
+    cp "$snapshot/refs" "$snapshot/refs-now"
+    for capture in fresh empty missing; do
+      case "$capture" in
+        fresh) sed "s/$current/$future/g" "$snapshot/refs" > "$snapshot/guard-report-refs-now" ;;
+        empty) : > "$snapshot/guard-report-refs-now" ;;
+        missing) rm -f "$snapshot/guard-report-refs-now" ;;
+      esac
+      report="$(oms_worker_refs_trace_report "$snapshot" "$project")" || exit 1
+      if [ "$capture" = fresh ]; then
+        contains "$report" "refs/heads/main ${current:0:12}->${future:0:12} (fast-forward)" ||
+          fail "fresh failure capture lost to stale refs-now: $report"
+        contains "$report" 'shared checkout HEAD moved' || fail "fresh HEAD detail missing: $report"
+      else
+        contains "$report" 'shared checkout HEAD unchanged' || fail "refs-now fallback missing: $report"
+      fi
+    done
+    cp "$snapshot/refs" "$snapshot/guard-report-refs-now"
+    changed="$(oms_worker_surface_diff "$project" "$snapshot" "" "$project")" || exit 1
+    [ -z "$changed" ] || fail "unchanged report fixture changed: $changed"
+    assert_not_exists "$snapshot/refs-now"
+    assert_not_exists "$snapshot/guard-report-refs-now"
+  ) || fail "ref report freshness checks failed"
   git -C "$project" worktree add -qb feature "$sibling"
   # A separate session rewrites both ordinary and oms/* branches. The provider
   # only waits; it performs no Git mutation in this fixture.
   for branch in feature oms/foreign; do
     [ "$branch" = feature ] || git -C "$sibling" checkout -qb "$branch"
     for strict in 0 1; do
-      next="$(git -C "$project" commit-tree -p "$branch" -m rewrite "${branch}^{tree}")"
+      old="$(git -C "$project" rev-parse "$branch")"
+      if [ "$strict" = 1 ]; then
+        next="$(git -C "$project" commit-tree -m rewrite "${branch}^{tree}")"
+      else
+        next="$(git -C "$project" commit-tree -p "$branch" -m rewrite "${branch}^{tree}")"
+      fi
       rm -f "$ready" "$done"
       (
         local tries=0
@@ -34713,6 +34747,10 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
       else
         [ "${result%%$'\t'*}" != 0 ] || fail "strict mode tolerated foreign rewrite: $result"
         contains "$result" 'outside its worktree: refs' || fail "strict foreign refs not hard: $result"
+        contains "$result" "refs/heads/$branch ${old:0:12}->${next:0:12} (non-fast-forward)" || fail "rewrite detail missing: $result"
+        contains "$result" 'shared checkout HEAD unchanged' || fail "HEAD detail missing: $result"
+        contains "$result" 'shared checkout index unchanged' || fail "index detail missing: $result"
+        contains "$result" 'another session committing in the shared checkout' || fail "hint missing: $result"
       fi
     done
   done
@@ -34722,6 +34760,7 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
   for branch in feature oms/foreign; do
     for strict in 0 1; do
       git -C "$sibling" checkout -q "$branch"
+      old="$(git -C "$project" rev-parse "$branch")"
       next="$(git -C "$project" commit-tree -p "$branch" -m fast-forward "${branch}^{tree}")"
       rm -f "$ready" "$done"
       (
@@ -34742,9 +34781,106 @@ test_worker_guard_reports_foreign_checkout_ref_moves() {
       else
         [ "${result%%$'\t'*}" != 0 ] || fail "strict mode tolerated foreign fast-forward then detach: $result"
         contains "$result" 'outside its worktree: refs' || fail "strict detached foreign refs not hard: $result"
+        contains "$result" "refs/heads/$branch ${old:0:12}->${next:0:12} (fast-forward)" || fail "fast-forward detail missing: $result"
+        contains "$result" 'shared checkout HEAD unchanged' || fail "HEAD detail missing: $result"
+        contains "$result" 'shared checkout index unchanged' || fail "index detail missing: $result"
+        contains "$result" 'another session committing in the shared checkout' || fail "hint missing: $result"
       fi
     done
   done
+
+  old="$(git -C "$project" rev-parse HEAD)"
+  rm -f "$ready" "$done"
+  (
+    local tries=0
+    while [ ! -f "$ready" ] && [ "$tries" -lt "${OMS_TEST_CALL_TIMEOUT:-100}" ]; do sleep 1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    printf 'shared change\n' > "$project/shared-change"
+    git -C "$project" add shared-change
+    git -C "$project" commit -q -m shared-change || exit 1
+    touch "$done"
+  ) &
+  pid=$!
+  result="$(run_guarded_worker "$project" "touch '$ready'; tries=0; while [ ! -f '$done' ] && [ \"\$tries\" -lt ${OMS_TEST_CALL_TIMEOUT:-100} ]; do sleep 1; tries=\$((tries + 1)); done; [ -f '$done' ] || exit 1")"
+  wait "$pid" || fail "shared commit fixture timed out"
+  next="$(git -C "$project" rev-parse HEAD)"
+  [ "${result%%$'\t'*}" != 0 ] || fail "shared commit must stop worker: $result"
+  contains "$result" "refs/heads/main ${old:0:12}->${next:0:12} (fast-forward)" || fail "shared ref detail missing: $result"
+  contains "$result" 'shared checkout HEAD moved' || fail "shared HEAD detail missing: $result"
+  contains "$result" 'shared checkout index moved' || fail "shared index detail missing: $result"
+  contains "$result" 'another session committing in the shared checkout' || fail "shared commit hint missing: $result"
+  artifact="$(find "$project/.oms/artifacts/delegate" -type f -name '*.md' -exec grep -lF "refs/heads/main ${old:0:12}->${next:0:12}" {} \; | sed -n '1p')"
+  [ -n "$artifact" ] || fail "shared commit artifact missing"
+  assert_file_contains "$artifact" 'shared checkout index moved'
+  if grep -Fq 'no path/ref detail available in the preserved manifests' "$artifact"; then
+    fail "shared commit artifact retained the unavailable-detail placeholder"
+  fi
+
+  # A soft foreign move populates refs-now before verification. A later shared
+  # commit must still be diagnosed when the index guard prevents another diff.
+  local verify_ready="$TMP/guard-refs-verify-ready" verify_done="$TMP/guard-refs-verify-done"
+  local verify_script="$TMP/guard-refs-verify.sh" stale_refs="$TMP/guard-refs-before-verify"
+  local wait_limit="${OMS_TEST_CALL_TIMEOUT:-120}" rc=0
+  git -C "$sibling" checkout -q feature
+  old="$(git -C "$project" rev-parse HEAD)"
+  rm -f "$ready" "$done"
+  oms_smoke_make_fake_provider_stub "$project-bin/codex" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in --version:|--help:|exec:--help) echo 'codex 1.0'; exit 0 ;; esac
+touch '$ready'
+tries=0
+while [ ! -f '$done' ] && [ "\$tries" -lt '$wait_limit' ]; do sleep 1; tries=\$((tries + 1)); done
+[ -f '$done' ] || exit 1
+echo done
+EOF
+  cat > "$verify_script" <<EOF
+cp ../worker-guard/refs-now '$stale_refs' || exit 1
+touch '$verify_ready'
+tries=0
+while [ ! -f '$verify_done' ] && [ "\$tries" -lt '$wait_limit' ]; do sleep 1; tries=\$((tries + 1)); done
+[ -f '$verify_done' ]
+EOF
+  (
+    local tries=0 number
+    while [ ! -f "$ready" ] && [ "$tries" -lt "$wait_limit" ]; do sleep 1; tries=$((tries + 1)); done
+    [ -f "$ready" ] || exit 1
+    git -C "$sibling" commit -q --allow-empty -m before-verify || exit 1
+    touch "$done"
+    tries=0
+    while [ ! -f "$verify_ready" ] && [ "$tries" -lt "$wait_limit" ]; do sleep 1; tries=$((tries + 1)); done
+    [ -f "$verify_ready" ] || exit 1
+    printf 'during verify\n' >> "$project/shared-change"
+    git -C "$project" add shared-change
+    git -C "$project" commit -q -m during-verify || exit 1
+    # More than twelve details must use the artifact's existing omission line.
+    for number in {1..12}; do
+      git -C "$project" update-ref "refs/heads/zz-diagnostic/$number" HEAD || exit 1
+    done
+    touch "$verify_done"
+  ) &
+  pid=$!
+  result="$(HOME="$project-home" NVM_DIR="$project-home/.nvm" PATH="$project-bin:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$project" --to codex --prompt x \
+    --allow-no-change --verify "bash '$verify_script'" 2>&1)" || rc=$?
+  wait "$pid" || fail "commit during verification fixture timed out: $result"
+  [ "$rc" = 1 ] || fail "commit during verification must fail closed: $rc $result"
+  next="$(git -C "$project" rev-parse HEAD)"
+  assert_file_contains "$stale_refs" "$old"
+  contains "$result" "refs canonical ref refs/heads/main ${old:0:12}->${next:0:12} (fast-forward)" ||
+    fail "stale refs-now hid the verification commit: $result"
+  contains "$result" 'shared checkout HEAD moved' || fail "verification HEAD detail missing: $result"
+  contains "$result" 'shared checkout index moved' || fail "verification index detail missing: $result"
+  artifact="$(find "$project/.oms/artifacts/delegate" -type f -name '*.md' -exec grep -lF "refs/heads/main ${old:0:12}->${next:0:12}" {} \; | sed -n '1p')"
+  [ -n "$artifact" ] || fail "verification commit artifact missing"
+  python3 - "$artifact" <<'PY' || fail "verification ref detail formatting violated its artifact contract"
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+assert "no path/ref detail available in the preserved manifests" not in text, text
+details = text.rsplit("Changed paths/refs by snapshot (up to 12 sanitized lines):\n", 1)[1].split("\nExecution-state details:", 1)[0].splitlines()
+assert len(details) == 13 and details[-1] == "additional changed paths omitted", details
+assert details[0].startswith("refs canonical ref refs/heads/"), details
+assert all(line.startswith("refs canonical ") for line in details[:12]), details
+PY
 
   # Exercise incomplete receipts without starting a provider for each damaged
   # file. A second checkout of the same branch cannot borrow the first's proof.

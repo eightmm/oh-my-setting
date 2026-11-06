@@ -1413,6 +1413,89 @@ PY
   fi
 }
 
+oms_worker_refs_trace_report() {  # MANIFEST_DIR [REPO_DIR] [PREFIX]
+  python3 -I -B - "$1" "${2:-}" "${3:-}" "$OMS_GIT_INDEX_SIGNATURE_PY" <<'PYREPORT'
+import base64, glob, os, re, subprocess, sys
+root, repo, prefix, source = sys.argv[1:]
+exec(source)
+def read(name):
+    try:
+        with open(os.path.join(root, name), encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+def parse(lines):
+    refs, head, identity = {}, None, None
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and parts[1].startswith("refs/") and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
+            refs[parts[1]] = parts[0]
+        elif len(parts) == 1 and re.fullmatch(r"[0-9a-fA-F]+", parts[0]):
+            head = parts[0]
+        elif len(parts) == 2 and parts[1] == "HEAD-identity":
+            identity = parts[0]
+    return refs, head, identity
+before, head, ident = parse(read("refs"))
+nowfile = "guard-report-refs-now" if os.path.isfile(os.path.join(root, "guard-report-refs-now")) and os.path.getsize(os.path.join(root, "guard-report-refs-now")) > 0 else "refs-now"
+after, newhead, newident = parse(read(nowfile))
+rows = read("git-execution-state")
+common = ""
+if repo:
+    try:
+        common = subprocess.check_output(["git", "-C", repo, "rev-parse", "--git-common-dir"], stderr=subprocess.DEVNULL, text=True).strip()
+        if not os.path.isabs(common):
+            common = os.path.join(repo, common)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+if not common and rows:
+    try:
+        common = os.path.dirname(os.fsdecode(base64.b64decode(rows[0].split("\t", 1)[0], validate=True)))
+    except (ValueError, IndexError):
+        pass
+def kind(old, new):
+    if not old: return "created, non-fast-forward"
+    if not new: return "deleted, non-fast-forward"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    try:
+        rc = subprocess.call(["git", "--git-dir=" + common, "merge-base", "--is-ancestor", old, new], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        rc = 1
+    return "fast-forward" if rc == 0 else "non-fast-forward"
+def safe(value):
+    return re.sub(r"[^A-Za-z0-9/_.-]", "?", value or "none")
+def move(old, new):
+    return "%s->%s (%s)" % ((old or "none")[:12], (new or "none")[:12], kind(old, new))
+for ref in sorted(set(before) | set(after)):
+    if before.get(ref) != after.get(ref):
+        print("refs %sref %s %s" % (prefix, safe(ref), move(before.get(ref), after.get(ref))))
+if head != newhead and (head or newhead):
+    print("refs %sshared checkout HEAD moved %s" % (prefix, move(head, newhead)))
+else:
+    print("refs %sshared checkout HEAD unchanged" % prefix)
+if ident != newident and (ident or newident):
+    print("refs %sshared checkout HEAD identity %s->%s" % (prefix, safe(ident), safe(newident)))
+moved = False
+for path in glob.glob(os.path.join(root, "execution-state-*-detail")) + [os.path.join(root, "execution-state-detail")]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            moved |= bool(re.search(r"component=execution-state(?: \S+)? index", f.read()))
+    except OSError:
+        pass
+for row in rows:
+    try:
+        encoded, expected = row.split("\t", 1)
+        if not expected.startswith("index:"): continue
+        path = os.fsdecode(base64.b64decode(encoded, validate=True))
+        size = int(expected.split(":", 2)[1])
+        with open(path, "rb") as f: current = "index:%d:%s" % (size, index_signature(f.read(), size))
+        moved |= current != expected
+    except (OSError, ValueError, IndexError):
+        moved = True
+print("refs %sshared checkout index %s" % (prefix, "moved" if moved else "unchanged"))
+PYREPORT
+}
+
 # Hash the complete private receipt inventory without following links or
 # opening special files. Scalar receipts have exactly one nonempty line;
 # reflogs retain their legitimate empty/multiline representation.
@@ -1526,6 +1609,8 @@ oms_worker_surface_diff() {
   if [ -n "${OMS_WG_RECEIPTS_SHA:-}" ]; then
     oms_worker_gitmeta_receipts_assert_unchanged "$before_dir" "$OMS_WG_RECEIPTS_SHA" || return 2
   fi
+  # Diagnostic captures belong to this pass, not an earlier boundary check.
+  rm -f "$before_dir/refs-now" "$before_dir/guard-report-refs-now" || return 2
   surface_git_dir="$(oms_worker_surface_git_dir "$repo")"
   : > "$before_dir/gitmeta-managed-added"
   for name in config remotes refs remote-refs work-branches tracked files gitmeta hooks; do

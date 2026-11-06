@@ -405,7 +405,16 @@ ma_read_guard_assert() {
     receipts_sha="${MA_READ_STATE_RECEIPTS_SHA:-}"
     [ "$name" != source ] || receipts_sha="${MA_READ_SOURCE_RECEIPTS_SHA:-}"
     oms_worker_gitmeta_receipts_assert_unchanged "$MA_READ_GUARD_DIR/$name" "$receipts_sha" || return 2
-    oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" || return 2
+    if ! oms_git_execution_state_assert_unchanged "$root" "$MA_READ_GUARD_DIR/$name/git-execution-state" "$digest" "$name repository" "$MA_READ_GUARD_DIR/$name/execution-state-detail"; then
+      if [ -s "$MA_READ_GUARD_DIR/$name/execution-state-detail" ] &&
+        grep -q 'component=execution-state .*index' "$MA_READ_GUARD_DIR/$name/execution-state-detail" &&
+        oms_git_assert_safe_execution_config "$root" diff-read; then
+        oms_worker_surface_capture_one "$root" refs > "$MA_READ_GUARD_DIR/$name/guard-report-refs-now" || true
+        oms_worker_refs_trace_report "$MA_READ_GUARD_DIR/$name" "$root" | sed 's/^/  /' >&2 || true
+        echo 'hint: another session committing in the shared checkout during the run moves its index, HEAD and branch ref; move it with oms sync-shared or commit in a linked worktree' >&2
+      fi
+      return 2
+    fi
     if [ "$name" = source ]; then
       if [ "$(oms_sha256_file "$MA_READ_SOURCE_HEAD_FILE")" != "$MA_READ_SOURCE_HEAD_SHA" ]; then
         MA_READ_GUARD_DIAGNOSTIC='error: read pass changed source repository protected surface: HEAD'
@@ -530,6 +539,11 @@ $named}"
         done
         python3 "$MA_LIB_DIR/worker-guard-details.py" \
           "$MA_READ_GUARD_DIR/$name" "$named" | head -n 12 | sed 's/^/  /' >&2 || true
+        case ", ${hard}," in
+          *", refs,"*)
+            oms_worker_refs_trace_report "$MA_READ_GUARD_DIR/$name" "$root" | sed 's/^/  /' >&2 || true
+            echo 'hint: another session committing in the shared checkout during the run moves its index, HEAD and branch ref; move it with oms sync-shared or commit in a linked worktree' >&2 ;;
+        esac
         case ", ${hard}," in
           *", gitmeta,"*)
             oms_worker_gitmeta_trace_report "$MA_READ_GUARD_DIR/$name" | \

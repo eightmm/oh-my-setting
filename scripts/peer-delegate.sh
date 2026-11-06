@@ -2922,6 +2922,34 @@ if [ -n "$worker_guard_dir" ]; then
     }; then
       guard_manifest_safe=0
     fi
+    guard_execution_details="$(
+      for guard_detail_file in "$worker_guard_dir/execution-state-canonical-detail" \
+        "$worker_guard_dir/execution-state-worktree-detail" \
+        "$worker_source_guard_dir/execution-state-source-detail"; do
+        [ -s "$guard_detail_file" ] || continue
+        tr -d '\r' < "$guard_detail_file"
+      done
+    )"
+    guard_refs_report=0
+    case "$guard_execution_details" in
+      *"component=execution-state canonical index"*|*"component=execution-state source index"*) guard_refs_report=1 ;;
+    esac
+    case ",$worker_guard_changed," in *,refs,*) guard_refs_report=1 ;; esac
+    if [ "$guard_refs_report" = 1 ] && [ "$worker_guard_identity_valid" = 1 ] &&
+      oms_git_assert_safe_execution_config "$REPO" && oms_git_assert_safe_execution_config "$worktree"; then
+      for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
+        [ -n "$guard_manifest_dir" ] || continue
+        guard_repo_dir="$REPO"
+        if [ "$guard_manifest_dir" = "$worker_source_guard_dir" ]; then
+          guard_repo_dir="$delegate_worktree_repo"
+          oms_git_assert_safe_execution_config "$guard_repo_dir" || continue
+        fi
+        # An execution-state failure skips the diff and can leave an older capture.
+        if [ ! -s "$guard_manifest_dir/refs-now" ] || [ "${worker_boundary_failed:-0}" = 1 ]; then
+          oms_worker_surface_capture_one "$guard_repo_dir" refs > "$guard_manifest_dir/guard-report-refs-now" || true
+        fi
+      done
+    fi
     if [ "$guard_manifest_safe" = 1 ]; then
       for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
         [ -n "$guard_manifest_dir" ] || continue
@@ -2954,12 +2982,33 @@ if [ -n "$worker_guard_dir" ]; then
           oms_worker_gitmeta_trace_report "$guard_manifest_dir" | sed 's/^/  /' >&2 || true
         done ;;
     esac
+    if [ "$guard_refs_report" = 1 ] && [ "$worker_guard_identity_valid" = 1 ] &&
+      oms_git_assert_safe_execution_config "$REPO" && oms_git_assert_safe_execution_config "$worktree"; then
+      for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
+        [ -n "$guard_manifest_dir" ] || continue
+        guard_repo_dir="$REPO"; guard_prefix="canonical "
+        if [ "$guard_manifest_dir" = "$worker_source_guard_dir" ]; then
+          guard_repo_dir="$delegate_worktree_repo"; guard_prefix="source "
+          oms_git_assert_safe_execution_config "$guard_repo_dir" || continue
+        fi
+        guard_refs_details="$(oms_worker_refs_trace_report "$guard_manifest_dir" "$guard_repo_dir" "$guard_prefix")"
+        [ -z "$guard_refs_details" ] || {
+          printf '%s\n' "$guard_refs_details" | sed 's/^/  /' >&2
+          guard_metadata_details="${guard_metadata_details}${guard_metadata_details:+
+}$guard_refs_details"
+        }
+      done
+    fi
     guard_metadata_details="$(printf '%s\n' "$guard_metadata_details" | python3 -c '
 import sys
-lines = [line.rstrip("\r\n") for line in sys.stdin]
+lines = [line.rstrip("\r\n") for line in sys.stdin if line.strip()]
+if len(lines) > 1:
+    lines = [line for line in lines if line != "no path/ref detail available in the preserved manifests"]
 details = []
 for value in lines:
-    if value.startswith("gitmeta source "):
+    if value.startswith("refs "):
+        details.append(value)
+    elif value.startswith("gitmeta source "):
         details.append("snapshot=source clone gitmeta " + value[len("gitmeta source "):])
     elif value.startswith("source "):
         details.append("snapshot=source clone " + value[len("source "):])
@@ -2974,15 +3023,6 @@ for value in details[:12]:
 if len(details) > 12:
     print("additional changed paths omitted")
 ')"
-    guard_execution_details="$(
-      for guard_detail_file in \
-        "$worker_guard_dir/execution-state-canonical-detail" \
-        "$worker_guard_dir/execution-state-worktree-detail" \
-        "$worker_source_guard_dir/execution-state-source-detail"; do
-        [ -s "$guard_detail_file" ] || continue
-        tr -d '\r' < "$guard_detail_file"
-      done
-    )"
     if [ -n "$guard_execution_details" ] || [ -n "$guard_metadata_details" ]; then
       {
         printf '\n## Worker guard detail\n\n'
@@ -3005,8 +3045,9 @@ if len(details) > 12:
     esac
     case ",$worker_guard_changed," in *,refs,*) guard_main_checkout_moved=1 ;; esac
     if [ "$guard_main_checkout_moved" = 1 ]; then
-      guard_failure_hint="$guard_failure_hint The usual cause of an index or branch-ref change is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run; move it with oms sync-shared (which waits for live calls) or commit in a linked worktree."
+      guard_failure_hint="$guard_failure_hint The usual cause of an index or branch-ref change is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run; another session committing in the shared checkout moves its index, HEAD and branch ref; move it with oms sync-shared (which waits for live calls) or commit in a linked worktree."
     fi
+    echo "hint: $guard_failure_hint" >&2
     guard_failure_summary="worker guard stopped run; changed surfaces: $worker_guard_changed; execution-state: $guard_execution_details; changed paths/refs: $guard_metadata_details"
     guard_failure_summary="${guard_failure_summary:0:1200}"
     # The breach is loud now (this run exits 1), but a later patch-land or
