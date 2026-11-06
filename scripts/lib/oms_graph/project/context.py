@@ -44,7 +44,7 @@ def _rank_entries(repo: Path, index: Graph, tokens: Sequence[str]) -> List[Dict[
     candidates = [node for node in index.nodes.values() if not index.is_test(node["id"])]
     for node in candidates:
         path = str(node.get("path", ""))
-        if path in sources:
+        if not path or path in sources:
             continue
         sources[path] = []
         try:
@@ -61,13 +61,14 @@ def _rank_entries(repo: Path, index: Graph, tokens: Sequence[str]) -> List[Dict[
     documents = []
     for node in candidates:
         metadata = node.get("metadata") or {}
-        lines = sources.get(str(node.get("path", "")), [])
+        node_path = str(node.get("path", ""))
+        lines = sources.get(node_path, [])
         start = int(metadata.get("line", 0) or 0)
         end = int(metadata.get("end_line", start) or start)
         body = "\n".join(lines[max(0, start - 1):end] if start else lines)
         quoted = " ".join(match.group(2) for match in _QUOTED_SOURCE.finditer(body))
         fields = (str(node.get("name", "")) + " " + str(metadata.get("qualname", "")),
-                  str(node.get("path", "")), str(node.get("summary") or ""), quoted)
+                  node_path, str(node.get("summary") or ""), quoted)
         counters = [Counter(_identifier_words(field)) for field in fields]
         documents.append((node, counters, [sum(counter.values()) for counter in counters]))
     count = len(documents)

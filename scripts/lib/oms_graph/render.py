@@ -480,17 +480,18 @@ def project_visual_model(
         node = index[ident]
         name = str(node.get("name", "") or ident)
         metadata = node.get("metadata") if isinstance(node.get("metadata"), Mapping) else {}
+        display_path = str(node.get("path", "") or "")
         row = {
             "id": ident,
             "label": name,
             "kind": str(node.get("kind", "node") or "node"),
             "language": str(node.get("language", "") or ""),
-            "path": str(node.get("path", "") or ""),
+            "path": display_path,
             "degree": degree[ident],
             "focus": ident in primary_ids,
             "distance": task_distances.get(ident),
-            "change": "changed" if str(node.get("path", "")) in changed else (
-                "impacted" if str(node.get("path", "")) in impacted else ""
+            "change": "changed" if display_path in changed else (
+                "impacted" if display_path in impacted else ""
             ),
             "show_label": ident in label_ids,
             "line": metadata.get("line") if isinstance(metadata.get("line"), int) else None,

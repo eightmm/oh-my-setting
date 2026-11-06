@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from oms_runtime.common import CoreError
-from oms_runtime.context_pack import MAX_PACK_BYTES, automatic_context_pack, validate_context_pack
+from oms_runtime.context_pack import MAX_PACK_BYTES, automatic_context_pack, scoped_consumers, validate_context_pack
 
 MODULE = ROOT / "scripts" / "lib" / "oms_runtime" / "context_pack.py"
 
@@ -118,7 +118,7 @@ class ContextPackValidatorTest(unittest.TestCase):
         from oms_graph.project import build
 
         source = self.repo / 'lease.py'
-        source.write_text('def recover_lease(): return 1\n', encoding='utf-8')
+        source.write_text('import os\ndef recover_lease(): return os.getenv("LEASE_MODE")\n', encoding='utf-8')
         parent = Path(self.tmp.name) / 'parent'
         parent.mkdir()
         cold = automatic_context_pack(self.repo, parent, Path(self.tmp.name) / 'cold', 'recover lease')
@@ -126,6 +126,17 @@ class ContextPackValidatorTest(unittest.TestCase):
         self.assertFalse((parent / '.oms').exists())
         build.build(self.repo)
         original_graph = (self.repo / '.oms/project-graph/graph.json').read_bytes()
+        graph = json.loads(original_graph)
+        env = next(node for node in graph['nodes'] if node['kind'] == 'env')
+        self.assertNotIn('path', env)
+        self.assertIsInstance(scoped_consumers(self.repo, build.state_dir(self.repo), ['lease.py']), str)
+        from oms_runtime import context as runtime_context
+        for invalid in ({**env, 'path': 'lease.py'}, {**env, 'path': None},
+                        {'id': 'invalid', 'kind': 'file'},
+                        {'id': 'invalid', 'kind': 'file', 'path': ''},
+                        {'id': 'invalid', 'kind': 'file', 'path': 'missing.py'}):
+            with self.subTest(invalid=invalid), mock.patch.object(build, 'load_graph', return_value={**graph, 'nodes': [invalid]}):
+                self.assertIsNone(runtime_context._fresh_graph(self.repo))
         # Warm copies must not reparse or mutate the parent's cache.
         with mock.patch.object(build, 'build', side_effect=AssertionError('unexpected rebuild')), \
                 mock.patch.object(build, 'check', wraps=build.check) as freshness:

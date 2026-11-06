@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import warnings
 
-from ..model import make_edge, make_node, node_id
+from ..model import env_name, make_edge, make_node, node_id
 from .base import ParseResult, Parser
 from .python import PythonParser
 
@@ -108,7 +108,7 @@ def _case_close_count(code: str) -> int:
 class ShellParser(Parser):
     language = "shell"
     extensions = (".sh", ".bash")
-    version = 5
+    version = 8
 
     def parse(self, path: str, text: str, source_digest: str) -> ParseResult:
         result = ParseResult()
@@ -145,6 +145,14 @@ class ShellParser(Parser):
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore")
                             parsed = PythonParser().parse(path, "\n".join(heredoc_body), source_digest)
+                        result.nodes.extend(node for node in parsed.nodes if node.get("kind") == "env")
+                        for edge in parsed.edges:
+                            if edge.get("relation") == "reads_env":
+                                edge = dict(edge)
+                                edge["source"] = node_id("function", path, current_function) if current_function else file_id
+                                edge["evidence"] = dict(edge["evidence"])
+                                edge["evidence"]["line"] += heredoc_line
+                                result.edges.append(edge)
                         for ref in parsed.refs:
                             if ref.get("relation") == "imports" and ref.get("from") == file_id:
                                 imported = dict(ref)
@@ -170,6 +178,35 @@ class ShellParser(Parser):
             if not stripped:
                 pending_comments = []
                 continue
+            # Expansions in single quotes and comments are literal shell text.
+            visible = []
+            quote = ""
+            escaped = False
+            for offset, char in enumerate(raw):
+                if escaped:
+                    visible.append(" ")
+                    escaped = False
+                elif char == "\\" and quote != "'":
+                    visible.append(" ")
+                    escaped = True
+                elif char == "'" and quote != '"':
+                    quote = "" if quote else "'"
+                    visible.append(" ")
+                elif char == '"' and quote != "'":
+                    quote = "" if quote else '"'
+                    visible.append(" ")
+                elif char == "#" and not quote and (offset == 0 or raw[offset - 1].isspace() and (offset < 2 or raw[offset - 2] != "\\")):
+                    break
+                else:
+                    visible.append(char if quote != "'" else " ")
+            for expansion in re.finditer(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*))", "".join(visible)):
+                name = expansion.group(1) or expansion.group(2)
+                if env_name(name):
+                    result.nodes.append(make_node("env", name, path, "env", source_digest))
+                    inline = re.match(r"\s*(?:function\s+([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\))", raw)
+                    owner = current_function or ((inline.group(1) or inline.group(2)) if inline else "")
+                    source = node_id("function", path, owner) if owner else file_id
+                    result.edges.append(make_edge(source, node_id("env", name), "reads_env", "EXTRACTED", path=path, source_digest=source_digest, line=number))
             here = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)", raw)
             if here:
                 heredoc = here.group(1)

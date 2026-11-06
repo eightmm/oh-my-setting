@@ -121,6 +121,8 @@ class Graph:
                     2 * weights[term] if _token_hits((term,), summary) else 0,
                 ) for term in tokens)
                 score = min(90, score)
+            if node.get("kind") == "env" and name == needle:
+                score = 103
             if score and node.get("kind") in ("class", "function", "method"):
                 score += 2
             if score:

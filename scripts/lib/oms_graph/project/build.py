@@ -238,7 +238,10 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
     node_map: Dict[str, Dict[str, Any]] = {}
     for item in extractions:
         for node in item.get("nodes", []):
-            node_map[node["id"]] = dict(node)
+            if node.get("kind") == "env":
+                node_map.setdefault(node["id"], dict(node))
+            else:
+                node_map[node["id"]] = dict(node)
     nodes = sort_nodes(list(node_map.values()))
     raw_edges = [edge for item in extractions for edge in item.get("edges", [])]
     by_id = {node["id"]: node for node in nodes}

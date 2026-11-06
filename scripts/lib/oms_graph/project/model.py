@@ -13,6 +13,8 @@ PATH_LITERAL_RE = re.compile(r"(?<![A-Za-z0-9_./$\\-])([A-Za-z0-9_][A-Za-z0-9_.-
 
 def node_id(kind: str, path: str, qualname: str = "") -> str:
     path = path.replace("\\", "/").lstrip("/")
+    if kind == "env":
+        return "env:%s" % (qualname or path)
     if kind == "file":
         return "file:%s" % path
     if kind == "module":
@@ -20,6 +22,11 @@ def node_id(kind: str, path: str, qualname: str = "") -> str:
     if kind in ("class", "function", "method", "symbol"):
         return "symbol:%s::%s" % (path, qualname)
     return "%s:%s" % (kind, path)
+
+
+def env_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) and
+                ("_" in name or name.startswith(("OMS_", "OH_MY_SETTING_", "CODEX_", "CLAUDE_", "GEMINI_"))))
 
 
 def compact_summary(value: Optional[str], limit: int = 240) -> Optional[str]:
@@ -35,11 +42,13 @@ def compact_summary(value: Optional[str], limit: int = 240) -> Optional[str]:
 
 
 def make_node(kind: str, name: str, path: str, language: str, source_digest: str, *, qualname: str = "", line: Optional[int] = None, summary: Optional[str] = None, metadata: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
-    node: Dict[str, Any] = {"id": node_id(kind, path, qualname), "kind": kind,
+    node: Dict[str, Any] = {"id": node_id(kind, path, name if kind == "env" else qualname), "kind": kind,
                             "name": name, "path": path.replace("\\", "/"),
                             "language": language, "source_digest": source_digest,
                             "summary": compact_summary(summary), "crux": None,
                             "metadata": dict(metadata or {})}
+    if kind == "env":
+        node.pop("path")
     if qualname:
         node["metadata"]["qualname"] = qualname
     if line is not None:

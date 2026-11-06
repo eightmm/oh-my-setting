@@ -10,7 +10,7 @@ from oms_graph.errors import GraphError
 from oms_runtime.common import run_output
 from .query import Graph
 
-DEFAULT_RELATIONS = ("imports", "calls", "references", "tests", "uses", "depends_on")
+DEFAULT_RELATIONS = ("imports", "calls", "references", "tests", "uses", "depends_on", "reads_env")
 
 
 def changed_paths(repo: Path, *, base: str = "") -> Dict[str, List[str]]:
@@ -60,6 +60,10 @@ def blast_radius(
     seeds = []
     matched_paths = set()
     for path in paths:
+        if path.startswith("env:") and path in index.nodes:
+            seeds.append(path)
+            matched_paths.add(path)
+            continue
         for ident, node in index.nodes.items():
             if node.get("path") == path:
                 seeds.append(ident)

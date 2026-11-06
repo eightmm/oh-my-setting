@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import builtins
 
-from ..model import compact_summary, make_edge, make_node, node_id
+from ..model import env_name, compact_summary, make_edge, make_node, node_id
 from .base import ParseResult, Parser
 
 _BUILTIN_NAMES = frozenset(dir(builtins))
@@ -91,7 +91,7 @@ def _python_signature(node: ast.AST, qualname: str, kind: str) -> str:
 class PythonParser(Parser):
     language = "python"
     extensions = (".py",)
-    version = 3
+    version = 6
 
     def parse(self, path: str, text: str, source_digest: str) -> ParseResult:
         result = ParseResult()
@@ -158,6 +158,8 @@ class PythonParser(Parser):
                 old_class, old_symbol = self.class_name, self.symbol
                 self.class_name = node.name
                 self.symbol = self._add_symbol("class", node.name, node)
+                for decorator in node.decorator_list:
+                    self.visit(decorator)
                 self.methods_stack.append({child.name for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))})
                 for base in node.bases:
                     base_name = _dotted_name(base)
@@ -173,6 +175,11 @@ class PythonParser(Parser):
                 kind = "method" if self.class_name else "function"
                 old = self.symbol
                 self.symbol = self._add_symbol(kind, name, node)
+                for decorator in node.decorator_list:
+                    self.visit(decorator)
+                for default in node.args.defaults + node.args.kw_defaults:
+                    if default is not None:
+                        self.visit(default)
                 self.locals_stack.append(_bound_names(node))
                 for child in getattr(node, "body", []):
                     self.visit(child)
@@ -191,7 +198,27 @@ class PythonParser(Parser):
                 for alias in node.names:
                     result.refs.append({"from": self._source(), "relation": "imports", "kind": "module", "value": module, "line": node.lineno, "binding": alias.asname or alias.name, "imported": alias.name})
 
+            def _env_read(self, value: ast.AST, line: int) -> None:
+                if isinstance(value, ast.Constant) and isinstance(value.value, str) and env_name(value.value):
+                    name = value.value
+                    result.nodes.append(make_node("env", name, path, "env", source_digest))
+                    result.edges.append(make_edge(self._source(), node_id("env", name), "reads_env", "EXTRACTED", path=path, source_digest=source_digest, line=line))
+
+            def visit_Subscript(self, node: ast.Subscript) -> None:
+                if _dotted_name(node.value) == "os.environ" and isinstance(node.ctx, ast.Load):
+                    self._env_read(node.slice, node.lineno)
+                self.generic_visit(node)
+
+            def visit_Compare(self, node: ast.Compare) -> None:
+                values = [node.left] + list(node.comparators)
+                for i, op in enumerate(node.ops):
+                    if isinstance(op, (ast.In, ast.NotIn)) and _dotted_name(values[i + 1]) == "os.environ":
+                        self._env_read(values[i], node.lineno)
+                self.generic_visit(node)
+
             def visit_Call(self, node: ast.Call) -> None:
+                if _dotted_name(node.func) in ("os.environ.get", "os.getenv", "environ.get") and node.args:
+                    self._env_read(node.args[0], node.lineno)
                 value = _dotted_name(node.func)
                 receiver, _, member = value.partition(".")
                 if receiver in ("self", "cls") and self.class_name and member and "." not in member:

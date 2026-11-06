@@ -116,7 +116,7 @@ def run(repo: Path, *, count: int = 60, revision: str = "HEAD", cache: Path) -> 
                     os.environ.pop("OMS_PROJECT_GRAPH_STATE", None)
                 else:
                     os.environ["OMS_PROJECT_GRAPH_STATE"] = previous
-            entries = list(dict.fromkeys(index.nodes[ident]["path"] for ident in pack["entries"][:8]))
+            entries = list(dict.fromkeys(index.nodes[ident]["path"] for ident in pack["entries"][:8] if index.nodes[ident].get("path")))
             hits = sorted(set(entries) & set(case["gold"]))
             row = dict(case, entries=entries, hits=hits, recall_at_8=len(hits) / len(case["gold"]),
                        pack_bytes=len(canonical_json(pack)))

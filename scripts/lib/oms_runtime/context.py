@@ -165,7 +165,9 @@ def _fresh_graph(repo: Path, *, state: Optional[Path] = None) -> Optional[Tuple[
         discovery = manifest.get("discovery", {})
         graph = build.load_graph(repo, state=state)
         paths = set(manifest.get("files", {}))
-        if any(node["path"] not in paths for node in graph.get("nodes", [])):
+        if any(("path" in node) if node.get("kind") == "env" else
+               ("path" not in node or node["path"] not in paths)
+               for node in graph.get("nodes", [])):
             return None
         # A regenerable index is data, not permission to read outside the repo.
         for raw in paths:

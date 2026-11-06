@@ -20,6 +20,7 @@ from oms_graph.project.build import build, check, ensure, load_graph
 from oms_graph.project.context import context_pack, select_context
 from oms_graph.project.benchmark import history_cases, run as benchmark_run
 from oms_graph.project.query import Graph
+from oms_graph.project import analytics, history
 
 
 class ProjectGraphTest(unittest.TestCase):
@@ -40,6 +41,72 @@ class ProjectGraphTest(unittest.TestCase):
     def graph(self):
         build(self.repo, state=self.state)
         return load_graph(self.repo, state=self.state)
+
+    def test_environment_readers_are_graph_nodes(self) -> None:
+        self.write("a.sh", 'reader() {\n  echo "${OMS_GRAPH_KNOB:-}" "$HOME"\n}\n')
+        self.write("b.py", 'import os\ndef reader():\n    return os.getenv("OMS_GRAPH_KNOB")\n')
+        self.write("c.sh", 'OMS_GRAPH_KNOB=literal\nexport OMS_OTHER_VALUE\necho "$PATH"\n')
+        self.write("tests/test_reader.py", 'import os\nos.getenv("OMS_TEST_ONLY")\nos.getenv("OMS_GRAPH_KNOB")\n')
+        graph = self.graph()
+        index = Graph(graph)
+        node = index.node("env:OMS_GRAPH_KNOB")
+        self.assertEqual((node["kind"], node["language"]), ("env", "env"))
+        self.assertNotIn("path", node)
+        edges = [edge for edge in graph["edges"] if edge["relation"] == "reads_env" and edge["target"] == node["id"]]
+        self.assertEqual({(e["source"], e["target"], e["evidence"]["line"], e["confidence"]) for e in edges},
+                         {("symbol:a.sh::reader", "env:OMS_GRAPH_KNOB", 2, "EXTRACTED"),
+                          ("symbol:b.py::reader", "env:OMS_GRAPH_KNOB", 3, "EXTRACTED"),
+                          ("test:tests/test_reader.py", "env:OMS_GRAPH_KNOB", 3, "EXTRACTED")})
+        self.assertEqual(index.find("OMS_GRAPH_KNOB")[0]["id"], "env:OMS_GRAPH_KNOB")
+        self.assertNotIn("env:HOME", index.nodes)
+        self.assertNotIn("env:PATH", index.nodes)
+        self.assertEqual({row["id"] for row in blast_radius(index, ["env:OMS_GRAPH_KNOB"])["dependents"]},
+                         {"symbol:a.sh::reader", "symbol:b.py::reader", "test:tests/test_reader.py"})
+
+        self.assertNotIn("symbol:b.py::reader", {row["id"] for row in blast_radius(index, ["a.sh"])["dependents"]})
+        self.assertFalse(index.is_test("env:OMS_TEST_ONLY"))
+        visual = render.project_visual_model(graph["nodes"], graph["edges"],
+                                             focus_ids=["env:OMS_TEST_ONLY"])
+        self.assertIn("env:OMS_TEST_ONLY", {row["id"] for row in visual["nodes"]})
+        assurance = analytics.structural_assurance(graph["nodes"], graph["edges"])["nodes"]
+        self.assertNotEqual(assurance["file:a.sh"]["assurance"], "supported")
+        self.assertEqual(assurance["env:OMS_GRAPH_KNOB"]["assurance"], "supported")
+        visual = render.project_visual_model(graph["nodes"], graph["edges"],
+                                             focus_ids=["file:a.sh", "env:OMS_GRAPH_KNOB"])
+        rendered = {row["id"]: row for row in visual["nodes"]}
+        self.assertNotEqual(rendered["file:a.sh"]["assurance"], "supported")
+        self.assertNotIn(("a.sh", "b.py"), history.structural_pairs(graph))
+        pack = select_context(self.repo, graph, task="OMS_GRAPH_KNOB", state=self.state)
+        self.assertTrue({"a.sh", "b.py"}.issubset({row["path"] for row in pack["evidence"]}))
+        env_rows = [row for row in pack["assurance"]["nodes"] if row["id"] == "env:OMS_GRAPH_KNOB"]
+        self.assertTrue(env_rows)
+        self.assertFalse(env_rows[0].get("path"))
+
+    def test_environment_read_syntax_and_literals(self) -> None:
+        self.write("syntax.py", 'import os\nfrom os import environ\n'
+                   'os.environ.get("OMS_A")\nos.environ["OMS_B"]\n'
+                   'os.getenv("OMS_C")\nenviron.get("OMS_D")\n'
+                   '"OMS_E" in os.environ\nos.environ["OMS_WRITE"] = "x"\n'
+                   'os.getenv(variable)\nos.getenv("")\nos.getenv("bad_NAME")\n'
+                   '@deco(os.getenv("OMS_DECORATOR"))\ndef fn(val=os.getenv("OMS_DEFAULT")): pass\n'
+                   '@deco(os.getenv("OMS_CLASS"))\nclass Example: pass\n')
+        self.write("syntax.sh", "echo $OMS_F ${OMS_G:=x} ${OMS_H+yes}\n"
+                   "echo '$OMS_LITERAL' \\$OMS_ESCAPED # $OMS_COMMENT\n"
+                   "reader() { echo \"$OMS_INLINE\"; }\n"
+                   "echo 'prefix'#literal \"$OMS_QUOTED_HASH\"\n"
+                   "outer() {\npython3 - <<'PY'\nimport os\nos.getenv('OMS_HEREDOC')\nPY\n}\n")
+        index = Graph(self.graph())
+        for name in ("OMS_A", "OMS_B", "OMS_C", "OMS_D", "OMS_E", "OMS_F", "OMS_G", "OMS_H", "OMS_INLINE", "OMS_QUOTED_HASH", "OMS_HEREDOC", "OMS_DEFAULT", "OMS_DECORATOR", "OMS_CLASS"):
+            self.assertIn("env:" + name, index.nodes)
+        for name, source, line in (("OMS_INLINE", "symbol:syntax.sh::reader", 3),
+                                   ("OMS_HEREDOC", "symbol:syntax.sh::outer", 8),
+                                   ("OMS_DEFAULT", "symbol:syntax.py::fn", 13),
+                                   ("OMS_DECORATOR", "symbol:syntax.py::fn", 12),
+                                   ("OMS_CLASS", "symbol:syntax.py::Example", 14)):
+            self.assertTrue(any(e["source"] == source and e["evidence"]["line"] == line
+                                for e in index.ins["env:" + name]))
+        for name in ("OMS_WRITE", "OMS_LITERAL", "OMS_ESCAPED", "OMS_COMMENT", "bad_NAME"):
+            self.assertNotIn("env:" + name, index.nodes)
 
     def test_context_history_benchmark_uses_parent_and_excludes_prose_tests(self) -> None:
         def git(*args):

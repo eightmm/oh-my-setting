@@ -101,6 +101,7 @@ def structural_assurance(
         if str(node.get("kind", "")) == "test" or str(node.get("path", "")) in test_paths
     }
     path_tests = {}  # type: Dict[str, set]
+    node_tests = {}  # type: Dict[str, set]
     uncertain = {}  # type: Dict[str, Dict[str, set]]
     for edge in edges:
         if not isinstance(edge, Mapping):
@@ -115,8 +116,11 @@ def structural_assurance(
             production_id, test_id = (target, source) if source_test else (source, target)
             production_path = str(index[production_id].get("path", ""))
             test_path = str(index[test_id].get("path", ""))
-            if production_path and test_path:
-                path_tests.setdefault(production_path, set()).add(test_path)
+            if test_path:
+                if production_path:
+                    path_tests.setdefault(production_path, set()).add(test_path)
+                elif index[production_id].get("kind") == "env" and edge.get("relation") == "reads_env":
+                    node_tests.setdefault(production_id, set()).add(test_path)
         if not source_test and not target_test and confidence in ("INFERRED", "AMBIGUOUS"):
             bucket = uncertain.setdefault(source, {"INFERRED": set(), "AMBIGUOUS": set()})
             bucket[confidence].add(_uncertain_site_key(edge, index))
@@ -137,7 +141,7 @@ def structural_assurance(
             }
         else:
             path = str(node.get("path", ""))
-            linked_tests = sorted(path_tests.get(path, set()))
+            linked_tests = sorted(path_tests.get(path, set()) | node_tests.get(node_id, set()))
             site_sets = uncertain.get(node_id, {"INFERRED": set(), "AMBIGUOUS": set()})
             inferred_sites = len(site_sets["INFERRED"])
             ambiguous_sites = len(site_sets["AMBIGUOUS"])
