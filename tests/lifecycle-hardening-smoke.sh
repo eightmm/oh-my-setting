@@ -747,14 +747,16 @@ json.dump({
   "plugin": {"name": "oh-my-setting", "version": "0.4.0", "sha256": "x" * 64}
 }, open(sys.argv[1], "w", encoding="utf-8"))
 PY
-  HOME="$home" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_SNAPSHOT_LOG="$TMP/snapshot.log" \
+  HOME="$home" XDG_CACHE_HOME="$home/.cache" OMS_DELEGATE_WORKTREE_ROOT='' \
+    OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_SNAPSHOT_LOG="$TMP/snapshot.log" \
     PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools --no-doctor >/dev/null
   assert_contains "$TMP/snapshot.log" "machine"
   if grep -Fq slurm "$TMP/snapshot.log"; then
     fail "Slurm auto snapshot ran without sinfo"
   fi
   : > "$TMP/snapshot.log"
-  HOME="$home" OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_SNAPSHOT_LOG="$TMP/snapshot.log" \
+  HOME="$home" XDG_CACHE_HOME="$home/.cache" OMS_DELEGATE_WORKTREE_ROOT='' \
+    OMS_INSTALL_RECEIPT="$receipt" OMS_TEST_SNAPSHOT_LOG="$TMP/snapshot.log" \
     OH_MY_SETTING_GENERATE_MACHINE=0 OH_MY_SETTING_GENERATE_SLURM=1 \
     PATH="/usr/bin:/bin" "$installed/scripts/update.sh" --no-tools --no-doctor >/dev/null
   assert_contains "$TMP/snapshot.log" "slurm"
