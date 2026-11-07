@@ -4,6 +4,7 @@ from pathlib import Path
 import hashlib
 import os
 import panel_reader
+from panel_state import tmux_command
 import re
 import room
 import shlex
@@ -16,10 +17,6 @@ import time
 
 class ReloadWatcher(Exception):
     """Raised by a watcher after its OMS sources changed and compile; main re-executes it."""
-
-
-def tmux_command(*args):
-    return ["tmux"] + list(args)
 
 
 _TMUX_PERCENT = []
@@ -121,7 +118,6 @@ def top_text(rows):
 def split_cells(stored, window):
     """Board cells on a `window`-cell axis for a parsed geometry, leaving the chat pane (and the border) at least
     MIN_CHAT cells and the board at least MIN_BOARD; a window too small for both splits in half."""
-    from terminal_panel import MIN_BOARD, MIN_CHAT
     cells = (2 * stored[1] * window + 100) // 200 if stored[2] else stored[1]
     low, high = MIN_BOARD, window - MIN_CHAT - 1
     return max(low, min(high, cells)) if high >= low else max(1, window // 2)
@@ -133,7 +129,6 @@ NATIVE_MIN = 40  # a native CLI prompt below this wraps every word (42-cell dogf
 def board_split_cells(stored, window, explicit=False):
     """Board cells, or None when both panes cannot fit: landscape needs NATIVE_MIN CLI columns,
     portrait needs MIN_CHAT CLI rows. Explicit sizes keep the existing chat floor; defaults reserve the CLI minimum."""
-    from terminal_panel import MIN_BOARD, MIN_CHAT, NATIVE_MIN, split_cells
     minimum = MIN_CHAT if stored[0] == "top" else NATIVE_MIN
     if window < MIN_BOARD + 1 + minimum:
         return None
@@ -158,7 +153,6 @@ def portrait_window(window, current=None):
 
 def work_split_cells(stored, window):
     """Apply the Work-mode board cap while preserving the narrow-window split contract."""
-    from terminal_panel import MIN_BOARD, WORK_CHAT_RESERVE, split_cells
     cells = split_cells(stored, window)
     if stored[0] == "top" or window < MIN_BOARD + WORK_CHAT_RESERVE + 1:
         return cells
@@ -168,13 +162,12 @@ def work_split_cells(stored, window):
 
 
 def next_panel_mode(mode):
-    from terminal_panel import PANEL_MODES
     return PANEL_MODES[(PANEL_MODES.index(mode) + 1) % len(PANEL_MODES)] if mode in PANEL_MODES else "overview"
 
 
 def cycle_panel_mode(pane):
     """Cycle this window's layout without changing its Work split record."""
-    from terminal_panel import next_panel_mode, tmux_command
+    from terminal_panel import tmux_command
     try:
         found = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{@oms_panel_mode}"),
                                capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
@@ -198,12 +191,20 @@ def terminal_window():
     return None
 
 
+def board_share():
+    configured = os.environ.get("OMS_PANEL_BOARD_PERCENT", "")
+    if re.fullmatch(r"[+-]?[0-9]+", configured):
+        try:
+            return max(25, min(35, int(configured)))
+        except ValueError:
+            pass
+    return BOARD_SHARE
+
+
 def board_split(pane, repo, command, main_watch=False):
     """Open this window's board on the left when possible, otherwise above the CLI.
     Leave narrow windows unsplit so both the board and native CLI remain usable."""
-    from terminal_panel import BOARD_HEIGHT_SHARE, BOARD_SHARE, NATIVE_MIN, OVERVIEW_SHARE, PANEL_MODES
-    from terminal_panel import board_split_cells, parse_split, parse_work_drag, split_text, terminal_window
-    from terminal_panel import tmux_command, top_text, work_split_cells
+    from terminal_panel import terminal_window, tmux_command
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
                                            "#{window_width} #{window_height} #{session_attached} #{session_id}"
@@ -221,13 +222,7 @@ def board_split(pane, repo, command, main_watch=False):
     mode = parts[3] if parts[3] in PANEL_MODES else "work"
     # A detached session still has tmux's 80x24 window; the terminal that is about to attach is the better size.
     sized = window if attached else terminal_window()
-    share = BOARD_SHARE
-    configured = os.environ.get("OMS_PANEL_BOARD_PERCENT", "")
-    if re.fullmatch(r"[+-]?[0-9]+", configured):
-        try:
-            share = max(25, min(35, int(configured)))
-        except ValueError:
-            pass
+    share = board_share()
     available = sized or window
     left_fits = bool(available and board_split_cells(("left", BOARD_SHARE, True), available[0]) is not None)
     top_fits = bool(available and board_split_cells(("top", BOARD_HEIGHT_SHARE, True), available[1]) is not None)
@@ -289,7 +284,7 @@ def board_split(pane, repo, command, main_watch=False):
 def panel_geometry():
     """One tmux read of this board: (window active, zoomed, panes, window w/h, pane w/h, stored split text);
     None when tmux cannot say or this is the control window (only main windows share the split)."""
-    from terminal_panel import PANEL_MODES, tmux_command
+    from terminal_panel import tmux_command
     try:
         result = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
                                              "#{window_active} #{window_zoomed_flag} #{window_panes} #{window_width} "
@@ -320,7 +315,7 @@ class PanelModeSync:
         self.mode = None
 
     def tick(self, geometry):
-        from terminal_panel import OVERVIEW_SHARE, split_cells, tmux_command
+        from terminal_panel import tmux_command
         if geometry is None:
             return None
         active, zoomed, panes, window, pane, text = geometry[:6]
@@ -361,9 +356,7 @@ class SplitSync:
 
     def tick(self, geometry):
         """Apply one geometry read; return the name of what was done ("record", "follow") or None."""
-        from terminal_panel import BOARD_HEIGHT_SHARE, BOARD_SHARE, MIN_BOARD, NATIVE_MIN, PANEL_MODES
-        from terminal_panel import WORK_CHAT_RESERVE, parse_split, parse_work_drag, split_cells, tmux_command
-        from terminal_panel import work_split_cells
+        from terminal_panel import tmux_command
         if geometry is None:
             return None
         active, zoomed, panes, window, pane, text = geometry[:6]
@@ -398,7 +391,6 @@ class SplitSync:
         self.last = (window, current_extent, active, current)
 
         def record(cells):
-            from terminal_panel import split_text, tmux_command, top_text
             if mode != "work":
                 return False
             value = top_text(cells) if orientation == "top" else split_text(cells)
@@ -553,7 +545,7 @@ def reload_ready(stamps, settle=1.0):
     Called on every refresh: the first sighting of a changed tree only starts the clock, so a copy or
     edit still in progress never reaches os.execv. A tree that fails to start sets REJECTED_RELOAD["notice"].
     """
-    from terminal_panel import REJECTED_RELOAD, RELOAD_MODULES, ROOT, compile, source_stamps
+    from terminal_panel import ROOT, compile, source_stamps
     try:
         current = source_stamps()
         if current == stamps or current == REJECTED_RELOAD.get("stamps"):
@@ -687,7 +679,7 @@ def bind_main_keys():
 
     tmux root bindings are server-wide, so a key the user already bound is left alone.
     """
-    from terminal_panel import MAIN_KEYS, keys_help, tmux_command
+    from terminal_panel import MAIN_KEYS, tmux_command
     quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
     # tmux has no compare-and-unbind operation. A shell-backed if-shell pauses only
     # its client queue, so even an exact legacy match can become a user binding

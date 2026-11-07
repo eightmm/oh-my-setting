@@ -199,8 +199,7 @@ def menu_input():
 
 def read_choice(repo, provider, previous, view, attention_only, navigation, cache):
     """One control key without Enter; arrows, clicks and Enter act on the Needs-you list. A line elsewhere."""
-    from terminal_panel import clean, finish_opening, managed_session, menu_input, navigate, read_evidence
-    from terminal_panel import read_field, reader_shell, tab_event
+    from terminal_panel import clean, finish_opening, managed_session, menu_input, navigate, read_evidence, read_field, reader_shell, tab_event
     from panel_input import choose, passive_click
 
     def repaint():
@@ -335,14 +334,12 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
 
 
 def interactive(repo, view="auto", attention_only=False):
-    from terminal_panel import ENTRY, MAIN_HARNESSES, MAX_PROMPT, NativeShutdown, SESSION_ID, _adopt_successor
-    from terminal_panel import browse_chats, browse_results, clean, clear_control_view, council, dispatch
-    from terminal_panel import ensure_room, finalize_selection, hold_state, live_main_refusal, main_installed
-    from terminal_panel import main_occupied, main_owner, managed_session, menu_rows, native_binary
-    from terminal_panel import open_native, panel_mains, panel_room, private_capacity, provider_catalog
-    from terminal_panel import raw_keys, read_choice, read_field, recorded_room, reopen_panel, retry_delivery
-    from terminal_panel import room_listing, room_open, run, safe_label, show_providers, snapshot, source_stamps
-    from terminal_panel import stale_notice, swap_choices, swap_main, terminal_style, tmux_command
+    from terminal_panel import (ENTRY, MAIN_HARNESSES, MAX_PROMPT, NativeShutdown, SESSION_ID, _adopt_successor,
+        clean, clear_control_view, council, dispatch, ensure_room, finalize_selection, hold_state, live_main_refusal,
+        main_installed, main_occupied, main_owner, managed_session, menu_rows, native_binary, open_native,
+        panel_mains, panel_room, private_capacity, provider_catalog, raw_keys, read_choice, read_field, recorded_room,
+        reopen_panel, retry_delivery, room_listing, room_open, run, safe_label, show_providers, snapshot,
+        source_stamps, stale_notice, swap_choices, swap_main, terminal_style, tmux_command)
     harness = os.environ.get("OMS_PANEL_HARNESS") or (panel_mains() or ["claude"])[0]
     provider = os.environ.get("OMS_PANEL_OWNER") or main_owner(harness)
     previous = "ready"

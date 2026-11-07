@@ -45,7 +45,7 @@ _refresh = [0]  # counts native_subagents() calls, so entries not shown in the l
 
 
 def parent_only():
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if room._child():
         raise ValueError("workers cannot navigate native owner chats")
 
 
@@ -95,12 +95,8 @@ def native_index(wanted):
                             continue
                         if provider == "codex":
                             try:
-                                fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-                                with os.fdopen(fd, "rb") as handle:
-                                    actual = os.fstat(handle.fileno())
-                                    if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (info.st_dev, info.st_ino):
-                                        continue
-                                    line = handle.readline(65537)
+                                head = _read_owned(path, 65537, expect=(info.st_dev, info.st_ino))
+                                line = head[:head.find(b"\n") + 1 or len(head)]
                                 if len(line) > 65536:
                                     continue
                                 meta = json.loads(line)

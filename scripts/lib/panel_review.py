@@ -146,16 +146,6 @@ def _call_result_event(repo, room_id, member, task_id, status):
     return payload, result_record
 
 
-def _judgment_mail(repo, room_id, member, caller, task_id, message, prefix="judgment-"):
-    try:
-        room.send(repo, room_id, member, caller, message, "note",
-                  message_id=prefix + member, quiet=False)
-        return True
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        print("OMS judgment notification unavailable for task " + task_id, file=sys.stderr)
-        return False
-
-
 def _review_verdict(answer, with_conflict=False):
     matches, fence = [], None
     for line in str(answer or "").splitlines():

@@ -273,16 +273,14 @@ def auto_check_due(now, deadline):
 
 
 def watch(repo, provider, count=0, no_animation=False, view=None, attention_only=False):
-    from terminal_panel import BOTTOM_OPTION, BackgroundRead, MAIN_HARNESSES, PanelModeSync, REJECTED_RELOAD
-    from terminal_panel import ReloadWatcher, SplitSync, _clear_cancel_option, _poll_cancel_confirmation
-    from terminal_panel import _request_cancel_confirmation, ask_advisor, board_view, bottom_state, clean
-    from terminal_panel import clear_control_view, cycle_panel_mode, expire_notice, finalize_selection
-    from terminal_panel import finish_opening, hold_state, main_has_open_questions, main_installed
-    from terminal_panel import main_needs_attention, managed_session, mark_window, navigate, open_worktree
-    from terminal_panel import panel_geometry, publish_bottom, read_evidence, read_panel, reap_spawns
-    from terminal_panel import refreshed_navigation, reload_ready, reset_group_view, session_option
-    from terminal_panel import source_stamps, stale_notice, start_spawn, swap_choices, tab_event
-    from terminal_panel import terminal_style, tmux_command, toggle_context_headers, update_context_header
+    from terminal_panel import (BOTTOM_OPTION, BackgroundRead, MAIN_HARNESSES, PanelModeSync, REJECTED_RELOAD,
+        ReloadWatcher, SplitSync, _clear_cancel_option, _poll_cancel_confirmation, _request_cancel_confirmation,
+        ask_advisor, board_view, bottom_state, clean, clear_control_view, cycle_panel_mode, expire_notice,
+        finalize_selection, finish_opening, hold_state, main_has_open_questions, main_installed,
+        main_needs_attention, managed_session, mark_window, navigate, open_worktree, panel_geometry,
+        publish_bottom, read_evidence, read_panel, refreshed_navigation, reload_ready, reset_group_view,
+        session_option, source_stamps, stale_notice, start_spawn, swap_choices, tab_event, terminal_style,
+        tmux_command, toggle_context_headers, update_context_header)
     from panel_navigation import accept_activity_report, pane_local_option
     from panel_input import TerminalInput, choose
     from panel_view import freeze_report
@@ -473,8 +471,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     continue
 
                 def redraw(discard_stale_clicks=False):
-                    from terminal_panel import _cancel_watch_authority, draw_frame, frame_view, main_occupied
-                    from terminal_panel import managed_session
+                    from terminal_panel import _cancel_watch_authority, draw_frame, frame_view, main_occupied, managed_session
                     nonlocal last
                     drawn_hits = navigation.get("hits")
                     owner = next((member for member in __import__("room_view").nodes(board)

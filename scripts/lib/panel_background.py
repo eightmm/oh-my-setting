@@ -30,20 +30,14 @@ RUN_ID = re.compile(r"run-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\Z")
 
 def _read(path, limit=MAX_BYTES):
     """Reject linked, oversized or changing records, including non-regular files."""
-    path = Path(path)
+    path, identity = Path(path), lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
         raise ValueError("invalid background record")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    flags |= getattr(os, "O_BINARY", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     with os.fdopen(os.open(str(path), flags), "rb") as stream:
-        opened = os.fstat(stream.fileno())
-        raw = stream.read(limit + 1)
-        after = os.fstat(stream.fileno())
-    identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
-    if (not stat.S_ISREG(opened.st_mode) or len(raw) > limit
-            or identity(before) != identity(opened) or identity(opened) != identity(after)
-            or identity(after) != identity(path.lstat())):
+        opened, raw, after = os.fstat(stream.fileno()), stream.read(limit + 1), os.fstat(stream.fileno())
+    if not stat.S_ISREG(opened.st_mode) or len(raw) > limit or len({identity(before), identity(opened), identity(after), identity(path.lstat())}) != 1:
         raise ValueError("background record changed")
     return raw.decode("utf-8")
 

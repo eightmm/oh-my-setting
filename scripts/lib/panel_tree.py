@@ -6,10 +6,10 @@ from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
 from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
                         _repo_root, main_occupied, menu_rows, status_alerts, TERMINAL_STATES, worker_rows, wrapped,
-                        role_style, call_identity, status_tag, glyph, paint, color_count, light_theme, age_label,
+                        role_style, call_identity, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
                         plan_tail_columns, format_tail_row, judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
-from room_view import (action as member_action, call_order, past_calls, context_note, open_count, footer_hints, live_unread,
+from room_view import (action as member_action, past_calls, context_note, open_count, footer_hints,
                        goal_banner, native_advisors, nodes, plan_idle,
                        settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
 

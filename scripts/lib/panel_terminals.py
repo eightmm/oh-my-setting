@@ -26,6 +26,7 @@ import sys
 import time
 import uuid
 
+import room
 from work_journal import sanitize_multiline, sanitize_text
 
 ID = re.compile(r"(?:term|job)-[0-9a-f]{32}\Z")
@@ -55,8 +56,7 @@ class CapacityError(RefusalError):
 
 
 def parent_only():
-    if (os.environ.get("OMS_HARNESS_CHILD") == "1"
-            or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
+    if room._child():
         raise RefusalError("caller-not-managed", "workers cannot control owner terminals or jobs")
 
 

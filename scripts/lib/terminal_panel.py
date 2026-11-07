@@ -1,44 +1,17 @@
 #!/usr/bin/env python3
 """Terminal front end; existing OMS tools retain state and mutation authority."""
 
-import argparse
+import argparse, datetime, fnmatch, hashlib, io, json, math, os, queue, re, shlex, shutil, signal, stat, subprocess, sys, tempfile, textwrap, threading, time, uuid
 from builtins import compile
-from contextlib import nullcontext, redirect_stdout
-import datetime
-import fnmatch
-import hashlib
-import io
-import json
-import math
-import os
-import queue
+from contextlib import redirect_stdout
 from pathlib import Path
-import re
-import shlex
-import signal
-import shutil
-import stat
-import subprocess
-import sys
-import time
-import threading
-import tempfile
-import textwrap
-from typing import NamedTuple
-import room
-import uuid
-import panel_host
-import panel_debate
-import panel_messages
-import panel_reader
+import room, panel_host, panel_debate, panel_messages, panel_reader, review_settlement
 import dispatch_supervisor as dispatch_store
-import review_settlement
-
 from dashboard_projection import clean
 from panel_view import INBOX_LIMIT, main_occupied, menu_rows, render, render_results
 from panel_input import PANEL_SESSION
 from panel_routing import (allocate, alternate_route, command as routed_command, policy, KINDS, MODEL_IDS,
-                           TIERS, WRITERS, MAIN_OWNERS, newest_route_model, routable_route_model, route_family, tier_catalog)
+                           TIERS, WRITERS, MAIN_OWNERS, routable_route_model, route_family, tier_catalog)
 from panel_results import (DURABLE, _read, _write, _lock, accept, finalize, outcomes, results, results_snapshot,
                            retry_delivery, verified_patch, pending_admissions, write_summary_draft)
 from panel_cache import read_shared
@@ -52,180 +25,59 @@ MAX_PROMPT = 65536
 SESSION_ID = r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}"
 OUTBOUND_SCANNER = ROOT / "scripts" / "lib" / "peer-common.sh"
 
-
-from panel_dispatch import PlanBinding
-from panel_native import NativeShutdown
-from panel_layout import ReloadWatcher
-from panel_native import native_adapter
-from panel_native import native_binary
-from panel_native import main_owner, resolve_main
-from panel_native import caller_owner
-from panel_native import main_installed
-from panel_native import main_missing
-from panel_state import ensure_room
-from panel_state import room_instructions
-from panel_dispatch import provider_catalog
-from panel_dispatch import route_inputs
-from panel_dispatch import routing_status
-from panel_dispatch import selected_route
-from panel_render import show_providers
-from panel_render import clear_control_view
-from panel_render import room_listing
-from panel_state import repository
-from panel_state import git_toplevel
-from panel_state import panel_repository
-from panel_state import child_environment
-from panel_native import bootstrap
-from panel_native import native_command
-from panel_state import events
-from panel_state import update_activity
-from panel_native import safe_label
-from panel_native import _main_window
-from panel_native import _main_exit_key
-from panel_native import _main_terminal_owner
-from panel_native import launch_failed_without_child
-from panel_native import run_native
-from panel_native import _native_resume_binding
-from panel_native import run_single_native
-from panel_native import main_history
-from panel_native import _run_native
-from panel_state import active_mains
-from panel_state import session_stored
-from panel_state import lineage_ids
-from panel_state import lineage_ids_from_rows
-from panel_state import owning_attempt
-from panel_dispatch import continuation
-from panel_dispatch import moved_main
-from panel_dispatch import scope_overlaps
-from panel_dispatch import dispatch
-from panel_dispatch import _suggested_workload
-from panel_dispatch import _validate_dispatch_verifier
-from panel_dispatch import plan_link
-from panel_dispatch import _read_dispatch_brief
-from panel_dispatch import continuation_defaults
-from panel_dispatch import _validate_dry_run_inputs
-from panel_review import _safe_patch_path
-from panel_review import _AUTO_REVIEW_FRONTIER_PATHS
-from panel_review import _automatic_review_workload
-from panel_review import _call_result_event
-from panel_review import _judgment_mail
-from panel_review import _review_verdict
-from panel_review import _review_dispatch_context
-from panel_review import _rework_history
-from panel_review import _write_brief_artifact
-from panel_review import _review_findings
-from panel_review import _review_fix_notice
-from panel_review import _dispatch_execution_repository
-from panel_review import _completion_inputs
-from panel_review import _review_verifier
-from panel_review import _settlement_claim_path
-from panel_review import _settlement_owner_identity
-from panel_review import SETTLEMENTS_HELD, SETTLEMENTS_HELD_LOCK
-from panel_review import _settlement_claim
-from panel_review import _settlement_owner_gone
-from panel_review import _settlement_step
-from panel_review import _settlement_release
-from panel_review import _settlement_delivery_pending
-from panel_review import _review_launch_state
-from panel_review import deliver_result
-from panel_review import _deliver_result_steps
-from panel_dispatch import _rollover_if_needed
-from panel_dispatch import _adopt_successor
-from panel_dispatch import _dispatch_capacity
-from panel_dispatch import _dispatch_group_gone
-from panel_dispatch import _dispatch_exited
-from panel_dispatch import _dispatch_leader_gone
-from panel_dispatch import _dispatch_process_snapshot
-from panel_dispatch import _dispatch_session_gone
-from panel_dispatch import _dispatch_descendants
-from panel_dispatch import _observe_dispatch_descendants
-from panel_dispatch import _dispatch_descendants_gone
-from panel_dispatch import _dispatch_recorded_gone
-from panel_dispatch import _dispatch_call_path
-from panel_dispatch import _dispatch_pending_path
-from panel_dispatch import _dispatch_exit_record
-from panel_dispatch import _dispatch_output_log
-from panel_dispatch import _tee_dispatch_output
-from panel_dispatch import _save_dispatch_output
-from panel_dispatch import _dispatch_verifier
-from panel_dispatch import _prepare_dispatch_call
-from panel_dispatch import _valid_rework_context
-from panel_dispatch import _dispatch_call_record
-from panel_dispatch import _record_dispatch_pending
-from panel_dispatch import _dispatch_pending
-from panel_dispatch import _dispatch_supervisor_snapshot
-from panel_dispatch import _dispatch_supervisor_receipt
-from panel_dispatch import _cancel_watch_authority
-from panel_navigation import _cancel_window_id
-from panel_navigation import _cancel_client_name
-from panel_navigation import _clear_cancel_option
-from panel_navigation import _begin_cancel_confirmation
-from panel_navigation import _cancel_option_value
-from panel_navigation import _poll_cancel_confirmation
-from panel_navigation import _request_cancel_confirmation
-from panel_dispatch import cancel_selected_call
-from panel_dispatch import _dispatch_call_finished
-from panel_dispatch import _dispatch_released
-from panel_dispatch import _reconcile_dispatch
-from panel_dispatch import _dispatch_before_force
-from panel_dispatch import _observe_dispatch_session
-from panel_dispatch import _stop_dispatch_groups
-from panel_dispatch import _stop_dispatch
-from panel_dispatch import _settle_dispatch
-from panel_dispatch import _rollback_dispatch_enrollment
-from panel_dispatch import run_dispatch
-from panel_dispatch import _print_dispatch_next_ready
-from panel_dispatch import council_command
-from panel_dispatch import council
-from panel_dispatch import peer_command
-from panel_dispatch import run
-from panel_dispatch import dashboard
-from panel_state import tmux_command
-from panel_layout import shell_command
-from panel_layout import panel_shell
-from panel_layout import watch_shell
-from panel_layout import panel_environment
-from panel_layout import board_view
-from panel_layout import reader_shell
-from panel_layout import BOARD_SHARE
-from panel_layout import BOARD_HEIGHT_SHARE
-from panel_layout import OVERVIEW_SHARE
-from panel_layout import MIN_BOARD, MIN_CHAT
-from panel_layout import WORK_CHAT_RESERVE
-from panel_layout import PANEL_MODES
-from panel_layout import parse_split
-from panel_layout import parse_work_drag
-from panel_layout import split_text
-from panel_layout import top_text
-from panel_layout import split_cells
-from panel_layout import NATIVE_MIN
-from panel_layout import board_split_cells
-from panel_layout import work_split_cells
-from panel_layout import next_panel_mode
-from panel_layout import cycle_panel_mode
-from panel_layout import terminal_window
-from panel_layout import board_split
-from panel_layout import panel_geometry
-from panel_layout import PanelModeSync
-from panel_layout import SplitSync
-from panel_layout import source_stamps
-from panel_layout import REJECTED_RELOAD
-from panel_layout import RELOAD_MODULES
-from panel_layout import reload_ready
-from panel_layout import panel_panes
-from panel_layout import reopen_panel
-from panel_state import session_candidates
-from panel_state import resolve_session
-from panel_state import session_owner
-from panel_state import room_open
-from panel_state import room_headroom
-from panel_state import recorded_room
-from panel_state import session_room
-from panel_state import panel_room
-from panel_native import launch_command
-from panel_layout import bind_window
-from panel_layout import keys_help
-
+from panel_dispatch import (
+    PlanBinding, provider_catalog, route_inputs, routing_status, selected_route, continuation, moved_main,
+    scope_overlaps, dispatch, _suggested_workload, _validate_dispatch_verifier, plan_link, _read_dispatch_brief,
+    continuation_defaults, _validate_dry_run_inputs, _rollover_if_needed, _adopt_successor, _dispatch_capacity,
+    _dispatch_group_gone, _dispatch_exited, _dispatch_leader_gone, _dispatch_process_snapshot, _dispatch_session_gone,
+    _dispatch_descendants, _observe_dispatch_descendants, _dispatch_descendants_gone, _dispatch_recorded_gone,
+    _dispatch_call_path, _dispatch_pending_path, _dispatch_exit_record, _dispatch_output_log, _tee_dispatch_output,
+    _save_dispatch_output, _dispatch_verifier, _prepare_dispatch_call, _dispatch_call_record,
+    _record_dispatch_pending, _dispatch_pending, _dispatch_supervisor_snapshot, _dispatch_supervisor_receipt,
+    _cancel_watch_authority, cancel_selected_call, _dispatch_call_finished, _dispatch_released, _reconcile_dispatch,
+    _observe_dispatch_session, _stop_dispatch_groups, _stop_dispatch, _settle_dispatch,
+    _rollback_dispatch_enrollment, run_dispatch, _print_dispatch_next_ready, council_command, council,
+    peer_command, run, dashboard)
+from panel_native import (
+    NativeShutdown, native_adapter, native_binary, main_owner, resolve_main, caller_owner, main_installed,
+    main_missing, bootstrap, native_command, safe_label, _main_window, _main_exit_key, _main_terminal_owner,
+    launch_failed_without_child, run_native, _native_resume_binding, run_single_native, main_history, _run_native,
+    launch_command, legacy_session, panel_mains, add_main_window, MAX_LIVE_MAINS, live_mains, live_main_refusal,
+    check_legacy_main, spawn_main, swap_choices, _swap_main_window, _swap_digest, _latest_swap, _swap_handoff_file,
+    _swap_submit, swap_main, spawn_single_main, split_panel, construct_panel, open_native)
+from panel_layout import (
+    ReloadWatcher, shell_command, panel_shell, watch_shell, panel_environment, board_view, reader_shell,
+    BOARD_SHARE, BOARD_HEIGHT_SHARE, MIN_CHAT, parse_split, split_text, top_text, split_cells, NATIVE_MIN,
+    board_split_cells, work_split_cells, cycle_panel_mode, terminal_window, board_split, panel_geometry,
+    PanelModeSync, SplitSync, source_stamps, REJECTED_RELOAD, reload_ready, panel_panes, reopen_panel, bind_window,
+    keys_help, bind_main_keys)
+from panel_state import (
+    ensure_room, room_instructions, repository, git_toplevel, panel_repository, child_environment, events,
+    update_activity, active_mains, session_stored, lineage_ids, lineage_ids_from_rows, owning_attempt, tmux_command,
+    session_candidates, resolve_session, session_owner, room_open, room_headroom, recorded_room, session_room,
+    panel_room, MAIN_OUTPUT, MAIN_INTERRUPT_CACHE, main_activity, snapshot, refresh_failed,
+    hold_state, awaiting_admission, read_panel, private_capacity, main_needs_attention,
+    main_has_open_questions)
+from panel_review import (
+    _safe_patch_path, _AUTO_REVIEW_FRONTIER_PATHS, _automatic_review_workload, _call_result_event,
+    _review_verdict, _review_dispatch_context, _rework_history, _write_brief_artifact,
+    _review_fix_notice, _dispatch_execution_repository, _completion_inputs, _review_verifier, _settlement_claim_path,
+    SETTLEMENTS_HELD, _settlement_step, _settlement_release, _settlement_delivery_pending, _review_launch_state,
+    deliver_result, finalize_selection)
+from panel_navigation import (
+    _cancel_window_id, _cancel_client_name, _clear_cancel_option, _begin_cancel_confirmation, _cancel_option_value,
+    _poll_cancel_confirmation, _request_cancel_confirmation, session_option, pane_option, pane_local_option,
+    reset_group_view, navigate, read_evidence, finish_opening, expire_notice, window_zoomed, call_results,
+    resolve_call_alias, render_call_view, ask_advisor, worker_worktree, open_worktree, tab_event,
+    BOTTOM_OPTION, HEADER_OPTION, HEADER_ENABLED, context_header_text,
+    _tmux_output_value, _window_option_local, update_context_header, toggle_context_headers, bottom_state,
+    bottom_text, read_bottom, publish_bottom, refreshed_navigation)
+from panel_render import (
+    show_providers, clear_control_view, room_listing, terminal_style, managed_session, stale_notice,
+    provider_availability, frame_view, _show_state, show, draw_frame)
+from panel_watch import BackgroundRead, mark_window, start_spawn, reap_spawns, watch
+from panel_interaction import (
+    read_field, browse_results, browse_chats, raw_keys, menu_input, read_choice, interactive)
 
 KEYS_HELP = keys_help()
 # Text inside tmux's conditional cannot contain commas or closing braces.
@@ -235,95 +87,6 @@ MAIN_KEYS = (("F9", "select-pane -t :.+"),
                     '"if-shell -F \\"#{==:#{@oms_panel_mode},focus}\\" \\"set-option -w @oms_panel_mode work\\" '
                     '\\"set-option -w @oms_panel_mode overview\\""'),
              ("F12", 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % KEYS_HELP))
-from panel_layout import bind_main_keys
-from panel_native import legacy_session
-from panel_native import panel_mains
-from panel_native import add_main_window
-from panel_native import MAX_LIVE_MAINS
-from panel_native import live_mains
-from panel_native import live_main_refusal
-from panel_native import check_legacy_main
-from panel_native import spawn_main
-from panel_native import swap_choices
-from panel_native import _swap_main_window
-from panel_native import _swap_digest
-from panel_native import _latest_swap
-from panel_native import _swap_handoff_file
-from panel_native import _swap_submit
-from panel_native import swap_main
-from panel_native import spawn_single_main
-from panel_native import split_panel
-from panel_native import construct_panel
-from panel_native import open_native
-from panel_interaction import read_field
-from panel_render import terminal_style
-from panel_render import managed_session
-from panel_state import MAIN_OUTPUT
-from panel_state import MAIN_INTERRUPT_CACHE
-from panel_state import _interrupted_transcript
-from panel_state import main_activity
-from panel_state import snapshot
-from panel_state import refresh_failed
-from panel_state import hold_state
-from panel_render import stale_notice
-from panel_render import AVAILABLE
-from panel_render import provider_availability
-from panel_render import frame_view
-from panel_state import awaiting_admission
-from panel_render import _show_state
-from panel_render import show
-from panel_render import draw_frame
-from panel_navigation import session_option
-from panel_navigation import pane_option
-from panel_navigation import pane_local_option
-from panel_navigation import reset_group_view
-from panel_navigation import navigate
-from panel_navigation import read_evidence
-from panel_navigation import finish_opening
-from panel_navigation import expire_notice
-from panel_navigation import window_zoomed
-from panel_navigation import call_results
-from panel_navigation import resolve_call_alias
-from panel_navigation import render_call_view
-from panel_navigation import advisor_command
-from panel_navigation import ask_advisor
-from panel_navigation import worker_worktree
-from panel_navigation import open_worktree
-from panel_navigation import tab_event
-from panel_navigation import BOTTOM_OPTION
-from panel_navigation import BOTTOM_LIMIT
-from panel_navigation import BOTTOM_KINDS
-from panel_navigation import HEADER_OPTION
-from panel_navigation import HEADER_ENABLED
-from panel_navigation import _header_safe
-from panel_navigation import context_header_text
-from panel_navigation import _tmux_output_value
-from panel_navigation import _window_option_local
-from panel_navigation import update_context_header
-from panel_navigation import toggle_context_headers
-from panel_navigation import bottom_state
-from panel_navigation import bottom_text
-from panel_navigation import read_bottom
-from panel_navigation import apply_bottom
-from panel_navigation import publish_bottom
-from panel_navigation import refreshed_navigation
-from panel_watch import BackgroundRead
-from panel_state import read_panel
-from panel_state import private_capacity
-from panel_state import WINDOW_ATTENTION
-from panel_state import main_needs_attention
-from panel_state import main_has_open_questions
-from panel_watch import mark_window
-from panel_watch import start_spawn
-from panel_watch import reap_spawns
-from panel_watch import watch
-from panel_interaction import browse_results
-from panel_interaction import browse_chats
-from panel_interaction import raw_keys
-from panel_interaction import menu_input
-from panel_interaction import read_choice
-from panel_review import finalize_selection
-from panel_interaction import interactive
 
 
 def main(argv=None):

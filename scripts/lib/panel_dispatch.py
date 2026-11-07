@@ -47,10 +47,14 @@ class PlanBinding(NamedTuple):
         return result
 
     @classmethod
+    def loads(cls, raw):
+        return json.loads(raw, object_pairs_hook=cls.unique_fields)
+
+    @classmethod
     def parse(cls, value):
         if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
             raise ValueError("plan observation exceeds 4096 bytes")
-        fields = json.loads(value, object_pairs_hook=cls.unique_fields)
+        fields = cls.loads(value)
         if not isinstance(fields, dict) or set(fields) != set(cls._fields):
             raise ValueError("plan observation requires exactly the binding fields")
         formats = dict(plan_id=r"plan_[0-9a-f]{32}", lease_id=r"lease_[0-9a-f]{32}",
@@ -68,8 +72,7 @@ class PlanBinding(NamedTuple):
         """Recheck observation under the caller's marker-set and canonical plan fences."""
         from terminal_panel import ROOT, _read, active_mains
         import runpy
-        plan = json.loads(_read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024),
-                          object_pairs_hook=self.unique_fields)
+        plan = self.loads(_read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024))
         task = plan["tasks"][self.task_id]
         if (plan.get("plan_id") != self.plan_id or task.get("id") != self.task_id
                 or task.get("lease_id") != self.lease_id or task.get("state") not in {"claimed", "running"}
@@ -133,8 +136,7 @@ def provider_catalog(selection="all"):
 
 def routing_status(repo, room_id=None, main=None, snapshot_sink=None):
     """Reuse recorded readings and unexpired Pi capacity cooldowns without a provider query."""
-    from terminal_panel import repository, snapshot
-    from terminal_panel import events
+    from terminal_panel import events, repository, snapshot
     from panel_metrics import collect
     from panel_routing import PI_COOLDOWN_SECONDS
     readings = {}
@@ -240,8 +242,7 @@ def route_inputs(owner, repo=None, room_id=None, main=None, task_id=None, candid
 
 def selected_route(owner, role, workload, access, purpose, target=None, model=None, effort=None,
                    repo=None, room_id=None, main=None, task_id=None, candidate=None, routing_readings=None, preferred=None):
-    from terminal_panel import MAIN_OWNERS, MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model
-    from terminal_panel import route_family, routing_status, tier_catalog
+    from terminal_panel import MAIN_OWNERS, MODEL_IDS, PROVIDERS, allocate, policy, provider_catalog, routable_route_model, route_family, routing_status, tier_catalog
     if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
     owner_model = None
@@ -543,8 +544,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     Fresh sessions receive the bounded tail of the verified answer so the final
     report survives earlier progress output.
     """
-    from terminal_panel import MAX_PROMPT, _rework_history, clean, events, owning_attempt
-    from terminal_panel import repository, results, session_stored, verified_patch, work_repository
+    from terminal_panel import MAX_PROMPT, _rework_history, clean, events, owning_attempt, repository, results, session_stored, verified_patch, work_repository
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
         raise ValueError("invalid task ID to continue")
     head_repo = work_repository(work_repo or repo)
@@ -890,8 +890,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     return Path(handle.name), resume, note
 def continuation_defaults(repo, owner, main, task_id, env, room_id=None):
     """Role, scope, workload and verifier of the newest recorded write dispatch for this main's task."""
-    from terminal_panel import _dispatch_call_record, _rework_history, events, owning_attempt, repository
-    from terminal_panel import resolve_call_alias
+    from terminal_panel import _dispatch_call_record, _rework_history, events, owning_attempt, repository, resolve_call_alias
     if env.get("OMS_ROOM_REPO"):
         repo = repository(env["OMS_ROOM_REPO"])
     task_id = resolve_call_alias(repo, room_id, task_id)
@@ -917,14 +916,17 @@ def continuation_defaults(repo, owner, main, task_id, env, room_id=None):
     return None
 
 
+def _env_child(env=os.environ):
+    return env.get("OMS_HARNESS_CHILD") == "1" or env.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"
+
+
 def moved_main(repo, owner, env):
     """(room, participant) of the Claude main this session continues, when its panel identity is gone.
 
     Claude Code's background service drops the panel environment but keeps
     CLAUDE_CODE_SESSION_ID, which the hook lineage rebind bound to the main."""
     session = env.get("CLAUDE_CODE_SESSION_ID")
-    if (owner != "claude" or not session or env.get("OMS_PANEL_MAIN_ATTEMPT") or env.get("OMS_ROOM_PARTICIPANT")
-            or env.get("OMS_HARNESS_CHILD") == "1" or env.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
+    if owner != "claude" or not session or env.get("OMS_PANEL_MAIN_ATTEMPT") or env.get("OMS_ROOM_PARTICIPANT") or _env_child(env):
         return None
     try:
         found = room.selected(repo, hashlib.sha256(session.encode()).hexdigest()[:32], env.get("OMS_ROOM_ID") or None)
@@ -1006,9 +1008,7 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
              candidate=None, allow_stale_base=False, from_task=None, workload_explicit=False):
-    from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment
-    from terminal_panel import continuation, events, policy, provider_catalog, routable_route_model, routing_status, tier_catalog
-    from terminal_panel import run_dispatch, safe_label, selected_route
+    from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment, continuation, events, policy, provider_catalog, routable_route_model, routing_status, run_dispatch, safe_label, selected_route, tier_catalog
     dispatch_env = child_environment(owner, repo)
     room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
     routing_report = []
@@ -1399,7 +1399,7 @@ def _require_assigned_route(repo, task_id, route):
     import runpy
     try:
         raw = _read(Path(repo), ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
-        tasks = json.loads(raw, object_pairs_hook=PlanBinding.unique_fields).get("tasks", {}) if raw else {}
+        tasks = PlanBinding.loads(raw).get("tasks", {}) if raw else {}
         value = tasks.get(task_id, {}).get("assignment", {}) if isinstance(tasks, dict) else {}
     except (OSError, ValueError, TypeError, AttributeError):
         return
@@ -1434,7 +1434,7 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
         raw = _read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
         if not raw and not (repo / ".oms/plan/tasks.json").exists():
             return {"tasks": {}}
-        document = json.loads(raw, object_pairs_hook=PlanBinding.unique_fields)
+        document = PlanBinding.loads(raw)
         if not isinstance(document, dict) or not isinstance(document.get("tasks"), dict):
             raise ValueError("invalid plan task table")
         return document
@@ -1450,7 +1450,7 @@ def plan_link(repo, owner, task_id, env, caller, access="read"):
                     and not result.stdout.strip() and task_id not in read_plan()["tasks"]):
                 return None
             raise ValueError(result.stderr.strip() or "plan snapshot unavailable")
-        task = json.loads(result.stdout, object_pairs_hook=PlanBinding.unique_fields)
+        task = PlanBinding.loads(result.stdout)
         if (not isinstance(task, dict) or task.get("id") != task_id
                 or task.get("state") not in {"ready", "claimed", "running", "review", "landing", "blocked", "done", "cancelled"}):
             raise ValueError("invalid plan snapshot")
@@ -1569,11 +1569,7 @@ def _validate_dry_run_inputs(prompt, brief):
     from terminal_panel import MAX_PROMPT, OUTBOUND_SCANNER
     if prompt and (len(prompt.encode("utf-8")) > MAX_PROMPT or "\0" in prompt):
         raise ValueError("prompt exceeds the panel input contract")
-    inputs = []
-    if prompt:
-        inputs.append(prompt.encode("utf-8"))
-    if brief:
-        inputs.append(_read_dispatch_brief(Path(brief)))
+    inputs = ([prompt.encode("utf-8")] if prompt else []) + ([_read_dispatch_brief(Path(brief))] if brief else [])
     if not inputs:
         return
     with tempfile.TemporaryDirectory(prefix="oms-panel-scan-") as temporary:

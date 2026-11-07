@@ -141,8 +141,7 @@ def _poll_cancel_confirmation(repo, state, navigation, main_attempt, now=None):
 
 
 def _request_cancel_confirmation(repo, state, navigation, main_attempt):
-    from terminal_panel import _begin_cancel_confirmation, _cancel_client_name, _cancel_window_id
-    from terminal_panel import cancel_selected_call, managed_session
+    from terminal_panel import _begin_cancel_confirmation, _cancel_client_name, _cancel_window_id, cancel_selected_call, managed_session
     if not managed_session():
         return "Cancel needs the managed tmux panel", None
     result = cancel_selected_call(repo, state, navigation, main_attempt)
@@ -683,7 +682,7 @@ def advisor_command(repo, room_id, member):
 
 def ask_advisor(repo, state, navigation):
     """Open a question prompt for the selected main; the board never calls a model itself."""
-    from terminal_panel import advisor_command, managed_session, tmux_command
+    from terminal_panel import managed_session, tmux_command
     selected = navigation.get("selected") or ("",)
     target = selected if selected[0] == "chat" else navigation.get("primary")
     room_id = navigation.get("room_id")
@@ -727,7 +726,7 @@ def worker_worktree(repo, member):
 
 def open_worktree(repo, state, navigation):
     """Open a plain shell at a finished worker's worktree; it carries no worker authority."""
-    from terminal_panel import managed_session, tmux_command, worker_worktree
+    from terminal_panel import managed_session, tmux_command
     from room_view import nodes
     selected = navigation.get("selected") or ("",)
     member = next((m for m in nodes(state) if selected[0] == "result" and m["participant"] == selected[1]), None)
@@ -834,7 +833,6 @@ def _header_safe(value):
 
 
 def context_header_text(state, main_attempt, repo):
-    from terminal_panel import _header_safe
     from room_view import nodes, model_name, context_note
     from panel_view import call_identity, status_tag
     member = next((m for m in nodes(state) if m.get("role") == "main" and
@@ -862,7 +860,7 @@ def _tmux_output_value(value):
 
 
 def _window_option_local(pane, option):
-    from terminal_panel import _tmux_output_value, tmux_command
+    from terminal_panel import tmux_command
     present = subprocess.run(tmux_command("show-options", "-w", "-q", "-t", pane, option),
                              capture_output=True, text=True, check=False, timeout=2,
                              stdin=subprocess.DEVNULL)
@@ -883,8 +881,7 @@ _HEADER_SEEN = {}
 
 
 def update_context_header(state, main_attempt, repo, navigation=None):
-    from terminal_panel import HEADER_ENABLED, HEADER_OPTION, _tmux_output_value, _window_option_local
-    from terminal_panel import context_header_text, managed_session
+    from terminal_panel import managed_session
     pane = os.environ.get("TMUX_PANE", "")
     if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
         return
@@ -949,7 +946,7 @@ def update_context_header(state, main_attempt, repo, navigation=None):
 
 
 def toggle_context_headers():
-    from terminal_panel import HEADER_ENABLED, _tmux_output_value, managed_session
+    from terminal_panel import managed_session
     _HEADER_SEEN.clear()
     pane = os.environ.get("TMUX_PANE", "")
     if not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
@@ -985,7 +982,6 @@ def toggle_context_headers():
 
 def bottom_state(navigation):
     """The bottom box as this board shows it: tab, previewed target and detail scroll."""
-    from terminal_panel import BOTTOM_KINDS
     from room_view import TABS
     tab = navigation.get("tab") if navigation.get("tab") in dict(TABS) else "log"
     target = (navigation.get("preview") or {}).get("target")
@@ -1004,7 +1000,6 @@ def bottom_text(state):
 
 def read_bottom(raw):
     """A shared bottom state, or None when the option is unset, oversized or malformed."""
-    from terminal_panel import BOTTOM_KINDS, BOTTOM_LIMIT
     from room_view import TABS
     if not raw or len(raw.encode("utf-8", "replace")) > BOTTOM_LIMIT:
         return None
@@ -1055,7 +1050,7 @@ def apply_bottom(navigation, state, shared):
 
 def publish_bottom(navigation, before):
     """Write the session's bottom box when one input event changed it; render clamps and unchanged frames write nothing."""
-    from terminal_panel import BOTTOM_OPTION, bottom_state, bottom_text, managed_session, tmux_command
+    from terminal_panel import managed_session, tmux_command
     state = bottom_state(navigation)
     if before is None or state == before:
         return
@@ -1068,7 +1063,6 @@ def publish_bottom(navigation, before):
 
 def refreshed_navigation(navigation, state, bottom=None, close_call=None):
     """Apply a new snapshot: another room resets the view; an open preview re-reads its evidence."""
-    from terminal_panel import apply_bottom, read_bottom
     ident = state.get("room", {}).get("id")
     if navigation.get("room_id") and ident and navigation["room_id"] != ident:
         if close_call:

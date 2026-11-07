@@ -16,6 +16,7 @@ import room
 from dashboard_projection import clean
 from panel_input import TerminalInput, hit_at
 from panel_results import ID
+from panel_state import tmux_command
 
 OPTION = "@oms_panel_reader"  # pane option on a reader: the board pane that owns it
 BOARD = "OMS_PANEL_READER_BOARD"  # set only in a reader's command; its --results then pages
@@ -331,7 +332,7 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
 
 
 def tmux(*args):
-    return subprocess.run(["tmux"] + list(args), capture_output=True, text=True, check=False, timeout=3,
+    return subprocess.run(tmux_command(*args), capture_output=True, text=True, check=False, timeout=3,
                           stdin=subprocess.DEVNULL)
 
 

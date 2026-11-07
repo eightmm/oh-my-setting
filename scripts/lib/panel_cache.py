@@ -182,12 +182,11 @@ def fingerprint(repo, inputs=None):
         for part in ('config', 'packed-refs', 'refs'):
             visit(common_dir / part, 'git-common/' + part)
     settings = {name: os.environ.get(name) for name in (
-        'XDG_STATE_HOME', 'LOCALAPPDATA', 'OH_MY_SETTING_AUTO_UPDATE_STATE',
+        'XDG_STATE_HOME', 'OH_MY_SETTING_AUTO_UPDATE_STATE',
         'OMS_THREAD_ATTENTION', 'OMS_EXPERIMENT_CLAIM_TTL', 'OMS_RUN_CURRENT_TTL', 'OMS_GUARD_TTL',
         'OMS_THREAD_CURRENT_TTL', 'OMS_THREAD_STALE_TTL')}
     entries.append(('settings', settings))
-    state_home = (os.environ.get('XDG_STATE_HOME') or
-                  (os.environ.get('LOCALAPPDATA') if os.name == 'nt' else None))
+    state_home = os.environ.get('XDG_STATE_HOME')
     approvals = (Path(state_home).expanduser() if state_home else Path.home() / '.local/state')
     visit(approvals / 'oh-my-setting/approvals' / (hashlib.sha256(str(repo).encode()).hexdigest() + '.jsonl'),
           'approvals')
@@ -510,8 +509,6 @@ def _plan_inputs(repo):
             add(folder, directory=True)
             for name in ('commondir', 'config', 'HEAD', 'packed-refs', 'shallow', 'info/grafts'):
                 add(folder / name)
-            if os.name == 'nt':
-                add(folder / 'index')
         # Git may read global or included config outside the worktree. Record
         # active origins and missing include targets so creation also invalidates.
         for path in (Path.home() / '.gitconfig',

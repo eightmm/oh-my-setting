@@ -297,7 +297,7 @@ def cli_main(arguments):
     parser.add_argument("--release-main", required=True, metavar="ATTEMPT")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(arguments)
-    if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
+    if room._child():
         parser.error("a worker cannot release owner sessions; return the need to its parent")
     try:
         result = release(repository(args.repo), args.release_main)

@@ -58,7 +58,7 @@ REVIEW_WAIT_SECONDS = 120
 
 
 def _owner():
-    if os.environ.get('OMS_HARNESS_CHILD') == '1' or os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0':
+    if room._child():
         raise ValueError('a worker must return its result to the owner')
 
 
@@ -194,9 +194,8 @@ def _read(repo, relative, maximum=MAX_RESULT, missing=False, label='panel eviden
 
 
 def _relative(repo, value, maximum=1024 * 1024):
-    if (not isinstance(value, str) or not value or len(value) > 300 or
-            value.startswith(('/', '\\')) or '\\' in value or ':' in value or
-            any(part in ('', '.', '..') for part in value.split('/'))):
+    from panel_review import _safe_patch_path
+    if not _safe_patch_path(value) or len(value) > 300:
         raise ValueError('evidence must be a safe repository-relative path')
     return {'path': value, 'sha256': hashlib.sha256(_read(repo, value, maximum)).hexdigest()}
 
@@ -579,21 +578,9 @@ def _lock(repo, name='panel-results', timeout=10):
     with os.fdopen(fd, 'r+b') as handle:
         if not DURABLE['safe_regular'](os.fstat(handle.fileno())):
             raise ValueError('unsafe panel lock')
-        if os.name == 'nt':
-            import msvcrt
-            if os.fstat(handle.fileno()).st_size == 0:
-                try:
-                    handle.write(b'\0'); handle.flush()
-                except OSError as error:
-                    if os.fstat(handle.fileno()).st_size == 0:
-                        raise ValueError('panel lock initialization unavailable') from error
-            handle.seek(0)
-            acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            release = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            release = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
+        import fcntl
+        acquire = lambda: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        release = lambda: fcntl.flock(handle, fcntl.LOCK_UN)
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -848,11 +835,9 @@ def _run_verifier(repo, verify, timeout, evidence_repo=None):
 
 
 def _run_verifier_slotted(repo, verify, timeout, evidence_repo, slot):
-    creationflags = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0) if os.name == 'nt' else 0
     process = subprocess.Popen(['bash', '-c', verify], cwd=str(repo),
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=os.name == 'posix',
-                               creationflags=creationflags,
+                               stderr=subprocess.PIPE, start_new_session=True,
                                env=dict(os.environ, OMS_VERIFY_SLOT_HELD=slot) if slot else None)
     output = {}
     def drain(name, pipe):
@@ -1047,8 +1032,7 @@ def _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding):
         from panel_dispatch import PlanBinding
         from panel_state import active_mains
         try:
-            plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
-                              object_pairs_hook=PlanBinding.unique_fields)
+            plan = PlanBinding.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024))
             task = plan.get('tasks', {}).get(task_id)
             if not isinstance(task, dict) or task.get('id') != task_id:
                 raise ValueError('plan task is unavailable')
@@ -1243,8 +1227,7 @@ def _owned_task(repo, execution, owner, task_id):
     if state['closed'] or not main or main['attempt_id'] != main_id:
         raise ValueError('accept/finish requires the current owning room main')
     try:
-        plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
-                          object_pairs_hook=PlanBinding.unique_fields)
+        plan = PlanBinding.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024))
     except (OSError, TypeError, ValueError) as error:
         raise ValueError('plan task %s is unavailable: %s' % (task_id, error)) from error
     stored = plan.get('tasks', {}).get(task_id)
@@ -1528,8 +1511,7 @@ def _record_accept(repo, execution, owner, snapshot, patch_path, commit):
 
 def _accepted_prefix(repo, execution, landings):
     """Canonical accepts in this clone's unpublished first-parent lineage."""
-    if (os.environ.get('OMS_HARNESS_CHILD') == '1' or
-            os.environ.get('OMS_HARNESS_DELEGATE_DEPTH', '0') != '0'):
+    if room._child():
         raise ValueError('panel acceptance prefix derivation is parent-only')
     from panel_dispatch import PlanBinding
     from land_receipts import pushed_receipts
@@ -1537,24 +1519,17 @@ def _accepted_prefix(repo, execution, landings):
     def same_checkout(value):
         if not isinstance(value, str) or not value:
             return False
-        if os.name == 'nt' and re.match(r'^/[A-Za-z]/', value):
-            value = value[1] + ':' + value[2:]
         return (os.path.isabs(value) and
                 os.path.normcase(os.path.realpath(value)) == os.path.normcase(str(execution)))
 
     def valid_foreign_checkout(value):
-        if not isinstance(value, str) or not value:
-            return False
-        if os.name == 'nt' and re.match(r'^/[A-Za-z]/', value):
-            value = value[1] + ':' + value[2:]
-        return os.path.isabs(value) and not same_checkout(value)
+        return isinstance(value, str) and bool(value) and os.path.isabs(value) and not same_checkout(value)
 
     panel_intents = [row for row in landings if row.get('event') == 'intent'
                      and row.get('panel_accept') == 'true' and row.get('_has_abandoned') is not True]
     local_intents = [row for row in panel_intents if same_checkout(row.get('worktree'))]
     try:
-        plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024),
-                          object_pairs_hook=PlanBinding.unique_fields)
+        plan = PlanBinding.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024))
     except (OSError, TypeError, ValueError) as error:
         task_id = next((row.get('task') for row in local_intents if row.get('task')), None)
         if task_id:

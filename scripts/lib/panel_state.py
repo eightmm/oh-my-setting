@@ -168,7 +168,7 @@ def session_stored(provider, session, account=None):
 
 def lineage_ids(repo, owner, participant, current_attempt):
     """Own participant history plus released earlier mains of this provider; unknown ownership fails closed."""
-    from terminal_panel import events, lineage_ids_from_rows
+    from terminal_panel import events
     try:
         rows = json.loads(events(repo, "list", "--json", output=True))
         return lineage_ids_from_rows(rows, owner, participant, current_attempt)
@@ -235,7 +235,7 @@ def lineage_ids_from_rows(rows, owner, participant, current_attempt):
 
 def owning_attempt(repo, owner, main, env):
     """Eligible worker parents for the explicitly bound or uniquely selected active main."""
-    from terminal_panel import active_mains, events, lineage_ids, repository
+    from terminal_panel import active_mains, events, repository
     if env.get("OMS_ROOM_REPO"):
         repo = repository(env["OMS_ROOM_REPO"])
     parent = env.get("OMS_PANEL_MAIN_ATTEMPT")
@@ -372,7 +372,6 @@ MAIN_INTERRUPT_CACHE = {}
 
 def _interrupted_transcript(path_value, since):
     """Return whether a Claude transcript tail records an interrupt after this turn began."""
-    from terminal_panel import MAIN_INTERRUPT_CACHE
     if (not isinstance(path_value, str) or not path_value or len(path_value) > 4096
             or not isinstance(since, (int, float)) or isinstance(since, bool)
             or not math.isfinite(float(since))):
@@ -397,15 +396,10 @@ def _interrupted_transcript(path_value, since):
                     or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)):
                 return False
             start = max(0, opened.st_size - 16384)
-            partial_first_line = False
-            if start:
-                handle.seek(start - 1)
-                partial_first_line = handle.read(1) != b"\n"
-            handle.seek(start)
-            tail = handle.read(16384)
-        if partial_first_line:
-            first_newline = tail.find(b"\n")
-            tail = tail[first_newline + 1:] if first_newline >= 0 else b""
+            handle.seek(max(0, start - 1))
+            tail = handle.read(16384 + bool(start))
+        if start:
+            tail = tail[1:] if tail[:1] == b"\n" else tail.partition(b"\n")[2]
     except (OSError, ValueError, RuntimeError):
         return False
     from datetime import datetime
@@ -444,7 +438,7 @@ def _interrupted_transcript(path_value, since):
 
 
 def main_activity(repo, members, windows=()):
-    from terminal_panel import MAIN_OUTPUT, _interrupted_transcript, _read, tmux_command
+    from terminal_panel import _read, tmux_command
     now, result = time.time(), {}
     started = time.monotonic()
     mains = [m for m in members if m.get("joined") and m.get("role") == "main"]
@@ -515,8 +509,8 @@ def main_activity(repo, members, windows=()):
 
 
 def snapshot(repo, room_id=None, _tick=None):
-    from terminal_panel import ENTRY, _latest_swap, awaiting_admission, main_activity, managed_session
-    from terminal_panel import outcomes, read_shared, tmux_command
+    from terminal_panel import (ENTRY, _latest_swap, awaiting_admission, main_activity, managed_session,
+                                outcomes, read_shared, tmux_command)
     from panel_cache import TickReads
     _tick = TickReads(repo) if _tick is None else _tick
     try:
@@ -747,7 +741,6 @@ def hold_state(held, state, status, key):
     """Keep the last good read when a refresh fails; returns state, status and a stale notice or None.
 
     Only a board that has already drawn a good state for the same room key holds it."""
-    from terminal_panel import refresh_failed
     if not refresh_failed(state):
         held.update(state=state, status=status, key=key, at=time.monotonic(), failures=0)
         return state, status, None
@@ -841,7 +834,6 @@ WINDOW_ATTENTION = {"failed", "timed_out", "waiting_input", "waiting_approval", 
 
 def main_needs_attention(state, main_attempt):
     """Whether this main waits on a person or its calls need attention."""
-    from terminal_panel import WINDOW_ATTENTION
     from room_view import DECIDED, call_classifier, nodes, handled_results, main_state
     from dashboard_projection import mapping
     members = nodes(state)

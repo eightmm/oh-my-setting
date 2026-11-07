@@ -81,22 +81,13 @@ def _read(path, max_bytes):
         if cached is not _CACHE_MISS:
             return cached
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            opened = os.fstat(fd)
+        with os.fdopen(fd, "rb") as source:
+            opened = os.fstat(source.fileno())
             if not stat.S_ISREG(opened.st_mode) or opened.st_ino != info.st_ino:
                 return None
             size = opened.st_size
-            os.lseek(fd, max(0, size - max_bytes), os.SEEK_SET)
-            chunks, remaining = [], min(size, max_bytes)
-            while remaining:
-                chunk = os.read(fd, min(65536, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-        finally:
-            os.close(fd)
+            source.seek(max(0, size - max_bytes))
+            raw = source.read(min(size, max_bytes))
         if size > max_bytes:
             raw = raw.split(b"\n", 1)[-1]
         result = raw.decode("utf-8", "replace")

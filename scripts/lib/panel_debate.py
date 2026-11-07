@@ -7,7 +7,7 @@ import codecs
 import re
 
 from dashboard_projection import clean, fit, listing, mapping
-from panel_view import MODEL_NAMES, PROVIDER_NAMES, TERMINAL_STATES, wrapped, call_identity, status_tag
+from panel_view import PROVIDER_NAMES, TERMINAL_STATES, wrapped, call_identity, status_tag
 from panel_results import MAX_RESULT as MAX_SEAT_ANSWER
 
 MAX_DEBATES, MAX_SYNTHESIS = 10, 64 * 1024

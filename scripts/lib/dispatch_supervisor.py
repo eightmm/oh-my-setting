@@ -255,18 +255,11 @@ def _location(repo, member, name=None):
 
 class RecordPaths:
     """Resolve historical flat logical names for private diagnostic callers."""
-
-    def __init__(self, repo):
-        self.repo = repo
-
-    def __truediv__(self, name):
-        member = _member(self.repo, name)
-        path, unused = _location(self.repo, member, name)
-        return path / name
+    def __init__(self, repo): self.repo = repo
+    def __truediv__(self, name): return _location(self.repo, _member(self.repo, name), name)[0] / name
 
 
-def store(repo):
-    return RecordPaths(repo)
+store = RecordPaths
 
 
 def initialize(repo, member, call, execution_repo=None):

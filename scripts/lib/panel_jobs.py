@@ -336,30 +336,24 @@ def restart_job(repo, session, ident, generation):
 
 def _descendants():
     """Walk actual children, including children adopted after setsid/double fork."""
-    result = []
-    pending = [os.getpid()]
-    visited = set(pending)
+    result, pending, visited = [], [os.getpid()], {os.getpid()}
     while pending:
-        pid = pending.pop()
         try:
-            # A child can fork from any thread, not only its main thread.
-            tasks = list(Path("/proc/%s/task" % pid).iterdir())
+            tasks = list(Path("/proc/%s/task" % pending.pop()).iterdir())
         except FileNotFoundError:
             continue
         for task in tasks:
             try:
-                children = (task / "children").read_text().split()
+                children = [int(v) for v in (task / "children").read_text().split()]
             except FileNotFoundError:
                 continue
-            for value in children:
-                child = int(value)
-                if child in visited:
-                    continue
-                visited.add(child)
-                info = terminals.process(child)
-                if info is not None:
-                    result.append(info)
-                    pending.append(child)
+            for child in children:
+                if child not in visited:
+                    visited.add(child)
+                    info = terminals.process(child)
+                    if info is not None:
+                        result.append(info)
+                        pending.append(child)
     return result
 
 

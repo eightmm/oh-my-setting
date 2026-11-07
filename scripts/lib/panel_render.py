@@ -108,7 +108,7 @@ AVAILABLE = {}
 
 def provider_availability(state):
     """PATH scans once per snapshot, not once per animation frame."""
-    from terminal_panel import AVAILABLE, PROVIDERS
+    from terminal_panel import PROVIDERS
     if AVAILABLE.get("state") is not state:
         AVAILABLE.update(state=state, found={name: bool(shutil.which(name)) for name in PROVIDERS})
     return AVAILABLE["found"]
@@ -154,7 +154,7 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
 
 def _show_state(repo, main_attempt=None, navigation=None, cache=None):
     # A cache lets key presses redraw the last snapshot instead of collecting a new one.
-    from terminal_panel import hold_state, snapshot, stale_notice
+    from terminal_panel import hold_state, snapshot
     if cache is not None and "state" in cache:
         state, status = cache["state"], cache["status"]
     else:
