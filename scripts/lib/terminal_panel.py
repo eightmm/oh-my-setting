@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "scripts" / "oms"
 PROVIDERS = ("codex", "claude")
 MAIN_HARNESSES = ("claude", "pi", "codex")
+# Fresh Agy launch has no verified swap/history binding; retain the existing shortcut targets.
+_LAUNCH_HARNESSES = (*MAIN_HARNESSES, "agy")
 MAX_PROMPT = 65536
 SESSION_ID = r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}"
 OUTBOUND_SCANNER = ROOT / "scripts" / "lib" / "peer-common.sh"
@@ -106,7 +108,7 @@ def main(argv=None):
     parser.add_argument("--host", choices=("auto", "inline", "tmux", "herdr"), default="auto",
                         help="optional terminal host; Herdr requires an existing local POSIX pane")
     parser.add_argument("--room", help="existing shared work room; never joins a different task implicitly")
-    parser.add_argument("--launch", help="open the sole main (claude preferred, pi or codex)")
+    parser.add_argument("--launch", help="open the sole main (claude, codex, agy or explicit pi)")
     parser.add_argument("--spawn-main", metavar="PROVIDER",
                         help="start the sole main in an empty panel without attaching; works without a terminal")
     parser.add_argument("--swap-main", metavar="PROVIDER",
@@ -408,6 +410,7 @@ def main(argv=None):
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
+    host_control = False
     try:
         if args.providers:
             rows = provider_catalog()
@@ -483,13 +486,15 @@ def main(argv=None):
                       panel_chats.open_chat(repo, ident, args.open_chat, args.chat_surface, args.dry_run))
             print(panel_chats.text(report) if args.chats and not args.json else json.dumps(report, ensure_ascii=False, indent=2))
             return 0
-        if args.launch and args.launch not in MAIN_HARNESSES and not (args.dry_run and args.launch == "agy"):
+        if args.launch and args.launch not in _LAUNCH_HARNESSES:
             args.launch = provider_catalog(args.launch)[0]["provider"]
             native_binary(args.launch)
         if args.launch == "pi" and args.resume:
             raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
+        if args.launch == "agy" and args.resume:
+            raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
         if args.spawn_main:
-            if args.spawn_main not in MAIN_HARNESSES:
+            if args.spawn_main not in _LAUNCH_HARNESSES:
                 args.spawn_main = provider_catalog(args.spawn_main)[0]["provider"]
             report = spawn_main(repo, args.spawn_main, args.task, args.model)
             if args.json:
@@ -619,7 +624,7 @@ def main(argv=None):
                               "providers": {name: {"installed": bool(shutil.which(name))}
                                             for name in PROVIDERS},
                               "main_harnesses": {name: {"installed": main_installed(name), "owner": main_owner(name)}
-                                                 for name in (*MAIN_HARNESSES, "agy")},
+                                                 for name in _LAUNCH_HARNESSES},
                               "max_live_mains": MAX_LIVE_MAINS,
                               "split_available": bool(shutil.which("tmux")),
                               "routing": policy(),
@@ -632,7 +637,7 @@ def main(argv=None):
                 args.layout == "auto" and shutil.which("tmux") and os.name != "nt"))
         if args.dry_run:
             resolution = resolve_main(args.launch, args.model) if args.launch else None
-            launchable = resolution and args.launch != "agy" and not (
+            launchable = resolution and not (
                 args.launch == "pi" and resolution["transport"] == "direct")
             print(json.dumps({"schema": 1, "kind": "oms-panel-launch",
                               "repo": str(repo), "layout": "split" if split else "inline",
@@ -652,6 +657,10 @@ def main(argv=None):
         if not args.launch and args.host == "auto" and args.layout == "auto" and managed_session():
             print(json.dumps(reopen_panel(repo)))
             return 0
+        # panel_shell supplies inline layout and a view, but no --host, including on reload.
+        if (not args.launch and args.layout == "inline" and args.view is not None
+                and (args.host == "auto" and managed_session() or panel_host.herdr_active())):
+            return interactive(repo, args.view, args.attention_only)
         if split and args.launch:
             if not main_installed(args.launch):
                 raise ValueError(main_missing(args.launch))
@@ -667,10 +676,23 @@ def main(argv=None):
             if not shutil.which("tmux"):
                 raise ValueError("split layout needs an installed tmux; inline needs no extra dependency")
             return split_panel(repo, args.view or "auto", args.attention_only)
+        from panel_native import _startup_main
+        mains, resume = _startup_main(repo)
+        if mains:
+            sibling = panel_host.herdr_active() and os.environ.get("OMS_PANEL_HOST") != "inline"
+            if not sibling:
+                return run_native(mains[0], repo, resume=resume)
+            open_native(mains[0], repo, resume=resume, view=args.view or "auto",
+                        attention_only=args.attention_only)
+        host_control = panel_host.herdr_active()
         return interactive(repo, args.view or "auto", args.attention_only)
     except ReloadWatcher:
         # The watcher restored the terminal; re-execute it on the updated, compiling sources.
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        command = [sys.executable] + sys.argv
+        if host_control:
+            # Retain Herdr's controller lifetime after the original startup argv is re-executed.
+            command += ["--layout", "inline", "--view", args.view or "auto"]
+        os.execv(sys.executable, command)
     except NativeShutdown as error:
         return error.exit_code
     except KeyboardInterrupt:

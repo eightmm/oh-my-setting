@@ -1749,28 +1749,56 @@ with patch.object(panel, "session_owner", return_value="/elsewhere"):
     else:
         raise AssertionError("a foreign panel session was reused")
 assert panel.resolve_session(Path("/tmp/project-a"), wait=False)[0] == panel.resolve_session(Path("/tmp/project-a/."), wait=False)[0]
-# A launch that loses the creation race joins the winner without treating its own new room as a choice.
+from contextlib import nullcontext
+import panel_native
+# A creation race restores the caller's room choice and rechecks the winner, without asking twice.
 race_repo = project
-original_split = panel.split_panel
-seen = {}
-with patch.dict(os.environ, {"OMS_ROOM_ID": ""}), patch.object(panel, "session_owner", side_effect=[None, None, str(race_repo), str(race_repo)]), \
-        patch.object(panel, "legacy_session", return_value=None), patch.object(panel, "check_legacy_main"), \
+race_owner, race_commands, restored_rooms = {"value": None}, [], []
+def race_session_owner(session):
+    return race_owner["value"]
+def lose_creation(command, **kwargs):
+    race_commands.append(command)
+    if command[1] == "new-session":
+        assert "OMS_ROOM_ID=room-lost" in command[-1], command
+        race_owner["value"] = str(race_repo)
+        raise subprocess.CalledProcessError(1, command)
+    assert command[1] == "new-window" and "OMS_ROOM_ID=room-winner" in command[-1], command
+    return "%2\n"
+def winning_room(*args):
+    restored_rooms.append(os.environ.get("OMS_ROOM_ID"))
+    return "room-winner"
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(panel, "session_owner", side_effect=race_session_owner), \
+        patch.object(panel, "legacy_session", return_value=None), \
+        patch.object(panel_native, "_startup_main", return_value=(["codex"], None)) as choose_once, \
+        patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()), \
+        patch.object(panel, "check_legacy_main"), patch.object(panel, "main_installed", return_value=True), \
         patch.object(panel, "ensure_room", return_value="room-lost"), \
-        patch.object(panel.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, ["tmux"])), \
-        patch.object(panel, "split_panel", side_effect=lambda *a, **k: seen.update(room=os.environ.get("OMS_ROOM_ID"), retry=k.get("retry")) or 0):
-    os.environ.pop("OMS_ROOM_ID")
-    assert original_split(race_repo, launch="codex") == 0
-assert seen == {"room": None, "retry": False}, seen
-# A new panel opens only Claude, sharing the room recorded before the owner marker.
+        patch.object(panel, "panel_room", side_effect=winning_room), \
+        patch.object(panel_native, "release_unleased_dead_mains"), patch.object(panel, "live_mains", return_value=0), \
+        patch.object(panel, "board_split"), patch.object(panel, "bind_window"), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+        patch.object(panel.subprocess, "check_output", side_effect=lose_creation), \
+        patch.object(panel.subprocess, "call", return_value=0) as attached:
+    os.environ.pop("OMS_ROOM_ID", None)
+    os.environ.pop("OMS_PANEL_MAIN", None)
+    assert panel.split_panel(race_repo) == 0
+    choose_once.assert_called_once_with(race_repo, None)
+    assert restored_rooms == [None], restored_rooms
+    assert [command[1] for command in race_commands] == ["new-session", "new-window"]
+    assert race_commands[-1][race_commands[-1].index("-n") + 1] == "codex"
+    assert attached.call_count == 1
+    assert os.environ["OMS_ROOM_ID"] == "room-winner"
+# An explicit Claude preference shares the room recorded before the owner marker.
 with patch.object(panel, "session_owner", return_value=None), patch.object(panel, "legacy_session", return_value=None), \
         patch.object(panel, "ensure_room", return_value="room-both"), patch.object(panel, "board_split"), \
         patch.object(panel, "bind_window"), patch.object(panel.subprocess, "call", return_value=0), \
         patch.object(panel.shutil, "which", return_value="/fixture/bin"), \
-        patch.object(panel.subprocess, "check_output", side_effect=["%1\n", "%2\n", "%3\n"]) as created_panes, \
+        patch.object(panel.subprocess, "check_output", side_effect=["%1\n", "%2\n"]) as created_panes, \
         patch.object(panel, "check_legacy_main"), \
-        patch.object(panel.subprocess, "run") as tmux_calls, patch.dict(os.environ, {"OMS_ROOM_ID": ""}):
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as tmux_calls, \
+        patch.dict(os.environ, {"OMS_ROOM_ID": "", "OMS_PANEL_MAIN": "claude"}):
     os.environ.pop("OMS_ROOM_ID")
-    os.environ.pop("OMS_PANEL_MAIN", None)
     assert panel.split_panel(race_repo) == 0
     windows = [c.args[0] for c in created_panes.call_args_list]
     assert windows[0][1] == "new-session" and [w[w.index("-n") + 1] for w in windows[1:]] == ["claude"], windows
@@ -1785,12 +1813,14 @@ for invalid in ("claude,pi", "unknown"):
             patch.object(panel.sys, "stderr", new_callable=io.StringIO) as warnings:
         assert panel.panel_mains() == []
         assert warnings.getvalue().splitlines() == [
-            "Warning: OMS_PANEL_MAIN accepts one of claude, pi, codex (or empty to open no main); no main opened."]
-for configured, available, expected in ((None, {"claude", "pi", "codex"}, ["claude"]),
-                                      (None, {"pi", "codex"}, ["pi"]),
+            "Warning: OMS_PANEL_MAIN accepts one of claude, pi, codex, agy (or empty to open no main); no main opened."]
+for configured, available, expected in ((None, {"claude", "pi", "codex", "agy"}, []),
+                                      (None, {"pi", "codex"}, []),
                                       (None, {"pi"}, []),
-                                      (None, {"codex"}, ["codex"]),
+                                      (None, {"codex"}, []),
                                       ("pi", {"claude", "pi", "codex"}, ["pi"]),
+                                      ("pi", {"pi"}, []),
+                                      ("agy", {"agy"}, ["agy"]),
                                       ("claude", {"pi", "codex"}, [])):
     with patch.dict(os.environ, {}, clear=False), \
             patch.object(panel.shutil, "which", side_effect=lambda name: "/x/" + name if name in available else None):
@@ -1799,10 +1829,23 @@ for configured, available, expected in ((None, {"claude", "pi", "codex"}, ["clau
         else:
             os.environ["OMS_PANEL_MAIN"] = configured
         assert panel.panel_mains() == expected, (configured, available, panel.panel_mains())
-# A session whose owner marker is not written yet is waited for, not refused as foreign.
-with patch.object(panel, "session_owner", side_effect=["", str(race_repo), str(race_repo)]), patch.object(panel.time, "sleep"), \
-        patch.object(panel.subprocess, "call", return_value=0):
+# A pending owner marker is waited for; the winner's live main is reattached without launching.
+race_owner["value"] = ""
+def record_owner(*args):
+    race_owner["value"] = str(race_repo)
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(panel, "session_owner", side_effect=race_session_owner), \
+        patch.object(panel.time, "sleep", side_effect=record_owner) as waited_owner, \
+        patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()), \
+        patch.object(panel, "check_legacy_main"), patch.object(panel, "panel_room", return_value="room-winner"), \
+        patch.object(panel, "live_mains", return_value=1), patch.object(panel_native, "release_unleased_dead_mains"), \
+        patch.object(panel_native, "_pick_main", side_effect=AssertionError("live winner prompted")), \
+        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+        patch.object(panel.subprocess, "call", return_value=0), \
+        patch.object(panel, "add_main_window", side_effect=AssertionError("live winner replaced")), \
+        patch.object(panel.subprocess, "check_output", side_effect=AssertionError("winner session recreated")):
     assert panel.split_panel(race_repo) == 0
+    assert waited_owner.called and race_owner["value"] == str(race_repo)
 with patch.object(panel, "session_owner", return_value=None), patch.object(panel, "legacy_session", return_value=None), \
         patch.object(panel, "ensure_room", return_value="room-first"), patch.object(panel, "board_split"), \
         patch.object(panel, "bind_window"), patch.object(panel.subprocess, "call", return_value=0), \

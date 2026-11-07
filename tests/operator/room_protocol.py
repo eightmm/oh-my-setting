@@ -90,6 +90,7 @@ with patch.object(panel, "provider_catalog", side_effect=ValueError("catalog una
         assert "catalog unavailable" in str(error), error
     else:
         raise AssertionError("catalog failure selected a different billing route")
+# BEGIN main-launch-discovery
 baseline = subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"])
 report = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--json"]))
 assert report["kind"] == "oms-panel" and report["schema"] == 1
@@ -98,12 +99,19 @@ assert report["dashboard"]["kind"] == "oms-dashboard"
 assert not (project / ".oms").exists(), "panel query created a state store"
 assert subprocess.check_output(["git", "-C", str(project), "status", "--porcelain"]) == baseline
 assert report["main_harnesses"]["agy"]["owner"] == "antigravity", report
+assert panel.MAIN_HARNESSES == ("claude", "pi", "codex"), "fresh launch must not add automatic swap targets"
 for harness, model, owner in (("pi", "openrouter/thinkingmachines/inkling:free", "pi"),
                               ("agy", "gemini-3-pro", "antigravity")):
     planned_main = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                    "--launch", harness, "--model", model, "--dry-run"]))
     assert planned_main["provider"] == owner and planned_main["harness"] == harness, planned_main
-    assert planned_main["argv"] is None and planned_main["executes"] is False, planned_main
+    assert planned_main["executes"] is False, planned_main
+    if harness == "agy":
+        assert planned_main["argv"][:2] == ["agy", "--prompt-interactive"], planned_main
+        assert planned_main["argv"][-2:] == ["--model", model], planned_main
+        assert "--owner antigravity" in planned_main["argv"][2], planned_main
+    else:
+        assert planned_main["argv"] is None, planned_main
     with patch.object(panel, "provider_catalog", side_effect=council_fixture_catalog), \
             patch("sys.stdout", new=io.StringIO()) as council_output:
         assert panel.council(project, owner, "owner-council", "Owner council", "Compare", dry_run=True) == 0
@@ -115,12 +123,14 @@ registered = {row["provider"]: row for row in inventory["providers"]}
 assert inventory["executes"] is False and inventory["kind"] == "oms-panel-providers"
 assert not log.exists() and not worker_log.exists() and not (project / ".oms").exists()
 for name in ("grok", "antigravity", "lumen"):
-    assert registered[name]["installed"] and not registered[name]["native_launch"], registered[name]
+    assert registered[name]["installed"], registered[name]
+    assert registered[name]["native_launch"] == (name == "antigravity"), registered[name]
     assert registered[name]["session_messaging"] == "room_polling"
     assert registered[name]["native_hook_wiring"] == "unverified"
 assert registered["lumen"]["access"] == ["read"]
 assert registered["codex"]["native_launch"] and registered["claude"]["native_launch"]
 assert shlex.split(panel.shell_command(["bash", str(panel.ENTRY), str(project)]))[1:] == ["bash", str(panel.ENTRY), str(project)]
+# END main-launch-discovery
 # Roles pick by tier, quota and availability; missing readings spread load away from the owner.
 both = {"claude", "codex"}
 assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku-5-5"
@@ -591,6 +601,616 @@ call(["bash", "-c", heartbeat_probe, "verify-heartbeat", str(root),
 main_attempts = ended_mains()
 import panel_results as saved
 _operator_block("native-controls")
+from contextlib import contextmanager, nullcontext
+from types import SimpleNamespace
+import panel_release
+active_picker_locks = []
+@contextmanager
+def picker_lock(repo, name, **kwargs):
+    active_picker_locks.append(name)
+    try:
+        yield
+    finally:
+        assert active_picker_locks.pop() == name
+
+def picker_answer(prompt):
+    assert not active_picker_locks, active_picker_locks
+    return "3"
+
+def picker_resume(*args, **kwargs):
+    assert not active_picker_locks, active_picker_locks
+    return None
+
+# BEGIN main-picker
+for answers, installed, expected in (
+        (["1"], {"claude", "codex", "agy"}, ["claude"]),
+        (["2"], {"claude", "codex", "agy"}, ["codex"]),
+        (["3"], {"claude", "codex", "agy"}, ["agy"]),
+        ([" AGY "], {"agy"}, ["agy"]),
+        ([""], set(), []), ([EOFError], set(), []),
+        (["0", "4", "pi", "malformed input", ""], set(), []),
+        (["claude", "codex", "agy", ""], set(), [])):
+    output = io.StringIO()
+    output.isatty = lambda: True
+    with patch("sys.stdin", new=SimpleNamespace(isatty=lambda: True)), \
+            patch("sys.stdout", new=output), patch("builtins.input", side_effect=answers), \
+            patch.object(panel, "main_installed", side_effect=lambda name, *a: name in installed):
+        assert panel_native._pick_main() == expected
+    assert all(name in output.getvalue() for name in ("Claude", "Codex", "Agy"))
+    for name in set(("claude", "codex", "agy")) - installed:
+        assert panel.main_missing(name) in output.getvalue()
+for tty_in, tty_out in ((False, True), (True, False)):
+    output = io.StringIO()
+    output.isatty = lambda: tty_out
+    with patch("sys.stdin", new=SimpleNamespace(isatty=lambda: tty_in)), \
+            patch("sys.stdout", new=output), patch("builtins.input") as asked:
+        assert panel_native._pick_main() == []
+        asked.assert_not_called()
+
+for configured, expected in ((None, ["agy"]), ("claude", ["claude"]), ("codex", ["codex"]),
+                             ("pi", ["pi"]), ("agy", ["agy"]), ("", []), ("  ", []), ("invalid", [])):
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {"OMS_PANEL_HARNESS": "claude"}, clear=True))
+        if configured is not None:
+            os.environ["OMS_PANEL_MAIN"] = configured
+        output = io.StringIO()
+        output.isatty = lambda: True
+        stack.enter_context(patch("sys.stdout", new=output))
+        stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+        stack.enter_context(patch("sys.stdin", new=SimpleNamespace(isatty=lambda: True)))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+        stack.enter_context(patch.object(panel, "_lock", side_effect=picker_lock))
+        stack.enter_context(patch.object(panel, "check_legacy_main"))
+        stack.enter_context(patch.object(panel, "recorded_room", return_value="picker-room"))
+        stack.enter_context(patch.object(panel, "panel_room", return_value="picker-room"))
+        stack.enter_context(patch.object(panel, "live_mains", return_value=0))
+        stack.enter_context(patch.object(panel_release, "events", return_value="[]"))
+        offer = stack.enter_context(patch.object(panel_native, "_resume_crashed_main", side_effect=picker_resume))
+        asked = stack.enter_context(patch("builtins.input", side_effect=picker_answer))
+        assert panel_native._startup_main(Path("."), "oms-fixture") == (expected, None)
+        assert asked.called == (configured is None)
+        assert offer.called == bool(expected)
+        if expected:
+            assert offer.call_args.args[1] == expected[0]
+
+for count, guard_error in ((1, None), (2, None), (0, ValueError("unknown legacy owner")),
+                            (ValueError("unknown main windows"), None)):
+    with patch.dict(os.environ, {}, clear=True), patch.object(panel, "_lock", side_effect=picker_lock), \
+            patch.object(panel, "check_legacy_main", side_effect=guard_error), \
+            patch.object(panel, "recorded_room", return_value="picker-room"), \
+            patch.object(panel, "live_main_refusal", return_value="fixture main occupied"), \
+            patch.object(panel, "live_mains", side_effect=count if isinstance(count, Exception) else None,
+                         return_value=count), patch.object(panel_release, "events", return_value="[]"), \
+            patch.object(panel_native, "_pick_main") as asked:
+        try:
+            panel_native._startup_main(Path("."), "oms-fixture")
+            raise AssertionError("startup guard was discarded")
+        except ValueError as error:
+            assert str(error) == str(guard_error or (count if isinstance(count, Exception) else "fixture main occupied"))
+        asked.assert_not_called()
+
+# Public inline startup keeps explicit authority ahead of both environment and picker.
+for launch, configured, answer, expected in ((None, None, "1", "claude"), (None, None, "2", "codex"),
+        (None, None, "3", "agy"), (None, None, "", None), (None, None, EOFError, None),
+        (None, "", None, None), (None, "invalid", None, None), (None, "pi", None, "pi"),
+        ("codex", "claude", None, "codex")):
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, environment, clear=True))
+        os.environ.pop("OMS_PANEL_MAIN", None)
+        if configured is not None:
+            os.environ["OMS_PANEL_MAIN"] = configured
+        output = io.StringIO()
+        output.isatty = lambda: True
+        stack.enter_context(patch("sys.stdout", new=output))
+        stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+        stack.enter_context(patch("sys.stdin", new=SimpleNamespace(isatty=lambda: True)))
+        stack.enter_context(patch.object(panel, "_lock", side_effect=picker_lock))
+        stack.enter_context(patch.object(panel, "check_legacy_main"))
+        stack.enter_context(patch.object(panel_release, "events", return_value="[]"))
+        stack.enter_context(patch.object(panel_native, "_resume_crashed_main", return_value=None))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+        native = stack.enter_context(patch.object(panel, "run_native", return_value=0))
+        control = stack.enter_context(patch.object(panel, "interactive", return_value=0))
+        asked = stack.enter_context(patch("builtins.input", side_effect=[answer]))
+        args = ["--repo", str(project), "--host", "inline"] + (["--launch", launch] if launch else [])
+        assert panel.main(args) == 0
+        assert asked.called == (launch is None and configured is None)
+        assert native.call_count == bool(expected) and control.call_count == (expected is None)
+        if expected:
+            assert native.call_args.args[0] == expected
+
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(panel_native, "_startup_main", side_effect=KeyboardInterrupt), \
+        patch.object(panel.sys.stdin, "isatty", return_value=True), \
+        patch.object(panel.sys.stdout, "isatty", return_value=True):
+    assert panel.main(["--repo", str(project), "--host", "inline"]) == 130
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(panel.sys.stdin, "isatty", return_value=False), \
+        patch("sys.stderr", new=io.StringIO()) as failure, \
+        patch.object(panel_native, "_startup_main") as asked:
+    try:
+        panel.main(["--repo", str(project), "--host", "inline"])
+    except SystemExit as error:
+        assert error.code == 2 and "interactive panel needs a terminal" in failure.getvalue()
+    else:
+        raise AssertionError("non-terminal startup accepted")
+    asked.assert_not_called()
+# END main-picker
+
+# BEGIN persistent-control-entry
+for control_view, attention in (("auto", False), ("graph", True)):
+    generated = shlex.split(panel.panel_shell(project, "oms-fixture", control_view, attention))
+    generated_args = generated[generated.index("--repo"):]
+    with patch.dict(os.environ, dict(environment, TMUX="fixture", OMS_PANEL_SESSION="oms-fixture"), clear=True), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), \
+            patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch.object(panel_native, "_startup_main", side_effect=AssertionError("control repeated startup")), \
+            patch.object(panel, "open_native", side_effect=AssertionError("control launched another main")), \
+            patch.object(panel, "interactive", return_value=0) as controller:
+        os.environ.pop("OMS_PANEL_MAIN", None)
+        assert panel.main(generated_args) == 0
+        controller.assert_called_once_with(project, control_view, attention)
+        # Reload must retain the exact argument shape that identifies the controller.
+        controller.reset_mock()
+        controller.side_effect = [panel.ReloadWatcher(), 0]
+        with patch.object(panel.sys, "argv", ["terminal_panel.py", *generated_args]), \
+                patch.object(panel.os, "execv") as reload_control:
+            panel.main(generated_args)
+        restarted = reload_control.call_args.args[1]
+        assert restarted == [panel.sys.executable, "terminal_panel.py", *generated_args]
+        assert panel.main(restarted[2:]) == 0
+        assert controller.call_count == 2
+
+# Being in a managed session alone does not turn a manual empty-panel start into control.
+for managed, inline_args, expected in ((True, ["--layout", "inline"], "startup"),
+        (True, ["--host", "inline"], "startup"),
+        (True, ["--host", "inline", "--layout", "inline", "--view", "auto"], "startup"),
+        (False, ["--layout", "inline", "--view", "auto"], "startup"),
+        (True, ["--host", "inline", "--launch", "codex"], "launch")):
+    with patch.dict(os.environ, dict(environment, OMS_PANEL_SESSION="oms-fixture",
+                                    **({"TMUX": "fixture", "TMUX_PANE": "%1"} if managed else {})), clear=True), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), \
+            patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch.object(panel.panel_host, "herdr_active", return_value=False), \
+            patch.object(panel, "git_toplevel", return_value=project), \
+            patch.object(panel, "panel_repository", return_value=project), \
+            patch.object(panel, "work_repository", return_value=project), \
+            patch.object(panel, "native_repository", return_value=project), \
+            patch.object(panel_native, "_startup_main", return_value=(["codex"], None)) as startup, \
+            patch.object(panel, "main_installed", return_value=True), \
+            patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()), \
+            patch.object(panel, "check_legacy_main"), patch.object(panel, "panel_room", return_value="inline-room"), \
+            patch.object(panel_native, "release_unleased_dead_mains"), patch.object(panel, "live_mains", return_value=0), \
+            patch.object(panel, "add_main_window", side_effect=AssertionError("inline startup opened a window")) as added, \
+            patch.object(panel.subprocess, "run", side_effect=AssertionError("inline startup submitted a command")) as submitted, \
+            patch.object(panel, "run_native", return_value=7) as native, \
+            patch.object(panel, "interactive", side_effect=AssertionError("standalone launch became control")):
+        os.environ.pop("OMS_PANEL_HOST", None)
+        assert panel.managed_session() == managed
+        assert panel.main(["--repo", str(project), *inline_args]) == 7
+        assert startup.call_count == (expected == "startup")
+        native.assert_called_once()
+        added.assert_not_called()
+        submitted.assert_not_called()
+with patch.dict(os.environ, dict(environment, TMUX="fixture", OMS_PANEL_SESSION="oms-fixture",
+                               OMS_PANEL_HOST="inline"), clear=True), \
+        patch.object(panel, "main_installed", return_value=True), \
+        patch.object(panel, "native_repository", return_value=project), \
+        patch.object(panel, "panel_room", side_effect=AssertionError("inline helper changed rooms")), \
+        patch.object(panel, "add_main_window", side_effect=AssertionError("inline helper opened a window")), \
+        patch.object(panel.subprocess, "run", side_effect=AssertionError("inline helper submitted a command")), \
+        patch.object(panel, "run_native", return_value=7) as native:
+    assert panel.open_native("codex", project, model="fixture-model", task="Bounded task") == 7
+    native.assert_called_once_with("codex", project, None, "fixture-model", "Bounded task")
+
+host_start_order = []
+with patch.dict(os.environ, environment, clear=True), \
+        patch.object(panel.sys.stdin, "isatty", return_value=True), \
+        patch.object(panel.sys.stdout, "isatty", return_value=True), \
+        patch.object(panel.panel_host, "herdr_active", return_value=True), \
+        patch.object(panel_native, "_startup_main", return_value=(["codex"], None)) as startup, \
+        patch.object(panel, "main_installed", return_value=True), \
+        patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()), \
+        patch.object(panel, "check_legacy_main"), patch.object(panel, "ensure_room", return_value="host-start-room"), \
+        patch.object(panel.panel_host, "open_native", side_effect=lambda *a: host_start_order.append("sibling")) as sibling, \
+        patch.object(panel, "interactive", side_effect=lambda *a: host_start_order.append("control") or 0) as controller:
+    os.environ.pop("OMS_PANEL_HOST", None)
+    assert panel.main(["--repo", str(project)]) == 0
+    assert host_start_order == ["sibling", "control"]
+    assert startup.call_count == sibling.call_count == controller.call_count == 1
+    assert "--launch" in sibling.call_args.args[2] and sibling.call_args.args[2][-1] == "codex"
+    startup.reset_mock()
+    with patch.object(panel, "run_native", return_value=0) as explicit:
+        assert panel.main(["--repo", str(project), "--launch", "codex"]) == 0
+        explicit.assert_called_once()
+        startup.assert_not_called()
+    assert sibling.call_count == controller.call_count == 1
+for host_mains, host_view, attention in (([], None, False), (["codex"], None, False), ([], "graph", True)):
+    host_args = ["--repo", str(project)] + (["--view", host_view, "--attention-only"] if host_view else [])
+    with patch.dict(os.environ, environment, clear=True), \
+            patch.object(panel.sys.stdin, "isatty", return_value=True), \
+            patch.object(panel.sys.stdout, "isatty", return_value=True), \
+            patch.object(panel.panel_host, "herdr_active", return_value=True), \
+            patch.object(panel_native, "_startup_main", return_value=(host_mains, None)) as startup, \
+            patch.object(panel, "open_native", return_value=0) as native, \
+            patch.object(panel, "interactive", side_effect=[panel.ReloadWatcher(), 0]) as controller, \
+            patch.object(panel.sys, "argv", ["terminal_panel.py", *host_args]), \
+            patch.object(panel.os, "execv") as reload_control:
+        os.environ.pop("OMS_PANEL_HOST", None)
+        panel.main(host_args)
+        restarted = reload_control.call_args.args[1]
+        assert panel.main(restarted[2:]) == 0
+        assert startup.call_count == 1, "Herdr control reload repeated startup"
+        assert native.call_count == bool(host_mains) and controller.call_count == 2
+        assert all(call.args == (project, host_view or "auto", attention) for call in controller.call_args_list)
+# END persistent-control-entry
+
+# BEGIN herdr-startup-resume
+for selected_room, resume, bound_rooms, discovery_error, expected_room, expected_error in (
+        (None, "resume-A", {"room-A"}, None, "room-A", None),
+        ("room-A", "resume-A", {"room-A"}, None, "room-A", None),
+        ("room-old", "resume-A", {"room-A"}, None, "room-A", None),
+        ("room-B", "resume-A", {"room-A"}, None, None, "another room"),
+        (None, "resume-A", {"room-A", "room-B"}, None, None, "multiple rooms"),
+        (None, "resume-A", set(), ValueError("native resume ownership discovery is incomplete"),
+         None, "discovery is incomplete"),
+        (None, "resume-A", set(), None, "room-new", None),
+        ("room-A", "resume-A", set(), None, "room-A", None),
+        (None, None, set(), None, "room-new", None)):
+    host_submissions = []
+    actual_ensure_room = panel.ensure_room
+    def submit_resumed_host(repo, provider, command, watcher):
+        assert binding.call_count == bool(resume), "host submitted before binding discovery"
+        assert os.environ["OMS_ROOM_ID"] == expected_room
+        child_resume = command[command.index("--resume") + 1] if "--resume" in command else None
+        assert child_resume == resume
+        host_submissions.append(panel.run_native(provider, repo, resume=child_resume))
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, dict(environment, HERDR_ENV="1",
+                                 HERDR_SOCKET_PATH=str(temporary / "herdr-fixture.sock")), clear=True))
+        stack.enter_context(patch.object(panel.sys.stdin, "isatty", return_value=True))
+        stack.enter_context(patch.object(panel.sys.stdout, "isatty", return_value=True))
+        for name in ("git_toplevel", "panel_repository", "work_repository", "native_repository"):
+            stack.enter_context(patch.object(panel, name, return_value=project))
+        stack.enter_context(patch.object(panel_native, "_startup_main", return_value=(["codex"], resume)))
+        binding = stack.enter_context(patch.object(panel, "_native_resume_binding",
+            return_value=([], bound_rooms), side_effect=discovery_error))
+        stack.enter_context(patch.object(panel.room, "resolve",
+            side_effect=lambda repo, ident: "room-A" if ident == "room-old" else ident))
+        stack.enter_context(patch.object(panel.room, "status", return_value={"closed": False}))
+        create_room = stack.enter_context(patch.object(panel.room, "create", return_value="room-new"))
+        stack.enter_context(patch.object(panel.room, "join", side_effect=AssertionError("host preflight enrolled a main")))
+        ensured = stack.enter_context(patch.object(panel, "ensure_room", wraps=actual_ensure_room))
+        stack.enter_context(patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()))
+        legacy = stack.enter_context(patch.object(panel, "check_legacy_main"))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+        native = stack.enter_context(patch.object(panel, "run_single_native", return_value=7))
+        sibling = stack.enter_context(patch.object(panel.panel_host, "open_native", side_effect=submit_resumed_host))
+        controller = stack.enter_context(patch.object(panel, "interactive", return_value=0))
+        stack.enter_context(patch.object(panel.subprocess, "run", side_effect=AssertionError("host preflight submitted a command")))
+        stack.enter_context(patch.object(panel.subprocess, "Popen", side_effect=AssertionError("host preflight spawned a child")))
+        failure = stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+        os.environ.pop("OMS_PANEL_HOST", None)
+        os.environ.pop("OMS_ROOM_ID", None)
+        host_args = ["--repo", str(project)] + (["--room", selected_room] if selected_room else [])
+        assert panel.main(host_args) == (1 if expected_error else 0)
+        if expected_error:
+            assert expected_error in failure.getvalue(), failure.getvalue()
+            ensured.assert_not_called()
+            create_room.assert_not_called()
+            sibling.assert_not_called()
+            native.assert_not_called()
+            controller.assert_not_called()
+            legacy.assert_not_called()
+            assert os.environ.get("OMS_ROOM_ID") == selected_room
+        else:
+            assert host_submissions == [7]
+            assert sibling.call_count == native.call_count == controller.call_count == 1
+            assert binding.call_count == (2 if resume else 0)
+            assert create_room.call_count == (expected_room == "room-new")
+            assert os.environ["OMS_ROOM_ID"] == expected_room
+            if resume and bound_rooms:
+                ensured.assert_called_once_with(project, "room-A")
+# END herdr-startup-resume
+
+# BEGIN control-main-choice
+for control_harness in (None, "agy"):
+    control_keys = iter(["4", "t", "q"] if control_harness else ["t", "q"])
+    control_fields = iter([control_harness, "Bounded task"] if control_harness else [])
+    def control_choice(repo, provider, previous, view, attention, navigation, cache):
+        cache.update(status=0, state={"collection": {"ok": True}})
+        key = next(control_keys)
+        if key == "q" and not control_harness:
+            assert "Select a main harness first (4)" in previous, previous
+        return key
+    def control_field(*args, **kwargs):
+        assert control_harness, "empty control defaulted to a main"
+        return next(control_fields)
+    with patch.dict(os.environ, {}, clear=True), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "main_installed", return_value=False), \
+            patch.object(panel, "raw_keys", return_value=False), \
+            patch.object(panel, "read_choice", side_effect=control_choice), \
+            patch.object(panel, "read_field", side_effect=control_field), \
+            patch.object(panel, "panel_room", return_value="choice-room"), \
+            patch.object(panel, "open_native", return_value=0) as native:
+        assert panel.interactive(project) == 0
+        assert native.call_count == bool(control_harness)
+        if control_harness:
+            assert native.call_args.args[0] == "agy"
+            assert native.call_args.kwargs["task"] == "Bounded task"
+for target, adapter, installed, model in (("antigravity", False, True, ""), ("agy", False, True, ""),
+                                         ("antigravity", True, True, ""), ("agy", False, False, ""),
+                                         ("antigravity", False, True, "bad model")):
+    provider_keys, native_messages = iter(["p", "q"]), []
+    def provider_choice(repo, provider, previous, *args):
+        native_messages.append(previous)
+        return next(provider_keys)
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, environment, clear=True))
+        stack.enter_context(patch.object(panel, "managed_session", return_value=False))
+        stack.enter_context(patch.object(panel, "raw_keys", return_value=False))
+        stack.enter_context(patch.object(panel, "read_choice", side_effect=provider_choice))
+        stack.enter_context(patch.object(panel, "read_field", side_effect=[target, "n", model, ""]))
+        stack.enter_context(patch.object(panel, "provider_catalog", return_value=[{
+            "provider": "antigravity", "installed": True, "native_launch": True,
+            "models": [], "access": ["read", "write"], "session_messaging": "room_polling"}]))
+        stack.enter_context(patch.object(panel, "show_providers"))
+        stack.enter_context(patch.object(panel, "native_adapter", return_value="fixture-adapter" if adapter else None))
+        stack.enter_context(patch.object(panel_native, "native_adapter", return_value="fixture-adapter" if adapter else None))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=installed))
+        allocated = stack.enter_context(patch.object(panel, "panel_room", return_value="native-room"))
+        native = stack.enter_context(patch.object(panel, "open_native", return_value=7))
+        assert panel.interactive(project) == 0
+        if installed and not model:
+            assert native.call_args.args[0] == ("antigravity" if adapter else "agy")
+            assert allocated.call_count == 1 and "error:" not in native_messages[-1]
+        else:
+            allocated.assert_not_called()
+            native.assert_not_called()
+            assert "error:" in native_messages[-1]
+for unset in (True, False):
+    keys = iter(["1", "t", "?", "p", "o", "q"] if unset else ["1", "t", "q"])
+    messages, fields, selected_rooms = [], [], []
+    expected_fields = iter(["Press Enter", "Target provider", "Room number", "Room title"] if unset else [])
+    answers = iter(["", "", "n", "Task room"] if unset else [])
+    def roomless_choice(repo, provider, previous, view, attention, navigation, cache):
+        cache.update(status=0, state={"collection": {"ok": True}})
+        key = next(keys, None)
+        if key is None:
+            raise EOFError
+        messages.append(previous)
+        if key in ("t", "?", "p", "o") or key == "q" and not unset:
+            assert len(fields) == ({"p": 1, "o": 2}.get(key, 0)) and not selected_rooms
+            created.assert_not_called()
+            assert ("o Rooms" in previous and "No room selected" in previous) if unset else "Room selection unknown" in previous
+        return key
+    def roomless_field(label, **kwargs):
+        assert label.startswith(next(expected_fields)), label
+        fields.append(label)
+        return next(answers)
+    def roomless_tmux(command, **kwargs):
+        if command[1] == "show-environment":
+            return subprocess.CompletedProcess(command, 0 if unset else 1, "", "query unavailable")
+        if command[1] == "set-environment":
+            selected_rooms.append(command[-1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, dict(environment, TMUX="fixture",
+            OMS_PANEL_SESSION="oms-fixture", OMS_PANEL_HARNESS="claude"), clear=True))
+        os.environ.pop("OMS_ROOM_ID", None)
+        output = io.StringIO()
+        stack.enter_context(patch("sys.stdout", new=output))
+        stack.enter_context(patch.object(panel, "managed_session", return_value=True))
+        stack.enter_context(patch.object(panel, "raw_keys", return_value=False))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+        stack.enter_context(patch.object(panel, "read_choice", side_effect=roomless_choice))
+        stack.enter_context(patch.object(panel, "read_field", side_effect=roomless_field))
+        stack.enter_context(patch.object(panel, "clear_control_view"))
+        stack.enter_context(patch.object(panel, "provider_catalog", return_value=[]))
+        stack.enter_context(patch.object(panel, "show_providers"))
+        stack.enter_context(patch.object(panel.room, "discover", return_value=([], False)))
+        created = stack.enter_context(patch.object(panel.room, "create", return_value="task-room"))
+        stack.enter_context(patch.object(panel, "room_listing", return_value=[]))
+        stack.enter_context(patch.object(panel.subprocess, "run", side_effect=roomless_tmux))
+        stack.enter_context(patch.object(panel.subprocess, "call", return_value=0))
+        native = stack.enter_context(patch.object(panel, "open_native", side_effect=AssertionError("blocked shortcut launched")))
+        allocated = stack.enter_context(patch.object(panel, "panel_room", side_effect=AssertionError("blocked shortcut allocated")))
+        assert panel.interactive(project) == 0
+        native.assert_not_called()
+        allocated.assert_not_called()
+        assert created.call_count == bool(unset)
+        assert selected_rooms == (["task-room"] if unset else [])
+        if unset:
+            assert "[o] Rooms before main/task shortcuts" in output.getvalue()
+            assert os.environ["OMS_ROOM_ID"] == "task-room"
+        else:
+            assert "No room selected" not in "\n".join(messages)
+# END control-main-choice
+
+# BEGIN main-picker-races
+for picker_owner, available, occupied, guard_error in (
+        (None, True, 0, None), (".", True, 0, None),
+        (None, False, 0, None), (".", False, 0, None),
+        (None, True, 0, ValueError("legacy main became live")),
+        (".", True, 0, ValueError("legacy main became live")), (".", True, 1, None)):
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {}, clear=True))
+        stack.enter_context(patch.object(panel, "session_owner", return_value=picker_owner))
+        stack.enter_context(patch.object(panel, "panel_mains", side_effect=AssertionError("choice was discarded")))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=available))
+        stack.enter_context(patch.object(panel, "recorded_room", return_value="picker-room"))
+        stack.enter_context(patch.object(panel, "panel_room", return_value="picker-room"))
+        stack.enter_context(patch.object(panel, "ensure_room", return_value="picker-room"))
+        stack.enter_context(patch.object(panel, "_lock", side_effect=picker_lock))
+        stack.enter_context(patch.object(panel, "check_legacy_main", side_effect=guard_error))
+        stack.enter_context(patch.object(panel_native, "release_unleased_dead_mains"))
+        stack.enter_context(patch.object(panel, "live_mains", return_value=occupied))
+        stack.enter_context(patch.object(panel, "panel_shell", return_value="control"))
+        stack.enter_context(patch.object(panel, "native_repository", return_value=Path(".")))
+        stack.enter_context(patch.object(panel, "board_split"))
+        stack.enter_context(patch.object(panel, "watch_shell", return_value="watch"))
+        stack.enter_context(patch.object(panel, "tmux_command", side_effect=lambda *a: ["tmux"] + list(a)))
+        new_panel = stack.enter_context(patch.object(panel.subprocess, "check_output", return_value="%1"))
+        stack.enter_context(patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)))
+        stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+        stack.enter_context(patch("builtins.input", side_effect=AssertionError("construction asked for input")))
+        opened = stack.enter_context(patch.object(panel, "add_main_window", return_value="%2"))
+        panel.construct_panel(Path("."), "oms-fixture", picker_owner, {}, "auto", False,
+                              None, None, None, None, panel_mains_override=["agy"])
+        assert opened.call_count == (1 if available and not occupied and not guard_error else 0)
+        if opened.called:
+            assert opened.call_args.args[2] == "agy"
+        if picker_owner is None:
+            assert new_panel.call_count == 1, "a failed choice lost usable control"
+
+# Losing session creation reuses the selection on a fully recorded competing panel.
+with patch.dict(os.environ, {}, clear=True), \
+        patch.object(panel, "resolve_session", return_value=("oms-fixture", None)), \
+        patch.object(panel, "legacy_session", return_value=None), \
+        patch.object(panel, "session_owner", return_value="."), \
+        patch.object(panel, "bind_main_keys"), \
+        patch.object(panel, "_lock", side_effect=picker_lock), \
+        patch.object(panel_native, "_startup_main", return_value=(["agy"], None)) as choose_once, \
+        patch.object(panel, "construct_panel", side_effect=[OSError("creation race"), "%2"]) as construct, \
+        patch.object(panel, "tmux_command", side_effect=lambda *a: ["tmux"] + list(a)), \
+        patch.object(panel.subprocess, "call", return_value=0), patch("sys.stdout", new=io.StringIO()):
+    assert panel.split_panel(Path(".")) == 0
+    choose_once.assert_called_once()
+    assert construct.call_count == 2
+    assert all(call.kwargs["panel_mains_override"] == ["agy"] for call in construct.call_args_list)
+for owner in (None, str(project)):
+    for configured in (None, "claude"):
+        for guard in ("legacy", "held-session", "held-session-empty", "live-query"):
+            if guard == "live-query" and owner is None:
+                continue
+            refusal = ("main window status unavailable" if guard == "live-query" else
+                       "main startup status unavailable" if guard == "held-session-empty" else
+                       "panel operation is busy; retry later" if guard == "held-session" else
+                       "live or unverified main; use oms panel --release-main att_fixture")
+            notices = []
+            def guarded_lock(repo, name, **kwargs):
+                if guard.startswith("held-session") and name == "panel-main-session":
+                    raise ValueError("" if guard == "held-session-empty" else refusal)
+                return nullcontext()
+            def guard_tmux(command, **kwargs):
+                if "@oms_panel_notice" in command:
+                    notices.append(command[-1])
+                return subprocess.CompletedProcess(command, 0, "", "")
+            with ExitStack() as stack:
+                stack.enter_context(patch.dict(os.environ, environment, clear=True))
+                os.environ.pop("OMS_PANEL_MAIN", None)
+                os.environ.pop("OMS_ROOM_ID", None)
+                if configured is not None:
+                    os.environ["OMS_PANEL_MAIN"] = configured
+                stack.enter_context(patch.object(panel, "resolve_session", return_value=("oms-fixture", owner)))
+                stack.enter_context(patch.object(panel, "session_owner", return_value=owner))
+                stack.enter_context(patch.object(panel, "legacy_session", return_value=None))
+                stack.enter_context(patch.object(panel, "recorded_room", return_value="guard-room"))
+                stack.enter_context(patch.object(panel, "panel_room", return_value="guard-room"))
+                stack.enter_context(patch.object(panel_native, "release_dead_mains", return_value=[{
+                    "tool": "panel-main", "terminal": False}] if guard == "legacy" else []))
+                stack.enter_context(patch.object(panel, "live_main_refusal", return_value=refusal))
+                stack.enter_context(patch.object(panel, "live_mains",
+                    side_effect=[ValueError(refusal), 0] if guard == "live-query" else None, return_value=0))
+                stack.enter_context(patch.object(panel, "_lock", side_effect=guarded_lock))
+                stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+                stack.enter_context(patch.object(panel.shutil, "which", return_value="fixture-cli"))
+                stack.enter_context(patch.object(panel_native, "_pick_main", side_effect=AssertionError("guard failure prompted")))
+                stack.enter_context(patch.object(panel, "ensure_room", side_effect=AssertionError("blocked startup allocated")))
+                for name in ("bind_main_keys", "bind_window", "board_split"):
+                    stack.enter_context(patch.object(panel, name))
+                stack.enter_context(patch.object(panel, "native_repository", return_value=project))
+                stack.enter_context(patch.object(panel.subprocess, "run", side_effect=guard_tmux))
+                stack.enter_context(patch.object(panel.subprocess, "check_output", return_value="%1"))
+                stack.enter_context(patch.object(panel.subprocess, "call", return_value=0))
+                opened = stack.enter_context(patch.object(panel, "add_main_window", side_effect=AssertionError("blocked startup launched")))
+                stack.enter_context(patch.object(panel_release, "events", return_value="[]"))
+                stack.enter_context(patch("sys.stdout", new=io.StringIO()))
+                stack.enter_context(patch("sys.stderr", new=io.StringIO()))
+                assert panel.split_panel(project) == 0
+                assert notices and refusal in notices[-1], (owner, configured, guard, notices)
+                assert "No main selected" not in notices[-1] and "CLI on PATH" not in notices[-1]
+                opened.assert_not_called()
+for inventory, available, code in (
+        ([("claude", "", "", "renamed-main", "@2", "claude")], False, 0),
+        ([("antigravity", "", "", "renamed-agy", "@2", "agy")], False, 0),
+        ([("antigravity", "", "", "antigravity", "@2", "antigravity")], False, 0),
+        ([("custom", "", "", "renamed", "@2", "custom")], False, 0),
+        ([("claude", "", "", "renamed", "@2", "")], False, 0),
+        ([("claude", "", "", "control", "@2", "claude")], False, 0),
+        ([("", "", "unverified", "control", "@2", "")], False, 0),
+        ([("", "", "", "claude", "@2", "")], False, 0),
+        ([("", "", "unverified", "custom", "@3", "")], False, 0),
+        ([("", "", "", "other", "@2", "")], False, 0),
+        ([("claude", "", "", "control", "@1", "")], True, 0),
+        ([("", "", "", "control", "@0", "")], True, 0),
+        ([("", "", "", "control", "", "")], False, 0),
+        ([("", "", "", "control", "@x", "")], False, 0),
+        ([("", "", "", "", "@2", "")], False, 0),
+        ([("", "", "", " ", "@2", "")], False, 0),
+        ([("bad",)], False, 0), ([("", "", "", "control", "@1")], False, 0),
+        ([("", "", "", "control", "@1", "", "extra")], False, 0), ([], False, 0), ([], False, 1),
+        ([("", "", "", "control", "@1", "")] * 2, False, 0)):
+    def inventory_tmux(command, **kwargs):
+        if command[1] == "show-environment":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        assert command[1] == "list-windows", command
+        columns = 6 if "#{@oms_panel_harness}" in command[-1] else 5
+        text = "\n".join("\t".join(row[:columns] if len(row) == 6 else row) for row in inventory)
+        return subprocess.CompletedProcess(command, code, text + ("\n" if inventory else ""), "")
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {}, clear=True))
+        stack.enter_context(patch.object(panel.shutil, "which", return_value="fixture-tmux"))
+        stack.enter_context(patch.object(panel, "resolve_session", return_value=("oms-fixture", str(project))))
+        stack.enter_context(patch.object(panel_native, "release_dead_mains", return_value=[]))
+        stack.enter_context(patch.object(panel, "_lock", side_effect=lambda *a, **k: nullcontext()))
+        stack.enter_context(patch.object(panel, "live_main_refusal", return_value="main ownership is unproven"))
+        stack.enter_context(patch.object(panel.subprocess, "run", side_effect=inventory_tmux))
+        stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+        stack.enter_context(patch.object(panel, "main_history", return_value=[]))
+        stack.enter_context(patch.object(panel.room, "status", return_value={"participants": []}))
+        stack.enter_context(patch.object(panel_release, "events", return_value="[]"))
+        asked = stack.enter_context(patch.object(panel_native, "_pick_main", return_value=[]))
+        native = stack.enter_context(patch.object(panel, "run_native", side_effect=AssertionError("inventory launched a provider")))
+        try:
+            assert panel_native._startup_main(project, "oms-fixture") == ([], None)
+        except (ValueError, subprocess.CalledProcessError):
+            assert not available, inventory
+        assert asked.call_count == int(available), inventory
+        native.assert_not_called()
+for windows, count in (("\t\t\tcontrol\t@1\t\n", 0), ("\t\t\tclaude\t@2\t\n", 1),
+                       ("\t\tunverified\tcustom\t@3\t\n", 1)):
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, windows, "")), \
+            patch.object(panel.room, "status", side_effect=AssertionError("roomless proof queried a room")), \
+            patch.object(panel, "main_history", side_effect=AssertionError("roomless proof queried history")):
+        assert panel.live_mains(project, "oms-fixture", None) == count
+for windows in ("", "malformed\n"):
+    with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, windows, "")):
+        try:
+            panel.live_mains(project, "oms-fixture", None)
+            raise AssertionError("roomless window proof accepted incomplete output")
+        except ValueError as error:
+            assert "main window status unavailable" in str(error), error
+for recorded, code in (("", 0), ("OMS_ROOM_ID=bad room\n", 0), ("", 1)):
+    with patch.dict(os.environ, {}, clear=True), \
+            patch.object(panel_native, "release_dead_mains", return_value=[]), \
+            patch.object(panel.shutil, "which", return_value="fixture-tmux"), \
+            patch.object(panel, "resolve_session", return_value=("oms-fixture", str(project))), \
+            patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], code, recorded, "")), \
+            patch.object(panel, "live_mains", return_value=0) as counted:
+        if recorded or code:
+            try:
+                panel.check_legacy_main(project)
+                raise AssertionError("unknown room status was accepted")
+            except (ValueError, subprocess.CalledProcessError):
+                pass
+            counted.assert_not_called()
+        else:
+            panel.check_legacy_main(project)
+            assert counted.call_args.args[2] is None
+# END main-picker-races
+
 def test_panel_reattach():
     from contextlib import nullcontext
     from types import SimpleNamespace
@@ -608,8 +1228,10 @@ def test_panel_reattach():
             stack.enter_context(patch.object(panel_release, "events", return_value="malformed" if count == 2
                                             else '[{"attempt_id":"crash"}]'))
             stack.enter_context(patch.object(panel, "session_owner", return_value="."))
+            stack.enter_context(patch.object(panel, "recorded_room", return_value="fixture-room"))
             stack.enter_context(patch.object(panel, "panel_room", return_value="fixture-room"))
             stack.enter_context(patch.object(panel, "panel_mains", return_value=["claude"]))
+            stack.enter_context(patch.object(panel, "main_installed", return_value=True))
             offer = stack.enter_context(patch.object(panel_native, "_resume_crashed_main", return_value="session_123"))
             release = stack.enter_context(patch.object(panel_native, "release_unleased_dead_mains",
                                                         side_effect=lambda *a: calls.append("release")))
@@ -636,15 +1258,13 @@ def test_panel_reattach():
                 assert not explicit or count == 0
             assert release.call_count == 1
             assert opened.call_count == (1 if count == 0 else 0), count
-            assert offer.call_count == (1 if count == 0 and not explicit else 0), count
+            assert offer.call_count == 0, "construction must never ask for input under its lock"
             if count == 0:
                 assert calls == ["release", "count"], calls
                 lease.assert_called_once_with(Path("."), "panel-main-session", timeout=.1)
                 legacy.assert_called_once()
                 assert opened.call_args.args[2] == ("codex" if explicit else "claude")
-                assert opened.call_args.args[6] == (None if explicit else "session_123")
-                if not explicit:
-                    assert offer.call_args.kwargs["_rows"] == [{"attempt_id": "crash"}]
+                assert opened.call_args.args[6] is None
                 assert any(c.args[0] == ["tmux", "select-window", "-t", "%2"] for c in tmux.call_args_list)
 
     crash = {"attempt_id": "crash", "provider": "claude", "updated_at": "2026-10-22T00:00:00Z",
@@ -667,7 +1287,7 @@ def test_panel_notice():
     from contextlib import nullcontext
     for owner in (None, "."):
         for configured, mains, failure, expected in (
-                (None, [], None, "Claude main needs the claude CLI on PATH"),
+                (None, [], None, "No main selected"),
                 ("", [], None, "OMS_PANEL_MAIN is empty"),
                 ("  ", [], None, "OMS_PANEL_MAIN is empty"),
                 ("unknown", [], None, "OMS_PANEL_MAIN"),
@@ -681,6 +1301,8 @@ def test_panel_notice():
                     os.environ["OMS_PANEL_MAIN"] = configured
                 stack.enter_context(patch.object(panel, "session_owner", return_value=owner))
                 stack.enter_context(patch.object(panel, "panel_mains", return_value=mains))
+                stack.enter_context(patch.object(panel, "main_installed", return_value=True))
+                stack.enter_context(patch.object(panel, "recorded_room", return_value="fixture-room"))
                 stack.enter_context(patch.object(panel, "panel_room", return_value="fixture-room"))
                 stack.enter_context(patch.object(panel_native, "_resume_crashed_main", return_value=None))
                 stack.enter_context(patch.object(panel_native, "release_unleased_dead_mains"))
@@ -774,8 +1396,10 @@ def test_panel_startup_error():
                         key.assert_not_called()
 
 
+# BEGIN panel-startup-guards
 test_panel_reattach()
 test_panel_notice()
+# END panel-startup-guards
 test_panel_startup_error()
 
 for pair_harness, pair_owner, matches in (
@@ -918,7 +1542,7 @@ for task in ("/review", "../scripts inspect", "Explain " + "/" + "home" + "/fixt
             patch.object(panel, "read_field", side_effect=["t", task, "q"]), \
             patch.object(panel, "ensure_room", return_value="fixture-room") as chosen_room, \
             patch.object(panel, "open_native", return_value=0) as task_open, \
-            patch.dict(os.environ, environment, clear=True):
+            patch.dict(os.environ, dict(environment, OMS_PANEL_HARNESS="claude"), clear=True):
         assert panel.interactive(project) == 0
         assert task_open.call_args.kwargs["task"] == task
         expected_title = "x" * 160 if task == "x" * 160 else "Shared work"

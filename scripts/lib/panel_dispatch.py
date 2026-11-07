@@ -129,7 +129,7 @@ def provider_catalog(selection="all"):
     writes = dict(line.replace("\r", "").split("\t") for line in access.stdout.splitlines())
     return [dict(row, installed=row["present"], access=["read"] +
                  (["write"] if writes.get(row["provider"]) == "true" else []),
-                 native_launch=row["provider"] in PROVIDERS or bool(native_adapter(row["provider"])),
+                 native_launch=row["provider"] in (*PROVIDERS, "antigravity") or bool(native_adapter(row["provider"])),
                  session_messaging="room_polling", native_hook_wiring="unverified")
             for row in rows]
 

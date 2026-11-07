@@ -1,6 +1,94 @@
+# BEGIN startup-main-pty
+if os.name == "posix":
+    picker_previous_log = log.read_bytes() if log.exists() else None
+    try:
+        with patch.dict(environment):
+            environment.pop("OMS_PANEL_MAIN", None)
+            environment.pop("OMS_PANEL_HARNESS", None)
+            for answer, owner in ((b"1\n", "claude"), (b"2\n", "codex"), (b"3\n", "antigravity")):
+                terminal(["bash", str(panel.ENTRY), "panel", "--host", "inline"], answer,
+                         b"NATIVE_FIXTURE_READY", trigger=b"> ", timeout=40)
+                row = json.loads(log.read_text().splitlines()[-1])
+                assert row["agent"] == owner, row
+                if owner == "antigravity":
+                    assert row["argv"][:1] == ["--prompt-interactive"]
+                    assert "--owner antigravity" in row["argv"][1]
+                    assert "--conversation" not in row["argv"] and "--model" not in row["argv"]
+            before_cancel = log.read_bytes()
+            terminal(["bash", str(panel.ENTRY), "panel", "--host", "inline"], b"\x03",
+                     b"Choose a main", trigger=b"> ", expected_exit=130)
+            terminal(["bash", str(panel.ENTRY), "panel", "--host", "inline"], b"\n",
+                     b"Needs you", trigger=b"> ", then=(b"Needs you", b"q"), timeout=40)
+            terminal(["bash", str(panel.ENTRY), "panel", "--host", "inline"], b"\x04",
+                     b"Needs you", trigger=b"> ", then=(b"Needs you", b"q"), timeout=40)
+            assert log.read_bytes() == before_cancel, "empty/cancelled picker launched a main"
+    finally:
+        if picker_previous_log is None:
+            log.unlink(missing_ok=True)
+        else:
+            log.write_bytes(picker_previous_log)
+# END startup-main-pty
+
+# BEGIN persistent-control-pty
+if os.name == "posix" and shutil.which("tmux"):
+    control_tmux = shutil.which("tmux")
+    control_socket = "oms-picker-" + str(os.getpid())
+    control_wrapper = binary / "tmux"
+    previous_wrapper = control_wrapper.read_bytes() if control_wrapper.exists() else None
+    previous_mode = control_wrapper.stat().st_mode if previous_wrapper is not None else None
+    control_wrapper.write_text("#!/usr/bin/env bash\nexec %s -L %s \"$@\"\n" %
+                               (shlex.quote(control_tmux), shlex.quote(control_socket)))
+    control_wrapper.chmod(0o755)
+    control_tmux_args = [control_tmux, "-L", control_socket]
+    try:
+        with patch.dict(environment):
+            environment.pop("OMS_PANEL_MAIN", None)
+            environment.pop("OMS_PANEL_HARNESS", None)
+            terminal(["bash", str(panel.ENTRY), "panel", "--host", "tmux"], b"\n", b"Needs you",
+                     trigger=b"> ", then=(b"Needs you", b"q"), timeout=40)
+            control_session = panel.session_candidates(project)[0]
+            control_target = "=" + control_session + ":control"
+            pane_state = subprocess.check_output(control_tmux_args + ["display-message", "-p", "-t", control_target,
+                "#{pane_dead}\t#{pane_start_command}"], env=environment, text=True)
+            assert pane_state.startswith("0\t") and "--layout inline --view auto" in pane_state, pane_state
+            screen = subprocess.check_output(control_tmux_args + ["capture-pane", "-p", "-t", control_target],
+                                             env=environment, text=True)
+            assert "Choose a main" not in screen, screen
+            previous_owner = subprocess.check_output(control_tmux_args + ["show-option", "-w", "-v", "-t",
+                control_target, "@oms_panel_owner"], env=environment, text=True).strip()
+            next_owner = "codex" if previous_owner == "claude" else "claude"
+            subprocess.run(control_tmux_args + ["send-keys", "-t", control_target, "4"], env=environment, check=True)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                screen = subprocess.check_output(control_tmux_args + ["capture-pane", "-p", "-t", control_target],
+                                                 env=environment, text=True)
+                if "Main harness (claude/pi/codex/agy)" in screen:
+                    break
+                time.sleep(.1)
+            else:
+                raise AssertionError("persistent control did not accept its menu key: " + screen)
+            subprocess.run(control_tmux_args + ["send-keys", "-t", control_target, next_owner, "Enter"],
+                           env=environment, check=True)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                selected_owner = subprocess.check_output(control_tmux_args + ["show-option", "-w", "-v", "-t",
+                    control_target, "@oms_panel_owner"], env=environment, text=True).strip()
+                if selected_owner == next_owner:
+                    break
+                time.sleep(.1)
+            assert selected_owner == next_owner, "control exited before applying its selection"
+    finally:
+        subprocess.run(control_tmux_args + ["kill-server"], env=environment, capture_output=True)
+        if previous_wrapper is None:
+            control_wrapper.unlink(missing_ok=True)
+        else:
+            control_wrapper.write_bytes(previous_wrapper)
+            control_wrapper.chmod(previous_mode)
+# END persistent-control-pty
+
 if os.name == "posix":
     # Raw single keys: no Enter, and no "oms> " prompt to wait for.
-    terminal(["bash", str(panel.ENTRY), "panel", "--layout", "inline"], b"9q", "OMS · ".encode("utf-8"), trigger=b"Needs you")
+    terminal(["env", "OMS_PANEL_MAIN=", "bash", str(panel.ENTRY), "panel", "--layout", "inline"], b"9q", "OMS · ".encode("utf-8"), trigger=b"Needs you")
     motion_attempt = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
                            "--provider", "claude", "--tool", "panel-motion-fixture",
                            "--ref", "panel_role=worker", "--ref", "panel_model=claude-sonnet-5-5",
@@ -134,7 +222,8 @@ if os.name == "posix":
                        env=dict(environment, TERM="xterm"), check=True)
         # Mains are opened one by one from the menu here; automatic opening is checked separately.
         env = dict(environment, TERM="xterm", OMS_PANEL_NO_ANIMATION="1", NO_COLOR="",
-                   OMS_PANEL_MAIN="")
+                   OMS_PANEL_HARNESS="claude")
+        env.pop("OMS_PANEL_MAIN", None)
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(project)
@@ -176,6 +265,12 @@ if os.name == "posix":
                     return text, result.returncode == 0 and expected in text and not any(needle in text for needle in absent)
                 return tmux_wait_until(observe, (arguments, expected), timeout)
 
+            def outer_picker():
+                if select.select([fd], [], [], .1)[0]:
+                    client_output.extend(os.read(fd, 65536))
+                return bytes(client_output), b"Choose a main" in client_output
+            tmux_wait_until(outer_picker, "outer startup offers the picker")
+            os.write(fd, b"\n")
             sessions = tmux_wait(["list-sessions", "-F", "#{session_name}"], "oms-panel-")
             session = next(s for s in sessions.splitlines() if s.startswith("oms-panel-"))
             # Panel keys act only in OMS panel sessions; other sessions receive the key itself.
@@ -187,7 +282,9 @@ if os.name == "posix":
             subprocess.run(tmux + ["set-environment", "-t", session, "PANEL_TEST_NATIVE_HOLD", "1"], env=env, check=True)
             panes = tmux_wait(["list-panes", "-t", session, "-F", "#{pane_id}\t#{pane_start_command}"], "--watch").splitlines()
             control = next(row.split("\t")[0] for row in panes if "--watch" not in row)
-            unselected = tmux_wait(["capture-pane", "-p", "-t", control], "session room is unset")
+            unselected = tmux_wait(["capture-pane", "-p", "-t", control], "No room selected; use o Rooms")
+            assert "[o] Rooms" in unselected, unselected
+            assert "Choose a main" not in unselected, "generated control repeated the startup picker"
             assert "START" not in unselected and "Press 1" not in unselected, unselected
             control_room = panel.room.create(project, title="Control fixture")
             subprocess.run(tmux + ["set-environment", "-t", session, "OMS_ROOM_ID", control_room], env=env, check=True)
@@ -414,7 +511,7 @@ if os.name == "posix":
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude --")
             subprocess.run(tmux + ["send-keys", "-t", control, "4"], env=env, check=True)
-            tmux_wait(["capture-pane", "-p", "-t", control], "Main harness (claude/pi/codex)")
+            tmux_wait(["capture-pane", "-p", "-t", control], "Main harness (claude/pi/codex/agy)")
             subprocess.run(tmux + ["send-keys", "-t", control, "codex", "Enter"], env=env, check=True)
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "codex")
             tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Codex --")

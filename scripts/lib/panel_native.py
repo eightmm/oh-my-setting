@@ -221,9 +221,9 @@ def bootstrap(provider, repo):
 
 def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None,
                    session_id=None):
-    from terminal_panel import ENTRY, MAIN_HARNESSES, bootstrap, main_owner, native_binary, native_repository
+    from terminal_panel import ENTRY, _LAUNCH_HARNESSES, bootstrap, main_owner, native_binary, native_repository
     from terminal_panel import policy, room_instructions
-    instructions = (Path(context_file).read_text(encoding="utf-8") if context_file and provider in MAIN_HARNESSES else
+    instructions = (Path(context_file).read_text(encoding="utf-8") if context_file and provider in _LAUNCH_HARNESSES else
                     bootstrap(main_owner(provider, model), repo) + room_instructions(room_id, member))
     if provider == "pi":
         if resume:
@@ -238,7 +238,13 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
             command += ["--", "User task (data): " + json.dumps(task, ensure_ascii=False)]
         return command
     if provider == "agy":
-        raise ValueError("Antigravity main launch is not available yet")
+        if resume:
+            raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
+        command = ["agy", "--prompt-interactive", instructions + (
+            "\nUser task (data): " + json.dumps(task, ensure_ascii=False) if task else "")]
+        if model is not None:
+            command += ["--model", resolve_main(provider, model)["model"]]
+        return command
     command = [provider]
     preset = policy()["main"].get(provider, {"model": None, "effort": "native-settings"})
     default = not model
@@ -378,7 +384,7 @@ def _main_terminal_owner(provider, repo, session, pane, attempt, ident):
             or not room.same_room(repo, previous.get("refs", {}).get("panel_room_id"), ident)
             or previous.get("refs", {}).get("panel_room_participant", attempt) != window[4]):
         raise ValueError("previous main has no confirmed terminal owner; restart refused")
-    resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+    resume = previous.get("refs", {}).get("native_session") if provider not in ("pi", "agy") else None
     if provider != "pi":
         member = room.participant(room.status(repo, ident), window[4])
         if (not member["joined"] or member["role"] != "main"
@@ -401,6 +407,8 @@ def run_native(provider, repo, resume=None, model=None, task=None):
     from terminal_panel import run_single_native, session_stored, tmux_command
     if room._child():
         raise ValueError("workers cannot open native owner sessions")
+    if provider == "agy" and resume:
+        raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
     if resume:
         # Reject foreign rooms before competing for the process-lifetime lease.
         # run_single_native repeats this check under the native-session lock.
@@ -421,7 +429,7 @@ def run_native(provider, repo, resume=None, model=None, task=None):
                     release_dead_mains(repo)
                     if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
                         raise ValueError("another main is live or unverified; finish it before restarting here")
-                    resume = previous.get("refs", {}).get("native_session") if provider != "pi" else None
+                    resume = previous.get("refs", {}).get("native_session") if provider not in ("pi", "agy") else None
                     if resume and not session_stored(provider, resume):
                         resume = None
                 check_legacy_main(repo)
@@ -521,6 +529,8 @@ def run_single_native(provider, repo, resume=None, model=None, task=None, _exit_
     from terminal_panel import _lock, _native_resume_binding, _run_native, ensure_room, main_history
     if room._child():
         raise ValueError("workers cannot open native owner sessions")
+    if provider == "agy" and resume:
+        raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
     if resume:
         key = hashlib.sha256((provider + "\0" + resume).encode()).hexdigest()[:32]
         with _lock(repo, "panel-native-" + key):
@@ -564,12 +574,14 @@ def main_history(repo, ident, member=None):
 
 
 def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None, _exit_info=None):
-    from terminal_panel import MAIN_HARNESSES, NativeShutdown, PROVIDERS, _latest_swap, _lock, bootstrap
+    from terminal_panel import _LAUNCH_HARNESSES, NativeShutdown, PROVIDERS, _latest_swap, _lock, bootstrap
     from terminal_panel import child_environment, clean, ensure_room, events, launch_failed_without_child
     from terminal_panel import lineage_ids, main_history, main_installed, main_missing
     from terminal_panel import managed_session, native_command, native_repository, pane_option
     from terminal_panel import room_instructions, safe_label, tmux_command, update_activity
     harness = provider
+    if harness == "agy" and resume:
+        raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
     execution = native_repository(repo)
     if not main_installed(harness, model):
         raise ValueError(main_missing(harness, model))
@@ -577,7 +589,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
         raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
     resolution = resolve_main(harness, model)
     provider = resolution["owner"]
-    if harness == "agy" or harness == "pi" and resolution["transport"] == "direct":
+    if harness == "pi" and resolution["transport"] == "direct":
         raise ValueError("selected main transport launch is not available yet")
     native_session = resume or (str(uuid.uuid4()) if harness == "claude" else None)
     room_id = room_id or ensure_room(repo)
@@ -651,7 +663,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     attempt = events(repo, "start", "--provider", provider, "--tool", "panel-main",
                      "--ref", "panel_role=main", "--ref", "panel_owner=" + provider,
                      "--ref", "panel_harness=" + harness,
-                     "--ref", "panel_model=" + resolution["model"],
+                     *(["--ref", "panel_model=" + resolution["model"]] if resolution["model"] is not None else []),
                      "--ref", "panel_effort=" + resolution["effort"],
                      "--ref", "panel_label=" + label,
                      "--ref", "panel_location=repository", "--ref", "panel_room_id=" + room_id,
@@ -730,7 +742,7 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
                           "state": row.get("state"), "label": screened_label(row)} for row in unsettled]
         context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)
                                 + ("\nUnsettled lineage workers (data): " + json.dumps(unsettled) if unsettled else "")
-                                + ("\nUser task (data): " + json.dumps(task) if task and harness not in MAIN_HARNESSES else ""),
+                                + ("\nUser task (data): " + json.dumps(task) if task and harness not in _LAUNCH_HARNESSES else ""),
                                 encoding="utf-8")
         context_path.chmod(0o600)
         try:
@@ -834,19 +846,66 @@ def legacy_session(repo):
 
 
 def panel_mains():
-    """The installed main selected by OMS_PANEL_MAIN, or the default installed main; empty opens none."""
-    from terminal_panel import MAIN_HARNESSES, main_installed
+    """Only an explicit OMS_PANEL_MAIN selects a main; unset and empty open none."""
+    from terminal_panel import _LAUNCH_HARNESSES, main_installed
     value = os.environ.get("OMS_PANEL_MAIN")
-    if value is not None and value.strip() and value.strip() not in MAIN_HARNESSES:
+    if value is not None and value.strip() and value.strip() not in _LAUNCH_HARNESSES:
         print("Warning: OMS_PANEL_MAIN accepts one of %s (or empty to open no main); no main opened."
-              % ", ".join(MAIN_HARNESSES), file=sys.stderr)
-    names = MAIN_HARNESSES if value is None else [value.strip()]
-    return next(([name] for name in names if name in MAIN_HARNESSES and main_installed(name)), [])
+              % ", ".join(_LAUNCH_HARNESSES), file=sys.stderr)
+    names = [] if value is None else [value.strip()]
+    return next(([name] for name in names if name in _LAUNCH_HARNESSES and main_installed(name)), [])
+
+
+def _pick_main():
+    """Startup has its own choices; the control menu's Pi/Codex shortcuts stay unchanged."""
+    from terminal_panel import main_installed, main_missing
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return []
+    choices = ("claude", "codex", "agy")
+    print("Choose a main (Enter = control only):")
+    for index, name in enumerate(choices, 1):
+        print("  %d %s%s" % (index, {"claude": "Claude", "codex": "Codex", "agy": "Agy"}[name],
+                                "" if main_installed(name) else " — " + main_missing(name)))
+    while True:
+        try:
+            answer = input("> ").strip().lower()
+        except EOFError:
+            return []
+        if not answer:
+            return []
+        selected = dict(zip(("1", "2", "3"), choices)).get(answer, answer)
+        if selected not in choices:
+            print("Select claude, codex or agy; Enter opens control only.")
+        elif not main_installed(selected):
+            print(main_missing(selected))
+        else:
+            return [selected]
+
+
+def _startup_main(repo, session=None):
+    """Prove availability briefly, then ask with no construction/session lock held."""
+    from terminal_panel import MAX_LIVE_MAINS, _lock, check_legacy_main, live_main_refusal, live_mains, panel_mains, recorded_room
+    import panel_release
+    rows = None
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            rows = json.loads(panel_release.events(repo, "list", "--json"))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    with _lock(repo, "panel-main-start", timeout=3):
+        ident = room.resolve(repo, os.environ.get("OMS_ROOM_ID") or recorded_room(session, checked=True)) if session else None
+        with _lock(repo, "panel-main-session", timeout=.1):
+            check_legacy_main(repo)
+        if session and live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
+            raise ValueError(live_main_refusal(repo))
+    mains = panel_mains() if "OMS_PANEL_MAIN" in os.environ else _pick_main()
+    resume = _resume_crashed_main(repo, mains[0], _rows=rows) if mains else None
+    return mains, resume
 
 
 def _resume_crashed_main(repo, provider, _rows=None):
     """Offer a proof-classified crash conversation; a pre-release snapshot survives automatic abandonment."""
-    if not provider or provider == "pi" or not sys.stdin.isatty() or not sys.stdout.isatty():
+    if provider not in ("claude", "codex") or not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
     try:
         import panel_release
@@ -896,20 +955,31 @@ MAX_LIVE_MAINS = 1
 
 def live_mains(repo, session, room_id, pending_window=None):
     """Panel-wide: joined mains with a live panel-main attempt in any room this panel's windows belong to, plus windows opened but not yet enrolled."""
-    from terminal_panel import MAIN_HARNESSES, main_history, tmux_command
+    from terminal_panel import _LAUNCH_HARNESSES, main_history, tmux_command
     found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
-                                        "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}\t#{window_name}\t#{window_id}"),
+                                        "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}\t#{window_name}\t#{window_id}\t#{@oms_panel_harness}"),
                            capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
     if found.returncode:
         raise ValueError("main window status unavailable; existing sessions preserved")
-    windows = [r for r in (line.replace("\r", "").split("\t") for line in found.stdout.splitlines())
-               if len(r) == 5 and (r[2] or r[3] in MAIN_HARNESSES) and r[0]
-               and not (pending_window and r[4] == pending_window and not r[2])]
+    records = [line.replace("\r", "").split("\t") for line in found.stdout.splitlines()]
+    if (not records or any(len(row) != 6 or not row[3].strip() or not re.fullmatch(r"@[0-9]+", row[4]) for row in records)
+            or len({row[4] for row in records}) != len(records)):
+        raise ValueError("main window status unavailable; existing sessions preserved")
+    windows = []
+    for row in records:
+        # Control writes an owner too; native harness/participant evidence survives a rename.
+        native = row[2] or row[5] or (row[0] and row[3] != "control") or row[3] in (*_LAUNCH_HARNESSES, "antigravity")
+        if not native:
+            if row[3] != "control":
+                raise ValueError("main window ownership is unverified; existing sessions preserved")
+            continue
+        if not (pending_window and row[4] == pending_window and not row[2]):
+            windows.append(row)
     live = set()
     terminal = set()
     windows = [[r[0], room.resolve(repo, r[1]) if r[1] else r[1]] + r[2:] for r in windows]
     room_id = room.resolve(repo, room_id)
-    for ident in sorted({room_id} | {r[1] for r in windows if r[1]}):
+    for ident in sorted(({room_id} if room_id else set()) | {r[1] for r in windows if r[1]}):
         try:
             joined = {p["participant"] for p in room.status(repo, ident)["participants"]
                       if p["joined"] and p["role"] == "main"}
@@ -1015,9 +1085,8 @@ def check_legacy_main(repo):
             if legacy and session_owner(legacy) == str(repo):
                 session, owner = legacy, str(repo)
         if owner == str(repo):
-            ident = recorded_room(session)
-            if not ident:
-                raise ValueError("main room status unavailable; existing sessions preserved")
+            ident = recorded_room(session, checked=True)
+            # An absent room is valid for pure control; history and windows must still prove it empty.
             pending = None
             if managed_session() and os.environ.get("OMS_PANEL_SESSION") == session:
                 current = subprocess.run(tmux_command("display-message", "-p", "-t", os.environ.get("TMUX_PANE", ""),
@@ -1378,8 +1447,8 @@ def spawn_single_main(repo, provider, task=None, model=None):
 
 
 def split_panel(repo, view="auto", attention_only=False, launch=None, resume=None, model=None, task=None, retry=True):
-    from terminal_panel import _lock, bind_main_keys, construct_panel, legacy_session, resolve_session
-    from terminal_panel import session_owner, split_panel, tmux_command
+    from terminal_panel import _lock, bind_main_keys, construct_panel, legacy_session, recorded_room, resolve_session
+    from terminal_panel import session_owner, tmux_command
     chosen_room = os.environ.get("OMS_ROOM_ID")
     panel_mains_override = None
     session, owner = resolve_session(repo, wait=retry)
@@ -1391,13 +1460,15 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
         raise ValueError("tmux session %s is not this checkout's OMS panel; close it or use --layout inline" % session)
     resume_provider = launch
     auto_resume = False
-    if owner is None and not launch and not resume:
-        panel_mains_override = panel_mains()
-        if panel_mains_override:
+    if not launch and not resume:
+        try:
+            panel_mains_override, resume = _startup_main(repo, session if owner is not None else None)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            panel_mains_override = error
+        if panel_mains_override and not isinstance(panel_mains_override, Exception):
             resume_provider = panel_mains_override[0]
-            resume = _resume_crashed_main(repo, resume_provider)
             auto_resume = bool(resume)
-    if owner is None and resume and resume_provider:
+    if resume and resume_provider:
         from terminal_panel import _native_resume_binding
         try:
             _, bound_rooms = _native_resume_binding(resume_provider, repo, resume)
@@ -1409,12 +1480,10 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
             raise ValueError("native session is bound to multiple rooms; resume refused")
         if bound_rooms:
             bound_room = next(iter(bound_rooms))
-            selected_room = room.resolve(repo, chosen_room)
+            selected_room = room.resolve(repo, chosen_room or (recorded_room(session, checked=True) if owner is not None else None))
             if selected_room and not room.same_room(repo, selected_room, bound_room):
                 raise ValueError("native session is bound to another room; resume refused")
-            if not selected_room:
-                chosen_room = bound_room
-                os.environ["OMS_ROOM_ID"] = chosen_room
+            # Adoption waits for construction: it must not become a caller override during a race.
     env = os.environ.copy()
     env["OMS_PANEL_SESSION"] = session
     bind_main_keys()
@@ -1433,8 +1502,14 @@ def split_panel(repo, view="auto", attention_only=False, launch=None, resume=Non
                     os.environ["OMS_ROOM_ID"] = chosen_room
                 else:
                     os.environ.pop("OMS_ROOM_ID", None)
-                return split_panel(repo, view, attention_only, launch, resume, model, task, retry=False)
-        raise
+                # Reuse the choice after a creation race; input must happen only once.
+                with _lock(repo, "panel-main-start", timeout=3):
+                    pane = construct_panel(repo, session, str(repo), env, view, attention_only,
+                                           launch, resume, model, task, panel_mains_override=panel_mains_override)
+            else:
+                raise
+        else:
+            raise
     attach = "switch-client" if os.environ.get("TMUX") else "attach-session"
     result = subprocess.call(tmux_command(attach, "-t", "=" + session))
     print("OMS session %s remains available while its panes are running." % session)
@@ -1445,9 +1520,9 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                     panel_mains_override=None):
     """Open a preferred main on creation or empty reattachment; persist failures for the control view."""
     # Recheck after taking the construction lock: another caller may have created it while we waited.
-    from terminal_panel import MAX_LIVE_MAINS, _lock, add_main_window, bind_window, board_split
+    from terminal_panel import MAX_LIVE_MAINS, _lock, _native_resume_binding, add_main_window, bind_window, board_split
     from terminal_panel import check_legacy_main, clean, ensure_room, launch_command, live_main_refusal
-    from terminal_panel import live_mains, native_repository, panel_mains, panel_room, panel_shell
+    from terminal_panel import live_mains, main_installed, main_missing, native_repository, panel_mains, panel_room, panel_shell, recorded_room
     from terminal_panel import session_owner, tmux_command, watch_shell
 
     def notice(message):
@@ -1458,16 +1533,30 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                        check=False)
 
     def missing_main():
-        from terminal_panel import MAIN_HARNESSES, main_missing
+        from terminal_panel import _LAUNCH_HARNESSES, main_missing
         selected = os.environ.get("OMS_PANEL_MAIN")
         if selected is not None:
             selected = selected.strip()
             if not selected:
                 return "OMS_PANEL_MAIN is empty"
-            if selected not in MAIN_HARNESSES:
-                return "OMS_PANEL_MAIN must name one of " + ", ".join(MAIN_HARNESSES)
-        return main_missing(selected or MAIN_HARNESSES[0])
+            if selected not in _LAUNCH_HARNESSES:
+                return "OMS_PANEL_MAIN must name one of " + ", ".join(_LAUNCH_HARNESSES)
+        return main_missing(selected) if selected else "No main selected; use the control menu to start one"
 
+    def resumed_room(provider, ident):
+        _, bound_rooms = _native_resume_binding(provider, repo, resume)
+        if len(bound_rooms) > 1:
+            raise ValueError("native session is bound to multiple rooms; resume refused")
+        bound = next(iter(bound_rooms), None)
+        if bound and ident and not room.same_room(repo, ident, bound):
+            raise ValueError("native session is bound to another room; resume refused")
+        return ident or bound
+
+    # An exception override preserves a blocked startup; [] means an explicit control-only choice.
+    startup_failure = ((clean(str(panel_mains_override), 1000) or "main startup status unavailable")
+                       if isinstance(panel_mains_override, Exception) else None)
+    if startup_failure is not None:
+        panel_mains_override, launch, resume = [], None, None
     current_owner = session_owner(session)
     if current_owner:
         if current_owner != str(repo):
@@ -1479,19 +1568,15 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             # Plain reattachment repairs a board whose main has ended, under the usual start guards.
             automatic = not launch
             try:
+                if startup_failure is not None:
+                    notice("Main not opened: " + startup_failure)
+                    return None
                 # An explicit --room wins; otherwise new mains default to the panel's open room.
-                os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
-                mains = panel_mains() if automatic else []
-                crash_history = None
-                if automatic and mains and not resume and sys.stdin.isatty() and sys.stdout.isatty():
-                    # Release rewrites crash records; retain them for an offer only after the zero-main proof.
-                    import panel_release
-                    try:
-                        crash_history = json.loads(panel_release.events(repo, "list", "--json"))
-                    except (OSError, ValueError, subprocess.SubprocessError):
-                        pass
+                recorded = recorded_room(session, checked=True)
+                ident = room.resolve(repo, os.environ.get("OMS_ROOM_ID") or recorded)
+                mains = (panel_mains() if panel_mains_override is None else panel_mains_override) if automatic else []
                 release_unleased_dead_mains(repo)
-                if live_mains(repo, session, os.environ["OMS_ROOM_ID"]) >= MAX_LIVE_MAINS:
+                if live_mains(repo, session, ident) >= MAX_LIVE_MAINS:
                     if automatic:
                         notice("")
                         return None
@@ -1501,10 +1586,17 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
                         notice(missing_main())
                         return None
                     launch = mains[0]
-                    if not resume:
-                        resume = _resume_crashed_main(repo, launch, _rows=crash_history)
+                    if not main_installed(launch, model):
+                        raise ValueError(main_missing(launch, model))
                 with _lock(repo, "panel-main-session", timeout=.1):
                     check_legacy_main(repo)
+                if resume:
+                    os.environ["OMS_ROOM_ID"] = ensure_room(repo, resumed_room(launch, ident))
+                    subprocess.run(tmux_command("set-environment", "-t", "=" + session,
+                                                "OMS_ROOM_ID", os.environ["OMS_ROOM_ID"]), check=True)
+                else:
+                    os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
+                env["OMS_ROOM_ID"] = os.environ["OMS_ROOM_ID"]
                 created = "window"
                 pane = add_main_window(repo, session, launch, view, attention_only, env, resume, model, task)
                 subprocess.run(tmux_command("select-window", "-t", pane), check=True)
@@ -1517,11 +1609,23 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
         else:
             # A new panel opens one preferred main and retains a separate control window.
             mains = [] if launch else (panel_mains() if panel_mains_override is None else panel_mains_override)
+            failure = startup_failure
             if launch or mains:
-                with _lock(repo, "panel-main-session", timeout=.1):
-                    check_legacy_main(repo)
+                try:
+                    with _lock(repo, "panel-main-session", timeout=.1):
+                        check_legacy_main(repo)
+                    if mains and not main_installed(mains[0], model):
+                        raise ValueError(main_missing(mains[0], model))
+                    if resume:
+                        ident = resumed_room(launch or mains[0], room.resolve(repo, os.environ.get("OMS_ROOM_ID")))
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    if launch:
+                        raise
+                    failure = clean(str(error), 160)
+                    mains = []
             if launch or mains:
-                os.environ["OMS_ROOM_ID"] = ensure_room(repo)
+                os.environ["OMS_ROOM_ID"] = ensure_room(repo, ident) if resume else ensure_room(repo)
+                env["OMS_ROOM_ID"] = os.environ["OMS_ROOM_ID"]
             if launch:
                 shell = launch_command(repo, session, launch, resume, model, task)
             else:
@@ -1541,7 +1645,6 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
             board_split(pane, repo, watch_shell(repo, launch, model=model), main_watch=bool(launch))
             subprocess.run(tmux_command("select-pane", "-t", pane), check=True)
             opened = []
-            failure = None
             for index, provider in enumerate(mains):
                 try:
                     opened.append(add_main_window(repo, session, provider, view, attention_only, env,
@@ -1567,15 +1670,28 @@ def construct_panel(repo, session, owner, env, view, attention_only, launch, res
 def open_native(provider, repo, resume=None, model=None, task=None, view="auto", attention_only=False):
     from terminal_panel import ENTRY, MAX_LIVE_MAINS, PANEL_SESSION, ROOT, _lock, add_main_window
     from terminal_panel import check_legacy_main, ensure_room, live_main_refusal, live_mains, main_installed
-    from terminal_panel import main_owner, native_repository, panel_room, run_native, tmux_command
+    from terminal_panel import _native_resume_binding, main_owner, native_repository, panel_room, run_native, tmux_command
+    if provider == "agy" and resume:
+        raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
     execution = native_repository(repo)
     if not main_installed(provider, model):
         raise ValueError(main_missing(provider, model))
     session = os.environ.get("OMS_PANEL_SESSION", "")
     if panel_host.herdr_active() and os.environ.get("OMS_PANEL_HOST") != "inline":
+        selected = None
+        if resume:
+            _, bound_rooms = _native_resume_binding(provider, repo, resume)
+            if len(bound_rooms) > 1:
+                raise ValueError("native session is bound to multiple rooms; resume refused")
+            selected = room.resolve(repo, os.environ.get("OMS_ROOM_ID"))
+            if bound_rooms:
+                bound_room = next(iter(bound_rooms))
+                if selected and not room.same_room(repo, selected, bound_room):
+                    raise ValueError("native session is bound to another room; resume refused")
+                selected = selected or bound_room
         with _lock(repo, "panel-main-session", timeout=.1):
             check_legacy_main(repo)
-        os.environ["OMS_ROOM_ID"] = ensure_room(repo)
+        os.environ["OMS_ROOM_ID"] = ensure_room(repo, selected) if resume else ensure_room(repo)
         native = ["bash", str(ROOT / "scripts" / "panel.sh"), "--repo", str(execution),
                   "--host", "herdr", "--layout", "inline", "--launch", provider]
         for flag, value in (("--resume", resume), ("--model", model), ("--task", task)):
@@ -1587,7 +1703,8 @@ def open_native(provider, repo, resume=None, model=None, task=None, view="auto",
             watcher.append("--attention-only")
         panel_host.open_native(execution, provider, native, watcher)
         return 0
-    if os.environ.get("TMUX") and re.fullmatch(PANEL_SESSION, session):
+    if (os.environ.get("OMS_PANEL_HOST") != "inline" and os.environ.get("TMUX")
+            and re.fullmatch(PANEL_SESSION, session)):
         with _lock(repo, "panel-main-start", timeout=3):
             ident = os.environ["OMS_ROOM_ID"] = panel_room(repo, session)
             release_unleased_dead_mains(repo)

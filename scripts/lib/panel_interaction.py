@@ -124,9 +124,10 @@ def plan_goal(repo):
 
 
 def help_rows(rows, width, unicode=True):
-    """menu_rows plus the goal-drive key, placed before the closing edge of the expanded box."""
+    """Expose the room prerequisite alongside the goal-drive key in expanded help."""
     from panel_view import box_row
-    return rows[:-1] + [box_row("GOAL".ljust(9) + "[d] Drive goal", width, unicode)] + rows[-1:]
+    return rows[:-1] + [box_row("ROOM".ljust(9) + "[o] Rooms before main/task shortcuts in roomless control", width, unicode),
+                       box_row("GOAL".ljust(9) + "[d] Drive goal", width, unicode)] + rows[-1:]
 
 
 def drive_goal(repo, state, harness, view="auto", attention_only=False):
@@ -335,13 +336,14 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
 
 def interactive(repo, view="auto", attention_only=False):
     from terminal_panel import (ENTRY, MAIN_HARNESSES, MAX_PROMPT, NativeShutdown, SESSION_ID, _adopt_successor,
-        clean, clear_control_view, council, dispatch, ensure_room, finalize_selection, hold_state, live_main_refusal,
-        main_installed, main_occupied, main_owner, managed_session, menu_rows, native_binary, open_native,
+        _LAUNCH_HARNESSES, caller_owner, clean, clear_control_view, council, dispatch, ensure_room,
+        finalize_selection, hold_state, live_main_refusal, main_installed, main_missing, main_occupied,
+        main_owner, managed_session, menu_rows, native_adapter, native_binary, open_native,
         panel_mains, panel_room, private_capacity, provider_catalog, raw_keys, read_choice, read_field, recorded_room,
         reopen_panel, retry_delivery, room_listing, room_open, run, safe_label, show_providers, snapshot,
         source_stamps, stale_notice, swap_choices, swap_main, terminal_style, tmux_command)
-    harness = os.environ.get("OMS_PANEL_HARNESS") or (panel_mains() or ["claude"])[0]
-    provider = os.environ.get("OMS_PANEL_OWNER") or main_owner(harness)
+    harness = os.environ.get("OMS_PANEL_HARNESS") or next(iter(panel_mains()), None)
+    provider = os.environ.get("OMS_PANEL_OWNER") or main_owner(harness) or caller_owner()
     previous = "ready"
     navigation = {}
     held = {}
@@ -354,7 +356,6 @@ def interactive(repo, view="auto", attention_only=False):
                 adopted = recorded_room(os.environ["OMS_PANEL_SESSION"], checked=True)
                 if not adopted:
                     os.environ.pop("OMS_ROOM_ID", None)
-                    raise ValueError("session room is unset")
                 if adopted and room.resolve(repo, adopted) != adopted:
                     # The session's room rolled over: record the successor for every window, then follow it.
                     _adopt_successor(repo)
@@ -365,7 +366,11 @@ def interactive(repo, view="auto", attention_only=False):
                 navigation["room_poll_unknown"] = True
                 previous = "Room selection unknown: " + clean("%s: %s" % (type(error).__name__, error), 100)
             else:
-                navigation.pop("room_poll_unknown", None)
+                if adopted:
+                    navigation.pop("room_poll_unknown", None)
+                else:
+                    navigation["room_poll_unknown"] = "unset"
+                    previous = "No room selected; use o Rooms to select or create one, or p Providers > Native"
                 if adopted != os.environ.get("OMS_ROOM_ID"):
                     if adopted:
                         os.environ["OMS_ROOM_ID"] = adopted
@@ -404,6 +409,8 @@ def interactive(repo, view="auto", attention_only=False):
                     or cache.get("state", {}).get("collection", {}).get("ok") is not True
                     or cache.get("state", {}).get("room", {}).get("error")):
                 occupied = main_occupied(cache.get("state", {}))
+                if navigation.get("room_poll_unknown") == "unset":
+                    raise ValueError("No room selected; use o Rooms to select or create one, or p Providers > Native")
                 raise ValueError("Room selection unknown; wait for a successful room poll" if navigation.get("room_poll_unknown")
                                  else live_main_refusal(repo, [occupied] if occupied else None))
             if choice != "9":
@@ -481,8 +488,8 @@ def interactive(repo, view="auto", attention_only=False):
                 previous = "Swapped to %s %s in the same room" % (result["provider"], result["model"])
                 continue
             if choice in ("1", "2", "0", "3"):
-                selected = {"1": "claude", "2": "pi", "0": "codex"}.get(choice) or read_field("Harness (claude/pi/codex or opted-in native adapter): ")
-                if selected not in MAIN_HARNESSES:
+                selected = {"1": "claude", "2": "pi", "0": "codex"}.get(choice) or read_field("Harness (claude/pi/codex/agy or opted-in native adapter): ")
+                if selected not in _LAUNCH_HARNESSES:
                     selected = provider_catalog(selected)[0]["provider"]
                     native_binary(selected)
                 resume = read_field("Exact session ID: ") if choice == "3" else None
@@ -496,12 +503,14 @@ def interactive(repo, view="auto", attention_only=False):
                 else:
                     previous = "%s native session exit=%s" % (provider, status)
             elif choice == "4":
-                selected = read_field("Main harness (claude/pi/codex): ")
-                if selected not in MAIN_HARNESSES:
-                    raise ValueError("select claude, pi or codex")
+                selected = read_field("Main harness (claude/pi/codex/agy): ")
+                if selected not in _LAUNCH_HARNESSES:
+                    raise ValueError("select claude, pi, codex or agy")
                 harness, provider = selected, main_owner(selected)
                 previous = "main provider selected"
             elif choice == "t":
+                if not harness:
+                    raise ValueError("Select a main harness first (4)")
                 task = read_field("Task for the main: ")
                 try:
                     title = safe_label(task) or "Shared work"
@@ -521,8 +530,14 @@ def interactive(repo, view="auto", attention_only=False):
                     choice = read_field("Action (n Native / 5 Explain / 6 Implement / 7 Review / a Advisor): ")
                     if choice == "n":
                         selected = provider_catalog(target)[0]["provider"]
+                        if selected == "antigravity" and not native_adapter(selected):
+                            selected = "agy"
+                        native_binary(selected)
                         model = read_field("Native model (Enter for profile): ", required=False) or None
                         task = read_field("Native task (Enter for readiness): ", required=False) or None
+                        main_owner(selected, model)
+                        if not main_installed(selected, model):
+                            raise ValueError(main_missing(selected, model))
                         os.environ["OMS_ROOM_ID"] = panel_room(repo)
                         status = open_native(selected, repo, model=model, task=task,
                                              view=view, attention_only=attention_only)
