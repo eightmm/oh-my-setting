@@ -353,53 +353,50 @@ oms_python_precompile() {
 }
 
 oms_python_runtime_activate_fallback() {
-  local root python version env_dir
+  local root python version env_dir bin_dir launcher
   unset -f python python3 2>/dev/null || true
   root="$(oms_python_runtime_root)"
-  python="$root/bin/python3"
   [ ! -L "$root/current" ] && [ -f "$root/current" ] || return 1
   IFS= read -r version < "$root/current" || return 1
   oms_python_runtime_version_valid "$version" || return 1
   env_dir="$root/envs/$version"
   oms_python_runtime_root_owned "$root" && [ ! -L "$root/bin" ] &&
-    [ ! -L "$root/envs" ] && oms_python_runtime_env_owned "$env_dir" "$version" &&
-    oms_python_runtime_env_python "$env_dir" >/dev/null &&
-    [ ! -L "$python" ] && [ -f "$python" ] && [ -x "$python" ] && env -u PYTHONHOME -u PYTHONPATH "$python" -I -c \
-      'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1 || return 1
-  unset -f python3 2>/dev/null || true
-  export OMS_PYTHON="$python" PATH="$root/bin:$PATH"
+    [ ! -L "$root/bin/python3" ] && [ -f "$root/bin/python3" ] && [ -x "$root/bin/python3" ] &&
+    [ ! -L "$root/envs" ] && oms_python_runtime_env_owned "$env_dir" "$version" || return 1
+  python="$(oms_python_runtime_env_python "$env_dir")" || return 1
+  launcher="$root/launchers/$version/python3"
+  if [ ! -L "$root/launchers" ] && [ ! -L "${launcher%/*}" ] &&
+     [ ! -L "$launcher" ] && [ -f "$launcher" ] && [ -x "$launcher" ]; then
+    bin_dir="${launcher%/*}"
+  elif [ "$python" = "$env_dir/bin/python3" ]; then
+    bin_dir="$env_dir/bin"
+  else
+    return 1
+  fi
+  env -u PYTHONHOME -u PYTHONPATH "$python" -I -c \
+    'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1 || return 1
+  export OMS_PYTHON="$python" PATH="$bin_dir:$PATH"
   hash -r 2>/dev/null || true
 }
 
 oms_python_runtime_is_active() {
-  local root selected version remainder
+  local root selected version env_dir python launcher
   unset -f python python3 2>/dev/null || true
   root="$(oms_python_runtime_root)"
   oms_python_runtime_root_owned "$root" || return 1
-  case "${OMS_PYTHON:-}" in *..*) return 1 ;; "$root"/*) ;; *) return 1 ;; esac
-  oms_python_runtime_candidate_valid "$root" "$OMS_PYTHON" || return 1
-  selected="$(command -v python3 2>/dev/null)" || return 1
-  case "$selected" in *..*) return 1 ;; esac
-  [ -f "$selected" ] && [ ! -L "$selected" ] || return 1
-  case "$selected" in
-    "$root"/bin/python3) [ ! -L "$root/bin" ] || return 1 ;;
-    "$root"/launchers/*/python3)
-      [ ! -L "$root/launchers" ] && [ ! -L "${selected%/*}" ] || return 1
-      remainder="${selected#"$root"/launchers/}"
-      version="${remainder%/python3}"
-      oms_python_runtime_version_valid "$version" || return 1 ;;
-    *) return 1 ;;
-  esac
   [ ! -L "$root/current" ] && [ -f "$root/current" ] || return 1
   IFS= read -r version < "$root/current" || return 1
-  case "$selected" in "$root"/launchers/"$version"/python3|"$root"/bin/python3) ;; *) return 1 ;; esac
-  oms_python_runtime_version_valid "$version" && [ ! -L "$root/envs" ] &&
-    oms_python_runtime_env_owned "$root/envs/$version" "$version" &&
-    oms_python_runtime_env_python "$root/envs/$version" >/dev/null || return 1
-  case "$OMS_PYTHON" in
-    "$root/bin/python3") [ ! -L "$root/bin" ] && [ ! -L "$OMS_PYTHON" ] || return 1 ;;
-    "$root/envs/$version/"*)
-      [ "$OMS_PYTHON" = "$(oms_python_runtime_env_python "$root/envs/$version")" ] || return 1 ;;
+  oms_python_runtime_version_valid "$version" || return 1
+  env_dir="$root/envs/$version"
+  [ ! -L "$root/envs" ] && oms_python_runtime_env_owned "$env_dir" "$version" || return 1
+  python="$(oms_python_runtime_env_python "$env_dir")" || return 1
+  [ "${OMS_PYTHON:-}" = "$python" ] || return 1
+  selected="$(command -v python3 2>/dev/null)" || return 1
+  launcher="$root/launchers/$version/python3"
+  case "$selected" in
+    "$launcher") [ ! -L "$root/launchers" ] && [ ! -L "${launcher%/*}" ] &&
+      [ ! -L "$launcher" ] && [ -f "$launcher" ] && [ -x "$launcher" ] ;;
+    "$env_dir/bin/python3") [ "$python" = "$selected" ] ;;
     *) return 1 ;;
   esac
 }

@@ -282,6 +282,93 @@ PY_RECEIPT
       PATH=/usr/bin:/bin bash "$d/copied-oms" list > "$d/copied.out" || fail "copied dispatcher failed"
   )
   [ ! -e "$d/bad-launcher" ] && [ ! -e "$d/bad-function" ] || fail "copied dispatcher trusted unverified Python"
+  # The copied entry must execute the current owned candidate, not a stale launcher.
+  local owned="$OMS_PYTHON_RUNTIME_ROOT/envs/$version" old="$OMS_PYTHON_RUNTIME_ROOT/envs/3.11.0"
+  mkdir -p "$old/Scripts" "$d/no-host"
+  printf 'schema=1\nversion=3.11.0\n' > "$old/.oh-my-setting-python-env"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$@" > "$OMS_TEST_OLD"' 'exec "$OMS_TEST_REAL" "$@"' > "$old/Scripts/python.exe"
+  printf '%s\n' '#!/usr/bin/env bash' 'exec "$OMS_TEST_OLD_EXE" "$@"' > "$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$d/no-host/python3"
+  rm "$owned/bin/python3"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = -I ]; then' \
+    '  [ -z "${PYTHONHOME+x}${PYTHONPATH+x}" ] || exit 99' \
+    '  case "${2:-}" in -) : > "$OMS_TEST_DECODER" ;; -c) : > "$OMS_TEST_FLOOR" ;; *) exit 98 ;; esac' \
+    'else : > "$OMS_TEST_CHILD"; fi' \
+    'exec "$OMS_TEST_REAL" "$@"' > "$owned/bin/python3"
+  chmod +x "$old/Scripts/python.exe" "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" "$d/no-host/python3" "$owned/bin/python3"
+  export OMS_TEST_OLD="$d/old-ran" OMS_TEST_OLD_EXE="$old/Scripts/python.exe"
+  export OMS_TEST_DECODER="$d/decoder-ran" OMS_TEST_FLOOR="$d/floor-ran" OMS_TEST_CHILD="$d/child-ran" OMS_TEST_REAL="$real_python"
+  cp "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" "$d/launcher.before"
+  cp "$OMS_PYTHON_RUNTIME_ROOT/current" "$d/current.before"
+  cp "$d/install.json" "$d/receipt.before"
+  cp "$owned/.oh-my-setting-python-env" "$d/env-marker.before"
+  mv "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version/python3" "$d/version-launcher"
+  for candidate in direct versioned python; do
+    case "$candidate" in
+      versioned) cp "$d/version-launcher" "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version/python3" ;;
+      python) mv "$owned/bin/python3" "$owned/bin/python" ;;
+    esac
+    rm -f "$d/decoder-ran" "$d/floor-ran" "$d/old-ran" "$d/child-ran"
+    OMS_INSTALL_RECEIPT="$d/install.json" PYTHONHOME=foreign PYTHONPATH=foreign \
+      PATH="$d/no-host:/usr/bin:/bin" bash "$d/copied-oms" list > "$d/bound.out" || fail "copied dispatcher failed with $candidate"
+    [ -e "$d/decoder-ran" ] && [ -e "$d/floor-ran" ] && [ ! -e "$d/old-ran" ] || fail "copied dispatcher binding failed for $candidate"
+    grep -Fq 'doctor' "$d/bound.out" || fail "copied dispatcher omitted list entry"
+    (
+      export PATH="$OMS_PYTHON_RUNTIME_ROOT/bin:$d/no-host:/usr/bin:/bin" OMS_PYTHON="$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+      oms_python_runtime_require || fail "managed activation failed for $candidate"
+      oms_python_runtime_is_active || fail "managed selection inactive for $candidate"
+      case "$candidate" in
+        direct) [ "$(command -v python3)" = "$owned/bin/python3" ] || fail "wrong direct child" ;;
+        *) [ "$(command -v python3)" = "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version/python3" ] || fail "wrong versioned child" ;;
+      esac
+      python3 -c 'print("bound-child")' > "$d/child.out" || fail "child failed"
+      grep -Fxq bound-child "$d/child.out" && [ -e "$d/child-ran" ] || fail "child did not use current interpreter"
+      [ ! -e "$d/old-ran" ] || fail "stale launcher executed"
+    )
+  done
+  rm "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version/python3"
+  (
+    export PATH="$d/no-host:/usr/bin:/bin" OMS_PYTHON="$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+    ! oms_python_runtime_require > "$d/refuse.out" 2> "$d/refuse.err" || fail "python-only layout activated without launcher"
+    grep -Fq 'error: OMS requires Python 3.11+' "$d/refuse.err" || fail "python-only refusal missing diagnostic"
+    [ ! -e "$d/old-ran" ] || fail "python-only refusal executed stale launcher"
+  )
+  (
+    export PATH=/usr/bin:/bin OMS_PYTHON="$OMS_PYTHON_RUNTIME_ROOT/bin/python3"
+    oms_python_runtime_require || fail "python-only layout blocked host fallback"
+    [ -z "${OMS_PYTHON+x}" ] || fail "host fallback retained managed selection"
+  )
+  cp "$owned/bin/python" "$OMS_PYTHON_RUNTIME_ROOT/managed/bound-python"
+  ln -s "$OMS_PYTHON_RUNTIME_ROOT/managed/bound-python" "$owned/bin/python3"
+  (
+    export PATH="$d/no-host:/usr/bin:/bin"
+    oms_python_runtime_require || fail "managed symlink candidate refused"
+    oms_python_runtime_is_active || fail "managed symlink selection inactive"
+    [ "$(command -v python3)" = "$owned/bin/python3" ] || fail "managed symlink child not selected"
+    python3 -c 'print("bound-link")' > "$d/link-child.out" || fail "managed symlink child failed"
+    grep -Fxq bound-link "$d/link-child.out" || fail "managed symlink child output missing"
+  )
+  rm "$owned/bin/python3"
+  cp "$d/version-launcher" "$OMS_PYTHON_RUNTIME_ROOT/launchers/$version/python3"
+  cmp -s "$owned/.oh-my-setting-python-env" "$d/env-marker.before" || fail "bootstrap changed environment marker"
+  rm "$owned/bin/python"
+  printf '%s\n' 3.11.0 > "$OMS_PYTHON_RUNTIME_ROOT/current"
+  rm -f "$d/old-ran"
+  OMS_INSTALL_RECEIPT="$d/install.json" PATH=/usr/bin:/bin \
+    bash "$d/copied-oms" list > "$d/windows-fallback.out" || fail "Windows-only layout blocked host fallback"
+  [ ! -e "$d/old-ran" ] || fail "Windows-only layout executed legacy interpreter"
+  if OMS_INSTALL_RECEIPT="$d/install.json" PATH="$d/no-host:/usr/bin:/bin" \
+    bash "$d/copied-oms" list > "$d/windows.out" 2> "$d/windows.err"; then
+    fail "Windows-only layout accepted without host Python"
+  fi
+  grep -Fq 'no usable install receipt' "$d/windows.err" || fail "missing receipt recovery diagnostic"
+  [ ! -e "$d/old-ran" ] || fail "Windows-only layout executed interpreter without host"
+  [ "$(cat "$OMS_PYTHON_RUNTIME_ROOT/current")" = 3.11.0 ] || fail "bootstrap changed current"
+  printf '%s\n' "$version" > "$OMS_PYTHON_RUNTIME_ROOT/current"
+  cmp -s "$OMS_PYTHON_RUNTIME_ROOT/current" "$d/current.before" && \
+    cmp -s "$OMS_PYTHON_RUNTIME_ROOT/bin/python3" "$d/launcher.before" && \
+    cmp -s "$d/install.json" "$d/receipt.before" || fail "bootstrap changed its inputs"
   mkdir -p "$d/old-bin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$d/old-bin/python3"
   chmod +x "$d/old-bin/python3"

@@ -54,9 +54,9 @@ receipt_runtime_safe() {
   [ ! -L "$root/envs" ] && [ ! -L "$env" ] && [ -d "$env" ] &&
     [ ! -L "$marker" ] && [ -f "$marker" ] &&
     [ "$(sed -n '1p' "$marker")" = schema=1 ] && [ "$(sed -n '2p' "$marker")" = "version=$version" ] || return 1
-  for candidate in "$env/bin/python3" "$env/bin/python" "$env/Scripts/python.exe"; do
+  for candidate in "$env/bin/python3" "$env/bin/python"; do
     [ ! -L "${candidate%/*}" ] && [ -f "$candidate" ] && [ -x "$candidate" ] || continue
-    if [ ! -L "$candidate" ]; then return 0; fi
+    if [ ! -L "$candidate" ]; then printf '%s\n' "$candidate"; return 0; fi
     [ ! -L "$root/managed" ] && [ -d "$root/managed" ] || continue
     managed="$(cd "$root/managed" && pwd -P)" || continue
     path="$candidate"; count=0
@@ -67,7 +67,7 @@ receipt_runtime_safe() {
       case "$target" in /*) path="$target" ;; *) path="$parent/$target" ;; esac
     done
     parent="${path%/*}"; parent="$(cd "${parent:-/}" && pwd -P)" || return 1
-    case "$parent/${path##*/}" in "$managed"/*) return 0 ;; esac
+    case "$parent/${path##*/}" in "$managed"/*) printf '%s\n' "$candidate"; return 0 ;; esac
   done
   return 1
 }
@@ -86,8 +86,7 @@ if [ ! -f "$SCRIPTS_DIR/agent-task.sh" ]; then
   # finds the checkout. Use the host interpreter in isolated mode.
   unset -f python python3 2>/dev/null || true
   runtime_root="${OMS_PYTHON_RUNTIME_ROOT:-$HOME/.local/share/oh-my-setting/python-runtime}"
-  receipt_python="$runtime_root/bin/python3"
-  if ! receipt_runtime_safe "$runtime_root"; then
+  if ! receipt_python="$(receipt_runtime_safe "$runtime_root")"; then
     receipt_python="$(command -v python3 2>/dev/null || true)"
     case "$receipt_python" in "$runtime_root"/*|"$HOME/.local/bin/python3") receipt_python="" ;; esac
   fi
