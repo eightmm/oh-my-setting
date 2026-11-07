@@ -4257,6 +4257,8 @@ ma_run_routed_provider_inner() {
   local isolation_repo="$state_repo"
   if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ]; then
     isolation_repo="$workdir"
+  elif [ "${OMS_PANEL_DISPATCH:-0}" != 1 ] && [ "$origin" = peer-delegate ] && [ "$access" = read ]; then
+    isolation_repo="$workdir"
   fi
 
   OMS_WORKER_AUTHORITY_VIOLATION=0

@@ -22811,6 +22811,62 @@ EOF
   assert_one_artifact_contains "$project/.oms/artifacts/call" 'antigravity-*.md' 'usage detail:'
   [ "$(git -C "$project" worktree list | wc -l)" -eq 1 ] ||
     fail "agy read isolation must clean up its worktree"
+
+  local managed="$TMP/agy-read-managed" scratch source_head state_head out
+  mkdir -p "$home_dir/config" "$home_dir/cache" "$home_dir/state" "$home_dir/runtime" "$home_dir/tmp" "$managed"
+  scratch="$(env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH \
+    HOME="$home_dir" XDG_CONFIG_HOME="$home_dir/config" XDG_CACHE_HOME="$home_dir/cache" \
+    XDG_STATE_HOME="$home_dir/state" XDG_RUNTIME_DIR="$home_dir/runtime" TMPDIR="$home_dir/tmp" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" "$ROOT/scripts/oms" scratch-worktree add --repo "$project" --owner-pid "$$")" ||
+    fail "agy binding scratch creation failed"
+  printf 'SOURCE_A\n' > "$scratch/binding-marker"
+  git -C "$scratch" add binding-marker
+  git -C "$scratch" commit -qm 'diverge source'
+  source_head="$(git -C "$scratch" rev-parse HEAD)"
+  state_head="$(git -C "$project" rev-parse HEAD)"
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --version|--help) exit 0 ;; esac
+add_dir=""
+printf 'run\n' >> "$HOME/agy-runs"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --add-dir) add_dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+git rev-parse HEAD > "$HOME/cwd-head"
+git -C "$add_dir" rev-parse HEAD > "$HOME/add-head"
+git worktree list --porcelain > "$HOME/trees"
+printf '%s\n' "${OMS_STATE_REPO:-}" > "$HOME/state-repo"
+cat binding-marker > "$HOME/source-marker" 2>/dev/null || :
+git show "$EXPECTED_SOURCE:binding-marker" > "$HOME/object-marker" 2>/dev/null || :
+echo pwned > escaped-write.txt
+printf '%s\n' '{"conversation_id":"iso2","status":"SUCCESS","response":"agy answer","usage":{}}'
+EOF
+  chmod +x "$bin_dir/agy"
+  [ "$(PATH="$bin_dir:/usr/bin:/bin" command -v agy)" = "$bin_dir/agy" ] || fail "fake agy must resolve first"
+  out="$(env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH \
+    HOME="$home_dir" XDG_CONFIG_HOME="$home_dir/config" XDG_CACHE_HOME="$home_dir/cache" \
+    XDG_STATE_HOME="$home_dir/state" XDG_RUNTIME_DIR="$home_dir/runtime" TMPDIR="$home_dir/tmp" \
+    OMS_DELEGATE_WORKTREE_ROOT="$managed" OMS_TEST_PROVIDER_PATH_ONLY=1 EXPECTED_SOURCE="$source_head" \
+    PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/oms" peer-delegate --to antigravity \
+    --repo "$scratch" --read-only --no-verify --prompt 'binding probe' 2>&1)" ||
+    fail "agy binding delegate failed: $out"
+  [ "$(wc -l < "$home_dir/agy-runs" | tr -d ' ')" = 1 ] || fail "binding probe must invoke the fake once: $(cat "$home_dir/agy-runs")"
+  [ "$(cat "$home_dir/cwd-head")" = "$source_head" ] ||
+    fail "agy cwd HEAD must be source $source_head, got $(cat "$home_dir/cwd-head") (state $state_head)"
+  [ "$(cat "$home_dir/add-head")" = "$source_head" ] || fail "agy add-dir HEAD must be source"
+  [ "$(cat "$home_dir/state-repo")" = "$project" ] || fail "agy state root must remain canonical"
+  [ "$(cat "$home_dir/source-marker")" = SOURCE_A ] || fail "agy must see source marker"
+  [ "$(cat "$home_dir/object-marker")" = SOURCE_A ] || fail "agy must see shared source object"
+  [ "$(grep -c "^HEAD $source_head$" "$home_dir/trees")" -ge 3 ] || fail "outer and inner trees must use source HEAD"
+  assert_not_exists "$scratch/escaped-write.txt"
+  assert_not_exists "$project/escaped-write.txt"
+  [ "$(git -C "$project" worktree list | wc -l)" -eq 2 ] || fail "delegate must clean its worktrees"
+  env -u OMS_HARNESS_CHILD -u OMS_HARNESS_DELEGATE_DEPTH OMS_DELEGATE_WORKTREE_ROOT="$managed" \
+    "$ROOT/scripts/oms" scratch-worktree remove --repo "$project" "$scratch" >/dev/null || fail "scratch cleanup failed"
+  [ "$(git -C "$project" worktree list | wc -l)" -eq 1 ] || fail "scratch cleanup must restore registrations"
 }
 
 test_patch_admit_report_survives_prune() {
@@ -31945,7 +32001,7 @@ EOF
   [ ! -e "$extra_dir" ] || fail "oversized prompt directory must be removed on timeout exit: $extra_dir"
 
   rc=0
-  TMPDIR="$project/missing-tmpdir/child" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+  OMS_LIB_TMPDIR="$project/missing-tmpdir/child" TMPDIR="$project/missing-tmpdir/child" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
     bash -c '. "$1/scripts/lib/peer-common.sh"
       ma_provider_attempt antigravity read "$2" "$3" "$4" provider-default "" agent-call "$4" "agy-no-tmp"' \
     _ "$ROOT" "$limit_prompt" "$out" "$project" >/dev/null 2>&1 || rc=$?
