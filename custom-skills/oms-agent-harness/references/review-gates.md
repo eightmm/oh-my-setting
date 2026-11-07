@@ -38,9 +38,9 @@ OMS defaults to CI-parity affected checks against the destination. Explicit full
 Before calling reviewers, inspect `git status --short`, the relevant diff or
 explicit base, and any existing verification result. Send the goal, contract,
 changed files, known risks, and only enough context to judge the patch. Use
-`--diff` for uncommitted work and `--base origin/main` (or another explicit
-base) for branch or PR review. Include untracked files only after confirming
-that they belong to the review boundary and are safe to transmit.
+`--base HEAD` (the default) for uncommitted work and an explicit base such as
+`--base origin/main` for branch or PR review. Include untracked files only after
+confirming that they belong to the review boundary and are safe to transmit.
 
 Exclude credentials, keys, env files, private paths, machine or cluster state,
 datasets, checkpoints, raw logs, and scratch data. If sensitive content is

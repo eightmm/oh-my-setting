@@ -696,7 +696,8 @@ test_apply_loader_abbreviates_home() {
   HOME="$fake_home" "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   # shellcheck disable=SC2088  # the literal ~ is the assertion: abbreviate, not expand
   assert_file_contains "$project/AGENTS.md" "~/$(basename "$ROOT")/templates/project-general-AGENTS.md"
-  if grep -Fq "$fake_home" "$project/AGENTS.md"; then
+  # HOME=/tmp also occurs inside a valid ~/tmp.*/... abbreviation.
+  if grep -Fq "$ROOT/templates/" "$project/AGENTS.md"; then
     fail "generated loader leaks the absolute home path"
   fi
 }
@@ -16530,7 +16531,7 @@ case " $* " in *"$OMS_TEST_SCAN_FAIL_PATH"*) exit 2 ;; esac
 exec "$OMS_TEST_REAL_SED" "$@"
 EOF
   chmod +x "$scan_bin/sed"
-  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$scan_tmp" OMS_TEST_SCAN_FAIL_PATH="$scan_tmp" \
+  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$scan_tmp" OMS_LIB_TMPDIR="$scan_tmp" OMS_TEST_SCAN_FAIL_PATH="$scan_tmp" \
     bash -c '. "$1/scripts/lib/peer-common.sh"; contains_sensitive_content "$2"' \
       _ "$ROOT" "$diff" >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "diff filter errors must remain distinguishable from clean scans, got $rc"
@@ -16583,7 +16584,7 @@ EOF
   make_committed_repo "$ask_project"
   printf 'changed\n' >> "$ask_project/file.txt"
   rc=0
-  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$scan_tmp" OMS_TEST_SCAN_FAIL_PATH="$scan_tmp" \
+  PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$scan_tmp" OMS_LIB_TMPDIR="$scan_tmp" OMS_TEST_SCAN_FAIL_PATH="$scan_tmp" \
     OH_MY_SETTING_ASK_DRY_RUN=1 "$ROOT/scripts/peer-ask.sh" --repo "$ask_project" \
       --artifact-dir "$ask_project/artifacts" --providers claude --diff --prompt 'review' \
       >"$ask_project/out" 2>"$ask_project/error" || rc=$?
