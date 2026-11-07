@@ -35469,6 +35469,49 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
 
 # smoke-weight: 126
 test_worker_guard_reports_foreign_checkout_ref_moves() {
+  local mixed_project="$TMP/guard-mixed-ref"
+  local mixed_ready="$TMP/guard-mixed-ref-ready" mixed_fired="$TMP/guard-mixed-ref-fired"
+  local mixed_hook="$TMP/guard-mixed-ref-hook.sh" mixed_old mixed_next mixed_index mixed_result
+  make_guard_repo "$mixed_project"
+  mixed_old="$(git -C "$mixed_project" rev-parse HEAD)"
+  mixed_next="$(git -C "$mixed_project" commit-tree -p HEAD -m mixed-diagnostic 'HEAD^{tree}')"
+  mixed_index="$(git -C "$mixed_project" hash-object .git/index)"
+  {
+    printf 'oms_test_refs_repo=%q\n' "$mixed_project"
+    printf 'oms_test_refs_ready=%q\n' "$mixed_ready"
+    printf 'oms_test_refs_fired=%q\n' "$mixed_fired"
+    printf 'oms_test_refs_old=%q\n' "$mixed_old"
+    printf 'oms_test_refs_next=%q\n' "$mixed_next"
+    printf 'oms_test_refs_git=%q\n' "$(command -v git)"
+    cat <<'SH'
+oms_test_refs_race() {
+  case "$1" in
+    'changed="$(worker_protected_surface_diff)"')
+      if [ -f "$oms_test_refs_ready" ] && [ ! -e "$oms_test_refs_fired" ]; then
+        : > "$oms_test_refs_fired"
+        "$oms_test_refs_git" -C "$oms_test_refs_repo" config user.name mixed-diagnostic
+        "$oms_test_refs_git" -C "$oms_test_refs_repo" update-ref refs/heads/main \
+          "$oms_test_refs_next" "$oms_test_refs_old"
+      fi ;;
+  esac
+  return 0
+}
+set -T
+trap 'oms_test_refs_race "$BASH_COMMAND"' DEBUG
+SH
+  } > "$mixed_hook"
+  mixed_result="$(BASH_ENV="$mixed_hook" run_guarded_worker "$mixed_project" "touch '$mixed_ready'")"
+  [ -f "$mixed_fired" ] || fail "mixed refs fixture did not reach the assertion-to-capture window"
+  [ "$(git -C "$mixed_project" rev-parse HEAD)" = "$mixed_next" ] || fail "mixed refs fixture did not move HEAD"
+  [ "$(git -C "$mixed_project" hash-object .git/index)" = "$mixed_index" ] || fail "mixed refs fixture changed the index"
+  [ "${mixed_result%%$'\t'*}" != 0 ] || fail "mixed config/refs change must keep the hard stop"
+  contains "$mixed_result" 'config, refs' || fail "mixed config/refs hard list missing: $mixed_result"
+  contains "$mixed_result" "refs/heads/main ${mixed_old:0:12}->${mixed_next:0:12} (fast-forward)" ||
+    fail "mixed refs trace missing: $mixed_result"
+  contains "$mixed_result" 'shared checkout HEAD moved' || fail "mixed HEAD detail missing: $mixed_result"
+  contains "$mixed_result" 'shared checkout index unchanged' || fail "mixed index detail missing: $mixed_result"
+  contains "$mixed_result" 'another session committing in the shared checkout' || fail "mixed refs hint missing: $mixed_result"
+
   local project="$TMP/guard-foreign-ref"
   local sibling="$TMP/guard-foreign-ref-sibling"
   local ready="$TMP/guard-foreign-ref-ready" done="$TMP/guard-foreign-ref-done"

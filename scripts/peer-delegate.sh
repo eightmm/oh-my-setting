@@ -2934,7 +2934,7 @@ if [ -n "$worker_guard_dir" ]; then
     case "$guard_execution_details" in
       *"component=execution-state canonical index"*|*"component=execution-state source index"*) guard_refs_report=1 ;;
     esac
-    case ",$worker_guard_changed," in *,refs,*) guard_refs_report=1 ;; esac
+    case ",${worker_guard_changed// /}," in *,refs,*) guard_refs_report=1 ;; esac
     if [ "$guard_refs_report" = 1 ] && [ "$worker_guard_identity_valid" = 1 ] &&
       oms_git_assert_safe_execution_config "$REPO" && oms_git_assert_safe_execution_config "$worktree"; then
       for guard_manifest_dir in "$worker_guard_dir" "$worker_source_guard_dir"; do
@@ -2964,7 +2964,7 @@ if [ -n "$worker_guard_dir" ]; then
                 "$worker_guard_worktree_physical" > "$guard_manifest_dir/guard-report-gitmeta-now" || true
             fi ;;
         esac
-        case ",$worker_guard_changed," in
+        case ",${worker_guard_changed// /}," in
           *,refs,*)
             if [ ! -s "$guard_manifest_dir/refs-now" ]; then
               oms_worker_surface_capture_one "$guard_repo_dir" refs \
@@ -3043,7 +3043,7 @@ if len(details) > 12:
       *"component=execution-state canonical index"*|*"component=execution-state source index"*) guard_main_checkout_moved=1 ;;
       *) guard_main_checkout_moved=0 ;;
     esac
-    case ",$worker_guard_changed," in *,refs,*) guard_main_checkout_moved=1 ;; esac
+    case ",${worker_guard_changed// /}," in *,refs,*) guard_main_checkout_moved=1 ;; esac
     if [ "$guard_main_checkout_moved" = 1 ]; then
       guard_failure_hint="$guard_failure_hint The usual cause of an index or branch-ref change is a commit, checkout or fast-forward in the canonical or source-clone main checkout during the run; another session committing in the shared checkout moves its index, HEAD and branch ref; move it with oms sync-shared (which waits for live calls) or commit in a linked worktree."
     fi
