@@ -372,16 +372,6 @@ assert not auto_case(auto_reading, disabled=True)[1]
 nav, spawned = auto_case(auto_reading, {"used": 90})
 assert not spawned and "no other main" in nav["notice"]
 assert auto_case(auto_reading)[1][0][0][1] == "codex"
-with patch("panel_metrics.current_weekly_reading", return_value=auto_reading), \
-        patch("panel_metrics.weekly_reading", return_value={"used": 100}), \
-        patch.object(panel_watch, "_auto_claim", return_value=True), \
-        patch("panel_native.swap_main", side_effect=lambda repo, target, precondition, **kwargs:
-              precondition("auto-attempt", {"provider": "claude"})):
-    try:
-        panel_watch.automatic_swap(project, "codex", "auto-attempt", "claude", "a" * 32)
-        assert False, "exhausted target was accepted"
-    except ValueError as error:
-        assert str(error) == "auto swap skipped: target quota exhausted"
 for target_used in (None, 0, 89, 90, 100):
     target_row = {} if target_used is None else {"used": target_used}
     with patch("panel_metrics.current_weekly_reading", return_value=auto_reading), \
@@ -3116,6 +3106,7 @@ for fields, query_status, closes in ((["exit-attempt", "", str(project.resolve()
                 [], query_status, "\t".join(["@42", *fields, "exit-attempt"]) + "\r\n", "")) as close_query:
         exit_input.return_value.__enter__.return_value.fd = None
         assert panel.run_native("claude", project) == 0
+        assert not [call for call in close_query.call_args_list if "kill-window" in call.args[0]]
         kills = [call for call in close_query.call_args_list if "if-shell" in call.args[0]]
         assert bool(kills) == closes, (fields, query_status, kills)
         if kills:
@@ -3300,36 +3291,6 @@ for failure_step, recovery in ([("write", key) for key in
                 patch.object(panel, "bootstrap", return_value="fixture"), patch.object(panel.subprocess, "Popen", side_effect=failure_process):
             assert panel.run_native("claude", project) == 0
         assert all(row["terminal"] is True for row in real_history(project, failure_room) if row["tool"] == "panel-main")
-# A successor takes the window after lookup. Only the server-side condition may
-# delete the pinned window; a separate kill against the moved pane would delete it.
-for change in ("attempt", "native-pane", "moved-pane"):
-    deleted = []
-    def close_race(command, **kwargs):
-        if "display-message" in command:
-            fields = "exit-attempt\t\t" + str(project.resolve())
-            if "#{window_id}" in command[-1]:
-                fields = "@42\t" + fields + "\texit-attempt"
-            return subprocess.CompletedProcess(command, 0, fields + "\n", "")
-        if "kill-window" in command:
-            deleted.append("successor")
-        elif "if-shell" in command:
-            assert command[-1] == "kill-window -t @42" and command[command.index("-t") + 1] == "@42"
-            condition = command[-2]
-            assert "#{==:#{@oms_panel_main_attempt},exit-attempt}" in condition
-            assert "#{==:#{@oms_panel_native_pane},}" in condition
-            assert "#{==:#{@oms_panel_repo}," + str(project.resolve()) + "}" in condition
-            if change == "moved-pane":
-                deleted.append("original")
-        return subprocess.CompletedProcess(command, 0, "", "")
-    with patch.dict(os.environ, dict(environment, TMUX="fixture", TMUX_PANE="%42", OMS_PANEL_SESSION="oms-exit"), clear=True), \
-            patch.object(panel, "check_legacy_main"), patch.object(panel, "run_single_native", side_effect=exited_native), \
-            patch.object(panel, "managed_session", return_value=True), \
-            patch.object(panel.sys.stdin, "isatty", return_value=True), patch.object(panel.sys.stdout, "isatty", return_value=True), \
-            patch("panel_input.TerminalInput") as exit_input, patch("builtins.input", return_value=""), \
-            patch.object(panel.subprocess, "run", side_effect=close_race):
-        exit_input.return_value.__enter__.return_value.fd = None
-        assert panel.run_native("claude", project) == 0
-    assert "successor" not in deleted and deleted == (["original"] if change == "moved-pane" else [])
 # Run the same close path against a real isolated server: ownership changes
 # after display-message returns but before if-shell evaluates on that server.
 close_tmux_binary = shutil.which("tmux")

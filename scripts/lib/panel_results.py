@@ -2152,7 +2152,7 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                    'superseded_attempts': current['superseded_attempts'],
                    # This display window also enters the revision. Settlement
                    # changes updated_at, so retain the latest-created attempts.
-                   'attempt_ids': [a['attempt_id'] for a in sorted(related, key=lambda a: (
+                   'attempt_ids': [a['attempt_id'] for a in sorted(current['related_attempts'], key=lambda a: (
                        a.get('created_at', ''), a['attempt_id']))[-20:]]}
         if binding:
             payload['plan_binding'] = binding

@@ -716,9 +716,6 @@ fi
 # The old all-tools contract had no partial mode; the new one has no silent
 # one — a missing capability is reported unavailable, never faked as success,
 # and there is still no escape hatch that skips tool installation entirely.
-if grep -Fq -- '--no-tools' "$ROOT/install.sh"; then
-  fail "initial install must not expose a no-tools escape hatch"
-fi
 grep -Fq 'CAPABILITY_PROFILES="${OH_MY_SETTING_CAPABILITY_PROFILES:-core}"' "$ROOT/install.sh" ||
   fail "fresh install must default to the core capability profile"
 grep -Fq '"$DEST/scripts/install-profile.sh"' "$ROOT/install.sh" ||

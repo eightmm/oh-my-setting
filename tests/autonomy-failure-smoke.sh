@@ -59,14 +59,11 @@ printf 'generated\n' > "$repo/generated.ok"
 grep -Fq 'git state changed; retry allowed' "$TMP/untracked.err" || fail "untracked-state warning missing"
 
 # A huge sparse untracked file must affect state without being read end-to-end.
-python3 - "$repo/huge.bin" <<'PY'
-import sys
-with open(sys.argv[1], "wb") as handle:
+python3 - "$repo" "$tool" <<'PY'
+import os, subprocess, sys
+with open(os.path.join(sys.argv[1], "huge.bin"), "wb") as handle:
     handle.seek(64 * 1024 * 1024 * 1024 - 1)
     handle.write(b"x")
-PY
-python3 - "$repo" "$tool" <<'PY'
-import subprocess, sys
 subprocess.run([sys.argv[2], "check", "--cmd", "bash scripts/check.sh"],
                cwd=sys.argv[1], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                timeout=3, check=True)

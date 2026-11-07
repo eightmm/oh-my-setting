@@ -23,13 +23,13 @@ selected_env = dict(resolver_env, OMS_ROOM_ID=shared_id, OMS_ROOM_REPO=str(share
                     OMS_ROOM_PARTICIPANT="resolution-owner")
 consumer_before = room.participant(room.status(shared_root, shared_id), "resolution-owner")
 for requested in (working_root, working_child):
-    shown = json.loads(call(["bash", str(panel.ENTRY), "room", "show", "--repo", str(requested), "--json"], selected_env))
-    assert shown["id"] == shared_id, shown
-    board = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(requested), "--json"], selected_env))
-    assert board["dashboard"]["room"]["id"] == shared_id, board
     with patch.dict(os.environ, resolver_env, clear=True):
         assert panel.repository(requested) == shared_root
         assert repo_paths.work_repository(requested) == working_root
+shown = json.loads(call(["bash", str(panel.ENTRY), "room", "show", "--repo", str(working_root), "--json"], selected_env))
+assert shown["id"] == shared_id, shown
+board = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(working_root), "--json"], selected_env))
+assert board["dashboard"]["room"]["id"] == shared_id, board
 for front in ("room", "panel"):
     default_command = ["bash", str(panel.ENTRY), front] + (["show"] if front == "room" else []) + ["--json"]
     default_view = subprocess.run(default_command, cwd=working_child, env=selected_env,

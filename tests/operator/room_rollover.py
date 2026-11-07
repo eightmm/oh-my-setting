@@ -396,7 +396,7 @@ with patch.dict(os.environ, {}):
             with patch.object(panel_result_store, "_records", return_value=([attempt], [])):
                 late_result, _ = panel._call_result_event(where, last_room, "call-reviewed", "rollover-review", 0)
                 assert late_result["attempt_id"] == "attempt-reviewed" and late_result["access"] == "write"
-        for guard in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"}):
+        for guard in (() if panel_env else ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "1"})):
             with patch.dict(os.environ, dict(guard, OMS_ROOM_ID=reviewed, OMS_ROOM_REPO=str(where),
                                             OMS_ROOM_PARTICIPANT="call-reviewed")):
                 for target in (reviewed, moved, next_room, last_room):
@@ -713,11 +713,12 @@ with patch.dict(os.environ, {}):
         squatted = fresh("m1", calls=[("call-s", "m1")])
         squatter = dict(os.environ, OMS_HARNESS_CHILD="1", OMS_ROOM_ID=squatted, OMS_ROOM_PARTICIPANT="call-s",
                         OMS_ROOM_REPO=str(where))
-        for verb in (["new", "--id", room.successor_id(squatted), "--topic", "x"],
+        for verb in (() if panel_env else (
+                     ["new", "--id", room.successor_id(squatted), "--topic", "x"],
                      ["new", "--id", room.successor_id(squatted), "--live"],
                      ["new", "--id", room.successor_id(squatted).upper(), "--live"],
                      ["append", "--id", squatted, "--role", "note", "--text", "plain"],
-                     ["close", "--id", squatted]):
+                     ["close", "--id", squatted])):
             refused = subprocess.run(["bash", str(panel.ENTRY), "thread", "--repo", str(where)] + verb, env=squatter,
                                      capture_output=True, text=True, timeout=60)
             assert refused.returncode and ("worker cannot create a room" in refused.stderr

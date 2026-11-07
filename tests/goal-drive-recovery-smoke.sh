@@ -935,16 +935,12 @@ HOME="$home" NVM_DIR="$home/.nvm" PATH="$bin:/usr/bin:/bin" \
   "$ROOT/scripts/goal-drive.sh" --repo "$empty_repo" --to codex \
   --max-cycles 2 --auto-repair > "$TMP/empty-repair.out" 2>&1 || rc=$?
 [ "$rc" = 3 ] || fail "empty repair should park the run, got $rc"
-if ! python3 - "$empty_repo/.oms/plan/progress.jsonl" <<'PY'
+python3 - "$empty_repo/.oms/plan/progress.jsonl" <<'PY' || fail "empty repaired review left the superseded commit intent open"
 import json, sys
 
-rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
-intents = [row for row in rows if row.get("kind") == "commit-intent"]
+intents = [r for r in map(json.loads, open(sys.argv[1], encoding="utf-8")) if r.get("kind") == "commit-intent"]
 assert intents and intents[-1].get("phase") == "abandoned", intents[-3:]
 PY
-then
-  fail "empty repaired review left the superseded commit intent open"
-fi
 
 # progress.jsonl is appendable evidence. A malformed JSON value and a second
 # forged open row must be ignored before valid-intent multiplicity is decided;
@@ -1007,11 +1003,7 @@ landing_lease="$(printf '%s' "$landing_task_json" |
   python3 -c 'import json,sys;print(json.load(sys.stdin)["lease_id"])' | tr -d '\r')"
 landing_verify="$(printf '%s' "$landing_task_json" |
   python3 -c 'import json,sys;print(json.load(sys.stdin)["verify"])' | tr -d '\r')"
-landing_patch_sha="$(python3 - "$landing_patch" <<'PY' | tr -d '\r'
-import hashlib, pathlib, sys
-print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
-PY
-)"
+landing_patch_sha="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$landing_patch" | tr -d '\r')"
 landing_frozen="$(append_outer_intent \
   "$landing_repo" tracked "$landing_patch" interrupted-outer prepared codex)"
 python3 - "$landing_repo" "$landing_frozen" "$landing_lease" <<'PY'
@@ -1661,11 +1653,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$accept_manifest_repo/check.sh"
 chmod +x "$accept_manifest_repo/check.sh"
 git -C "$accept_manifest_repo" add PROJECT.md check.sh
 git -C "$accept_manifest_repo" commit -qm base
-accept_spec_sha="$(python3 - "$accept_manifest_repo/PROJECT.md" <<'PY' | tr -d '\r'
-import hashlib, pathlib, sys
-print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
-PY
-)"
+accept_spec_sha="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$accept_manifest_repo/PROJECT.md" | tr -d '\r')"
 accept_base="$(git -C "$accept_manifest_repo" rev-parse HEAD)"
 accept_proposal="$TMP/accept-manifest-proposal.json"
 python3 - "$accept_proposal" "$accept_spec_sha" "$accept_base" <<'PY'
@@ -1679,11 +1667,7 @@ pathlib.Path(path).write_text(json.dumps({
                "allowed": ["check.sh"], "verify": "bash check.sh", "depends": []}],
 }, sort_keys=True), encoding="utf-8")
 PY
-accept_proposal_sha="$(python3 - "$accept_proposal" <<'PY' | tr -d '\r'
-import hashlib, pathlib, sys
-print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
-PY
-)"
+accept_proposal_sha="$(python3 -c 'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$accept_proposal" | tr -d '\r')"
 "$ROOT/scripts/agent-plan.sh" --repo "$accept_manifest_repo" apply-proposal \
   --proposal "$accept_proposal" --expected-proposal-sha256 "$accept_proposal_sha" \
   --expected-plan-sha256 absent --goal manifest --accept 'bash check.sh' \
@@ -1726,6 +1710,13 @@ grep -Fq 'model_reasoning_effort="high"' "$TMP/goal-routing-argv" ||
   fail "goal-drive did not forward --reasoning-effort"
 grep -Fxq 23s "$TMP/goal-routing-timeout" ||
   fail "goal-drive did not forward --provider-timeout"
+for bad_timeout in 0s 86401s 25h 18446744073709551617s; do
+  bad_rc=0
+  "$ROOT/scripts/goal-drive.sh" --repo "$route_repo" --provider-timeout "$bad_timeout" \
+    > "$TMP/bad-timeout.out" 2>&1 || bad_rc=$?
+  [ "$bad_rc" -eq 2 ] ||
+    fail "goal-drive accepted invalid --provider-timeout $bad_timeout (rc=$bad_rc)"
+done
 
 # Synchronous provider phases must not outlive a targeted TERM of goal-drive.
 # Exercise both the ordinary plan-run phase and the optional repair phase with

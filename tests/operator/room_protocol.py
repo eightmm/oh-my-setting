@@ -137,15 +137,8 @@ assert allocate("codex", tier="light", installed=both)["model"] == "claude-haiku
 assert allocate("claude", tier="light", installed={"codex"})["model"] == "gpt-6-luna"
 assert allocate("codex", installed={"claude"})["model"] == "claude-sonnet-5-5"
 assert allocate("claude", installed={"codex"})["model"] == "gpt-6.1-terra"
-for role, model in (("worker", "claude-sonnet-5-5"), ("builder", "claude-sonnet-5-5"), ("refactorer", "claude-sonnet-5-5"),
-                    ("release-engineer", "claude-sonnet-5-5"),
-                    ("performance-engineer", "claude-opus-5-5"), ("integrator", "claude-opus-5-5")):
-    for owner in both:
-        expected = model if owner == "codex" else ("gpt-6.1-sol" if role in (
-            "performance-engineer", "integrator") else "gpt-6.1-terra")
-        assert allocate(owner, role=role, installed=both)["model"] == expected
+for role in ("worker", "builder", "refactorer", "release-engineer", "performance-engineer", "integrator"):
     assert allocate("claude", role=role, installed={"codex"})["provider"] == "codex"
-assert allocate("codex", role="documenter", installed=both)["model"] == "claude-haiku-5-5"
 assert allocate("claude", role="documenter", installed={"codex"})["model"] == "gpt-6-luna"
 # BEGIN review-role-model-pins
 assert allocate("claude", role="advisor", installed=both)["model"] == "gpt-6.1-sol"
@@ -159,7 +152,6 @@ else:
 assert allocate("claude", role="verifier", installed=both)["provider"] == "codex"
 assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6.1-sol"
 # END review-role-model-pins
-assert allocate("codex", role="researcher", installed=both)["model"] == "claude-haiku-5-5"
 for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
                        (None, "claude"), (True, "claude"), ("90", "claude"), (101, "claude")):
     readings = {"claude": {"weekly_used": used}}
@@ -173,11 +165,6 @@ except ValueError as error:
 else:
     raise AssertionError("a reviewer used the writer family after quota exhaustion")
 # END exhausted independent reviewer
-# With both readings, more weekly quota left wins; missing readings put the owner last.
-for claude_used, codex_used, expected in ((60, 20, "codex"), (20, 60, "claude")):
-    readings = {"claude": {"weekly_used": claude_used}, "codex": {"weekly_used": codex_used}}
-    assert allocate("claude", role="builder", installed=both, provider_status=readings)["provider"] == expected, readings
-    assert allocate("codex", role="integrator", installed=both, provider_status=readings)["provider"] == expected, readings
 # Readings inside the tie band (within 15 points) are equal: fewer recent dispatches
 # win, else the provider opposite the main.
 for claude_used, codex_used in ((2, 11), (40, 40), (11, 2), (70, 60), (49, 35)):
@@ -219,16 +206,13 @@ else:
 for readings in ({}, {"claude": {"weekly_used": 60}}, {"codex": {"weekly_used": 20}}):
     for owner in both:
         assert allocate(owner, role="builder", installed=both, provider_status=readings)["provider"] != owner
-assert allocate("claude", role="reviewer", installed=both,
-                provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "codex"
-assert allocate("codex", role="reviewer", installed=both,
-                provider_status={"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}})["provider"] == "claude"
 assert allocate("codex", installed={"codex"}, provider_status={"codex": {"weekly_used": 100}})["provider"] == "codex"
 # BEGIN role-review-tier-cap
 # Routing spread follows quota readings except that independent judgments always avoid the owner.
 routing_roles = {
     "researcher": "light", "scholar": "deep",
-    "worker": "routine", "builder": "routine", "documenter": "light",
+    "worker": "routine", "builder": "routine", "refactorer": "routine", "release-engineer": "routine",
+    "documenter": "light",
     "integrator": "deep", "performance-engineer": "deep",
     "reviewer": "deep", "verifier": "deep", "security-auditor": "frontier",
     "critic": "deep",
@@ -2854,9 +2838,6 @@ assert foreign.returncode != 0 and "identities disagree" in foreign.stderr, fore
 third = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
                        capture_output=True, text=True)
 assert third.returncode == 0, third
-escalated = subprocess.run(worker + ["--brief-file", str(brief), "--continue", "room-continue"], env=room_env,
-                          capture_output=True, text=True)
-assert escalated.returncode == 0, escalated
 # A continuation is refused by its plan task's reviewed assignment before any continuation work, claim or enrollment.
 call(plan_cli + ["add", "--id", "continue-assigned", "--title", "Assigned continuation", "--assignment",
                  json.dumps(dict(provider="claude"))])

@@ -239,17 +239,23 @@ class NotionJournalTest(unittest.TestCase):
                 "timeout": 0.25,
             }
         )
-        exporter.upsert("key", "title", "hash", "content")
+        exporter.upsert("key", "title", "hash", "content", kind="daily")
         self.assertEqual(
             "/v1/data_sources/data-source-id/query",
             transport.calls[0][1],
         )
+        create_payload = transport.calls[1][2]
         self.assertEqual(
             {
                 "type": "data_source_id",
                 "data_source_id": "data-source-id",
             },
-            transport.calls[1][2]["parent"],
+            create_payload["parent"],
+        )
+        self.assertEqual({"type": "emoji", "emoji": "📔"}, create_payload["icon"])
+        self.assertEqual(
+            {"type": "emoji", "emoji": "📚"},
+            notion.NotionJournalExporter._page_icon({"kind": "weekly"}),
         )
 
     def human_exporter(self, transport, **extra):
@@ -730,7 +736,7 @@ class NotionJournalTest(unittest.TestCase):
         self.assertEqual(len(calls), len(set(calls)))
         self.assertGreaterEqual(len(calls), 7)
 
-    def test_default_sync_only_exports_closed_periods_and_force_exports_live(self):
+    def _policy_store_and_sync(self, clock_dt, project_id, events):
         work_journal = load_work_journal()
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-notion-policy."))
         self.addCleanup(lambda: shutil.rmtree(tmp))
@@ -739,14 +745,11 @@ class NotionJournalTest(unittest.TestCase):
         store = work_journal.JournalStore(
             repo,
             timezone_name="UTC",
-            clock=lambda: dt.datetime(2026, 7, 31, 12, tzinfo=dt.timezone.utc),
-            project_id="proj_policy",
+            clock=lambda: clock_dt,
+            project_id=project_id,
             project_name="demo",
         )
-        for source, occurred_at in (
-            ("closed", "2026-07-30T02:00:00Z"),
-            ("live", "2026-07-31T02:00:00Z"),
-        ):
+        for source, occurred_at in events:
             store.record_event(
                 {
                     "event_type": "validation",
@@ -770,22 +773,28 @@ class NotionJournalTest(unittest.TestCase):
             access_name: "test-" + "credential",
             "OMS_WORK_JOURNAL_NOTION_DATABASE_ID": "database",
         }
-        sys.path.insert(0, str(ROOT / "scripts" / "lib"))
-        self.addCleanup(lambda: sys.path.remove(str(ROOT / "scripts" / "lib")))
-        with mock.patch.dict(os.environ, configured, clear=False), mock.patch.dict(
+        lib_dir = str(ROOT / "scripts" / "lib")
+        sys.path.insert(0, lib_dir)
+        self.addCleanup(lambda: sys.path.remove(lib_dir) if lib_dir in sys.path else None)
+        return work_journal, store, calls, mock.patch.dict(os.environ, configured, clear=False), mock.patch.dict(
             sys.modules, {"notion_journal": notion}
         ), mock.patch.object(
-            notion.NotionJournalExporter,
-            "from_config",
-            return_value=SuccessExporter(),
-        ):
+            notion.NotionJournalExporter, "from_config", return_value=SuccessExporter()
+        )
+
+    def test_default_sync_only_exports_closed_periods_and_force_exports_live(self):
+        _, store, calls, p_env, p_mod, p_cfg = self._policy_store_and_sync(
+            dt.datetime(2026, 7, 31, 12, tzinfo=dt.timezone.utc),
+            "proj_policy",
+            (("closed", "2026-07-30T02:00:00Z"), ("live", "2026-07-31T02:00:00Z")),
+        )
+        with p_env, p_mod, p_cfg:
             store.sync_notion()
             self.assertEqual(
                 ["proj_policy:daily:2026-07-30"],
                 [call[0][0] for call in calls],
             )
             store.sync_notion(force=True)
-
         self.assertEqual(
             {
                 "proj_policy:daily:2026-07-30",
@@ -796,59 +805,18 @@ class NotionJournalTest(unittest.TestCase):
         )
 
     def test_recent_sync_limits_daily_and_overlapping_weekly_pages(self):
-        work_journal = load_work_journal()
-        tmp = pathlib.Path(tempfile.mkdtemp(prefix="oms-wj-notion-recent."))
-        self.addCleanup(lambda: shutil.rmtree(tmp))
-        repo = tmp / "repo"
-        repo.mkdir()
-        store = work_journal.JournalStore(
-            repo,
-            timezone_name="UTC",
-            clock=lambda: dt.datetime(2026, 8, 5, 12, tzinfo=dt.timezone.utc),
-            project_id="proj_recent",
-            project_name="demo",
+        work_journal, store, calls, p_env, p_mod, p_cfg = self._policy_store_and_sync(
+            dt.datetime(2026, 8, 5, 12, tzinfo=dt.timezone.utc),
+            "proj_recent",
+            (
+                ("old-week", "2026-07-22T02:00:00Z"),
+                ("outside-day", "2026-07-29T02:00:00Z"),
+                ("range-start", "2026-07-30T02:00:00Z"),
+                ("today", "2026-08-05T02:00:00Z"),
+            ),
         )
-        for source, occurred_at in (
-            ("old-week", "2026-07-22T02:00:00Z"),
-            ("outside-day", "2026-07-29T02:00:00Z"),
-            ("range-start", "2026-07-30T02:00:00Z"),
-            ("today", "2026-08-05T02:00:00Z"),
-        ):
-            store.record_event(
-                {
-                    "event_type": "validation",
-                    "occurred_at": occurred_at,
-                    "source": {"type": "test", "id": source},
-                    "outcome": {"summary": source, "status": "success"},
-                    "verification_status": "passed",
-                    "evidence": [{"type": "test", "ref": source}],
-                }
-            )
-        store.materialize()
-        calls = []
-
-        class SuccessExporter:
-            def upsert(self, *args, **kwargs):
-                del kwargs
-                calls.append(args[0])
-                return {"status": "synced", "page_id": "page-%d" % len(calls)}
-
-        access_name = "OMS_WORK_JOURNAL_NOTION_" + "TOKEN"
-        configured = {
-            access_name: "test-credential",
-            "OMS_WORK_JOURNAL_NOTION_DATABASE_ID": "database",
-        }
-        sys.path.insert(0, str(ROOT / "scripts" / "lib"))
-        self.addCleanup(lambda: sys.path.remove(str(ROOT / "scripts" / "lib")))
-        with mock.patch.dict(os.environ, configured, clear=False), mock.patch.dict(
-            sys.modules, {"notion_journal": notion}
-        ), mock.patch.object(
-            notion.NotionJournalExporter,
-            "from_config",
-            return_value=SuccessExporter(),
-        ):
+        with p_env, p_mod, p_cfg:
             report = store.sync_notion(force=True, recent_days=7)
-
         self.assertEqual(4, report["synced"])
         self.assertEqual(
             {
@@ -857,7 +825,7 @@ class NotionJournalTest(unittest.TestCase):
                 "proj_recent:weekly:2026-W31",
                 "proj_recent:weekly:2026-W32",
             },
-            set(calls),
+            {call[0][0] for call in calls},
         )
         with self.assertRaises(work_journal.JournalError):
             store.sync_notion(force=True, recent_days=0)
@@ -1106,30 +1074,6 @@ class HumanPageTest(unittest.TestCase):
                 "GET", "/v1/x", None, 2.0
             )
         self.assertIsNone(run.call_args.kwargs["env"])
-
-    def test_page_icon_set_on_create(self):
-        transport = FakeTransport(
-            [
-                {"results": []},
-                {"id": "page-created"},
-            ]
-        )
-        exporter = notion.NotionJournalExporter(
-            **{
-                "to" + "ken": "secret-" + "token",
-                "data_source_id": "data-source-id",
-                "transport": transport,
-                "sleep": lambda _seconds: None,
-                "timeout": 0.25,
-            }
-        )
-        exporter.upsert("key", "title", "hash", "content", kind="daily")
-        create_payload = transport.calls[1][2]
-        self.assertEqual({"type": "emoji", "emoji": "📔"}, create_payload["icon"])
-        self.assertEqual(
-            {"type": "emoji", "emoji": "📚"},
-            notion.NotionJournalExporter._page_icon({"kind": "weekly"}),
-        )
 
 
 if __name__ == "__main__":

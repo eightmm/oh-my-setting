@@ -320,28 +320,15 @@ for unsafe_repo in unsafe_repositories:
     unsafe_state["plan"] = {"stale": [{}]}
     unsafe_state["ci"] = {"state": "unpushed", "ahead": 1}
     unsafe_report = project_inbox(unsafe_state, repo_path=unsafe_repo)
-    unsafe_item = next(item for item in unsafe_report["items"]
-                       if item["code"] == "pending-room-mail")
-    unsafe_command = unsafe_item["command"]
-    assert shlex.split(unsafe_command) == ["OMS_ROOM_REPO=" + unsafe_repo] + unsafe_args, unsafe_command
-    unsafe_json = json.loads(json.dumps(unsafe_report))
-    json_command = next(item["command"] for item in unsafe_json["items"]
-                        if item["code"] == "pending-room-mail")
-    assert shlex.split(json_command) == ["OMS_ROOM_REPO=" + unsafe_repo] + unsafe_args
-    plan_command = next(item["command"] for item in unsafe_report["items"]
-                        if item["code"] == "stale-plan-claim")
-    git_command = next(item["command"] for item in unsafe_report["items"]
-                       if item["code"] == "unpushed-head")
-    assert shlex.split(plan_command) == ["oms", "agent-plan", "--repo", unsafe_repo, "reclaim"]
-    assert shlex.split(git_command) == ["git", "-C", unsafe_repo, "push"]
-    json_commands = {item["code"]: shlex.split(item["command"]) for item in unsafe_json["items"]}
-    assert json_commands["stale-plan-claim"] == ["oms", "agent-plan", "--repo", unsafe_repo, "reclaim"]
-    assert json_commands["unpushed-head"] == ["git", "-C", unsafe_repo, "push"]
+    commands = {item["code"]: shlex.split(item["command"]) for item in unsafe_report["items"]}
+    assert commands["pending-room-mail"] == ["OMS_ROOM_REPO=" + unsafe_repo] + unsafe_args
+    assert commands["stale-plan-claim"] == ["oms", "agent-plan", "--repo", unsafe_repo, "reclaim"]
+    assert commands["unpushed-head"] == ["git", "-C", unsafe_repo, "push"]
     terminal = io.StringIO()
     with contextlib.redirect_stdout(terminal):
         project_inbox_module.print_inbox(unsafe_report)
     terminal_text = terminal.getvalue()
-    assert COMMAND_HIDDEN_NOTICE in terminal_text and unsafe_command not in terminal_text
+    assert COMMAND_HIDDEN_NOTICE in terminal_text and next(i["command"] for i in unsafe_report["items"] if i["code"] == "pending-room-mail") not in terminal_text
     assert "oms room updates" not in terminal_text and "oms agent-plan" not in terminal_text
     assert "git push" not in terminal_text and "\x1b" not in terminal_text
 conflicting_env = dict(os.environ, OMS_ROOM_REPO="/tmp/conflicting-repository")

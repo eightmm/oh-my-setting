@@ -73,19 +73,8 @@ fi
 if "$plan" --repo "$plan_repo" finish --id t1 >/dev/null 2>&1; then
   fail "review task reached done without landing"
 fi
-review_lease="$(python3 - "$plan_repo/.oms/plan/tasks.json" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    task = json.load(handle)["tasks"]["t1"]
-print(task["review_lease_id"])
-PY
-)"
-patch_sha="$(python3 - "$patch" <<'PY'
-import hashlib, sys
-with open(sys.argv[1], "rb") as handle:
-    print(hashlib.sha256(handle.read()).hexdigest())
-PY
-)"
+review_lease="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["tasks"]["t1"]["review_lease_id"])' "$plan_repo/.oms/plan/tasks.json")"
+patch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$patch")"
 "$plan" --repo "$plan_repo" land --id t1 --lease-id "$review_lease" \
   --expected-review-patch "$patch" \
   --expected-review-patch-sha256 "$patch_sha" \
@@ -97,10 +86,7 @@ if "$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
   >/dev/null 2>&1; then
   fail "landed task finished without an exact landing receipt"
 fi
-landing_receipt_sha="$("$plan" --repo "$plan_repo" show --id t1 | python3 -c '
-import json,runpy,sys
-print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
-' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
+landing_receipt_sha="$("$plan" --repo "$plan_repo" show --id t1 | python3 -c 'import json,runpy,sys; print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
 "$plan" --repo "$plan_repo" finish --id t1 --lease-id "$review_lease" \
   --expected-landing-receipt-sha256 "$landing_receipt_sha" >/dev/null
 status_out="$("$plan" --repo "$plan_repo" show --id t1)"
@@ -193,25 +179,22 @@ cat > "$rf_patch" <<'EOF'
 EOF
 rf_art="$rf_repo/worker.md"
 printf 'work\n' > "$rf_art"
-rf_finish() {  # TASK EXTRA-FLAGS...
-  local tid="$1"; shift
+rf_finish() {
+  local tid="$1" patch_path="$2"; shift 2
   "$plan" --repo "$rf_repo" start --id "$tid" --lease-id "lease-$tid" >/dev/null
   "$plan" --repo "$rf_repo" review --id "$tid" --lease-id "lease-$tid" \
-    --artifact "$rf_art" --patch "$rf_patch" >/dev/null
+    --artifact "$rf_art" --patch "$patch_path" >/dev/null
   rf_lease="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][sys.argv[2]]["review_lease_id"])' \
     "$rf_repo/.oms/plan/tasks.json" "$tid")"
-  rf_patch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_patch")"
+  rf_patch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$patch_path")"
   "$plan" --repo "$rf_repo" land --id "$tid" --lease-id "$rf_lease" \
-    --expected-review-patch "$rf_patch" \
+    --expected-review-patch "$patch_path" \
     --expected-review-patch-sha256 "$rf_patch_sha" \
     --expected-review-verify true \
     --expected-review-executor-id "" \
     --expected-review-executor-soul-sha256 "" \
     --expected-review-lease-id "$rf_lease" >/dev/null
-  rf_receipt="$("$plan" --repo "$rf_repo" show --id "$tid" | python3 -c '
-import json,runpy,sys
-print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
-' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
+  rf_receipt="$("$plan" --repo "$rf_repo" show --id "$tid" | python3 -c 'import json,runpy,sys; print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
   "$plan" --repo "$rf_repo" finish --id "$tid" --lease-id "$rf_lease" \
     --expected-landing-receipt-sha256 "$rf_receipt" "$@" >/dev/null
 }
@@ -223,7 +206,7 @@ rf_before="$(rf_manifest)"
 # Control: no consent flag — manifest byte-identical even though the tree
 # moved (the park is the correct outcome without consent).
 printf 'touched v2\n' > "$rf_repo/f_touched.txt"
-rf_finish t1
+rf_finish t1 "$rf_patch"
 [ "$(rf_manifest)" = "$rf_before" ] ||
   fail "an unconsented finish must not touch the frozen manifest"
 [ ! -e "$rf_repo/.oms/plan/manifest-refreeze.jsonl" ] ||
@@ -240,38 +223,15 @@ GIT binary patch
 literal 11
 ScmZQzU|?icN-P9`00000
 EOF
-rf_binary_finish() {  # TASK
-  local tid="$1"
-  "$plan" --repo "$rf_repo" start --id "$tid" --lease-id "lease-$tid" >/dev/null
-  "$plan" --repo "$rf_repo" review --id "$tid" --lease-id "lease-$tid" \
-    --artifact "$rf_art" --patch "$rf_binary_patch" >/dev/null
-  rf_lease="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][sys.argv[2]]["review_lease_id"])' \
-    "$rf_repo/.oms/plan/tasks.json" "$tid")"
-  rf_patch_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_binary_patch")"
-  "$plan" --repo "$rf_repo" land --id "$tid" --lease-id "$rf_lease" \
-    --expected-review-patch "$rf_binary_patch" \
-    --expected-review-patch-sha256 "$rf_patch_sha" \
-    --expected-review-verify true \
-    --expected-review-executor-id "" \
-    --expected-review-executor-soul-sha256 "" \
-    --expected-review-lease-id "$rf_lease" >/dev/null
-  rf_receipt="$("$plan" --repo "$rf_repo" show --id "$tid" | python3 -c '
-import json,runpy,sys
-print(runpy.run_path(sys.argv[1])["digest"](json.load(sys.stdin)))
-' "$ROOT/scripts/lib/plan-receipt.py" | tr -d '\r')"
-  "$plan" --repo "$rf_repo" finish --id "$tid" --lease-id "$rf_lease" \
-    --expected-landing-receipt-sha256 "$rf_receipt" --refreeze-acceptance >/dev/null
-}
 # Consented: only the touched entry refreezes to the landed tree's hash.
-rf_finish t2 --refreeze-acceptance
+rf_finish t2 "$rf_patch" --refreeze-acceptance
 rf_new_touched="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_repo/f_touched.txt")"
 python3 - "$rf_repo/.oms/plan/tasks.json" "$rf_new_touched" <<'PY' || fail "refreeze did not update exactly the touched entry"
 import hashlib, json, sys
 plan = json.load(open(sys.argv[1]))
 manifest = {m["path"]: m["sha256"] for m in plan["project_contract"]["acceptance_manifest"]}
 assert manifest["f_touched.txt"] == sys.argv[2], manifest
-other = hashlib.sha256(b"other v1\n").hexdigest()
-assert manifest["f_other.txt"] == other, manifest
+assert manifest["f_other.txt"] == hashlib.sha256(b"other v1\n").hexdigest(), manifest
 PY
 grep -Fq '"kind":"manifest-refreeze"' "$rf_repo/.oms/plan/manifest-refreeze.jsonl" ||
   fail "a consented refreeze must leave a typed row"
@@ -281,7 +241,7 @@ grep -Fq '"path":"f_touched.txt"' "$rf_repo/.oms/plan/manifest-refreeze.jsonl" |
 # Consented binary landing: the file named only by the diff --git header
 # refreezes; the untouched entry keeps its frozen hash.
 printf 'touched v3\n' > "$rf_repo/f_touched.txt"
-rf_binary_finish t3
+rf_finish t3 "$rf_binary_patch" --refreeze-acceptance
 rf_new_touched="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$rf_repo/f_touched.txt")"
 python3 - "$rf_repo/.oms/plan/tasks.json" "$rf_new_touched" <<'PY' || fail "a binary patch's file was not refrozen"
 import hashlib, json, sys

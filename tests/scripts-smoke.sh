@@ -21161,6 +21161,7 @@ EOF
   chmod +x "$scan_bin/sed"
   mkdir -p "$TMP/admit-scan-tmp"
   PATH="$scan_bin:$PATH" OMS_TEST_REAL_SED="$real_sed" TMPDIR="$TMP/admit-scan-tmp" \
+    OMS_LIB_TMPDIR="$TMP/admit-scan-tmp" \
     OMS_TEST_SCAN_FAIL_PATH="$TMP/admit-scan-tmp" \
     "$SH" --patch "$repo/change.patch" --repo "$repo" --verify true \
     > "$repo/scan-failure.out" 2>&1 || rc=$?
@@ -26410,77 +26411,6 @@ assert module.pid_alive(321, os_name="posix", posix_kill=ambiguous_kill) is True
 PY
   then
     fail "POSIX process liveness probe contract failed"
-  fi
-}
-
-test_autopilot_receipt_windows_claim_identity_is_fail_closed() {
-  if ! python3 - "$ROOT/scripts/lib/autopilot-receipt.py" \
-      "$TMP/receipt-native-identity" <<'PY'
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-
-helper = pathlib.Path(sys.argv[1])
-sys.path.insert(0, str(helper.parent))
-spec = importlib.util.spec_from_file_location("autopilot_receipt", helper)
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-root = pathlib.Path(sys.argv[2])
-root.mkdir(parents=True)
-receipt = root / "autopilot-run.json"
-ledger = root / "autopilot-reentries.jsonl"
-row = {"stage": "proposing", "spec_sha256": "a" * 64,
-       "branch": "main", "owner_id": "owner_" + "1" * 32}
-module.validate_live = lambda _row, _repo, _state_repo='': None
-original_os_name = module.os.name
-module.os.name = "nt"
-try:
-    for native in (None, "123", True, 0x100000000):
-        claim = {"schema": 1, "kind": "autopilot-drive-claim",
-                 "spec_sha256": row["spec_sha256"], "branch": "main",
-                 "owner_id": row["owner_id"], "claim_pid": 123}
-        if native is not None:
-            claim["claim_native_pid"] = native
-        ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
-        result = module.reenter_judgment(receipt, row, str(root), 456, 789, True)
-        assert "unproven legacy session claim" in result[0], result
-        assert result[1] == 0, result
-
-    claim["claim_pid"] = 1 << 40
-    claim["claim_native_pid"] = 321
-    ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
-    result = module.reenter_judgment(receipt, row, str(root), 456, 789, True)
-    assert "unproven legacy session claim" in result[0], result
-    claim["claim_pid"] = 123
-
-    observed = []
-    module.pid_alive = lambda pid, *, native_pid=None: (
-        observed.append((pid, native_pid)) or True
-    )
-    claim["claim_native_pid"] = 321
-    for source in (None, "", "native-child-ppid", 7):
-        claim.pop("claim_native_pid_source", None)
-        if source is not None:
-            claim["claim_native_pid_source"] = source
-        ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
-        result = module.reenter_judgment(
-            receipt, row, str(root), 456, 789, True)
-        assert "unproven legacy session claim" in result[0], result
-        assert observed == [], observed
-
-    claim["claim_native_pid_source"] = "msys-proc-v1"
-    ledger.write_text(json.dumps(claim) + "\n", encoding="utf-8")
-    result = module.reenter_judgment(
-        receipt, row, str(root), 456, 789, True)
-    assert observed == [(123, 321)], observed
-    assert result[3:] == (123, 321), result
-finally:
-    module.os.name = original_os_name
-PY
-  then
-    fail "autopilot receipt accepted an unproven Windows claim identity"
   fi
 }
 

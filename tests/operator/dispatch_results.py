@@ -6032,6 +6032,22 @@ with patch.dict(os.environ, environment, clear=True), \
                     assert "matching landed patch" in str(error), error
             with patch.object(saved, "_records", return_value=(attempts, rows)):
                 assert saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])["outcome"] == "accepted"
+            target = {"attempt_id": "att_target_old", "task_id": "other-task",
+                      "parent_attempt_id": "scope-main", "created_at": "2020-01-01T00:00:00Z", "refs": {}}
+            unrelated = [dict(scope_worker, attempt_id="att_unrelated_%02d" % n,
+                              task_id="another-task", created_at="2026-01-01T00:00:%02dZ" % n)
+                         for n in range(21)]
+            local_attempts = [target] + attempts
+            with patch.object(saved, "_records", return_value=(local_attempts, rows)):
+                baseline = saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])
+            with patch.object(saved, "_records", return_value=(local_attempts + unrelated, rows)):
+                crowded = saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])
+            assert crowded["attempt_ids"] == baseline["attempt_ids"] == ["att_scope_write", "att_target_old"], crowded
+            assert crowded["revision"] == baseline["revision"], (baseline, crowded)
+            unrelated[0] = dict(unrelated[0], created_at="2027-01-01T00:00:00Z")
+            with patch.object(saved, "_records", return_value=(local_attempts + unrelated, rows)):
+                changed_other = saved.finalize(project, "codex", "other-task", str(summary), "accepted", "true", ["value.txt"])
+            assert changed_other["revision"] == baseline["revision"] and changed_other["attempt_ids"] == baseline["attempt_ids"], changed_other
             changed = [dict(attempts[0], refs=dict(scope_worker["refs"], panel_room_participant="changed")), attempts[1]]
             with patch.object(saved, "_records", side_effect=[(attempts, rows), (changed, rows)]):
                 try:
