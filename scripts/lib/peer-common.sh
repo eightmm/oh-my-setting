@@ -3226,6 +3226,8 @@ def text(value):
 
 
 messages, pending, completed = [], [], False
+weekly_quota = False
+claude_result = None
 for line in raw.splitlines():
     candidate = line.strip()
     if candidate.startswith("{") and '"type"' in candidate:
@@ -3235,16 +3237,30 @@ for line in raw.splitlines():
             doc = None
         if isinstance(doc, dict):
             kind = doc.get("type")
-            if kind == "turn.completed":
+            if (sys.argv[2] == "claude" and kind == "rate_limit_event"
+                    and isinstance(doc.get("rate_limit_info"), dict)):
+                info = doc["rate_limit_info"]
+                if info.get("status") == "rejected" and info.get("rateLimitType") == "seven_day":
+                    weekly_quota = True
+            elif (sys.argv[2] == "claude" and kind == "result"
+                  and doc.get("subtype") == "success" and doc.get("is_error") is False):
+                weekly_quota = False
+                messages, pending, completed = [], [], False
+                claude_result = (True, (), False)
+            elif kind == "turn.completed":
                 completed = True
             elif kind == "turn.failed":
                 messages.append(text(doc.get("error")))
             elif kind == "error":
                 pending.append(text(doc.get("message")) or text(doc.get("error")))
             elif kind == "result" and doc.get("is_error") is True:
+                if sys.argv[2] == "claude":
+                    messages, pending, completed = [], [], False
                 result = doc.get("result")
                 if isinstance(result, str) and ENVELOPE.match(result):
                     messages.append(result)
+                if sys.argv[2] == "claude":
+                    claude_result = (False, tuple(messages), weekly_quota)
             continue
     match = re.match(r"^(\d{3}):\s*(\S.*)$", candidate) if sys.argv[2] == "pi" else None
     if match:
@@ -3253,6 +3269,12 @@ for line in raw.splitlines():
         match = PREFIX.match(candidate)
         if match:
             messages.append(match.group(1))
+if claude_result is not None:
+    successful, messages, weekly_quota = claude_result
+    if successful:
+        raise SystemExit(0)
+    messages = list(messages)
+    pending = []
 # A reconnect error the turn finished after is not the failure.
 if not completed:
     messages.extend(pending)
@@ -3268,6 +3290,9 @@ for message in messages:
     else:
         continue
     break
+else:
+    if weekly_quota:
+        print("capacity")
 PY
 }
 

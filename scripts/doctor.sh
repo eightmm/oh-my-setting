@@ -1776,8 +1776,21 @@ check_hook_surfaces() {
   # source-versus-live comparison is meaningful for a bare checkout too, and
   # the receipt only contributes the schema stamp.
   if [ "$RECEIPT_STATE" = "valid" ]; then
-    receipt_schema="$(oms_install_receipt_field hooks_schema "$RECEIPT" 2>/dev/null ||
-      printf 'absent')"
+    receipt_schema="$(python3 - "$RECEIPT" "$settings" <<'PYBIND'
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        row = json.load(stream)
+    binding = row.get("claude_settings_path")
+    if "claude_settings_path" not in row:
+        binding = os.path.realpath(os.path.join(os.environ["HOME"], ".claude/settings.json"))
+    bound = (isinstance(binding, str) and os.path.isabs(binding)
+             and os.path.realpath(binding) == binding and os.path.realpath(sys.argv[2]) == binding)
+    print(row.get("hooks_schema", "absent") if bound else "unbound")
+except (OSError, ValueError):
+    print("unbound")
+PYBIND
+)"
   fi
 
   OMS_DOCTOR_EXPECTED="$expected" \
@@ -1902,7 +1915,9 @@ for event, script in retired:
     missing += 1
 
 source_schema = expected["hooks_schema"]
-if receipt_schema == "skip":
+if receipt_schema == "unbound":
+    print("warn: global hooks_schema does not attest this settings target")
+elif receipt_schema == "skip":
     print("note: no valid install receipt; hooks_schema %d unverified" % source_schema)
 elif receipt_schema == "absent":
     print(
@@ -2561,7 +2576,7 @@ check_provider_auth
 
 check_codex_accounts() {
   python3 "$ROOT/scripts/lib/provider_accounts.py" doctor || {
-    echo "warn: Codex account health check unavailable"
+    echo "warn: provider account health check unavailable"
     return 0
   }
 }

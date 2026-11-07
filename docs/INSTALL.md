@@ -4,9 +4,15 @@ Host requirements, profiles and maintenance for Linux, macOS and Windows via WSL
 For the one-line install and a summary of changed files, see the [README](../README.md).
 [한국어](INSTALL.ko.md)
 
-To register or verify another Codex login, use `oms connect-services --account
-codex:ID`; see [provider accounts](TERMINAL-PANEL.md#provider-accounts) for
-home isolation, login, verification, and removal.
+Register another account with `oms connect-services --account codex:ID` or
+`--account claude:ID`; see [provider accounts](TERMINAL-PANEL.md#provider-accounts)
+for private homes, explicit verification, repair and removal. Codex routing is
+unchanged. Manual config-scoped claude.ai use is documented; OMS isolation
+verification remains unsupported/uncertain because native selection fields do not
+attest credential origin. Native status may initialize metadata in its selected root. Registration, doctor
+and update never run status. Claude state is separate from legacy Codex files;
+old versions cannot manage it or protect against arbitrary home collisions.
+Antigravity OAuth account isolation remains unknown and unavailable.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash

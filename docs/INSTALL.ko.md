@@ -4,8 +4,15 @@ Linux, macOS, Windows via WSL2의 호스트 요구 사항, 프로필과 유지�
 한 줄 설치 명령과 바뀌는 파일의 요약은 [README](../README.ko.md)를 참고한다.
 [English](INSTALL.md)
 
-추가 Codex 로그인을 등록하거나 확인하려면 `oms connect-services --account
-codex:ID`를 사용한다. 홈 격리, 로그인, 확인 및 제거는 [provider accounts](TERMINAL-PANEL.md#provider-accounts)를 참고한다.
+추가 계정은 `oms connect-services --account codex:ID` 또는 `--account claude:ID`로
+등록한다. 전용 홈, 명시적 검증, repair 및 제거는
+[provider accounts](TERMINAL-PANEL.md#provider-accounts)를 참고한다. Codex 라우팅은
+기존과 같다. 수동 config-scoped claude.ai 사용은 문서화되어 있지만, native
+선택 필드만으로 credential origin을 증명하지 못하므로 OMS 격리 검증은
+unsupported/uncertain이다. Native status는 선택된 root에 metadata를 초기화할 수 있다. 등록·doctor·update는
+status를 자동 실행하지 않는다. Claude 상태는 기존 Codex 파일과 분리된다.
+구버전은 Claude를 관리하거나 임의 홈 충돌을 보호하지 못한다.
+Antigravity OAuth 계정 격리는 아직 확인되지 않아 지원하지 않는다.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash

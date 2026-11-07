@@ -1024,6 +1024,72 @@ source shows no evidence that they need the same namespace, so that stays unveri
 
 #### Register and remove accounts
 
+Codex accounts support routing. Claude accounts support registration, explicit
+verification and owned integration lifecycle; they do not participate in routing or
+quota selection. Antigravity's independent OAuth namespace remains unproved, so
+`antigravity:ID` is rejected before file changes. Changing HOME or supplying an API
+key does not establish an independent entitled Antigravity account.
+
+For Claude, use `oms connect-services --account claude:work`, optionally with
+`--home PATH`, `--first|--last`, `--repair`, `--remove` or `--verify`. The default
+config root is `${CLAUDE_CONFIG_DIR:-~/.claude}/accounts/work`; it is not an OS HOME.
+Registration reports `registered, login pending` and never runs login or auth status.
+Manually log into **claude.ai** using the printed `CLAUDE_CONFIG_DIR` command.
+Manual config-scoped claude.ai use is documented, but explicit OMS isolation
+verification remains unsupported/uncertain. Matching `configDirectory` and
+`authMethod: claude.ai` do not attest credential origin or establish that shared
+global Anthropic OAuth profiles were excluded. No real independent authenticated
+accounts have been proved here. API-key, helper, external OAuth, keyless Console,
+gateway and unknown modes are unsupported too: an `api_key` status enum cannot
+prove storage origin. Global auth environment overrides refuse verification.
+`--verify` requests only native `claude auth status` in the selected config root,
+checks the nonsecret selection fields, and returns exit 2 until trustworthy origin
+evidence exists. Raw diagnostics and credential contents are never stored or logged. Native status may initialize vendor metadata inside that
+selected config root. OMS registry/effect receipts, main settings and other profiles
+remain unchanged. Registration, doctor, relink and update never run native status.
+
+Claude links only OMS `CLAUDE.md`, `skills` and `output-styles/oms-korean.md` to
+the current checkout, and merges hooks, HUDs and defaults into its own
+`settings.json`. Existing files and user links are preserved rather than adopted.
+Settings ownership lives beside that file in `.oms-claude-hooks.json`; preexisting
+values remain user-owned even when equal to OMS defaults. Removal deletes only
+unchanged recorded effects and preserves user edits and hook siblings. No operation
+removes account directories, credentials, history or sessions, or logs out a provider.
+
+Claude's private `provider-accounts.claude.json` (schema 1, provider `claude`,
+`accounts` containing only `id` and physical `home`) and
+`provider-account-effects.json` sit beside the legacy Codex registry. Claude actions
+never create or rewrite `provider-accounts.json` or `codex-account-links.json`.
+The last Claude removal publishes an empty accounts array. IDs are provider-local:
+`codex:work` and `claude:work` can coexist. Modern lifecycle operations reject
+physical-home collisions across both providers and pending effect reservations.
+Malformed or unknown Claude state blocks modern mutations while passive Codex
+routing keeps its unchanged legacy reader. Doctor reports provider-qualified
+nonsecret integration warnings without executing providers.
+
+Effect intent is durable before home/link/settings changes. The registry publishes
+after effects, and ownership finalizes afterward. These separate files are not one
+atomic transaction. Concurrent OMS calls share the existing registry lock; hook
+writes additionally hold the install lock. Relink refresh runs after the global
+install lock is released. A settings identity or concurrent snapshot mismatch,
+retargeted link, or ambiguous interrupted write preserves data and reservation
+authority with recovery guidance. Equal bytes after a crash cannot prove ownership;
+OMS does not restore a settings backup or adopt a replacement home. Uninstall stops
+before global cleanup or unlink when account cleanup is incomplete. These checks do
+not claim protection against arbitrary mutation by the same UID or root.
+
+Rollback preserves legacy Codex reads and selections. Old versions cannot manage
+Claude accounts or their effects, and cannot detect arbitrary `--home` collisions
+with active Claude homes. Perform account mutations with the modern version. An old
+uninstall is not Claude cleanup; returning to a modern version with duplicate homes
+preserves both states and refuses mutation until the conflict is resolved.
+
+The global install receipt's optional physical `claude_settings_path` binds
+`hooks_schema` to its main settings target and source owner. Alternate account
+settings never stamp or unstamp the main receipt. An old relink may drop that field;
+without it, only the actual default main target can stamp, and a normal modern
+relink restores the binding. This does not fix historical alternate-target writers.
+
 Register another entitled Codex account with:
 
 ```bash
@@ -1117,11 +1183,13 @@ and its resolved absolute `home`. It preserves other providers and unknown
 fields, refusing malformed state without rewriting it. Routing's existing
 validation still rejects unsupported providers and unknown fields.
 
-Provider names must occur in the routing policy. Only Codex accounts are enabled; Claude
+Provider names must occur in the routing policy. Only Codex accounts are enabled
+**in this legacy routing file**; Claude
 and Pi entries are rejected with `accounts for PROVIDER are not supported yet`. The
 home-variable table in `scripts/lib/provider_accounts.py` maps Codex to `CODEX_HOME`;
-Claude's `CLAUDE_CONFIG_DIR` and Pi's `PI_CODING_AGENT_DIR` remain disabled until
-independent CLI homes are verified. Account entries have only `id` and `home` fields.
+Claude's `CLAUDE_CONFIG_DIR` and Pi's `PI_CODING_AGENT_DIR` remain disabled for routing.
+Claude registration uses its separate private registry;
+Pi registration remains unavailable. Account entries have only `id` and `home` fields.
 Unknown keys, duplicate IDs or physical homes (including across providers), malformed
 configuration and non-absolute homes are errors.
 

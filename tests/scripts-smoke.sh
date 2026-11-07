@@ -8,7 +8,7 @@ if [ "${OMS_SMOKE_RUNNER_ACTIVE:-0}" != "1" ]; then
 fi
 
 ROOT="${OMS_TEST_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-TMP="$(mktemp -d /tmp/oms-tests.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-tests.XXXXXX")"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
 # Stop fixtures must never reach a live Codex app on the developer machine.
@@ -3113,10 +3113,11 @@ timeout = int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "120"))
 entry = ["bash", str(root / "scripts/connect-services.sh")]
 public_entry = ["bash", str(root / "scripts/oms"), "connect-services"]
 
-def run(args, ok=True, public=False):
+def run(args, ok=True, public=False, expected_exit=None):
     result = subprocess.run((public_entry if public else entry) + args,
         env=env, capture_output=True, text=True, timeout=timeout)
     assert (result.returncode == 0) == ok, (args, result.returncode, result.stdout, result.stderr)
+    assert expected_exit is None or result.returncode == expected_exit, (args, result.returncode, result.stdout, result.stderr)
     return result.stdout + result.stderr
 
 def register(ident, *args, ok=True):
@@ -3124,6 +3125,40 @@ def register(ident, *args, ok=True):
 
 def registry():
     return json.loads(config.read_text())
+
+# A legacy central Claude row must not disappear behind an absent sidecar.
+legacy_claude_home = user / "legacy-claude-account"
+legacy_claude_home.mkdir(mode=0o700)
+legacy_user_file = legacy_claude_home / "user-data"
+legacy_user_file.write_bytes(b"keep user data")
+legacy_main_dir = user / ".claude"
+legacy_main_dir.mkdir(mode=0o700)
+legacy_main_settings = legacy_main_dir / "settings.json"
+legacy_main_settings.write_bytes(b'{"main":"keep"}')
+legacy_main_settings.chmod(0o600)
+config.parent.parent.mkdir(mode=0o700)
+config.parent.mkdir(mode=0o700)
+config.write_text(json.dumps({"schema": 1, "providers": {"claude": {
+    "policy": "ordered", "accounts": [{"id": "legacy", "home": str(legacy_claude_home)}]}}}))
+config.chmod(0o600)
+legacy_claude_state = [config, receipt, config.with_name("provider-accounts.claude.json"),
+                       config.with_name("provider-account-effects.json")]
+legacy_claude_bytes = [path.read_bytes() if path.exists() else None for path in legacy_claude_state]
+legacy_main_bytes = {name: (main / name).read_bytes() for name in links if (main / name).is_file()}
+out = run(["--account", "claude:separate", "--home", str(legacy_claude_home)],
+          ok=False, public=True, expected_exit=2)
+assert "legacy Claude accounts" in out and "unsupported" in out, out
+assert [path.read_bytes() if path.exists() else None for path in legacy_claude_state] == legacy_claude_bytes
+assert {name: (main / name).read_bytes() for name in legacy_main_bytes} == legacy_main_bytes
+assert sorted(path.name for path in legacy_claude_home.iterdir()) == [legacy_user_file.name]
+assert legacy_user_file.read_bytes() == b"keep user data"
+assert legacy_main_settings.read_bytes() == b'{"main":"keep"}'
+assert sorted(path.name for path in legacy_main_dir.iterdir()) == [legacy_main_settings.name]
+legacy_main_settings.unlink()
+legacy_main_dir.rmdir()
+config.unlink()
+config.parent.rmdir()
+config.parent.parent.rmdir()
 
 secondary = main / "accounts" / "credits"
 old_umask = os.umask(0o002)
@@ -3169,7 +3204,7 @@ register("default", "--verify")
 assert "not registered" in register("missing", "--verify", ok=False)
 register("credits", "--verify", "--first", ok=False)
 register("credits", "--verify", "--home", secondary, ok=False)
-for invalid in ("", "codex:", "codex:bad:id", "claude:a", "codex"):
+for invalid in ("", "codex:", "codex:bad:id", "antigravity:a", "codex"):
     run(["--account", invalid], ok=False)
 
 sibling = user / ".codex-legacy"
@@ -3665,6 +3700,324 @@ config.write_text(json.dumps({"schema": 1, "providers": {"codex": {
 register("solo", "--remove")
 with patch.dict(os.environ, env):
     assert accounts.load_accounts()["providers"] == {}
+# Claude lifecycle uses separate state; the unchanged legacy decoder remains
+# the rollback reader, including its unsupported-provider negatives.
+# The earlier umask fixture deliberately created group-writable config dirs.
+# Claude's private state requires safe existing ancestors; repair that fixture
+# explicitly rather than letting the product change an existing directory.
+config.parent.chmod(0o700)
+config.parent.parent.chmod(0o700)
+claude_main = user / ".claude"
+claude_main.mkdir(mode=0o700)
+(claude_main / "settings.json").write_text('{"main":"keep"}\n')
+env["CLAUDE_CONFIG_DIR"] = str(claude_main)
+claude_registry = config.with_name("provider-accounts.claude.json")
+effects = config.with_name("provider-account-effects.json")
+legacy_bytes = (config.read_bytes(), receipt.read_bytes())
+claude_home = claude_main / "accounts/solo"
+
+def claude(ident="solo", *args, ok=True, expected_exit=None):
+    return run(["--account", "claude:" + ident, *map(str, args)], ok=ok, public=True, expected_exit=expected_exit)
+
+stub = bin_dir / "claude"
+stub.write_text("#!/bin/sh\n" +
+    '[ "$1" = --help ] && exit 0\n' +
+    '[ "$1 $2" = "auth status" ] || exit 90\n' +
+    'printf initialized > "$CLAUDE_CONFIG_DIR/vendor-metadata"\n' +
+    'cat "$CLAUDE_CONFIG_DIR/status-fixture"\n' +
+    '[ ! -f "$CLAUDE_CONFIG_DIR/status-fail" ]\n')
+stub.chmod(0o700)
+out = claude()
+assert "registered, login pending" in out, out
+assert "CLAUDE_CONFIG_DIR=" + shlex.quote(str(claude_home)) in out, out
+assert (config.read_bytes(), receipt.read_bytes()) == legacy_bytes
+assert not (claude_home / "vendor-metadata").exists()
+assert claude_registry.stat().st_mode & 0o777 == 0o600
+assert json.loads(claude_registry.read_text()) == {"schema": 1, "provider": "claude",
+    "accounts": [{"id": "solo", "home": str(claude_home)}]}
+assert accounts.PROVIDER_HOMES["claude"][1] is False
+with patch.dict(os.environ, env):
+    old_view = accounts.load_accounts()
+    merged = accounts.load_registered_accounts()
+assert old_view["providers"] == {}
+assert merged["providers"]["claude"]["accounts"][0]["id"] == "solo"
+# Same textual IDs are provider-local only in the new lifecycle view.
+register("solo")
+legacy_bytes = (config.read_bytes(), receipt.read_bytes())
+with patch.dict(os.environ, env):
+    assert accounts.load_accounts()["providers"]["codex"]["accounts"][-1]["id"] == "solo"
+    assert {"codex", "claude"} <= set(accounts.load_registered_accounts()["providers"])
+claude("collision", "--home", main / "accounts/solo", ok=False)
+register("collision", "--home", claude_home, ok=False)
+claude("default", ok=False)
+for invalid in ("", "UPPER", "bad:id", "x" * 65):
+    claude(invalid, ok=False)
+for ident in ("0", "x" * 64):
+    claude(ident)
+    claude(ident, "--remove")
+assert (config.read_bytes(), receipt.read_bytes()) == legacy_bytes
+settings_path = claude_home / "settings.json"
+sidecar = claude_home / ".oms-claude-hooks.json"
+assert settings_path.is_file() and sidecar.is_file()
+assert (claude_home / "CLAUDE.md").is_symlink()
+assert (claude_home / "skills").is_symlink()
+assert (claude_home / "output-styles/oms-korean.md").is_symlink()
+# Recreating a missing owned link journals pending state before re-finalizing.
+(claude_home / "skills").unlink()
+claude("solo", "--repair")
+assert (claude_home / "skills").is_symlink()
+state_before = (claude_registry.read_bytes(), effects.read_bytes(), sidecar.read_bytes())
+claude()
+assert (claude_registry.read_bytes(), effects.read_bytes(), sidecar.read_bytes()) == state_before
+claude("solo", "--repair")
+assert (config.read_bytes(), receipt.read_bytes()) == legacy_bytes
+
+# Native status may initialize its selected root. OMS state, main config and
+# other roots are invariant; raw diagnostic output never leaves the child.
+# Matching status fields still cannot prove an independent credential origin.
+status_path = claude_home / "status-fixture"
+main_bytes = (claude_main / "settings.json").read_bytes()
+for payload, valid_status in (({"configDirectory": str(claude_home), "authMethod": "claude.ai"}, False),
+        ({"configDirectory": str(claude_main), "authMethod": "claude.ai"}, False),
+        ({"configDirectory": str(claude_home)}, False), ({}, False)):
+    status_path.write_text(json.dumps(payload))
+    out = claude("solo", "--verify", ok=valid_status, expected_exit=2)
+    if payload.get("configDirectory") == str(claude_home) and payload.get("authMethod") == "claude.ai":
+        assert "credential origin is not attested" in out and "isolation verification unsupported" in out, out
+    assert "configDirectory" not in out and "authMethod" not in out
+    assert (claude_registry.read_bytes(), effects.read_bytes(), sidecar.read_bytes()) == state_before
+    assert (config.read_bytes(), receipt.read_bytes()) == legacy_bytes
+    assert (claude_main / "settings.json").read_bytes() == main_bytes
+    assert not (claude_main / "vendor-metadata").exists()
+for method in (
+        "api_key", "api_key_helper", "oauth_token", "third_party", "unknown", "none"):
+    status_path.write_text(json.dumps(dict(configDirectory=str(claude_home), authMethod=method)))
+    claude("solo", "--verify", ok=False)
+for content in ("", "{", "[]", "null"):
+    status_path.write_text(content)
+    claude("solo", "--verify", ok=False)
+status_path.write_text(json.dumps(dict(configDirectory=str(claude_home), authMethod="claude.ai")))
+(claude_home / "status-fail").touch()
+claude("solo", "--verify", ok=False)
+(claude_home / "status-fail").unlink()
+
+# Invalid sidecar must block modern mutations before any home or legacy write,
+# while passive Codex selection continues to use precisely its old decoder.
+saved_claude = claude_registry.read_bytes()
+for malformed in ("", "{", "[]", '{"schema":true,"provider":"claude","accounts":[]}',
+        '{"schema":2,"provider":"claude","accounts":[]}',
+        '{"schema":1,"schema":1,"provider":"claude","accounts":[]}',
+        '{"schema":1,"provider":"claude","accounts":[],"extra":0}',
+        '{"schema":1,"provider":"claude","accounts":[],"extra":NaN}'):
+    claude_registry.write_text(malformed)
+    claude("blocked", ok=False)
+    register("blocked", ok=False)
+    assert not (main / "accounts/blocked").exists()
+    assert not (claude_main / "accounts/blocked").exists()
+    assert claude_registry.read_text() == malformed
+    assert (config.read_bytes(), receipt.read_bytes()) == legacy_bytes
+    with patch.dict(os.environ, env):
+        assert accounts.load_accounts()["providers"]["codex"]
+        try:
+            accounts.load_registered_accounts()
+            raise AssertionError("malformed Claude sidecar accepted")
+        except ValueError:
+            pass
+claude_registry.write_bytes(saved_claude)
+assert "claude account solo" in health()
+saved_hook_state = sidecar.read_bytes()
+stale = json.loads(saved_hook_state)
+stale["hooks_schema"] += 1
+sidecar.write_text(json.dumps(stale))
+assert "claude account solo settings schema stale" in health()
+sidecar.write_bytes(saved_hook_state)
+
+# Interrupted publication reserves the home before any registry row exists.
+# Re-running installed effects can finalize publication without adopting data.
+def claude_args(ident):
+    return SimpleNamespace(account="claude:" + ident, home=None, verify=False,
+                           remove=False, repair=False, first=False, last=False)
+
+def stop_publication(path, value, **kwargs):
+    if path == claude_registry:
+        raise OSError("injected Claude registry interruption")
+    return writer(path, value, **kwargs)
+
+with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side_effect=stop_publication):
+    try:
+        accounts.connect_claude_account(claude_args("publish-interrupted"))
+        raise AssertionError("publication interruption not observed")
+    except OSError as error:
+        assert "injected" in str(error)
+interrupted_home = claude_main / "accounts/publish-interrupted"
+assert interrupted_home.is_dir() and (interrupted_home / "skills").is_symlink()
+assert not any(row["id"] == "publish-interrupted" for row in json.loads(claude_registry.read_text())["accounts"])
+register("reserved", "--home", interrupted_home, ok=False)
+assert "pending" in health()
+claude("publish-interrupted")
+claude("publish-interrupted", "--remove")
+
+# The reservation is durable before creating a home. A failed initial intent
+# can be removed without adopting any directory; a post-create crash cannot.
+def reserved_intent(path, value, **kwargs):
+    result = writer(path, value, **kwargs)
+    if path == effects and any(row["id"] == "intent-only" and row["identity"] is None for row in value["accounts"]):
+        raise OSError("injected intent interruption")
+    return result
+
+with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side_effect=reserved_intent):
+    try:
+        accounts.connect_claude_account(claude_args("intent-only"))
+        raise AssertionError("intent interruption not observed")
+    except OSError:
+        pass
+intent_home = claude_main / "accounts/intent-only"
+assert not intent_home.exists()
+register("reserved", "--home", intent_home, ok=False)
+claude("intent-only", "--remove")
+assert not any(row["id"] == "intent-only" for row in json.loads(effects.read_text())["accounts"])
+
+# Finalization after registry publication is retryable under the same lock.
+def stop_finalization(path, value, **kwargs):
+    if path == effects and any(row["id"] == "finalize-interrupted" and row["status"] == "installed" for row in value["accounts"]):
+        raise OSError("injected finalization interruption")
+    return writer(path, value, **kwargs)
+
+with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side_effect=stop_finalization):
+    try:
+        accounts.connect_claude_account(claude_args("finalize-interrupted"))
+        raise AssertionError("finalization interruption not observed")
+    except OSError:
+        pass
+assert any(row["id"] == "finalize-interrupted" for row in json.loads(claude_registry.read_text())["accounts"])
+claude("finalize-interrupted")
+claude("finalize-interrupted", "--remove")
+
+# A removed effect remains reserved if registry publication is interrupted.
+claude("remove-interrupted")
+with patch.dict(os.environ, env), patch.object(common, "atomic_write_json", side_effect=stop_publication):
+    try:
+        args = claude_args("remove-interrupted")
+        args.remove = True
+        accounts.connect_claude_account(args)
+        raise AssertionError("removal interruption not observed")
+    except OSError:
+        pass
+assert any(row["id"] == "remove-interrupted" for row in json.loads(claude_registry.read_text())["accounts"])
+claude("remove-interrupted", "--remove")
+
+# Unknown ownership schemas and symlink state block mutations without writes.
+saved_effects = effects.read_bytes()
+for malformed in ("", "{}", "[]", '{"schema":true,"accounts":[]}', '{"schema":2,"accounts":[]}',
+                  '{"schema":1,"accounts":[{}]}'):
+    effects.write_text(malformed)
+    claude("bad-effects", ok=False)
+    register("bad-effects", ok=False)
+    assert effects.read_text() == malformed
+    assert not (claude_main / "accounts/bad-effects").exists()
+effects.write_bytes(saved_effects)
+for invalid in (None, 0, "", "relative"):
+    malformed = json.loads(saved_effects)
+    malformed["accounts"][0]["source_root"] = invalid
+    effects.write_text(json.dumps(malformed))
+    result = subprocess.run(entry + ["--account", "claude:bad-owner"], env=env,
+                            capture_output=True, text=True, timeout=timeout)
+    assert result.returncode == 2 and "Traceback" not in result.stderr, result
+    assert not (claude_main / "accounts/bad-owner").exists()
+effects.write_bytes(saved_effects)
+saved_state = claude_registry.read_bytes()
+foreign_state = config.parent / "foreign-state"
+claude_registry.rename(foreign_state)
+claude_registry.symlink_to(foreign_state)
+claude("bad-filetype", ok=False)
+register("bad-filetype", ok=False)
+assert foreign_state.read_bytes() == saved_state
+claude_registry.unlink()
+foreign_state.rename(claude_registry)
+
+# A durable pending settings intent never authorizes automatic rollback or
+# ownership adoption. Modern cleanup stops before global unlink.
+claude("settings-interrupted")
+interrupted_settings = claude_main / "accounts/settings-interrupted/settings.json"
+interrupted_sidecar = interrupted_settings.with_name(".oms-claude-hooks.json")
+sidecar_value = json.loads(interrupted_sidecar.read_text())
+sidecar_value["status"] = "pending"
+interrupted_sidecar.write_text(json.dumps(sidecar_value))
+legacy_snapshot = (config.read_bytes(), receipt.read_bytes())
+settings_snapshot = interrupted_settings.read_bytes()
+claude("settings-interrupted", "--repair", ok=False)
+claude("settings-interrupted", "--remove", ok=False)
+result = subprocess.run(helper + ["cleanup", "--root", str(root)], env=env,
+                        capture_output=True, text=True, timeout=timeout)
+assert result.returncode == 2 and "pending" in result.stderr, result
+assert interrupted_settings.read_bytes() == settings_snapshot
+assert (config.read_bytes(), receipt.read_bytes()) == legacy_snapshot
+sidecar_value["status"] = "installed"
+interrupted_sidecar.write_text(json.dumps(sidecar_value))
+claude("settings-interrupted", "--remove")
+
+# The same shared lock serializes different providers and the lifecycle reader.
+commands = [entry + ["--account", "claude:parallel-claude"],
+            entry + ["--account", "codex:parallel-codex"]]
+calls = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for command in commands]
+for call in calls:
+    result = call.communicate(timeout=timeout)
+    assert call.returncode == 0, result
+with patch.dict(os.environ, env):
+    assert {"parallel-claude"} <= {row["id"] for row in accounts.load_registered_accounts()["providers"]["claude"]["accounts"]}
+claude("parallel-claude", "--remove")
+register("parallel-codex", "--remove")
+legacy_bytes = (config.read_bytes(), receipt.read_bytes())
+saved_claude = claude_registry.read_bytes()
+
+# A replaced home or settings symlink never acquires cleanup authority.
+settings_saved = settings_path.read_bytes()
+settings_path.rename(claude_home / "held-settings-inode")
+settings_path.symlink_to(claude_main / "settings.json")
+claude("solo", "--repair", ok=False)
+claude("solo", "--remove", ok=False)
+assert (claude_main / "settings.json").read_bytes() == main_bytes
+assert claude_registry.read_bytes() == saved_claude
+settings_path.unlink()
+settings_path.write_bytes(settings_saved)
+settings_path.chmod(0o600)
+# Exact recorded settings identity changed; recovery preserves all effects.
+claude("solo", "--repair", ok=False)
+# Restore the original fixture inode through a separate disposable account.
+claude("owned")
+owned = claude_main / "accounts/owned"
+preexisting = claude_main / "accounts/user-values"
+preexisting.mkdir(mode=0o700)
+user_settings = {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}},
+    "attribution": {"commit": "", "pr": "", "sessionUrl": False}}
+(preexisting / "settings.json").write_text(json.dumps(user_settings))
+(preexisting / "settings.json").chmod(0o600)
+claude("user-values", "--home", preexisting)
+claude("user-values", "--remove")
+assert json.loads((preexisting / "settings.json").read_text()) == user_settings
+claude("owned", "--remove")
+assert json.loads((owned / "settings.json").read_text()) == {}
+empty_home = claude_main / "accounts/empty-values"
+empty_home.mkdir(mode=0o700)
+empty_values = {"hooks": {}, "modelSettings": {"claude-opus-5-5": {}}, "theme": "keep"}
+(empty_home / "settings.json").write_text(json.dumps(empty_values))
+(empty_home / "settings.json").chmod(0o600)
+claude("empty-values", "--home", empty_home)
+claude("empty-values", "--remove")
+assert json.loads((empty_home / "settings.json").read_text()) == empty_values
+assert owned.is_dir() and not (owned / "skills").exists()
+# Claude-only operation must not manufacture legacy files.
+for target in (user / "claude-move-a", user / "claude-move-b"):
+    claude("moving", "--home", target)
+claude("moving", "--remove")
+assert all(target.is_dir() and not (target / "skills").exists()
+           for target in (user / "claude-move-a", user / "claude-move-b"))
+config.unlink()
+receipt.unlink()
+claude("isolated")
+claude("isolated", "--remove")
+assert not config.exists() and not receipt.exists()
+
 print("codex account connect: create, repair, preservation, ordering, validation, concurrency, doctor, remove and cleanup passed")
 PY
 }
@@ -14934,6 +15287,23 @@ EOF
 #!/usr/bin/env bash
 case "${1:-}" in --version|--help) exit 0 ;; esac
 [ -z "${PANEL_RUNS:-}" ] || printf '%s\n' claude >> "$PANEL_RUNS"
+if [ -n "${PANEL_WEEKLY_CASE:-}" ]; then
+  printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","overageDisabledReason":"org_level_disabled"}}'
+  case "$PANEL_WEEKLY_CASE" in
+    reconnect-success) printf '%s\n' '{"type":"error","message":"API Error: 503 service unavailable"}' ;;
+    error-success) printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 503 service unavailable"}' ;;
+    terminal-errors) printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 too many requests"}' ;;
+  esac
+  if [ "$PANEL_WEEKLY_CASE" != failure ] && [ "$PANEL_WEEKLY_CASE" != terminal-errors ]; then
+    printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+  fi
+  case "$PANEL_WEEKLY_CASE" in
+    success-failure|terminal-errors) printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 503 service unavailable"}' ;;
+    success-error-notice) printf '%s\n' '{"type":"error","message":"API Error: 503 service unavailable"}' ;;
+    success-quota-notice) printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}' ;;
+  esac
+  exit 1
+fi
 printf '%s\n' "$@" > "$PANEL_ARGV"
 printf '%s\n' "${OMS_FIXTURE_ROOT:-}" "${TMUX_TMPDIR:-}" "${OMS_LOCK_DIR:-}" \
   "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}" "${TMUX:-}" "${TMUX_PANE:-}" > "$PANEL_ENV"
@@ -15050,6 +15420,51 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
     classify_case capacity claude 1 'claude overloaded envelope'
   printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"There'"'"'s an issue with the selected model (x). It may not exist or you may not have access to it."}' |
     classify_case model_unavailable claude 1 'claude model envelope'
+  local weekly='{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day","overageDisabledReason":"org_level_disabled"}}'
+  printf '%s\n' "$weekly" | classify_case capacity claude 1 'native weekly rejected'
+  printf '%s\n' "$weekly" | classify_case '' claude 0 'native weekly outer success'
+  printf '%s\n' "$weekly" | classify_case '' codex 1 'native weekly foreign provider'
+  for native_status in allowed accepted warning '' null; do
+    printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"$native_status\",\"rateLimitType\":\"seven_day\"}}" |
+      classify_case '' claude 1 'native non-rejected status'
+  done
+  printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":null}' '{"type":"rate_limit_event","rate_limit_info":' |
+    classify_case '' claude 1 'native malformed info'
+  printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":""}}' |
+    classify_case '' claude 1 'native missing weekly type'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"success","is_error":false,"result":"ok"}' |
+    classify_case '' claude 1 'native weekly followed by success'
+  printf '%s\n' "$weekly" '{"type":"error","message":"API Error: 503 service unavailable"}' \
+    '{"type":"result","subtype":"success","is_error":false,"result":"ok"}' |
+    classify_case '' claude 1 'native reconnect followed by success'
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 503 service unavailable"}' \
+    '{"type":"result","subtype":"success","is_error":false,"result":"ok"}' |
+    classify_case '' claude 1 'native error followed by success'
+  printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok"}' \
+    '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 503 service unavailable"}' |
+    classify_case provider_down claude 1 'native success followed by error'
+  printf '%s\n' "$weekly" \
+    '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 429 too many requests"}' \
+    '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 503 service unavailable"}' |
+    classify_case provider_down claude 1 'native final error replaces earlier error'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"success","is_error":false,"result":"ok"}' \
+    '{"type":"error","message":"API Error: 503 service unavailable"}' |
+    classify_case '' claude 1 'native final success suppresses later notice'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"success","is_error":false,"result":"ok"}' "$weekly" |
+    classify_case '' claude 1 'native final success suppresses later quota'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"success","is_error":"false","result":"ok"}' |
+    classify_case capacity claude 1 'native malformed success boolean'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"success","is_error":true,"result":"API Error: 503 service unavailable"}' |
+    classify_case provider_down claude 1 'native weekly followed by distinct failure'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"error","is_error":false}' |
+    classify_case capacity claude 1 'native non-success result'
+  printf '%s\n' "$weekly" '{"type":"result","subtype":"success","is_error":true,"result":"failed"}' |
+    classify_case capacity claude 1 'native weekly followed by error result'
+  for native_kind in assistant user tool; do
+    printf '%s\n' "{\"type\":\"$native_kind\",\"message\":$weekly}" |
+      classify_case '' claude 1 'quoted native event'
+  done
+  printf '%s\n' 'weekly limit reached' | classify_case '' claude 1 'weekly prose'
   crlf_line=$'ERROR: service unavailable\r'
   printf '%s\n' "$crlf_line" | classify_case provider_down codex 1 'CRLF line'
   printf '%s\n' 'ERROR: service unavailable' | classify_case '' codex 0 'successful status'
@@ -15074,6 +15489,27 @@ $fixture/mapped-suite/cache" ] || fail "suite fixture root mapping was wrong: $m
   make_committed_repo "$retry_repo"
   make_committed_repo "$retry_state"
   printf 'fixture prompt\n' > "$fixture/provider-retry/prompt"
+  # Exercise the public symlinked entry and its actual attempt sidecar.
+  ln -s "$ROOT/scripts/oms" "$fixture/bin/oms"
+  for native_case in failure success reconnect-success error-success success-failure terminal-errors success-error-notice success-quota-notice; do
+    root="$fixture/native-$native_case"
+    mkdir -p "$root/repo" "$root/home"
+    git -C "$root/repo" init -q
+    PANEL_WEEKLY_CASE="$native_case" HOME="$root/home" PATH="$fixture/bin:/usr/bin:/bin" \
+      OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=advisor OMS_AGENT=claude \
+      "$fixture/bin/oms" agent-call --repo "$root/repo" --artifact-dir "$root/artifacts" \
+      --to claude --prompt 'Inspect weekly event' > "$root/log" 2>&1 || :
+    python3 - "$root/artifacts" "$native_case" <<'PYNATIVE' || fail "native $native_case attempt classification mismatch"
+import json, pathlib, sys
+sidecars = list(pathlib.Path(sys.argv[1]).glob('*.attempts.json'))
+assert len(sidecars) == 1, sidecars
+attempts = json.loads(sidecars[0].read_text())['attempts']
+assert len(attempts) == 1, attempts
+assert attempts[0]['exit'] == 1, attempts
+expected = {'failure': 'capacity', 'success-failure': 'provider_down', 'terminal-errors': 'provider_down'}.get(sys.argv[2], '')
+assert attempts[0]['classification'] == expected, attempts
+PYNATIVE
+  done
   # BEGIN early panel failover skip fixture
   for retry_case in refusal-zero fallback-failed authority interactive interactive-authority interactive-zero nonpanel noattempt nostate; do
     retry_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$retry_state" start --provider codex \

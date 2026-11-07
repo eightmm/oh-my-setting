@@ -277,3 +277,41 @@ link_all() {
 # The receipt path is stable across checkouts, so concurrent link.sh runs for
 # the same HOME cannot interleave their global agent configuration.
 oms_with_file_lock "$(oms_install_receipt_path)" link_all
+
+# Account refresh takes the registry lock, then the hook install lock. Start
+# only after the global link transaction releases its install lock.
+python3 -I - "$ROOT/scripts/lib/provider_accounts.py" <<'PY_ACCOUNTS'
+from pathlib import Path
+import runpy
+import sys
+
+helper = Path(sys.argv[1])
+sys.path.insert(0, str(helper.parent))
+from oms_runtime.common import CoreError, file_lock
+
+try:
+    accounts = runpy.run_path(str(helper))
+    if "refresh_registered_accounts" in accounts:
+        refresh = accounts["refresh_registered_accounts"]
+        if not callable(refresh):
+            raise ValueError("account refresh helper is incompatible")
+        refresh()
+    else:
+        # Old rollback checkouts have no refresh operation. Only a machine
+        # without registered account state can safely omit that operation.
+        paths = accounts.get("_account_paths")
+        if not callable(paths):
+            raise ValueError("account state helper is incompatible")
+        registry, codex_links = paths()
+        with file_lock(registry):
+            for path in (registry, codex_links, registry.parent / "provider-accounts.claude.json",
+                         registry.parent / "provider-account-effects.json"):
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                raise ValueError("legacy checkout cannot refresh registered account state; update the complete checkout")
+except (OSError, ValueError, RuntimeError, CoreError) as error:
+    print("error: " + str(error), file=sys.stderr)
+    raise SystemExit(2)
+PY_ACCOUNTS

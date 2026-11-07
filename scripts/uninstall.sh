@@ -20,7 +20,9 @@ Usage: uninstall.sh [--yes] [--purge] [--purge-dirty] [--dry-run] [-h|--help]
 
 Remove oh-my-setting managed links/copies (and restore backups when available). With
 --purge also delete the oh-my-setting checkout directory itself.
-Registered Codex homes, logins and sessions stay; only recorded shared links
+Registered Claude and Codex homes, logins and sessions stay. Claude cleanup
+removes only account-owned integration effects; ambiguous ownership stops before
+global cleanup, unlink or purge. For Codex, only recorded shared links
 still pointing to main-home or OMS-managed targets are removed.
 Directory identity must match the receipt. Changed entries and platforms lacking
 safe directory-relative unlink keep their links and report why.
@@ -173,10 +175,6 @@ run_removal() {  # LABEL COMMAND...
   return 0
 }
 
-run_removal "the auto-update trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
-  "$ROOT/scripts/uninstall-autoupdate.sh"
-run_removal "the tick trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
-  "$ROOT/scripts/tick.sh" uninstall
 if [ "$DRY_RUN" = 1 ]; then
   run_removal "Codex account shared links" \
     python3 "$ROOT/scripts/lib/provider_accounts.py" cleanup --root "$ROOT" --dry-run
@@ -184,6 +182,14 @@ else
   run_removal "Codex account shared links" \
     python3 "$ROOT/scripts/lib/provider_accounts.py" cleanup --root "$ROOT"
 fi
+if [ "$removal_failed" -ne 0 ]; then
+  echo "error: account cleanup incomplete; uninstall stopped before global cleanup, unlink or purge" >&2
+  exit 1
+fi
+run_removal "the auto-update trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
+  "$ROOT/scripts/uninstall-autoupdate.sh"
+run_removal "the tick trigger" env OH_MY_SETTING_DRY_RUN="$DRY_RUN" \
+  "$ROOT/scripts/tick.sh" uninstall
 if [ "$DRY_RUN" = "1" ]; then
   echo "would remove claude oh-my-setting hooks/HUD from ~/.claude/settings.json"
   echo "would remove codex oh-my-setting plugin"

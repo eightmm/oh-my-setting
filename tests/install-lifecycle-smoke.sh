@@ -866,8 +866,47 @@ row['permissions']['allow'] = ['read_file(*)', 'user(existing)']
 with open(path, 'w') as handle:
     json.dump(row, handle)
 PY_RESET
+# The normal update must refresh registered Claude integrations without auth
+# probes; uninstall must refuse ambiguous account ownership before global work.
+# Registration requires private ancestors; both directories belong to the fixture.
+chmod 700 "$HOME" "$HOME/.claude"
+"$dest/scripts/connect-services.sh" --account claude:lifecycle >/dev/null ||
+  fail "Claude lifecycle registration failed"
+claude_account="$HOME/.claude/accounts/lifecycle"
+python3 - "$claude_account" <<'PYACCOUNT'
+import json, sys
+from pathlib import Path
+home = Path(sys.argv[1])
+(home / "history-fixture").write_text("keep account history")
+sidecar = home / ".oms-claude-hooks.json"
+row = json.loads(sidecar.read_text())
+row["status"] = "pending"
+sidecar.write_text(json.dumps(row))
+PYACCOUNT
+account_uninstall_status=0
+(cd "$HOME" && "$dest/scripts/uninstall.sh" --yes) > "$TMP/account-refusal.txt" 2>&1 ||
+  account_uninstall_status=$?
+[ "$account_uninstall_status" != 0 ] || fail "uninstall accepted pending Claude ownership"
+[ -f "$XDG_CONFIG_HOME/oh-my-setting/install.json" ] || fail "account refusal lost global receipt"
+grep -Fq 'skill-router.sh' "$HOME/.claude/settings.json" || fail "account refusal changed main hooks"
+python3 - "$claude_account/.oms-claude-hooks.json" <<'PYACCOUNT'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+row = json.loads(path.read_text())
+row["status"] = "installed"
+path.write_text(json.dumps(row))
+PYACCOUNT
 permissions_before="$(cksum < "$antigravity_settings")"
 (cd "$HOME" && "$dest/scripts/update.sh" --no-tools)
+python3 - "$claude_account" "$dest" <<'PYACCOUNT'
+import json, os, sys
+from pathlib import Path
+home, source = map(Path, sys.argv[1:])
+assert os.readlink(home / "CLAUDE.md") == str(source / "rules/global-AGENTS.md")
+assert json.loads((home / ".oms-claude-hooks.json").read_text())["status"] == "installed"
+assert (home / "history-fixture").read_text() == "keep account history"
+PYACCOUNT
 [ "$permissions_before" = "$(cksum < "$antigravity_settings")" ] ||
   fail "no-tools update changed provider settings"
 assert_lib_pyc_current "update"
@@ -1004,6 +1043,13 @@ for git_layout in directory file; do
 done
 
 (cd "$HOME" && "$dest/scripts/uninstall.sh" --yes --purge --purge-dirty)
+[ -d "$claude_account" ] || fail "uninstall removed the Claude account directory"
+[ "$(cat "$claude_account/history-fixture")" = "keep account history" ] || fail "uninstall changed account history"
+[ ! -L "$claude_account/skills" ] || fail "uninstall kept owned Claude account links"
+python3 - "$claude_account/settings.json" <<'PYACCOUNT'
+import json, sys
+assert json.load(open(sys.argv[1])) == {}
+PYACCOUNT
 [ -f "$HOME/.codex/AGENTS.md" ] &&
   [ "$(sed -n '1p' "$HOME/.codex/AGENTS.md")" = "user rules" ] ||
   fail "uninstall did not restore the original Codex rules"

@@ -406,17 +406,241 @@ fi
 
 # shellcheck source=scripts/lib/python-runtime.sh
 . "$ROOT/scripts/lib/python-runtime.sh"
+
+agy_managed_selected_env() {
+  local raw_root="${1:-}" selected="${2:-}"
+  local runtime_phys selected_name selected_bin_dir selected_bin_name
+  local selected_env_dir selected_version selected_envs_dir selected_envs_name
+  local selected_bin_phys selected_env_python
+
+  [ -n "$raw_root" ] && [ -n "$selected" ] || return 1
+  while [ "$raw_root" != "/" ] && [ "${raw_root%/}" != "$raw_root" ]; do
+    raw_root="${raw_root%/}"
+  done
+  oms_python_runtime_root_owned "$raw_root" &&
+    [ ! -L "$raw_root/bin" ] && [ -d "$raw_root/bin" ] &&
+    [ ! -L "$raw_root/bin/python3" ] && [ -f "$raw_root/bin/python3" ] &&
+    [ -x "$raw_root/bin/python3" ] &&
+    [ ! -L "$raw_root/envs" ] && [ -d "$raw_root/envs" ] &&
+    [ ! -L "$raw_root/launchers" ] &&
+    { [ ! -e "$raw_root/launchers" ] || [ -d "$raw_root/launchers" ]; } || return 1
+
+  runtime_phys="$(CDPATH='' cd -P -- "$raw_root" 2>/dev/null && pwd -P)" || return 1
+  case "$runtime_phys" in
+    ""|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  oms_python_runtime_root_owned "$runtime_phys" &&
+    [ ! -L "$runtime_phys/bin" ] && [ -d "$runtime_phys/bin" ] &&
+    [ ! -L "$runtime_phys/bin/python3" ] && [ -f "$runtime_phys/bin/python3" ] &&
+    [ -x "$runtime_phys/bin/python3" ] &&
+    [ ! -L "$runtime_phys/envs" ] && [ -d "$runtime_phys/envs" ] &&
+    [ ! -L "$runtime_phys/launchers" ] &&
+    { [ ! -e "$runtime_phys/launchers" ] || [ -d "$runtime_phys/launchers" ]; } || return 1
+
+  case "$selected" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+    */envs/*/*/*) ;;
+    *) return 1 ;;
+  esac
+  case "/$selected/" in
+    */../*) return 1 ;;
+  esac
+  selected_name="${selected##*/}"
+  selected_bin_dir="${selected%/*}"
+  selected_bin_name="${selected_bin_dir##*/}"
+  selected_env_dir="${selected_bin_dir%/*}"
+  selected_version="${selected_env_dir##*/}"
+  selected_envs_dir="${selected_env_dir%/*}"
+  selected_envs_name="${selected_envs_dir##*/}"
+
+  case "$selected_name" in
+    python3|python) ;;
+    *) return 1 ;;
+  esac
+  [ "$selected_bin_name" = "bin" ] && [ "$selected_envs_name" = "envs" ] || return 1
+  oms_python_runtime_version_valid "$selected_version" || return 1
+  [ ! -L "$selected_envs_dir" ] && [ -d "$selected_envs_dir" ] &&
+    [ ! -L "$selected_env_dir" ] && [ -d "$selected_env_dir" ] &&
+    [ ! -L "$selected_bin_dir" ] && [ -d "$selected_bin_dir" ] || return 1
+
+  selected_bin_phys="$(CDPATH='' cd -P -- "$selected_bin_dir" 2>/dev/null && pwd -P)" || return 1
+  [ "$selected_bin_phys" = "$runtime_phys/envs/$selected_version/bin" ] || return 1
+
+  [ ! -L "$runtime_phys/envs/$selected_version" ] &&
+    oms_python_runtime_env_owned "$runtime_phys/envs/$selected_version" "$selected_version" &&
+    [ ! -L "$runtime_phys/envs/$selected_version/bin" ] &&
+    [ -d "$runtime_phys/envs/$selected_version/bin" ] &&
+    [ ! -L "$runtime_phys/launchers/$selected_version" ] &&
+    { [ ! -e "$runtime_phys/launchers/$selected_version" ] || [ -d "$runtime_phys/launchers/$selected_version" ]; } || return 1
+
+  selected_env_python="$(OMS_PYTHON_RUNTIME_ROOT="$runtime_phys" \
+    oms_python_runtime_env_python "$runtime_phys/envs/$selected_version" 2>/dev/null)" || return 1
+  [ "$selected_env_python" = "$runtime_phys/envs/$selected_version/bin/$selected_name" ] &&
+    oms_python_runtime_candidate_valid "$runtime_phys" "$selected_env_python" || return 1
+
+  printf '%s\n%s\n%s\n' "$runtime_phys" "$selected_version" "$selected_env_python"
+}
+
+agy_build_expected_launcher() {
+  local ref_work="${1:-}" runtime_phys="${2:-}" selected_version="${3:-}" out_expected="${4:-}"
+  local ref_root ref_phys emitted_ref
+  local line1 line2 line3 line4 line5 extra
+  local exp_line1 exp_line2 exp_line3 exp_line4 exp_line5 rebound_line4
+
+  [ -n "$ref_work" ] && [ -n "$runtime_phys" ] &&
+    [ -n "$selected_version" ] && [ -n "$out_expected" ] || return 1
+  oms_python_runtime_version_valid "$selected_version" || return 1
+  [ ! -L "$ref_work" ] && [ -d "$ref_work" ] || return 1
+
+  ref_root="$ref_work/ref-root"
+  rm -rf "$ref_root" "$ref_work/ref.header" "$ref_work/rebound.header" \
+    "$ref_work/ref.body" "$ref_work/ref.reconstructed" "$out_expected"
+  (umask 077 && mkdir "$ref_root") || return 1
+  chmod 0700 "$ref_root" || return 1
+  ref_phys="$(CDPATH='' cd -P -- "$ref_root" 2>/dev/null && pwd -P)" || return 1
+  case "$runtime_phys$ref_phys" in
+    ""|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  [ "$ref_phys" != "$runtime_phys" ] || return 1
+
+  oms_python_runtime_write_launcher "$ref_phys" "$selected_version" python3 || return 1
+  emitted_ref="$ref_phys/launchers/$selected_version/python3"
+  [ ! -L "$emitted_ref" ] && [ -f "$emitted_ref" ] && [ -x "$emitted_ref" ] && [ -s "$emitted_ref" ] || return 1
+
+  exp_line1='#!/bin/bash'
+  exp_line2='unset CDPATH PYTHONHOME'
+  exp_line3="unset -f cd pwd read readlink test '[' echo exec exit true 2>/dev/null || :"
+  exp_line4="root=$(printf '%q' "$ref_phys")"
+  exp_line5="version=$(printf '%q' "$selected_version")"
+  rebound_line4="root=$(printf '%q' "$runtime_phys")"
+
+  {
+    IFS= read -r line1 &&
+    IFS= read -r line2 &&
+    IFS= read -r line3 &&
+    IFS= read -r line4 &&
+    IFS= read -r line5 &&
+    IFS= read -r extra
+  } < "$emitted_ref" || return 1
+
+  [ "$line1" = "$exp_line1" ] &&
+    [ "$line2" = "$exp_line2" ] &&
+    [ "$line3" = "$exp_line3" ] &&
+    [ "$line4" = "$exp_line4" ] &&
+    [ "$line5" = "$exp_line5" ] &&
+    [ -n "$extra" ] || return 1
+
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$exp_line1" "$exp_line2" "$exp_line3" "$exp_line4" "$exp_line5" > "$ref_work/ref.header" || return 1
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$exp_line1" "$exp_line2" "$exp_line3" "$rebound_line4" "$exp_line5" > "$ref_work/rebound.header" || return 1
+  tail -n +6 "$emitted_ref" > "$ref_work/ref.body" || return 1
+  [ -s "$ref_work/ref.body" ] || return 1
+  cat "$ref_work/ref.header" "$ref_work/ref.body" > "$ref_work/ref.reconstructed" || return 1
+  cmp -s "$emitted_ref" "$ref_work/ref.reconstructed" || return 1
+  cat "$ref_work/rebound.header" "$ref_work/ref.body" > "$out_expected" || return 1
+  rm -rf "$ref_root" "$ref_work/ref.header" "$ref_work/rebound.header" \
+    "$ref_work/ref.body" "$ref_work/ref.reconstructed"
+  [ ! -L "$out_expected" ] && [ -f "$out_expected" ] && [ -s "$out_expected" ]
+}
+
+agy_launcher_candidate_matches() {
+  local runtime_phys="${1:-}" selected_version="${2:-}" expected_file="${3:-}" candidate="${4:-}"
+  local parent
+
+  [ -n "$runtime_phys" ] && [ -n "$selected_version" ] &&
+    [ -n "$expected_file" ] && [ -n "$candidate" ] || return 1
+  [ ! -L "$expected_file" ] && [ -f "$expected_file" ] && [ -s "$expected_file" ] || return 1
+
+  case "$candidate" in
+    "$runtime_phys/launchers/$selected_version/python3")
+      parent="$runtime_phys/launchers/$selected_version"
+      [ ! -L "$runtime_phys/launchers" ] && [ -d "$runtime_phys/launchers" ] &&
+        [ ! -L "$parent" ] && [ -d "$parent" ] || return 1
+      ;;
+    "$runtime_phys/bin/python3")
+      parent="$runtime_phys/bin"
+      [ ! -L "$parent" ] && [ -d "$parent" ] &&
+        [ ! -L "$runtime_phys/launchers" ] &&
+        { [ ! -e "$runtime_phys/launchers" ] || [ -d "$runtime_phys/launchers" ]; } &&
+        [ ! -L "$runtime_phys/launchers/$selected_version" ] &&
+        { [ ! -e "$runtime_phys/launchers/$selected_version" ] || [ -d "$runtime_phys/launchers/$selected_version" ]; } || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  [ ! -L "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ] &&
+    cmp -s "$expected_file" "$candidate"
+}
+
+agy_select_managed_launcher() {
+  local raw_root="${1:-}" selected="${2:-}" ref_work="${3:-}"
+  local env_info runtime_phys selected_version selected_env_python
+  local expected_file versioned_candidate stable_candidate chosen
+
+  env_info="$(agy_managed_selected_env "$raw_root" "$selected")" || return 1
+  {
+    IFS= read -r runtime_phys &&
+    IFS= read -r selected_version &&
+    IFS= read -r selected_env_python
+  } <<EOF_ENV
+$env_info
+EOF_ENV
+  [ -n "$runtime_phys" ] && [ -n "$selected_version" ] && [ -n "$selected_env_python" ] || return 1
+
+  expected_file="$ref_work/expected-launcher"
+  agy_build_expected_launcher "$ref_work" "$runtime_phys" "$selected_version" "$expected_file" || return 1
+
+  versioned_candidate="$runtime_phys/launchers/$selected_version/python3"
+  stable_candidate="$runtime_phys/bin/python3"
+  chosen=""
+  if agy_launcher_candidate_matches "$runtime_phys" "$selected_version" "$expected_file" "$versioned_candidate"; then
+    chosen="$versioned_candidate"
+  elif agy_launcher_candidate_matches "$runtime_phys" "$selected_version" "$expected_file" "$stable_candidate"; then
+    chosen="$stable_candidate"
+  else
+    return 1
+  fi
+
+  printf '%s\n' "$chosen"
+}
+
+agy_recheck_managed_launcher() {
+  local raw_root="${1:-}" selected="${2:-}" ref_work="${3:-}" chosen="${4:-}"
+  local env_info runtime_phys selected_version selected_env_python expected_file
+
+  env_info="$(agy_managed_selected_env "$raw_root" "$selected")" || return 1
+  {
+    IFS= read -r runtime_phys &&
+    IFS= read -r selected_version &&
+    IFS= read -r selected_env_python
+  } <<EOF_RECHECK
+$env_info
+EOF_RECHECK
+  expected_file="$ref_work/expected-launcher"
+  agy_launcher_candidate_matches "$runtime_phys" "$selected_version" "$expected_file" "$chosen"
+}
+
 oms_python_runtime_require || exit 1
 [ -f "$ROOT/scripts/oms-mcp-server.py" ] || fail "oms-mcp-server.py not found under $ROOT"
 [ -f "$ROOT/plugins/antigravity/plugin.json" ] || fail "plugin template missing"
 
+BUILD="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/oms-agy-plugin.XXXXXX")" ||
+  fail "could not create temporary build directory"
+REF_WORK=""
+trap 'rm -rf "$BUILD" "${REF_WORK:-}"' EXIT
+chmod 0700 "$BUILD" || fail "could not secure temporary build directory"
+
 OMS_AP_PYTHON=""
 if [ -n "${OMS_PYTHON:-}" ]; then
+  REF_WORK="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/oms-agy-ref.XXXXXX")" ||
+    fail "managed Python launcher is invalid"
+  chmod 0700 "$REF_WORK" || fail "managed Python launcher is invalid"
   runtime_root="$(oms_python_runtime_root)"
-  oms_python_runtime_root_owned "$runtime_root" && [ ! -L "$runtime_root/bin" ] &&
-    [ ! -L "$runtime_root/bin/python3" ] && [ -f "$runtime_root/bin/python3" ] &&
-    [ -x "$runtime_root/bin/python3" ] || fail "managed Python launcher is invalid"
-  OMS_AP_PYTHON="$runtime_root/bin/python3"
+  OMS_AP_PYTHON="$(agy_select_managed_launcher "$runtime_root" "$OMS_PYTHON" "$REF_WORK")" ||
+    fail "managed Python launcher is invalid"
 else
   OMS_AP_PYTHON="$(env -u PYTHONHOME -u PYTHONPATH python3 -I -c '
 import os, stat, sys
@@ -434,26 +658,11 @@ print(path)
 ')" || fail "host Python interpreter is writable by others or invalid"
 fi
 
-BUILD="$(mktemp -d "${TMPDIR:-/tmp}/oms-agy-plugin.XXXXXX")"
-trap 'rm -rf "$BUILD"' EXIT
-
 VERDICT="$(agy_surface_verdict)"
 HOOKS=0
 [ "$VERDICT" != verified ] || HOOKS=1
 
-# An agy that lost its certification — an upgrade, a reinstall — must not keep
-# firing the hooks the previous binary earned. `plugin install` copies into an
-# existing directory, so dropping hooks.json from the build is not enough to
-# retract it; the installed copy has to go first. This is the only place that
-# reaches into the installed plugin, and only for the two files generated here.
-INSTALLED="$HOME/.gemini/config/plugins/oh-my-setting"
-if [ "$HOOKS" != "1" ] && [ -f "$INSTALLED/hooks.json" ]; then
-  "$AGY_BIN" plugin uninstall oh-my-setting >/dev/null 2>&1 || true
-  rm -f "$INSTALLED/hooks.json" "$INSTALLED/agy-hook.sh" 2>/dev/null || true
-  echo "agy-plugin: retracted hooks from an agy that is no longer certified"
-fi
-
-OMS_AP_ROOT="$ROOT" OMS_AP_BUILD="$BUILD" OMS_AP_HOOKS="$HOOKS" OMS_AP_PYTHON="$OMS_AP_PYTHON" python3 - <<'PY'
+env OMS_AP_ROOT="$ROOT" OMS_AP_BUILD="$BUILD" OMS_AP_HOOKS="$HOOKS" OMS_AP_PYTHON="$OMS_AP_PYTHON" "$OMS_AP_PYTHON" - <<'PY'
 import json, os, sys
 
 root = os.environ["OMS_AP_ROOT"]
@@ -620,6 +829,25 @@ emit '{}'
 ADAPTER_BODY
   } > "$BUILD/agy-hook.sh"
   chmod +x "$BUILD/agy-hook.sh"
+fi
+
+if [ -n "${OMS_PYTHON:-}" ]; then
+  agy_recheck_managed_launcher "$runtime_root" "$OMS_PYTHON" "$REF_WORK" "$OMS_AP_PYTHON" ||
+    fail "managed Python launcher is invalid"
+  rm -rf "$REF_WORK"
+  REF_WORK=""
+fi
+
+# An agy that lost its certification — an upgrade, a reinstall — must not keep
+# firing the hooks the previous binary earned. `plugin install` copies into an
+# existing directory, so dropping hooks.json from the build is not enough to
+# retract it; the installed copy has to go first. This is the only place that
+# reaches into the installed plugin, and only for the two files generated here.
+INSTALLED="$HOME/.gemini/config/plugins/oh-my-setting"
+if [ "$HOOKS" != "1" ] && [ -f "$INSTALLED/hooks.json" ]; then
+  "$AGY_BIN" plugin uninstall oh-my-setting >/dev/null 2>&1 || true
+  rm -f "$INSTALLED/hooks.json" "$INSTALLED/agy-hook.sh" 2>/dev/null || true
+  echo "agy-plugin: retracted hooks from an agy that is no longer certified"
 fi
 
 if out="$("$AGY_BIN" plugin install "$BUILD" 2>&1)"; then

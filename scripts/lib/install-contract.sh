@@ -515,6 +515,7 @@ receipt, root, commit, channel, version, plugin_version, plugin_hash = sys.argv[
 row = {
     "schema": 2,
     "source_root": root,
+    "claude_settings_path": os.path.realpath(os.environ.get("OMS_CLAUDE_SETTINGS") or os.path.join(os.environ["HOME"], ".claude", "settings.json")),
     "commit": commit,
     "channel": channel,
     "dirty": os.environ.get("OMS_INSTALL_DIRTY") == "true",

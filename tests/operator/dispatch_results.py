@@ -7507,6 +7507,52 @@ def exercise_provider_account_routing():
                     "codex": {"accounts": [value["accounts"][0]]},
                     "claude": {"accounts": [value["accounts"][1]]}}})
                 assert set(accounts.load_accounts()["providers"]) == {"codex", "claude"}
+            # Provider-local lifecycle IDs use separate state. The legacy
+            # decoder and all Codex route consumers retain their strict view.
+            configure()
+            legacy_bytes = config_path.read_bytes()
+            sibling = config_path.with_name("provider-accounts.claude.json")
+            isolated = base / "claude-config"
+            isolated.mkdir(mode=0o700)
+            private = {"schema": 1, "provider": "claude", "accounts": [
+                {"id": "credits", "home": str(isolated)}]}
+            sibling.write_text(json.dumps(private))
+            assert set(accounts.load_accounts()["providers"]) == {"codex"}
+            merged = accounts.load_registered_accounts()
+            assert {"codex", "claude"} <= set(merged["providers"])
+            assert merged["configured_providers"] == {"codex": True, "claude": True}
+            assert accounts.route_account_home({"provider": "claude", "account": "credits"}) is None
+            assert accounts.next_account_route({"provider": "claude", "account": "credits"}) is None
+            assert config_path.read_bytes() == legacy_bytes
+            pending_receipt = config_path.with_name("codex-account-links.json")
+            pending_alias = base / "pending-home-alias"
+            pending_alias.symlink_to(isolated, target_is_directory=True)
+            pending_receipt.write_text(json.dumps([{"id": "pending-codex", "home": str(pending_alias), "links": {}}]))
+            try:
+                accounts.load_registered_accounts()
+                raise AssertionError("physical pending reservation collision accepted")
+            except ValueError as error:
+                assert "reserved" in str(error), error
+            pending_receipt.unlink()
+            for invalid in (dict(private, schema=True), dict(private, schema=2),
+                    dict(private, provider="codex"), dict(private, extra=0),
+                    dict(private, accounts=[private["accounts"][0]] * 2),
+                    dict(private, accounts=[dict(private["accounts"][0], home=str(homes[0]))]),
+                    dict(private, accounts=[dict(private["accounts"][0], home="")]),
+                    dict(private, accounts=[dict(private["accounts"][0], home="relative")]),
+                    dict(private, accounts=[dict(private["accounts"][0], home="bad\0path")]),
+                    dict(private, accounts=[dict(private["accounts"][0], id="default")]),
+                    dict(private, accounts=[dict(private["accounts"][0], extra=0)])):
+                sibling.write_text(json.dumps(invalid))
+                assert set(accounts.load_accounts()["providers"]) == {"codex"}
+                try:
+                    accounts.load_registered_accounts()
+                    raise AssertionError("invalid Claude lifecycle state accepted")
+                except ValueError:
+                    pass
+            sibling.write_text(json.dumps(dict(private, accounts=[])))
+            assert accounts.load_registered_accounts()["providers"]["claude"]["accounts"] == []
+            sibling.unlink()
             configure(dict(value, accounts=[dict(value["accounts"][0], id="x" * 64)]))
             assert accounts.load_accounts()["providers"]["codex"]["accounts"][0]["id"] == "x" * 64
             refused(dict(value, accounts=[dict(value["accounts"][0], id="x" * 65)]), "id")

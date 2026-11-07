@@ -317,6 +317,107 @@ PY
     "claude hook missing: SessionEnd -> precompact-handoff.sh"
   run_hook_doctor "$settings" > "$TMP/sessionend-doctor-ok"
   assert_contains "$TMP/sessionend-doctor-ok" "ok: claude hooks registered"
+
+  # Account mode records only newly introduced leaves and refuses a concurrent
+  # settings edit after durable intent. The main receipt remains separate.
+  python3 - "$ROOT" "$home" <<'PYOWN'
+import json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+root, home = map(Path, sys.argv[1:])
+home.chmod(0o700)
+sys.path.insert(0, str(root / "scripts/lib"))
+import provider_accounts as accounts
+account_home = home / "private-account"
+account_home.mkdir(mode=0o700)
+settings = account_home / "settings.json"
+prior = {"modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}},
+         "attribution": {"commit": "", "pr": "", "sessionUrl": False},
+         "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "user-hook"}]}]}}
+settings.write_text(json.dumps(prior))
+settings.chmod(0o600)
+env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / "private-config"),
+           OMS_LOCK_DIR=str(home / "account-locks"))
+env.pop("OMS_INSTALL_RECEIPT", None)
+entry = ["bash", str(root / "scripts/connect-services.sh"), "--account", "claude:owned", "--home", str(account_home)]
+result = subprocess.run(entry, env=env, capture_output=True, text=True)
+assert result.returncode == 0, (result.stdout, result.stderr)
+sidecar = account_home / ".oms-claude-hooks.json"
+owned = json.loads(sidecar.read_text())
+assert not any(leaf["path"] in (["attribution"], ["modelSettings", "claude-opus-5-5", "effortLevel"])
+               for leaf in owned["leaves"])
+# A standalone helper takes the same registry then install lock and rejects
+# a caller-selected receipt path as deletion authority.
+installer = ["bash", str(root / "scripts/install-claude-hooks.sh"), "--settings", str(settings)]
+snapshot = settings.read_bytes()
+for invalid_receipt in ("", "0", str(home / "foreign-sidecar")):
+    result = subprocess.run(installer + ["--ownership-receipt", invalid_receipt],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 2 and settings.read_bytes() == snapshot, result
+result = subprocess.run(installer + ["--ownership-receipt"], env=env, capture_output=True, text=True)
+assert result.returncode == 2 and settings.read_bytes() == snapshot, result
+result = subprocess.run(installer + ["--ownership-receipt", str(sidecar)], env=env,
+                        capture_output=True, text=True)
+assert result.returncode == 0 and settings.read_bytes() == snapshot, result
+result = subprocess.run(entry[:-2] + ["--remove"], env=env, capture_output=True, text=True)
+assert result.returncode == 0, result
+assert json.loads(settings.read_text()) == prior
+# Re-register, then inject an edit precisely between intent and settings CAS.
+result = subprocess.run(entry, env=env, capture_output=True, text=True)
+assert result.returncode == 0, result
+manifest = json.loads(subprocess.check_output(["bash", str(root / "scripts/install-claude-hooks.sh"),
+                                               "--print-expected"], text=True))
+# Replacing our published settings with equal user bytes cannot acquire the
+# written inode's ownership. This models an external writer after replacement.
+post_home = home / "postwrite-account"
+post_entry = entry[:]
+post_entry[post_entry.index("claude:owned")] = "claude:postwrite"
+post_entry[-1] = str(post_home)
+result = subprocess.run(post_entry, env=env, capture_output=True, text=True)
+assert result.returncode == 0, result
+post_settings = post_home / "settings.json"
+post_sidecar = post_home / ".oms-claude-hooks.json"
+replace = os.replace
+replaced = []
+def user_after_write(source, target, **kwargs):
+    result = replace(source, target, **kwargs)
+    if target == "settings.json" and kwargs.get("dst_dir_fd") is not None and not replaced:
+        same_bytes = post_settings.read_bytes()
+        post_settings.rename(post_home / "held-written-inode")
+        post_settings.write_bytes(same_bytes)
+        post_settings.chmod(0o600)
+        replaced.append(True)
+    return result
+
+with patch.dict(os.environ, env), patch.object(os, "replace", side_effect=user_after_write):
+    try:
+        accounts.account_hook_settings(str(post_settings), str(post_sidecar), str(root), manifest, remove=True)
+        raise AssertionError("equal external replacement adopted")
+    except ValueError as error:
+        assert "replaced after write" in str(error), error
+assert replaced and json.loads(post_sidecar.read_text())["status"] == "pending"
+assert json.loads(post_settings.read_text()) == {}
+publish = accounts._account_publish
+changed = []
+def concurrent(path, value):
+    publish(path, value)
+    if path == sidecar and value["status"] == "pending" and not changed:
+        data = json.loads(settings.read_text())
+        data["user-concurrent"] = "keep"
+        settings.write_text(json.dumps(data))
+        changed.append(True)
+
+with patch.dict(os.environ, env), patch.object(accounts, "_account_publish", side_effect=concurrent):
+    try:
+        accounts.account_hook_settings(str(settings), str(sidecar), str(root), manifest, remove=True)
+        raise AssertionError("concurrent settings edit accepted")
+    except ValueError as error:
+        assert "concurrent" in str(error), error
+assert changed and json.loads(settings.read_text())["user-concurrent"] == "keep"
+assert json.loads(sidecar.read_text())["status"] == "pending"
+result = subprocess.run(entry[:-2] + ["--remove"], env=env, capture_output=True, text=True)
+assert result.returncode == 2 and "pending" in result.stderr, result
+PYOWN
 }
 
 test_receipt_preserves_snapshot_modes() {

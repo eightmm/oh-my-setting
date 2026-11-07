@@ -625,6 +625,60 @@ with open(sys.argv[1], encoding="utf-8") as fh:
 ' "$home/.config/oh-my-setting/install.json")"
   [ "$recorded" = "$EXPECTED_HOOKS_SCHEMA" ] ||
     fail "an already-current install should still stamp hooks_schema (got $recorded)"
+
+  # Alternate targets never certify or unstamp the canonical registration.
+  python3 - "$ROOT" "$home" <<'PYBIND'
+import json, os, subprocess, sys
+from pathlib import Path
+root, home = map(Path, sys.argv[1:])
+receipt = home / ".config/oh-my-setting/install.json"
+env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+           OMS_INSTALL_RECEIPT=str(receipt), OMS_LOCK_DIR=str(home / ".locks"))
+installer = ["bash", str(root / "scripts/install-claude-hooks.sh")]
+
+def hooks(path, remove=False):
+    result = subprocess.run(installer + ["--settings", str(path)] + (["--remove"] if remove else []),
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    return result
+
+before = receipt.read_bytes()
+alternate = home / "alternate/settings.json"
+hooks(alternate)
+assert receipt.read_bytes() == before, "alternate install stamped main receipt"
+hooks(alternate, True)
+assert receipt.read_bytes() == before, "alternate remove unstamped main receipt"
+alias = home / "physical-alias"
+alias.symlink_to(home / ".claude", target_is_directory=True)
+hooks(alias / "settings.json")
+assert receipt.read_bytes() == before
+# The unchanged legacy owner decoder accepts the producer's additive field.
+producer = 'source "$1/scripts/lib/install-contract.sh"; oms_install_write_receipt "$1"; oms_install_receipt_owner'
+result = subprocess.run(["bash", "-c", producer, "receipt-fixture", str(root)],
+                        env=env, capture_output=True, text=True)
+assert result.returncode == 0 and result.stdout.strip() == str(root.resolve()), result
+row = json.loads(receipt.read_text())
+assert row["claude_settings_path"] == str(home / ".claude/settings.json")
+hooks(home / ".claude/settings.json")
+hooks(home / ".claude/settings.json", True)
+assert "hooks_schema" not in json.loads(receipt.read_text())
+# Unknown or retargeted bindings cannot attest either target.
+for binding in (None, 0, "relative/settings.json", str(alias / "settings.json")):
+    row["claude_settings_path"] = binding
+    row.pop("hooks_schema", None)
+    receipt.write_text(json.dumps(row))
+    before = receipt.read_bytes()
+    hooks(home / ".claude/settings.json")
+    assert receipt.read_bytes() == before
+# A legacy writer may drop the field. Only the actual default is eligible.
+row.pop("claude_settings_path")
+receipt.write_text(json.dumps(row))
+before = receipt.read_bytes()
+hooks(alternate)
+assert receipt.read_bytes() == before
+hooks(home / ".claude/settings.json")
+assert "hooks_schema" in json.loads(receipt.read_text())
+PYBIND
 }
 
 # --- displaced user config ---------------------------------------------------

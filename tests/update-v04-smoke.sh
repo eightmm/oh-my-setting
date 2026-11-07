@@ -72,6 +72,7 @@ test_native_windows_old_updater_rolls_back() {
     # regression test ships in a tree that carries the new startup guards.
     python3 - "$ROOT" "$source" <<'PY_OLD'
 from pathlib import Path
+import ast
 import sys
 for name in ('link.sh', 'python-runtime.sh', 'update.sh'):
     text = (Path(sys.argv[1]) / 'scripts' / name).read_text()
@@ -80,17 +81,70 @@ for name in ('link.sh', 'python-runtime.sh', 'update.sh'):
         end = text.index('esac\n', start) + len('esac\n')
         text = text[:start] + text[end:]
     (Path(sys.argv[2]) / 'scripts' / name).write_text(text)
+# Keep the missing-refresh capability after the new helper is committed too.
+helper = Path(sys.argv[1]) / 'scripts/lib/provider_accounts.py'
+text = helper.read_text()
+lines = text.splitlines(keepends=True)
+for node in reversed(ast.parse(text).body):
+    if isinstance(node, ast.FunctionDef) and node.name == 'refresh_registered_accounts':
+        del lines[node.lineno - 1:node.end_lineno]
+(Path(sys.argv[2]) / 'scripts/lib/provider_accounts.py').write_text(''.join(lines))
 PY_OLD
-    git -C "$source" add scripts/link.sh scripts/python-runtime.sh scripts/update.sh
+    git -C "$source" add scripts/link.sh scripts/python-runtime.sh scripts/update.sh \
+      scripts/lib/provider_accounts.py
     git -C "$source" commit -qm 'fixture: updater before Windows retirement' --allow-empty
     first="$(git -C "$source" rev-parse HEAD)"
     git clone -q "$source" "$installed"
     mkdir -p "$home"
-    HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
-      OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge OH_MY_SETTING_LINK_MODE="$mode" \
-      OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
-      OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
-      "$installed/scripts/link.sh" >/dev/null
+    local caller="$TMP/windows-caller-$mode"
+    mkdir -p "$caller"
+    printf '%s\n' 'raise RuntimeError("caller pathlib must not execute")' >"$caller/pathlib.py"
+    windows_legacy_link() (
+      cd "$caller"
+      HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
+        OH_MY_SETTING_PROFILE=minimal OH_MY_SETTING_REF=edge OH_MY_SETTING_LINK_MODE="$mode" \
+        OH_MY_SETTING_CLAUDE_HOOKS=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+        OH_MY_SETTING_MCP=0 OH_MY_SETTING_AGY_PLUGIN=0 OH_MY_SETTING_AUTO_UPDATE=0 \
+        "$installed/scripts/link.sh"
+    )
+    local account_state account_path
+    mkdir -p "$home/.config/oh-my-setting"
+    for account_state in provider-accounts.json codex-account-links.json \
+      provider-accounts.claude.json provider-account-effects.json; do
+      account_path="$home/.config/oh-my-setting/$account_state"
+      case "$account_state" in
+        provider-accounts.json) : >"$account_path" ;;
+        codex-account-links.json) ln -s missing-account-state "$account_path" ;;
+        provider-accounts.claude.json)
+          mkdir "$account_path"
+          printf '%s\n' preserve >"$account_path/sentinel" ;;
+        provider-account-effects.json) printf '%s\n' malformed >"$account_path" ;;
+      esac
+      output="$TMP/windows-account-$mode-$account_state.out"
+      rc=0
+      windows_legacy_link >"$output" 2>&1 || rc=$?
+      [ "$rc" = 2 ] || fail "legacy account state was not refused: $mode/$account_state: $(cat "$output")"
+      grep -Fq 'legacy checkout cannot refresh registered account state' "$output" ||
+        fail "legacy account refusal was not actionable: $(cat "$output")"
+      case "$account_state" in
+        provider-accounts.json)
+          [ -f "$account_path" ] && [ ! -L "$account_path" ] && [ ! -s "$account_path" ] ||
+            fail 'legacy registry changed'
+          rm "$account_path" ;;
+        codex-account-links.json)
+          [ -L "$account_path" ] && [ "$(readlink "$account_path")" = missing-account-state ] ||
+            fail 'legacy account symlink changed'
+          rm "$account_path" ;;
+        provider-accounts.claude.json)
+          [ "$(cat "$account_path/sentinel")" = preserve ] || fail 'legacy account directory changed'
+          rm "$account_path/sentinel"
+          rmdir "$account_path" ;;
+        provider-account-effects.json)
+          [ "$(cat "$account_path")" = malformed ] || fail 'legacy account effects changed'
+          rm "$account_path" ;;
+      esac
+    done
+    windows_legacy_link >/dev/null
     cp "$receipt" "$TMP/windows-receipt-before"
     windows_install_snapshot() {
       python3 - "$home" <<'PY_LINKS'
@@ -187,6 +241,7 @@ test_update_rolls_back_and_supports_explicit_rollback() {
   # this fixture always exercises the working implementation.
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/link.sh" "$source/scripts/link.sh"
+  cp "$ROOT/scripts/lib/provider_accounts.py" "$source/scripts/lib/provider_accounts.py"
   cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
   cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
   cp "$ROOT/tools.lock.json" "$source/tools.lock.json"
@@ -646,7 +701,7 @@ test_schema1_update_preserves_channel_pin_and_cron() {
   local divergent merge_target alternate
 
   git clone -q "$ROOT" "$source"
-  for file in scripts/update.sh scripts/link.sh scripts/doctor.sh \
+  for file in scripts/update.sh scripts/link.sh scripts/lib/provider_accounts.py scripts/doctor.sh \
     scripts/install-claude-hooks.sh scripts/lib/claude-hook-surfaces.py \
     scripts/claude-statusline.py \
     scripts/claude-subagent-statusline.py scripts/telemetry-hook.sh \
@@ -1602,6 +1657,7 @@ test_missing_codex_degrades_and_dead_ref_is_fail_closed() {
   git -C "$source" checkout -qB main
   cp "$ROOT/scripts/update.sh" "$source/scripts/update.sh"
   cp "$ROOT/scripts/link.sh" "$source/scripts/link.sh"
+  cp "$ROOT/scripts/lib/provider_accounts.py" "$source/scripts/lib/provider_accounts.py"
   cp "$ROOT/scripts/unlink.sh" "$source/scripts/unlink.sh"
   cp "$ROOT/scripts/doctor.sh" "$source/scripts/doctor.sh"
   cp "$ROOT/tools.lock.json" "$source/tools.lock.json"

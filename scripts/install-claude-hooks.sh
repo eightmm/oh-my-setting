@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SETTINGS="${OMS_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 REMOVE=0
 PRINT_EXPECTED=0
+OWNERSHIP_RECEIPT=""
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/file-lock.sh
@@ -121,6 +122,7 @@ Notification|telemetry-hook.sh|permission_prompt|elicitation_dialog|5
 # the install lock and before the canonical-owner check on purpose: the doctor
 # that needs the list is usually running from a workspace that does not own the
 # install, and that is exactly the case worth reporting on.
+ACCOUNT_MODE=0
 REQUESTED_REMOVE=0
 REQUESTED_HELP=0
 skip_settings=0
@@ -128,14 +130,28 @@ for arg in "$@"; do
   if [ "$skip_settings" = 1 ]; then skip_settings=0; continue; fi
   case "$arg" in
     --settings) skip_settings=1 ;;
+    --ownership-receipt) ACCOUNT_MODE=1; skip_settings=1 ;;
     --print-expected) PRINT_EXPECTED=1 ;;
     --remove) REQUESTED_REMOVE=1 ;;
     -h|--help) REQUESTED_HELP=1 ;;
   esac
 done
 
+# Direct account calls acquire the same registry lock before the existing
+# install lock. Connector calls already hold that registry transaction.
+if [ "$ACCOUNT_MODE" = 1 ] && [ "${OMS_ACCOUNT_REGISTRY_LOCK_HELD:-0}" != 1 ] &&
+   [ "$REQUESTED_HELP" = 0 ] && [ "$PRINT_EXPECTED" = 0 ]; then
+  python3 - "$ROOT/scripts/lib" "$@" <<'PYACCOUNT'
+import sys
+sys.path.insert(0, sys.argv[1])
+from provider_accounts import run_account_hook_installer
+raise SystemExit(run_account_hook_installer(sys.argv[2:]))
+PYACCOUNT
+  exit $?
+fi
+
 AUTO_COMPACT_SUPPORTED=0
-if [ "$PRINT_EXPECTED" = 0 ] && [ "$REQUESTED_REMOVE" = 0 ] && [ "$REQUESTED_HELP" = 0 ]; then
+if [ "$PRINT_EXPECTED" = 0 ] && [ "$REQUESTED_REMOVE" = 0 ] && [ "$REQUESTED_HELP" = 0 ] && [ "$ACCOUNT_MODE" = 0 ]; then
   if [ "${OMS_INSTALL_LOCK_HELD:-0}" = 1 ]; then
     if [ "${OMS_INSTALL_CLAUDE_AUTO_COMPACT_SUPPORTED:-0}" = 1 ]; then
       AUTO_COMPACT_SUPPORTED=1
@@ -156,6 +172,7 @@ fi
 usage() {
   cat <<'EOF'
 Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
+                               [--ownership-receipt PATH]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
@@ -175,6 +192,10 @@ Options:
   --remove          Remove the oh-my-setting hook entries instead.
   --settings PATH   Settings file (default: ~/.claude/settings.json,
                     override with OMS_CLAUDE_SETTINGS).
+  --ownership-receipt PATH
+                    Account ownership sidecar beside physical settings.json;
+                    preserves preexisting equal-valued user settings on remove.
+                    Requires a registered or pending Claude account reservation.
   --print-expected  Print this checkout's expected event/script surfaces as
                     JSON and exit, changing nothing.
   -h, --help        Show help.
@@ -240,6 +261,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --remove) REMOVE=1; shift ;;
     --settings) [ "$#" -ge 2 ] || fail "--settings requires a path"; SETTINGS="$2"; shift 2 ;;
+    --ownership-receipt) [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--ownership-receipt requires a nonempty path"; OWNERSHIP_RECEIPT="$2"; shift 2 ;;
     --print-expected) PRINT_EXPECTED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
@@ -247,7 +269,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 # Nothing to remove needs no interpreter: a failed early install has neither.
-if [ "$REMOVE" = 1 ] && [ ! -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ]; then
+if [ "$REMOVE" = 1 ] && [ -z "$OWNERSHIP_RECEIPT" ] && [ ! -e "$SETTINGS" ] && [ ! -L "$SETTINGS" ]; then
   echo "claude-hooks: nothing to remove ($SETTINGS absent)"
   exit 0
 fi
@@ -277,20 +299,34 @@ if [ "$REMOVE" != "1" ] && [ -f "$(oms_install_receipt_path)" ]; then
     fail "this checkout is not the canonical install owner: $ROOT (owner: $owner)"
 fi
 
-if [ "$REMOVE" = 1 ] && [ ! -f "$SETTINGS" ]; then
+if [ "$REMOVE" = 1 ] && [ -z "$OWNERSHIP_RECEIPT" ] && [ ! -f "$SETTINGS" ]; then
   echo "claude-hooks: nothing to remove ($SETTINGS absent)"
   exit 0
 fi
-mkdir -p "$(dirname "$SETTINGS")"
+if [ -z "$OWNERSHIP_RECEIPT" ]; then mkdir -p "$(dirname "$SETTINGS")"; fi
 
 EXPECTED_JSON="$(print_expected_json)"
 
-OMS_CH_SETTINGS="$SETTINGS" \
+OMS_CH_OWNERSHIP="$OWNERSHIP_RECEIPT" OMS_CH_SCHEMA="$HOOKS_SCHEMA" \
+  OMS_CH_SETTINGS="$SETTINGS" \
   OMS_CH_REMOVE="$REMOVE" OMS_CH_AUTO_COMPACT_SUPPORTED="$AUTO_COMPACT_SUPPORTED" \
   OMS_CH_EXPECTED="$EXPECTED_JSON" OMS_CH_ROOT="$ROOT" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" \
   OMS_CH_SUBAGENT_STATUS_PATH="$ROOT/scripts/claude-subagent-statusline.py" python3 <<'PY'
 import importlib.util, json, os, shlex, sys, tempfile
+
+if os.environ.get("OMS_CH_OWNERSHIP"):
+    sys.path.insert(0, os.path.join(os.environ["OMS_CH_ROOT"], "scripts/lib"))
+    from provider_accounts import account_hook_settings, validate_account_hook_reservation
+    try:
+        validate_account_hook_reservation(os.environ["OMS_CH_SETTINGS"], os.environ["OMS_CH_OWNERSHIP"])
+        account_hook_settings(os.environ["OMS_CH_SETTINGS"], os.environ["OMS_CH_OWNERSHIP"],
+                              os.environ["OMS_CH_ROOT"], json.loads(os.environ["OMS_CH_EXPECTED"]),
+                              os.environ["OMS_CH_REMOVE"] == "1")
+    except (OSError, ValueError, RuntimeError) as error:
+        sys.stderr.write("error: " + str(error) + "\n")
+        sys.exit(2)
+    sys.exit(0)
 
 path = os.environ["OMS_CH_SETTINGS"]
 remove = os.environ["OMS_CH_REMOVE"] == "1"
@@ -458,6 +494,7 @@ stamp_receipt_hooks_schema() {
   local receipt
   local owner
 
+  [ -z "$OWNERSHIP_RECEIPT" ] || return 0
   receipt="$(oms_install_receipt_path)"
   [ -f "$receipt" ] || return 0
   # Only the canonical owner may speak for the install; another checkout
@@ -465,7 +502,7 @@ stamp_receipt_hooks_schema() {
   owner="$(oms_install_receipt_owner "$receipt" 2>/dev/null)" || return 0
   [ "$owner" = "$ROOT" ] || return 0
 
-  OMS_CH_HOOKS_SCHEMA="$HOOKS_SCHEMA" OMS_CH_REMOVE="$REMOVE" \
+  OMS_CH_HOOKS_SCHEMA="$HOOKS_SCHEMA" OMS_CH_REMOVE="$REMOVE" OMS_CH_SETTINGS="$SETTINGS" \
     python3 - "$receipt" <<'PY'
 import json, os, sys, tempfile
 
@@ -480,6 +517,17 @@ except Exception:
     sys.exit(1)
 if not isinstance(row, dict):
     sys.exit(1)
+target = os.path.realpath(os.environ["OMS_CH_SETTINGS"])
+binding = row.get("claude_settings_path")
+if "claude_settings_path" not in row:
+    binding = os.path.realpath(os.path.join(os.environ["HOME"], ".claude", "settings.json"))
+elif (not isinstance(binding, str) or not os.path.isabs(binding)
+      or os.path.realpath(binding) != binding):
+    sys.stderr.write("warning: invalid claude_settings_path; hooks_schema not stamped\n")
+    sys.exit(0)
+if target != binding:
+    sys.stderr.write("warning: alternate Claude settings; hooks_schema not stamped\n")
+    sys.exit(0)
 if value is None:
     if "hooks_schema" not in row:
         sys.exit(0)

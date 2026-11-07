@@ -23,7 +23,7 @@ usage() {
   cat <<'EOF'
 Usage: connect-services.sh [--auto|--required] [--data-source-id ID]
                            [--no-github] [--no-notion] [-h|--help]
-       connect-services.sh --account codex:ID [--home PATH] [--first|--last]
+       connect-services.sh --account PROVIDER:ID [--home PATH] [--first|--last]
                            [--repair|--remove|--verify]
 
 Authenticate GitHub with `gh auth login` and Notion with `ntn login`, then
@@ -52,6 +52,23 @@ directory identity and a verified link; platforms without safe unlink keep it.
 Removing a missing or replaced home forgets its stale receipt and prints the
 exact registration command to recover. Cleanup retires ownership per entry;
 only remaining recorded links retain receipts for retry.
+--account claude:ID manages an independent CLAUDE_CONFIG_DIR (default:
+CLAUDE_CONFIG_DIR/accounts/ID or ~/.claude/accounts/ID). It installs only OMS
+rules, skills, output style and owned settings; existing user values stay.
+Claude state uses provider-accounts.claude.json and provider-account-effects.json;
+legacy Codex registry and link receipts stay unchanged. IDs are provider-local;
+physical homes must be unique across providers and pending reservations.
+Claude --verify explicitly requests native auth status for the selected config.
+Manual config-scoped claude.ai use is documented. OMS isolation verification stays
+unsupported/uncertain: matching status fields do not attest credential origin or
+exclude shared global OAuth. Other auth modes are also unsupported. Native status
+can initialize vendor metadata in the selected root. Registration, doctor and update
+never run it.
+Account settings ownership uses .oms-claude-hooks.json; interrupted or ambiguous
+ownership keeps data and reservations for explicit recovery. --remove preserves
+homes, login and history. Antigravity account isolation is unproved and unavailable.
+After rollback, old writers cannot manage Claude or protect its homes against
+arbitrary --home collisions; use the modern version for account mutations.
 Account options cannot be combined with GitHub/Notion options.
 EOF
 }
@@ -97,7 +114,7 @@ if [ "$ACCOUNT_SELECTED" = 1 ]; then
   command -v python3 >/dev/null 2>&1 || { echo "error: Python 3 is required" >&2; exit 2; }
   exec python3 "$ROOT/scripts/lib/provider_accounts.py" connect "${ACCOUNT_ARGS[@]}"
 fi
-[ "$ACCOUNT_OPTIONS" = 0 ] || { echo "error: account options require --account codex:ID" >&2; exit 2; }
+[ "$ACCOUNT_OPTIONS" = 0 ] || { echo "error: account options require --account PROVIDER:ID" >&2; exit 2; }
 
 case "${OMS_CONNECT_INTERACTIVE:-auto}" in
   1) INTERACTIVE=1; LOGIN_USES_TTY=0 ;;

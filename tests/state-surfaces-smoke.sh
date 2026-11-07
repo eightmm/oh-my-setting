@@ -1610,16 +1610,34 @@ EOF
 # --- antigravity plugin -----------------------------------------------------
 
 make_agy_runtime() {
-  local runtime="$1" python version
+  local runtime="$1" version="${2:-}" tag="${3:-}" marker="${4:-}" python
   python="$(command -v python3)"
-  version="$($python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
-  mkdir -p "$runtime/bin" "$runtime/envs/$version/bin"
+  if [ -z "$version" ]; then
+    version="$("$python" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+  fi
+  mkdir -p "$runtime/bin" "$runtime/envs/$version/bin" "$runtime/launchers/$version" "$runtime/managed"
   printf 'schema=1\nowner=oh-my-setting\n' > "$runtime/.oh-my-setting-python-runtime"
   printf 'schema=1\nversion=%s\n' "$version" > "$runtime/envs/$version/.oh-my-setting-python-env"
   printf '%s\n' "$version" > "$runtime/current"
-  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$python" > "$runtime/bin/python3"
-  cp "$runtime/bin/python3" "$runtime/envs/$version/bin/python3"
-  chmod +x "$runtime/bin/python3" "$runtime/envs/$version/bin/python3"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf 'export OMS_TEST_AGY_ENV_VERSION=%q\n' "${tag:-$version}"
+    if [ -n "$tag" ]; then
+      printf 'if [ -n "${OMS_TEST_AGY_ENV_LOG:-}" ]; then printf "%%s\\n" %q >> "$OMS_TEST_AGY_ENV_LOG"; fi\n' "$tag"
+    fi
+    if [ -n "$marker" ]; then
+      printf ': > %q\n' "$marker"
+    fi
+    printf '%s\n' 'case "$*" in *"expected = tuple"*|*"sys.version_info < (3, 11)"*) exit 0 ;; esac'
+    printf 'exec %q "$@"\n' "$python"
+  } > "$runtime/envs/$version/bin/python3"
+  chmod +x "$runtime/envs/$version/bin/python3"
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$runtime" "$version" python3
+    oms_python_runtime_write_launcher "$runtime" "$version" python
+    oms_python_runtime_write_launcher "$runtime" "$version" python3 bin
+  )
 }
 
 test_install_agy_plugin_bakes_absolute_paths() {
@@ -1663,32 +1681,40 @@ exit 0
 EOF
   chmod +x "$bin/agy"
 
-  # Uncertified is the default: an agy nobody has probed gets the MCP server
-  # and nothing else, whatever a previous probe on this machine concluded about
-  # a different binary.
-  make_agy_runtime "$TMP/agy-runtime"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$bin/python3"
-  chmod +x "$bin/python3"
-  (
-    PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
-      OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
-      bash "$ROOT/scripts/install-agy-plugin.sh"
-  ) > "$TMP/agy-out" ||
-    fail "agy plugin install should succeed with agy present"
-  local locked_version
+  local locked_version runtime_phys
   locked_version="$(python3 - "$ROOT/tools.lock.json" <<'PY_LOCKED'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     print(json.load(handle)["python"]["version"])
 PY_LOCKED
 )"
-  mkdir -p "$TMP/agy-runtime/envs/$locked_version/bin" "$TMP/agy-runtime/launchers/$locked_version"
-  printf 'schema=1\nversion=%s\n' "$locked_version" > "$TMP/agy-runtime/envs/$locked_version/.oh-my-setting-python-env"
-  printf '%s\n' '#!/usr/bin/env bash' \
-    'case "$*" in *"expected = tuple"*) exit 0 ;; esac' \
-    'exec /usr/bin/python3 "$@"' > "$TMP/agy-runtime/envs/$locked_version/bin/python3"
-  chmod +x "$TMP/agy-runtime/envs/$locked_version/bin/python3"
-  cp "$TMP/agy-runtime/envs/$locked_version/bin/python3" "$TMP/agy-runtime/launchers/$locked_version/python3"
+
+  # Uncertified is the default: an agy nobody has probed gets the MCP server
+  # and nothing else, whatever a previous probe on this machine concluded about
+  # a different binary. Seed a stale regular stable launcher (3.11.1, env-a)
+  # alongside the selected versioned launcher ($locked_version, env-b).
+  make_agy_runtime "$TMP/agy-runtime" "3.11.1" "env-a" "$TMP/stale-a.marker"
+  make_agy_runtime "$TMP/agy-runtime" "$locked_version" "env-b"
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$TMP/agy-runtime" "3.11.1" python3 bin
+  )
+  runtime_phys="$(CDPATH='' cd -P -- "$TMP/agy-runtime" && pwd -P)"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$bin/python3"
+  chmod +x "$bin/python3"
+  : > "$TMP/agy-env.log"
+  (
+    PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+      OMS_TEST_AGY_ENV_LOG="$TMP/agy-env.log" \
+      bash "$ROOT/scripts/install-agy-plugin.sh"
+  ) > "$TMP/agy-out" ||
+    fail "agy plugin install should succeed with agy present"
+  [ ! -e "$TMP/stale-a.marker" ] ||
+    fail "stale regular stable launcher A was executed during packaging"
+  grep -Fxq "env-b" "$TMP/agy-env.log" ||
+    fail "selected environment B did not run during packaging"
+
   mv "$TMP/agy-runtime/bin/python3" "$TMP/agy-runtime/bin/python3.saved"
   ln -s "$bin/python3" "$TMP/agy-runtime/bin/python3"
   if PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
@@ -1697,6 +1723,11 @@ PY_LOCKED
     fail "AGY packaging accepted a symlinked runtime launcher"
   fi
   rm "$TMP/agy-runtime/bin/python3"
+  if PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" bash "$ROOT/scripts/install-agy-plugin.sh" \
+      > "$TMP/agy-missing-stable.out" 2>&1; then
+    fail "AGY packaging accepted a missing stable runtime launcher"
+  fi
   mv "$TMP/agy-runtime/bin/python3.saved" "$TMP/agy-runtime/bin/python3"
   if (
     PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
@@ -1737,23 +1768,439 @@ PY_LOCKED
   [ -f "$capture/mcp_config.json" ] || fail "mcp_config.json was not built"
   [ ! -e "$capture/hooks.json" ] || fail "hooks.json must not ship uncertified"
   [ ! -e "$capture/agy-hook.sh" ] || fail "the hook adapter must not ship uncertified"
-  OMS_T_DIR="$capture" OMS_T_ROOT="$ROOT" python3 - <<'PY' || fail "generated plugin content is wrong"
-import json, os
+  OMS_T_DIR="$capture" OMS_T_ROOT="$ROOT" OMS_T_RUNTIME="$runtime_phys" OMS_T_VERSION="$locked_version" \
+    python3 - <<'PY' || fail "generated plugin content is wrong"
+import json, os, subprocess
 d = os.environ["OMS_T_DIR"]
 root = os.environ["OMS_T_ROOT"]
+runtime = os.environ["OMS_T_RUNTIME"]
+version = os.environ["OMS_T_VERSION"]
 plugin = json.load(open(os.path.join(d, "plugin.json")))
 assert plugin["name"] == "oh-my-setting", plugin
 assert plugin["version"] not in ("", "0.0.0"), plugin
 mcp = json.load(open(os.path.join(d, "mcp_config.json")))
 server = mcp["mcpServers"]["oh-my-setting"]
+assert set(server.keys()) == {"command", "args"}, server
+expected_cmd = os.path.join(runtime, "launchers", version, "python3")
+assert server["command"] == expected_cmd, (server["command"], expected_cmd)
 assert os.path.isabs(server["command"]), server
-import subprocess
-result = subprocess.run([server["command"], "-c", "import sys; assert sys.version_info >= (3, 11)"],
-                        env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True,
-                        timeout=float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "30")))
+result = subprocess.run(
+    [server["command"], "-c", "import os, sys; assert sys.version_info >= (3, 11); print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+    env=dict(os.environ, PATH="/usr/bin:/bin"),
+    capture_output=True,
+    text=True,
+    timeout=float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "30")),
+)
 assert result.returncode == 0, result
+assert result.stdout.strip() == "env-b", result.stdout
 assert server["args"] == [os.path.join(root, "scripts", "oms-mcp-server.py")], server
 PY
+  [ ! -e "$TMP/stale-a.marker" ] ||
+    fail "packaged command executed stale launcher A"
+
+  # Literal dots inside an owned runtime directory are not traversal.
+  make_agy_runtime "$TMP/python..runtime" "$locked_version" "env-dots"
+  mkdir -p "$TMP/agy-dots-save"
+  cp -R "$capture"/. "$TMP/agy-dots-save"/
+  : > "$TMP/agy-dots-env.log"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/python..runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    OMS_TEST_AGY_ENV_LOG="$TMP/agy-dots-env.log" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-dots.out" 2>&1 ||
+    fail "owned runtime with literal dots should package successfully"
+  grep -Fxq "env-dots" "$TMP/agy-dots-env.log" ||
+    fail "literal dots runtime did not run selected environment during packaging"
+  OMS_T_DIR="$capture" OMS_T_RUNTIME="$TMP/python..runtime" OMS_T_VERSION="$locked_version" \
+    python3 - <<'PY' || fail "literal dots runtime command mismatch"
+import json, os, subprocess
+server = json.load(open(os.path.join(os.environ['OMS_T_DIR'], 'mcp_config.json')))['mcpServers']['oh-my-setting']
+expected = os.path.join(os.path.realpath(os.environ['OMS_T_RUNTIME']), 'launchers', os.environ['OMS_T_VERSION'], 'python3')
+assert server['command'] == expected, server
+result = subprocess.run([server['command'], '-c', "import os; print(os.environ['OMS_TEST_AGY_ENV_VERSION'])"],
+                        env=dict(os.environ, PATH='/usr/bin:/bin'), capture_output=True, text=True)
+assert result.returncode == 0 and result.stdout.strip() == 'env-dots', result
+PY
+  cp -R "$TMP/agy-dots-save"/. "$capture"/
+
+  mkdir -p "$TMP/agy-traversal"
+  : > "$log"
+  status=0
+  PATH="$TMP/agy-traversal/../agy-runtime/launchers/$locked_version:$bin:/usr/bin:/bin" \
+    HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-traversal/../agy-runtime" \
+    OMS_PYTHON="$TMP/agy-traversal/../agy-runtime/envs/$locked_version/bin/python3" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-traversal.out" 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "runtime traversal component should be refused"
+  [ ! -s "$log" ] || fail "runtime traversal refusal invoked agy"
+
+  # Host-mode positive: with no managed runtime, a validated 0755 host python3
+  # in a 0700 directory succeeds and bakes its resolved path.
+  mkdir -p "$TMP/agy-host-capture"
+  cp "$TMP/capture-save" "$TMP/capture-save" 2>/dev/null || true
+  cp -R "$capture"/. "$TMP/agy-host-capture"/
+  PATH="$TMP/agy-writable-host:$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/absent-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-host-pos.out" 2>&1 ||
+    fail "clean host interpreter should succeed when managed runtime is absent"
+  OMS_T_DIR="$capture" OMS_T_HOST="$TMP/agy-writable-host/python3" python3 - <<'PY' || fail "host interpreter command mismatch"
+import json, os
+mcp = json.load(open(os.path.join(os.environ["OMS_T_DIR"], "mcp_config.json")))
+server = mcp["mcpServers"]["oh-my-setting"]
+assert server["command"] == os.path.realpath(os.environ["OMS_T_HOST"]), server
+PY
+  cp -R "$TMP/agy-host-capture"/. "$capture"/
+
+  # Wrong current hint with selected locked V remains valid and still chooses
+  # the verified versioned launcher for V rather than stale stable A.
+  printf '3.11.0\n' > "$TMP/agy-runtime/current"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 97' > "$bin/python3"
+  chmod +x "$bin/python3"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-drifted-current.out" 2>&1 ||
+    fail "drifted current hint broke locked environment packaging"
+  [ ! -e "$TMP/stale-a.marker" ] || fail "drifted current hint ran stale stable A"
+  printf '%s\n' "$locked_version" > "$TMP/agy-runtime/current"
+
+  # Invalid versioned candidate plus verified stable fallback must not execute
+  # the invalid versioned file during config generation or later invocation.
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$TMP/agy-runtime" "$locked_version" python3 bin
+  )
+  cp "$TMP/agy-runtime/launchers/$locked_version/python3" "$TMP/agy-runtime/launchers/$locked_version/python3.good"
+  for bad_mode in foreign stale symlink; do
+    rm -f "$TMP/agy-runtime/launchers/$locked_version/python3"
+    if [ "$bad_mode" = foreign ]; then
+      printf '%s\n' '#!/usr/bin/env bash' ": > \"$TMP/bad-versioned.marker\"" 'exit 93' \
+        > "$TMP/agy-runtime/launchers/$locked_version/python3"
+      chmod +x "$TMP/agy-runtime/launchers/$locked_version/python3"
+    elif [ "$bad_mode" = stale ]; then
+      (
+        . "$ROOT/scripts/lib/python-runtime.sh"
+        oms_python_runtime_write_launcher "$TMP/agy-runtime" "3.11.1" python3
+      )
+      cp "$TMP/agy-runtime/launchers/3.11.1/python3" "$TMP/agy-runtime/launchers/$locked_version/python3"
+    else
+      ln -s "$TMP/agy-runtime/bin/python3" "$TMP/agy-runtime/launchers/$locked_version/python3"
+    fi
+    : > "$TMP/agy-env.log"
+    PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+      OMS_TEST_AGY_ENV_LOG="$TMP/agy-env.log" \
+      bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-fallback-$bad_mode.out" 2>&1 ||
+      fail "verified stable fallback failed when versioned launcher was $bad_mode"
+    [ ! -e "$TMP/bad-versioned.marker" ] && [ ! -e "$TMP/stale-a.marker" ] ||
+      fail "invalid versioned launcher ($bad_mode) was executed during packaging"
+    grep -Fxq "env-b" "$TMP/agy-env.log" ||
+      fail "verified stable fallback ($bad_mode) did not run selected env-b during config generation"
+    OMS_T_DIR="$capture" OMS_T_RUNTIME="$runtime_phys" python3 - <<'PY' || fail "stable fallback command wrong"
+import json, os, subprocess
+mcp = json.load(open(os.path.join(os.environ["OMS_T_DIR"], "mcp_config.json")))
+server = mcp["mcpServers"]["oh-my-setting"]
+expected_cmd = os.path.join(os.environ["OMS_T_RUNTIME"], "bin", "python3")
+assert server["command"] == expected_cmd, (server["command"], expected_cmd)
+res = subprocess.run([server["command"], "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-b", res
+PY
+    [ ! -e "$TMP/bad-versioned.marker" ] && [ ! -e "$TMP/stale-a.marker" ] ||
+      fail "invalid versioned launcher ($bad_mode) ran on later invocation"
+  done
+  mv "$TMP/agy-runtime/launchers/$locked_version/python3.good" "$TMP/agy-runtime/launchers/$locked_version/python3"
+
+  # Both POSIX spellings (bin/python when bin/python3 is absent) and supported
+  # managed symlink candidates inside envs/V/bin retain behavior.
+  mv "$TMP/agy-runtime/envs/$locked_version/bin/python3" "$TMP/agy-runtime/envs/$locked_version/bin/python"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-posix-python.out" 2>&1 ||
+    fail "POSIX bin/python spelling was rejected"
+  OMS_T_DIR="$capture" python3 - <<'PY' || fail "POSIX bin/python command failed"
+import json, os, subprocess
+cmd = json.load(open(os.path.join(os.environ["OMS_T_DIR"], "mcp_config.json")))["mcpServers"]["oh-my-setting"]["command"]
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-b", res
+PY
+  mkdir -p "$TMP/agy-runtime/managed/cpython-$locked_version/bin"
+  mv "$TMP/agy-runtime/envs/$locked_version/bin/python" \
+    "$TMP/agy-runtime/managed/cpython-$locked_version/bin/python3.real"
+  local hop prev_target="python3.real"
+  for hop in $(seq 1 30); do
+    ln -sf "$prev_target" "$TMP/agy-runtime/managed/cpython-$locked_version/bin/hop-$hop"
+    prev_target="hop-$hop"
+  done
+  ln -sf "$prev_target" "$TMP/agy-runtime/managed/cpython-$locked_version/bin/python3"
+  ln -s "../../../managed/cpython-$locked_version/bin/python3" \
+    "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+  # 32 symlinks total (envs/V/bin/python3 -> managed/.../python3 -> hop-30 -> ... -> hop-1 -> python3.real)
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-managed-symlink.out" 2>&1 ||
+    fail "managed interpreter 32-hop symlink candidate was rejected"
+  OMS_T_DIR="$capture" python3 - <<'PY' || fail "managed symlink command failed"
+import json, os, subprocess
+cmd = json.load(open(os.path.join(os.environ["OMS_T_DIR"], "mcp_config.json")))["mcpServers"]["oh-my-setting"]["command"]
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-b", res
+PY
+  # 33 symlinks (one over the 32-hop limit) must be refused.
+  ln -sf "hop-30" "$TMP/agy-runtime/managed/cpython-$locked_version/bin/hop-31"
+  ln -sf "hop-31" "$TMP/agy-runtime/managed/cpython-$locked_version/bin/python3"
+  ! "$runtime_phys/launchers/$locked_version/python3" -c 'pass' >/dev/null 2>&1 ||
+    fail "33-hop symlink chain was accepted by guarded launcher"
+  rm -f "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+  mv "$TMP/agy-runtime/managed/cpython-$locked_version/bin/python3.real" \
+    "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+
+  # Per-launch controls on the packaged versioned launcher:
+  # 1. PYTHONHOME is cleaned while explicit PYTHONPATH and argv are preserved.
+  local versioned_cmd="$runtime_phys/launchers/$locked_version/python3"
+  OMS_T_CMD="$versioned_cmd" OMS_T_PYPATH="$TMP/custom-pypath" python3 - <<'PY' || fail "launcher env/argv semantics broken"
+import os, subprocess
+res = subprocess.run(
+    [os.environ["OMS_T_CMD"], "-c",
+     "import os, sys; print(os.environ.get('PYTHONHOME', 'CLEAN')); print(os.environ.get('PYTHONPATH', '')); print(sys.argv[1:])",
+     "--flag", "two words"],
+    env=dict(os.environ, PATH="/usr/bin:/bin", PYTHONHOME="/bogus/pythonhome", PYTHONPATH=os.environ["OMS_T_PYPATH"]),
+    capture_output=True, text=True, timeout=30,
+)
+assert res.returncode == 0, res
+lines = res.stdout.strip().splitlines()
+assert lines == ["CLEAN", os.environ["OMS_T_PYPATH"], "['--flag', 'two words']"], lines
+PY
+  # 2. Root/env ownership removal or foreign link insertion refuses without foreign execution.
+  mv "$TMP/agy-runtime/.oh-my-setting-python-runtime" "$TMP/agy-runtime/.owner.saved"
+  ! "$versioned_cmd" -c 'pass' >/dev/null 2>&1 || fail "launcher accepted missing root ownership marker"
+  mv "$TMP/agy-runtime/.owner.saved" "$TMP/agy-runtime/.oh-my-setting-python-runtime"
+  printf 'schema=1\nversion=0.0.0\n' > "$TMP/agy-runtime/envs/$locked_version/.oh-my-setting-python-env"
+  ! "$versioned_cmd" -c 'pass' >/dev/null 2>&1 || fail "launcher accepted mismatched env ownership marker"
+  printf 'schema=1\nversion=%s\n' "$locked_version" > "$TMP/agy-runtime/envs/$locked_version/.oh-my-setting-python-env"
+  printf '%s\n' '#!/usr/bin/env bash' ": > \"$TMP/foreign-exec.marker\"" 'exit 0' > "$TMP/foreign-exec"
+  chmod +x "$TMP/foreign-exec"
+  mv "$TMP/agy-runtime/envs/$locked_version/bin/python3" "$TMP/agy-runtime/envs/$locked_version/bin/python3.saved"
+  ln -s "$TMP/foreign-exec" "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+  ! "$versioned_cmd" -c 'pass' >/dev/null 2>&1 || fail "launcher executed foreign symlink interpreter"
+  [ ! -e "$TMP/foreign-exec.marker" ] || fail "foreign symlink interpreter ran"
+  rm "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+  mv "$TMP/agy-runtime/envs/$locked_version/bin/python3.saved" "$TMP/agy-runtime/envs/$locked_version/bin/python3"
+
+  # 3. Versioned command lifetime vs stable alias mutability, config save/refresh/restore:
+  local lifecycle_rt="$TMP/agy-lifecycle-rt"
+  local lifecycle_phys
+  make_agy_runtime "$lifecycle_rt" "3.12.8" "env-v1"
+  lifecycle_phys="$(CDPATH='' cd -P -- "$lifecycle_rt" && pwd -P)"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$lifecycle_rt" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" >/dev/null ||
+    fail "v1 packaging failed"
+  cp "$capture/mcp_config.json" "$TMP/mcp_config.v1.json"
+  make_agy_runtime "$lifecycle_rt" "3.13.1" "env-v2"
+  # current and bin/python3 now point to 3.13.1 (env-v2), while 3.12.8 (env-v1) stays retained.
+  OMS_T_CFG="$TMP/mcp_config.v1.json" python3 - <<'PY' || fail "versioned v1 command drifted after current/stable repoint"
+import json, os, subprocess
+cmd = json.load(open(os.environ["OMS_T_CFG"]))["mcpServers"]["oh-my-setting"]["command"]
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-v1", res
+PY
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$lifecycle_rt" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" >/dev/null ||
+    fail "v2 refresh packaging failed"
+  OMS_T_CFG="$capture/mcp_config.json" OMS_T_RT="$lifecycle_phys" python3 - <<'PY' || fail "refreshed config did not select v2"
+import json, os, subprocess
+cmd = json.load(open(os.environ["OMS_T_CFG"]))["mcpServers"]["oh-my-setting"]["command"]
+assert cmd == os.path.join(os.environ["OMS_T_RT"], "launchers", "3.13.1", "python3"), cmd
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-v2", res
+PY
+  cp "$TMP/mcp_config.v1.json" "$capture/mcp_config.json"
+  OMS_T_CFG="$capture/mcp_config.json" python3 - <<'PY' || fail "restored v1 config failed against retained v1 env"
+import json, os, subprocess
+cmd = json.load(open(os.environ["OMS_T_CFG"]))["mcpServers"]["oh-my-setting"]["command"]
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-v1", res
+PY
+
+  # No-versioned direct B + matching guarded stable B succeeds and executes B;
+  # stable fallback's mutable alias follows a subsequent supported bin/python3 rewrite.
+  rm -rf "$lifecycle_rt/launchers"
+  printf '3.12.8\n' > "$lifecycle_rt/current"
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$lifecycle_rt" "3.12.8" python3 bin
+  )
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$lifecycle_rt" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" >/dev/null ||
+    fail "no-versioned direct B with matching stable B should succeed"
+  OMS_T_CFG="$capture/mcp_config.json" OMS_T_RT="$lifecycle_phys" python3 - <<'PY' || fail "direct B stable fallback failed"
+import json, os, subprocess
+cmd = json.load(open(os.environ["OMS_T_CFG"]))["mcpServers"]["oh-my-setting"]["command"]
+assert cmd == os.path.join(os.environ["OMS_T_RT"], "bin", "python3"), cmd
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-v1", res
+PY
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$lifecycle_rt" "3.13.1" python3 bin
+  )
+  OMS_T_CFG="$capture/mcp_config.json" python3 - <<'PY' || fail "stable alias rewrite did not advance to v2"
+import json, os, subprocess
+cmd = json.load(open(os.environ["OMS_T_CFG"]))["mcpServers"]["oh-my-setting"]["command"]
+res = subprocess.run([cmd, "-c", "import os; print(os.environ.get('OMS_TEST_AGY_ENV_VERSION', ''))"],
+                     env=dict(os.environ, PATH="/usr/bin:/bin"), capture_output=True, text=True, timeout=30)
+assert res.returncode == 0 and res.stdout.strip() == "env-v2", res
+PY
+
+  # No-versioned stale/wrong-root/foreign/bare-forwarder/guard-deleted/cleanup-deleted/
+  # trailing-payload/empty stable and TOCTOU tampering fail before fake plugin
+  # install or stale-hook retraction, preserving preexisting payload/config/modes/neighbors.
+  local preserve_home="$TMP/agy-preserve-home"
+  local preserve_plugin="$preserve_home/.gemini/config/plugins/oh-my-setting"
+  local preserve_neighbor="$preserve_home/.gemini/config/plugins/user-neighbor"
+  local clean_tmp="$TMP/agy-clean-tmp"
+  mkdir -p "$preserve_plugin" "$preserve_neighbor" "$clean_tmp"
+  printf '{"name":"oh-my-setting","version":"0.1.0"}\n' > "$preserve_plugin/plugin.json"
+  printf '{"mcpServers":{"oh-my-setting":{"command":"/old/python3","args":["/old/server.py"]}}}\n' > "$preserve_plugin/mcp_config.json"
+  printf '{"oh-my-setting":{"Stop":[]}}\n' > "$preserve_plugin/hooks.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$preserve_plugin/agy-hook.sh"
+  printf '{"user":"keep"}\n' > "$preserve_plugin/user-neighbor.json"
+  printf '{"name":"user-neighbor"}\n' > "$preserve_neighbor/plugin.json"
+  chmod 0640 "$preserve_plugin/plugin.json" "$preserve_plugin/mcp_config.json" \
+    "$preserve_plugin/hooks.json" "$preserve_neighbor/plugin.json"
+  chmod 0750 "$preserve_plugin/agy-hook.sh"
+  chmod 0600 "$preserve_plugin/user-neighbor.json"
+  OMS_T_PRESERVE="$preserve_home/.gemini/config/plugins" python3 - <<'PY' > "$TMP/preserve.before"
+import hashlib, os, stat
+base = os.environ["OMS_T_PRESERVE"]
+for root, dirs, files in sorted(os.walk(base)):
+    dirs.sort()
+    for name in sorted(files):
+        path = os.path.join(root, name)
+        rel = os.path.relpath(path, base)
+        mode = stat.S_IMODE(os.lstat(path).st_mode)
+        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        print("%s %04o %s" % (rel, mode, digest))
+PY
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$lifecycle_rt" "3.12.8" python3 bin
+  )
+  cp "$lifecycle_rt/bin/python3" "$TMP/valid-direct-stable"
+  mkdir -p "$TMP/other-rt-root"
+  (
+    . "$ROOT/scripts/lib/python-runtime.sh"
+    oms_python_runtime_write_launcher "$TMP/other-rt-root" "3.12.8" python3 bin
+  )
+  local reject_case
+  for reject_case in stale wrong-root foreign bare-forwarder guard-deleted cleanup-deleted trailing-payload empty toctou-recheck mid-require-env symlink-launchers-dir; do
+    rm -rf "$lifecycle_rt/launchers"
+    cp "$TMP/valid-direct-stable" "$lifecycle_rt/bin/python3"
+    chmod 0755 "$lifecycle_rt/bin/python3"
+    printf 'schema=1\nversion=3.12.8\n' > "$lifecycle_rt/envs/3.12.8/.oh-my-setting-python-env"
+    case "$reject_case" in
+      stale)
+        make_agy_runtime "$lifecycle_rt" "3.11.1" "env-stale" "$TMP/foreign-stable.marker"
+        rm -rf "$lifecycle_rt/launchers"
+        printf '3.12.8\n' > "$lifecycle_rt/current"
+        (
+          . "$ROOT/scripts/lib/python-runtime.sh"
+          oms_python_runtime_write_launcher "$lifecycle_rt" "3.11.1" python3 bin
+        )
+        ;;
+      wrong-root)
+        cp "$TMP/other-rt-root/bin/python3" "$lifecycle_rt/bin/python3"
+        ;;
+      foreign)
+        printf '%s\n' '#!/bin/bash' ": > \"$TMP/foreign-stable.marker\"" 'exec /usr/bin/python3 "$@"' > "$lifecycle_rt/bin/python3"
+        chmod +x "$lifecycle_rt/bin/python3"
+        ;;
+      bare-forwarder)
+        printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$(command -v python3)" > "$lifecycle_rt/bin/python3"
+        chmod +x "$lifecycle_rt/bin/python3"
+        ;;
+      guard-deleted)
+        grep -Fv 'oms_python_runtime_root_owned "$root"' "$TMP/valid-direct-stable" > "$lifecycle_rt/bin/python3"
+        chmod +x "$lifecycle_rt/bin/python3"
+        ;;
+      cleanup-deleted)
+        sed 's/^unset CDPATH PYTHONHOME$/# deleted cleanup/' "$TMP/valid-direct-stable" > "$lifecycle_rt/bin/python3"
+        chmod +x "$lifecycle_rt/bin/python3"
+        ;;
+      trailing-payload)
+        cp "$TMP/valid-direct-stable" "$lifecycle_rt/bin/python3"
+        printf ': > %q\n' "$TMP/foreign-stable.marker" >> "$lifecycle_rt/bin/python3"
+        chmod +x "$lifecycle_rt/bin/python3"
+        ;;
+      empty)
+        : > "$lifecycle_rt/bin/python3"
+        chmod +x "$lifecycle_rt/bin/python3"
+        ;;
+      toctou-recheck)
+        cp "$lifecycle_rt/envs/3.12.8/bin/python3" "$TMP/env-3128.saved"
+        {
+          printf '%s\n' '#!/usr/bin/env bash'
+          printf '%s\n' 'if [ -n "${OMS_AP_BUILD:-}" ] && [ -n "${OMS_AP_PYTHON:-}" ]; then printf "# drift\n" >> "$OMS_AP_PYTHON"; fi'
+          printf '%s\n' 'case "$*" in *"expected = tuple"*|*"sys.version_info < (3, 11)"*) exit 0 ;; esac'
+          printf 'exec %q "$@"\n' "$(command -v python3)"
+        } > "$lifecycle_rt/envs/3.12.8/bin/python3"
+        chmod +x "$lifecycle_rt/envs/3.12.8/bin/python3"
+        ;;
+      mid-require-env)
+        cp "$lifecycle_rt/envs/3.12.8/bin/python3" "$TMP/env-3128.saved"
+        {
+          printf '%s\n' '#!/usr/bin/env bash'
+          printf 'case "$*" in *"sys.version_info < (3, 11)"*) printf "schema=1\\nversion=0.0.0\\n" > %q; exit 0 ;; esac\n' \
+            "$lifecycle_rt/envs/3.12.8/.oh-my-setting-python-env"
+          printf 'exec %q "$@"\n' "$(command -v python3)"
+        } > "$lifecycle_rt/envs/3.12.8/bin/python3"
+        chmod +x "$lifecycle_rt/envs/3.12.8/bin/python3"
+        ;;
+      symlink-launchers-dir)
+        ln -s "$TMP/other-rt-root" "$lifecycle_rt/launchers"
+        ;;
+    esac
+    : > "$log"
+    status=0
+    TMPDIR="$clean_tmp" PATH="$bin:/usr/bin:/bin" HOME="$preserve_home" OMS_AGY_BIN="$bin/agy" \
+      OMS_PYTHON_RUNTIME_ROOT="$lifecycle_rt" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+      bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/reject-$reject_case.out" 2>&1 || status=$?
+    if [ "$reject_case" = toctou-recheck ] || [ "$reject_case" = mid-require-env ]; then
+      mv "$TMP/env-3128.saved" "$lifecycle_rt/envs/3.12.8/bin/python3"
+    fi
+    rm -rf "$lifecycle_rt/launchers"
+    printf 'schema=1\nversion=3.12.8\n' > "$lifecycle_rt/envs/3.12.8/.oh-my-setting-python-env"
+    [ "$status" -eq 2 ] || fail "invalid stable case '$reject_case' did not exit 2 (got $status)"
+    grep -Fq "error: managed Python launcher is invalid" "$TMP/reject-$reject_case.out" ||
+      fail "invalid stable case '$reject_case' did not report invalid launcher"
+    [ ! -s "$log" ] || fail "invalid stable case '$reject_case' invoked agy CLI: $(cat "$log")"
+    [ ! -e "$TMP/foreign-stable.marker" ] || fail "invalid stable case '$reject_case' executed untrusted candidate"
+    [ -z "$(ls -A "$clean_tmp")" ] || fail "invalid stable case '$reject_case' leaked temporary files"
+    OMS_T_PRESERVE="$preserve_home/.gemini/config/plugins" python3 - <<'PY' > "$TMP/preserve.after"
+import hashlib, os, stat
+base = os.environ["OMS_T_PRESERVE"]
+for root, dirs, files in sorted(os.walk(base)):
+    dirs.sort()
+    for name in sorted(files):
+        path = os.path.join(root, name)
+        rel = os.path.relpath(path, base)
+        mode = stat.S_IMODE(os.lstat(path).st_mode)
+        digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        print("%s %04o %s" % (rel, mode, digest))
+PY
+    cmp -s "$TMP/preserve.before" "$TMP/preserve.after" ||
+      fail "invalid stable case '$reject_case' mutated preexisting plugin payload, modes, or neighbors"
+  done
+  rm -f "$bin/python3"
+  touch "$TMP/agy.registered"
+  : > "$log"
 
   PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" \
     bash "$ROOT/scripts/install-agy-plugin.sh" --remove >/dev/null ||

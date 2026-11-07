@@ -624,6 +624,828 @@ def _drop_account_links(rows, receipt, ident=None, root=None, dry_run=False):
         _report_account_cleanup(removed_count, kept, rows_kept, dry_run)
 
 
+# Registration is independent of the legacy routing capability table above.
+REGISTERED_ACCOUNT_PROVIDERS = frozenset(("codex", "claude"))
+CLAUDE_SHARED_ENTRIES = {"CLAUDE.md": "rules/global-AGENTS.md",
+                         "skills": "custom-skills",
+                         "output-styles/oms-korean.md": "output-styles/oms-korean.md"}
+
+
+def _claude_paths():
+    parent = _account_paths()[0].parent
+    return parent / "provider-accounts.claude.json", parent / "provider-account-effects.json"
+
+
+def _private_state(path, fallback):
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return fallback
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022):
+            raise ValueError("account state must be a user-owned regular non-link file: " + str(path))
+        try:
+            return json.load(stream, object_pairs_hook=_unique_fields,
+                             parse_constant=_invalid_account_constant)
+        except (ValueError, RecursionError) as error:
+            raise ValueError("malformed account state; left unchanged: " + str(path)) from error
+
+
+def _valid_ident(ident):
+    return isinstance(ident, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", ident) is not None
+
+
+def _physical_path(value):
+    return (isinstance(value, str) and bool(value) and "\0" not in value
+            and Path(value).is_absolute() and str(Path(value).resolve()) == value)
+
+
+def _claude_registry():
+    path, _ = _claude_paths()
+    value = _private_state(path, {"schema": 1, "provider": "claude", "accounts": []})
+    if (not isinstance(value, dict) or set(value) != {"schema", "provider", "accounts"}
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or value["provider"] != "claude" or not isinstance(value["accounts"], list)):
+        raise ValueError("invalid claude account registry; restore provider-accounts.claude.json")
+    ids, homes = set(), set()
+    for row in value["accounts"]:
+        if (not isinstance(row, dict) or set(row) != {"id", "home"}
+                or not _valid_ident(row["id"]) or row["id"] == "default"
+                or not _physical_path(row["home"])):
+            raise ValueError("invalid claude account entry")
+        if row["id"] in ids or row["home"] in homes:
+            raise ValueError("duplicate claude account id or canonical home")
+        ids.add(row["id"])
+        homes.add(row["home"])
+    return value
+
+
+def _identity(info):
+    return {"st_uid": info.st_uid, "st_dev": info.st_dev, "st_ino": info.st_ino}
+
+
+def _valid_identity(value):
+    return (isinstance(value, dict) and set(value) == {"st_uid", "st_dev", "st_ino"}
+            and all(type(n) is int and n >= 0 for n in value.values()))
+
+
+def _source_root(root):
+    if not isinstance(root, (str, Path)):
+        raise ValueError("invalid Claude account source root")
+    root = Path(root)
+    if (not _physical_path(str(root)) or not (root / "scripts/install-claude-hooks.sh").is_file()
+            or not (root / "rules/global-AGENTS.md").is_file()):
+        raise ValueError("unverified Claude account source root; restore its OMS checkout")
+    return root
+
+
+def _claude_effects():
+    _, path = _claude_paths()
+    value = _private_state(path, {"schema": 1, "accounts": []})
+    if (not isinstance(value, dict) or set(value) != {"schema", "accounts"}
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or not isinstance(value["accounts"], list)):
+        raise ValueError("invalid Claude account effects; preserve state and restore its receipt")
+    homes = set()
+    for row in value["accounts"]:
+        keys = {"provider", "id", "home", "parent", "parent_identity", "identity", "source_root",
+                "settings", "hooks_receipt", "status", "links"}
+        if (not isinstance(row, dict) or set(row) != keys or row["provider"] != "claude"
+                or not _valid_ident(row["id"]) or row["id"] == "default"
+                or not _physical_path(row["home"]) or row["home"] in homes
+                or not _physical_path(row["parent"]) or not _valid_identity(row["parent_identity"])
+                or (row["identity"] is not None and not _valid_identity(row["identity"]))
+                or row["status"] not in ("pending", "installed", "removing")
+                or row["settings"] != str(Path(row["home"]) / "settings.json")
+                or row["hooks_receipt"] != str(Path(row["home"]) / ".oms-claude-hooks.json")
+                or not isinstance(row["links"], dict)):
+            raise ValueError("invalid Claude account effects; preserve state for recovery")
+        if row["status"] == "installed" and row["identity"] is None:
+            raise ValueError("installed Claude effects require a bound home identity")
+        source = _source_root(row["source_root"])
+        if Path(row["parent"]) not in Path(row["home"]).parents:
+            raise ValueError("invalid Claude reservation parent")
+        for name, link in row["links"].items():
+            if (name not in CLAUDE_SHARED_ENTRIES or not isinstance(link, dict)
+                    or set(link) != {"target", "identity", "status"}
+                    or not isinstance(link["target"], str)
+                    or not _physical_path(link["target"])
+                    or link["status"] not in ("pending", "installed", "removing")
+                    or (link["identity"] is not None and not _valid_identity(link["identity"]))):
+                raise ValueError("invalid Claude account link ownership")
+            if row["status"] == "installed" and (link["identity"] is None or link["status"] != "installed"):
+                raise ValueError("installed Claude effects require finalized link identities")
+            target = Path(link["target"])
+            link_root = target
+            for _ in Path(CLAUDE_SHARED_ENTRIES[name]).parts:
+                link_root = link_root.parent
+            if target != _source_root(str(link_root)) / CLAUDE_SHARED_ENTRIES[name]:
+                raise ValueError("unverified Claude account link source")
+        homes.add(row["home"])
+    return value
+
+
+def _registered_locked(legacy=None):
+    legacy = load_accounts() if legacy is None else legacy
+    if "claude" in legacy["providers"]:
+        raise ValueError("legacy Claude accounts in provider-accounts.json are unsupported; preserve the file and restore its Codex-only configuration")
+    claude = _claude_registry()
+    effects = _claude_effects()
+    for row in effects["accounts"]:
+        if row["identity"] is not None:
+            _hook_receipt(Path(row["settings"]), Path(row["hooks_receipt"]), row["source_root"], binding=row)
+    providers = dict(legacy["providers"])
+    providers["claude"] = {"policy": "ordered", "accounts": claude["accounts"]}
+    homes = {}
+    for provider, settings in providers.items():
+        for row in settings["accounts"]:
+            home = str(Path(row["home"]).resolve())
+            key = (provider, row["id"])
+            if home in homes and homes[home] != key:
+                raise ValueError("duplicate provider canonical home; preserve both states and choose separate homes")
+            homes[home] = key
+    reservations = list(effects["accounts"])
+    for row in _link_receipt(_account_paths()[1]):
+        reservations.append(dict(row, provider="codex"))
+    for row in reservations:
+        key = (row["provider"], row["id"])
+        home = str(Path(row["home"]).resolve())
+        if home in homes and homes[home] != key:
+            raise ValueError("account home reserved by pending effects; repair or remove that account")
+        homes[home] = key
+    return {"schema": 1, "configured": bool(legacy.get("configured") or claude["accounts"]),
+            "providers": providers, "configured_providers": {
+                "codex": legacy.get("configured", bool(legacy["providers"])),
+                "claude": bool(claude["accounts"])}, "reservations": reservations}
+
+
+def load_registered_accounts():
+    """Consistent lifecycle snapshot; passive Codex readers keep load_accounts."""
+    from oms_runtime.common import file_lock
+    with file_lock(_account_paths()[0]):
+        return _registered_locked()
+
+
+def _account_publish(path, value):
+    from oms_runtime.common import atomic_write_json
+    _account_parent_private(path.parent)
+    missing = []
+    parent = path.parent
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    for parent in reversed(missing):
+        parent.mkdir(mode=0o700)
+    _account_home_private(path.parent, path.parent.stat())
+    if _private_state(path, None) != value:
+        atomic_write_json(path, value)
+
+
+def _claude_main():
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser().resolve()
+
+
+def _claude_collision(view, home, ident, provider):
+    for other, settings in view["providers"].items():
+        for entry in settings["accounts"]:
+            if (other, entry["id"]) != (provider, ident) and Path(entry["home"]).resolve() == home:
+                raise ValueError("duplicate provider canonical home")
+    for row in view["reservations"]:
+        if (row["provider"], row["id"]) != (provider, ident) and Path(row["home"]).resolve() == home:
+            raise ValueError("account home reserved by pending Claude effects")
+    if home in (_claude_main(), Path(default_account("codex")["home"])):
+        raise ValueError("account home must differ from provider main homes")
+
+
+def _effect_home(row):
+    parent = Path(row["parent"])
+    if _identity(parent.stat()) != row["parent_identity"]:
+        raise ValueError("Claude reservation parent identity changed; preserve effects for recovery")
+    _account_parent_private(parent)
+    home = Path(row["home"])
+    if row["identity"] is None:
+        raise ValueError("Claude home creation interrupted; preserve the home and reservation for recovery")
+    info = home.lstat()
+    if not stat.S_ISDIR(info.st_mode) or _identity(info) != row["identity"]:
+        raise ValueError("Claude account directory identity changed; preserve effects for recovery")
+    _account_home_private(home, info)
+    return home
+
+
+def _claude_link_parent(row, name, create=False):
+    home = _effect_home(row)
+    parent = (home / name).parent
+    if parent != home:
+        if not os.path.lexists(str(parent)) and create:
+            with _account_directory(home, row["identity"]) as (descriptor, _):
+                if descriptor is None or os.mkdir not in os.supports_dir_fd:
+                    raise ValueError("platform lacks safe Claude integration directory creation")
+                os.mkdir(parent.name, mode=0o700, dir_fd=descriptor)
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("Claude account integration parent must not be a link")
+        _account_home_private(parent, info)
+    return parent
+
+
+def _claude_link_apply(row, effects, repair, source_root=None):
+    _, path = _claude_paths()
+    source = _source_root(source_root or row["source_root"])
+    for name, relative in CLAUDE_SHARED_ENTRIES.items():
+        parent = _claude_link_parent(row, name, create=True)
+        link = parent / Path(name).name
+        target = str(source / relative)
+        recorded = row["links"].get(name)
+        current = link.lstat() if os.path.lexists(str(link)) else None
+        if recorded and current is not None:
+            if (recorded["identity"] is None or _identity(current) != recorded["identity"]
+                    or not stat.S_ISLNK(current.st_mode) or os.readlink(str(link)) != recorded["target"]):
+                raise ValueError("changed or ambiguous Claude account link; preserve it and restore recorded ownership: " + name)
+            if recorded["target"] == target and recorded["status"] == "installed":
+                continue
+        elif current is not None:
+            print("warn: kept existing unmanaged Claude account entry " + name)
+            continue
+        row["status"] = "pending"
+        if current is not None:
+            if not repair:
+                raise ValueError("Claude account links need --repair")
+            recorded["status"] = "removing"
+            _account_publish(path, effects)
+            with _account_directory(parent) as (descriptor, _):
+                if not _unlink_account_entry(parent, descriptor, None, link.name,
+                                             recorded["target"], current):
+                    raise ValueError("Claude account link removal refused")
+        row["links"][name] = {"target": target, "identity": None, "status": "pending"}
+        _account_publish(path, effects)
+        with _account_directory(parent) as (descriptor, _):
+            _effect_home(row)
+            if descriptor is None or not _ACCOUNT_FD_SYMLINK:
+                raise ValueError("platform lacks safe Claude account link creation")
+            os.symlink(target, link.name, dir_fd=descriptor)
+            info = _account_entry(parent, descriptor, link.name)
+            row["links"][name].update(identity=_identity(info), status="installed")
+            _account_publish(path, effects)
+
+
+def _claude_hooks(row, remove=False, source_root=None):
+    import subprocess
+    _effect_home(row)
+    root = _source_root(source_root or row["source_root"])
+    command = ["bash", str(root / "scripts/install-claude-hooks.sh"), "--settings", row["settings"],
+               "--ownership-receipt", row["hooks_receipt"]]
+    if remove:
+        command.append("--remove")
+    # Keep the caller's HOME and lock domain. Account mode probes no provider.
+    result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False,
+                            env=dict(os.environ, OMS_ACCOUNT_REGISTRY_LOCK_HELD="1"))
+    if result.returncode:
+        raise ValueError("Claude account settings ownership pending; restore the sidecar/settings binding and retry --repair or --remove")
+
+
+def _claude_remove_row(row, effects, dry_run=False):
+    _, path = _claude_paths()
+    if row["identity"] is None and not os.path.lexists(row["home"]):
+        parent = Path(row["parent"])
+        if _identity(parent.stat()) != row["parent_identity"] or row["links"]:
+            raise ValueError("Claude pending reservation identity changed; preserve it for recovery")
+        _account_parent_private(parent)
+        print("Claude pending reservation has no applied effects: " + row["id"])
+        return
+    home = _effect_home(row)
+    if dry_run:
+        _hook_receipt(Path(row["settings"]), Path(row["hooks_receipt"]), row["source_root"])
+        print("would remove owned Claude account integrations: " + row["id"])
+        return
+    row["status"] = "removing"
+    _account_publish(path, effects)
+    _claude_hooks(row, remove=True)
+    for name, recorded in list(row["links"].items()):
+        parent = _claude_link_parent(row, name)
+        link = parent / Path(name).name
+        with _account_directory(parent) as (descriptor, _):
+            info = _account_entry(parent, descriptor, link.name)
+            if info is not None:
+                if (recorded["identity"] is None or _identity(info) != recorded["identity"]
+                        or not stat.S_ISLNK(info.st_mode) or os.readlink(str(link)) != recorded["target"]):
+                    raise ValueError("changed Claude account link kept; restore it before --remove: " + name)
+                recorded["status"] = "removing"
+                _account_publish(path, effects)
+                _effect_home(row)
+                if not _unlink_account_entry(parent, descriptor, None, link.name, recorded["target"], info):
+                    raise ValueError("Claude account cleanup refused; reservation kept")
+            del row["links"][name]
+            _account_publish(path, effects)
+    print("Claude account integrations removed: " + row["id"] + "; home, login and sessions kept")
+
+
+def _verify_claude(row):
+    import subprocess
+    _effect_home(row)
+    if any(name.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_", "CLAUDE_CODE_OAUTH_"))
+           for name in os.environ):
+        raise ValueError("Claude verification refuses global auth environment overrides")
+    # Only diagnostic process plumbing is inherited; no caller auth overrides.
+    names = ("HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+    env = {name: os.environ[name] for name in names if name in os.environ}
+    env["CLAUDE_CONFIG_DIR"] = row["home"]
+    try:
+        result = subprocess.run(["claude", "auth", "status"], env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=False)
+        status = json.loads(result.stdout, object_pairs_hook=_unique_fields,
+                            parse_constant=_invalid_account_constant)
+        good = (result.returncode == 0 and isinstance(status, dict)
+                and status.get("authMethod") == "claude.ai"
+                and isinstance(status.get("configDirectory"), str)
+                and Path(status["configDirectory"]).is_absolute()
+                and Path(status["configDirectory"]).resolve() == Path(row["home"]))
+    except (OSError, ValueError, RecursionError, subprocess.TimeoutExpired):
+        good = False
+    if not good:
+        raise ValueError("Claude account status unverified; independent authentication isolation is unsupported")
+    raise ValueError("Claude status selected the requested config, but credential origin is not attested; isolation verification unsupported")
+
+
+def _create_claude_home(row, effects):
+    from contextlib import ExitStack
+    parent, home = Path(row["parent"]), Path(row["home"])
+    with ExitStack() as stack:
+        if not _ACCOUNT_SAFE_UNLINK or os.mkdir not in os.supports_dir_fd or os.open not in os.supports_dir_fd:
+            raise ValueError("platform lacks safe Claude account directory creation")
+        _account_parent_private(parent)
+        descriptor = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, descriptor)
+        info = _verify_account_directory(parent, descriptor, row["parent_identity"])
+        current = parent
+        for name in home.relative_to(parent).parts:
+            _verify_account_directory(current, descriptor, _identity(info))
+            os.mkdir(name, mode=0o700, dir_fd=descriptor)
+            descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            stack.callback(os.close, descriptor)
+            current = current / name
+            info = _verify_account_directory(current, descriptor, None)
+            _account_home_private(current, info)
+        row["identity"] = _identity(info)
+        _account_publish(_claude_paths()[1], effects)
+
+
+def connect_claude_account(args):
+    from oms_runtime.common import file_lock
+    ident = args.account.split(":", 1)[1]
+    if not _valid_ident(ident) or ident == "default":
+        raise ValueError("invalid Claude account id; default is reserved for the main config")
+    registry, effects_path = _claude_paths()
+    with file_lock(_account_paths()[0]):
+        view = _registered_locked(_registration_config(_account_paths()[0]))
+        value, effects = _claude_registry(), _claude_effects()
+        existing = next((entry for entry in value["accounts"] if entry["id"] == ident), None)
+        owned = [row for row in effects["accounts"] if row["id"] == ident]
+        if existing and not any(row["home"] == existing["home"] for row in owned):
+            raise ValueError("Claude account ownership missing; preserve registry and restore effects for recovery")
+        if args.verify:
+            row = next((row for row in owned if existing and row["home"] == existing["home"]), None)
+            if row is None or row["status"] != "installed":
+                raise ValueError("Claude account is not registered and installed: " + ident)
+            _verify_claude(row)
+            return
+        if args.remove:
+            for row in owned:
+                _claude_remove_row(row, effects)
+            if existing:
+                value["accounts"].remove(existing)
+                _account_publish(registry, value)
+            effects["accounts"][:] = [row for row in effects["accounts"] if row not in owned]
+            if owned:
+                _account_publish(effects_path, effects)
+            return
+        raw = args.home if args.home is not None else (existing["home"] if existing else str(_claude_main() / "accounts" / ident))
+        if not raw or "\0" in raw:
+            raise ValueError("Claude account home must not be empty")
+        home = Path(raw).expanduser().resolve()
+        _claude_collision(view, home, ident, "claude")
+        _outside_repository(home)
+        _account_parent_private(home.parent)
+        row = next((row for row in owned if row["home"] == str(home)), None)
+        if row is None:
+            if home.exists():
+                _account_home_private(home, home.lstat())
+                if not home.is_dir():
+                    raise ValueError("Claude account home must be a directory")
+            parent = home.parent
+            while not parent.exists():
+                parent = parent.parent
+            root = _source_root(str(Path(__file__).resolve().parents[2]))
+            row = {"provider": "claude", "id": ident, "home": str(home), "parent": str(parent),
+                   "parent_identity": _identity(parent.stat()), "identity": _identity(home.stat()) if home.exists() else None,
+                   "source_root": str(root), "settings": str(home / "settings.json"),
+                   "hooks_receipt": str(home / ".oms-claude-hooks.json"), "status": "pending", "links": {}}
+            effects["accounts"].append(row)
+            _account_publish(effects_path, effects)
+            if row["identity"] is None:
+                _create_claude_home(row, effects)
+        _effect_home(row)
+        for old in owned:
+            if old is not row:
+                _claude_remove_row(old, effects)
+                # Old reservation remains until the new registry row is published.
+        current_root = str(_source_root(str(Path(__file__).resolve().parents[2])))
+        _claude_link_apply(row, effects, args.repair, source_root=current_root)
+        _claude_hooks(row, source_root=current_root)
+        row["source_root"] = current_root
+        entry = {"id": ident, "home": str(home)}
+        value["accounts"][:] = [entry for entry in value["accounts"] if entry["id"] != ident]
+        value["accounts"].insert(0, entry) if args.first else value["accounts"].append(entry)
+        _account_publish(registry, value)
+        row["status"] = "installed"
+        effects["accounts"][:] = [item for item in effects["accounts"] if item["id"] != ident or item is row]
+        _account_publish(effects_path, effects)
+        import shlex
+        print("Claude account " + ident + ": registered, login pending; registration does not verify authentication")
+        print("CLAUDE_CONFIG_DIR=" + shlex.quote(str(home)) + " claude auth login")
+
+
+def _settings_snapshot(path):
+    import hashlib
+    try:
+        descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None, None, {}
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ValueError("Claude settings must be a user-owned regular non-link file")
+        data = stream.read()
+    value = json.loads(data, object_pairs_hook=_unique_fields, parse_constant=_invalid_account_constant)
+    if not isinstance(value, dict):
+        raise ValueError("Claude settings must be a JSON object")
+    return _identity(info), hashlib.sha256(data).hexdigest(), value
+
+
+def _hook_lib(root):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("oms_account_hooks", str(Path(root) / "scripts/lib/claude-hook-surfaces.py"))
+    lib = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lib)
+    return lib
+
+
+def _managed_leaf_values(root):
+    lib = _hook_lib(root)
+    return {
+        ("statusLine",): {"type": "command", "command": lib.entry_command(root, "python3", str(Path(root) / "scripts/claude-statusline.py"))},
+        ("subagentStatusLine",): {"type": "command", "command": lib.entry_command(root, "python3", str(Path(root) / "scripts/claude-subagent-statusline.py"))},
+        ("modelSettings", "claude-opus-5-5", "effortLevel"): "high",
+        ("attribution",): {"commit": "", "pr": "", "sessionUrl": False},
+    }
+
+
+def _hook_receipt(settings, receipt, root, binding=None):
+    home = settings.parent
+    if (settings.name != "settings.json" or receipt != home / ".oms-claude-hooks.json"
+            or home.resolve() != home):
+        raise ValueError("account hook receipt must be beside its physical settings.json")
+    if binding is None:
+        _account_home_private(home, home.lstat())
+        identity, digest, value = _settings_snapshot(settings)
+    else:
+        identity, digest, value = None, None, {}
+    row = _private_state(receipt, None)
+    if row is None:
+        return None, identity, digest, value
+    keys = {"schema", "settings", "home_identity", "source_root", "hooks_schema", "status",
+            "settings_identity", "settings_digest", "leaves", "hooks", "containers"}
+    if (not isinstance(row, dict) or set(row) != keys or type(row["schema"]) is not int or row["schema"] != 1
+            or row["settings"] != str(settings) or not _valid_identity(row["home_identity"])
+            or row["home_identity"] != (binding["identity"] if binding else _identity(home.lstat()))
+            or type(row["hooks_schema"]) is not int or row["hooks_schema"] < 1
+            or row["status"] not in ("pending", "installed", "removed")
+            or (row["settings_identity"] is not None and not _valid_identity(row["settings_identity"]))
+            or (row["settings_digest"] is not None and (not isinstance(row["settings_digest"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", row["settings_digest"])))
+            or not isinstance(row["leaves"], list) or not isinstance(row["hooks"], list)
+            or not isinstance(row["containers"], list)):
+        raise ValueError("invalid account hooks ownership receipt; preserve settings for recovery")
+    for parts in row["containers"]:
+        if parts not in (["hooks"], ["modelSettings"], ["modelSettings", "claude-opus-5-5"]):
+            raise ValueError("invalid account settings container ownership")
+    source = str(_source_root(row["source_root"]))
+    allowed = _managed_leaf_values(source)
+    for leaf in row["leaves"]:
+        if (not isinstance(leaf, dict) or set(leaf) != {"path", "value"} or not isinstance(leaf["path"], list)
+                or any(not isinstance(part, str) for part in leaf["path"])
+                or tuple(leaf["path"]) not in allowed or leaf["value"] != allowed[tuple(leaf["path"])]):
+            raise ValueError("invalid account hook leaf ownership")
+    lib = _hook_lib(source)
+    for hook in row["hooks"]:
+        if (not isinstance(hook, dict) or set(hook) != {"event", "entry"} or not isinstance(hook["event"], str)
+                or not isinstance(hook["entry"], dict) or set(hook["entry"]) - {"hooks", "matcher"}
+                or not isinstance(hook["entry"].get("hooks"), list) or len(hook["entry"]["hooks"]) != 1
+                or lib.owned_script(hook["entry"]["hooks"][0], [source]) is None):
+            raise ValueError("invalid account hook command ownership")
+        hook_value = hook["entry"]["hooks"][0]
+        script = lib.owned_script(hook_value, [source])
+        if (set(hook_value) - {"type", "command", "timeout"} or hook_value.get("type") != "command"
+                or hook_value.get("command") != lib.hook_command(source, script)
+                or ("timeout" in hook_value and (type(hook_value["timeout"]) is not int or hook_value["timeout"] < 1))):
+            raise ValueError("unverified account hook command identity")
+    if binding is None and row["status"] == "pending":
+        raise ValueError("interrupted account settings write (pending); ownership ambiguous, preserve settings and sidecar for recovery")
+    if binding is None and row["settings_identity"] != identity:
+        raise ValueError("Claude settings identity changed; preserve settings and sidecar for recovery")
+    return row, identity, digest, value
+
+
+def _leaf_get(settings, parts):
+    cursor = settings
+    for part in parts:
+        if not isinstance(cursor, dict) or part not in cursor:
+            return False, None
+        cursor = cursor[part]
+    return True, cursor
+
+
+def _leaf_set(settings, parts, value, remove=False):
+    cursor = settings
+    for part in parts[:-1]:
+        if part not in cursor:
+            if remove:
+                return False
+            cursor[part] = {}
+        if not isinstance(cursor[part], dict):
+            return False
+        cursor = cursor[part]
+    if remove:
+        cursor.pop(parts[-1], None)
+    else:
+        cursor[parts[-1]] = value
+    return True
+
+
+def validate_account_hook_reservation(settings, receipt):
+    settings = Path(os.path.abspath(settings))
+    receipt = Path(os.path.abspath(receipt))
+    view = _registered_locked(_registration_config(_account_paths()[0]))
+    row = next((row for row in view["reservations"] if row["provider"] == "claude" and row["settings"] == str(settings)
+                and row["hooks_receipt"] == str(receipt)), None)
+    if row is None:
+        raise ValueError("account hooks require an existing validated Claude reservation")
+    _effect_home(row)
+
+
+def run_account_hook_installer(arguments):
+    import subprocess
+    from oms_runtime.common import file_lock
+    with file_lock(_account_paths()[0]):
+        root = Path(__file__).resolve().parents[2]
+        return subprocess.call(["bash", str(root / "scripts/install-claude-hooks.sh")] + arguments,
+                               env=dict(os.environ, OMS_ACCOUNT_REGISTRY_LOCK_HELD="1"))
+
+
+def _write_account_settings(path, data, identity, digest, home_identity):
+    import hashlib
+    import uuid
+    with _account_directory(path.parent, home_identity) as (descriptor, _):
+        if descriptor is None:
+            raise ValueError("platform lacks safe account settings replacement")
+        name = ".oms-settings-" + uuid.uuid4().hex
+        output = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=descriptor)
+        try:
+            with os.fdopen(output, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+                written = _identity(os.fstat(stream.fileno()))
+            _verify_account_directory(path.parent, descriptor, home_identity)
+            if _settings_snapshot(path)[:2] != (identity, digest):
+                raise ValueError("concurrent Claude settings edit; pending receipt kept for recovery")
+            os.replace(name, path.name, src_dir_fd=descriptor, dst_dir_fd=descriptor)
+            try:
+                os.fsync(descriptor)
+            except OSError:
+                pass
+            current, current_digest, _ = _settings_snapshot(path)
+            if current != written or current_digest != hashlib.sha256(data).hexdigest():
+                raise ValueError("Claude settings replaced after write; pending ownership kept for recovery")
+            return current, current_digest
+        finally:
+            try:
+                os.unlink(name, dir_fd=descriptor)
+            except FileNotFoundError:
+                pass
+
+
+def account_hook_settings(settings, receipt, root, manifest, remove=False):
+    """Called under the install lock; the registry lock is acquired by the caller.
+
+    Pending receipts deliberately require recovery after a cross-file crash:
+    matching bytes cannot prove who wrote a previously unowned value.
+    """
+    import copy
+    settings, receipt = Path(os.path.abspath(settings)), Path(os.path.abspath(receipt))
+    root = str(_source_root(root))
+    old, identity, digest, current = _hook_receipt(settings, receipt, root)
+    updated = copy.deepcopy(current)
+    wanted = _managed_leaf_values(root)
+    owned_leaves, owned_hooks = [], []
+    containers = {tuple(parts) for parts in old["containers"]} if old else set()
+    original = copy.deepcopy(current)
+    old_leaves = {tuple(row["path"]): row["value"] for row in old["leaves"]} if old else {}
+    for parts, value in wanted.items():
+        exists, actual = _leaf_get(updated, parts)
+        if parts in old_leaves:
+            if not exists:
+                continue
+            if actual != old_leaves[parts]:
+                print("recovery: kept user-modified Claude setting " + ".".join(parts))
+                continue
+            _leaf_set(updated, parts, value, remove=remove)
+            if not remove:
+                owned_leaves.append({"path": list(parts), "value": value})
+        elif not remove and not exists and _leaf_set(updated, parts, value):
+            owned_leaves.append({"path": list(parts), "value": value})
+            for length in range(1, len(parts)):
+                if not _leaf_get(original, parts[:length])[0]:
+                    containers.add(parts[:length])
+    hooks = updated.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("Claude settings hooks must be an object")
+    if any(not isinstance(entries, list) for entries in hooks.values()):
+        raise ValueError("Claude hook events must be lists")
+    # Remove only the single recorded hook in its recorded matcher. User hook
+    # siblings and entry metadata survive; ambiguous duplicates stay untouched.
+    for row in old["hooks"] if old else []:
+        event, entry = row["event"], row["entry"]
+        entries = hooks.get(event, [])
+        matches = [(candidate, i) for candidate in entries if isinstance(candidate, dict)
+                   and candidate.get("matcher") == entry.get("matcher")
+                   and isinstance(candidate.get("hooks"), list)
+                   for i, hook in enumerate(candidate["hooks"]) if hook == entry["hooks"][0]]
+        if len(matches) != 1:
+            print("recovery: kept changed or ambiguous Claude hook " + event)
+            continue
+        candidate, index = matches[0]
+        del candidate["hooks"][index]
+        if not candidate["hooks"] and not set(candidate) - {"hooks", "matcher"}:
+            entries.remove(candidate)
+        if not entries:
+            hooks.pop(event, None)
+    if not remove:
+        # Converge only newly constructed rows through the existing merger.
+        # Preexisting user registrations, including identical OMS commands,
+        # remain outside this account's deletion authority.
+        lib = _hook_lib(root)
+        desired = {}
+        lib.converge(desired, manifest["surfaces"], root, [root])
+        for event, entries in desired.items():
+            current_entries = hooks.setdefault(event, [])
+            if not isinstance(current_entries, list):
+                raise ValueError("Claude hooks event must be a list: " + event)
+            for entry in entries:
+                if any(isinstance(candidate, dict) and candidate.get("matcher") == entry.get("matcher")
+                       and isinstance(candidate.get("hooks"), list)
+                       and entry["hooks"][0] in candidate["hooks"] for candidate in current_entries):
+                    continue
+                current_entries.append(entry)
+                owned_hooks.append({"event": event, "entry": entry})
+    if hooks or "hooks" in current:
+        updated["hooks"] = hooks
+        if not remove and "hooks" not in original:
+            containers.add(("hooks",))
+    if remove:
+        for parts in sorted(containers, key=len, reverse=True):
+            exists, value = _leaf_get(updated, parts)
+            if exists and value == {}:
+                _leaf_set(updated, parts, None, remove=True)
+    if remove and old is None:
+        print("claude-settings: no account-owned settings to remove")
+        return
+    row = {"schema": 1, "settings": str(settings), "home_identity": _identity(settings.parent.lstat()),
+           "source_root": root, "hooks_schema": manifest["hooks_schema"], "status": "pending",
+           "settings_identity": identity, "settings_digest": digest, "leaves": owned_leaves, "hooks": owned_hooks,
+           "containers": [] if remove else [list(parts) for parts in sorted(containers)]}
+    if old and old["status"] == ("removed" if remove else "installed") and updated == current:
+        stable = dict(row, status=old["status"])
+        if stable == old:
+            print("claude-settings: already current (account ownership verified)")
+            return
+    if _settings_snapshot(settings)[:2] != (identity, digest):
+        raise ValueError("concurrent Claude settings edit; retry after inspecting user changes")
+    _account_publish(receipt, row)
+    # Intent is durable before the settings write. There is no backup rollback.
+    if _identity(settings.parent.lstat()) != row["home_identity"]:
+        raise ValueError("Claude settings parent changed; preserve pending receipt")
+    if _settings_snapshot(settings)[:2] != (identity, digest):
+        raise ValueError("concurrent Claude settings edit; pending receipt kept for recovery")
+    if updated != current:
+        data = (json.dumps(updated, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        identity, digest = _write_account_settings(settings, data, identity, digest, row["home_identity"])
+    elif _settings_snapshot(settings)[:2] != (identity, digest):
+        raise ValueError("concurrent Claude settings edit; pending ownership kept for recovery")
+    row["settings_identity"], row["settings_digest"] = identity, digest
+    row["status"] = "removed" if remove else "installed"
+    _account_publish(receipt, row)
+    print("claude-settings: " + row["status"] + " account-owned hooks and defaults")
+
+
+def doctor_registered_accounts():
+    doctor_codex_accounts()
+    try:
+        view = load_registered_accounts()
+    except (OSError, ValueError, RuntimeError) as error:
+        print("warn: claude account health unavailable: " + str(error))
+        return
+    entries = view["providers"]["claude"]["accounts"]
+    for row in view["reservations"]:
+        if row["provider"] != "claude":
+            continue
+        prefix = "claude account " + row["id"] + " "
+        try:
+            _effect_home(row)
+            if row["status"] != "installed" or not any(entry["home"] == row["home"] for entry in entries):
+                raise ValueError("pending effects; retry --repair or --remove")
+            hook, _, digest, _ = _hook_receipt(Path(row["settings"]), Path(row["hooks_receipt"]), row["source_root"])
+            if hook is None or hook["status"] != "installed":
+                raise ValueError("settings ownership missing or stale")
+            if digest != hook["settings_digest"] or row["source_root"] != str(Path(__file__).resolve().parents[2]):
+                raise ValueError("settings or source changed; inspect user edits and rerun --repair")
+            source_text = (Path(row["source_root"]) / "scripts/install-claude-hooks.sh").read_text(encoding="utf-8")
+            schema = re.search(r"^HOOKS_SCHEMA=([0-9]+)$", source_text, re.MULTILINE)
+            if schema is None or hook["hooks_schema"] != int(schema.group(1)):
+                raise ValueError("settings schema stale; inspect and rerun --repair")
+            for name in CLAUDE_SHARED_ENTRIES:
+                link = row["links"].get(name)
+                if link is None:
+                    print("warn: " + prefix + "unmanaged integration kept: " + name)
+                    continue
+                path = Path(row["home"]) / name
+                if (_identity(path.lstat()) != link["identity"] or not path.is_symlink()
+                        or not path.exists() or os.readlink(str(path)) != link["target"]):
+                    raise ValueError("link identity or target changed: " + name)
+            print("ok: " + prefix + "integrations installed; login unverified (explicit --verify only)")
+        except (OSError, ValueError, RuntimeError) as error:
+            print("warn: " + prefix + str(error))
+            print("recovery: oms connect-services --account claude:" + row["id"] + " --repair or --remove; preserve ambiguous user data")
+    for entry in entries:
+        if not any(row["provider"] == "claude" and row["home"] == entry["home"] for row in view["reservations"]):
+            print("warn: claude account " + entry["id"] + " ownership missing; preserve its config for recovery")
+
+
+def refresh_registered_accounts():
+    from oms_runtime.common import file_lock
+    with file_lock(_account_paths()[0]):
+        view = _registered_locked(_registration_config(_account_paths()[0]))
+        effects = _claude_effects()
+        if any(not any(row["home"] == entry["home"] for row in effects["accounts"])
+               for entry in view["providers"]["claude"]["accounts"]):
+            raise ValueError("Claude account ownership missing; preserve registry and restore effects for recovery")
+        current = str(Path(__file__).resolve().parents[2])
+        for row in effects["accounts"]:
+            if row["status"] != "installed":
+                raise ValueError("Claude account refresh pending; repair or remove " + row["id"])
+            _effect_home(row)
+            row["status"] = "pending"
+            _account_publish(_claude_paths()[1], effects)
+            _claude_link_apply(row, effects, True, source_root=current)
+            _claude_hooks(row, source_root=current)
+            row["source_root"] = current
+            row["status"] = "installed"
+            _account_publish(_claude_paths()[1], effects)
+
+
+def cleanup_registered_accounts(root, dry_run=False):
+    from oms_runtime.common import file_lock
+    with file_lock(_account_paths()[0]):
+        view = _registered_locked(_registration_config(_account_paths()[0]))
+        effects = _claude_effects()
+        if any(not any(row["home"] == entry["home"] for row in effects["accounts"])
+               for entry in view["providers"]["claude"]["accounts"]):
+            raise ValueError("Claude account ownership missing; uninstall stopped; restore effects for recovery")
+        for row in effects["accounts"]:
+            if row["identity"] is not None:
+                _effect_home(row)
+                _hook_receipt(Path(row["settings"]), Path(row["hooks_receipt"]), row["source_root"])
+        for row in list(effects["accounts"]):
+            _claude_remove_row(row, effects, dry_run)
+            if not dry_run:
+                # Keep the registry until cleanup succeeded, then release the
+                # reservation last. An interrupted cleanup remains discoverable.
+                value = _claude_registry()
+                value["accounts"][:] = [entry for entry in value["accounts"] if entry["home"] != row["home"]]
+                _account_publish(_claude_paths()[0], value)
+                effects["accounts"].remove(row)
+                _account_publish(_claude_paths()[1], effects)
+        registry, receipt = _account_paths()
+        if not os.path.lexists(str(receipt)):
+            _report_account_cleanup(0, {}, 0, dry_run)
+            return
+        _drop_account_links(_link_receipt(receipt), receipt, root=root, dry_run=dry_run)
+        if _link_receipt(receipt) and not dry_run:
+            raise ValueError("Codex account cleanup incomplete; preserve the install and retry account recovery")
+
+
 def connect_codex_account(args):
     from oms_runtime.common import atomic_write_json, file_lock
     ident = args.codex_account
@@ -634,6 +1456,8 @@ def connect_codex_account(args):
     registry, receipt = _account_paths()
     with file_lock(registry):
         value = _registration_config(registry)
+        if not getattr(args, "verify", False):
+            modern = _registered_locked(value)
         rows = _link_receipt(receipt)
         settings = value["providers"].get("codex")
         entries = settings["accounts"] if settings else []
@@ -683,6 +1507,8 @@ def connect_codex_account(args):
             raise ValueError("Codex account home must not be empty")
         home = Path(raw_home).expanduser().resolve()
         main = Path(default_account("codex")["home"])
+        if home != main:
+            _claude_collision(modern, home, ident, "codex")
         if home == main:
             raise ValueError("Codex account home must differ from the main home")
         _outside_repository(home)
@@ -815,30 +1641,28 @@ def _account_command():
     action.add_argument("--remove", action="store_true")
     action.add_argument("--verify", action="store_true")
     commands.add_parser("doctor")
+    commands.add_parser("refresh")
     cleanup = commands.add_parser("cleanup")
     cleanup.add_argument("--root", type=Path, required=True)
     cleanup.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "connect":
-            if not args.account.startswith("codex:"):
-                raise ValueError("account must have the form codex:ID; other providers are not supported yet")
+            if args.account.count(":") != 1 or args.account.split(":")[0] not in REGISTERED_ACCOUNT_PROVIDERS:
+                raise ValueError("account must have the form codex:ID or claude:ID; antigravity and other providers are unsupported")
             if args.verify and (args.home is not None or args.first or args.last):
                 raise ValueError("--verify cannot be combined with --home, --first or --last")
-            args.codex_account = args.account[len("codex:"):]
-            connect_codex_account(args)
-        elif args.command == "doctor":
-            doctor_codex_accounts()
-        else:
-            registry, receipt = _account_paths()
-            if not os.path.lexists(str(receipt)):
-                _report_account_cleanup(0, {}, 0, args.dry_run)
-                return 0
-            if args.dry_run:
-                _drop_account_links(_link_receipt(receipt), receipt, root=args.root.resolve(), dry_run=True)
+            if args.account.startswith("claude:"):
+                connect_claude_account(args)
             else:
-                with file_lock(registry):
-                    _drop_account_links(_link_receipt(receipt), receipt, root=args.root.resolve())
+                args.codex_account = args.account[len("codex:"):]
+                connect_codex_account(args)
+        elif args.command == "doctor":
+            doctor_registered_accounts()
+        elif args.command == "refresh":
+            refresh_registered_accounts()
+        else:
+            cleanup_registered_accounts(args.root.resolve(), args.dry_run)
     except (OSError, ValueError, RuntimeError, CoreError) as error:
         if args.command == "doctor":
             print("warn: Codex account health unavailable: " + str(error))
