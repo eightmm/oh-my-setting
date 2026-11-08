@@ -24376,13 +24376,11 @@ test_fail_ledger_report_privacy_and_preview() {
       fail "ordinary diagnostic text refused: $value"
     if contains "$out" $'\r'; then fail "CRLF was not normalized"; fi
   done
-  for value in 'not-a-public-tool'; do
-    (cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record --cmd "oms $value" --exit 1 >/dev/null 2>&1)
-    fp="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" list --json |
-      python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][-1]["fingerprint"])')"
-    out="$(cd "$project" && OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --from-failure "$fp" --dry-run </dev/null)"
-    contains "$out" 'Verb: unavailable' || fail "unknown or internal tool leaked into verb"
-  done
+  (cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record --cmd "oms not-a-public-tool" --exit 1 >/dev/null 2>&1)
+  fp="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" list --json |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][-1]["fingerprint"])')"
+  out="$(cd "$project" && OMS_REPORT_REPO=sample/oms bash "$ROOT/scripts/report.sh" bug --from-failure "$fp" --dry-run </dev/null)"
+  contains "$out" 'Verb: unavailable' || fail "unknown tool leaked into verb"
   local before
   before="$(cat "$project/.oms/failures.jsonl")"
   for value in '' ' ' $'\t\r\n'; do
