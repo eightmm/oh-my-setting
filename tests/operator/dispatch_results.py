@@ -2121,9 +2121,17 @@ assert newest_route_model("codex", "gpt-6-luna", ["gpt-6.2-luna", "gpt-6.10-luna
 assert newest_route_model("codex", "gpt-6-astra", ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.1-terra"]) == "gpt-6.2-astra"
 assert newest_route_model("codex", "gpt-6.1-terra", ["gpt-5.6-terra", "gpt-6.1-terra", "gpt-6.1-sol"]) == "gpt-6.1-terra"
 assert newest_route_model("claude", "claude-haiku-5-5", ["claude-haiku-5-6", "claude-opus-9-9"]) == "claude-haiku-5-6"
-# BEGIN sole writer review refusal
 codex_only = {"provider": "codex", "binary": "codex", "installed": True, "exact_model_override": True, "access": ["read", "write"], "models": ["gpt-6-sol"],
               "catalog_models": ["gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.3-astra"]}
+
+
+def explicit_codex_route():
+    """Shared setup for the sole-writer case and unmarked fallback checks."""
+    with patch.object(panel, "provider_catalog", return_value=[codex_only]):
+        return panel.selected_route("claude", "worker", None, "read", None, "codex")
+
+
+# BEGIN sole writer review refusal
 with patch.object(panel, "provider_catalog", return_value=[codex_only]):
     assert panel.selected_route("codex", "worker", "deep", "read", "investigate")["model"] == "gpt-6.2-sol"
     assert panel.selected_route("codex", "worker", "light", "read", "explain")["model"] == "gpt-6-luna"
@@ -2133,7 +2141,7 @@ with patch.object(panel, "provider_catalog", return_value=[codex_only]):
         assert "independent review unavailable" in str(error), error
     else:
         raise AssertionError("self-review was selected")
-    explicit = panel.selected_route("claude", "worker", None, "read", None, "codex")
+    explicit = explicit_codex_route()
     assert explicit["provider"] == "codex" and explicit["model"] == "gpt-6.1-terra" and explicit["effort"] == "medium"
 # END sole writer review refusal
 # Like the shell's routable set, a family whose newest member is a major generation behind the newest
@@ -2174,6 +2182,7 @@ assert alternate_route(automatic, both, provider_status={other: {"weekly_used": 
 assert alternate_route(automatic, both, provider_status={}) ["provider"] == other
 assert alternate_route(automatic, both, provider_status={other: {"weekly_used": 90}}) is None
 assert alternate_route(automatic, {"codex", "claude"}, {other: {"weekly_used": 97.2}}) is None
+explicit = explicit_codex_route()
 with patch.object(panel, "selected_route", return_value=explicit), \
         patch.object(panel, "provider_catalog", side_effect=AssertionError("explicit --to queried fallback")), \
         patch.object(panel, "run_dispatch", side_effect=lambda *args, **kwargs: args[-2]):
@@ -2533,6 +2542,13 @@ help_text = call(["bash", str(panel.ENTRY), "panel", "--help"])
 assert "Codex, Claude and Antigravity debate" in help_text, help_text
 # END council help families
 
+main_catalog_rows = [
+    {"provider": "claude", "binary": "claude", "installed": True, "catalog_probe": "unsupported",
+     "models": [], "catalog_models": [], "routable": []},
+    {"provider": "codex", "installed": True, "models": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]},
+]
+argon_catalog = ["gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"]
+
 # BEGIN council extra seats
 (capability_dir / "codex.models").write_text("gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n")
 with patch.object(panel, "provider_catalog", return_value=[
@@ -2543,11 +2559,6 @@ with patch.object(panel, "provider_catalog", return_value=[
         assert "catalog lookup failed" in str(error), error
     else:
         raise AssertionError("missing main provider catalogs accepted")
-main_catalog_rows = [
-    {"provider": "claude", "binary": "claude", "installed": True, "catalog_probe": "unsupported",
-     "models": [], "catalog_models": [], "routable": []},
-    {"provider": "codex", "installed": True, "models": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]},
-]
 for codex_models in ([], ["gpt-6.2-sol", "gpt-6.2-terra", "gpt-6-astra"]):
     with patch.object(panel, "provider_catalog", return_value=[
             main_catalog_rows[0], dict(main_catalog_rows[1], binary="codex", models=codex_models,
@@ -2572,7 +2583,6 @@ for model in (None, "", "gemini-latest", "gemini-4-argon", "gemini-4-argon-ultra
     assert not panel_routing.valid_route({"provider": "antigravity", "model": model, "effort": "high"}), model
 configured_extra = panel.policy()["council"]["extra"][0]
 assert configured_extra["model"] == "gemini-4-argon-high", configured_extra
-argon_catalog = ["gemini-4-argon-" + level for level in ("low", "medium", "high")]
 for configured, routable, resolved, note in (
         ("gemini-3.1-argon-high", argon_catalog, "gemini-4-argon-high", ""),
         (configured_extra["model"], argon_catalog, "gemini-4-argon-high", ""),

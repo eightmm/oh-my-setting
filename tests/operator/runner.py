@@ -1,4 +1,9 @@
-"""One section manifest and fixture execution path for every operator invocation."""
+"""One section manifest and fixture execution path for every operator invocation.
+
+--list reports whole sections and dispatch case units, including the unmarked
+integration remainder. Focused sections and --case keep their existing meaning;
+shards group their dispatch cases in source order under one private fixture.
+"""
 from collections import Counter
 from functools import lru_cache
 import ast
@@ -14,28 +19,68 @@ ROOT = HERE.parent.parent
 SOURCE = ROOT / "tests/operator-tools-smoke.sh"
 # The integration chains retain order within their own files. Everything else
 # starts with a fresh process, directory and explicitly declared fixture.
-# Measured 2026-10-25 (seconds, one host): room-protocol 425, worker-leases 289,
-# dispatch-results 287, room-rollover 193, native-integration 168, dispatch-exit 143,
-# native-pty 99, auto-review 98, shared-cache 64, visual 27, scratch-state 16,
-# dashboard 12, rendering 10, salvage 2. Four-way sums: 465/459/455/454.
+# Costs are rounded medians of the latest four successful per-section timings
+# in land gate logs available 2026-11-08 (one host; source and contention vary).
+# dispatch-results was 906/1211/1117/1340s, rather than the old 287s weight.
+# Sharded dispatch-results timing rows now cover subsets; refresh its total
+# from a serial section timing or the sum of all shards, not one subset row.
 # core/room-protocol stays one section: its later phases reuse the state its
 # earlier phases build (room_env, shared, main_attempts, plan_cli).
 SECTIONS = (
-    ("core/dashboard", 0, "dashboard.sh"),
-    ("core/visual-and-controls", 1, "visual_and_controls.py"),
-    ("core/room-protocol", 0, "room_protocol.py"),
-    ("core/room-and-board-rendering", 0, "room_and_board_rendering.py"),
-    ("core/native-integration", 2, "native_integration.py"),
-    ("shared-cache", 3, "shared-cache.sh"),
-    ("native-pty", 3, "native_pty.py"),
-    ("dispatch-exit", 1, None),
-    ("worker-leases", 1, "worker_leases.py"),
-    ("dispatch-results", 2, "dispatch_results.py"),
-    ("salvage", 0, "salvage.py"),
-    ("scratch-state", 0, "scratch_state.py"),
-    ("auto-review", 3, "auto_review.py"),
-    ("room-rollover", 3, "room_rollover.py"),
+    ("core/dashboard", 20, "dashboard.sh"),
+    ("core/visual-and-controls", 33, "visual_and_controls.py"),
+    ("core/room-protocol", 879, "room_protocol.py"),
+    ("core/room-and-board-rendering", 19, "room_and_board_rendering.py"),
+    ("core/native-integration", 298, "native_integration.py"),
+    ("shared-cache", 117, "shared-cache.sh"),
+    ("native-pty", 129, "native_pty.py"),
+    ("dispatch-exit", 266, None),
+    ("worker-leases", 587, "worker_leases.py"),
+    ("dispatch-results", 1164, "dispatch_results.py"),
+    ("salvage", 2, "salvage.py"),
+    ("scratch-state", 14, "scratch_state.py"),
+    ("auto-review", 232, "auto_review.py"),
+    ("room-rollover", 338, "room_rollover.py"),
 )
+
+# The unmarked integration chain shares mutable state and stays one unit.
+# Marked cases use the same definitions/literals as --case, once per shard,
+# without replaying that chain. A single successful module-line profile timed
+# all 25 cases plus the remainder in 1480s (1484s wall, traced/contended).
+# These proportions scale to the 1164s gate median; subsecond cases round to
+# 1s. They are placement estimates, not measured speedups. Three setup probes
+# took 1.326..1.392s for fixtures and 0.002..0.003s for shared declarations per
+# dispatch process; allow another 2s per shard beyond the unit-weight sums.
+# Four-way estimated sums with that allowance: 1030/1030/1029/1029s.
+DISPATCH_REMAINDER = "integration remainder"
+DISPATCH_SECONDS = {
+    "continuation round delta": 1,
+    "continued acceptance regression": 1,
+    "results task index": 1,
+    "tier routing": 1,
+    "settled overlap warning": 1,
+    "continuation admission hint": 1,
+    "continuation route provenance": 1,
+    "continuation outbound temporary file": 1,
+    "verify selector validation": 1,
+    "sole writer review refusal": 1,
+    "pinned judge result label": 3,
+    "explicit judge families": 1,
+    "family exclusion quota": 1,
+    "council resolved catalog model": 1,
+    "council help families": 1,
+    "council extra seats": 4,
+    "council prompt defaults": 7,
+    "council lens seats": 33,
+    "finalized survey next-ready projection": 1,
+    "finalized survey plan hint": 1,
+    "reviewed-result acceptance composition": 223,
+    "patch-scope finalize regression": 6,
+    "Provider account routing": 1,
+    "Provider account execution": 481,
+    "Provider account retry evidence": 1,
+    DISPATCH_REMAINDER: 401,
+}
 
 
 def shard(spec):
@@ -59,7 +104,22 @@ def requested_sections(spec):
 
 def selected(spec):
     index, total = shard(spec)
-    return [name for name, bucket, _ in SECTIONS if bucket % total == index - 1]
+    names = {name for name, _, bucket in assignments(total) if bucket == index}
+    return [name for name, _, _ in SECTIONS if name in names]
+
+
+def assignments(total):
+    shard("1/%s" % total)
+    units = [(name, None, seconds) for name, seconds, _ in SECTIONS if name != "dispatch-results"]
+    units += [("dispatch-results", case, seconds) for case, seconds in DISPATCH_SECONDS.items()]
+    loads, placed = [0] * total, {}
+    # Longest-first placement keeps the indivisible stateful chains together
+    # while filling the remaining capacity with independent dispatch cases.
+    for name, case, seconds in sorted(units, key=lambda unit: -unit[2]):
+        bucket = min(range(total), key=lambda index: loads[index])
+        loads[bucket] += seconds
+        placed[name, case] = bucket + 1
+    return [(name, case, placed[name, case]) for name, case, _ in units]
 
 
 def body(name):
@@ -149,6 +209,26 @@ def case_body(name, case):
         keep.update(range(first, node.end_lineno + 1))
     # Blank lines elsewhere keep traceback numbers equal to the file's lines.
     return "\n".join(line if number in keep else "" for number, line in enumerate(code.splitlines(), 1)) + "\n", filename
+
+
+def dispatch_body(spec):
+    index, total = shard(spec)
+    cases = [case for name, case, bucket in assignments(total)
+             if name == "dispatch-results" and bucket == index]
+    code, filename = body("dispatch-results")
+    markers = case_markers(code)
+    if set(DISPATCH_SECONDS) != set(markers) | {DISPATCH_REMAINDER}:
+        raise ValueError("dispatch case costs differ from the case manifest")
+    # Union the existing standalone extraction, retaining source order and line
+    # numbers. One fixture per shard amortizes setup across its selected cases.
+    extracted = [case_body("dispatch-results", case)[0].splitlines()
+                 for case in cases if case != DISPATCH_REMAINDER]
+    unmarked = set(range(1, len(code.splitlines()) + 1))
+    for begin, end in markers.values():
+        unmarked.difference_update(range(begin, end + 1))
+    return "\n".join(line if any(part[number - 1] for part in extracted)
+                     or DISPATCH_REMAINDER in cases and number in unmarked else ""
+                     for number, line in enumerate(code.splitlines(), 1)) + "\n", filename
 
 
 def module_names(code, filename, lines=None):
@@ -263,21 +343,28 @@ def self_check(total):
         raise ValueError("dispatch-exit traceback lines differ from the source file")
     for filename in expected - set(files):
         ast.parse((HERE / filename).read_text(encoding="utf-8"), filename)
-    assignments = [name for index in range(1, total + 1) for name in selected("%s/%s" % (index, total))]
-    if Counter(assignments) != Counter(names):
-        raise ValueError("operator sections are unassigned or duplicated")
+    expected_units = [(name, None) for name in names if name != "dispatch-results"]
+    expected_units += [("dispatch-results", case) for case in case_markers(body("dispatch-results")[0])]
+    expected_units.append(("dispatch-results", DISPATCH_REMAINDER))
+    if Counter((name, case) for name, case, _ in assignments(total)) != Counter(expected_units):
+        raise ValueError("operator execution units are unassigned or duplicated")
     if selected("1/1") != names or requested_sections(",".join(names)) != names:
         raise ValueError("serial and focused section manifests differ")
     execution_contract(total)
     parsed.cache_clear()
     fixture_names.cache_clear()
     case_markers.cache_clear()
-    return [(name, bucket % total + 1) for name, bucket, _ in SECTIONS]
+    # --list describes execution units; the remainder is not a standalone --case.
+    return [(name + (" [" + case + "]" if case is not None else ""), bucket)
+            for name, case, bucket in assignments(total)]
 
 
-def execute(name, temporary, case=None):
+def execute(name, temporary, case=None, spec=None):
     # Refuse unsupported selectors before initializing section fixtures.
-    code, filename = case_body(name, case) if case is not None else body(name)
+    if spec is not None:
+        code, filename = dispatch_body(spec)
+    else:
+        code, filename = case_body(name, case) if case is not None else body(name)
     os.chdir(temporary)
     namespace = {"root": ROOT, "temporary": temporary, "section": name}
     fixture = HERE / "fixtures.py"
@@ -294,7 +381,7 @@ def execute(name, temporary, case=None):
         exec(compile(code, filename, "exec"), namespace)
 
 
-def run_sections(names, temporary, case=None):
+def run_sections(names, temporary, case=None, spec=None):
     partial, failure = False, 0
     for name in names:
         socket_denied = os.environ.get("OMS_OPERATOR_SOCKET_DENIED") == "1"
@@ -317,6 +404,9 @@ def run_sections(names, temporary, case=None):
             command = [sys.executable, str(HERE / "runner.py"), "--execute", str(directory), name]
             if case is not None:
                 command += ["--case", case]
+            elif name == "dispatch-results" and spec is not None and shard(spec)[1] > 1:
+                command[2] = "--execute-shard"
+                command.append(spec)
         print("operator-section: " + name + " started", flush=True)
         result = subprocess.run(command, cwd=directory)
         elapsed = int(time.monotonic() - started)
@@ -361,7 +451,7 @@ def execution_contract(total):
             assert "before_edit" in provided_names() and "after_edit" not in provided_names()
             (fixtures / "helpers.py").write_text("after_edit = 1\n", encoding="utf-8")
             assert "after_edit" in provided_names(), "fixture cache reused source from before an edit"
-        for mode in ("serial", "sharded", "focused", "failure"):
+        for mode in ("serial", "focused", "failure"):
             observed = {}
             parent = Path(directory) / mode
             parent.mkdir()
@@ -372,14 +462,82 @@ def execution_contract(total):
                 observed[name] = [part.replace(str(cwd), "{fixture}") for part in command]
                 return subprocess.CompletedProcess(command, int(mode == "failure" and name == names[0]))
 
-            groups = ([selected("%s/%s" % (i, total)) for i in range(1, total + 1)]
-                      if mode == "sharded" else [[name] for name in names] if mode == "focused" else [names])
+            groups = [[name] for name in names] if mode == "focused" else [names]
             with patch.object(subprocess, "run", side_effect=launch):
                 results = [run_sections(group, parent) for group in groups]
             assert set(observed) == set(names), (mode, observed)
             assert results == ([1] if mode == "failure" else [0] * len(groups)), (mode, results)
             manifests.append(observed)
     assert all(manifest == manifests[0] for manifest in manifests), "fixture launches depend on selection mode"
+    with tempfile.TemporaryDirectory(prefix="oms-operator-contract-") as directory, \
+            patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
+        observed = []
+        for index in range(1, total + 1):
+            spec = "%s/%s" % (index, total)
+            parent = Path(directory) / str(index)
+            parent.mkdir()
+
+            def launch(command, cwd):
+                name = next(name for name in names if name.replace("/", "-") == cwd.name)
+                normalized = [part.replace(str(cwd), "{fixture}") for part in command]
+                expected = list(manifests[0][name])
+                if name == "dispatch-results" and total > 1:
+                    expected[2] = "--execute-shard"
+                    expected.append(spec)
+                assert normalized == expected, (spec, name, normalized)
+                observed.append(name)
+                return subprocess.CompletedProcess(command, int(name == "dispatch-results"))
+
+            with patch.object(subprocess, "run", side_effect=launch):
+                result = run_sections(selected(spec), parent, spec=spec)
+            assert result == int("dispatch-results" in selected(spec)), (spec, result)
+        assert Counter(observed) == Counter(name for name, _, _ in SECTIONS
+                                            if name != "dispatch-results") + Counter({"dispatch-results": total})
+
+    code, filename = body("dispatch-results")
+    markers = case_markers(code)
+    bodies = [dispatch_body("%s/%s" % (index, total))[0].splitlines() for index in range(1, total + 1)]
+    assert set(DISPATCH_SECONDS) == set(markers) | {DISPATCH_REMAINDER}
+    for case, (begin, end) in markers.items():
+        owners = [index for index, part in enumerate(bodies)
+                  if all(part[number - 1] == line for number, line in enumerate(code.splitlines(), 1)
+                         if begin < number < end)]
+        assert len(owners) == 1, (case, owners)
+    marked = {number for begin, end in markers.values() for number in range(begin, end + 1)}
+    for node in parsed(code, filename).body:
+        if node.lineno in marked or isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef,
+                                                      ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign)):
+            continue
+        # Shared declarations may repeat; unmarked assertions and integration
+        # calls must still run exactly once, rather than vanish with the cases.
+        assert sum(bool(part[node.lineno - 1]) for part in bodies) == 1, node.lineno
+    for index in range(1, total + 1):
+        extracted, filename = dispatch_body("%s/%s" % (index, total))
+        chosen = [case for name, case, bucket in assignments(total)
+                  if name == "dispatch-results" and bucket == index]
+        lines = {number for case, (begin, end) in markers.items() if case in chosen
+                 for number in range(begin + 1, end)}
+        if DISPATCH_REMAINDER in chosen:
+            lines |= set(range(1, len(code.splitlines()) + 1)) - marked
+        bound, loaded = module_names(extracted, filename, lines)
+        assert not loaded - bound - provided_names(), (index, sorted(loaded - bound - provided_names()))
+    if total == 4:
+        assert all("dispatch-results" in selected("%s/4" % index) for index in range(1, 5))
+    for costs in ({}, {"unknown case": 0}):
+        with patch.dict(globals(), DISPATCH_SECONDS=costs):
+            try:
+                dispatch_body("1/4")
+            except ValueError as error:
+                assert str(error) == "dispatch case costs differ from the case manifest", error
+            else:
+                raise AssertionError("incomplete dispatch case costs accepted")
+    for invalid in ("", "0/4", "1/0", "1/5", "5/4", "x/4"):
+        try:
+            selected(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid shard accepted: " + invalid)
     shell_source = "# BEGIN shell case\nprintf 'must not execute'\n# END shell case\n"
     with patch.dict(globals(), body=lambda _: (shell_source, "fixture.sh"), self_check=lambda _: None), \
             patch.object(ast, "parse", side_effect=AssertionError("shell case parsed as Python")), \
@@ -422,9 +580,11 @@ def main(args):
     elif mode == "--execute" and len(args) in {3, 5} and args[3:4] in ([], ["--case"]):
         name = requested_sections(args[2])[0]
         execute(name, Path(args[1]), args[4] if len(args) == 5 else None)
+    elif mode == "--execute-shard" and len(args) == 4 and args[2] == "dispatch-results":
+        execute(args[2], Path(args[1]), spec=args[3])
     elif mode == "--run-shard" and len(args) == 3:
         self_check(shard(args[2])[1])
-        return run_sections(selected(args[2]), Path(args[1]))
+        return run_sections(selected(args[2]), Path(args[1]), spec=args[2])
     elif mode == "--run-sections" and len(args) in {3, 5} and args[3:4] in ([], ["--case"]):
         self_check(4)
         names = requested_sections(args[2])
@@ -443,7 +603,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except (ValueError, StopIteration) as error:
-        if sys.argv[1:2] == ["--execute"]:
+        if sys.argv[1:2] in (["--execute"], ["--execute-shard"]):
             raise
         print("error: " + str(error), file=sys.stderr)
         sys.exit(2)
