@@ -47,9 +47,20 @@ trap_file = temporary / 'salvage-git-executed'
 trap_command = 'touch ' + shlex.quote(str(trap_file))
 for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
     subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', key, trap_command], check=True)
-with patch.dict(os.environ, {'MSYSTEM': 'fixture', 'OMS_DELEGATE_WORKTREE_ROOT': str(salvage_registry)}), \
-        patch.object(panel_salvage.subprocess, 'run', side_effect=AssertionError('unexpected path conversion')):
-    assert panel_salvage._worktree_root() == salvage_registry
+# A well-formed marker naming another repository must not pass identity validation.
+marker_path = salvage_tree.parent / '.oh-my-setting-tmp'
+marker_before = marker_path.read_bytes()
+try:
+    marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\nrepo=%s\nworktree=%s\n' % (project, salvage_tree))
+    with patch.dict(os.environ, {'OMS_DELEGATE_WORKTREE_ROOT': str(salvage_registry)}):
+        try:
+            panel_salvage._managed(salvage_execution_repo, str(salvage_tree))
+        except ValueError as error:
+            assert 'does not belong' in str(error), error
+        else:
+            raise AssertionError('foreign marker repository passed identity validation')
+finally:
+    marker_path.write_bytes(marker_before)
 
 index_path = panel_salvage._git_directory(salvage_tree) / 'index'
 index_before = index_path.read_bytes()
