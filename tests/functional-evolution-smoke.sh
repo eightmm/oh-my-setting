@@ -1717,14 +1717,19 @@ if os.name != 'nt':
     for name in siblings:
         (plan_dir / name).unlink()
 
-    # Keep the capture predicate aligned with the engine's authority guard,
-    # rather than allowing another state list to drift independently.
+    # Keep the capture predicate aligned with the guard that actually requires
+    # the lease; preceding state refusals do not define live lease authority.
     import ast
     engine = ast.parse((root / 'scripts/lib/agent_plan_core.py').read_text())
     block = next(node for node in ast.walk(engine) if isinstance(node, ast.If) and
                  ast.dump(node.test) == ast.dump(ast.parse('act == "block"', mode='eval').body))
-    guard = next(node for node in block.body if isinstance(node, ast.If) and
-                 isinstance(node.test, ast.Compare))
+    lease_call = ast.dump(ast.parse('require_current_lease(t)', mode='eval').body)
+    guards = [node for node in block.body if isinstance(node, ast.If) and
+              isinstance(node.test, ast.Compare) and
+              any(ast.dump(child) == lease_call for child in ast.walk(node))]
+    assert len(guards) == 1, 'block must have one live lease authority guard'
+    guard = guards[0]
+    assert len(guard.test.ops) == 1 and isinstance(guard.test.ops[0], ast.In)
     active_states = ast.literal_eval(guard.test.comparators[0])
     assert isinstance(active_states, tuple) and active_states
     # A completed/blocked/cancelled task retains its lease as history; only
