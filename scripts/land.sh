@@ -42,7 +42,7 @@ outside the repo:
   push    git push --no-verify REMOTE VERIFIED_SHA:TARGET, only if HEAD and the tree
           are unchanged since the gate started
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
-          seconds (default 2700; 0 skips; needs gh)
+          seconds (default 2700; 0 skips; gh or public OMS API fallback)
   update  only after CI success plus full proof for the SHA: a full local
           gate (gate.scope=full) or a CI run whose jobs show the full
           selection (ci.scope=full; an affected-only or unreadable run

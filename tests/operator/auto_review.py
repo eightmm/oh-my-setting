@@ -57,6 +57,65 @@ assert __import__("panel_routing").alternate_route(route, {"codex", "antigravity
 # BEGIN writer-model-independence
 import panel_dispatch as judge_dispatch
 import panel_routing as judge_routing
+judge_room = room.create(project, "writer-model-room", "Writer model routing fixtures")
+judge_main = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                   "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                   "--ref", "panel_room_id=" + judge_room, "--ref", "panel_model=gpt-6.1-sol",
+                   "--then", "starting", "--then", "working"]).strip()
+room.join(project, judge_room, judge_main, "claude", "main", model="gpt-6.1-sol")
+judge_env = dict(environment, OMS_ROOM_ID=judge_room, OMS_ROOM_REPO=str(project),
+                 OMS_ROOM_PARTICIPANT=judge_main, OMS_PANEL_MAIN_ATTEMPT=judge_main, OMS_AGENT="claude")
+# Native fallbacks still apply without recorded model evidence; a harness name
+# must not hide a recorded GPT model from independent-review routing.
+judge_catalog = [dict(provider=provider, installed=True, binary=provider, access=["read", "write"],
+                      catalog_models=[], models=[], exact_model_override=True)
+                 for provider in ("codex", "claude")]
+for main_owner, main_model, expected in (("claude", None, "codex"),
+                                       ("codex", None, "claude"),
+                                       ("claude", "claude-opus-5-5", "codex"),
+                                       ("claude", "gpt-6.1-sol", "claude"),
+                                       ("pi", "anthropic/claude-opus-5-5", "codex"),
+                                       ("pi", "openai/gpt-6.1-sol", "claude"),
+                                       ("antigravity", "claude-opus-5-5", "codex")):
+    expected_family = "openai" if expected == "claude" else "anthropic"
+    selected = allocate(main_owner, role="reviewer", installed={"claude", "codex"},
+                        owner_model=main_model)
+    assert selected["owner"] == main_owner and selected["provider"] == expected, selected
+    assert selected["judged_family"] == expected_family, selected
+    with patch.object(panel, "provider_catalog", side_effect=lambda selection: [
+            row for row in judge_catalog if row["provider"] in selection.split(",")]), \
+            patch.object(panel, "active_mains", return_value={judge_main: {"refs": {"panel_model": main_model}}}), \
+            patch.dict(os.environ, judge_env, clear=True):
+        selected = panel.selected_route(main_owner, "reviewer", None, "read", None,
+                                        repo=project, routing_readings={})
+        if main_owner == "claude" and main_model == "gpt-6.1-sol":
+            for target, exact_model in (("codex", "gpt-6.1-sol"), ("claude", "claude-opus-5-5")):
+                pinned = panel.selected_route(main_owner, "reviewer", None, "read", None,
+                                              target=target, model=exact_model, repo=project, routing_readings={})
+                assert pinned["provider"] == target and pinned["judged_family"] == "openai", pinned
+                assert pinned.get("judge_note") == ("same-family judge (owner-pinned)" if target == "codex" else None), pinned
+    assert selected["owner"] == main_owner and selected["provider"] == expected, selected
+    assert selected["judged_family"] == expected_family, selected
+# CLI preflight receives the source checkout; Main evidence belongs to the
+# inherited canonical room repository even when the reviewer reads elsewhere.
+judge_source = temporary / "judge-source"
+subprocess.run(["git", "clone", "--quiet", "--local", "--no-hardlinks", str(project), str(judge_source)], check=True)
+preview = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(judge_source),
+                           "--room", judge_room, "--dispatch", "reviewer", "--owner", "claude",
+                           "--prompt", "Review value.txt.", "--verify", "test -f value.txt", "--dry-run"], judge_env))
+assert preview["route"]["owner"] == "claude" and preview["route"]["provider"] == "claude", preview
+assert preview["route"]["judged_family"] == "openai", preview
+assert preview["argv"][preview["argv"].index("--repo") + 1] == str(judge_source), preview
+try:
+    allocate("claude", role="reviewer", installed={"codex"}, owner_model="gpt-6.1-sol")
+except ValueError as error:
+    assert "independent review unavailable" in str(error), error
+else:
+    raise AssertionError("GPT harness silently accepted a same-family reviewer")
+selected = allocate("claude", role="reviewer", installed={"codex"}, owner_model="gpt-6.1-sol",
+                    explicit_target=True)
+assert selected["provider"] == "codex" and selected["judged_family"] == "openai", selected
+assert selected["judge_note"] == "same-family judge (owner-pinned)", selected
 for provider in ("pi", "opencode", "antigravity"):
     for model in (None, "", "malformed"):
         try:
@@ -79,18 +138,23 @@ for owner in ("pi", "antigravity"):
     alternate = judge_routing.alternate_route(primary, {"claude", "antigravity"},
         {"claude": {"weekly_used": 10}}, resolve_accounts=False)
     assert alternate["provider"] == "antigravity", alternate
-attempt = {"attempt_id": "writer", "task_id": "task", "provider": "pi", "refs": {
-    "panel_alias": "W1", "panel_access": "write", "panel_room_id": "room",
-    "panel_model": "openai/gpt-6.1-sol"}}
 artifact = {"attempt_id": "writer", "patch": "patch.diff", "patch_sha256": "digest", "base_sha": "base"}
-with patch.object(judge_dispatch.room, "resolve", return_value="room"), \
-        patch.object(judge_dispatch.room, "same_room", return_value=True), \
-        patch.object(panel, "events", return_value=json.dumps([attempt])), \
-        patch.object(panel_result_store, "_records", return_value=([attempt], [artifact])):
-    _, writer = judge_dispatch.room_history(project, "claude", "task",
-        {"patch": "patch.diff", "sha256": "digest", "base": "base"}, "room")
-    assert writer == "pi" and writer.model == "openai/gpt-6.1-sol", writer
-    assert allocate("claude", role="reviewer", installed={"codex", "claude"}, writer=writer)["provider"] == "claude"
+for provider in ("pi", "claude"):
+    attempt = {"attempt_id": "writer", "task_id": "task", "provider": provider, "refs": {
+        "panel_alias": "W1", "panel_access": "write", "panel_room_id": judge_room,
+        "panel_model": "openai/gpt-6.1-sol"}}
+    with patch.object(panel, "events", return_value=json.dumps([attempt])), \
+            patch.object(panel_result_store, "_records", return_value=([attempt], [artifact])), \
+            patch.object(panel, "provider_catalog", return_value=judge_catalog), \
+            patch.object(panel, "active_mains", return_value={judge_main: {"refs": {"panel_model": "claude-opus-5-5"}}}), \
+            patch.dict(os.environ, judge_env, clear=True):
+        candidate = {"patch": "patch.diff", "sha256": "digest", "base": "base"}
+        _, writer = judge_dispatch.room_history(project, "claude", "task", candidate, judge_room)
+        assert writer == provider and writer.model == "openai/gpt-6.1-sol", writer
+        selected = panel.selected_route("claude", "reviewer", None, "read", None,
+                                        repo=project, room_id=judge_room, task_id="task", candidate=candidate,
+                                        routing_readings={})
+        assert selected["provider"] == "claude" and selected["judged_family"] == "openai", selected
 # END writer-model-independence
 # BEGIN independent-antigravity-boundaries
 import panel_routing as judge_routing
@@ -124,7 +188,7 @@ with patch.object(family_routing, "model_family", side_effect=lambda provider, m
 shared_before_auto, room_env_before_auto = shared, room_env
 shared = room.create(project, "auto-review-room", "Automatic review fixtures")
 room.join(project, shared, room_owner, "claude", "main", model="claude-opus-5-5")
-room_env = dict(room_env, OMS_ROOM_ID=shared)
+room_env = dict(room_env, OMS_ROOM_ID=shared, OMS_AGENT="claude")
 import panel_review as panel_review_impl
 Path(room_env["XDG_STATE_HOME"]).mkdir(mode=0o700, parents=True, exist_ok=True)
 Path(room_env["XDG_STATE_HOME"]).chmod(0o700)
@@ -218,7 +282,9 @@ assert prior_prompt([prior_event], unsafe_finding + "\nGATE: fail") == ""
 other_event = dict(prior_event, task_id="other-task")
 assert prior_prompt([other_event], "P1: old\nGATE: fail") == ""
 
-candidate_root = Path.home() / "candidate-fixture"
+# This string is screened, not opened: exercise a known home-prefix rule
+# without inheriting the test runner's HOME (which may be /root or a temp dir).
+candidate_root = Path("/hom" + "e/oms-fixture/candidate-fixture")
 candidate_digest = "a" * 64
 candidate_event = dict(prior_event, patch_sha256=candidate_digest)
 candidate_outcome = dict(prior_row, kind="review-outcome", review={"gate_verify_exit": 0,
@@ -236,7 +302,7 @@ with patch.object(room, "structured_events", return_value=[candidate_event]), \
         assert panel_review_impl._prior_gate_findings(project, shared, prior_task) == ""
     candidate_outcome["review"]["candidate"]["patch_sha256"] = "b" * 64
     assert panel_review_impl._prior_gate_findings(project, shared, prior_task) == ""
-auto_task, auto_call, auto_attempt = "auto-review-task", "call-aaaaaaaaaaaaaaaa", "attempt-auto-review-fixture"
+auto_task, auto_call = "auto-review-task", "call-aaaaaaaaaaaaaaaa"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
 # BEGIN automatic-review-tier-cap
@@ -293,9 +359,15 @@ for fixture_call in (auto_call, fixture_call_id("auto-review-off"), fixture_call
                          "review-gate-timeout", "review-gate-completed-fail", "review-gate-last-fail", "review-gate-fenced-suffix",
                          "review-gate-guard-stop", "review-gate-fail-guard-text", "review-gate-missing"))):
     room.join(project, shared, fixture_call, "codex", "worker", parent=room_owner)
-auto_attempt = {"attempt_id": auto_attempt, "task_id": auto_task,
-                "refs": {"panel_room_id": shared, "panel_room_participant": auto_call,
-                         "panel_role": "worker", "panel_access": "write"}}
+# Record the Codex writer through the lifecycle API so candidate linkage, not
+# the caller's ambient native CLI, determines the independent reviewer.
+auto_attempt_id = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                        "start", "--provider", "codex", "--tool", "peer-delegate", "--task-id", auto_task,
+                        "--ref", "panel_room_id=" + shared, "--ref", "panel_room_participant=" + auto_call,
+                        "--ref", "panel_alias=W1", "--ref", "panel_role=worker", "--ref", "panel_access=write",
+                        "--ref", "panel_model=gpt-6.1-sol"]).strip()
+auto_attempt = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project),
+                                "show", "--attempt", auto_attempt_id, "--json"]))
 auto_index = {"kind": "delegate", "attempt_id": auto_attempt["attempt_id"], "task_id": auto_task,
               "artifact": auto_artifact, "patch": auto_patch_path, "patch_sha256": auto_digest,
               "artifact_sha256": hashlib.sha256(auto_artifact_file.read_bytes()).hexdigest(),
@@ -309,18 +381,9 @@ def fixture_dispatch(*args, **kwargs):
     actual_dispatch_calls.append((args, kwargs))
     return 0
 from panel_routing import command as routed_command
-catalog_rows = [dict(provider=provider, installed=provider == "codex", binary=provider, access=["read", "write"],
+catalog_rows = [dict(provider=provider, installed=True, binary=provider, access=["read", "write"],
                      catalog_models=[], models=[], exact_model_override=True)
                 for provider in ("codex", "claude")]
-for main_owner, main_model, expected in (("pi", "anthropic/claude-opus-5-5", "codex"),
-                                       ("pi", "openai/gpt-6.1-sol", "claude"),
-                                       ("antigravity", "claude-opus-5-5", "codex")):
-    with patch.object(panel, "provider_catalog", return_value=[dict(row, installed=True) for row in catalog_rows]), \
-            patch.object(panel, "active_mains", return_value={room_owner: {"refs": {"panel_model": main_model}}}), \
-            patch.dict(os.environ, room_env, clear=True):
-        selected = panel.selected_route(main_owner, "reviewer", None, "read", None,
-                                        repo=project, routing_readings={})
-    assert selected["owner"] == main_owner and selected["provider"] == expected, selected
 with patch.object(panel, "provider_catalog", return_value=catalog_rows):
     route = panel.selected_route("claude", "reviewer", None, "read", None, repo=project)
 review_prompt = "Review task auto-review-task. Read repo-relative patch .oms/artifacts/fixture/change.patch.\nDo not apply it."
@@ -364,7 +427,8 @@ with patch.object(panel_result_store, "_records", return_value=([auto_attempt], 
     assert "do not regenerate it with git diff" in prompt and "direct callers and callees, and their existing tests" in prompt
     assert dispatch_args[2:4] == ("reviewer", "read")
     assert dispatch_args[10]["workload"] == "deep", dispatch_args[10]
-    assert dispatch_args[10]["provider"] != "claude", dispatch_args[10]
+    assert dispatch_args[1] == "claude", dispatch_args
+    assert dispatch_args[10]["provider"] == "claude" and dispatch_args[10]["judged_family"] == "openai", dispatch_args[10]
     assert set(dispatch_kwargs) == {"candidate", "routing_report", "routing_repo", "fallback_decision",
                                  "route_provenance"}, dispatch_kwargs
     assert dispatch_kwargs["fallback_decision"] == "alternate-not-routable", dispatch_kwargs
