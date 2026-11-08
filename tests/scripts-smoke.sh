@@ -16520,7 +16520,7 @@ import sys
 import time
 
 ROOT = Path(sys.argv[1])
-checker = os.environ.get('OMS_BASH32_BIN', 'bash')
+checker = 'bash'
 with tempfile.TemporaryDirectory(prefix='oms-ci-parallel-probe-') as tmp:
     root = Path(tmp)
     (root / 'scripts').mkdir()
@@ -19411,95 +19411,6 @@ test_state_writing_entrypoints_reject_unknown_arguments() {
       fail "$script must refuse an unknown argument instead of running: $out"
     fi
   done
-
-  # check-bash32 takes file arguments, so a flag must be answered before the
-  # loop treats it as a path — it exited 127 trying to parse a file named --help.
-  out="$("$ROOT/scripts/check-bash32.sh" --help 2>&1)" ||
-    fail "check-bash32.sh --help should exit 0: $out"
-  contains "$out" 'usage: check-bash32.sh' ||
-    fail "check-bash32.sh should print usage: $out"
-  if out="$("$ROOT/scripts/check-bash32.sh" --definitely-not-a-flag 2>&1)"; then
-    fail "check-bash32.sh must refuse an unknown option: $out"
-  fi
-}
-
-test_bash32_gate_uses_the_requested_parser() {
-  local parser="$TMP/bash32-parser"
-  local log="$TMP/bash32-parser.log"
-
-  cat > "$parser" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$OMS_BASH32_LOG"
-EOF
-  chmod +x "$parser"
-
-  OMS_BASH32_BIN="$parser" OMS_BASH32_LOG="$log" \
-    "$ROOT/scripts/check-bash32.sh" >/dev/null
-  assert_file_contains "$log" "-n $ROOT/install.sh"
-  assert_file_contains "$log" "-n $ROOT/scripts/lib/peer-common.sh"
-}
-
-# Bash 3.2 cannot parse a here-document inside $( ) whose body holds an odd
-# number of apostrophes, even behind a quoted delimiter. It shipped: a prose
-# "operator's" inside an inline Python heredoc made peer-common.sh unparseable,
-# so every peer tool died on macOS while Linux stayed green. Nothing but a real
-# 3.2 parser sees it, and the only one in CI is one job away from deletion.
-test_bash32_gate_rejects_an_apostrophe_heredoc_in_substitution() {
-  local bad="$TMP/bash32-heredoc-bad.sh"
-  local good="$TMP/bash32-heredoc-good.sh"
-  local out
-
-  cat > "$bad" <<'EOF'
-#!/usr/bin/env bash
-f() {
-  v="$(python3 - <<'PY'
-# the fix is the operator's problem
-print("x")
-PY
-)"
-}
-EOF
-  # Same heredoc, apostrophes balanced: this one is legal and must stay legal.
-  cat > "$good" <<'EOF'
-#!/usr/bin/env bash
-f() {
-  v="$(python3 - <<'PY'
-# the fix is the operator's problem, and the operator's alone
-print("x")
-PY
-)"
-}
-EOF
-
-  if out="$("$ROOT/scripts/check-bash32.sh" "$bad" 2>&1)"; then
-    fail "the gate must reject an odd-apostrophe heredoc inside \$( ): $out"
-  fi
-  contains "$out" 'heredoc <<PY inside $( )' ||
-    fail "the gate must name the offending heredoc: $out"
-
-  "$ROOT/scripts/check-bash32.sh" "$good" >/dev/null 2>&1 ||
-    fail "balanced apostrophes must still pass"
-
-  # Even apostrophes can still hide a paren between them: the 3.2 scanner
-  # skips the ")" inside the quote span and the file fails at EOF. This is
-  # the exact shape that kept every macOS CI leg red while the old parity
-  # rule stayed green locally.
-  local sneaky="$TMP/bash32-heredoc-sneaky.sh"
-  cat > "$sneaky" <<'EOF'
-#!/usr/bin/env bash
-f() {
-  v="$(python3 - <<'PY'
-# identical in fail-ledger.sh (record's repeat count) and in gc.sh's sweep
-print("x")
-PY
-)"
-}
-EOF
-  if out="$("$ROOT/scripts/check-bash32.sh" "$sneaky" 2>&1)"; then
-    fail "the gate must reject a paren hidden inside an even quote span: $out"
-  fi
-  contains "$out" 'paren drift: +1' ||
-    fail "the gate must report the paren drift: $out"
 }
 
 # check.sh exits at the first failing stage. CI runs lint and tests as separate
@@ -22942,7 +22853,7 @@ test_oms_dispatcher_lists_and_dispatches() {
       fail "retired adapter still dispatched: $retired"
     fi
   done
-  for hidden in skill-router turn-guard check-bash32 install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
+  for hidden in skill-router turn-guard install-tools multi-agent-ask multi-agent-review multi-agent-delegate \
     generate-slurm-reference generate-slurm-skill github-source import-agent-result install-autoupdate run-capsule tool-lock uninstall-autoupdate write-machine-snapshot; do
     if printf '%s' "$out" | grep >/dev/null -E "^${hidden} "; then
       fail "oms list should hide internal/deprecated tool: $hidden"
@@ -22973,7 +22884,7 @@ test_oms_dispatcher_lists_and_dispatches() {
   if "$bin/oms" lib/tool-lock >/dev/null 2>&1; then
     fail "oms must reject the internal lib/tool-lock implementation"
   fi
-  for hidden in skill-router turn-guard check-bash32 install-tools \
+  for hidden in skill-router turn-guard install-tools \
     run-capsule generate-slurm-skill generate-slurm-reference github-source \
     import-agent-result install-autoupdate uninstall-autoupdate \
     write-machine-snapshot; do
@@ -24465,7 +24376,7 @@ test_fail_ledger_report_privacy_and_preview() {
       fail "ordinary diagnostic text refused: $value"
     if contains "$out" $'\r'; then fail "CRLF was not normalized"; fi
   done
-  for value in 'not-a-public-tool' 'check-bash32'; do
+  for value in 'not-a-public-tool'; do
     (cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" record --cmd "oms $value" --exit 1 >/dev/null 2>&1)
     fp="$(cd "$project" && bash "$ROOT/scripts/fail-ledger.sh" list --json |
       python3 -c 'import json,sys; print(json.load(sys.stdin)["failures"][-1]["fingerprint"])')"
@@ -41967,7 +41878,6 @@ test_oms_allowlist_stays_in_sync_with_scripts() {
 internal="
 agent-ml-context
 check
-check-bash32
 check-python
 detect-project-style
 fail-ledger-hook

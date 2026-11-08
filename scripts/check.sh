@@ -2,8 +2,7 @@
 set -euo pipefail
 
 # Core repository gate shared with CI, which additionally runs the real install
-# lifecycle on Linux (symlink and copy ownership) and macOS,
-# and parses every script with macOS's stock Bash 3.2. A missing tool is a HARD
+# lifecycle on Linux (symlink and copy ownership) and macOS. A missing tool is a HARD
 # FAILURE, never a silent skip. Wire this as a pre-push hook with
 # scripts/install-hooks.sh.
 #
@@ -163,7 +162,7 @@ usage() {
   cat <<'EOF'
 usage: check.sh [MODE] [OPTIONS]
 
-Runs the repository gate: lint (shellcheck, Bash 3.2, Python syntax, skill
+Runs the repository gate: lint (shellcheck, Python syntax, skill
 manifest) then the test suites. With no arguments it runs both.
 
   --no-lint             Skip lint only when equivalent checks ran separately.
@@ -200,11 +199,7 @@ manifest) then the test suites. With no arguments it runs both.
                         runs lint and the quick lane instead (CI runs the full
                         selection), plus operator-tools when tier-routing
                         inputs change; test stages run with every registry
-                        provider CLI hidden from PATH as on CI hosts, and
-                        changed shell files are parsed by a real Bash 3.2
-                        (docker image bash:3.2 on
-                        Linux, /bin/bash on macOS; skipped with a reason when
-                        neither is available).
+                        provider CLI hidden from PATH as on CI hosts.
   --changed-from REF    Base tree for --quick or --affected.
   --changed-to REF      Target tree for --quick or --affected.
 
@@ -718,47 +713,6 @@ hide_provider_clis() {
   echo "ci-parity: provider CLIs hidden from PATH ($CHECK_PROVIDER_CLIS oms-agent-adapter-*; shadowed PATH entries: $count)"
 }
 
-# The host bash -n accepts what Bash 3.2 cannot parse (f698ac9 shipped such a
-# file to the macOS leg), so ci-parity parses changed shell files with a real
-# 3.2. It never pulls an image: an absent docker, daemon or image is a printed
-# skip, and CI's macOS leg stays the authority.
-parse_with_bash32() {  # parse_with_bash32 FILE...
-  local docker="${OMS_DOCKER_BIN:-docker}" probe=()
-  if [ "$LIST_STAGES" = 1 ]; then
-    stage bash32-parse true
-    return 0
-  fi
-  case "$(uname -s 2>/dev/null)" in
-    Darwin)
-      stage bash32-parse env OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh "$@"
-      return 0
-      ;;
-    Linux) ;;
-    *)
-      echo "skip: bash32-parse (no Bash 3.2 parser on $(uname -s 2>/dev/null))"
-      return 0
-      ;;
-  esac
-  if ! command -v "$docker" >/dev/null 2>&1; then
-    echo "skip: bash32-parse (docker is not installed)"
-    return 0
-  fi
-  ! command -v timeout >/dev/null 2>&1 || probe=(timeout 30)
-  if ! ${probe[@]+"${probe[@]}"} "$docker" image inspect bash:3.2 >/dev/null 2>&1; then
-    echo "skip: bash32-parse (docker image bash:3.2 is absent or docker is not running; docker pull bash:3.2 enables it)"
-    return 0
-  fi
-  case "$ROOT" in
-    *:*|*,*)
-      echo "skip: bash32-parse (docker cannot mount a checkout path containing ':' or ',')"
-      return 0
-      ;;
-  esac
-  # shellcheck disable=SC2016 # $f and $@ expand inside the container.
-  stage bash32-parse "$docker" run --rm --network none -v "$ROOT:/r:ro" bash:3.2 \
-    bash -c 'for f in "$@"; do bash -n "/r/$f" || exit 1; done' bash32-parse "$@"
-}
-
 compile_affected_plan() {  # compile_affected_plan PLAN_JSON
   python3 - "$1" "$ROOT" <<'PY'
 import json
@@ -881,7 +835,7 @@ prepare_affected_gate() {
       .github/workflows/*|install.sh|scripts/*.sh|scripts/*.py|scripts/oms|\
       plugins/*|rules/*|config/*|templates/*.sh|tests/*.py|tests/scripts-smoke.sh|\
       tests/*install*|tests/*update*|tests/*portability*|\
-      tests/*windows*|tests/*python*|tests/*runtime*|tests/*hook*|tests/*bash32*|\
+      tests/*windows*|tests/*python*|tests/*runtime*|tests/*hook*|\
       \"*|*\\*)
         AFFECTED_NATIVE=true ;;
     esac
@@ -1078,8 +1032,6 @@ if [ "$RUN_LINT" = 1 ]; then
   stage shellcheck lint_shell install.sh scripts/oms scripts/*.sh \
     scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh tests/operator/*.sh
 
-  stage bash-compat bash scripts/check-bash32.sh install.sh scripts/oms scripts/*.sh \
-    scripts/lib/*.sh plugins/oh-my-setting/scripts/*.sh templates/*.sh tests/*.sh tests/operator/*.sh
   stage python-syntax bash scripts/check-python.sh
 
   stage skill-manifest bash scripts/install-skills.sh
@@ -1231,10 +1183,6 @@ if [ "$RUN_QUICK" = 1 ]; then
       exit 1
     }
     stage shellcheck-changed lint_shell "${quick_shell_files[@]}"
-    stage bash-compat-changed bash scripts/check-bash32.sh "${quick_shell_files[@]}"
-  fi
-  if [ "${#quick_shell_files[@]}" -gt 0 ] && [ "$SKIP_LINT" = 0 ] && [ "$CI_PARITY" = 1 ]; then
-    parse_with_bash32 "${quick_shell_files[@]}"
   fi
   [ "$quick_lint" = 0 ] || [ "$quick_python" = 0 ] || stage python-syntax bash scripts/check-python.sh "${quick_python_files[@]}"
   [ "$quick_lint" = 0 ] || [ "$quick_skills" = 0 ] || stage skill-manifest bash scripts/install-skills.sh

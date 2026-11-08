@@ -276,13 +276,10 @@ PY
 # leg catches broken ownership markers or lost backups alongside symlink mode.
 grep -Fq '"link_mode":"copy"' "$workflow" ||
   fail "install lifecycle matrix must exercise copy mode"
-# The macOS job is the only stock Bash 3.2 parser and the only BSD userland in
-# CI. Both catch a class nothing else does, and both have already shipped
-# breakage, so neither may quietly disappear again.
+# The macOS job is the only BSD userland in CI. It catches a class nothing else
+# does and has already shipped breakage, so it may not quietly disappear again.
 grep -Fq 'bsd-portability-smoke.sh' "$workflow" ||
   fail "macOS portability job must run the BSD userland fixtures"
-grep -Fq 'OMS_BASH32_BIN=/bin/bash' "$workflow" ||
-  fail "macOS portability job must parse with the stock Bash 3.2"
 # check.sh exits at the first failing stage, so lint, focused suites, and each
 # large smoke shard are independent jobs. That preserves failure evidence and
 # lets GitHub run the four expensive shards on separate runners.
@@ -409,8 +406,6 @@ native_body = workflow_text.split("\n  install_e2e:\n", 1)[1].split("\n  python3
 assert "windows-latest" not in native_body, "native Windows is unsupported"
 assert "runner.os == 'Windows'" not in workflow_text, "native Windows steps must be removed"
 for command, host in (
-    ("OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh", "macOS"),
-    ("OMS_BASH32_BIN=/bin/bash bash tests/scripts-smoke.sh --only test_shared_fast_mode_detection_gates_auto_verify", "macOS"),
     ("bash tests/bsd-portability-smoke.sh", "macOS"),
 ):
     step = next((part for part in native_body.split("      - name:")

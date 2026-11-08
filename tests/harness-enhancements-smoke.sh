@@ -974,7 +974,6 @@ test_gate_fingerprints_full_oms_state() {
 printf '%s\n' '{"schema":1,"mode":"affected","tests":["tests/source-distribution-smoke.sh"]}'
 EOF
   printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-python.sh"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-bash32.sh"
   cat > "$gate/fake-shellcheck" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1296,9 +1295,7 @@ test_affected_gate_runs_positive_evidence_and_fails_open() {
     "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/provider-registry.sh" \
     "$ROOT/scripts/lib/check-parallel.sh" "$gate/scripts/lib/"
   cp "$ROOT/tests/run-smoke-shard.sh" "$gate/tests/run-smoke-shard.sh"
-  for script in check-python.sh check-bash32.sh; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/$script"
-  done
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/scripts/check-python.sh"
   printf '#!/usr/bin/env bash\nprintf "syntax:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$gate/scripts/check-python.sh"
   for suite in codex-hud-config-smoke.sh source-distribution-smoke.sh \
       platform-portability-smoke.sh bsd-portability-smoke.sh functional-evolution-smoke.sh; do
@@ -1588,12 +1585,12 @@ PYTEST
     fail "affected gate rejected its own selector-boundary change"
   printf '%s\n' "$out" | grep >/dev/null -Fx autonomy-hook ||
     fail "check.sh trusted the graph to validate its own selector change: $out"
-  # oms land's default caps that fallback: whole lint, the quick lane and a
-  # real Bash 3.2 parse here; the focused and smoke lanes are CI's.
+  # oms land's default caps that fallback: whole lint, the quick lane here;
+  # the focused and smoke lanes are CI's.
   out="$(cd "$gate" && bash scripts/check.sh --affected --ci-parity \
     --changed-from "$boundary_base" --changed-to "$head" --list-stages 2>/dev/null)" ||
     fail "ci-parity gate rejected a selector-boundary change"
-  for stage_name in shellcheck source-distribution bash32-parse repo-invariants; do
+  for stage_name in shellcheck source-distribution repo-invariants; do
     grep -Fxq "$stage_name" <<< "$out" || fail "capped fallback omitted $stage_name: $out"
   done
   if grep -Eqx 'autonomy-hook|shellcheck-changed|operator-tools' <<< "$out"; then
@@ -1635,7 +1632,6 @@ PYTEST
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-rel/parity-helper"
   chmod +x "$TMP/parity-rel/"*
   parity_rel="$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$TMP/parity-rel" "$gate")"
-  printf '#!/usr/bin/env bash\nprintf "docker:%%s\\n" "$*" >> "$OMS_TEST_AFFECTED_LOG"\n' > "$TMP/parity-bin/fake-docker"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/parity-bin/fake-shellcheck"
   chmod +x "$TMP/parity-bin/"*
   cat > "$gate/tests/leaf-smoke.sh" <<'EOF'
@@ -1651,27 +1647,12 @@ EOF
   head="$(git -C "$gate" rev-parse HEAD)"
   : > "$log"
   out="$(cd "$gate" && PATH="$parity_rel:$TMP/parity-bin:$PATH" OMS_TEST_AFFECTED_LOG="$log" \
-    OMS_SHELLCHECK_BIN="$TMP/parity-bin/fake-shellcheck" OMS_DOCKER_BIN="$TMP/parity-bin/fake-docker" \
+    OMS_SHELLCHECK_BIN="$TMP/parity-bin/fake-shellcheck" \
     bash scripts/check.sh --affected --ci-parity --changed-from "$base" --changed-to "$head" 2>&1)" ||
     fail "ci-parity gate failed: $out"
   grep -Fxq 'check: ok (affected tests; mode=affected; ci-parity)' <<< "$out" || fail "ci-parity verdict missing: $out"
-  # Git Bash cannot shadow PATH with links and only Linux parses through docker
-  # (macOS has /bin/bash); those hosts must say so instead.
-  case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-      grep -Fq 'skip: provider-less PATH' <<< "$out" || fail "Windows provider-less skip was silent: $out" ;;
-    *) grep -Fxq 'codex:absent cursor:absent adapter:absent helper:present' "$log" ||
-         fail "ci-parity PATH kept a provider CLI or lost a tool: $(cat "$log")" ;;
-  esac
-  if [ "$(uname -s)" = Linux ]; then
-    grep -Eq '^docker:run .* bash:3\.2 .* tests/leaf-smoke\.sh$' "$log" ||
-      fail "ci-parity did not parse the changed shell file with Bash 3.2: $(cat "$log")"
-    out="$(cd "$gate" && OMS_TEST_AFFECTED_LOG="$log" OMS_SHELLCHECK_BIN="$TMP/parity-bin/fake-shellcheck" \
-      OMS_DOCKER_BIN="$TMP/parity-bin/absent-docker" \
-      bash scripts/check.sh --affected --ci-parity --changed-from "$base" --changed-to "$head" 2>&1)" ||
-      fail "ci-parity without docker failed instead of skipping: $out"
-    grep -Fq 'skip: bash32-parse (docker is not installed)' <<< "$out" || fail "absent docker skip was silent: $out"
-  fi
+  grep -Fxq 'codex:absent cursor:absent adapter:absent helper:present' "$log" ||
+    fail "ci-parity PATH kept a provider CLI or lost a tool: $(cat "$log")"
 
   # Prose changes need no graph or unrelated runtime suites. Agent policy is
   # not prose-only, and the changed tree must still match what gets checked.

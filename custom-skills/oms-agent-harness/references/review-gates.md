@@ -52,7 +52,7 @@ that no independent signal was obtained.
 ```bash
 oms peer-review --repo . --prompt "Review this diff for blocking findings."
 oms peer-review --repo . --base origin/main --gate \
-  --verify "bash scripts/check-bash32.sh"
+  --verify "bash scripts/check-python.sh"
 ```
 
 Without a declared fast mode, `peer-review --gate` requires an explicit

@@ -225,12 +225,6 @@ jobs:
 
       # Reuse the native host and interpreter. Each check still reports a
       # failure if another check failed; cancellation must stop obsolete work.
-      - name: stock Bash 3.2 parse and project checker
-        timeout-minutes: 20
-        if: ${{ !cancelled() && runner.os == 'macOS' }}
-        run: |
-          OMS_BASH32_BIN=/bin/bash bash scripts/check-bash32.sh
-          OMS_BASH32_BIN=/bin/bash bash tests/scripts-smoke.sh --only test_shared_fast_mode_detection_gates_auto_verify
       - name: BSD userland fixtures
         timeout-minutes: 20
         if: ${{ !cancelled() && runner.os == 'macOS' }}

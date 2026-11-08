@@ -31,8 +31,7 @@ Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
 (default: bash scripts/check.sh when the repo has one; the harness checkout
 uses --affected --ci-parity against REMOTE/TARGET: a full selection runs lint
-and the quick lane, without provider CLIs on PATH, plus a Bash 3.2 parse of
-changed shell files, and leaves the full lanes to CI).
+and the quick lane, without provider CLIs on PATH, and leaves the full lanes to CI).
 Stages, each recorded beside its gate log under
 $XDG_STATE_HOME/oh-my-setting/land/<repo-slug>/<sha>-<request-digest>.json,
 outside the repo:
