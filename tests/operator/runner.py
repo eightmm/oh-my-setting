@@ -76,6 +76,7 @@ DISPATCH_SECONDS = {
     "finalized survey plan hint": 1,
     "reviewed-result acceptance composition": 223,
     "patch-scope finalize regression": 6,
+    "batch-landed finalize proof": 17,
     "Provider account routing": 1,
     "Provider account execution": 481,
     "Provider account retry evidence": 1,

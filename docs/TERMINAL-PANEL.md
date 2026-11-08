@@ -1882,6 +1882,23 @@ replay set once those commits are landed. Run `oms land --repo INTEGRATION_CLONE
 explicitly, then add `--repo INTEGRATION_CLONE --landed-commit SHA` to `--finalize`:
 publication proof finishes the plan before recording its result.
 
+For reviewed patches admitted and committed together in a batch, the same finalize
+command works without a `panel_accept` record. The latest write candidate must belong
+to the current task lease and have a passing automatic review gate bound to its
+`patch_sha256`. The receipt's push-base-to-landed range must introduce an exact replay
+of those patch bytes on every touched path, and the landed tree must retain those
+bytes; other tasks' paths may share that commit. A patch already present in the base
+or changed by a later commit does not qualify. The existing land receipt and
+remote-target reachability checks still apply. Finalize checks admission evidence,
+the indexed candidate artifact, landing proof, allowed paths and the verifier before
+moving a running task through review and the same landed finish path. These checks
+also apply to `completed --landed-commit`; a refused precondition leaves the task's
+state unchanged. A task already in review or done must record the candidate's exact
+artifact and patch paths. A missing review pass or edited
+integration patch refuses with the missing proof; the owner can still record
+`completed` without `--landed-commit`, which leaves plan acceptance pending.
+The outcome or summary alone never finishes a plan task.
+
 SHA is the full head that `oms land` pushed, not the accepted commit when commits such
 as the batch changelog sit on top. Verification runs in that execution clone; evidence
 remains in the canonical state repository. Only clones recognized by the existing

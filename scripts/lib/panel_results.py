@@ -1812,42 +1812,57 @@ def _ensure_accept_tree(execution, record, patch):
         raise ValueError('stored accepted tree no longer matches the reviewed patch')
 
 
-def _publication_contains_acceptance(execution, landed_commit, record, patch):
-    accepted = record['commit']
-    _ensure_accept_tree(execution, record, patch)
-    accepted_patch = _tree_patch_id(execution, record['base'], record['tree'])
-    if not accepted_patch:
-        raise ValueError('accepted patch has no patch identity')
-    accepted_object = subprocess.run(['git', '-C', str(execution), 'cat-file', '-e', accepted + '^{commit}'],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, check=False, timeout=30)
-    if accepted_object.returncode == 0:
-        ancestor = subprocess.run(['git', '-C', str(execution), 'merge-base', '--is-ancestor',
-                                   accepted, landed_commit], stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=60)
-        if ancestor.returncode == 0:
-            return
-        if ancestor.returncode not in (1,):
-            raise ValueError('cannot verify accepted commit ancestry in the publication')
-    elif accepted_object.returncode != 1:
-        raise ValueError('cannot inspect the accepted commit object')
+def _publication_contains_acceptance(execution, landed_commit, record, patch, landed_base=None):
+    if record is None and (not isinstance(landed_base, str)
+                           or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', landed_base)):
+        raise ValueError('exact replay requires the land receipt push base')
+    accepted_patch = None
+    if record is not None:
+        accepted = record['commit']
+        _ensure_accept_tree(execution, record, patch)
+        accepted_patch = _tree_patch_id(execution, record['base'], record['tree'])
+        if not accepted_patch:
+            raise ValueError('accepted patch has no patch identity')
+        accepted_object = subprocess.run(['git', '-C', str(execution), 'cat-file', '-e', accepted + '^{commit}'],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, check=False, timeout=30)
+        if accepted_object.returncode == 0:
+            ancestor = subprocess.run(['git', '-C', str(execution), 'merge-base', '--is-ancestor',
+                                       accepted, landed_commit], stdin=subprocess.DEVNULL,
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=60)
+            if ancestor.returncode == 0:
+                return
+            if ancestor.returncode not in (1,):
+                raise ValueError('cannot verify accepted commit ancestry in the publication')
+        elif accepted_object.returncode != 1:
+            raise ValueError('cannot inspect the accepted commit object')
     paths = _patch_paths(patch)
     if not paths:
-        raise ValueError('accepted patch has no paths for rebased publication validation')
+        raise ValueError('reviewed patch has no paths for exact replay validation')
     git_env = dict(os.environ, GIT_LITERAL_PATHSPECS='1', GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='')
     history = subprocess.run(['git', '-C', str(execution), 'log', '--no-merges', '--format=%H',
-                              landed_commit, '--', *paths], env=git_env, stdin=subprocess.DEVNULL,
+                              landed_base + '..' + landed_commit if record is None else landed_commit,
+                              '--', *paths], env=git_env, stdin=subprocess.DEVNULL,
                              capture_output=True, check=False, timeout=60)
     if history.returncode:
         raise ValueError('cannot inspect published history for the accepted patch')
     for commit in history.stdout.decode('ascii', 'replace').splitlines():
         if commit:
             try:
-                if _commit_patch_id(execution, commit) != accepted_patch:
+                if record is not None and _commit_patch_id(execution, commit) != accepted_patch:
                     continue
                 parent = _git(execution, 'rev-parse', commit + '^').decode().strip()
                 candidate_tree = _git(execution, 'rev-parse', commit + '^{tree}').decode().strip()
-                if _replay_patch_tree(execution, parent, patch) == candidate_tree:
+                replayed = _replay_patch_tree(execution, parent, patch)
+                if record is None:
+                    # A batch must introduce these bytes and retain them through publication.
+                    def changes(left, right):
+                        return _git(execution, '--literal-pathspecs', 'diff', '--no-ext-diff',
+                                    '--ignore-submodules=none', '--raw', left, right, '--', *paths)
+                    if (changes(parent, candidate_tree) and not changes(replayed, candidate_tree)
+                            and not changes(replayed, landed_commit)):
+                        return
+                elif replayed == candidate_tree:
                     return
             except (OSError, ValueError, subprocess.SubprocessError):
                 # A shallow or incomplete local history cannot prove this commit exact.
@@ -1855,11 +1870,95 @@ def _publication_contains_acceptance(execution, landed_commit, record, patch):
     raise ValueError('published SHA does not contain the accepted commit or an exact replay of the reviewed patch')
 
 
+def _batch_finish_preflight(repo, execution, task, candidate, landed_commit):
+    # Exercise the real finish proof and scope checks against a private plan;
+    # validation failures must not move the canonical task into review.
+    plan = json.loads(_read(repo, '.oms/plan/tasks.json', 4 * 1024 * 1024))
+    stored = plan['tasks'][task['id']]
+    if dict(stored, plan_id=plan.get('plan_id')) != task:
+        raise ValueError('plan task changed during landing validation')
+    # Other tasks' typed completion references can only load from the canonical plan.
+    plan['tasks'] = {task['id']: stored}
+    if stored['state'] in ('claimed', 'running'):
+        stored.update(state='review', review_lease_id=task['lease_id'],
+                      artifact=candidate['artifact'], patch=candidate['patch'])
+    elif stored['state'] == 'done':
+        # A retry must re-prove even a receipt rewritten by installation.
+        stored['state'] = 'review'
+    with tempfile.TemporaryDirectory(prefix='oms-panel-finish-check-') as directory:
+        shadow = Path(directory) / 'tasks.json'
+        shadow.write_text(json.dumps(plan), encoding='utf-8')
+        _plan_command(execution, 'finish', '--file', str(shadow), '--id', task['id'],
+                      '--lease-id', task['lease_id'], '--landed-commit', landed_commit,
+                      '--artifact', candidate['artifact'], '--patch', candidate['patch'])
+        landing = json.loads(shadow.read_text(encoding='utf-8'))['tasks'][task['id']]['landing']
+    state_dir = subprocess.run(['bash', '-c', '. "$1"; oms_land_state_dir "$2"', 'panel-finish-proof',
+                               str(ROOT / 'scripts/lib/land-receipts.sh'), str(execution)],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False)
+    if state_dir.returncode:
+        raise ValueError('cannot resolve land receipt directory')
+    primary = Path(state_dir.stdout.strip())
+    directories = [primary] + [path for path in sorted(primary.parent.iterdir())[:512]
+                               if path != primary and not path.is_symlink() and path.is_dir()]
+    from land_receipts import recorded_base
+    for directory in directories:
+        for path in sorted(directory.glob(landed_commit + '-*.json')):
+            try:
+                raw = _read(directory, path.name, 1024 * 1024, label='oms land receipt')
+                if hashlib.sha256(raw).hexdigest() != landing['receipt_sha256']:
+                    continue
+                base = recorded_base(json.loads(raw))
+                if base is None:
+                    raise ValueError('exact replay requires the land receipt push base')
+                return base
+            except (OSError, ValueError):
+                continue
+    raise ValueError('land receipt with a push base is missing or changed during validation')
+
+
 def _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_commit):
     task = _owned_task(repo, execution, owner, task_id)
     record = task.get('panel_accept')
     if record is None:
-        raise ValueError('task has no exact panel acceptance bound to its current lease (it was not landed with oms panel --accept); a plain patch-land landing is finalized without --landed-commit, and accepted additionally needs that patch-land bound with --plan-task')
+        try:
+            finished_retry = (task.get('state') == 'done' and isinstance(task.get('landing'), dict)
+                              and task['landing'].get('sha') == landed_commit)
+            if task.get('state') not in ('claimed', 'running', 'review') and not finished_retry:
+                raise ValueError('task has no exact panel acceptance bound to its current lease '
+                                 '(it was not landed with oms panel --accept); reviewed batch landing '
+                                 'does not match the current task state; plain patch-land acceptance '
+                                 'requires --plan-task')
+            if (task.get('state') in ('review', 'done')
+                    and task.get('review_lease_id') != task.get('lease_id')):
+                raise ValueError('reviewed batch landing does not match the current task lease')
+            if not verify or verify.replace('\r', '') != task.get('verify', '').replace('\r', ''):
+                raise ValueError('--verify does not match the plan task verify contract')
+            main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
+            _, _, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
+            if len(workers) != 1 or workers[0].get('task_id') != task_id:
+                raise ValueError('reviewed batch landing requires one unique worker candidate')
+            worker = workers[0]
+            candidates = [row for row in rows if row.get('kind') == 'delegate'
+                          and row.get('attempt_id') == worker.get('attempt_id') and row.get('patch_sha256')]
+            if len(candidates) != 1:
+                raise ValueError('reviewed batch landing requires one unambiguous candidate')
+            candidate = candidates[0]
+            if (candidate.get('task_id') != task_id or candidate.get('exit') != 0
+                    or worker.get('parent_attempt_id') != main_id
+                    or worker.get('refs', {}).get('panel_lease_id') != task.get('lease_id')
+                    or candidate.get('plan_id') != task.get('plan_id')):
+                raise ValueError('reviewed batch candidate is missing or does not match the current task lease')
+            if (task.get('state') in ('review', 'done') and
+                    any(task.get(key) != candidate.get(key) for key in ('artifact', 'patch'))):
+                raise ValueError('recorded artifact/patch does not match the reviewed batch candidate')
+            _review_preflight(repo, task_id, workers, rows, admissions)
+            _indexed(repo, candidate, 1024 * 1024)
+            patch = verified_patch(repo, candidate)
+            base = _batch_finish_preflight(repo, execution, task, candidate, landed_commit)
+            _publication_contains_acceptance(execution, landed_commit, None, patch, landed_base=base)
+            return candidate
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise ValueError('%s; task can still be finalized completed without --landed-commit' % error) from error
     required = {'schema', 'task_id', 'plan_id', 'lease_id', 'candidate_event_id',
                 'candidate_attempt_id', 'patch_sha256', 'artifact', 'patch', 'commit', 'tree', 'base',
                 'review_gate'}
@@ -2075,22 +2174,24 @@ def _reusable_admission(repo, execution, rows, admissions, task_id, verify):
         return None
 
 
-def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify, verify_timeout, execution):
+def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify, verify_timeout, execution,
+                     landed_finish=None):
     main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
+    requires_acceptance = outcome == 'accepted' or landed_finish is not None
     with _lock(repo):
         evidence_refs = [dict(ref) for ref in refs]
         snapshot, attempts, rows, related, workers, admissions = _finalize_snapshot(
             repo, owner, task_id, main_id, evidence_refs)
         binding = snapshot['binding']
-        if outcome == 'accepted':
+        if requires_acceptance:
             _review_preflight(repo, task_id, workers, rows, admissions)
             if not refs:
                 refs = _automatic_admission_evidence(repo, rows, admissions, task_id)
                 snapshot['evidence'] = [dict(ref) for ref in refs]
-        if outcome == 'accepted' and (not verify or not refs):
+        if requires_acceptance and (not verify or not refs):
             raise ValueError('accepted requires an evidence reference and a passing verifier')
         _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding)
-        if outcome == 'accepted':
+        if requires_acceptance:
             for admission in admissions:
                 if not admission:
                     continue
@@ -2123,7 +2224,7 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                         'exit': verify_exit, 'command_sha256': hashlib.sha256(verify.encode()).hexdigest()}
         if verified.get('diagnostics'):
             verification['diagnostics'] = verified['diagnostics']
-        if outcome == 'accepted' and verify_exit:
+        if requires_acceptance and verify_exit:
             raise ValueError('accepted verifier failed (exit %s); private diagnostics: %s'
                              % (verify_exit, verified['diagnostics']['path']))
     with _lock(repo):
@@ -2142,6 +2243,9 @@ def _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notif
                 ('main_attempt_id', 'finalizing main identity changed during verification')):
             if current[field] != snapshot[field]:
                 raise ValueError(message)
+        if landed_finish is not None:
+            landed_finish()
+            binding = _plan_bindings(repo, {task_id}).get(task_id)
         payload = {'schema': 1, 'kind': 'oms-panel-result', 'task_id': task_id,
                    'owner': owner, 'outcome': outcome, 'summary': summary,
                    'summary_sha256': hashlib.sha256(summary.encode()).hexdigest(),
@@ -2217,21 +2321,41 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         raise ValueError('use at most eight evidence references')
     if execution_error is not None:
         raise execution_error
+    landed_finish = None
+    plan_finished = False
     if landed_commit is not None:
         if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', landed_commit):
             raise ValueError('--landed-commit must be a full lowercase commit SHA')
         with _accept_lock(repo, execution):
             task = _owned_task(repo, execution, owner, task_id)
-            _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_commit)
-            try:
+            proof = _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_commit)
+            def finish():
+                nonlocal plan_finished
+                if task.get('panel_accept') is None and task.get('state') in ('claimed', 'running'):
+                    _plan_command(execution, 'review', '--id', task_id, '--lease-id', task['lease_id'],
+                                  '--artifact', proof['artifact'], '--patch', proof['patch'])
                 _plan_command(execution, 'finish', '--id', task_id, '--lease-id', task['lease_id'],
-                              '--landed-commit', landed_commit)
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
-                raise ValueError('finish failed; SHA %s; retry finish only after validating completion: %s'
-                                 % (landed_commit, error)) from error
+                              '--landed-commit', landed_commit, '--artifact', proof['artifact'],
+                              '--patch', proof['patch'])
+                plan_finished = True
+            if task.get('panel_accept') is None:
+                def landed_finish():
+                    with _accept_lock(repo, execution):
+                        if (_owned_task(repo, execution, owner, task_id) != task or
+                                _validate_landed_acceptance(repo, execution, owner, task_id, verify,
+                                                            landed_commit) != proof):
+                            raise ValueError('reviewed batch authority changed during verification')
+                        finish()
+            else:
+                try:
+                    finish()
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    raise ValueError('finish failed; SHA %s; retry finish only after validating completion: %s'
+                                     % (landed_commit, error)) from error
     try:
+        options = {'landed_finish': landed_finish} if landed_finish is not None else {}
         result = _finalize_result(repo, owner, task_id, summary, refs, outcome, verify, notify,
-                                  verify_timeout, execution)
+                                  verify_timeout, execution, **options)
         try:
             first_line = summary.splitlines()[0].strip() if summary.splitlines() else ""
             journal_summary = 'Task %s %s: %s' % (task_id, outcome, first_line[:120])
@@ -2256,7 +2380,7 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
             pass
         return result
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        if landed_commit is not None:
+        if plan_finished:
             raise ValueError('finalization failed after plan finish; SHA %s; retry only --finalize after '
                              'confirming exact completion: %s' % (landed_commit, error)) from error
         raise

@@ -302,9 +302,23 @@ to running. After verification, inspection, integration and required checks,
 run `oms agent-plan review` after acceptance and record the owner result.
 For plan-bound writes use `oms panel --accept TASK`, then after authorized land
 `oms panel --finalize --landed-commit SHA`; alternatively review and land with
-`oms patch-land --plan-task ID`. Eligible verified local research uses
+`oms patch-land --plan-task ID`. For patches admitted and committed as a batch,
+`--finalize --landed-commit SHA --verify COMMAND` also works without `panel_accept`:
+the latest candidate must match the current task lease, its automatic review gate
+must pass for that exact `patch_sha256`, and the land receipt's pushed range must
+introduce an exact replay on all touched paths, retained in the final landed tree.
+Patches already present at the push base or changed later in the range do not count.
+Other tasks' paths may share the commit. Admission evidence, the indexed candidate,
+land receipt, remote-target reachability, allowed paths and verifier must pass before
+the task moves through review/finish, including for `completed --landed-commit`.
+Refused preconditions preserve the plan task state; review/done tasks must already
+record the candidate's artifact and patch paths. Missing
+review proof or an edited integration patch refuses with the missing proof and
+allows `completed` without `--landed-commit`, leaving plan acceptance pending.
+Eligible verified local research uses
 `oms agent-plan accept-main-research`. Finalization alone does not mark a plan
-task done or release its dependencies. Campaign precedence and exact reviewed
+task done or release its dependencies without publication proof; outcome or summary
+alone never grants acceptance. Campaign precedence and exact reviewed
 re-entry are in [autonomy-loop.md](autonomy-loop.md).
 
 Without an active shared-plan goal, register a supplied objective with

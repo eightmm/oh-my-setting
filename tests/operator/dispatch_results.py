@@ -3582,7 +3582,7 @@ assert json.loads(plan_path.read_text())["tasks"]["elsewhere-task"]["state"] == 
 # Retrying an older finalize revision never settles against the newer decision.
 superseded = review_settlement.after_finalize(project, dict(outside, main_attempt_id=main_attempts["codex"]))
 assert superseded.get("skipped") == "superseded_revision", superseded
-def finalize_plan_fixture(label, assigned):
+def finalize_plan_fixture(label, assigned, allowed="value.txt"):
     repo = temporary / label
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -3598,7 +3598,7 @@ def finalize_plan_fixture(label, assigned):
         "--ref", "panel_harness=claude", "--then", "starting", "--then", "working"], env).strip()
     command = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(repo)]
     call(command + ["init", "--goal", "Bound finalize ownership"], env)
-    call(command + ["add", "--id", "owned-task", "--title", "Assigned result", "--allowed", "value.txt",
+    call(command + ["add", "--id", "owned-task", "--title", "Assigned result", "--allowed", allowed,
                     "--verify", "true", "--assignment", json.dumps({"provider": assigned, "workload": "routine"})], env)
     call(command + ["claim", "--id", "owned-task", "--provider", "claude"], env)
     task = json.loads(call(command + ["evidence-snapshot", "--id", "owned-task"], env))
@@ -4730,6 +4730,204 @@ assert gap.returncode == 0 and gap.stderr.count("waiting up to") == 1 and "defer
     (gap.returncode, gap.stderr)
 assert any(row.get("kind") == "panel-result" and row.get("task_id") == "finalize-review-gap"
            for row in saved._records(project)[1]), "finalize after the gap wrote no result"
+# BEGIN batch-landed finalize proof
+batch_repo, batch_env, batch_task = finalize_plan_fixture("batch-finalize", "claude", "value.txt,other.txt")
+batch_env.update(GIT_AUTHOR_NAME="Batch fixture", GIT_AUTHOR_EMAIL="batch@example.com",
+                 GIT_COMMITTER_NAME="Batch fixture", GIT_COMMITTER_EMAIL="batch@example.com")
+batch_plan = ["bash", str(panel.ENTRY), "agent-plan", "--repo", str(batch_repo)]
+call(batch_plan + ["start", "--id", "owned-task", "--lease-id", batch_task["lease_id"]], batch_env)
+batch_value = batch_repo / "value.txt"
+batch_value.write_text("old\n")
+call(["git", "-C", str(batch_repo), "add", "value.txt"], batch_env)
+call(["git", "-C", str(batch_repo), "commit", "-qm", "baseline"], batch_env)
+batch_base = call(["git", "-C", str(batch_repo), "rev-parse", "HEAD"], batch_env).strip()
+batch_value.write_text("reviewed\n")
+batch_patch = batch_repo / ".oms/artifacts/batch.patch"
+batch_patch.parent.mkdir(parents=True, exist_ok=True)
+batch_patch.write_text(call(["git", "-C", str(batch_repo), "diff", "--binary"], batch_env))
+batch_digest = hashlib.sha256(batch_patch.read_bytes()).hexdigest()
+(batch_repo / "other.txt").write_text("another task\n")
+call(["git", "-C", str(batch_repo), "add", "value.txt", "other.txt"], batch_env)
+call(["git", "-C", str(batch_repo), "commit", "-qm", "land reviewed batch"], batch_env)
+batch_sha = call(["git", "-C", str(batch_repo), "rev-parse", "HEAD"], batch_env).strip()
+batch_summary = temporary / "batch-summary.txt"
+batch_summary.write_text("Not admitted.\n")
+batch_worker = {"attempt_id": "att_batch_worker", "task_id": "owned-task", "created_at": "2026-01-01",
+                "parent_attempt_id": batch_env["OMS_PANEL_MAIN_ATTEMPT"], "state": "review",
+                "refs": {"panel_role": "worker", "panel_access": "write",
+                         "panel_lease_id": batch_task["lease_id"]}}
+batch_candidate = {"kind": "delegate", "event_id": "batch-candidate", "attempt_id": "att_batch_worker",
+                   "task_id": "owned-task", "plan_id": batch_task["plan_id"], "exit": 0,
+                   "patch": ".oms/artifacts/batch.patch", "artifact": ".oms/artifacts/batch.md",
+                   "patch_sha256": batch_digest}
+batch_artifact = batch_repo / batch_candidate["artifact"]
+batch_artifact.write_text("Reviewed batch result.\n")
+batch_candidate["artifact_sha256"] = hashlib.sha256(batch_artifact.read_bytes()).hexdigest()
+batch_admission = {"kind": "patch-land", "event_id": "batch-landing", "exit": 0,
+                   "task_id": "owned-task", "plan_id": batch_task["plan_id"], "patch_sha256": batch_digest}
+batch_extra = []
+batch_review = {"kind": "review-outcome", "task_id": "owned-task", "exit": 0,
+                "review": {"gate_verify_exit": 0, "candidate": {"patch_sha256": batch_digest},
+                           "seats": [{"verdict": "pass"}]}}
+with patch.dict(os.environ, batch_env, clear=True):
+    batch_receipts = Path(call(["bash", "-c", '. "$1"; oms_land_state_dir "$2"', "batch-receipt",
+        str(root / "scripts/lib/land-receipts.sh"), str(batch_repo)], batch_env).strip())
+    batch_receipts.mkdir(parents=True, exist_ok=True)
+    batch_receipt = {"schema": 1, "state": "passed", "sha": batch_sha, "remote": "origin", "target": "main",
+                     "gate": {"rc": 0, "command": "true"}, "push": {"rc": 0, "moved": 1, "base": batch_base},
+                     "ci": {"conclusion": "success"}}
+    (batch_receipts / (batch_sha + "-fixture.json")).write_text(json.dumps(batch_receipt))
+    def refuse_batch(sha, expected, **options):
+        before = (batch_repo / ".oms/plan/tasks.json").read_bytes()
+        try:
+            saved.finalize(batch_repo, "claude", "owned-task", str(batch_summary), "completed",
+                           options.pop("verify", "true"), [batch_candidate["patch"]], landed_commit=sha, **options)
+            raise AssertionError("batch finalize accepted " + expected)
+        except ValueError as error:
+            assert expected in str(error), error
+        assert (batch_repo / ".oms/plan/tasks.json").read_bytes() == before, expected + " changed the plan"
+    call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", batch_sha], batch_env)
+    batch_records = saved._records
+    def recorded_batch(*args, **kwargs):
+        attempts, rows = batch_records(*args, **kwargs)
+        return attempts + [batch_worker], rows + batch_extra + [batch_candidate, batch_review] + ([batch_admission] if batch_admission else [])
+    with patch.object(saved, "_records", side_effect=recorded_batch), \
+            patch.object(review_settlement, "after_finalize", return_value={}), \
+            patch.object(saved, "_worker_owns", return_value=["value.txt"]):
+        # Outcome text alone never finishes the running plan task.
+        saved.finalize(batch_repo, "claude", "owned-task", str(batch_summary), "completed")
+        assert json.loads(call(batch_plan + ["show", "--id", "owned-task"], batch_env))["state"] == "running"
+        batch_summary.write_text("Reviewed batch published.\n")
+        # Finding 1: matching earlier history cannot survive a later in-range revert.
+        base_tree = call(["git", "-C", str(batch_repo), "rev-parse", batch_base + "^{tree}"], batch_env).strip()
+        batch_value.write_text("old\n")
+        call(["git", "-C", str(batch_repo), "add", "value.txt"], batch_env)
+        base_tree = call(["git", "-C", str(batch_repo), "write-tree"], batch_env).strip()
+        batch_value.write_text("reviewed\n")
+        call(["git", "-C", str(batch_repo), "add", "value.txt"], batch_env)
+        reverted_sha = call(["git", "-C", str(batch_repo), "commit-tree", base_tree,
+                             "-p", batch_sha, "-m", "revert reviewed batch"], batch_env).strip()
+        reverted_receipt = dict(batch_receipt, sha=reverted_sha)
+        (batch_receipts / (reverted_sha + "-fixture.json")).write_text(json.dumps(reverted_receipt))
+        call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", reverted_sha], batch_env)
+        refuse_batch(reverted_sha, "exact replay")
+        for sha, base in ((reverted_sha, batch_base), (batch_sha, batch_sha)):
+            try:
+                saved._publication_contains_acceptance(batch_repo, sha, None, batch_patch.read_bytes(),
+                                                       landed_base=base)
+                raise AssertionError("reverted patch or empty pushed range proved exact replay")
+            except ValueError as error:
+                assert "exact replay" in str(error), error
+        for base in (None, "", "0", 0, "A" * 40):
+            try:
+                saved._publication_contains_acceptance(batch_repo, batch_sha, None, batch_patch.read_bytes(),
+                                                       landed_base=base)
+                raise AssertionError("missing or malformed push base proved exact replay")
+            except ValueError as error:
+                assert "push base" in str(error), error
+        # Finding 1: exclude the receipt's base even if it contains the reviewed patch.
+        present_sha = call(["git", "-C", str(batch_repo), "commit-tree",
+                            call(["git", "-C", str(batch_repo), "rev-parse", batch_sha + "^{tree}"], batch_env).strip(),
+                            "-p", batch_sha, "-m", "patch already present"], batch_env).strip()
+        present_receipt = dict(batch_receipt, sha=present_sha, push=dict(batch_receipt["push"], base=batch_sha))
+        present_path = batch_receipts / (present_sha + "-fixture.json")
+        present_path.write_text(json.dumps(present_receipt))
+        call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", present_sha], batch_env)
+        refuse_batch(present_sha, "land")
+        try:
+            saved._publication_contains_acceptance(batch_repo, present_sha, None, batch_patch.read_bytes(),
+                                                   landed_base=batch_sha)
+            raise AssertionError("patch already in the push base proved exact replay")
+        except ValueError as error:
+            assert "exact replay" in str(error), error
+        present_path.unlink()
+        present_receipt = dict(batch_receipt, push=dict(batch_receipt["push"], base=batch_sha))
+        receipt_path = batch_receipts / (batch_sha + "-fixture.json")
+        for base in (batch_sha, "0", "", 0):
+            present_receipt["push"]["base"] = base
+            receipt_path.write_text(json.dumps(present_receipt))
+            refuse_batch(batch_sha, "land")
+        receipt_path.write_text(json.dumps(batch_receipt))
+        call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", batch_sha], batch_env)
+        # Finding 2: completed also needs the verifier before any plan mutation.
+        with patch.object(saved, "_run_verifier", return_value={"exit": 1, "diagnostics": {"path": "fixture"}}):
+            refuse_batch(batch_sha, "verifier failed")
+        for refusal in ("failed review", "missing review", "failed gate", "failed review process", "wrong digest",
+                        "modified patch", "empty patch", "malformed patch", "stale lease", "latest failed result",
+                        "missing verifier", "missing admission", "unindexed result", "ambiguous candidate",
+                        "unpublished"):
+            original_review = deepcopy(batch_review)
+            original_candidate = dict(batch_candidate)
+            original_admission = dict(batch_admission)
+            original_patch = batch_patch.read_bytes()
+            if refusal == "failed review":
+                batch_review["review"]["seats"][0]["verdict"] = "fail"
+            elif refusal == "missing review":
+                batch_review["review"]["seats"] = []
+            elif refusal == "failed gate":
+                batch_review["review"]["gate_verify_exit"] = 1
+            elif refusal == "failed review process":
+                batch_review["exit"] = 1
+            elif refusal == "wrong digest":
+                batch_review["review"]["candidate"]["patch_sha256"] = "0" * 64
+            elif refusal in ("modified patch", "empty patch", "malformed patch"):
+                changed_patch = {"modified patch": original_patch.replace(b"+reviewed", b"+edited"),
+                                 "empty patch": b"", "malformed patch": b"malformed"}[refusal]
+                batch_patch.write_bytes(changed_patch)
+                changed_digest = hashlib.sha256(batch_patch.read_bytes()).hexdigest()
+                batch_candidate["patch_sha256"] = changed_digest
+                batch_review["review"]["candidate"]["patch_sha256"] = changed_digest
+                batch_admission["patch_sha256"] = changed_digest
+            elif refusal == "stale lease":
+                batch_worker["refs"]["panel_lease_id"] = "lease_" + "0" * 32
+            elif refusal == "latest failed result":
+                batch_candidate["exit"] = 1
+            elif refusal == "missing admission":
+                batch_admission.clear()
+            elif refusal == "unindexed result":
+                batch_candidate.pop("artifact_sha256")
+            elif refusal == "ambiguous candidate":
+                batch_extra.append(dict(batch_candidate, event_id="other-batch-candidate"))
+            elif refusal == "unpublished":
+                call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", batch_base], batch_env)
+            expected = ("passing review gate" if refusal in ("failed review", "missing review", "failed gate",
+                                                           "failed review process", "wrong digest")
+                        else "exact replay" if refusal in ("modified patch", "empty patch", "malformed patch")
+                        else "current task lease" if refusal in ("stale lease", "latest failed result")
+                        else "verify contract" if refusal == "missing verifier"
+                        else "matching landed patch evidence" if refusal == "missing admission"
+                        else "artifact digest mismatch" if refusal == "unindexed result"
+                        else "unambiguous candidate" if refusal == "ambiguous candidate" else "land")
+            try:
+                refuse_batch(batch_sha, expected, verify=None if refusal == "missing verifier" else "true")
+            finally:
+                batch_patch.write_bytes(original_patch)
+                batch_candidate.clear()
+                batch_candidate.update(original_candidate)
+                batch_admission.clear()
+                batch_admission.update(original_admission)
+                batch_extra.clear()
+                batch_worker["refs"]["panel_lease_id"] = batch_task["lease_id"]
+                batch_review.clear()
+                batch_review.update(original_review)
+                call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", batch_sha], batch_env)
+        # Finding 3: reviewed task records must name this exact artifact and patch.
+        call(batch_plan + ["review", "--id", "owned-task", "--lease-id", batch_task["lease_id"],
+                           "--artifact", batch_candidate["artifact"], "--patch", ".oms/artifacts/other.patch"], batch_env)
+        refuse_batch(batch_sha, "recorded artifact/patch")
+        call(batch_plan + ["repair", "--id", "owned-task", "--lease-id", batch_task["lease_id"]], batch_env)
+        call(["git", "-C", str(batch_repo), "update-ref", "refs/remotes/origin/main", batch_sha], batch_env)
+        result = saved.finalize(batch_repo, "claude", "owned-task", str(batch_summary), "completed", "true", [batch_candidate["patch"]],
+                                landed_commit=batch_sha)
+        batch_done = json.loads(call(batch_plan + ["show", "--id", "owned-task"], batch_env))
+        assert batch_done["state"] == "done" and batch_done["landing"]["sha"] == batch_sha, batch_done
+        assert "panel_accept" not in batch_done and result["outcome"] == "completed"
+        receipt_path.write_text(json.dumps(dict(batch_receipt, update={"rc": 0})))
+        retry = saved.finalize(batch_repo, "claude", "owned-task", str(batch_summary), "completed", "true", [batch_candidate["patch"]],
+                               landed_commit=batch_sha)
+        assert retry["revision"] == result["revision"]
+# END batch-landed finalize proof
+
 # BEGIN reviewed-result acceptance composition (uses only disposable Git fixtures).
 accept_repo = temporary / "accept state repo"
 subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(project), str(accept_repo)], check=True)
