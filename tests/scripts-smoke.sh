@@ -19755,11 +19755,32 @@ EOF
     fail "quick pre-push did not preserve the exact update range: $(cat "$repo/check.args")"
 
   zero=0000000000000000000000000000000000000000
+  for gate_flag in "" --full; do
+    rm -f "$repo/check.args"
+    printf 'refs/heads/old %s refs/heads/old %s\n' "$zero" "$second" |
+      (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
+        bash scripts/pre-push-check.sh $gate_flag origin example.invalid >/dev/null)
+    [ ! -e "$repo/check.args" ] || fail "a deletion-only push ran a gate (flag: ${gate_flag:-quick})"
+  done
+
   rm -f "$repo/check.args"
-  printf 'refs/heads/old %s refs/heads/old %s\n' "$zero" "$second" |
+  printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/old %s refs/heads/old %s\n' \
+    "$second" "$first" "$zero" "$second" |
     (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
-      bash scripts/pre-push-check.sh origin example.invalid >/dev/null)
-  [ ! -e "$repo/check.args" ] || fail "a deletion-only push should not run a gate"
+      bash scripts/pre-push-check.sh --full origin example.invalid >/dev/null)
+  [ -e "$repo/check.args" ] || fail "a mixed deletion and update push skipped the full gate"
+
+  rm -f "$repo/check.args"
+  printf 'refs/heads/old %s refs/heads/old\n' "$zero" |
+    (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
+      bash scripts/pre-push-check.sh --full origin example.invalid >/dev/null)
+  [ -e "$repo/check.args" ] || fail "a malformed deletion record skipped the full gate"
+
+  rm -f "$repo/check.args"
+  printf '' |
+    (cd "$repo" && OMS_TEST_CHECK_ARGS="$repo/check.args" \
+      bash scripts/pre-push-check.sh --full origin example.invalid >/dev/null)
+  [ -e "$repo/check.args" ] || fail "an empty full push (zero records) skipped the full gate"
 }
 
 test_pre_push_published_tags() {
@@ -19802,11 +19823,7 @@ refs/heads/main $second refs/heads/main $first"; do
     rm -f "$repo/gate"
     printf 'refs/tags/v1 %s refs/tags/v1 %s\n' "$zero" "$first" |
       (cd "$repo" && OMS_TEST_CHECK_MARKER="$repo/gate" .git/hooks/pre-push origin url >/dev/null)
-    if [ "$mode" = full ]; then
-      [ -e "$repo/gate" ] || fail "full tag deletion skipped gate"
-    else
-      [ ! -e "$repo/gate" ] || fail "quick tag deletion ran gate"
-    fi
+    [ ! -e "$repo/gate" ] || fail "$mode tag deletion ran gate"
   done
 }
 

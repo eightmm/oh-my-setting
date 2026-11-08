@@ -82,14 +82,16 @@ if [ "$record_count" -gt 0 ] && [ "$tag_only" -eq 1 ]; then
   echo "pre-push: tag-only push of published commits; gate skipped"
   exit 0
 fi
+# A well-formed deletion publishes no commit, so it needs no gate in either mode.
+if [ "$malformed" -eq 0 ] && [ "$update_count" -eq 0 ] &&
+  { [ "$record_count" -gt 0 ] || [ "$gate_mode" = quick ]; }; then
+  echo "pre-push: deletion-only update; no local gate needed"
+  exit 0
+fi
 if [ "$gate_mode" = full ] || [ "$malformed" -eq 1 ]; then
   exec "$ROOT/scripts/check.sh"
 fi
 
-if [ "$update_count" -eq 0 ]; then
-  echo "pre-push: deletion-only update; no local gate needed"
-  exit 0
-fi
 if [ "$update_count" -ne 1 ]; then
   run_full_gate "multiple refs are being pushed"
 fi
