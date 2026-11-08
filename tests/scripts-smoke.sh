@@ -9869,6 +9869,18 @@ PY
   [ -z "$("$plan" --repo "$project" ready)" ] ||
     fail "cancelled task incorrectly satisfied a dependent task"
   "$plan" --repo "$project" add --id blocked_cancel --title blocked >/dev/null
+  cp "$plan_file" "$TMP/agent-plan-cancel-valid-plan"
+  if "$plan" --repo "$project" block --id rejected --reason reassess >/dev/null 2>&1; then
+    fail "block accepted a cancelled task"
+  fi
+  cmp -s "$plan_file" "$TMP/agent-plan-cancel-valid-plan" ||
+    fail "refused block changed the cancelled task or its receipt"
+  cmp -s "$decision" "$TMP/agent-plan-cancel-valid-decision" ||
+    fail "refused block changed cancellation decision bytes"
+  "$plan" --repo "$project" status --json >/dev/null ||
+    fail "refused block made the plan unreadable"
+  "$plan" --repo "$project" show --id blocked_cancel >/dev/null ||
+    fail "refused block made an unrelated task unreadable"
   "$plan" --repo "$project" block --id blocked_cancel --reason rejected >/dev/null
   python3 - "$plan_file" <<'PY'
 import json, sys

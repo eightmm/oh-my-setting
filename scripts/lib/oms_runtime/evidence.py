@@ -13,13 +13,14 @@ import tempfile
 from pathlib import Path
 from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence
 
-from . import RUNTIME_SCHEMA
-from .common import MAX_JSONL_BYTES, MAX_JSONL_LINE_BYTES, MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, git_head, install_root, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
+from . import RUNTIME_SCHEMA, common
+from .common import MAX_JSONL_BYTES, MAX_JSONL_LINE_BYTES, MAX_JSONL_ROWS, CoreError, append_jsonl, bounded_line, install_root, parse_path_list, read_jsonl, relative_path, safe_id, sha256_file, utc_now
 from .projection import build_base_envelope, finalize_envelope
 
 VALID_STATUSES = {"verified", "failed", "inconclusive", "skipped_with_reason", "stale"}
 PLAN_ID_RE = re.compile(r"^plan_[0-9a-f]{32}$")
 ACTIVE_TASK_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+WORKTREE_STATE_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64}|unborn):[0-9a-f]{64}:[0-9a-f]{64}")
 ADVISORY_RECEIPT_KINDS = {
     "call", "ask", "review", "ask-synthesis", "review-synthesis",
     "review-outcome", "call-export", "ask-export", "review-export",
@@ -484,6 +485,23 @@ def _dependency_digests(repo: Path, paths: Sequence[str]) -> Dict[str, str]:
     return result
 
 
+def _worktree_state_head(state: Any) -> Optional[str]:
+    if not isinstance(state, str) or not WORKTREE_STATE_RE.fullmatch(state):
+        return None
+    head = state.split(":", 1)[0]
+    return "" if head == "unborn" else head
+
+
+def _worktree_state(repo: Path) -> str:
+    # Use the task verifier's canonical index/worktree/untracked fingerprint.
+    # Its failure sentinels cannot serve as evidence of a readable snapshot.
+    state = common.run_output([
+        "bash", "-c", '. "$1"; oms_git_state_fingerprint "$2"',
+        "oms-evidence-state", str(install_root() / "scripts" / "lib" / "oms-common.sh"), str(repo),
+    ])
+    return state if _worktree_state_head(state) is not None else ""
+
+
 def _stale(row: Mapping[str, Any], repo: Path, head: str) -> bool:
     # `head` is the base envelope's own snapshot, taken once per build: every
     # row is judged against the same commit (a commit landing mid-build cannot
@@ -567,7 +585,15 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
     if ref == task_ref and base.get("task", {}).get("verification") != "fresh":
         raise CoreError("task verification is not fresh and cannot be bound")
     dependency_digests = _dependency_digests(repo, parse_path_list(list(dependencies)))
-    row = {"schema": 1, "binding_id": "binding-%s" % __import__("uuid").uuid4().hex, "action": "bind", "created_at": utc_now(), "criterion_id": criterion_id, "evidence_ref": ref, "status": status, "evidence_type": bounded_line(evidence_type, 80), "note": bounded_line(note, 300), "verified_head": None if dependency_digests else (git_head(repo) or None), "dependency_digests": dependency_digests}
+    verified_state = "" if dependency_digests else _worktree_state(repo)
+    verified_head = _worktree_state_head(verified_state)
+    if not dependency_digests and verified_head != str(base.get("repo", {}).get("head") or ""):
+        if status == "verified":
+            raise CoreError("cannot bind verified evidence without a readable, current worktree fingerprint")
+        verified_state, verified_head = "", None
+    row = {"schema": 1, "binding_id": "binding-%s" % __import__("uuid").uuid4().hex, "action": "bind", "created_at": utc_now(), "criterion_id": criterion_id, "evidence_ref": ref, "status": status, "evidence_type": bounded_line(evidence_type, 80), "note": bounded_line(note, 300), "verified_head": verified_head or None, "dependency_digests": dependency_digests}
+    if not dependency_digests:
+        row["verified_state"] = verified_state or None
     if plan_id:
         row["plan_id"] = plan_id
     if active_task_id:
@@ -576,10 +602,22 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
     return row
 
 
-def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str, resolved: Collection[str] = ()) -> Dict[str, Any]:
+def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str, resolved: Collection[str] = (), worktree_state: str = "") -> Dict[str, Any]:
     status = (str(row.get("status", "inconclusive")) if support == "explicit-binding"
               else outcome(row) or str(row.get("status", "inconclusive")))
     stale = _stale(row, repo, head)
+    dependencies = row.get("dependency_digests", row.get("dependencies"))
+    if support == "explicit-binding" and not (isinstance(dependencies, dict) and dependencies):
+        stored_state = row.get("verified_state")
+        stored_head = _worktree_state_head(stored_state)
+        if (stored_head is None or stored_head != str(row.get("verified_head") or "")
+                or _worktree_state_head(worktree_state) != head):
+            # Legacy HEAD-only bindings cannot attest to current worktree
+            # bytes. Keep them readable without inventing or rewriting proof.
+            if status == "verified":
+                status = "inconclusive"
+        else:
+            stale = stale or stored_state != worktree_state
     if status == "failed" and row.get("_source") == INDEX_SOURCE and row.get("event_id") in resolved:
         stale = True
     if stale:
@@ -727,6 +765,13 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None, *, use_
         wanted = {str(binding.get("evidence_ref", "")) for binding in active_bindings} - {""}
         if wanted and wanted.intersection(inert_refs):
             return build_coverage(repo, base_envelope, use_cache=False)
+    # Capture once after the cache fallback, never once per binding. Explicit
+    # dependencies retain their narrower scope and do not need this probe.
+    worktree_state = ""
+    if any(not (isinstance(binding.get("dependency_digests", binding.get("dependencies")), dict)
+                and binding.get("dependency_digests", binding.get("dependencies")))
+           for binding in active_bindings):
+        worktree_state = _worktree_state(repo)
     for binding_index, binding in enumerate(active_bindings, total_rows + 1):
         binding = dict(binding)
         binding["_ordinal"] = binding_index
@@ -750,7 +795,9 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None, *, use_
                 continue
         merged = dict(row_by_ref.get(str(binding.get("evidence_ref", "")), {}))
         merged.update(binding)
-        by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head, resolved=resolved))
+        # A legacy binding cannot borrow a fingerprint from its source row.
+        merged["verified_state"] = binding.get("verified_state")
+        by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head, resolved=resolved, worktree_state=worktree_state))
     task = base_envelope.get("task", {})
     if task.get("verification") == "fresh":
         task_ref = "task-verification:%s" % task.get("task_id", "")

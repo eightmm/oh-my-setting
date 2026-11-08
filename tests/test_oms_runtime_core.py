@@ -362,9 +362,74 @@ class RuntimeFixture(RuntimeFixtureBase):
         subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'unrelated'], check=True)
         statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
         self.assertEqual(statuses['project-safe'], 'verified')
+
+        # An unscoped attestation covers the worktree too, including changes
+        # that do not advance HEAD. Its own ignored receipt must not age it.
+        default = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
+        head = git_head(self.repo)
+        (self.repo / '.oms' / 'ignored-receipt.json').write_text('{}\n', encoding='utf-8')
+        project_safe = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == 'project-safe')
+        default_item = next(item for item in project_safe['evidence'] if item['binding_id'] == default['binding_id'])
+        self.assertEqual(default_item['status'], 'verified')
         dependency.write_text(dependency.read_text(encoding='utf-8') + '\n# changed\n', encoding='utf-8')
+        envelope = evidence.build_envelope(self.repo)
+        self.assertEqual(envelope['task']['verification'], 'stale')
+        self.assertEqual(git_head(self.repo), head)
+        statuses = {item['id']: item['status'] for item in envelope['criteria']}
+        self.assertEqual(statuses['project-safe'], 'stale')
+        self.assertTrue(default.get('verified_state'))
+        self.assertEqual(default['verified_state'].split(':', 1)[0], default['verified_head'])
+
+        # Staging changes the index even when the worktree bytes stay equal.
+        default = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
+        unchanged = dependency.read_bytes()
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'scripts/sample.py'], check=True)
+        self.assertEqual(dependency.read_bytes(), unchanged)
+        self.assertEqual(git_head(self.repo), head)
         statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
         self.assertEqual(statuses['project-safe'], 'stale')
+        bound = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified', dependencies=['scripts/sample.py'])
+        dependency.unlink()
+        project_safe = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == 'project-safe')
+        scoped = next(item for item in project_safe['evidence'] if item['binding_id'] == bound['binding_id'])
+        self.assertEqual(scoped['status'], 'stale')
+
+        # Old or malformed receipts remain readable but cannot prove current
+        # worktree freshness. Projection must not rewrite those stored bytes.
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        legacy = dict(default)
+        legacy.pop('verified_state', None)
+        invalid_metadata = ({}, {'verified_state': None}, {'verified_state': ''},
+                            {'verified_state': 'unknown'}, {'verified_state': 7},
+                            {'verified_state': head + ':unreadable:' + '0' * 64})
+        for metadata in invalid_metadata:
+            with self.subTest(metadata=metadata):
+                bindings.write_text(json.dumps(dict(legacy, **metadata)) + '\n', encoding='utf-8')
+                before = bindings.read_bytes()
+                statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+                self.assertEqual(statuses['project-safe'], 'inconclusive')
+                self.assertEqual(bindings.read_bytes(), before)
+
+        # An unreadable live fingerprint is equally unknown; it cannot mint
+        # a verified binding or make an existing one look fresh.
+        from oms_runtime import common
+        current = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
+        original = common.run_output
+        for unavailable in ('', head + ':unreadable:' + '0' * 64,
+                            '0' * len(head) + ':' + current['verified_state'].split(':', 1)[1]):
+            with self.subTest(unavailable=unavailable):
+                def unreadable(command, **kwargs):
+                    if any('oms_git_state_fingerprint' in str(part) for part in command):
+                        return unavailable
+                    return original(command, **kwargs)
+
+                before = bindings.read_bytes()
+                with patch.object(common, 'run_output', side_effect=unreadable):
+                    statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+                    self.assertEqual(statuses['project-safe'], 'inconclusive')
+                    with self.assertRaises(CoreError):
+                        evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
+                self.assertEqual(bindings.read_bytes(), before)
 
     @unittest.skipUnless(hasattr(os, 'getuid'), 'the row cache is disabled without POSIX ownership')
     def test_coverage_row_cache_matches_full_read_across_append_rewrite_and_torn_tail(self) -> None:
@@ -1047,9 +1112,9 @@ class RuntimeFixture(RuntimeFixtureBase):
                 index.write_text(json.dumps(artifact) + '\n', encoding='utf-8')
                 if bindings.exists():
                     bindings.unlink()
-                if binding is not None:
-                    append_jsonl(bindings, binding)
                 write_plan(first_id)
+                if binding is not None:
+                    evidence.bind(self.repo, binding['criterion_id'], binding['evidence_ref'], binding['status'])
                 self.assertEqual(task_status(), 'verified')
                 write_plan(second_id)
                 self.assertEqual(task_status(), 'missing')
@@ -1213,10 +1278,12 @@ class RuntimeFixture(RuntimeFixtureBase):
     def test_projection_subprocess_cost_does_not_scale_with_evidence_rows(self) -> None:
         # The staleness judgment once ran `git rev-parse` per evidence row —
         # ~4.5s of a ~5s build on a thousand-row index. Every row is now
-        # judged against the base envelope's single head snapshot, so the
-        # subprocess count must be a constant of the build, not of the index.
+        # judged against shared head/worktree snapshots, so the subprocess
+        # count must be a constant of the build, not of the index or bindings.
         from oms_runtime import common
         index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        binding = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
 
         def spawns_after_adding(count: int, tag: str) -> int:
             for i in range(count):
@@ -1225,6 +1292,7 @@ class RuntimeFixture(RuntimeFixtureBase):
                     'kind': 'review-verify', 'exit': 0, 'status': 'verified',
                     'verified_head': 'deadbeefdeadbeef',
                 })
+                append_jsonl(bindings, dict(binding, binding_id='binding-scale-%s-%d' % (tag, i)))
             calls = []
             original = common.run_output
 
@@ -1237,6 +1305,9 @@ class RuntimeFixture(RuntimeFixtureBase):
                 evidence.build_envelope(self.repo)
             finally:
                 common.run_output = original
+            fingerprints = [command for command in calls
+                            if any('oms_git_state_fingerprint' in str(part) for part in command)]
+            self.assertEqual(len(fingerprints), 1)
             return len(calls)
 
         small = spawns_after_adding(5, 'small')
