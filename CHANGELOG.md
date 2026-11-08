@@ -572,6 +572,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Codex and Antigravity hook launchers, the `oms` entry and `uninstall.sh`
+  run their children under the recorded Bash 5 when the first `bash` on PATH
+  is 3.2 (macOS), instead of exiting silently at the Bash 5 floor guard; a
+  standalone copy of `uninstall.sh` still runs its safety guards first.
 - The pre-push hook skips the full gate for a push that only deletes branches.
 - The Antigravity plugin installer rewrites exact copies of the selected
   runtime's launchers left by the retired native-Windows template, so updating
@@ -802,6 +806,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Removed
 
+- `oms goal-drive --max-parallel-tasks` and `oms autopilot --max-parallel-tasks`
+  batch mode: panel dispatch is the parallel execution engine. The option is
+  rejected as unknown; a legacy `max_parallel_tasks` field in stored autopilot
+  records is ignored with a notice.
 - Automatic task classification (`oms decide --auto task-classify`, the
   `oms agent-plan add` request and the dispatch workload suggestion): it changed
   no route in the recorded tasks and could delay each plan add. `oms decide`
