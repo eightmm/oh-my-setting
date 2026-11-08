@@ -8,6 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- A reviewed worker patch landed inside a batch commit finalizes `--outcome
+  accepted --landed-commit SHA` and closes its plan task when the landed range
+  contains a commit that applies that exact patch, the landed tree still holds
+  it on the patch paths, admission evidence and the verifier pass; any refusal
+  leaves the plan task unchanged.
+
 - `oms panel --metrics` reports organization-level coordination: concurrent
   write pairs with overlapping scopes (duplicate work), the input growth of later
   write rounds over the first (handoff rework), blocking reviews split by same or
@@ -107,6 +113,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   data (including linked objects, refs or HEAD) or special files is kept.
 
 ### Changed
+
+- One WIP limit of four per main (live write workers plus results awaiting
+  decision) refuses new write dispatches and drives the panel warning, replacing
+  the review backlog threshold of eight; it is an advisory snapshot check.
+- Re-reviews receive the prior findings of every failing seat from the latest
+  failing automatic review of the task, including reviews from predecessor
+  rooms and reviews whose gate verify failed, within the 3000-byte bound.
+- Automatic tier routing reserves Claude Fable for security audits; other roles
+  fall back to the remaining families or refuse naming the reservation. Role
+  mandates are restated in the roles reference and the verifier contract.
+- Councils' synthesized consensus dispatches implementation by default.
+- The operator self-check names unregistered execution units.
 
 - The second consecutive blocking review stops automatic fix drafts: the owner
   narrows and re-dispatches, fixes directly, or finalizes rejected.
