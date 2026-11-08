@@ -2519,6 +2519,171 @@ with tempfile.TemporaryDirectory() as empty_repo:
 failed_data = counted["failed_and_undecided"]
 assert failed_data["reason_code"] == {"no_change": 1, "delegate_failed": 1}, counted
 assert failed_data["first_failing_stage"] == {"none": 1, "unknown": 1}, counted
+# Coordination uses declared scopes, digest-bound gates, provider usage and
+# the same retained owner decisions as decisions_by_model; never infer a writer
+# from the most recent attempt or turn absent usage into a zero-cost handoff.
+from unittest.mock import patch
+def coordination_attempt(ident, task, start, end, provider="codex", role="builder", access="write"):
+    def stamp(second):
+        return "2026-10-26T00:00:%02dZ" % second
+    return {"attempt_id": ident, "task_id": task, "tool": "peer-delegate",
+            "provider": provider, "state": "done", "terminal": True,
+            "created_at": stamp(start), "updated_at": stamp(end),
+            "transitions": [{"state": "running", "ts": stamp(start)},
+                            {"state": "done", "ts": stamp(end)}],
+            "refs": {"panel_role": "worker" if access == "write" else "reviewer",
+                     "panel_access": access, "panel_purpose": role, "panel_model": "fixture"}}
+with tempfile.TemporaryDirectory() as metrics_repo:
+    root = pathlib.Path(metrics_repo)
+    (root / ".oms/artifacts").mkdir(parents=True)
+    (root / ".oms/plan").mkdir()
+    attempt_rows = [coordination_attempt("w1", "alpha", 0, 10),
+                    coordination_attempt("w2", "beta", 5, 15),
+                    coordination_attempt("w3", "gamma", 5, 15),
+                    coordination_attempt("w4", "delta", 5, 15),
+                    coordination_attempt("w5", "alpha", 20, 30),
+                    coordination_attempt("w6", "alpha", 30, 40),
+                    coordination_attempt("r1", "alpha", 10, 12, "claude", "reviewer", "read"),
+                    coordination_attempt("r2", "beta", 15, 17, "codex", "reviewer", "read"),
+                    coordination_attempt("r3", "gamma", 15, 17, "codex", "reviewer", "read")]
+    plan_tasks = [{"id": task, "state": "done", "allowed_paths": paths}
+                  for task, paths in (("alpha", ["src"]), ("beta", ["src/file.py"]),
+                                      ("gamma", ["src-other"]), ("delta", []))]
+    (root / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": plan_tasks}))
+    artifact_rows = [{"kind": "delegate", "attempt_id": ident, "task_id": task,
+                      "patch_sha256": ident, "provider_usage": {
+                          "input_tokens": units, "cache_read_tokens": cache}}
+                     for ident, task, units, cache in (("w1", "alpha", 80, 20),
+                                                       ("w2", "beta", 0, 0),
+                                                       ("w3", "gamma", 10, 0),
+                                                       ("w5", "alpha", 120, 30))]
+    for ident, task, writer, verdict in (("r1", "alpha", "w1", "fail"),
+                                         ("r2", "beta", "w2", "pass"),
+                                         ("r3", "gamma", "missing", "fail")):
+        artifact_rows.append({"kind": "review-outcome", "attempt_id": ident, "task_id": task,
+                              "ts": next(a["updated_at"] for a in attempt_rows if a["attempt_id"] == ident),
+                              "review": {"candidate": {"patch_sha256": writer}, "gate_verify_exit": 0,
+                                         "seats": [{"provider": "claude" if ident == "r1" else "codex",
+                                                    "verdict": verdict}]}})
+    artifact_rows.extend({"kind": "panel-result", "task_id": "alpha", "ts": stamp}
+                         for stamp in ("2026-10-26T00:00:00Z", "2026-10-26T00:00:41Z"))
+    def collect_coordination(rows=attempt_rows, artifacts=artifact_rows, since=None, owner_result=None):
+        (root / ".oms/artifacts/index.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in artifacts))
+        with patch.object(panel_metrics, "_attempt_history", return_value=(rows, False)), \
+                patch.object(panel_results, "outcomes", return_value={
+                    "alpha": "accepted", "beta": "rejected", "gamma": "accepted"}), \
+                patch.object(panel_results, "_indexed", return_value=json.dumps(owner_result or {
+                    "kind": "oms-panel-result", "task_id": "alpha", "outcome": "accepted",
+                    "attempt_ids": ["w1", "w5", "w6"],
+                    "superseded_attempts": [{"attempt_id": "w1"}]}).encode()):
+            return panel_metrics.aggregate(root, since=since, now=1792972850)
+    measured = collect_coordination()
+    coordination = measured["coordination"]
+    duplicate = coordination["duplicate_work"]
+    assert (duplicate["numerator"], duplicate["denominator"], duplicate["unknown"]) == (1, 3, 3), duplicate
+    cross = coordination["cross_catch"]
+    assert cross["different_provider"]["reviews"] == 1, cross
+    assert cross["different_provider"]["blocking_verdicts"] == 1, cross
+    assert cross["different_provider"]["confirmed_catches"] == 1, cross
+    assert cross["same_provider"]["reviews"] == 1 and cross["unknown"] == 1, cross
+    handoff = coordination["handoff_rework"]
+    assert (handoff["median"], handoff["n"], handoff["unknown"]) == (1.5, 1, 1), handoff
+    cell = coordination["outcome_by_provider_role"]["codex"]["builder"]
+    assert (cell["accepted"], cell["rejected"], cell["total"], cell["unknown"]) == (2, 1, 3, 1), cell
+    text = panel_metrics.metrics_text(measured)
+    assert "codex/builder accepted=2 rejected=1 total=3 unknown=1" in text, text
+    # No write pair, no second round and no review is a missing denominator,
+    # rather than a 0% rate. Small provider/role cells stay in JSON only.
+    empty = collect_coordination([], [])
+    assert empty["coordination"]["duplicate_work"]["rate"] is None, empty
+    assert empty["coordination"]["handoff_rework"]["median"] is None, empty
+    assert "duplicate_work=0/0 (none)" in panel_metrics.metrics_text(empty), empty
+    single = collect_coordination(attempt_rows[:1], [])
+    assert "hidden smaller cells=1" in panel_metrics.metrics_text(single), single
+    # The strict interval boundary is not concurrency; equal-path and root
+    # declarations overlap, while a string prefix without a slash does not.
+    boundary = collect_coordination([attempt_rows[0], dict(attempt_rows[1],
+                                   created_at=attempt_rows[0]["updated_at"], transitions=[])], [])
+    assert boundary["coordination"]["duplicate_work"]["denominator"] == 0, boundary
+    recent = collect_coordination(since="10s")
+    assert recent["coordination"]["duplicate_work"]["denominator"] == 0, recent
+    assert recent["coordination"]["cross_catch"]["different_provider"]["reviews"] == 0, recent
+    assert recent["coordination"]["handoff_rework"]["n"] == 0, recent
+    malformed = [dict(attempt_rows[0], created_at="invalid", transitions=[]), attempt_rows[1]]
+    assert collect_coordination(malformed, [])["coordination"]["duplicate_work"]["unknown"] == 1
+    zero = [attempt_rows[1], dict(attempt_rows[4], task_id="beta")]
+    assert collect_coordination(zero)["coordination"]["handoff_rework"]["unknown"] == 1
+    bad_usage = [dict(row, provider_usage={"input_tokens": "bad", "cache_read_tokens": 0})
+                 if row.get("attempt_id") == "w1" else row for row in artifact_rows]
+    assert collect_coordination(artifacts=bad_usage)["coordination"]["handoff_rework"]["n"] == 0
+    # Old gates without lifecycle linkage still contribute unknowns. The seat
+    # provider and candidate digest suffice when both are retained, even if the
+    # reviewer attempt has aged out of the lifecycle tail.
+    legacy = [{"kind": "review-outcome", "ts": "2026-10-26T00:00:12Z"}]
+    assert collect_coordination([], legacy)["coordination"]["cross_catch"]["unknown"] == 1
+    gated = [dict(row, attempt_id="expired") if row.get("kind") == "review-outcome" else row
+             for row in artifact_rows]
+    assert collect_coordination(artifacts=gated)["coordination"]["cross_catch"]["different_provider"]["reviews"] == 1
+    for bad_verdict in (None, "no-verdict", "malformed"):
+        malformed_gate = [dict(row, review=dict(row["review"], seats=[{
+            "provider": "claude", "verdict": bad_verdict}])) if row.get("attempt_id") == "r1" else row
+                          for row in artifact_rows]
+        entry = collect_coordination(artifacts=malformed_gate)["coordination"]["cross_catch"]["different_provider"]
+        assert entry["reviews"] == 0 and entry["unknown"] == 1, entry
+    for failed_verify in (None, 1, "0", False):
+        failed_gate = [dict(row, review=dict(row["review"], gate_verify_exit=failed_verify))
+                       if row.get("attempt_id") == "r1" else row for row in artifact_rows]
+        assert collect_coordination(artifacts=failed_gate)["coordination"]["cross_catch"]["different_provider"]["unknown"] == 1
+    unresolved = [row for row in artifact_rows if row.get("kind") != "panel-result"]
+    entry = collect_coordination(artifacts=unresolved)["coordination"]["cross_catch"]["different_provider"]
+    assert entry["catch_unknown"] == 1 and entry["confirmed_catch_rate"]["rate"] is None, entry
+    # An already-created parallel write round is not a later correction, and
+    # identical bytes written by different providers make attribution unknown.
+    before_gate = [dict(row, created_at="2026-10-26T00:00:01Z") if row["attempt_id"] in {"w5", "w6"} else row
+                   for row in attempt_rows]
+    assert collect_coordination(before_gate)["coordination"]["cross_catch"]["different_provider"]["confirmed_catches"] == 0
+    ambiguous = artifact_rows + [{"kind": "delegate", "attempt_id": "w5", "task_id": "alpha", "patch_sha256": "w1"}]
+    other_provider = [dict(attempt_rows[0], attempt_id="w5", provider="claude")
+                      if row["attempt_id"] == "w5" else row for row in attempt_rows]
+    assert collect_coordination(other_provider, ambiguous)["coordination"]["cross_catch"]["unknown"] == 2
+    assert collect_coordination(artifacts=ambiguous)["coordination"]["cross_catch"]["different_provider"]["reviews"] == 1
+    # Equal and root path declarations overlap; absent/malformed declarations
+    # remain unknown. A zero follow-up over a nonzero baseline is a valid ratio.
+    for paths, expected in ((["src"], 1), (["."], 1), (["../invalid"], 0), ([""], 0), ("src", 0)):
+        plan_tasks[1]["allowed_paths"] = paths
+        (root / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": plan_tasks}))
+        duplicate = collect_coordination(attempt_rows[:2], [])["coordination"]["duplicate_work"]
+        assert duplicate["numerator"] == expected, duplicate
+        assert duplicate["unknown"] == (0 if expected else 1), duplicate
+    plan_tasks[1]["allowed_paths"] = ["src/file.py"]
+    (root / ".oms/plan/tasks.json").write_text(json.dumps({"tasks": plan_tasks}))
+    zero_followup = [dict(row, provider_usage={"input_tokens": 0, "cache_read_tokens": 0})
+                    if row.get("attempt_id") == "w5" else row for row in artifact_rows]
+    assert collect_coordination(artifacts=zero_followup)["coordination"]["handoff_rework"]["median"] == 0
+    for value in (-1, True, None):
+        invalid_usage = [dict(row, provider_usage={"input_tokens": value, "cache_read_tokens": 0})
+                         if row.get("attempt_id") == "w1" else row for row in artifact_rows]
+        assert collect_coordination(artifacts=invalid_usage)["coordination"]["handoff_rework"]["unknown"] == 2
+    two_ratios = artifact_rows + [{"kind": "delegate", "task_id": "alpha", "attempt_id": "w6",
+                                  "provider_usage": {"input_tokens": 100, "cache_read_tokens": 0}}]
+    assert collect_coordination(artifacts=two_ratios)["coordination"]["handoff_rework"]["median"] == 1.25
+    for owner_result in ({"outcome": "malformed"}, {"outcome": "accepted"}, {"outcome": "rejected"}):
+        owner_result.update(kind="oms-panel-result", task_id="alpha")
+        entry = collect_coordination(owner_result=owner_result)["coordination"]["cross_catch"]["different_provider"]
+        assert entry["confirmed_catches"] == 0, entry
+        assert entry["catch_unknown"] == (owner_result["outcome"] != "rejected"), entry
+    with patch.object(panel_results, "_worker_owns", return_value=["."]):
+        duplicate = collect_coordination(attempt_rows[:3], [])["coordination"]["duplicate_work"]
+        assert duplicate["numerator"] == duplicate["denominator"] == 3, duplicate
+    for row in (dict(attempt_rows[0], created_at="2026-10-26T00:00:20Z", transitions=[]),
+                dict(attempt_rows[0], task_id=""),
+                dict(attempt_rows[0], state="queued", transitions=[])):
+        assert collect_coordination([row, attempt_rows[1]], [])["coordination"]["duplicate_work"]["unknown"] == 1
+    for at_boundary in ("2026-10-26T00:00:05Z", "2026-10-26T00:00:15Z"):
+        no_interval = dict(attempt_rows[0], created_at=at_boundary, updated_at=at_boundary, transitions=[])
+        assert collect_coordination([no_interval, attempt_rows[1]], [])["coordination"]["duplicate_work"]["denominator"] == 0
+    assert collect_coordination([attempt_rows[0], dict(attempt_rows[1], task_id="alpha")], [])["coordination"]["duplicate_work"]["denominator"] == 0
 indexed_reader = panel_results._indexed
 attempts = [
     {"attempt_id": "a-decided", "refs": {"panel_role": "reviewer"}},

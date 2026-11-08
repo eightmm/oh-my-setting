@@ -596,7 +596,12 @@ def aggregate(repo, since=None, now=None):
     """Aggregate bounded recorded evidence read only.
 
     Follow-up task IDs are not linked by any producer record; rework therefore
-    counts only additional write rounds for the same task ID.
+    counts only additional write rounds for the same task ID. Coordination
+    excludes unknown observations from rate denominators. Duplicate pairs use
+    half-open run intervals and the later start for --since; handoff cohorts
+    use the first write start, like rework. Handoff units are the recorded input
+    plus cache-read counters (provider definitions can differ). Gates use their
+    verdict timestamp and bind writers by task and candidate patch digest.
     """
     from panel_results import _read, _indexed, outcomes, settled_pending_admissions
 
@@ -881,11 +886,14 @@ def aggregate(repo, since=None, now=None):
                     if isinstance(task.get("cancellation"), dict)]
     cancels += sum(in_window(stamp) for stamp in plan_cancels)
     owner_failures = 0
+    owner_results = []
     for row in retained_artifacts:
         if row.get("kind") != "panel-result" or not in_window(row.get("ts")):
             continue
         try:
             result = json.loads(_indexed(repo, row, 1024 * 1024))
+            if isinstance(result, dict) and result.get("kind") == "oms-panel-result":
+                owner_results.append((row, result))
             owner_failures += int(isinstance(result, dict) and result.get("kind") == "oms-panel-result"
                                   and result.get("outcome") == "failed")
         except (OSError, ValueError, TypeError):
@@ -950,6 +958,7 @@ def aggregate(repo, since=None, now=None):
     task_sets = {name: set() for name in token_decisions}
     unreported_tokens = 0
     model_tasks = {}
+    role_tasks = {}
     # outcomes() reads only retained panel-result rows, so a task last active before the earliest one
     # may have been decided without a retained record; it is not undecided.
     result_stamps = [_stamp(row.get("ts")) for row in retained_artifacts
@@ -982,6 +991,9 @@ def aggregate(repo, since=None, now=None):
             model = model if isinstance(model, str) and model else "unknown"
             buckets = model_tasks.setdefault(provider, {}).setdefault(model, {})
             buckets.setdefault(bucket, set()).add(task_key)
+            role = refs.get("panel_purpose") or refs.get("panel_role")
+            role = role if isinstance(role, str) and role else "unknown"
+            role_tasks.setdefault(provider, {}).setdefault(role, {}).setdefault(bucket, set()).add(task_key)
         entry = token_decisions[bucket]
         entry["attempts"] += 1
         if task_key is not None:
@@ -1008,6 +1020,183 @@ def aggregate(repo, since=None, now=None):
                       ("accepted", "completed", "rejected", "failed", "undecided")}
             counts["tasks"] = len(set().union(*buckets.values()))
             decisions_by_model[provider][model] = counts
+    def measured_rate(numerator, denominator, unknown=0):
+        return {"numerator": numerator, "denominator": denominator, "unknown": unknown,
+                "rate": round(numerator / denominator, 4) if denominator else None}
+
+    # Scope is a declaration, not the files ultimately patched. Cache room
+    # projections because many retained workers can belong to the same room.
+    from panel_results import _worker_owns
+    from room import overlaps
+    from path_scope import normalize
+    coordination_writes = [call for call in calls if call.get("refs", {}).get("panel_role") == "worker"
+                           and call.get("refs", {}).get("panel_access") == "write"]
+    scope_by_task = {task["id"]: task.get("allowed_paths") for task in tasks}
+    rooms, scopes, intervals = {}, {}, {}
+    terminal_states = {"review", "done", "failed", "cancelled", "timed_out", "abandoned"}
+    for call in coordination_writes:
+        ident = call.get("attempt_id")
+        try:
+            paths = _worker_owns(repo, call, _rooms=rooms) or scope_by_task.get(call.get("task_id"))
+            scopes[ident] = ([normalize(path) for path in paths]
+                             if isinstance(paths, list) and paths
+                             and all(isinstance(path, str) and path.strip() for path in paths) else None)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            scopes[ident] = None
+        starts = [_stamp(item.get("ts")) for item in call.get("transitions", [])
+                  if item.get("state") == "running"]
+        start = min((stamp for stamp in starts if stamp is not None),
+                    default=_stamp(call.get("created_at")))
+        ends = [_stamp(item.get("ts")) for item in call.get("transitions", [])
+                if item.get("state") in terminal_states]
+        end = min((stamp for stamp in ends if stamp is not None), default=(
+            _stamp(call.get("updated_at")) if call.get("state") in terminal_states else
+            now if call.get("state") == "running" else None))
+        intervals[ident] = (start, end)
+    duplicate_n, concurrent_n, duplicate_unknown = 0, 0, 0
+    for index, left in enumerate(coordination_writes):
+        for right in coordination_writes[index + 1:]:
+            if left.get("task_id") and left.get("task_id") == right.get("task_id"):
+                continue
+            a, b = intervals[left.get("attempt_id")], intervals[right.get("attempt_id")]
+            if not in_window(max((stamp for stamp in (a[0], b[0]) if stamp is not None), default=None)):
+                continue
+            if (not left.get("task_id") or not right.get("task_id")
+                    or None in a + b or a[1] < a[0] or b[1] < b[0]):
+                duplicate_unknown += 1
+                continue
+            if max(a[0], b[0]) >= min(a[1], b[1]):
+                continue
+            left_paths, right_paths = scopes[left.get("attempt_id")], scopes[right.get("attempt_id")]
+            if left_paths is None or right_paths is None:
+                duplicate_unknown += 1
+                continue
+            concurrent_n += 1
+            duplicate_n += any(overlaps(a_path, b_path) for a_path in left_paths for b_path in right_paths)
+
+    # Detailed usage is retained on delegate index rows; lifecycle tokens alone
+    # cannot distinguish input/cache reads from output. Require every component.
+    units = {}
+    for call in coordination_writes:
+        rows = [row for row in calls_by_attempt.get(call.get("attempt_id"), [])
+                if row.get("kind") == "delegate"]
+        amounts = []
+        for row in rows:
+            usage = row.get("provider_usage")
+            values = [usage.get(key) for key in ("input_tokens", "cache_read_tokens")] if isinstance(usage, dict) else []
+            if len(values) != 2 or any(type(value) is not int or value < 0 for value in values):
+                break
+            amounts.append(sum(values))
+        units[call.get("attempt_id")] = sum(amounts) if rows and len(amounts) == len(rows) else None
+    coordination_groups = {}
+    for call in coordination_writes:
+        if call.get("task_id"):
+            coordination_groups.setdefault(call["task_id"], []).append(call)
+    ratios, handoff_unknown = [], 0
+    for group in coordination_groups.values():
+        if len(group) < 2:
+            continue
+        if any(_stamp(call.get("created_at")) is None for call in group):
+            handoff_unknown += len(group) - 1
+            continue
+        ordered = sorted(group, key=lambda call: (_stamp(call["created_at"]), call.get("created_order", 0)))
+        if not in_window(ordered[0]["created_at"]):
+            continue
+        baseline = units.get(ordered[0].get("attempt_id"))
+        for call in ordered[1:]:
+            amount = units.get(call.get("attempt_id"))
+            if baseline is None or baseline == 0 or amount is None:
+                handoff_unknown += 1
+            else:
+                ratios.append(amount / baseline)
+
+    cross = {split: {"reviews": 0, "blocking_verdicts": 0, "confirmed_catches": 0,
+                     "unknown": 0, "catch_unknown": 0}
+             for split in ("same_provider", "different_provider")}
+    cross["unknown"] = 0
+    for verdict in retained_artifacts:
+        if verdict.get("kind") != "review-outcome" or not in_window(verdict.get("ts")):
+            continue
+        review = verdict.get("review")
+        review = review if isinstance(review, dict) else {}
+        seats = review.get("seats")
+        seats = seats if isinstance(seats, list) and seats else [{}]
+        candidate = review.get("candidate")
+        digest = candidate.get("patch_sha256") if isinstance(candidate, dict) else None
+        decided = _stamp(verdict.get("ts"))
+        writers = [call for call in coordination_writes if call.get("task_id") == verdict.get("task_id")
+                   and decided is not None and _stamp(call.get("created_at")) is not None
+                   and _stamp(call["created_at"]) <= decided
+                   and digest and any(row.get("patch_sha256") == digest for row in
+                                      calls_by_attempt.get(call.get("attempt_id"), [])
+                                      if row.get("kind") == "delegate")]
+        providers = {call.get("refs", {}).get("panel_provider") or call.get("provider") for call in writers}
+        writer = next(iter(providers)) if len(providers) == 1 else None
+        for seat in seats:
+            provider = seat.get("provider") if isinstance(seat, dict) else None
+            if not isinstance(writer, str) or not writer or not isinstance(provider, str) or not provider:
+                cross["unknown"] += 1
+                continue
+            entry = cross["same_provider" if writer == provider else "different_provider"]
+            if (type(review.get("gate_verify_exit")) is not int or review["gate_verify_exit"] != 0
+                    or seat.get("verdict") not in {"pass", "fail"}):
+                entry["unknown"] += 1
+                continue
+            entry["reviews"] += 1
+            if seat["verdict"] != "fail":
+                continue
+            entry["blocking_verdicts"] += 1
+            confirmed = False
+            known = False
+            for row, result in owner_results:
+                if result.get("task_id") != verdict.get("task_id"):
+                    continue
+                settled = _stamp(row.get("ts"))
+                if decided is None or settled is None or settled < decided:
+                    continue
+                if result.get("outcome") != "accepted":
+                    known = known or result.get("outcome") in {"completed", "rejected", "failed"}
+                    continue
+                ids = result.get("attempt_ids")
+                superseded = result.get("superseded_attempts")
+                if not isinstance(ids, list) or not isinstance(superseded, list):
+                    continue
+                excluded = {item.get("attempt_id") for item in superseded if isinstance(item, dict)}
+                accepted = [call for call in coordination_writes
+                            if call.get("task_id") == verdict.get("task_id")
+                            and call.get("attempt_id") in ids and call.get("attempt_id") not in excluded]
+                if not accepted:
+                    continue
+                known = all(_stamp(call.get("created_at")) is not None for call in accepted)
+                confirmed = any(_stamp(call.get("created_at")) is not None
+                                and _stamp(call["created_at"]) > decided for call in accepted)
+                if confirmed:
+                    break
+            entry["confirmed_catches"] += confirmed
+            entry["catch_unknown"] += not confirmed and not known
+    for split in ("same_provider", "different_provider"):
+        entry = cross[split]
+        entry["blocking_rate"] = measured_rate(entry["blocking_verdicts"], entry["reviews"], entry["unknown"])
+        entry["confirmed_catch_rate"] = measured_rate(entry["confirmed_catches"],
+                                                     entry["blocking_verdicts"] - entry["catch_unknown"],
+                                                     entry["catch_unknown"])
+    role_outcomes = {}
+    for provider, roles in sorted(role_tasks.items()):
+        role_outcomes[provider] = {}
+        for role, buckets in sorted(roles.items()):
+            accepted, rejected = len(buckets.get("accepted", set())), len(buckets.get("rejected", set()))
+            total = len(set().union(*(buckets.get(name, set()) for name in ("accepted", "completed", "rejected", "failed"))))
+            unknown = len(buckets.get("undecided", set()))
+            role_outcomes[provider][role] = {"accepted": accepted, "rejected": rejected, "total": total,
+                                             "unknown": unknown,
+                                             "accepted_rate": measured_rate(accepted, total, unknown),
+                                             "rejected_rate": measured_rate(rejected, total, unknown)}
+    coordination = {"duplicate_work": measured_rate(duplicate_n, concurrent_n, duplicate_unknown),
+                    "cross_catch": cross,
+                    "handoff_rework": {"median": percentile(sorted(ratios), .5), "n": len(ratios),
+                                       "unknown": handoff_unknown},
+                    "outcome_by_provider_role": role_outcomes}
+
     def has_claim_evidence(task):
         history = task.get("history") if isinstance(task.get("history"), list) else []
         has_history = any(isinstance(item, dict) and item.get("kind") in {"claim", "start", "started"}
@@ -1045,6 +1234,7 @@ def aggregate(repo, since=None, now=None):
             "endings": ending_counts,
             "tokens_by_decision": token_decisions,
             "decisions_by_model": decisions_by_model,
+            "coordination": coordination,
             "write_attempts": {"total": len(delegate_writes), "states": state_totals,
                                "state_counts": delegate_states,
                                "reconciles": (state_totals["done"] + state_totals["failed"]
@@ -1092,6 +1282,24 @@ def metrics_text(report):
                    for provider, model, counts in models[:8]]
     if len(models) > 8:
         model_parts.append("+%d more" % (len(models) - 8))
+    coordination = report.get("coordination", {})
+    duplicate = coordination.get("duplicate_work", {})
+    handoff = coordination.get("handoff_rework", {})
+    cross = coordination.get("cross_catch", {})
+    cross_parts = []
+    for split in ("same_provider", "different_provider"):
+        entry = cross.get(split, {})
+        cross_parts.append("%s reviews=%d blocking=%d confirmed=%d unknown=%d catch_unknown=%d" % (
+            split, entry.get("reviews", 0), entry.get("blocking_verdicts", 0), entry.get("confirmed_catches", 0),
+            entry.get("unknown", 0), entry.get("catch_unknown", 0)))
+    cells, hidden = [], 0
+    for provider, roles in sorted(coordination.get("outcome_by_provider_role", {}).items()):
+        for role, counts in sorted(roles.items()):
+            if counts["total"] < 3:
+                hidden += 1
+            else:
+                cells.append("%s/%s accepted=%d rejected=%d total=%d unknown=%d" % (
+                    provider, role, counts["accepted"], counts["rejected"], counts["total"], counts["unknown"]))
     return "\n".join(line for line in (
         "Panel metrics (since %s; until %s)" % (report.get("since") or "all retained", report.get("until", "unknown")),
         "coverage: %s attempts, %s artifact events (limits %s/%s); plan tasks without an observed write attempt=%d%s" % (
@@ -1131,6 +1339,12 @@ def metrics_text(report):
                 if name != "unreported_attempts"),
             report.get("tokens_by_decision", {}).get("unreported_attempts", 0)),
         "decisions by model: " + ("; ".join(model_parts) or "none"),
+        "coordination: duplicate_work=%d/%d (%s) unknown=%d; handoff_rework median=%s n=%d unknown=%d" % (
+            duplicate.get("numerator", 0), duplicate.get("denominator", 0), rate(duplicate.get("rate")),
+            duplicate.get("unknown", 0), "none" if handoff.get("median") is None else handoff["median"],
+            handoff.get("n", 0), handoff.get("unknown", 0)),
+        "coordination: cross_catch %s; unknown=%d; outcome_by_provider_role %s; hidden smaller cells=%d" % (
+            "; ".join(cross_parts), cross.get("unknown", 0), "; ".join(cells) or "none", hidden),
         "failed/undecided write reasons/stages: %s / %s; undecided ages=%s" % (
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("reason_code", {}), sort_keys=True),
             json.dumps(report.get("write_attempts", {}).get("failed_and_undecided", {}).get("first_failing_stage", {}), sort_keys=True),
