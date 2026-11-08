@@ -83,6 +83,11 @@ the whole council. Preserve requested participants when another full round is
 requested. There is no separate sequential mode, persistent provider session,
 token streaming, or automatic client wakeup.
 
+A council's synthesized consensus is the decision within the user's goal:
+dispatch its implementation without another approval round, and judge disputed
+points from evidence. Publication, destructive, paid and out-of-scope contract
+changes keep their own authority.
+
 ## Advisor that reads your history
 
 `oms advise` is the decision-point advisor (VERDICT/RISKS/MISSING/NEXT).
