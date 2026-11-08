@@ -4,7 +4,31 @@
 
 기준: v0.7.0, [`acf4c5a`](https://github.com/eightmm/oh-my-setting/commit/acf4c5a5f7b4fee25e77ce1fd8602d3703a1e306)
 
-상태: 작업계획. 아래 구현 항목은 모두 미완료이며, 이 문서의 추가가 버그 수정을 뜻하지 않는다.
+상태: S1–S6 구현을 아래 PR로 제출했다. 아직 병합하지 않았으며, 로컬 집중 검증과
+전체 통합 CI의 완료 여부를 구분한다. 아래 완료 조건은 최종 수락용 checklist로
+보존하고, 해당 구현 PR의 CI와 병합을 확인한 뒤 완료 처리한다.
+
+## 구현 현황
+
+| 작업 | 구현 PR | 로컬에서 확인한 근거 | 남은 확인 |
+|---|---|---|---|
+| S1, S4 | [#12 — task와 evidence 유효성](https://github.com/eightmm/oh-my-setting/pull/12) | 취소 전환 회귀, lease/reopen 3개 smoke; freshness·비용·lineage 등 runtime 8개 case | 전체 CI; 완료 task 재활성화 통합 case |
+| S2, S5 | [#11 — 실제 모델 계열과 리뷰 identity](https://github.com/eightmm/oh-my-setting/pull/11) | 모델 계열 및 실제 routing 호출 2개 집중 case; 수정 전 실패 재현 | 전체 auto-review integration과 CI |
+| S3, S6 | [#13 — 공개 CI 조회와 업데이트 증빙](https://github.com/eightmm/oh-my-setting/pull/13) | 전체 update-v04·install-profile·문서 검사; 기존 land CI/scope 16개 사례 | 전체 land·native/portability CI |
+
+#12와 #13은 #11의 기존 자동 리뷰 fixture 수정을 기반으로 한 별도 PR이다.
+병합 순서는 #11을 먼저 적용하고, 이후 #12와 #13을 각각 검토한다. 두 후속 PR 사이에는
+구현 의존성이 없다. 이 계획 문서 PR은 기능 변경과 독립적이다.
+
+로컬 통합 검사에서는 process identity/reference 등록 실패가 발생했고,
+full 선택의 committed-range gate는 ShellCheck가 없어 중단했다. 해당 검사를 통과로
+표시하거나 guard를 완화하지 않았다. 각 PR에는 실행한 명령과 실패 범위를 기록했다.
+
+호환성상 달라지는 부분은 기본 evidence binding의 선택적 `verified_state`다.
+기존 `schema: 1`과 명시적 dependency 의미를 유지하며, 지문 없는 오래된 verified
+binding은 현재 worktree의 검증을 입증하지 못하므로 inconclusive로 표시한다.
+S6은 exact-SHA conclusion/scope 조회를 공유하되 자동 업데이트의 affected 성공 허용,
+land의 full-proof 요구, fresh/manual edge 예외를 각각 유지한다.
 
 ## 목표와 범위
 
