@@ -1440,9 +1440,9 @@ warning_plan = temporary / "dispatch-warning-plan"
     '"forbidden_paths":["secrets/"]},"empty":{"verify":""}}}')
 assert dispatch._plan_task_paths(warning_plan, "verified") == (["scripts/a.sh"], ["secrets/"])
 assert dispatch._plan_task_paths(warning_plan, "missing") == ([], [])
-assert dispatch._plan_task_has_verifier(warning_plan, "verified")
-assert not dispatch._plan_task_has_verifier(warning_plan, "empty")
-assert not dispatch._plan_task_has_verifier(warning_plan, "missing")
+assert dispatch._plan_task_verifier(warning_plan, "verified")
+assert not dispatch._plan_task_verifier(warning_plan, "empty")
+assert not dispatch._plan_task_verifier(warning_plan, "missing")
 warning_route = {"kind": "worker", "provider": "codex", "model": "test-model",
                  "role": "builder", "workload": "light", "effort": "low",
                  "access": "write", "purpose": "implement"}

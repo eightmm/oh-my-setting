@@ -18,31 +18,15 @@ import uuid
 
 import dispatch_supervisor
 import panel_results
-from room_repository import LIBRARY, harness_residue_parent, state_repository, work_repository
+from room_repository import harness_residue_parent, state_repository, work_repository
 
 PREFIX = b'# oms-salvage: '
 MAX_EVIDENCE = 8 * 1024 * 1024
 
 
-def _native_path(value):
-    # Use the same trusted native-library bridge as room_repository; Git Bash
-    # marker spellings are not native Python paths on Windows.
-    if os.name != 'nt' and not os.environ.get('MSYSTEM'):
-        return Path(value)
-    query = subprocess.run(['bash', '-c', '. "${1%/*}/peer-common.sh" || exit $?; '
-                            'ma_artifact_index_python_path "$2"',
-                            'salvage-native-path', LIBRARY.as_posix(), str(value)],
-                           env=dict(os.environ, MSYS2_ARG_CONV_EXCL='*'),
-                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           check=False, timeout=15)
-    if query.returncode:
-        raise ValueError('native salvage path conversion failed: ' + query.stderr[:160].strip())
-    return Path(query.stdout.replace('\r', '').rstrip('\n'))
-
-
 def _worktree_root():
     cache = os.environ.get('XDG_CACHE_HOME') or str(Path.home() / '.cache')
-    return _native_path(os.environ.get('OMS_DELEGATE_WORKTREE_ROOT') or
+    return Path(os.environ.get('OMS_DELEGATE_WORKTREE_ROOT') or
                 str(Path(cache) / 'oh-my-setting/worktrees')).resolve(strict=True)
 
 
@@ -57,16 +41,16 @@ def _git_directory(repo):
     value = _read(repo, '.git', 4096).decode().replace('\r', '').strip()
     if not value.startswith('gitdir: '):
         raise ValueError('invalid worktree gitfile')
-    return (repo / _native_path(value[8:])).resolve(strict=True)
+    return (repo / Path(value[8:])).resolve(strict=True)
 
 
 def _common(directory):
     value = _read(directory, 'commondir', 4096, True).decode().replace('\r', '').strip()
-    return (directory / _native_path(value)).resolve(strict=True) if value else directory
+    return (directory / Path(value)).resolve(strict=True) if value else directory
 
 
 def _managed(repo, path):
-    kept = _native_path(path).expanduser()
+    kept = Path(path).expanduser()
     physical = kept.resolve(strict=True)
     root = _worktree_root()
     residue = harness_residue_parent(physical)
@@ -80,15 +64,15 @@ def _managed(repo, path):
         if not equals or key in fields:
             raise ValueError('invalid kept worktree marker')
         fields[key] = value
-    marker_repo = _native_path(fields.get('repo', '')).resolve(strict=True)
+    marker_repo = Path(fields.get('repo', '')).resolve(strict=True)
     if (fields.get('kind') != 'oh-my-setting-temp' or fields.get('temporary') != '1' or
-            _native_path(fields.get('worktree', '')).resolve() != physical or
+            Path(fields.get('worktree', '')).resolve() != physical or
             _common(_git_directory(marker_repo)) != _common(_git_directory(repo))):
         raise ValueError('kept worktree marker does not belong to this repository')
     directory = _git_directory(physical)
     common = _common(_git_directory(repo))
     if (_common(directory) != common or directory.parent != common / 'worktrees' or
-            _native_path(_read(directory, 'gitdir', 4096).decode().replace('\r', '').strip()).resolve() !=
+            Path(_read(directory, 'gitdir', 4096).decode().replace('\r', '').strip()).resolve() !=
             physical / '.git'):
         raise ValueError('kept worktree registration does not match this repository')
     head = _read(directory, 'HEAD', 4096).decode().strip()
@@ -132,13 +116,13 @@ def _latest(repo, task, attempt_id=None):
                 all(part not in {'', '.', '..'} and '\\' not in part and ':' not in part
                     for part in components)):
             root = _worktree_root().resolve(strict=True)
-            candidate = Path(_native_path(root / relative)).resolve(strict=False)
+            candidate = (root / relative).resolve(strict=False)
             if candidate != root and root in candidate.parents:
                 delegate_path = str(candidate)
                 paths.append(delegate_path)
     if not paths:
         raise ValueError('latest delegate has no recorded kept worktree path')
-    paths = [str(_native_path(value)) for value in paths]
+    paths = [str(Path(value)) for value in paths]
     if len(set(paths)) != 1:
         raise ValueError('conflicting kept worktree evidence')
     reason = attempt.get('reason_code') or ('delegate exit ' + str(record.get('exit', 'unknown')))
@@ -195,7 +179,7 @@ def _standalone(repo, attempt_id, artifact):
     paths = [a or b for a, b in re.findall(
         r'^(?:error: )?worktree kept(?: at|:) (.+)$|^- worktree: (/.+)$',
         body.decode('utf-8'), re.M)]
-    paths = [str(_native_path(value)) for value in paths]
+    paths = [str(Path(value)) for value in paths]
     if not paths or len(set(paths)) != 1:
         raise ValueError('standalone artifact has no unique kept worktree path')
     base = record.get('base_sha', '')
@@ -403,8 +387,6 @@ def _capture(kept, common, base, head=None):
             elif stat.S_ISREG(info.st_mode):
                 after = _read(kept, name, 256 * 1024 * 1024)
                 mode = '100755' if info.st_mode & 0o111 else '100644'
-                if os.name == 'nt':
-                    mode = committed.get(os.fsencode(name), entries.get(name, ('100644', ''))[0])
             else:
                 raise ValueError('salvage refuses special file: ' + name)
             if name in entries and before == after and entries[name][0] == mode:
@@ -553,7 +535,7 @@ def _attempt_recovery_evidence(repo, task, attempt, indexed=None, attempt_row=No
             for block in listed.stdout.split('\n\n'):
                 entry = next((line[9:] for line in block.splitlines() if line.startswith('worktree ')), None)
                 if entry:
-                    entry_path = _native_path(entry)
+                    entry_path = Path(entry)
                     if (entry_path.is_dir() and entry_path.name == parts[-1]
                             and entry_path.parent.name == expected_parent):
                         evidence.append('registered worktree: ' + str(entry_path))

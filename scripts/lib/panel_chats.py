@@ -859,9 +859,7 @@ def plan(repo, ident, who, surface="auto"):
         method = "existing-terminal"
     elif surface != "terminal" and row["uri"]:
         launcher = "open" if sys.platform == "darwin" else "xdg-open"
-        if os.name == "nt":
-            method = "windows-uri"
-        elif shutil.which(launcher):
+        if shutil.which(launcher):
             if sys.platform == "linux":
                 if not shutil.which("xdg-mime"):
                     raise ValueError("Codex app handler cannot be verified: xdg-mime is unavailable")
@@ -880,7 +878,7 @@ def plan(repo, ident, who, surface="auto"):
             method = "app-uri"
         else:
             raise ValueError("no local app URI opener; use the existing terminal or native app sidebar")
-    elif surface != "terminal" and row["provider"] == "claude" and row["session_id"] and sys.platform in {"darwin", "win32"}:
+    elif surface != "terminal" and row["provider"] == "claude" and row["session_id"] and sys.platform == "darwin":
         launcher = shutil.which("claude")
         if not launcher:
             raise ValueError("Claude CLI is unavailable; use the native app sidebar")
@@ -909,13 +907,10 @@ def open_chat(repo, ident, who, surface="auto", dry_run=False, allowed_methods=N
         import panel_host
         panel_host.focus(request["target"])
         return dict(request, status="navigation_requested")
-    if request["method"] == "windows-uri":
-        os.startfile(request["uri"])
-    else:
-        for command in request["commands"]:
-            result = subprocess.run(command, check=False, timeout=5, stdin=subprocess.DEVNULL)
-            if result.returncode:
-                raise ValueError("chat navigation failed; session was preserved")
+    for command in request["commands"]:
+        result = subprocess.run(command, check=False, timeout=5, stdin=subprocess.DEVNULL)
+        if result.returncode:
+            raise ValueError("chat navigation failed; session was preserved")
     return dict(request, status="navigation_requested")
 
 

@@ -47,36 +47,9 @@ trap_file = temporary / 'salvage-git-executed'
 trap_command = 'touch ' + shlex.quote(str(trap_file))
 for key in ('filter.trap.clean', 'filter.trap.smudge', 'diff.external', 'core.fsmonitor'):
     subprocess.run(['git', '-C', str(salvage_execution_repo), 'config', key, trap_command], check=True)
-# Native-path conversion handles Bash marker spellings before Python resolves them.
-path_bin = temporary / 'salvage-path-bin'
-path_bin.mkdir()
-bash_registry = '/c/oms-fixture/registry'
-bash_tree = bash_registry + '/oh-my-setting-delegate.fixture/wt'
-bash_repo = '/c/oms-fixture/repo'
-path_mapping = {bash_registry: str(salvage_registry), bash_tree: str(salvage_tree),
-                bash_repo: str(salvage_execution_repo), '/c/oms-fixture/foreign': str(project)}
-(path_bin / 'cygpath').write_text('#!%s\nimport sys\n' % sys.executable +
-    'mapping = %r\nassert sys.argv[1] == "-m"\nsys.stdout.write(mapping.get(sys.argv[2], sys.argv[2]) + "\\r\\n")\n' % path_mapping)
-(path_bin / 'cygpath').chmod(0o755)
-path_env = {'MSYSTEM': 'MINGW64', 'PATH': str(path_bin) + os.pathsep + os.environ['PATH'],
-            'OMS_DELEGATE_WORKTREE_ROOT': bash_registry}
-marker_path = salvage_tree.parent / '.oh-my-setting-tmp'
-marker_before = marker_path.read_bytes()
-try:
-    marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\npid=99999999\nrepo=%s\nworktree=%s\n' %
-                           (bash_repo, bash_tree))
-    with patch.dict(os.environ, path_env):
-        assert panel_salvage._native_path(bash_repo) == salvage_execution_repo, 'CRLF native path not normalized'
-        assert panel_salvage._managed(salvage_execution_repo, bash_tree)[0] == salvage_tree
-        marker_path.write_text('kind=oh-my-setting-temp\ntemporary=1\nrepo=/c/oms-fixture/foreign\nworktree=%s\n' % bash_tree)
-        try:
-            panel_salvage._managed(salvage_execution_repo, bash_tree)
-        except ValueError as error:
-            assert 'does not belong' in str(error), error
-        else:
-            raise AssertionError('foreign Bash marker repository passed native identity validation')
-finally:
-    marker_path.write_bytes(marker_before)
+with patch.dict(os.environ, {'MSYSTEM': 'fixture', 'OMS_DELEGATE_WORKTREE_ROOT': str(salvage_registry)}), \
+        patch.object(panel_salvage.subprocess, 'run', side_effect=AssertionError('unexpected path conversion')):
+    assert panel_salvage._worktree_root() == salvage_registry
 
 index_path = panel_salvage._git_directory(salvage_tree) / 'index'
 index_before = index_path.read_bytes()
@@ -656,25 +629,18 @@ except ValueError as error:
 else:
     raise AssertionError('committed gitlink was silently omitted from salvage')
 
-# On Windows, a newly committed executable must retain the mode recorded by HEAD.
+# A newly committed executable retains its mode.
 executable_tree, executable_attempt = kept_fixture('executable')
 git_executable = ['git', '-C', str(executable_tree), '-c', 'user.email=test@example.com', '-c', 'user.name=test']
 (executable_tree / 'run.sh').write_text('#!/bin/sh\nprintf ok\n')
 (executable_tree / 'run.sh').chmod(0o755)
 subprocess.run(git_executable + ['add', 'run.sh'], check=True)
 subprocess.run(git_executable + ['commit', '-qm', 'add executable'], check=True)
-class WindowsOS:
-    name = 'nt'
-
-    def __getattr__(self, attribute):
-        return getattr(os, attribute)
-
-with patch.object(panel_salvage, 'os', WindowsOS()):
-    executable_patch, executable_files, _ = panel_salvage._capture(
-        executable_tree, Path(subprocess.run(['git', '-C', str(executable_tree), 'rev-parse', '--git-common-dir'],
-                                             check=True, capture_output=True, text=True).stdout.strip()),
-        launch_base, subprocess.run(['git', '-C', str(executable_tree), 'rev-parse', 'HEAD'],
-                                    check=True, capture_output=True, text=True).stdout.strip())
+executable_patch, executable_files, _ = panel_salvage._capture(
+    executable_tree, Path(subprocess.run(['git', '-C', str(executable_tree), 'rev-parse', '--git-common-dir'],
+                                         check=True, capture_output=True, text=True).stdout.strip()),
+    launch_base, subprocess.run(['git', '-C', str(executable_tree), 'rev-parse', 'HEAD'],
+                                check=True, capture_output=True, text=True).stdout.strip())
 assert executable_files and 'run.sh' in {row['path'] for row in executable_files}, executable_files
 assert b'new file mode 100755' in executable_patch, executable_patch
 for broken, expected in (({'base_sha': ''}, 'valid recorded launch base'), ({'base_sha': 'f' * 12}, 'recorded launch base')):

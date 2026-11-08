@@ -1352,9 +1352,6 @@ def _plan_task_paths(repo, task_id):
     return paths("allowed_paths"), paths("forbidden_paths")
 
 
-def _plan_task_has_verifier(repo, task_id): return bool(_plan_task_verifier(repo, task_id))
-
-
 def _plan_task_verifier(repo, task_id):
     """Return the stored command, empty for an invalid verifier, or None for no readable task."""
     if not task_id:

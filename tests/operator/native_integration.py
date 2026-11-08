@@ -780,7 +780,7 @@ with patch.object(panel, "managed_session", return_value=False), \
         patch("panel_chats.open_chat", return_value={"method": "existing-terminal"}) as opened:
     nav = {"room_id": shared}
     panel.navigate(project, ("chat", main_attempts["codex"]), tree_room, nav, 91)
-    assert opened.call_args.kwargs == {"allowed_methods": {"existing-terminal", "app-uri", "windows-uri"}}, opened.call_args
+    assert opened.call_args.kwargs == {"allowed_methods": {"existing-terminal", "app-uri"}}, opened.call_args
     assert nav["notice"] == "Chat navigation requested in its window"
     left = deepcopy(tree_room["room"])
     for member in left["participants"]:
@@ -797,7 +797,7 @@ with patch("panel_chats.plan", return_value={"method": "claude-desktop"}), \
         patch("panel_chats.subprocess.run") as launched:
     import panel_chats
     try:
-        panel_chats.open_chat(project, shared, main_attempts["claude"], allowed_methods={"existing-terminal", "app-uri", "windows-uri"})
+        panel_chats.open_chat(project, shared, main_attempts["claude"], allowed_methods={"existing-terminal", "app-uri"})
     except ValueError:
         pass
     else:
@@ -1032,11 +1032,8 @@ with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.Path
         app = panel_chats.open_chat(project, shared, "chat-sol", "app", dry_run=True)
     assert app["uri"] == native["uri"]
     assert len(navigation_calls) == 2
-    if os.name != "nt":
-        assert app["commands"] == [["xdg-open", native["uri"]]]
-        assert handler_probe.call_args.args[0] == ["xdg-mime", "query", "default", "x-scheme-handler/codex"]
-    else:
-        assert app["method"] == "windows-uri" and not handler_probe.called
+    assert app["commands"] == [["xdg-open", native["uri"]]]
+    assert handler_probe.call_args.args[0] == ["xdg-mime", "query", "default", "x-scheme-handler/codex"]
     with patch.object(panel_chats.sys, "platform", "linux"):
         try:
             panel_chats.open_chat(project, shared, "chat-opus", "app", dry_run=True)
@@ -1310,7 +1307,7 @@ if os.name != "nt":
         preferred = panel_chats.open_chat(project, shared, "chat-sol", dry_run=True)
         assert preferred["method"] == "existing-terminal"
         launched.assert_not_called()
-for platform in ("darwin", "win32"):
+for platform in ("darwin",):
     for supported in (True, False):
         with patch.dict(os.environ, chat_env, clear=True), \
                 patch.object(panel_chats.sys, "platform", platform), \

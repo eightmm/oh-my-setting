@@ -1552,13 +1552,12 @@ def _accepted_prefix(repo, execution, landings):
     if not accepted and not local_intents:
         return []
 
-    # The shell helper owns the receipt namespace, including Git Bash path
-    # spelling. A passed clone-local publication resets even unfinalized tasks.
+    # The shell helper owns the receipt namespace. A passed clone-local
+    # publication resets even unfinalized tasks.
     directory = subprocess.check_output(['bash', '-c',
         '. "$1"; panel_receipts=$(oms_land_state_dir "$2") || exit; '
-        'if [ "$3" = nt ]; then cygpath -w "$panel_receipts"; '
-        'else printf "%s\\n" "$panel_receipts"; fi',
-        'panel-prefix', str(ROOT / 'scripts/lib/land-receipts.sh'), str(execution), os.name],
+        'printf "%s\\n" "$panel_receipts"',
+        'panel-prefix', str(ROOT / 'scripts/lib/land-receipts.sh'), str(execution)],
         text=True, timeout=30).replace('\r', '').rstrip('\n')
     chain_rows = _git(execution, 'rev-list', '--first-parent', '--parents', '--max-count=10000',
                       'HEAD').decode().splitlines()

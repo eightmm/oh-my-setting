@@ -295,9 +295,8 @@ def navigate(repo, action, state, navigation, width):
     if kind == "chat":
         import panel_chats
         opened = panel_chats.open_chat(repo, room_id, ident,
-            allowed_methods={"existing-terminal", "app-uri", "windows-uri"})
-        navigation["notice"] = "Chat navigation requested " + {"existing-terminal": "in its window", "app-uri": "in the app",
-                                                                  "windows-uri": "in the app"}.get(opened["method"], "")
+            allowed_methods={"existing-terminal", "app-uri"})
+        navigation["notice"] = "Chat navigation requested " + {"existing-terminal": "in its window", "app-uri": "in the app"}.get(opened["method"], "")
     elif kind == "mail":
         current = dict(current, messages=panel_messages.read(repo, room_id))
         navigation["detail"] = {"title": "MESSAGES", "text": panel_messages.mail_page(current, ident, width)}
