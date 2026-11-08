@@ -89,10 +89,6 @@ PreToolUse|git-move-guard-hook.sh|Bash|5
 # is everything between); a 5s ceiling bounds bash -n on a pathological file.
 PostToolUse|syntax-guard-hook.sh|Edit|Write|MultiEdit|5
 
-# A panel main sees its direct-work streak while it works. Advisory only;
-# ordinary sessions and harness children exit before starting Python.
-PostToolUse|panel-direct-work-hook.sh|Edit|Write|MultiEdit|NotebookEdit|Bash|5
-
 # Compaction discards transcript detail; snapshot a handoff digest first. The
 # hook is best-effort and self-bounded, but a ceiling keeps a huge transcript
 # from stalling compaction.
@@ -176,7 +172,7 @@ Usage: install-claude-hooks.sh [--remove] [--settings PATH] [--print-expected]
 
 Register oh-my-setting's UserPromptSubmit skill-router hook, Stop turn-guard
 hook, PostToolUseFailure/PostToolUse fail-ledger hooks, PostToolUse
-edit-time syntax-guard and panel-main direct-work feedback hooks,
+edit-time syntax-guard hook,
 PreCompact/SessionEnd handoff-snapshot hooks,
 SessionStart resume hook, SessionStart/SessionEnd telemetry hooks, main usage
 HUD, compact subagent HUD, and the per-model effort default for the Claude
@@ -284,7 +280,6 @@ fi
 [ -f "$ROOT/scripts/turn-guard.sh" ] || fail "turn-guard.sh not found under $ROOT"
 [ -f "$ROOT/scripts/fail-ledger-hook.sh" ] || fail "fail-ledger-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/syntax-guard-hook.sh" ] || fail "syntax-guard-hook.sh not found under $ROOT"
-[ -f "$ROOT/scripts/panel-direct-work-hook.sh" ] || fail "panel-direct-work-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/precompact-handoff.sh" ] || fail "precompact-handoff.sh not found under $ROOT"
 [ -f "$ROOT/scripts/resume-hook.sh" ] || fail "resume-hook.sh not found under $ROOT"
 [ -f "$ROOT/scripts/telemetry-hook.sh" ] || fail "telemetry-hook.sh not found under $ROOT"

@@ -1346,57 +1346,6 @@ def is_panel_main() -> bool:
     return bool(os.environ.get("OMS_PANEL_MAIN_ATTEMPT")) and os.environ.get("OMS_PANEL_SESSION", "").startswith("oms-")
 
 
-DIRECT_KINDS = ("edit", "write", "run")
-DIRECT_EDIT_TOOLS = frozenset(("Edit", "Write", "MultiEdit", "NotebookEdit"))
-DIRECT_RUN_TOOLS = frozenset(("python", "python3", "pytest", "torchrun", "bash"))
-DIRECT_JOB_TOOLS = frozenset(("sbatch", "srun", "squeue", "ssh"))
-DIRECT_BOOKKEEPING = frozenset(("CHANGELOG.md", "VERSION", "MANIFEST", "MANIFEST.in",
-                                "manifest.json", "manifest.toml", "package.json", "package-lock.json",
-                                "pyproject.toml", "Cargo.toml", "Cargo.lock"))
-
-
-def panel_direct_repo(payload: dict[str, Any]) -> Path | None:
-    from hook_repo import root
-    bound = os.environ.get("OMS_ROOM_REPO") or os.environ.get("CLAUDE_PROJECT_DIR")
-    return root(bound or payload_cwd(payload))
-
-
-def panel_direct_path(repo: Path, payload: dict[str, Any]) -> Path:
-    return repo / ".oms/hooks/sessions" / (session_hash(payload) + ".direct-work.json")
-
-
-def direct_counts(value: Any) -> dict[str, int]:
-    value = value if isinstance(value, dict) else {}
-    return {kind: value[kind] if type(value.get(kind)) is int and value[kind] >= 0 else 0
-            for kind in DIRECT_KINDS}
-
-
-def direct_repo_file(raw: Any, repo: Path, cwd: Path) -> str:
-    """Accept only repository paths; integration worktrees and ephemeral notes are main work."""
-    from hook_repo import native_path
-    if not isinstance(raw, str) or not raw or any(ch in raw for ch in "$`\n\r"):
-        return ""
-    raw = native_path(raw)
-    if raw is None:
-        return ""
-    path = Path(raw).expanduser()
-    path = (cwd / path).resolve() if not path.is_absolute() else path.resolve()
-    try:
-        relative = path.relative_to(repo)
-    except ValueError:
-        return ""
-    if path.name in DIRECT_BOOKKEEPING or any(part in ("scratchpad", "manifests", ".claude") for part in relative.parts):
-        return ""
-    for base in (os.environ.get("TMPDIR"), os.environ.get("CLAUDE_CODE_TMPDIR"), str(Path.home() / ".claude")):
-        if base and (path == Path(base).resolve() or Path(base).resolve() in path.parents):
-            return ""
-    for parent in path.parents:
-        if parent.name.startswith(("oh-my-setting-scratch.", "oh-my-setting-admit.", "oh-my-setting-land.")):
-            if (parent / ".oh-my-setting-tmp").is_file():
-                return ""
-    return re.sub(r"[^A-Za-z0-9_.()+ -]", "_", path.name[:48])
-
-
 def direct_shell_segments(command: str) -> list[list[tuple[str, bool]]]:
     # Operators count only outside quotes and escapes, so `--format="a > b"`
     # or `rg 'x > y'` never looks like a redirection. Heredoc bodies are
@@ -1515,147 +1464,6 @@ def apply_patch_paths(command: str, include_deleted: bool = False) -> list[str]:
     return names
 
 
-def classify_direct_work(payload: dict[str, Any], repo: Path) -> tuple[str, str] | None:
-    from hook_repo import native_path
-    tool, data = payload.get("tool_name"), payload.get("tool_input")
-    if not isinstance(data, dict):
-        return None
-    cwd = Path(native_path(payload_cwd(payload)) or str(repo)).resolve()
-    if tool in DIRECT_EDIT_TOOLS:
-        name = direct_repo_file(data.get("file_path") or data.get("notebook_path"), repo, cwd)
-        return ("edit", name) if name else None
-    if tool == "apply_patch":
-        for target in apply_patch_paths(data.get("command") if isinstance(data.get("command"), str) else "", True):
-            name = direct_repo_file(target, repo, cwd)
-            if name:
-                return ("edit", name)
-        return None
-    if tool != "Bash" or not isinstance(data.get("command"), str):
-        return None
-    try:
-        segments = direct_shell_segments(data["command"])
-    except ValueError:
-        return None
-    result = None
-    for words in segments:
-        while words and (words[0][0] in ("do", "then", "while", "if", "command", "exec", "time", "nohup")
-                         or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0][0])):
-            words = words[1:]
-        if not words:
-            continue
-        values = [word for word, _ in words]
-        exe = Path(values[0]).name
-        args = values[1:]
-        if exe == "oms":
-            if args and (args[0] == "peer-delegate" or
-                         args[0] == "panel" and any(arg in ("--dispatch", "--council", "--continue") for arg in args)):
-                return ("dispatch", "")
-            continue
-        if exe == "cd":
-            if len(args) == 1 and not any(ch in args[0] for ch in "$`"):
-                cwd = (cwd / args[0]).resolve()
-            continue
-        for index, (word, operator) in enumerate(words[:-1]):
-            if operator and word in (">", ">>", "1>", "1>>"):
-                name = direct_repo_file(values[index + 1], repo, cwd)
-                if name:
-                    result = ("write", name)
-        if exe in ("sed", "perl") and any(re.match(r"^-[A-Za-z]*i", arg) for arg in args):
-            names = [direct_repo_file(arg, repo, cwd) for arg in args
-                     if not arg.startswith("-") and (cwd / arg).is_file()]
-            if any(names):
-                result = ("write", next(name for name in reversed(names) if name))
-        elif exe == "tee":
-            names = [direct_repo_file(arg, repo, cwd) for arg in args if not arg.startswith("-")]
-            if any(names):
-                result = ("write", next(name for name in names if name))
-        elif exe == "git" and args and args[0] == "apply":
-            if not any(arg in ("--check", "--stat", "--numstat", "--summary", "-h", "--help") for arg in args):
-                name = direct_repo_file(".git-apply", repo, cwd)
-                if name:
-                    result = ("write", "")
-        elif exe in DIRECT_JOB_TOOLS:
-            result = result or ("run", "")
-        elif exe in DIRECT_RUN_TOOLS:
-            if any(arg in ("--help", "-h", "--version", "-V", "-c") for arg in args) or exe == "bash" and "-n" in args:
-                continue
-            project = exe in ("pytest", "torchrun") and bool(direct_repo_file(".direct-run", repo, cwd))
-            files = [arg for arg in args if arg.endswith((".py", ".sh")) and not arg.startswith("-")]
-            name = next((name for arg in files if (name := direct_repo_file(arg, repo, cwd))), "")
-            if exe.startswith("python") and "-m" in args and args[args.index("-m") + 1:]:
-                module = args[args.index("-m") + 1]
-                project = bool(direct_repo_file(".direct-run", repo, cwd)) and (module == "pytest" or
-                    re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", module) and (cwd / (module.replace(".", "/") + ".py")).is_file())
-            if project or name:
-                result = result or ("run", name)
-    return result
-
-
-def panel_direct_work(payload: dict[str, Any]) -> str:
-    """Only counters and short basenames survive the PostToolUse event."""
-    if (not is_panel_main() or is_harness_child()
-            or (payload.get("hook_event_name") or payload.get("hookEventName")) != "PostToolUse"):
-        return ""
-    session = payload.get("session_id") or payload.get("sessionId")
-    if not isinstance(session, str) or not session:
-        return ""
-    repo = panel_direct_repo(payload)
-    if repo is None:
-        return ""
-    classified = classify_direct_work(payload, repo)
-    if classified is None:
-        return ""
-    import thread_live
-    path = panel_direct_path(repo, payload)
-    path = thread_live.safe_path(repo, path.relative_to(repo).as_posix(), True)
-    with event_file_lock(path, name="." + path.stem + ".lockdir"):
-        if path.is_symlink():
-            return ""
-        old = load_state(path)
-        counts, streak = direct_counts(old.get("counts")), direct_counts(old.get("since_dispatch"))
-        raw_files = old.get("files")
-        files = [name for name in raw_files if isinstance(name, str) and name == Path(name).name
-                 and bounded_name(name, 48)] if isinstance(raw_files, list) else []
-        kind, name = classified
-        if kind == "dispatch":
-            streak, files = direct_counts(None), []
-        else:
-            counts[kind] += 1
-            streak[kind] += 1
-            if name and name not in files:
-                files.append(name)
-        write_json_atomic(path, {"schema": 1, "counts": counts, "since_dispatch": streak, "files": files[-3:]})
-    total = sum(streak.values())
-    if total != 3 and (not total or total % 8):
-        return ""
-    details = []
-    for key, label in (("edit", "edit"), ("write", "Bash write"), ("run", "run")):
-        if streak[key]:
-            details.append("%d %s%s" % (streak[key], label, "s" if streak[key] != 1 else ""))
-    names = "; files: " + ", ".join(files[-3:]) if files else ""
-    return ("[oms panel] %d direct work calls since your last dispatch (%s%s). A panel main delegates: "
-            "oms panel --dispatch builder ... --brief-file F --verify CMD (experiments: builder writes the run script, "
-            "worker --purpose investigate reports outputs). Direct edits are for admitted-patch integration, "
-            "known-cause 1-2 file fixes, or after a worker failed twice — say which applies."
-            % (total, "; ".join(details), names))
-
-
-def panel_direct_hint(payload: dict[str, Any]) -> str:
-    if not is_panel_main() or is_harness_child():
-        return ""
-    repo = panel_direct_repo(payload)
-    total = sum(direct_counts(load_state(panel_direct_path(repo, payload)).get("since_dispatch")).values()) if repo else 0
-    return " · direct work since last dispatch: %d" % total if total else ""
-
-
-def cmd_panel_direct_work(_) -> int:
-    payload, _ = load_payload()
-    message = panel_direct_work(payload)
-    if message:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": message}}))
-    return 0
-
-
 def record_panel_activity(payload: dict[str, Any], repo: Path | None = None) -> None:
     """Turn presence only; never copy prompt/tool text or append room events."""
     if not is_panel_main() or is_harness_child():
@@ -1763,10 +1571,8 @@ def panel_main_hint(payload: dict[str, Any]) -> str:
                 if line:
                     base = line + "\n" + base
     status = panel_status_hint(payload, room)
-    direct = panel_direct_hint(payload)
-    status = status.removesuffix(direct) if direct else status
     message = base + panel_dedup_hint(payload, panel_plan_hint(payload) + status,
-                                      bool(path) and not state.get("delivered")) + direct + panel_graph_hint(payload)
+                                      bool(path) and not state.get("delivered")) + panel_graph_hint(payload)
     if path and not state.get("delivered"):
         write_json_atomic(path, dict(state, schema=1, updated_at=utc_now(), delivered=True))
     return message
@@ -2028,23 +1834,22 @@ def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
     """Ask for a declared status when the main has none or it is older than twenty minutes."""
     if os.environ.get("OMS_HARNESS_CHILD") == "1" or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0":
         return ""
-    direct = panel_direct_hint(payload)
     me = os.environ.get("OMS_ROOM_PARTICIPANT", "")
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
     if not (me and room_id and repo):
-        return direct
+        return ""
     try:
         found = declared_status(payload, repo.resolve(), room_id, me)
         age = time.time() - datetime.strptime(str(found.get("ts")), "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc).timestamp()
         if found.get("text") and age <= 20 * 60:
-            return direct
+            return ""
     except (ValueError, TypeError):
         pass
     except Exception:
-        return direct
+        return ""
     return (" · set your status: oms room send --id %s --participant %s --to all --kind status "
-            "--text \"short current task\"" % (room_id, me)) + direct
+            "--text \"short current task\"" % (room_id, me))
 
 
 def panel_main_base(payload: dict[str, Any], room: str) -> str:
@@ -3337,7 +3142,6 @@ def main() -> int:
     sub.add_parser("relay").set_defaults(func=cmd_relay)
     sub.add_parser("relay-hint").set_defaults(func=cmd_relay_hint)
     sub.add_parser("panel-hook").set_defaults(func=cmd_panel_hook)
-    sub.add_parser("panel-direct-work").set_defaults(func=cmd_panel_direct_work)
     args = parser.parse_args()
     return int(args.func(args))
 

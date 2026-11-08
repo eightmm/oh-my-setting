@@ -28539,11 +28539,7 @@ assert len(notice) == 1 and notice[0]["matcher"] == "permission_prompt|elicitati
 assert "telemetry-hook.sh" in notice[0]["hooks"][0]["command"] and notice[0]["hooks"][0]["timeout"] == 5, notice
 assert sum(
     len(entry["hooks"]) for entries in d["hooks"].values() for entry in entries
-) == 13 + 1, d["hooks"]  # the thirteen OMS registrations plus the user router
-direct = [entry for entry in d["hooks"].get("PostToolUse", [])
-          if "panel-direct-work-hook.sh" in entry["hooks"][0]["command"]]
-assert len(direct) == 1 and direct[0]["matcher"] == "Edit|Write|MultiEdit|NotebookEdit|Bash", direct
-assert direct[0]["hooks"][0]["timeout"] == 5, direct
+) == 12 + 1, d["hooks"]  # the twelve OMS registrations plus the user router
 pre = d["hooks"]["PreToolUse"]
 assert len(pre) == 1 and pre[0]["matcher"] == "Bash", pre
 assert "git-move-guard-hook.sh" in pre[0]["hooks"][0]["command"] and pre[0]["hooks"][0]["timeout"] == 5, pre
@@ -41895,7 +41891,6 @@ install-mcp
 install-skills
 install-tools
 link
-panel-direct-work-hook
 pre-push-check
 precompact-handoff
 python-runtime
@@ -45408,7 +45403,7 @@ assert any("owner-marker" in item["message"] for item in row["findings"]), row
 # Every hook the Codex plugin registers must reach a script the dispatcher
 # admits: a hooks.json row naming a tool outside harness-hook.sh's allowlist
 # fails silently at dispatch time, which is how a hook can ship registered
-# and never run. Syntax and panel direct-work feedback must both reach a script.
+# and never run. The syntax guard must reach its script.
 test_codex_plugin_hooks_dispatch_only_allowlisted_scripts() {
   local hooks="$ROOT/plugins/oh-my-setting/hooks.json"
   local manifest="$ROOT/plugins/oh-my-setting/.codex-plugin/plugin.json"
@@ -45447,18 +45442,14 @@ rows = [entry for entry in doc["hooks"].get("PostToolUse", [])
 assert len(rows) == 1, rows
 assert "apply_patch" in rows[0].get("matcher", ""), rows[0]
 PY
-  python3 - "$hooks" "$dispatcher" "$ROOT" <<'PY' || fail "the Codex direct-work dispatcher contract failed"
+  python3 - "$hooks" "$dispatcher" "$ROOT" <<'PY' || fail "the Codex dispatcher contract failed"
 import json, os, runpy, subprocess, sys
 from pathlib import Path
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
-rows = [entry for entry in doc["hooks"].get("PostToolUse", [])
-        if any("panel-direct-work-hook" in hook.get("command", "") for hook in entry.get("hooks", []))]
-assert len(rows) == 1 and rows[0].get("matcher") == "Bash|apply_patch", rows
-assert len(rows[0]["hooks"]) == 1 and rows[0]["hooks"][0]["timeout"] == 5, rows
 bridge = runpy.run_path(str(Path(sys.argv[3]) / "scripts/lib/codex-hook-bridge.py"))
 registered = bridge["expected_hook_keys"](Path(sys.argv[1]).parent, "fixture")
 assert registered["fixture:hooks.json:post_tool_use:0:0"] == "syntax-guard-hook", registered
-assert registered["fixture:hooks.json:post_tool_use:1:0"] == "panel-direct-work-hook", registered
+assert "fixture:hooks.json:post_tool_use:1:0" not in registered, registered
 env = dict(os.environ)
 for name in ("OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_SESSION", "OMS_HARNESS_CHILD"):
     env.pop(name, None)
@@ -45477,20 +45468,10 @@ exec bash "$1" "$2"
 ''', 1),
 )
 for probe, status in probes:
-    for route in ("turn-guard", "panel-direct-work-hook"):
-        result = subprocess.run(["bash", "-c", probe, "dispatcher-probe", sys.argv[2], route],
-                                input="{}", capture_output=True, text=True, env=env, timeout=timeout)
-        assert not result.stdout, (route, result)
-        if route == "panel-direct-work-hook":
-            assert result.returncode == 0 and not result.stderr, (route, result)
-        else:
-            assert result.returncode == status and result.stderr, (route, result)
-for raw in ("", "0", "{}", "{"):
-    result = subprocess.run(["bash", sys.argv[2], "panel-direct-work-hook"], input=raw,
-                            capture_output=True, text=True, env=env, timeout=timeout)
-    assert result.returncode == 0 and not result.stdout and not result.stderr, result
+    result = subprocess.run(["bash", "-c", probe, "dispatcher-probe", sys.argv[2], "turn-guard"],
+                            input="{}", capture_output=True, text=True, env=env, timeout=timeout)
+    assert not result.stdout and result.returncode == status and result.stderr, result
 PY
-  case "|$allow|" in *"|panel-direct-work-hook|"*) ;; *) fail "dispatcher must admit panel-direct-work-hook" ;; esac
 }
 
 test_codex_desktop_main_reviewer_proof_rejects_forged_context() {

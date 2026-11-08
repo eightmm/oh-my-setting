@@ -666,12 +666,23 @@ test_hook_installers_keep_telemetry_off_the_tool_hot_path() {
   local home_dir="$TMP/claude-home"
 
   mkdir -p "$home_dir"
-  printf '{}\n' > "$settings"
+  python3 - "$ROOT" "$settings" <<'PYTEST'
+import json, sys
+from pathlib import Path
+root, settings = map(Path, sys.argv[1:])
+old = "panel-" + "direct-work-hook.sh"
+command = 'bash "' + str(root / "scripts" / old) + '"'
+settings.write_text(json.dumps({"hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [
+    {"type": "command", "command": command}, {"type": "command", "command": "user-hook"}]}]}}))
+PYTEST
   HOME="$home_dir" OMS_CLAUDE_SETTINGS="$settings" \
     bash "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
   python3 - "$settings" <<'PY' || fail "Claude telemetry hooks were not installed"
 import json, sys
 hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+commands = [h.get("command", "") for entries in hooks.values() for entry in entries for h in entry.get("hooks", [])]
+assert not any(("panel-" + "direct-work-hook.sh") in command for command in commands), commands
+assert "user-hook" in commands, commands
 for event in ("SessionStart", "SessionEnd"):
     commands = [h.get("command", "") for entry in hooks.get(event, []) for h in entry.get("hooks", [])]
     assert any("telemetry-hook.sh" in command for command in commands), (event, commands)
@@ -693,7 +704,7 @@ expected = {
     "Stop": [("", "turn-guard")],
     "PreCompact": [("", "precompact-handoff codex")],
     "SessionStart": [("", "resume-hook"), ("", "telemetry-hook")],
-    "PostToolUse": [("apply_patch", "syntax-guard-hook"), ("Bash|apply_patch", "panel-direct-work-hook")],
+    "PostToolUse": [("apply_patch", "syntax-guard-hook")],
     "SessionEnd": [("", "telemetry-hook")],
 }
 actual = {event: [(entry.get("matcher", ""), h.get("command", "").split('harness-hook.sh" ', 1)[-1])
@@ -2495,7 +2506,14 @@ with tempfile.TemporaryDirectory() as empty_repo:
     panel_metrics._attempt_history = lambda _repo: (
         [_write_attempt("a-nochange", "no_change"), _write_attempt("a-failed", "delegate_failed")], False)
     try:
-        counted = panel_metrics.aggregate(empty_repo, now=1792972800)["write_attempts"]
+        old_state = pathlib.Path(empty_repo) / ".oms/hooks/sessions" / (("a" * 32) + ".direct-work.json")
+        old_state.parent.mkdir(parents=True)
+        old_state.write_text('{"counts":{"edit":1}}')
+        report = panel_metrics.aggregate(empty_repo, now=1792972800)
+        assert ("direct" + "_work") not in report, report
+        assert "main direct work" not in panel_metrics.metrics_text(report)
+        assert old_state.read_text() == '{"counts":{"edit":1}}'
+        counted = report["write_attempts"]
     finally:
         panel_metrics._attempt_history = original_history
 failed_data = counted["failed_and_undecided"]

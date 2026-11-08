@@ -38,7 +38,7 @@ case "${2:-}" in
       exit $?
     fi
     ;;
-  */panel-direct-work-hook.sh|*/git-move-guard-hook.sh)
+  */git-move-guard-hook.sh)
     [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] || exit 0
     [ "${OMS_HARNESS_CHILD:-}" != 1 ] || exit 0
     case "${OMS_PANEL_SESSION:-}" in oms-*) ;; *) exit 0 ;; esac

@@ -815,53 +815,6 @@ shrink as new artifact records arrive.
 model, counting a task once per model it touched and grouping attempts without a
 recorded model as `unknown`.
 
-Claude and Codex panel mains also receive advisory feedback while doing direct work.
-The `panel-direct-work-hook.sh` PostToolUse hook matches
-`Edit|Write|MultiEdit|NotebookEdit|Bash` for Claude and `Bash|apply_patch` through
-the Codex plugin dispatcher, with a five-second ceiling. Ordinary
-sessions and harness children exit before starting Python. It never denies a
-tool call or asks the user to intervene; hook failures are silent. The Codex
-dispatcher returns zero silently on input-read or setup failure for this
-advisory route. Existing guard routes preserve their failure behavior.
-After upgrade, approve the new Codex row once through the usual `/hooks` trust
-flow; existing rows retain their trust keys.
-
-| Direct-work kind | Recognized calls |
-| --- | --- |
-| `edit` | Edit, Write, MultiEdit `file_path`; NotebookEdit `notebook_path`; Codex `apply_patch` with an Add File, Update File, Move to or Delete File header inside the session repository (one edit per call) |
-| `write` | Bash `sed -i`, `perl -i`, repository output through `>`/`>>`, heredoc redirection or `tee`, and `git apply` without its inspection options |
-| `run` | Python project scripts or local modules, `python -m pytest`, `pytest`, `torchrun`, Bash project scripts, and `sbatch`, `srun`, `squeue`, `ssh` |
-
-Unknown commands are ignored. OMS commands and their quoted briefs do not count;
-`oms panel --dispatch`, `--council`, `--continue`, and `oms peer-delegate` reset
-the streak. Read-only inspection and Git reads without repository output do not
-count. Runtime help/version requests, Python `-c`, Bash `-n`, and patches without
-recognized file headers are ignored. Codex Bash uses the same shell classifier.
-Edits outside the repository, symlink targets outside it, scratchpad/TMPDIR and
-Claude memory paths are excluded. Marked OMS scratch, patch-admission and landing
-worktrees are excluded from repository edits and writes. Release bookkeeping
-is excluded: `CHANGELOG.md`, `VERSION`, `MANIFEST`, `MANIFEST.in`, `manifest.json`,
-`manifest.toml`, `package.json`, `package-lock.json`, `pyproject.toml`, `Cargo.toml`,
-`Cargo.lock`, and files under `manifests/`.
-
-Feedback reaches both providers as PostToolUse `hookSpecificOutput.additionalContext` at three direct
-calls since dispatch, then at eight and every eight thereafter. It gives the
-kind counts and up to three short file basenames, names the delegation command,
-and asks the main to state the applicable direct-edit exception. Each prompt
-also includes `direct work since last dispatch: N` while the streak is nonzero.
-The existing session hook directory retains one `<session-hash>.direct-work.json`
-record with cumulative `counts`, `since_dispatch` kind counts, and `files`
-(at most three basenames, each capped at 48 characters). It stores no prompt,
-command text, full path or file contents. Per-session locking serializes updates;
-atomic replacement leaves either the old or new record if a call is interrupted.
-
-Metrics expose these retained main counters as `direct_work.counts` by kind and
-`direct_work.sessions`; absent or malformed records show `not recorded` in text
-and null counts in JSON. These cumulative session counters are independent of
-the `--since` window. Claude and Codex share the same counter records. There is
-no transcript backfill. Antigravity currently wires only PreInvocation and Stop, with no
-certified post-tool equivalent.
-
 On a capable terminal the sidebar animates live-state indicators at four frames per
 second using the cached snapshot. Borders and role dividers stay still. Only changed
 rows are redrawn; resizing triggers a complete repaint. Starting, working, verifying and

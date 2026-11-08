@@ -2,12 +2,7 @@
 set -euo pipefail
 
 tool="${1:-}"
-case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|syntax-guard-hook|panel-direct-work-hook|telemetry-hook) ;; *) exit 0 ;; esac
-if [ "$tool" = panel-direct-work-hook ]; then
-  # Advisory setup failures stay silent, including fatal nounset errors.
-  exec 2>/dev/null
-  trap 'exit 0' EXIT
-fi
+case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|syntax-guard-hook|telemetry-hook) ;; *) exit 0 ;; esac
 payload="$(cat)"
 # Only the Codex plugin dispatches here; Codex SessionStart carries no turn_id.
 export OMS_HOOK_AGENT="${OMS_HOOK_AGENT:-codex}"
@@ -43,11 +38,6 @@ for root in "$SOURCE_ROOT" "${OH_MY_SETTING_DIR:-}" "$PLUGIN_ROOT/../.." "$HOME/
     if [ "$tool" = syntax-guard-hook ]; then
       printf '%s' "$payload" | bash "$root/scripts/$tool.sh" "${@:2}" || true
       exit 0
-    fi
-    if [ "$tool" = panel-direct-work-hook ]; then
-      [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] || exit 0
-      [ "${OMS_HARNESS_CHILD:-}" != 1 ] || exit 0
-      case "${OMS_PANEL_SESSION:-}" in oms-*) ;; *) exit 0 ;; esac
     fi
     case "$tool:${OMS_HARNESS_CHILD:-0}" in skill-router:1|turn-guard:1) exit 0 ;; esac
     # Select once in the parent: resume output formatting also runs Python.
