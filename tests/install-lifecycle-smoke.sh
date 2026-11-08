@@ -5,6 +5,11 @@ set -euo pipefail
 # The fixture repository is built from the working tree so CI tests the patch,
 # including uncommitted files in a pull-request checkout.
 
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+  echo "FAIL: install-lifecycle-smoke.sh needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS: brew install bash" >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # shellcheck source=tests/lib/smoke-env.sh
 . "$ROOT/tests/lib/smoke-env.sh"
@@ -40,7 +45,7 @@ test_uninstall_with_old_python() (
   export OMS_PYTHON_RUNTIME_ROOT="$d/missing-runtime" OMS_TEST_REAL_PYTHON="$real_python"
   unset OMS_INSTALL_RECEIPT OMS_CODEX_CONFIG CLAUDE_CONFIG_DIR
   export CODEX_HOME="$HOME/.codex" OMS_CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-  bash "$ROOT/scripts/link.sh" > "$d/link.out" 2>&1 || fail "legacy link fixture failed"
+  "$BASH" "$ROOT/scripts/link.sh" > "$d/link.out" 2>&1 || fail "legacy link fixture failed"
   printf 'model = "legacy-user"\n[tui]\nanimations = true\n' > "$HOME/.codex/config.toml"
   "$real_python" "$ROOT/scripts/lib/codex-hud-config.py" install "$HOME/.codex/config.toml" >/dev/null
   "$real_python" "$ROOT/scripts/lib/codex-usage-config.py" install "$HOME/.codex/config.toml" >/dev/null
@@ -63,11 +68,14 @@ esac
 exec "$OMS_TEST_REAL_PYTHON" "$@"
 SH_OLD
   chmod +x "$d/bin/python3"
+  # The reduced PATH must still resolve `bash` (shebangs, nested calls) to the
+  # Bash 5 running this test, not the host's stock /bin/bash.
+  ln -s "$BASH" "$d/bin/bash"
   export PATH="$d/bin:/usr/bin:/bin" PYTHONPATH="$d/modules"
   for script in uninstall.sh doctor.sh update.sh auto-update.sh; do
-    bash "$ROOT/scripts/$script" --help > "$d/help.out" 2>&1 || fail "$script help refused old Python"
+    "$BASH" "$ROOT/scripts/$script" --help > "$d/help.out" 2>&1 || fail "$script help refused old Python"
   done
-  bash "$ROOT/scripts/doctor.sh" --contract > "$d/doctor.out" 2>&1 ||
+  "$BASH" "$ROOT/scripts/doctor.sh" --contract > "$d/doctor.out" 2>&1 ||
     fail "doctor contract check refused old Python: $(cat "$d/doctor.out")"
   [ "$(grep -Fc 'warn: host Python is older than 3.11' "$d/doctor.out")" = 1 ] ||
     fail "doctor must report the old host once"
@@ -92,8 +100,8 @@ SH_CODEX
   [ "$(grep -Fc 'warn: host Python is older than 3.11' "$d/doctor.out")" = 1 ] || fail "doctor must report the old host once"
   "$HOME/.local/bin/oms" doctor --json > "$d/doctor.json" 2> "$d/doctor.err" || true
   "$real_python" -c 'import json,sys; json.load(open(sys.argv[1]))' "$d/doctor.json" || fail "doctor JSON invalid"
-  bash "$ROOT/scripts/uninstall.sh" --yes --dry-run > "$d/dry-run.out" 2>&1 || fail "legacy dry-run failed"
-  bash "$ROOT/scripts/uninstall.sh" --yes > "$d/uninstall.out" 2>&1 ||
+  "$BASH" "$ROOT/scripts/uninstall.sh" --yes --dry-run > "$d/dry-run.out" 2>&1 || fail "legacy dry-run failed"
+  "$BASH" "$ROOT/scripts/uninstall.sh" --yes > "$d/uninstall.out" 2>&1 ||
     fail "legacy uninstall failed: $(cat "$d/uninstall.out")"
   [ ! -e "$HOME/.codex/AGENTS.md" ] || fail "legacy uninstall left managed links"
   ! grep -Fq 'oh-my-setting managed' "$HOME/.codex/config.toml" || fail "legacy uninstall left TOML markers"

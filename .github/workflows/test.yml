@@ -217,6 +217,16 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      - name: Bash 5 on macOS
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          prefix="$(brew --prefix)"
+          if ! "$prefix/bin/bash" -c "[ \${BASH_VERSINFO[0]} -ge 5 ]" 2>/dev/null; then
+            brew install bash
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/bash" --version | head -n 1
       - name: install / update / uninstall lifecycle
         timeout-minutes: 30
         env:
