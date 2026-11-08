@@ -1776,6 +1776,8 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
     elif act == "block":
         r = env("OMS_REASON")
         if not r: die("--reason is required for block")
+        if t["state"] == "cancelled":
+            die("task %s is cancelled; it cannot be blocked" % i)
         if t["state"] in ("claimed", "running", "review", "landing"):
             require_current_lease(t)
         if t.get("completion_kind"):
