@@ -1582,6 +1582,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         stable = release.resolve(self.repo, 'stable')
         self.assertTrue(stable['ready'])
         self.assertEqual(failures.classify('verification failed')['code'], 'verifier_failed')
+        self.assertEqual(failures.classify('land: gate failed for 0123abc in lint')['code'], 'verifier_failed')
         row = benchmark_snapshot(self.repo)
         self.assertIsNone(row['useful_work_efficiency'])
         comparison = compare(dict(row, useful_work_efficiency=1), dict(row, useful_work_efficiency=2))
