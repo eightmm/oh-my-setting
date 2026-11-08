@@ -102,6 +102,14 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Entry points require Bash 5.0 or newer (macOS through Homebrew) and put the
+  recorded interpreter first on PATH for the scripts they start; `oms doctor
+  --repair` refreshes the record. The Bash 3.2 parse gate (`check-bash32.sh`,
+  its `check.sh` stage and CI's stock-Bash step) is retired.
+- The panel refresh reads attempts in process instead of starting an
+  `oms agent-events list` subprocess (about 470 ms per refresh).
+- Operator dispatch-results cases spread across shards by measured cost; the
+  slowest CI operator shard drops from about 1600 s to about 950 s.
 - Install, provider install, update and repair apply the Antigravity delegate
   permissions (`provider-permissions.sh --apply --profile delegate
   --allow-toolchains`) whenever agy is present, so a new host or a vendor
@@ -531,6 +539,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The pre-push hook skips the full gate for a push that only deletes branches.
+- The Antigravity plugin installer rewrites exact copies of the selected
+  runtime's launchers left by the retired native-Windows template, so updating
+  a host installed before that change no longer fails with "managed Python
+  launcher is invalid" and rolls back; other launcher bytes still fail closed.
 - The worker guard relieves a live `patch-admit` worktree that registers
   between its baseline scan and receipt capture, when its live admit marker
   proves it, instead of stopping the worker on hard Git metadata; dead or
@@ -756,6 +769,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Removed
 
+- Dead native-Windows branches and helpers in the peer shell, Python hooks,
+  landing and panel Python.
 - Removed the unused `otel-export`, `open-in`, `support-bundle`, and `semantic-eval` commands.
 
 ### Added
