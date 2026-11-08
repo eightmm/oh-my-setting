@@ -245,7 +245,7 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
     owner_model = None
-    if owner in ("pi", "antigravity") and role in ("reviewer", "verifier", "security-auditor", "critic"):
+    if role in ("reviewer", "verifier", "security-auditor", "critic"):
         from terminal_panel import active_mains, child_environment
         repo = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         environment = child_environment(owner, repo)

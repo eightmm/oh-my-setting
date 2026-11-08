@@ -375,7 +375,10 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     if role in INDEPENDENT:
         judged = writer or owner
         judged_model = getattr(writer, "model", None) if writer else owner_model
-        judged_family = {"codex": "openai", "claude": "anthropic"}.get(judged)
+        # Harness ownership is not model identity (for example, Claude + GPT).
+        # Keep the native fallback when older attempts did not record a model.
+        judged_family = (model_family(judged, judged_model) if judged_model else
+                         {"codex": "openai", "claude": "anthropic"}.get(judged))
         if judged_family is None:
             judged_family = model_family(judged, judged_model)
         if not judged_family or judged_family == "unknown":
