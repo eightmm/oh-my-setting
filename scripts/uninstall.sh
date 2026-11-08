@@ -2,6 +2,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# A PATH Bash 3.2 re-enters the recorded Bash 5; children (tick.sh) need it too.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+  if [ -f "$ROOT/scripts/lib/install-contract.sh" ]; then
+    # shellcheck source=scripts/lib/install-contract.sh
+    . "$ROOT/scripts/lib/install-contract.sh"
+    if oms_bash_reexec="$(oms_install_bash_interpreter 2>/dev/null)"; then
+      exec "$oms_bash_reexec" "${BASH_SOURCE[0]}" "$@"
+    fi
+  fi
+elif [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_bash_enter
+fi
 # The TOML helpers need the interpreter that wrote the config; a host python3
 # older than 3.11 has no parser and stopped the uninstall.
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then

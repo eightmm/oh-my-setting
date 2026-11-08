@@ -75,6 +75,11 @@ receipt_runtime_safe() {
 
 SCRIPTS_DIR="$(cd "$(dirname "$(resolve_self "${BASH_SOURCE[0]}")")" && pwd)"
 ROOT="$(cd "$SCRIPTS_DIR/.." && pwd -P)"
+if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$SCRIPTS_DIR/lib/platform.sh"
+  oms_bash_enter
+fi
 if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
   . "$SCRIPTS_DIR/lib/python-runtime.sh"
@@ -115,9 +120,16 @@ PY
   if [ -n "$source_root" ] && [ -f "$source_root/scripts/agent-task.sh" ]; then
     SCRIPTS_DIR="$source_root/scripts"
     ROOT="$source_root"
-    # shellcheck source=scripts/lib/python-runtime.sh
-    . "$SCRIPTS_DIR/lib/python-runtime.sh"
-    oms_python_runtime_activate_if_present
+    if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
+      # shellcheck source=scripts/lib/platform.sh
+      . "$SCRIPTS_DIR/lib/platform.sh"
+      oms_bash_enter
+    fi
+    if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
+      # shellcheck source=scripts/lib/python-runtime.sh
+      . "$SCRIPTS_DIR/lib/python-runtime.sh"
+      oms_python_runtime_activate_if_present
+    fi
   else
     echo "error: oms cannot locate its checkout from $SCRIPTS_DIR" >&2
     echo "error: no harness scripts there and no usable install receipt at $receipt" >&2

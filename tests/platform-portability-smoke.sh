@@ -1595,4 +1595,71 @@ PY_ENTRY
 )
 test_bash_floor
 
+# Hook and dispatcher children must run under the running Bash 5 even when an
+# old bash is first on PATH (macOS GUI runner), not whatever PATH resolves.
+test_bash_children() (
+  local d="$TMP/bash-children" real_bash="$BASH" out src
+  mkdir -p "$d/dead" "$d/old3" "$d/wrap" "$d/home" "$d/cfg" "$d/rc/scripts" \
+    "$d/root/scripts/lib" "$d/plugin/scripts"
+  fake3() {  # SRC DST: consult OMS_FAKE_BASH_MAJOR for the running version
+    sed 's|\${BASH_VERSINFO\[0\]:-0}|${OMS_FAKE_BASH_MAJOR:-${BASH_VERSINFO[0]:-0}}|g' "$1" > "$2"
+    chmod +x "$2"
+  }
+  # dead: a PATH bash that cannot run anything. old3: a PATH bash that reports
+  # version 3. wrap: the recorded Bash 5 (reports its real version).
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$d/dead/bash"
+  printf '%s\n' '#!/bin/sh' "exec env OMS_FAKE_BASH_MAJOR=3 '$real_bash' \"\$@\"" > "$d/old3/bash"
+  printf '%s\n' '#!/bin/sh' "exec env -u OMS_FAKE_BASH_MAJOR '$real_bash' \"\$@\"" > "$d/wrap/bash"
+  chmod +x "$d/dead/bash" "$d/old3/bash" "$d/wrap/bash"
+  printf '%s\n' "$d/wrap/bash" > "$d/cfg/bash-interpreter"
+  unset OMS_BASH
+
+  # Codex plugin hook started under Bash 3.2: the recorded interpreter runs it
+  # and its floor-guarded child.
+  fake3 "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" "$d/plugin/scripts/harness-hook.sh"
+  fake3 "$ROOT/scripts/lib/python-entry.sh" "$d/root/scripts/lib/python-entry.sh"
+  cp "$ROOT/scripts/lib/python-runtime.sh" "$ROOT/scripts/lib/platform.sh" "$d/root/scripts/lib/"
+  printf '%s\n' '[ "${OMS_FAKE_BASH_MAJOR:-${BASH_VERSINFO[0]}}" -ge 5 ] || exit 1' \
+    'cat >/dev/null' 'echo child-ran' > "$d/root/scripts/telemetry-hook.sh"
+  out="$(printf '{}' | PATH="$d/old3:$PATH" OH_MY_SETTING_DIR="$d/root" \
+    OMS_INSTALL_RECEIPT="$d/cfg/install.json" \
+    "$d/old3/bash" "$d/plugin/scripts/harness-hook.sh" telemetry-hook 2>&1)" || true
+  [ "$out" = child-ran ] || fail "Codex hook under Bash 3.2 missed the recorded Bash 5: $out"
+
+  # Generated agy adapter, assembled from the installer's own heredocs.
+  printf '%s\n' '[ "${OMS_FAKE_BASH_MAJOR:-${BASH_VERSINFO[0]}}" -ge 5 ] || exit 1' \
+    'cat >/dev/null' 'echo agy-hint' > "$d/root/scripts/skill-router.sh"
+  {
+    awk "/<<'ADAPTER_HEAD'/{on=1;next} /^ADAPTER_HEAD\$/{on=0} on" "$ROOT/scripts/install-agy-plugin.sh"
+    printf 'ROOT=%q\n' "$d/root"
+    awk "/<<'ADAPTER_BODY'/{on=1;next} /^ADAPTER_BODY\$/{on=0} on" "$ROOT/scripts/install-agy-plugin.sh"
+  } > "$d/agy-hook.sh"
+  grep -Fq 'LAUNCHER_BASH' "$d/agy-hook.sh" || fail "agy adapter extraction failed"
+  fake3 "$d/agy-hook.sh" "$d/agy-hook3.sh"
+  out="$(printf '{"workspacePaths":["%s"],"invocationNum":1}' "$d/home" |
+    OMS_HARNESS_CHILD=0 PATH="$d/old3:$PATH" OMS_INSTALL_RECEIPT="$d/cfg/install.json" \
+    "$d/old3/bash" "$d/agy-hook3.sh" preinvocation 2>&1)" || true
+  case "$out" in *agy-hint*) ;; *) fail "agy adapter under Bash 3.2 missed the recorded Bash 5: $out" ;; esac
+
+  # Nested children (uninstall -> tick.sh) start through `env bash`: the
+  # dispatcher and a direct run under a PATH Bash 3.2 must carry Bash 5 to them.
+  for src in "$ROOT"/scripts/*; do
+    [ "${src##*/}" = uninstall.sh ] || ln -sfn "$src" "$d/rc/scripts/${src##*/}"
+  done
+  fake3 "$ROOT/scripts/uninstall.sh" "$d/rc/scripts/uninstall.sh"
+  # The re-exec stands in for a real Bash 5 process: it must not stay faked.
+  sed -i.bak 's|exec "\$oms_bash_reexec"|exec env -u OMS_FAKE_BASH_MAJOR "$oms_bash_reexec"|' "$d/rc/scripts/uninstall.sh"
+  grep -Fq 'env -u OMS_FAKE_BASH_MAJOR' "$d/rc/scripts/uninstall.sh" || fail "uninstall re-exec line not found"
+  out="$(HOME="$d/home" OMS_INSTALL_RECEIPT="$d/cfg/install.json" PATH="$d/dead:$PATH" \
+    "$real_bash" "$ROOT/scripts/oms" uninstall --dry-run 2>&1)" ||
+    fail "oms uninstall child chain resolved PATH bash: $out"
+  case "$out" in *"managed targets removed"*) ;; *) fail "oms uninstall dry run: $out" ;; esac
+  out="$(HOME="$d/home" OMS_INSTALL_RECEIPT="$d/cfg/install.json" PATH="$d/dead:$PATH" \
+    OMS_FAKE_BASH_MAJOR=3 "$real_bash" "$d/rc/scripts/uninstall.sh" --dry-run 2>&1)" ||
+    fail "direct uninstall under Bash 3.2 did not enter the recorded Bash 5: $out"
+  case "$out" in *"managed targets removed"*) ;; *) fail "direct uninstall dry run: $out" ;; esac
+  echo 'bash-children: ok'
+)
+test_bash_children
+
 echo "platform-portability: ok"

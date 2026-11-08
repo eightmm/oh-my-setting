@@ -765,6 +765,8 @@ ADAPTER_HEAD
     printf 'ROOT=%q\n' "$ROOT"
     cat <<'ADAPTER_BODY'
 EVENT="${1:-}"
+LAUNCHER_BASH=bash
+case "${BASH:-}" in /*) [ "${BASH_VERSINFO[0]:-0}" -lt 5 ] || LAUNCHER_BASH="$BASH" ;; esac
 
 emit() { printf '%s\n' "$1"; exit 0; }
 
@@ -838,7 +840,7 @@ case "$EVENT" in
   preinvocation)
     [ "${OMS_SKILL_ROUTER_OFF:-0}" != 1 ] || emit '{}'
     HINT="$( (cd "$REPO" && OMS_STATE_REPO="$REPO" \
-      bash "$ROOT/scripts/skill-router.sh" < "$TMP") 2>/dev/null || true)"
+      "$LAUNCHER_BASH" "$ROOT/scripts/lib/python-entry.sh" bash "$ROOT/scripts/skill-router.sh" < "$TMP") 2>/dev/null || true)"
     [ -n "$HINT" ] || emit '{}'
     printf '%s' "$HINT" | python3 -c '
 import json, sys
@@ -854,9 +856,9 @@ print(json.dumps({"injectSteps": [{"ephemeralMessage": text}]}) if text else "{}
     # this surface was certified to deliver Stop, not trusted to stop the
     # primary agent.
     (cd "$REPO" && OMS_STATE_REPO="$REPO" OMS_TURN_GUARD_OFF=1 \
-      bash "$ROOT/scripts/turn-guard.sh" < "$TMP") >/dev/null 2>&1 || true
+      "$LAUNCHER_BASH" "$ROOT/scripts/lib/python-entry.sh" bash "$ROOT/scripts/turn-guard.sh" < "$TMP") >/dev/null 2>&1 || true
     (cd "$REPO" && OMS_STATE_REPO="$REPO" \
-      bash "$ROOT/scripts/telemetry-hook.sh" < "$TMP") >/dev/null 2>&1 || true
+      "$LAUNCHER_BASH" "$ROOT/scripts/lib/python-entry.sh" bash "$ROOT/scripts/telemetry-hook.sh" < "$TMP") >/dev/null 2>&1 || true
     emit '{}'
     ;;
 esac
