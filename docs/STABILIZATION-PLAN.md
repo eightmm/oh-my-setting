@@ -4,25 +4,40 @@
 
 기준: v0.7.0, [`acf4c5a`](https://github.com/eightmm/oh-my-setting/commit/acf4c5a5f7b4fee25e77ce1fd8602d3703a1e306)
 
-상태: S1–S6 구현을 아래 PR로 제출했다. 아직 병합하지 않았으며, 로컬 집중 검증과
-전체 통합 CI의 완료 여부를 구분한다. 아래 완료 조건은 최종 수락용 checklist로
-보존하고, 해당 구현 PR의 CI와 병합을 확인한 뒤 완료 처리한다.
+상태: S1–S6 구현, 각 PR의 필수 CI, main 병합을 완료했다. 아래 32개 수락 조건은
+구현 PR의 실제 회귀 검사와 통합 CI에 연결해 완료 처리했다.
 
 ## 구현 현황
 
-| 작업 | 구현 PR | 로컬에서 확인한 근거 | 남은 확인 |
+| 작업 | 구현 PR | 검증 근거 | 병합 상태 |
 |---|---|---|---|
-| S1, S4 | [#12 — task와 evidence 유효성](https://github.com/eightmm/oh-my-setting/pull/12) | 취소 전환 회귀, lease/reopen 3개 smoke; freshness·비용·lineage 등 runtime 8개 case | 전체 CI; 완료 task 재활성화 통합 case |
-| S2, S5 | [#11 — 실제 모델 계열과 리뷰 identity](https://github.com/eightmm/oh-my-setting/pull/11) | 모델 계열 및 실제 routing 호출 2개 집중 case; 수정 전 실패 재현 | 전체 auto-review integration과 CI |
-| S3, S6 | [#13 — 공개 CI 조회와 업데이트 증빙](https://github.com/eightmm/oh-my-setting/pull/13) | 전체 update-v04·install-profile·문서 검사; 기존 land CI/scope 16개 사례 | 전체 land·native/portability CI |
+| S1, S4 | [#12 — task와 evidence 유효성](https://github.com/eightmm/oh-my-setting/pull/12) | 취소·lease·reopen 집중 검사, runtime 8개 case; [최신 full CI](https://github.com/eightmm/oh-my-setting/actions/runs/42460414026)의 전체 focused·smoke·functional-evolution·native와 gate 통과 | [`d07787f`](https://github.com/eightmm/oh-my-setting/commit/d07787fb8cfd0929f7eef3dc549121e716b8d2fb)로 main 병합 |
+| S2, S5 | [#11 — 실제 모델 계열과 리뷰 identity](https://github.com/eightmm/oh-my-setting/pull/11) | [최신 CI](https://github.com/eightmm/oh-my-setting/actions/runs/42460398750)의 affected checks, 전체 worker-leases·auto-review, Linux/macOS lifecycle, Python 3.11과 gate 통과 | [`2340a65`](https://github.com/eightmm/oh-my-setting/commit/2340a65b6902836fb225009dde3fdfa195f46139)로 main 병합 |
+| S3, S6 | [#13 — 공개 CI 조회와 업데이트 증빙](https://github.com/eightmm/oh-my-setting/pull/13) | [최신 full CI](https://github.com/eightmm/oh-my-setting/actions/runs/42460429172)의 update-v04·land·operator-tools·전체 smoke·native/portability와 gate 통과 | [`39ef936`](https://github.com/eightmm/oh-my-setting/commit/39ef9369a50f1e431faad4278d4e92b696468a58)로 main 병합 |
 
-#12와 #13은 #11의 기존 자동 리뷰 fixture 수정을 기반으로 한 별도 PR이다.
-병합 순서는 #11을 먼저 적용하고, 이후 #12와 #13을 각각 검토한다. 두 후속 PR 사이에는
-구현 의존성이 없다. 이 계획 문서 PR은 기능 변경과 독립적이다.
+병합은 #11 → #12 → #13 순서로 완료했다. 각 PR은 기능별 diff를 유지하며,
+#13의 head `abc71c310ab7f52caf00ad1c5b8b6d67d07f4b1b`에서 S1–S6 전체 조합을 검증했다.
+이 run은 full selection으로 실행한 14개 job이 모두 success이며,
+full 검사에서 불필요한 affected 전용 job 2개만 계획에 따라 skipped다.
+문서 PR의 green을 기능 검증 근거로 사용하지 않는다.
 
-로컬 통합 검사에서는 process identity/reference 등록 실패가 발생했고,
-full 선택의 committed-range gate는 ShellCheck가 없어 중단했다. 해당 검사를 통과로
-표시하거나 guard를 완화하지 않았다. 각 PR에는 실행한 명령과 실패 범위를 기록했다.
+최종 기능 병합 [`39ef936`](https://github.com/eightmm/oh-my-setting/commit/39ef9369a50f1e431faad4278d4e92b696468a58)의 tree는
+`c0fe5bb27ba1078b50fdf8b94c163820b375bbb1`이며, full CI가 검증한 #13의 tree와 동일하다.
+CI 링크는 해당 PR head의 검증 기록이다. 다른 merge SHA의 설치 증빙으로 대신하지 않는다.
+
+로컬에서 process identity/reference 조회와 ShellCheck 부재로 끝까지 실행하지 못했던
+통합 범위는 실제 GitHub CI에서 확인했다. guard나 gate를 완화하지 않았으며,
+실제 연구 프로젝트·유료 provider 추론·GPU/Slurm 작업은 완료 조건에 포함하지 않았다.
+
+### CI에서 추가로 확인해 고친 회귀
+
+- Privacy fixture의 가짜 HOME literal이 소스 자체의 scrubber 검사에 걸렸다.
+  실행 시의 예제 경로와 privacy assertion을 유지하며 기존 split-literal 패턴을 적용했다.
+- S1의 cancellation guard가 추가되자 retention fixture가 잘못된 첫 조건문을 읽었다.
+  실제 `require_current_lease(t)` guard를 찾아 기존 lease-state/GC parity 검사를 유지한다.
+- Reviewer의 초기 route 조회가 source checkout에서 Main room 상태를 읽었다.
+  Main 모델 근거는 canonical room 저장소에서 읽고, reviewer의 source checkout은 유지한다.
+  별도 source를 쓰는 실제 CLI dry-run 회귀와 전체 worker-leases를 확인했다.
 
 호환성상 달라지는 부분은 기본 evidence binding의 선택적 `verified_state`다.
 기존 `schema: 1`과 명시적 dependency 의미를 유지하며, 지문 없는 오래된 verified
@@ -41,9 +56,9 @@ land의 full-proof 요구, fresh/manual edge 예외를 각각 유지한다.
 한다. 실제 연구 프로젝트, 유료 추론, GPU 학습, Slurm 제출, 장시간 생산성
 benchmark는 완료 조건이 아니다. 기본 운영은 기존 구독의 native CLI를 유지한다.
 
-이 문서는 기준 커밋의 관찰을 후속 구현자가 사용할 수 있도록 고정한 기록이다.
-작업 시작 시 최신 코드에서 해당 문제가 남아 있는지 먼저 확인하고, 이미 해결됐다면
-수정 커밋과 검증 근거를 연결해 닫는다. 상태 파일을 직접 편집해 재현을 우회하지 않는다.
+아래 S1–S6의 관찰과 권장 수정은 기준 커밋을 검토할 당시의 기록이다.
+구현 현황과 완료 checklist는 위 PR 및 CI 결과를 반영한다.
+과거 재현 결과를 현재 main의 미해결 결함으로 읽지 않도록 구분한다.
 
 ## 실행 순서
 
@@ -86,10 +101,10 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 
 **완료 조건**
 
-- [ ] block이 nonzero로 끝나고 plan bytes가 변경되지 않는다.
-- [ ] 거부 이후 status와 unrelated task 조회가 정상 동작한다.
-- [ ] cancellation receipt와 decision artifact가 보존된다.
-- [ ] 기존 claim/lease 및 완료 task 전환의 의미가 유지된다.
+- [x] block이 nonzero로 끝나고 plan bytes가 변경되지 않는다.
+- [x] 거부 이후 status와 unrelated task 조회가 정상 동작한다.
+- [x] cancellation receipt와 decision artifact가 보존된다.
+- [x] 기존 claim/lease 및 완료 task 전환의 의미가 유지된다.
 
 **검증 위치:** [scripts-smoke.sh](../tests/scripts-smoke.sh)의
 `test_agent_plan_cancellation_is_closed_not_verified_and_cas_fenced`에 위 assertion을
@@ -112,11 +127,11 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 
 **완료 조건**
 
-- [ ] 독립 reviewer가 준비된 fixture에서는 동일 결과를 두 번 전달해도 dispatch는 1회다.
-- [ ] 독립 reviewer가 없는 fixture에서는 dispatch 0회와 명확한 검토 불가 결과를 남긴다.
-- [ ] Main과 실제 writer가 다를 때 writer의 모델 계열을 기준으로 한다.
-- [ ] 실제 provider 설치 여부, caller 환경, 개인 HOME에 따라 결과가 달라지지 않는다.
-- [ ] 기존 실패 lane을 해당 수정 SHA에서 다시 확인한다. 문서 PR의 green과 구분한다.
+- [x] 독립 reviewer가 준비된 fixture에서는 동일 결과를 두 번 전달해도 dispatch는 1회다.
+- [x] 독립 reviewer가 없는 fixture에서는 dispatch 0회와 명확한 검토 불가 결과를 남긴다.
+- [x] Main과 실제 writer가 다를 때 writer의 모델 계열을 기준으로 한다.
+- [x] 실제 provider 설치 여부, caller 환경, 개인 HOME에 따라 결과가 달라지지 않는다.
+- [x] 기존 실패 lane을 해당 수정 SHA에서 다시 확인한다. 문서 PR의 green과 구분한다.
 
 **검증 위치:** [auto_review.py](../tests/operator/auto_review.py),
 [fixtures.py](../tests/operator/fixtures.py),
@@ -141,11 +156,11 @@ status/show t2 -> exit 2, cancellation evidence without cancelled state
 
 **완료 조건**
 
-- [ ] gh 없음·인증 불가·CI pending·CI failure·성공을 구분한다.
-- [ ] 성공 근거는 정확한 대상 SHA와 workflow에 묶인다.
-- [ ] 네트워크/응답 파싱 오류를 성공으로 취급하지 않고 시간·응답 크기를 제한한다.
-- [ ] gh가 있는 기존 경로와 dirty checkout 보호가 유지된다.
-- [ ] 최소 설치에 사용자 GitHub 로그인이나 추가 유료 서비스를 강제하지 않는다.
+- [x] gh 없음·인증 불가·CI pending·CI failure·성공을 구분한다.
+- [x] 성공 근거는 정확한 대상 SHA와 workflow에 묶인다.
+- [x] 네트워크/응답 파싱 오류를 성공으로 취급하지 않고 시간·응답 크기를 제한한다.
+- [x] gh가 있는 기존 경로와 dirty checkout 보호가 유지된다.
+- [x] 최소 설치에 사용자 GitHub 로그인이나 추가 유료 서비스를 강제하지 않는다.
 
 **검증 위치:** [update-v04-smoke.sh](../tests/update-v04-smoke.sh)의 자동 업데이트
 fixture와 [install-profile-smoke.sh](../tests/install-profile-smoke.sh)의 최소 설치 검사.
@@ -168,13 +183,13 @@ stale이 된다. 현재 확인된 영향은 projection·표시·다음 행동의
 
 **완료 조건**
 
-- [ ] 동일 HEAD의 relevant unstaged/staged 변경이 기존 검증을 무효화한다.
-- [ ] 명시적 dependency 변경·삭제를 검사하는 기존 동작이 유지된다.
-- [ ] 명시적 dependency와 관계없는 변경은 기존 scope 계약에 맞게 처리한다.
-- [ ] ignored `.oms` receipt/cache 기록이 binding 자체를 stale로 만들지 않는다.
-- [ ] 동일 envelope에서 task와 criterion의 freshness 근거를 설명할 수 있다.
-- [ ] fingerprint 계산을 envelope당 공유해 evidence 행 수만큼 Git 호출이 늘지 않는다.
-- [ ] legacy receipt의 불확실성을 표시하며 별도 landing gate는 그대로 유지한다.
+- [x] 동일 HEAD의 relevant unstaged/staged 변경이 기존 검증을 무효화한다.
+- [x] 명시적 dependency 변경·삭제를 검사하는 기존 동작이 유지된다.
+- [x] 명시적 dependency와 관계없는 변경은 기존 scope 계약에 맞게 처리한다.
+- [x] ignored `.oms` receipt/cache 기록이 binding 자체를 stale로 만들지 않는다.
+- [x] 동일 envelope에서 task와 criterion의 freshness 근거를 설명할 수 있다.
+- [x] fingerprint 계산을 envelope당 공유해 evidence 행 수만큼 Git 호출이 늘지 않는다.
+- [x] legacy receipt의 불확실성을 표시하며 별도 landing gate는 그대로 유지한다.
 
 **검증 위치:** [test_oms_runtime_core.py](../tests/test_oms_runtime_core.py)의
 `test_explicit_binding_and_dependency_staleness`,
@@ -197,13 +212,13 @@ launcher는 별도 경로이며, 실제 live panel 오심사까지 재현한 것
 
 **완료 조건**
 
-- [ ] Claude harness + GPT와 Pi + GPT가 동일한 OpenAI 계열로 판단된다.
-- [ ] native Claude + Claude 모델은 기존 Anthropic 판정을 유지한다.
-- [ ] linked writer가 있으면 Main이 아니라 해당 writer의 모델 계열을 사용한다.
-- [ ] 기존 unknown/모순 기록의 거부 정책을 유지한다. 모델 미기록 native legacy
+- [x] Claude harness + GPT와 Pi + GPT가 동일한 OpenAI 계열로 판단된다.
+- [x] native Claude + Claude 모델은 기존 Anthropic 판정을 유지한다.
+- [x] linked writer가 있으면 Main이 아니라 해당 writer의 모델 계열을 사용한다.
+- [x] 기존 unknown/모순 기록의 거부 정책을 유지한다. 모델 미기록 native legacy
   동작은 이번 회귀 수정에서 불필요하게 바꾸지 않는다.
-- [ ] 사용자가 명시한 same-family 선택은 기존 표시·권한 계약을 보존한다.
-- [ ] owner, room identity, 인증 환경을 바꿔 family 오류를 우회하지 않는다.
+- [x] 사용자가 명시한 same-family 선택은 기존 표시·권한 계약을 보존한다.
+- [x] owner, room identity, 인증 환경을 바꿔 family 오류를 우회하지 않는다.
 
 **검증 위치:** [auto_review.py](../tests/operator/auto_review.py)의
 `writer-model-independence` case에 Claude harness + GPT의 Main/writer 경로,
@@ -236,11 +251,11 @@ GitHub Releases나 새 배포 시스템을 도입하지 않는다. 공개 flag, 
 
 **완료 조건**
 
-- [ ] full/affected-only/실패/미확인에 대한 각 경로의 허용 결과가 명확하다.
-- [ ] 설치가 허용된 이유와 실제 검증 범위를 출력·기록한다.
-- [ ] target SHA가 바뀌면 이전 CI 근거를 재사용하지 않는다.
-- [ ] 실패·조회 불가·scope 불명확을 검증 성공으로 표시하지 않는다.
-- [ ] dirty tree 보호와 기존 rollback·ownership 동작이 유지된다.
+- [x] full/affected-only/실패/미확인에 대한 각 경로의 허용 결과가 명확하다.
+- [x] 설치가 허용된 이유와 실제 검증 범위를 출력·기록한다.
+- [x] target SHA가 바뀌면 이전 CI 근거를 재사용하지 않는다.
+- [x] 실패·조회 불가·scope 불명확을 검증 성공으로 표시하지 않는다.
+- [x] dirty tree 보호와 기존 rollback·ownership 동작이 유지된다.
 
 **검증 위치:** [land-smoke.sh](../tests/land-smoke.sh),
 [update-v04-smoke.sh](../tests/update-v04-smoke.sh)의 기존 가짜 gh/remote fixtures.
