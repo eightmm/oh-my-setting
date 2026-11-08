@@ -43,8 +43,8 @@ LEDGER_WINDOW = 256 * 1024
 # The one place a cached read declares its .oms inputs. Only a read whose complete input set is known may be
 # listed; every other key (the dashboard, which aggregates state.sh and the collectors it starts) keeps the
 # whole-.oms walk minus PRUNED and WALK_SKIPPED, so a key that joins that walk must never read those paths. A new read_shared key must either list every .oms file it opens here or stay unlisted.
-#   attempts       agent-events list --json: load_projection reads only lifecycle/events.jsonl
-#                  (scripts/lib/agent-events.py event_list -> load_projection -> read_rows(event_path))
+#   attempts       list_attempts, the in-process agent-events list --json: load_projection reads only
+#                  lifecycle/events.jsonl (scripts/lib/agent-events.py load_projection -> read_rows(event_path))
 #   result-records _records (panel_results.py): that attempts list plus read_index of artifacts/index.jsonl
 # result-records is derived from the attempts read, so both keys list the same inputs: a tick then captures one
 # generation for the pair, and a ledger advance between the two reads fails the publication check.
@@ -53,15 +53,37 @@ KEY_INPUTS = {'attempts': _LEDGER_READS, 'result-records': _LEDGER_READS}
 _ledger_source = []
 
 
+def _ledger_module():
+    if not _ledger_source:
+        _ledger_source.append(runpy.run_path(str(Path(__file__).with_name('agent-events.py'))))
+    return _ledger_source[0]
+
+
+def list_attempts(repo):
+    """The rows of `agent-events --repo REPO list --json`, read in process.
+
+    Same projection and updated_at order; the JSON round trip keeps the CLI's value types and refusals
+    (NaN) and detaches rows from the projection cache. REPO is used as resolved, the key read_shared
+    fingerprints, not re-rooted through git: panel repositories are already toplevels. Any failure,
+    like the CLI's non-zero exit, is ValueError('attempt evidence unavailable'). The read path takes
+    no lock: _ledger_fd opens O_NONBLOCK and only writers use file_lock.
+    """
+    try:
+        source = _ledger_module()
+        rows = sorted(source['load_projection'](Path(repo).resolve(strict=True))[1].values(),
+                      key=lambda item: item['updated_at'])
+        return json.loads(json.dumps(rows, ensure_ascii=False, allow_nan=False, sort_keys=True))
+    except Exception as error:
+        raise ValueError('attempt evidence unavailable') from error
+
+
 def _ledger_token(path, size):
     """End offset of the last non-heartbeat row, so plain heartbeats keep the fingerprint.
 
     Any doubt returns the file size, which changes on every append.
     """
     try:
-        if not _ledger_source:
-            _ledger_source.append(runpy.run_path(str(Path(__file__).with_name('agent-events.py'))))
-        with _ledger_source[0]['_ledger_fd'](Path(path)) as descriptor:
+        with _ledger_module()['_ledger_fd'](Path(path)) as descriptor:
             end = os.fstat(descriptor).st_size
             start = max(0, end - LEDGER_WINDOW)
             os.lseek(descriptor, start, os.SEEK_SET)
@@ -301,19 +323,9 @@ class TickReads:
         return self.values[key]
 
     def attempts(self):
-        def collect():
-            result = subprocess.run(['bash', str(ROOT / 'scripts/oms'), 'agent-events',
-                                     '--repo', str(self.repo), 'list', '--json'],
-                                    capture_output=True, text=True, check=False, timeout=30,
-                                    stdin=subprocess.DEVNULL)
-            if result.returncode:
-                raise ValueError('attempt evidence unavailable')
-            rows = json.loads(result.stdout)
-            if not isinstance(rows, list):
-                raise ValueError('invalid attempt evidence')
-            return rows
         return self._once('attempts', lambda: read_shared(
-            self.repo, 'attempts', lambda: self._once('agent-events', collect), _tick=self))
+            self.repo, 'attempts', lambda: self._once('agent-events', lambda: list_attempts(self.repo)),
+            _tick=self))
 
     def board(self, report):
         """This collection's board view: room members project once while the inputs they read stay the same."""

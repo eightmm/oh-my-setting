@@ -221,7 +221,8 @@ tick_project = project / 'fingerprint-ticks'
 with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}}, 0)) as dashboard, \
         patch.object(panel.room, 'status', side_effect=lambda repo, ident: {'id': ident}), \
         patch.object(panel.subprocess, 'run', side_effect=lambda command, **kwargs:
-                     subprocess.CompletedProcess(command, 0, '[]' if 'agent-events' in command else '{}', '')) as commands, \
+                     subprocess.CompletedProcess(command, 0, '{}', '')), \
+        patch.object(cache, 'list_attempts', return_value=[]) as listed_attempts, \
         patch.object(panel_results, '_records', return_value=([], [])) as records, \
         patch.object(cache, 'fingerprint', wraps=cache.fingerprint) as fingerprints:
     anchor = time.time()
@@ -236,7 +237,7 @@ with patch.object(panel, 'dashboard', return_value=({'repo': {'name': 'fixture'}
             assert tuple(tick.records()) == ([], [])
         assert fingerprints.call_count == expected, (offset, fingerprints.call_count)
     assert dashboard.call_count == records.call_count == 2
-    assert sum('agent-events' in call.args[0] for call in commands.call_args_list) == 2
+    assert listed_attempts.call_count == 2
 
 # Enumeration order and output growth must not weaken the shared generation.
 scan_project = project / 'scandir-inputs'
@@ -850,6 +851,61 @@ lifecycle = metric_repo / '.oms/lifecycle/events.jsonl'
 lifecycle.parent.mkdir(parents=True)
 lifecycle.write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n' for row in event_rows), encoding='utf-8')
 
+# Panel attempts are the `agent-events list --json` rows, read in process: same rows, key order and refusals.
+def cli_attempts(repo):
+    return real_run(['bash', str(root / 'scripts/oms'), 'agent-events', '--repo', str(repo), 'list', '--json'],
+                    capture_output=True, text=True, timeout=30, check=False)
+ledger_cases = {'empty': '', 'malformed': '{"attempt_id": \n', 'not-object': '[]\n'}
+for name, body in ledger_cases.items():
+    case = project / ('ledger-' + name)
+    (case / '.oms/lifecycle').mkdir(parents=True)
+    real_run(['git', 'init', '-q', str(case)], check=True)
+    (case / '.oms/lifecycle/events.jsonl').write_text(body, encoding='utf-8')
+(project / 'ledger-missing').mkdir()
+real_run(['git', 'init', '-q', str(project / 'ledger-missing')], check=True)
+listed_repo = project / 'ledger-listed'
+listed_rows = []
+for number, final in enumerate(('done', 'failed', 'review', 'cancelled', 'working', 'done') * 2):
+    attempt = 'listed-%02d' % number
+    listed_rows.append(dict(new_event(attempt, 1, 'attempt.created', run_id='run-listed', task_id='task-%d' % (number % 3),
+                                      provider='codex', tool='panel-dispatch', to_state='queued',
+                                      refs={'panel_role': 'worker', 'panel_model': 'm%d' % number}), ts=stamp_metric(-50)))
+    path = ['starting', 'working'] + (['review', 'done'] if final == 'done' else [] if final == 'working' else [final])
+    for seq, (previous, state) in enumerate(zip(['queued'] + path, path), 2):
+        # Ties in updated_at keep ledger order, as the CLI's stable sort does.
+        listed_rows.append(dict(new_event(attempt, seq, 'attempt.state_changed', from_state=previous, to_state=state,
+                                          actor='main-listed'), ts=stamp_metric(-40 + number % 4)))
+    listed_rows.append(dict(new_event(attempt, len(path) + 2, 'attempt.usage', usage={'tokens': 10 * number + 1}),
+                            ts=stamp_metric(-30 + number % 5)))
+(listed_repo / '.oms/lifecycle').mkdir(parents=True)
+real_run(['git', 'init', '-q', str(listed_repo)], check=True)
+(listed_repo / '.oms/lifecycle/events.jsonl').write_text(
+    ''.join(json.dumps(row) + '\n' for row in listed_rows), encoding='utf-8')
+cli_listing = cli_attempts(listed_repo)
+assert cli_listing.returncode == 0, cli_listing.stderr
+cli_rows = json.loads(cli_listing.stdout)
+assert len(cli_rows) == 12 and len({row['updated_at'] for row in cli_rows}) < 12, cli_rows
+cli_outcomes = {name: cli_attempts(project / ('ledger-' + name)) for name in (*ledger_cases, 'missing')}
+assert [cli_outcomes[name].returncode != 0 for name in ('empty', 'missing', 'malformed', 'not-object')] == [
+    False, False, True, True], cli_outcomes
+assert cli_attempts(project / 'ledger-absent').returncode
+with patch.object(cache.subprocess, 'run', side_effect=AssertionError('panel attempts started a subprocess')):
+    for projection_cache in (os.environ.get('XDG_CACHE_HOME', ''), str(project / 'fresh-projection-cache')):
+        with patch.dict(os.environ, {'XDG_CACHE_HOME': projection_cache}):
+            rows = cache.list_attempts(listed_repo)
+            assert rows == cli_rows and [list(row) for row in rows] == [list(row) for row in cli_rows]
+    for name in ('empty', 'missing'):
+        assert cache.list_attempts(project / ('ledger-' + name)) == json.loads(cli_outcomes[name].stdout) == []
+    for name in ('malformed', 'not-object', 'absent'):
+        for read in (lambda: cache.list_attempts(project / ('ledger-' + name)),
+                     lambda: cache.TickReads(project / ('ledger-' + name)).attempts()):
+            try:
+                read()
+            except ValueError as error:
+                assert str(error) == 'attempt evidence unavailable', error
+            else:
+                raise AssertionError('invalid attempt evidence was listed: ' + name)
+
 metric_result_path = metric_repo / '.oms/artifacts/panel-results/failure.json'
 metric_result_path.parent.mkdir(parents=True)
 metric_result_path.write_text(json.dumps({'schema': 1, 'kind': 'oms-panel-result', 'outcome': 'failed'}), encoding='utf-8')
@@ -1238,16 +1294,16 @@ def tick_module(path, *args, **kwargs):
     if Path(path).name == 'artifact-index-store.py':
         return dict(tick_store, read_index=tick_index)
     return run_path(path, *args, **kwargs)
+def tick_attempts(repo):
+    counts['events'] += 1
+    if failure[0]:
+        raise ValueError('attempt evidence unavailable')
+    churn()
+    return deepcopy(listed)
 def tick_run(command, **kwargs):
     value = {}
-    if 'agent-events' in command:
-        counts['events'] += 1
-        assert command[-2:] == ['list', '--json'], command
-        if failure[0]:
-            raise subprocess.TimeoutExpired(command, 5)
-        value = listed
-        churn()
-    elif 'agent-plan' in command:
+    assert 'agent-events' not in command, command
+    if 'agent-plan' in command:
         value = {'tasks': [{'id': t} for t in task_ids]}
     elif command[:2] == ['tmux', 'list-windows']:
         return subprocess.CompletedProcess(command, 0, f'@1\ttick-main\ttick-room\t%1\ttick-main\t{project.resolve()}\t$1\n', '')
@@ -1262,6 +1318,7 @@ with patch.object(panel, 'dashboard', side_effect=lambda *a, **k: (deepcopy(tick
         patch.object(panel.room, 'status', side_effect=lambda *a: deepcopy(tick_room)), \
         patch.object(panel, 'managed_session', return_value=False), \
         patch.object(panel.subprocess, 'run', side_effect=tick_run), \
+        patch.object(cache, 'list_attempts', side_effect=tick_attempts), \
         patch.object(panel_results.runpy, 'run_path', side_effect=tick_module), \
         patch.object(panel_chats.shutil, 'which', return_value='/fixture/tmux'), \
         patch.object(panel_chats, 'current_models', return_value={}), \
@@ -1379,11 +1436,11 @@ derived = project / 'derived-reads'
 (derived / '.oms/lifecycle').mkdir()
 derived_ledger = derived / '.oms/lifecycle/events.jsonl'
 derived_ledger.write_text('generation A\n', encoding='utf-8')
-def derived_run(command, **kwargs):
-    return subprocess.CompletedProcess(command, 0, json.dumps([derived_ledger.read_text(encoding='utf-8').strip()]), '')
+def derived_attempts(repo):
+    return [derived_ledger.read_text(encoding='utf-8').strip()]
 def derived_records(repo, _attempts=None, **kwargs):
     return list(_attempts), []
-with patch.object(cache.subprocess, 'run', side_effect=derived_run), \
+with patch.object(cache, 'list_attempts', side_effect=derived_attempts), \
         patch.object(panel_results, '_records', side_effect=derived_records):
     tick = cache.TickReads(derived)
     assert tick.attempts() == ['generation A']

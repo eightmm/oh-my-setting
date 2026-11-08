@@ -4121,15 +4121,17 @@ def fake_run(command, **kwargs):
         return subprocess.CompletedProcess(command, 0, json.dumps({"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}), "")
     if command[:1] == ["tsp"]:  # the background probe on hosts with tsp installed
         return subprocess.CompletedProcess(command, 1, "", "")
-    assert command[2:3] == [str(panel.ENTRY)] or "agent-events" in command, command
+    assert command[2:3] == [str(panel.ENTRY)], command
     return subprocess.CompletedProcess(command, 0, json.dumps(listed), "")
+listed_attempts = lambda repo: deepcopy(listed)
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
         patch("panel_results._records", return_value=(listed, indexed)), \
         patch.object(panel, "results", return_value={"rows": []}), \
         patch.object(panel, "outcomes", return_value={}), \
-        patch.object(panel.subprocess, "run", side_effect=fake_run):
+        patch.object(panel.subprocess, "run", side_effect=fake_run), \
+        patch("panel_cache.list_attempts", side_effect=listed_attempts):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, got.get("land")
 # With hook state, the land probe is shared: a second snapshot inside the cache interval does not run it again.
@@ -4148,7 +4150,8 @@ with tempfile.TemporaryDirectory() as land_repo:
                 patch("panel_results._records", return_value=(listed, indexed)), \
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel, "outcomes", return_value={}), \
-                patch.object(panel.subprocess, "run", side_effect=counting_run):
+                patch.object(panel.subprocess, "run", side_effect=counting_run), \
+                patch("panel_cache.list_attempts", side_effect=listed_attempts):
             cached_got, _ = panel.snapshot(Path(land_repo), "flow-room")
         assert cached_got["land"] == {"active": True, "sha": "abc1234", "step": "gate", "minutes": 2}, cached_got.get("land")
     assert len(land_calls) == 1, land_calls
@@ -4171,7 +4174,8 @@ with tempfile.TemporaryDirectory() as free_repo:
                 patch("panel_results._records", return_value=(listed, indexed)), \
                 patch.object(panel, "results", return_value={"rows": []}), \
                 patch.object(panel, "outcomes", return_value={}), \
-                patch.object(panel.subprocess, "run", side_effect=free_run):
+                patch.object(panel.subprocess, "run", side_effect=free_run), \
+                patch("panel_cache.list_attempts", side_effect=listed_attempts):
             free_got, _ = panel.snapshot(Path(free_repo), "flow-room")
         assert "land" not in free_got, free_got.get("land")
     assert len(free_calls) == 1, free_calls
@@ -4202,13 +4206,15 @@ with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0))
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
         patch.object(panel, "outcomes", side_effect=lambda repo, ids, _shared=False, _tick=None: {"t-window-09": "accepted"} if "t-window-09" in ids else {}), \
-        patch.object(panel.subprocess, "run", side_effect=fake_run):
+        patch.object(panel.subprocess, "run", side_effect=fake_run), \
+        patch("panel_cache.list_attempts", side_effect=listed_attempts):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert got.get("finalized") == {"t-window-09": "accepted"}, got.get("finalized")
 with patch.object(panel, "dashboard", return_value=({"repo": {"name": "x"}}, 0)), \
         patch.object(room_module, "status", return_value={"id": "flow-room", "participants": members}), \
         patch.object(panel, "managed_session", return_value=False), \
-        patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("agent-events", 5)):
+        patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("agent-events", 5)), \
+        patch("panel_cache.list_attempts", side_effect=ValueError("attempt evidence unavailable")):
     got, _ = panel.snapshot(Path("."), "flow-room")
 assert "room_attempts" not in got and got["room"]["participants"] == members, got
 # Admission belongs to the shared snapshot, including watch reads, not only the control menu.

@@ -831,7 +831,8 @@ with patch.dict(os.environ, {}):
                            "plan": {"present": True, "goal": "Owed work", "tasks": tasks}}
 
         def evidence(command, **kwargs):
-            found = {"tasks": tasks} if "agent-plan" in command else ledger if "agent-events" in command else []
+            assert "agent-events" not in command, command
+            found = {"tasks": tasks} if "agent-plan" in command else []
             return subprocess.CompletedProcess(command, 0, json.dumps(found), "")
 
         def collect(target):
@@ -841,7 +842,8 @@ with patch.dict(os.environ, {}):
                         task: "accepted" for task in ids if task == "task-call-decided"}), \
                     patch.object(panel_results, "pending_admissions",
                                  side_effect=lambda repo, ids, _tick=None: {"task-call-adm"} & set(ids)), \
-                    patch.object(panel.subprocess, "run", side_effect=evidence):
+                    patch.object(panel.subprocess, "run", side_effect=evidence), \
+                    patch("panel_cache.list_attempts", side_effect=lambda repo: deepcopy(ledger)):
                 return panel.snapshot(where, target)[0]
         for hops in (1, 2):
             with bound(owing, "m1"):
