@@ -35,7 +35,6 @@ BASE=""
 BASE_EXPLICIT=0
 REMOTE="origin"
 MAX_CYCLES=10
-MAX_PARALLEL_TASKS=1
 INITIAL_TASKS=6
 REPLAN_TASKS=2
 AUTO_REPAIR=0
@@ -148,7 +147,6 @@ Options:
                           exhausted contract with oms autopilot abandon.
   --initial-tasks N       Initial proposal cap, 1..12 (default: 6).
   --replan-tasks N        Sole r1- proposal cap, 1..2 (default: 2).
-  --max-parallel-tasks N  Concurrent independent tasks, 1..4 (default: 1).
   --auto-repair           Allow goal-drive's one same-lease landing repair.
   --retry-known           Explicitly retry a matching unresolved worker failure.
   --allow-verifier-change Contract-level consent, bound at propose time: the
@@ -235,9 +233,6 @@ while [ "$#" -gt 0 ]; do
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires paths"; ALLOWED="$2"; ALLOWED_EXPLICIT=1; shift 2 ;;
     --base) [ "$#" -ge 2 ] || fail "--base requires a branch"; BASE="$2"; BASE_EXPLICIT=1; shift 2 ;;
     --remote) [ "$#" -ge 2 ] || fail "--remote requires a name"; REMOTE="$2"; shift 2 ;;
-    --max-parallel-tasks)
-      [ "$#" -ge 2 ] || fail "--max-parallel-tasks requires a count"
-      MAX_PARALLEL_TASKS="$2"; shift 2 ;;
     --max-cycles)
       [ "$#" -ge 2 ] || fail "--max-cycles requires a count"
       MAX_CYCLES="$2"; shift 2 ;;
@@ -488,8 +483,6 @@ if [ "$COLLABORATION" = auto ]; then
 fi
 # Child routing is part of this receipt, never inherited from a different run.
 export OMS_AUTOPILOT_COLLABORATION="$COLLABORATION"
-case "$MAX_PARALLEL_TASKS" in *[!0-9]*|"") fail "--max-parallel-tasks must be 1..4" ;; esac
-[ "$MAX_PARALLEL_TASKS" -ge 1 ] && [ "$MAX_PARALLEL_TASKS" -le 4 ] || fail "--max-parallel-tasks must be 1..4"
 case "$MAX_CYCLES" in *[!0-9]*|"") fail "--max-cycles must be 1..10" ;; esac
 [ "$MAX_CYCLES" -ge 1 ] && [ "$MAX_CYCLES" -le 10 ] || fail "--max-cycles must be 1..10"
 case "$INITIAL_TASKS" in *[!0-9]*|"") fail "--initial-tasks must be 1..12" ;; esac
@@ -871,7 +864,7 @@ outer_receipt_binding_args() {  # COMMAND STAGE EXPECTED
     --planner-timeout "$PLANNER_TIMEOUT" --worker-timeout "$WORKER_TIMEOUT" \
     --reviewer-timeout "$REVIEWER_TIMEOUT" --allowed "$ALLOWED" \
     --base "$BASE" --base-sha "$review_base_sha" --remote "$REMOTE" \
-    --max-cycles "$MAX_CYCLES" --max-parallel-tasks "$MAX_PARALLEL_TASKS" --initial-tasks "$INITIAL_TASKS" \
+    --max-cycles "$MAX_CYCLES" --initial-tasks "$INITIAL_TASKS" \
     --replan-tasks "$REPLAN_TASKS" --review-mode "$REVIEW_MODE" \
     --collaboration "$COLLABORATION" \
     --proposal "$APPROVED_PROPOSAL_PATH" \
@@ -1266,7 +1259,7 @@ PY
   continuation=(oms autopilot --repo "$REPO" --planner "$PLANNER" \
     --worker "$WORKER" --reviewer "$REVIEWER" --allowed "$ALLOWED" \
     --base "$BASE" --remote "$REMOTE" \
-    --max-cycles "$MAX_CYCLES" --max-parallel-tasks "$MAX_PARALLEL_TASKS" --initial-tasks "$INITIAL_TASKS" \
+    --max-cycles "$MAX_CYCLES" --initial-tasks "$INITIAL_TASKS" \
     --replan-tasks "$REPLAN_TASKS" --provider-timeout "$PROVIDER_TIMEOUT" \
     --planner-timeout "$PLANNER_TIMEOUT" --worker-timeout "$WORKER_TIMEOUT" \
     --reviewer-timeout "$REVIEWER_TIMEOUT" \
@@ -1610,7 +1603,7 @@ accept_sha="$(printf '%s' "$accept_cmd" | oms_sha256_stream)" || fail "cannot ha
 
 drive_run_id="ap-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 drive_args=(--repo "$REPO" --to "$WORKER" --max-cycles "$MAX_CYCLES" \
-  --max-parallel-tasks "$MAX_PARALLEL_TASKS" --contract-id "$AUTOPILOT_OWNER_ID" \
+  --contract-id "$AUTOPILOT_OWNER_ID" \
   --run-id "$drive_run_id" --provider-timeout "$WORKER_TIMEOUT" \
   --reasoning-effort "$WORKER_REASONING_EFFORT" \
   --expected-ref "refs/heads/$work_branch")

@@ -71,7 +71,7 @@ test_smoke_shards_partition_every_definition() {
   # The cost weights keep the heaviest tests apart.
   local heavy_a heavy_b
   heavy_a="$(grep -lx test_worker_guard_rejects_any_worker_authority_state_change "$TMP"/shard-[1-4])"
-  heavy_b="$(grep -lx test_goal_drive_parallel_failure_recovery "$TMP"/shard-[1-4])"
+  heavy_b="$(grep -lx test_worker_guard_reports_foreign_checkout_ref_moves "$TMP"/shard-[1-4])"
   [ -n "$heavy_a" ] && [ "$heavy_a" != "$heavy_b" ] || fail "the two heaviest smoke tests share a shard"
   if "$ROOT/tests/run-smoke-shard.sh" --list --shard 0/4 >/dev/null 2>&1; then
     fail "zero-indexed smoke shard should be rejected"

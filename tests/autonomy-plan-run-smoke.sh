@@ -937,7 +937,7 @@ esac
 exec "$OMS_T_REAL_BASH" "$@"
 EOF
   chmod +x "$bin/bash"
-  for mode in plan-run goal-drive batch; do
+  for mode in plan-run goal-drive; do
     floor_repo="$TMP/floor-$mode"
     git clone -q "$repo" "$floor_repo"
     git -C "$floor_repo" config user.email test@example.com
@@ -960,10 +960,8 @@ EOF
         --id floor-one --land --retry-known --allow-verifier-change --allow-floor-change "$floor_reason" \
         >"$TMP/floor-land.out" 2>&1 || fail "plan-run dropped floor consent: $(tail -8 "$TMP/floor-land.out")"
     else
-      local width=1
-      [ "$mode" != batch ] || width=2
       HOME="$home" PATH="$bin:/usr/bin:/bin" "$ROOT/scripts/goal-drive.sh" \
-        --repo "$floor_repo" --to codex --max-cycles 1 --max-parallel-tasks "$width" \
+        --repo "$floor_repo" --to codex --max-cycles 1 \
         --allow-verifier-change --allow-floor-change "$floor_reason" \
         >"$TMP/floor-land.out" 2>&1 || fail "$mode dropped floor consent: $(tail -8 "$TMP/floor-land.out")"
       grep -Fq 'goal-drive: done' "$TMP/floor-land.out" || fail "$mode acceptance did not pass"

@@ -1400,55 +1400,6 @@ state, waves, call budgets, last event, winner and handoff command if available.
 It exits 2 if no ledger exists and cannot be combined with `--dry-run`.
 
 
-### Parallel task limits
-
-`oms autopilot --max-parallel-tasks N` binds an immutable width of 1..4
-(default 1); standalone `oms goal-drive` accepts the same flag. Propose/run
-continuations and reentry retain it, and older receipts mean width 1. Each
-new task attempt reserves one lifetime cycle before dispatch; adopting a
-completed review spends no additional cycle or provider call. Width never
-exceeds the remaining attempt budget.
-
-Parallel goal-drive keeps per-task worktrees and selects dependency-ready tasks
-in plan order under the explicit `--max-parallel-tasks N` opt-in. Intersecting
-allowed paths serialize using graph scope overlap checks; an overlapping
-candidate is named and skipped while selection continues, so later eligible
-tasks can join the batch. Verifier syntax does not decide eligibility: Python,
-pytest, npm and make checks can run concurrently. A batch of two or more tasks
-prints a start line with width, selected tasks and skips, then a done line with
-each task's outcome and the batch's elapsed seconds. If a later claim or the
-prepare step fails before launch, already claimed tasks are rolled back;
-startup also reports how to release owner claims left without a worker.
-With this option the project asserts its checks tolerate concurrent runs.
-Worktrees do not isolate shared caches, ports, databases or network services,
-or provide resource isolation.
-
-A batch barrier precedes serial native admission and exact commits in plan order. Each
-candidate replays the already committed tasks' stored verifiers from the same validated
-batch, then its own verifier, on the candidate tree. Admission reuse binds that derived
-prefix. A live batch validates its full row; a retained review from a retired batch
-replays its original contiguous, lineage-verified done prefix, ending at a released or
-re-leased predecessor. Recovery keeps this replay obligation. Any failure refuses the
-candidate before apply and preserves the committed prefix.
-
-Ignoring repairs, baseline floor checks and admission reuse, a width-n batch adds
-n(n-1)/2 verifier runs (one at width 2, six at width 4). Goal acceptance stays after the
-batch. Campaign review semantics are unchanged. A failed sibling preserves all results,
-integrates the successful ordered prefix and closes the batch with its integrated
-prefix, released tasks and preserved reviews, then parks with the existing recoverable
-prefix contract. A retry uses a fresh batch and the remaining attempt budget. Without
-`--retry-known`, retained reviews are adopted before fresh attempts, including when the
-attempt budget is exhausted; the retry gate for new attempts stays unchanged.
-
-`autopilot abandon` also retires the old batch; completed reviews remain reusable
-without provider calls or charges, including when the replacement contract chooses width
-1. Claimed tasks are released only through exact-lease recovery with live-marker
-protection; running or uncertain work is preserved. Reentry reconciles the existing
-commit intent first, then the batch's lease-bound reviews. Every committed prefix tree
-must match its frozen patch digest. Changed contracts, leases or commit lineage park
-with `invalid-batch` and preserve evidence for the owning agent to reconcile.
-
-
 ### Lease recovery and garbage collection
 
 Each new autopilot receipt also binds an opaque run owner. Claims and worker markers

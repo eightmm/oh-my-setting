@@ -164,7 +164,9 @@ def load_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
         contract.setdefault("allow_verifier_change", False)
         contract.setdefault("allow_floor_change", "")
         contract.setdefault("collaboration", "off")
-        contract.setdefault("max_parallel_tasks", 1)
+        if "max_parallel_tasks" in contract:
+            contract.pop("max_parallel_tasks")
+            print("autopilot: ignoring legacy max_parallel_tasks field", file=sys.stderr)
     # Legacy receipts predate owner-fenced task recovery. Keep them readable,
     # but leave the owner empty so recovery fails closed instead of guessing.
     row.setdefault("owner_id", "")
@@ -292,7 +294,6 @@ def validate_receipt(row: dict[str, Any]) -> None:
         "base_sha",
         "remote",
         "max_cycles",
-        "max_parallel_tasks",
         "initial_tasks",
         "replan_tasks",
         "auto_repair",
@@ -313,7 +314,6 @@ def validate_receipt(row: dict[str, Any]) -> None:
     if not GIT_SHA.fullmatch(text(contract.get("base_sha"), "base digest")):
         raise ReceiptError("base digest is invalid")
     integer(contract.get("max_cycles"), "max cycles", 1, 10)
-    integer(contract.get("max_parallel_tasks"), "max parallel tasks", 1, 4)
     integer(contract.get("initial_tasks"), "initial tasks", 1, 12)
     integer(contract.get("replan_tasks"), "replan tasks", 1, 2)
     boolean(contract.get("auto_repair"), "auto repair")
@@ -882,8 +882,6 @@ def option_args(row: dict[str, Any]) -> list[str]:
         contract["remote"],
         "--max-cycles",
         str(contract["max_cycles"]),
-        "--max-parallel-tasks",
-        str(contract["max_parallel_tasks"]),
         "--initial-tasks",
         str(contract["initial_tasks"]),
         "--replan-tasks",
@@ -976,7 +974,6 @@ def row_from_args(args: argparse.Namespace) -> dict[str, Any]:
             "base_sha": args.base_sha,
             "remote": args.remote,
             "max_cycles": args.max_cycles,
-            "max_parallel_tasks": args.max_parallel_tasks,
             "initial_tasks": args.initial_tasks,
             "replan_tasks": args.replan_tasks,
             "auto_repair": args.auto_repair,
@@ -1020,7 +1017,6 @@ def add_binding_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--remote", required=True)
     parser.add_argument("--max-cycles", type=int, required=True)
-    parser.add_argument("--max-parallel-tasks", type=int, default=1)
     parser.add_argument("--initial-tasks", type=int, required=True)
     parser.add_argument("--replan-tasks", type=int, required=True)
     parser.add_argument("--auto-repair", action="store_true")
@@ -2001,10 +1997,6 @@ def goal_batch_command(plan_file, progress, repo, owner, width, accept, mode, ar
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    batch = sub.add_parser("goal-batch")
-    for key in ("plan_file", "progress", "repo", "owner", "width", "accept", "mode"):
-        batch.add_argument(key)
-    batch.add_argument("args", nargs="*")
     write = sub.add_parser("write")
     write.add_argument("path")
     write.add_argument("--expected", required=True)
@@ -2090,13 +2082,6 @@ def main() -> int:
     try:
         if args.command == "supervise":
             return supervise_phase(args)
-        if args.command == "goal-batch":
-            result = goal_batch_command(args.plan_file, args.progress, args.repo, args.owner,
-                                        args.width, args.accept, args.mode, args.args)
-            if args.mode == "prefix":
-                print(json.dumps(result, sort_keys=True))
-                return 0
-            return result
         path = Path(args.path)
         if args.command == "digest":
             print(digest(regular_bytes(path, RECEIPT_LIMIT, "outer receipt")))
@@ -2173,7 +2158,7 @@ def main() -> int:
             )
             goal_batch_command(str(path.with_name("tasks.json")), str(path.with_name("progress.jsonl")),
                                os.path.realpath(row["repo"]), row.get("owner_id", ""),
-                               row["contract"]["max_parallel_tasks"], "", "abandon", [])
+                               1, "", "abandon", [])
             os.unlink(path)
             fsync_directory(path.parent)
             print(record_path)

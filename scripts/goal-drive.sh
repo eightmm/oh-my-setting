@@ -28,9 +28,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$PWD"
 PROVIDER="codex"
 MAX_CYCLES=3
-MAX_PARALLEL_TASKS=1
-GOAL_BATCH_ID=""
-GOAL_BATCH_SELECT_LOG=""
 AUTO_REPAIR=0
 RUN_ID_OVERRIDE=""
 CONTRACT_ID=""
@@ -83,7 +80,6 @@ it parked; a later run whose acceptance passes resolves those park rows.
   --repo PATH     Repository (default: current directory). Tree must be clean.
   --to PROVIDER   Default worker for tasks without an assignment (default: codex).
   --max-cycles N  Hard task-attempt cap (default 3, max 10).
-  --max-parallel-tasks N  Independent concurrent workers, 1..4 (default 1).
   --run-id ID      Optional caller correlation receipt (1..64 safe characters).
   --contract-id OWNER_ID  Internal autopilot lifetime-cycle identity.
   --auto-repair   Run one same-lease repair delegation after a failed landing,
@@ -123,11 +119,6 @@ while [ "$#" -gt 0 ]; do
     --status) CAMPAIGN_STATUS=1; shift ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; PROVIDER="$2"; shift 2 ;;
-    --max-parallel-tasks) CAMPAIGN_CONFLICT="${CAMPAIGN_CONFLICT:---max-parallel-tasks}";
-      [ "$#" -ge 2 ] || fail "--max-parallel-tasks requires a count"
-      case "$2" in *[!0-9]*|"") fail "--max-parallel-tasks must be 1..4" ;; esac
-      [ "$2" -ge 1 ] && [ "$2" -le 4 ] || fail "--max-parallel-tasks must be 1..4"
-      MAX_PARALLEL_TASKS="$2"; shift 2 ;;
     --max-cycles)
       [ "$#" -ge 2 ] || fail "--max-cycles requires a count"
       case "$2" in *[!0-9]*|"") fail "--max-cycles requires a positive integer" ;; esac
@@ -457,10 +448,6 @@ terminal_result() {  # STATUS REASON
 
 park() {  # REASON NEXT
   local recorded
-  if [ -n "${GOAL_BATCH_ID:-}" ] && [ "$1" = task-failed ]; then
-    goal_batch_tool retire || fail "cannot retire the failed batch safely"
-    GOAL_BATCH_ID=""
-  fi
   if ! terminal_row park "$1"; then
     echo "error: cannot durably append the goal-drive terminal row" >&2
     exit 2
@@ -2069,10 +2056,6 @@ reconcile_commit_intent() {
       --plan-task "$INTENT_TASK" --verify "$TASK_RECEIPT_VERIFY" >/dev/null 2>&1 || land_rc=$?
     if [ "$land_rc" -ne 0 ]; then
       recovery="the frozen reviewed patch no longer admits; inspect its report"
-      if [ "$RETRY_KNOWN" -eq 0 ] && [ "$(goal_batch_tool retired-reviews)" = 1 ]; then
-        release_command="$(goal_review_release_command "$INTENT_TASK")"
-        recovery="$recovery; to release retained task $INTENT_TASK and permit fresh attempts, run: $release_command"
-      fi
       park "intent-reland-failed" "$recovery"
     fi
     intent_write landed "reconciled-by-landing"
@@ -2139,99 +2122,6 @@ PY
   intent_commit
   exit 0
 fi
-# A batch owns leases before any provider starts. Its append-only receipt is
-# separate from the singleton exact commit intent: recovery never redispatches
-# an uncertain attempt, and only the ordered successful prefix can integrate.
-goal_batch_tool() {  # MODE [ARGS...]
-  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/lib/autopilot-receipt.py" goal-batch -- \
-    "$PLAN_FILE" "$PROGRESS" "$REPO" "$CONTRACT_ID" "$MAX_PARALLEL_TASKS" "$ACCEPT_SNAPSHOT" "$@" | tr -d '\r'
-}
-
-goal_batch_select_log_cleanup() {
-  if [ -n "${GOAL_BATCH_SELECT_LOG:-}" ]; then
-    rm -f "$GOAL_BATCH_SELECT_LOG" || true
-    GOAL_BATCH_SELECT_LOG=""
-  fi
-}
-trap 'goal_batch_select_log_cleanup' EXIT
-
-GOAL_BATCH_PIDS=()
-GOAL_BATCH_LOGS=()
-GOAL_BATCH_LAUNCHING=0
-GOAL_BATCH_PENDING_SIGNAL=""
-GOAL_BATCH_PENDING_EXIT=""
-GOAL_BATCH_CLAIMS=()
-GOAL_BATCH_PREPARED=0
-goal_batch_rollback_claims() {
-  local pair id lease released="" failed=""
-  [ "$GOAL_BATCH_PREPARED" -eq 0 ] || return 0
-  for pair in ${GOAL_BATCH_CLAIMS[@]+"${GOAL_BATCH_CLAIMS[@]}"}; do
-    id="${pair%%:*}"; lease="${pair#*:}"
-    if "$ROOT/scripts/agent-plan.sh" --repo "$REPO" --lease-id "$lease" release --id "$id" >/dev/null 2>&1; then
-      released="${released}${released:+, }$id/$lease"
-    else
-      failed="${failed}${failed:+; }oms agent-plan release --id $id --lease-id $lease"
-    fi
-  done
-  [ -z "$released" ] || echo "goal-drive: released pre-batch claims: $released" >&2
-  [ -z "$failed" ] || echo "goal-drive: release failed; run $failed" >&2
-  GOAL_BATCH_CLAIMS=()
-}
-goal_batch_forget_pid() {  # PID
-  local target="$1" pid
-  local -a remaining=()
-  for pid in ${GOAL_BATCH_PIDS[@]+"${GOAL_BATCH_PIDS[@]}"}; do
-    [ "$pid" = "$target" ] || remaining+=("$pid")
-  done
-  GOAL_BATCH_PIDS=(${remaining[@]+"${remaining[@]}"})
-}
-
-goal_batch_reap_completed() {
-  local active pid rc=0
-  # Keep stopped jobs owned; only wait for jobs Bash no longer reports active.
-  active="$(jobs -pr; jobs -ps)"
-  active="${active//$'\n'/ }"
-  for pid in ${GOAL_BATCH_PIDS[@]+"${GOAL_BATCH_PIDS[@]}"}; do
-    case " $active " in
-      *" $pid "*) ;;
-      *)
-        wait "$pid" || rc=$?
-        goal_batch_forget_pid "$pid"
-        ;;
-    esac
-  done
-  return "$rc"
-}
-
-goal_batch_wait_all() {
-  local rc=0
-  while [ -n "${GOAL_BATCH_PIDS[*]-}" ]; do
-    goal_batch_reap_completed || rc=$?
-    [ -z "${GOAL_BATCH_PIDS[*]-}" ] || sleep 0.1
-  done
-  return "$rc"
-}
-
-goal_batch_signal() {  # SIGNAL EXIT_CODE
-  local pid
-  if [ "$GOAL_BATCH_LAUNCHING" -eq 1 ]; then
-    GOAL_BATCH_PENDING_SIGNAL="$1"
-    GOAL_BATCH_PENDING_EXIT="$2"
-    return 0
-  fi
-  trap - HUP INT TERM
-  goal_batch_rollback_claims
-  # Bash can reap an exited job asynchronously. Drop it before signalling any
-  # remaining PID so cancellation cannot target a later process that reused it.
-  goal_batch_reap_completed || true
-  for pid in ${GOAL_BATCH_PIDS[@]+"${GOAL_BATCH_PIDS[@]}"}; do
-    kill -s "$1" "$pid" 2>/dev/null || true
-  done
-  goal_batch_wait_all || true
-  rm -f ${GOAL_BATCH_LOGS[@]+"${GOAL_BATCH_LOGS[@]}"}
-  exit "$2"
-}
-
 goal_reserve_cycle() {  # TASK [LEASE]
   OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_CONTRACT="$CONTRACT_ID" \
     OMS_GD_RUN="$RUN_ID" OMS_GD_CYCLE="$CYCLE" python3 - "$1" "${2:-}" <<'PY' | progress_append || return $?
@@ -2245,181 +2135,6 @@ PY
   if [ -n "$CONTRACT_ID" ]; then
     CONTRACT_CYCLES=$((CONTRACT_CYCLES + 1))
   fi
-}
-
-goal_batch_dispatch() {
-  local ready selected remaining id lease prior_lease_epoch log pid rc=0 i provider dispatched=0 batch_cycle prepare_rc=0 summary select_line select_skips=""
-  local -a ids leases args
-  remaining=$((MAX_CYCLES - RUN_ATTEMPTS))
-  [ -z "$CONTRACT_ID" ] || remaining=$((MAX_CYCLES - CONTRACT_CYCLES))
-  [ "$remaining" -ge 0 ] || remaining=0
-  ready="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json)" ||
-    park invalid-plan "cannot verify ready dependencies"
-  # Adopt retained work before opening fresh attempts. A released failed
-  # sibling must not hide its independent review behind retry or cycle gates.
-  if [ "$RETRY_KNOWN" -eq 0 ] && [ "${retired_reviews:-0}" = 1 ]; then
-    ready="$(printf '%s' "$ready" | python3 -c 'import json,sys;d=json.load(sys.stdin);d["actionable"]=[];print(json.dumps(d))' | tr -d '\r')" ||
-      park invalid-plan "cannot select retained reviews before new attempts"
-  fi
-  GOAL_BATCH_SELECT_LOG="$(agent_memory_mktemp)" || park internal "cannot allocate batch selection output"
-  selected="$(goal_batch_tool select "$ready" "$remaining" 2>"$GOAL_BATCH_SELECT_LOG")" || {
-    cat "$GOAL_BATCH_SELECT_LOG" >&2
-    park invalid-batch "cannot select a safe task batch"
-  }
-  while IFS= read -r select_line; do
-    case "$select_line" in
-      'goal-drive: skipped '*)
-        if [ -n "$select_skips" ]; then
-          select_skips="$select_skips"$'\n'"$select_line"
-        else
-          select_skips="$select_line"
-        fi
-        ;;
-      *) printf '%s\n' "$select_line" >&2 ;;
-    esac
-  done < "$GOAL_BATCH_SELECT_LOG"
-  if [ -z "$selected" ]; then
-    [ -z "$select_skips" ] || printf '%s\n' "$select_skips" >&2
-    [ "$remaining" -gt 0 ] || park cycles-exhausted "the task-attempt budget is exhausted"
-    park tasks-exhausted "acceptance fails and the plan has no actionable task"
-  fi
-  ids=(); leases=()
-  GOAL_BATCH_CLAIMS=(); GOAL_BATCH_PREPARED=0
-  trap 'goal_batch_signal HUP 129' HUP
-  trap 'goal_batch_signal INT 130' INT
-  trap 'goal_batch_signal TERM 143' TERM
-  while IFS= read -r id; do
-    load_task_receipt "$id" || { goal_batch_rollback_claims; park invalid-batch "cannot resolve task $id"; }
-    if [ "$TASK_RECEIPT_STATE" = review ]; then
-      ids+=("$id"); leases+=("")
-      continue
-    fi
-    provider="$TASK_ROUTE_PROVIDER"
-    prior_lease_epoch="$TASK_RECEIPT_LEASE_EPOCH"
-    GOAL_BATCH_LAUNCHING=1
-    if ! OMS_AUTOPILOT_OWNER_ID="$CONTRACT_ID" "$ROOT/scripts/agent-plan.sh" \
-      --repo "$REPO" claim --id "$id" --provider "$provider" >/dev/null; then
-      GOAL_BATCH_LAUNCHING=0
-      if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
-        goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
-      fi
-      goal_batch_rollback_claims
-      park batch-claim-failed "task $id changed before reservation"
-    fi
-    if ! load_task_receipt "$id"; then
-      lease="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" show --json --id "$id" 2>/dev/null |
-        python3 -c 'import json,sys
-try:
- task=json.load(sys.stdin); epoch=int(sys.argv[2])
-except (ValueError,TypeError,KeyError): raise SystemExit(1)
-if (isinstance(task,dict) and task.get("state")=="claimed"
-    and task.get("autopilot_owner_id")==sys.argv[1]
-    and task.get("lease_epoch")==epoch+1 and task.get("lease_id")):
- print(task["lease_id"])' "$CONTRACT_ID" "$prior_lease_epoch" | tr -d '\r')" || lease=""
-      if [ -n "$lease" ]; then
-        GOAL_BATCH_CLAIMS+=("$id:$lease")
-      else
-        echo "goal-drive: could not confirm the exact claim lease for $id; inspect its current lease before release" >&2
-      fi
-      GOAL_BATCH_LAUNCHING=0
-      if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
-        goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
-      fi
-      goal_batch_rollback_claims
-      park invalid-batch "cannot read reserved lease $id"
-    fi
-    lease="$TASK_RECEIPT_LEASE"
-    GOAL_BATCH_CLAIMS+=("$id:$lease")
-    ids+=("$id"); leases+=("$lease")
-    GOAL_BATCH_LAUNCHING=0
-    if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
-      goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
-    fi
-    dispatched=$((dispatched + 1))
-  done <<EOF_IDS
-$selected
-EOF_IDS
-  [ "$dispatched" -eq 0 ] || CYCLE=$((CYCLE + dispatched - 1))
-  GOAL_BATCH_ID="$RUN_ID-b$CYCLE-${TERMINAL_RECEIPT:0:16}"
-  GOAL_BATCH_LAUNCHING=1
-  goal_batch_tool prepare "$GOAL_BATCH_ID" "$RUN_ID" "${ids[@]}" | progress_append || prepare_rc=$?
-  if [ "$prepare_rc" -eq 0 ]; then
-    GOAL_BATCH_PREPARED=1
-    GOAL_BATCH_CLAIMS=()
-  fi
-  GOAL_BATCH_LAUNCHING=0
-  if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
-    goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
-  fi
-  [ "$prepare_rc" -eq 0 ] ||
-    { goal_batch_rollback_claims; park batch-receipt-failed "pre-batch receipt failed; claims were rolled back where possible"; }
-  batch_cycle=$((CYCLE - dispatched + 1))
-  for ((i=0; i<${#ids[@]}; i++)); do
-    [ -n "${leases[$i]}" ] || continue
-    CYCLE="$batch_cycle"
-    goal_reserve_cycle "${ids[$i]}" "${leases[$i]}" || park batch-cycle-failed "prepared batch retained; cycle reservation failed"
-    batch_cycle=$((batch_cycle + 1))
-  done
-  GOAL_BATCH_PIDS=(); GOAL_BATCH_LOGS=()
-  # Allocate every output before starting a child: allocation failure must
-  # leave no running sibling behind an internal-error exit.
-  for ((i=0; i<${#ids[@]}; i++)); do
-    log="$(agent_memory_mktemp)" || park internal "cannot allocate batch output"
-    GOAL_BATCH_LOGS+=("$log")
-  done
-  for ((i=0; i<${#ids[@]}; i++)); do
-    [ -n "${leases[$i]}" ] || continue
-    args=(--repo "$REPO" --to "$PROVIDER" --id "${ids[$i]}" --claimed-lease "${leases[$i]}")
-    [ "$RETRY_KNOWN" -eq 0 ] || args+=(--retry-known)
-    [ "$ALLOW_VERIFIER_CHANGE" -eq 0 ] || args+=(--allow-verifier-change)
-    [ -z "$ALLOW_FLOOR_CHANGE_REASON" ] || args+=(--allow-floor-change "$ALLOW_FLOOR_CHANGE_REASON")
-    [ -z "$MODEL" ] || args+=(--model "$MODEL")
-    [ -z "$FALLBACK_MODEL" ] || args+=(--fallback-model "$FALLBACK_MODEL")
-    [ "$REASONING_EFFORT" = auto ] || args+=(--reasoning-effort "$REASONING_EFFORT")
-    log="${GOAL_BATCH_LOGS[$i]}"
-    GOAL_BATCH_LAUNCHING=1
-    python3 "$ROOT/scripts/lib/autopilot-receipt.py" supervise \
-      --wall "$GOAL_PROVIDER_PHASE_WALL" --kill-after 1 --label goal-provider -- \
-      env "OMS_PEER_TIMEOUT=$PROVIDER_TIMEOUT" "OMS_AUTOPILOT_OWNER_ID=$CONTRACT_ID" bash "$ROOT/scripts/plan-run.sh" "${args[@]}" >"$log" 2>&1 &
-    pid=$!
-    GOAL_BATCH_PIDS+=("$pid")
-    GOAL_BATCH_LAUNCHING=0
-    if [ -n "$GOAL_BATCH_PENDING_SIGNAL" ]; then
-      goal_batch_signal "$GOAL_BATCH_PENDING_SIGNAL" "$GOAL_BATCH_PENDING_EXIT"
-    fi
-  done
-  if [ "${#ids[@]}" -gt 1 ]; then
-    summary="goal-drive: batch $GOAL_BATCH_ID width ${#ids[@]}/$MAX_PARALLEL_TASKS:"
-    for id in "${ids[@]}"; do summary="$summary $id"; done
-    while IFS= read -r id; do
-      case "$id" in
-        'goal-drive: skipped '*) summary="$summary; ${id#goal-drive: skipped }" ;;
-      esac
-    done <<EOF_SKIPS
-$select_skips
-EOF_SKIPS
-    printf '%s\n' "$summary"
-  elif [ -n "$select_skips" ]; then
-    printf '%s\n' "$select_skips" >&2
-  fi
-  goal_batch_select_log_cleanup
-  goal_batch_wait_all || rc=$?
-  trap - HUP INT TERM
-  for log in "${GOAL_BATCH_LOGS[@]}"; do
-    tail -n 6 "$log"
-    rm -f "$log"
-  done
-  GOAL_BATCH_LOGS=()
-  guard_git_authority
-  guard_expected_ref
-  [ "$(git -C "$REPO" rev-parse HEAD)" = "$head_before" ] ||
-    park head-moved "another writer advanced HEAD during the batch; preserve its reviews"
-  # Task receipts, not child exit codes, determine the integrable prefix.
-  if [ "${OMS_GOAL_DRIVE_TEST_STOP_AFTER_REVIEW:-0}" = 1 ]; then
-    echo "goal-drive: injected stop after batch review" >&2
-    exit 75
-  fi
-  [ "$rc" -eq 0 ] || echo "goal-drive: batch has a failed attempt; preserving its ordered prefix" >&2
 }
 
 goal_integrate_current() {
@@ -2578,52 +2293,7 @@ dirty="$(git_status_porcelain)"
 
 prev_tree=""
 prev_accept_out=""
-GOAL_BATCH_ID="$(goal_batch_tool recover)" || park invalid-batch "the durable batch contract or lease changed; preserve its patches"
-
 while :; do
-  if [ -n "$GOAL_BATCH_ID" ]; then
-    batch_results="$(goal_batch_tool collect)" ||
-      park batch-recovery-required "an attempt is unresolved or its batch results changed; preserve every owned worker and patch"
-    if [ -n "$batch_results" ]; then
-      printf '%s\n' "$batch_results" | progress_append || fail "cannot freeze batch results"
-    fi
-    while :; do
-      task_id="$(goal_batch_tool next)" || park invalid-batch "the durable batch receipt cannot be reconciled"
-      case "$task_id" in
-        complete)
-          batch_complete="$(goal_batch_tool complete)" || fail "cannot close completed batch"
-          printf '%s\n' "$batch_complete" | progress_append || fail "cannot close completed batch"
-          if summary="$(printf '%s\n' "$batch_complete" | python3 -c '
-import calendar, json, sys, time
-row=json.load(sys.stdin)
-if len(row["tasks"]) < 2:
-    raise SystemExit(0)
-started=calendar.timegm(time.strptime(row["ts"], "%Y-%m-%dT%H:%M:%SZ"))
-elapsed=max(0, int(time.time()-started))
-tasks=", ".join(item["id"] + " committed" for item in row["tasks"])
-print("goal-drive: batch %s done: %s (%ds)" % (row["batch_id"], tasks, elapsed))
-' 2>/dev/null | tr -d '\r')"; then
-            [ -z "$summary" ] || printf '%s\n' "$summary"
-          else
-            echo "goal-drive: warning: cannot format completed batch summary" >&2
-          fi
-          GOAL_BATCH_ID=""
-          break ;;
-        failed:*)
-          goal_batch_tool retire || park batch-recovery-required "cannot retire the failed batch safely"
-          GOAL_BATCH_ID=""
-          park batch-task-failed "ordered prefix integrated and batch retired; retry released tasks under the remaining cycle budget" ;;
-        "") park invalid-batch "the pending batch disappeared" ;;
-      esac
-      load_task_receipt "$task_id" || park invalid-review-receipt "cannot read batch task $task_id"
-      patch_file="$TASK_RECEIPT_PATCH"
-      head_before="$(git -C "$REPO" rev-parse HEAD)"
-      head_ref_before="$(git -C "$REPO" symbolic-ref -q HEAD | tr -d '\r')"
-      goal_integrate_current
-      "$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json >/dev/null ||
-        park invalid-plan "cannot recompute dependency readiness after integration"
-    done
-  fi
   CYCLE=$((CYCLE + 1))
   guard_git_authority
   guard_expected_ref
@@ -2708,11 +2378,6 @@ print(found)
   # commit authority; plan-run no longer gets to cross both in one opaque
   # call. A unique exact review may predate this process (provider completed,
   # then goal-drive crashed), so adopt that receipt before claiming new work.
-  retired_reviews="$(goal_batch_tool retired-reviews)" || park invalid-batch "cannot identify retained reviews"
-  if [ "$MAX_PARALLEL_TASKS" -gt 1 ] || [ "$retired_reviews" = 1 ]; then
-    goal_batch_dispatch
-    continue
-  fi
   pending_rc=0
   task_id="$(pending_review 2>&1)" || pending_rc=$?
   provider_called=0

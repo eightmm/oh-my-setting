@@ -34,11 +34,7 @@ and then run the exact reviewed proposal with `--review-mode gate` and its
 `--expected-proposal-sha256`.
 
 For a parked campaign, `oms autopilot status` leads with the recorded phase,
-reason, semantic verdict and evidence path. In parallel goal-drive, disjoint
-scope qualifies whatever the verifier form; overlapping tasks are skipped while
-selection continues. For two or more tasks, batch start/done lines report
-selected tasks, skips, outcomes and the batch's elapsed seconds, and pre-launch
-claim failures roll back claims already taken for that batch.
+reason, semantic verdict and evidence path.
 
 An analysis request does not authorize writes. Local implementation and commits
 may follow a clear implementation request; a Draft PR requires explicit current
