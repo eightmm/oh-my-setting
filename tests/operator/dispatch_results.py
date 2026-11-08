@@ -2651,8 +2651,6 @@ for installed, models, rounds, workload, included, note in (
         (False, [], 1, "deep", False, "not installed"),
         (False, [], 1, "frontier", False, "not installed"),
         (True, [], 1, "deep", False, "absent from the catalog"),
-        (True, [extra_route["model"]], 2, "deep", False, "5 seats x 3 rounds exceeds the 12-call budget"),
-        (True, [extra_route["model"]], 2, "frontier", False, "5 seats x 3 rounds exceeds the 12-call budget"),
         (True, [extra_route["model"]], 2, "routine", True, "")):
     row = {"provider": "antigravity", "installed": installed, "models": models}
     output = io.StringIO()
@@ -2677,6 +2675,39 @@ for installed, models, rounds, workload, included, note in (
                 argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
             assert "antigravity:" not in argv[argv.index("--providers") + 1]
             assert note in output.getvalue(), output.getvalue()
+for workload in ("deep", "frontier"):
+    output = io.StringIO()
+    with patch.object(panel, "policy", return_value=extra_policy), redirect_stderr(output), \
+            patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [
+                {"provider": "antigravity", "installed": True, "models": [extra_route["model"]]}]):
+        for rounds, expected in ((1, 5), (2, 4)):
+            argv = panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=rounds, workload=workload)
+            targets = argv[argv.index("--providers") + 1].split(",")
+            assert len(targets) == expected and len({t.split(":", 1)[0] for t in targets}) == 3, (rounds, targets)
+    assert output.getvalue().count("dropped") == 1 and \
+        "12-call budget" in output.getvalue() and "unavailable" not in output.getvalue(), output.getvalue()
+# Beyond one seat per family the trim cannot fit: refuse naming the budget, with no "dropped" line first.
+many = deepcopy(extra_policy)
+many["tiers"]["routine"] = [{"provider": name, "model": name + "-m", "effort": "high"}
+                            for name in ("codex", "claude", "pi", "opencode")]
+output = io.StringIO()
+with patch.object(panel, "PROVIDERS", ("codex", "claude", "pi", "opencode")), \
+        patch.object(panel, "policy", return_value=many), redirect_stderr(output), \
+        patch.object(panel, "provider_catalog", return_value=[
+            {"provider": name, "installed": True, "models": [name + "-m"]}
+            for name in ("codex", "claude", "pi", "opencode")] + [
+            {"provider": "antigravity", "installed": True, "models": [extra_route["model"]]}]), \
+        patch.object(panel, "routable_route_model", side_effect=lambda provider, model, catalog: model):
+    for partial in ("", "1"):
+        with patch.dict(os.environ, {"OMS_COUNCIL_ALLOW_PARTIAL": partial}):
+            try:
+                panel.council_command(project, "Compare", "extra-seat", "Compare", rounds=2, workload="routine")
+            except ValueError as error:
+                assert "12-call budget" in str(error) and "maximum rounds: 1" in str(error) \
+                    and "unavailable" not in str(error), error
+            else:
+                raise AssertionError("over-budget council accepted")
+    assert "dropped" not in output.getvalue(), output.getvalue()
 for result in (ValueError("unavailable"), subprocess.TimeoutExpired("catalog", 1), OSError("unavailable"),
                [], [{"provider": "other", "installed": False}]):
     output = io.StringIO()
@@ -2760,11 +2791,10 @@ not_installed_run = subprocess.run(refusal_cmd, cwd=str(project), env=no_agy_env
 assert not_installed_run.returncode != 0, not_installed_run
 assert len(not_installed_run.stderr.strip().splitlines()) == 1, not_installed_run.stderr
 assert "antigravity" in not_installed_run.stderr and "not installed" in not_installed_run.stderr, not_installed_run.stderr
-budget_refusal = subprocess.run(refusal_cmd + ["--rounds", "2"], cwd=str(project),
-                                env=dict(no_agy_env, PATH=environment["PATH"]), capture_output=True, text=True)
-assert budget_refusal.returncode != 0, budget_refusal
-assert len(budget_refusal.stderr.strip().splitlines()) == 1, budget_refusal.stderr
-assert "antigravity" in budget_refusal.stderr and "12-call budget" in budget_refusal.stderr, budget_refusal.stderr
+budget_plan = subprocess.run(refusal_cmd + ["--rounds", "2", "--dry-run"], cwd=str(project),
+                             env=dict(no_agy_env, PATH=environment["PATH"]), capture_output=True, text=True)
+assert budget_plan.returncode == 0 and "seat unavailable" not in budget_plan.stderr, budget_plan
+assert budget_plan.stderr.count("dropped") == 1 and "12-call budget" in budget_plan.stderr, budget_plan.stderr
 (capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
 unrouted_refusal = subprocess.run(refusal_cmd, cwd=str(project),
                                   env=dict(no_agy_env, PATH=environment["PATH"]), capture_output=True, text=True)
@@ -3073,7 +3103,7 @@ for rounds in (1, 2):
                                       dict(environment, OMS_COUNCIL_ALLOW_PARTIAL="1")))
     if rounds == 2:
         assert partial_planned["primary_calls"] == 12 and partial_planned["max_calls"] == 24
-        assert partial_planned["families"] == 2 and partial_planned["seats"] == 4
+        assert partial_planned["families"] == 3 and partial_planned["seats"] == 4
 for rounds in (1, 2):
     routine_plan = json.loads(call(council_args + ["--workload", "routine", "--rounds", str(rounds), "--dry-run"]))
     assert (routine_plan["seats"], routine_plan["families"], routine_plan["primary_calls"]) == (3, 3, 3 * (rounds + 1))

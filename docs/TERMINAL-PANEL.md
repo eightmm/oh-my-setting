@@ -1614,7 +1614,9 @@ The council uses read-only seats. The owner decides the outcome.
 | `frontier` | Deep and frontier pairs + Antigravity | 5 | 10 |
 
 - Two rebuttal rounds use 9 primary calls for `routine`; `deep` and `frontier`
-  exceed the 12-primary-call budget.
+  would need 15, so the council drops the latest additional same-family seat
+  (one stderr line each) until it fits: four seats, 12 primary calls, all three
+  families kept.
 - **The budget counts primary calls.** Format repair can add one call per primary
   call. `--dry-run` reports both counts without running a model.
 - Missing required families or unavailable routes refuse the council before
@@ -1633,8 +1635,8 @@ routine tier plus the extra Antigravity seat, deep uses the deep and routine tie
 Antigravity, and frontier uses the deep and frontier tiers plus Antigravity, so every
 workload seats all three provider families (`claude`, `codex`, and `antigravity`). One
 rebuttal round means six primary calls for routine (three seats) and ten for deep or
-frontier (five seats); two rounds mean nine for routine and exceed the 12-primary-call
-budget for five-seat deep or frontier councils.
+frontier (five seats); two rounds mean nine for routine and twelve for deep or frontier
+after one same-family seat is dropped to fit the 12-primary-call budget.
 
 Its configured Gemini ID selects a name and
 level (for example, `gemini-4-argon-high` selects `argon-high`); council routing
@@ -1649,11 +1651,13 @@ Code cannot enumerate models, and Codex may not have refreshed its catalog yet.
 
 Installation and catalog lookup checks still apply to every seat. When `codex`,
 `claude`, or `antigravity` cannot seat (not installed, catalog lookup failed, model
-absent, or the 12-call budget would be exceeded), the council refuses before any
+absent), the council refuses before any
 provider call or started-council record, exiting nonzero with one line naming the
 missing family and the reason (unless `OMS_COUNCIL_ALLOW_PARTIAL=1` is set as an
 explicit opt-out for hosts that cannot run a provider, which keeps the skip-and-continue
-behavior). The council summary shows the resolved model.
+behavior). A council over the 12-call budget first drops seats as above; if one
+seat per family still does not fit, it refuses naming the budget and the maximum
+rounds, and prints no "dropped" lines. The council summary shows the resolved model.
 
 Format repair can add one call per
 primary call. `--dry-run` exposes both counts without executing a model. Every

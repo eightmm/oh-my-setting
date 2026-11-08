@@ -3129,8 +3129,6 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
                         raise ValueError("model %s absent from the catalog" % model)
             except ValueError as error:
                 reason = str(error)
-            if reason is None and (len(kept) + 1) * (rounds + 1) > 12:
-                reason = "%s seats x %s rounds exceeds the 12-call budget" % (len(kept) + 1, rounds + 1)
         if reason is not None:
             if not allow_partial:
                 raise ValueError("council: %s seat unavailable: %s" % (provider, reason))
@@ -3157,8 +3155,6 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
                     model = routable_route_model(provider, model, catalog)
                 if model not in catalog:
                     raise ValueError("model %s absent from the catalog" % model)
-                if (len(seats) + 1) * (rounds + 1) > 12:
-                    raise ValueError("%s seats x %s rounds exceeds the 12-call budget" % (len(seats) + 1, rounds + 1))
             except ValueError as error:
                 reason = str(error)
             else:
@@ -3167,8 +3163,21 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
         if not allow_partial:
             raise ValueError("council: %s seat unavailable: %s" % (provider, reason))
         print("council: %s seat skipped: %s" % (provider, reason), file=sys.stderr)
+    dropped, total = [], len(seats)
+    if total * (rounds + 1) > 12 and lenses is None:
+        # Over budget: drop later same-family seats, latest first, only until the budget fits.
+        first = {}
+        for item in seats:
+            first.setdefault(item["provider"], item)
+        for item in reversed(seats):
+            if len(seats) * (rounds + 1) <= 12:
+                break
+            if first[item["provider"]] is not item:
+                dropped.append(item)
+                seats = [seat for seat in seats if seat is not item]
     if len(seats) * (rounds + 1) > 12:
-        raise ValueError("council: %s seats x %s rounds exceeds the 12-call budget" % (len(seats), rounds + 1))
+        raise ValueError("council: %s seats x %s rounds exceeds the 12-call budget (maximum rounds: %s)"
+                         % (len(seats), rounds + 1, max(12 // max(len(seats), 1) - 1, 0)))
     if not allow_partial:
         for family in required_families:
             if all(item["provider"] != family for item in seats):
@@ -3176,6 +3185,9 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
     if len({item["provider"] for item in seats}) < 2:
         missing = next((p for p in required_families if all(item["provider"] != p for item in seats)), "provider")
         raise ValueError("council: %s seat unavailable: council tier must include two independent provider families" % missing)
+    for item in dropped:
+        print("council: %s seat %s dropped: %s seats x %s rounds exceeds the 12-call budget"
+              % (item["provider"], item["model"], total, rounds + 1), file=sys.stderr)
     seen, ordered, repeats = set(), [], []
     for item in seats:
         (repeats if item["provider"] in seen else ordered).append(item)
