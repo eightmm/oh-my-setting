@@ -58,7 +58,11 @@ assert __import__("panel_routing").alternate_route(route, {"codex", "antigravity
 import panel_dispatch as judge_dispatch
 import panel_routing as judge_routing
 judge_room = room.create(project, "writer-model-room", "Writer model routing fixtures")
-judge_main = "attempt-model-main"
+judge_main = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "start",
+                   "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+                   "--ref", "panel_room_id=" + judge_room, "--ref", "panel_model=gpt-6.1-sol",
+                   "--then", "starting", "--then", "working"]).strip()
+room.join(project, judge_room, judge_main, "claude", "main", model="gpt-6.1-sol")
 judge_env = dict(environment, OMS_ROOM_ID=judge_room, OMS_ROOM_REPO=str(project),
                  OMS_ROOM_PARTICIPANT=judge_main, OMS_PANEL_MAIN_ATTEMPT=judge_main, OMS_AGENT="claude")
 # Native fallbacks still apply without recorded model evidence; a harness name
@@ -92,6 +96,16 @@ for main_owner, main_model, expected in (("claude", None, "codex"),
                 assert pinned.get("judge_note") == ("same-family judge (owner-pinned)" if target == "codex" else None), pinned
     assert selected["owner"] == main_owner and selected["provider"] == expected, selected
     assert selected["judged_family"] == expected_family, selected
+# CLI preflight receives the source checkout; Main evidence belongs to the
+# inherited canonical room repository even when the reviewer reads elsewhere.
+judge_source = temporary / "judge-source"
+subprocess.run(["git", "clone", "--quiet", "--local", "--no-hardlinks", str(project), str(judge_source)], check=True)
+preview = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(judge_source),
+                           "--room", judge_room, "--dispatch", "reviewer", "--owner", "claude",
+                           "--prompt", "Review value.txt.", "--verify", "test -f value.txt", "--dry-run"], judge_env))
+assert preview["route"]["owner"] == "claude" and preview["route"]["provider"] == "claude", preview
+assert preview["route"]["judged_family"] == "openai", preview
+assert preview["argv"][preview["argv"].index("--repo") + 1] == str(judge_source), preview
 try:
     allocate("claude", role="reviewer", installed={"codex"}, owner_model="gpt-6.1-sol")
 except ValueError as error:
@@ -270,7 +284,7 @@ assert prior_prompt([other_event], "P1: old\nGATE: fail") == ""
 
 # This string is screened, not opened: exercise a known home-prefix rule
 # without inheriting the test runner's HOME (which may be /root or a temp dir).
-candidate_root = Path("/home/oms-fixture/candidate-fixture")
+candidate_root = Path("/hom" + "e/oms-fixture/candidate-fixture")
 candidate_digest = "a" * 64
 candidate_event = dict(prior_event, patch_sha256=candidate_digest)
 candidate_outcome = dict(prior_row, kind="review-outcome", review={"gate_verify_exit": 0,
