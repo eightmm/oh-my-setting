@@ -736,35 +736,41 @@ def exercise_antigravity_read_tiers():
         # Antigravity's unknown quota cannot disturb native quota and tie-band ordering.
         for used, expected in ((0, "codex"), (14, "codex"), (15, "claude"), (89, "claude"), (90, "claude")):
             readings = {"claude": {"weekly_used": 0}, "codex": {"weekly_used": used}}
-            assert choose(tier, provider_status=readings)["provider"] == expected
+            assert choose(tier, provider_status=readings)["provider"] == (expected if tier == "deep" else "codex" if used < 90 else "antigravity")
         for used in (0, 89, 90, 100):
             readings = dict(exhausted, claude={"weekly_used": used})
-            assert choose(tier, provider_status=readings)["provider"] == ("claude" if used < 90 else "antigravity")
+            assert choose(tier, provider_status=readings)["provider"] == ("claude" if tier == "deep" and used < 90 else "antigravity")
         for unknown in (None, "", "malformed"):
             readings = dict(exhausted, claude={"weekly_used": unknown})
-            assert choose(tier, provider_status=readings)["provider"] == "claude"
+            assert choose(tier, provider_status=readings)["provider"] == ("claude" if tier == "deep" else "antigravity")
         # An unknown-quota route keeps its position unless a known native must precede it.
         reordered = deepcopy(configured)
         reordered["tiers"][tier].insert(0, reordered["tiers"][tier].pop())
         with patch.object(routing, "policy", return_value=reordered):
             assert choose(tier)["provider"] == "antigravity"
             readings = dict(exhausted, claude={"weekly_used": 89})
-            assert choose(tier, provider_status=readings)["provider"] == "claude"
+            assert choose(tier, provider_status=readings)["provider"] == ("claude" if tier == "deep" else "antigravity")
             previous = dict(provider="codex", workload=tier, access="read", role="worker")
-            assert routing.alternate_route(previous, providers, readings, resolve_accounts=False)["provider"] == "claude"
+            assert routing.alternate_route(previous, providers, readings, resolve_accounts=False)["provider"] == ("claude" if tier == "deep" else "antigravity")
         assert choose(tier, provider_status=exhausted)["provider"] == "antigravity"
         assert choose(tier, installed={"antigravity"})["provider"] == "antigravity"
         for missing in (None, {}, {"antigravity": []}, {"antigravity": ["gemini-5-argon-low"]}):
             assert choose(tier, catalogs=missing)["provider"] == "codex"
             refused(lambda: choose(tier, installed={"antigravity"}, catalogs=missing))
             for used in (0, 89, 90, 100, None, "malformed"):
-                route = choose(tier, installed={"claude", "antigravity"}, catalogs=missing,
+                options = dict(installed={"claude", "antigravity"}, catalogs=missing,
                                provider_status={"claude": {"weekly_used": used}})
-                assert route["provider"] == "claude"
+                if tier == "deep":
+                    assert choose(tier, **options)["provider"] == "claude"
+                else:
+                    refused(lambda: choose(tier, **options))
         for role in routing.WRITERS:
             assert choose(tier, role=role, access="write")["provider"] != "antigravity"
             refused(lambda: choose(tier, role=role, access="write", installed={"antigravity"}))
-            refused(lambda: choose(tier, role=role, access="write", provider_status=exhausted))
+            if tier == "deep":
+                refused(lambda: choose(tier, role=role, access="write", provider_status=exhausted))
+            else:
+                assert choose(tier, role=role, access="write", provider_status=exhausted)["provider"] == "codex"
         for role in ("scholar", "reviewer", "verifier", "security-auditor", "critic", "advisor", "architect"):
             route = choose(tier, role=role, writer="claude", provider_status=exhausted)
             assert route["provider"] == "antigravity" and route["access"] == "read", route
@@ -780,7 +786,7 @@ def exercise_antigravity_read_tiers():
             assert "antigravity" in " ".join(argv), argv
             if role not in ("reviewer", "advisor"):
                 assert "--read-only" in argv, argv
-        native = choose(tier, installed={"claude"})
+        native = choose(tier, installed={"claude"}, explicit_target=True)
         assert routing.alternate_route(native, {"antigravity"})["provider"] == "antigravity"
         assert routing.alternate_route(dict(native, access="write"), {"antigravity"}) is None
         restricted = deepcopy(configured)
@@ -8101,12 +8107,17 @@ os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL
         if (result.returncode == 0 or rows or "non-Codex provider" not in result.stderr
                 or "routed to another provider" not in result.stderr):
             regressions.append(("same-provider refusal recovery", result.returncode, rows, result.stderr))
-        for name, options in (("account-switch-explicit", ["--to", "claude", "--model", "claude-opus-5-5"]),
-                              ("account-switch-workload", ["--workload", "frontier"])):
-            result, rows = run(name, continuing=True, route_args=options, extra={"ACCOUNT_TEST_MODE": "fresh-provider"})
-            if (result.returncode not in (0, 6) or [row["provider"] for row in rows] != ["claude"]
-                    or "earlier worker ran on codex, not claude" not in result.stderr):
-                regressions.append((name, result.returncode, rows, result.stderr))
+        result, rows = run("account-switch-explicit", continuing=True,
+                           route_args=["--to", "claude", "--model", "claude-opus-5-5"],
+                           extra={"ACCOUNT_TEST_MODE": "fresh-provider"})
+        if (result.returncode not in (0, 6) or [row["provider"] for row in rows] != ["claude"]
+                or "earlier worker ran on codex, not claude" not in result.stderr):
+            regressions.append(("account-switch-explicit", result.returncode, rows, result.stderr))
+        result, rows = run("account-switch-workload", continuing=True, route_args=["--workload", "frontier"],
+                           extra={"ACCOUNT_TEST_MODE": "fresh-provider"})
+        if (result.returncode == 0 or rows or "no eligible account" not in result.stderr
+                or "Fable reserved for security audits" not in result.stderr):
+            regressions.append(("account-switch-workload", result.returncode, rows, result.stderr))
         result, rows = run("account-default", continuing=True)
         if (result.returncode not in (0, 6) or [row["home"] for row in rows] != [env["CODEX_HOME"]]
                 or not rows or default_session not in rows[0]["argv"]):

@@ -360,6 +360,10 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
     else:
         purpose = {"advisor": "advise", "reviewer": "review", "researcher": "research", "scholar": "research"}.get(role, role)
     candidates = routes["tiers"][tier]
+    skipped_fable = role != "security-auditor" and not explicit_target and any(
+        c["model"] == "claude-fable-5-1" for c in candidates)
+    if skipped_fable:
+        candidates = [c for c in candidates if c["model"] != "claude-fable-5-1"]
     if role in INDEPENDENT and tier == "routine":
         candidates = candidates + [c for c in routes["tiers"]["deep"] if c["provider"] == "antigravity"]
     if access == "write":
@@ -385,7 +389,7 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
             raise ValueError("independent review unavailable for unknown family (%s model family unverified)" % judged)
     families = {"codex": "openai", "claude": "anthropic", "antigravity": "google"}
     excluded_family = bool(judged_family and not explicit_target)
-    reasons = {}
+    reasons = {"claude": "Fable reserved for security audits"} if skipped_fable else {}
     if excluded_family:
         independent = []
         for candidate in candidates:
@@ -419,15 +423,18 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         skipped_codex = True
         if not usable:
             raise ValueError("Codex write seats are unavailable: this host restricts unprivileged user namespaces "
-                             "(see oms doctor); no other provider serves the %s tier" % tier)
+                             "(see oms doctor); no other provider serves the %s tier%s" % (
+                                 tier, "; Fable reserved for security audits" if skipped_fable else ""))
     if check_visibility:
         usable = public_candidates(usable, repo)
     if not usable:
-        raise ValueError("no installed provider serves the %s tier (%s); install one or use --to" % (
-            tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured"))
+        raise ValueError("no installed provider serves the %s tier (%s); install one or use --to%s" % (
+            tier, ", ".join(sorted({c["provider"] for c in candidates})) or "none configured",
+            "; Fable skipped: reserved for security audits" if skipped_fable else ""))
     usable = [c for c in usable if not daily_capped(provider_status, c)]
     if not usable:
-        raise ValueError("all installed providers in the %s tier are in daily cooldown" % tier)
+        raise ValueError("all installed providers in the %s tier are in daily cooldown%s" % (
+            tier, "; Fable reserved for security audits" if skipped_fable else ""))
     # routing_status supplies only active cooldowns; keep Pi if every candidate is cooling.
     pi_status = provider_status.get("pi", {}) if isinstance(provider_status, dict) else {}
     cooldowns = pi_status.get("cooldown", {}) if isinstance(pi_status, dict) else {}
@@ -447,6 +454,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                 if candidate["provider"] == "codex":
                     excluded_codex += 1
         if not eligible:
+            if skipped_fable:
+                raise ValueError("Fable reserved for security audits; %s" % refused)
             raise refused
         usable = eligible
     # Family and sandbox exclusions still count; unroutable catalogs do not.
@@ -489,8 +498,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                     reasons["codex"] = "quota or no eligible account"
                     detail = ", ".join("%s: %s" % item for item in sorted(reasons.items()))
                     raise ValueError("independent review unavailable for %s family (%s)" % (judged_family, detail))
-                raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left or no eligible account; %s"
-                                 % (tier, refused))
+                raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left or no eligible account; %s%s"
+                                 % (tier, "Fable reserved for security audits; " if skipped_fable else "", refused))
             usable = eligible
     if several:
         # Exact-model providers have no weekly quota; retain their tier positions for reads.
@@ -509,7 +518,8 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
                 reasons.update({c["provider"]: "quota" for c in usable})
                 detail = ", ".join("%s: %s" % item for item in sorted(reasons.items()))
                 raise ValueError("independent review unavailable for %s family (%s)" % (judged_family, detail))
-            raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left" % tier)
+            raise ValueError("all installed providers in the %s tier have <=10%% weekly quota left%s" % (
+                tier, "; Fable reserved for security audits" if skipped_fable else ""))
         natives = [c for c in available if c["provider"] in used_by]
         if used_by and None not in used_by.values():
             band = routes["tie_band"]
@@ -543,8 +553,13 @@ def allocate(owner, role="worker", tier=None, access="read", purpose=None, insta
         route["judged_family"] = judged_family
         if explicit_target and families.get(route["provider"]) == judged_family:
             route["judge_note"] = "same-family judge (owner-pinned)"
+    reasons_out = []
+    if skipped_fable:
+        reasons_out.append("Fable skipped: reserved for security audits")
     if skipped_codex:
-        route["route_reason"] = "Codex skipped: host restricts unprivileged user namespaces (bwrap sandbox); see oms doctor"
+        reasons_out.append("Codex skipped: host restricts unprivileged user namespaces (bwrap sandbox); see oms doctor")
+    if reasons_out:
+        route["route_reason"] = "; ".join(reasons_out)
     return route
 
 
@@ -568,6 +583,7 @@ def alternate_route(route, installed=None, provider_status=None, repo=None, reso
         tier_candidates = tier_candidates + [c for c in routes["tiers"]["deep"] if c["provider"] == "antigravity"]
     candidates = [candidate for candidate in tier_candidates
                   if candidate["provider"] != route.get("provider")
+                  and (route.get("role") == "security-auditor" or candidate["model"] != "claude-fable-5-1")
                   and (route.get("access") != "write" or candidate.get("access") != "read")
                   and (installed is None or candidate["provider"] in installed)
                   and (candidate["provider"] == "codex" or (weekly_used(provider_status, candidate["provider"]) or 0) < 90)

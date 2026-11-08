@@ -63,20 +63,36 @@ bundled profile with `oms agent-role --repo . --name builder resolve` or
 selection alone neither starts a permanent instance nor grants execution or
 publication authority. Project and global overrides retain precedence.
 
-| Role | Use and purpose | Default scope |
-|---|---|---|
-| `builder` | Implement a bounded feature or fix | Assigned code paths |
-| `refactorer` | Improve structure while preserving behavior | Assigned code paths |
-| `reviewer` | Independent correctness and regression review | Read-only |
-| `architect` | Decide how components and interfaces fit together | Read-only |
-| `advisor` | Recommend which direction to take | Read-only |
-| `critic` | Identify when a design fails | Read-only |
-| `security-auditor` | Review security, permissions and hazardous changes | Read-only |
-| `verifier` | Compare the original request with the final result before closure | Read-only; authorized deterministic checks |
-| `integrator` | Prepare branch integration and resolve assigned conflicts | Assigned conflicts; merge needs separate authorization |
-| `performance-engineer` | Analyze performance and benchmark when necessary | Authorized bounded measurements and assigned paths |
-| `documenter` | Record behavior, decisions and completion handoff | Assigned documentation paths |
-| `release-engineer` | Prepare packaging, deployment and rollback when releasing | Read-only preparation; execution needs separate authorization |
+| Role | Mandate | Output | Access | Tier | Independent |
+|---|---|---|---|---|---|
+| `worker` | Explain, investigate or implement the assigned task | Findings or patch | Read or write | routine | No |
+| `builder` | Implement a bounded feature or fix | Patch | Read or write | routine | No |
+| `refactorer` | Improve structure while preserving behavior | Patch | Read or write | routine | No |
+| `documenter` | Record behavior and decisions | Documentation | Read or write | light | No |
+| `release-engineer` | Prepare release and rollback | Release plan | Read | routine | No |
+| `reviewer` | Find defects in the diff | Findings | Read | deep | Yes |
+| `verifier` | Compare request and acceptance criteria with final result | Requirement evidence | Read | deep | Yes |
+| `security-auditor` | Assess trust boundaries and security risks | Findings | Read | frontier | Yes |
+| `architect` | Design components and interfaces | Structure | Read | deep | No |
+| `critic` | Identify failure modes | Critique | Read | deep | Yes |
+| `integrator` | Prepare integration and resolve assigned conflicts | Integration patch | Read or write | deep | No |
+| `performance-engineer` | Analyze performance and measure authorized changes | Evidence or patch | Read or write | deep | No |
+| `advisor` | Recommend a direction | Recommendation | Read | deep | No |
+| `researcher` | Perform bounded source lookup | Cited summary | Read | light | No |
+| `scholar` | Research across sources and verify citations | Research synthesis | Read | deep | No |
+
+Independent means the model family must differ from the writer's, unless explicitly pinned.
+Builder creates new behavior; refactorer preserves behavior.
+Reviewer finds diff defects; verifier compares the original request with the final result.
+Advisor chooses a direction; architect designs structure; critic identifies failure modes.
+Researcher performs bounded lookup at the light tier; scholar performs multi-source research with verified citations.
+
+Per-role models: tier routing stays until a paired experiment shows an advantage.
+After the settlement fix lands, compare 20 paired routine builder tasks on the same
+snapshot and brief (claude-sonnet-5-5 versus gpt-6.1-terra), with blind owner judgment.
+Move one candidate ahead in its tier list only for a >= 15 point first-submission
+acceptance gap, exact McNemar p <= 0.05, and no new P1 defect. Automatic role
+routing reserves claude-fable-5-1 for security-auditor; explicit pins are unchanged.
 
 In the terminal panel, `oms panel --dispatch ROLE` accepts `worker`, `researcher`, `scholar`
 and the built-in strategies below. Existing standard names remain valid for

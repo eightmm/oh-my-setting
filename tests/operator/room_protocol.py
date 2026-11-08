@@ -151,6 +151,24 @@ else:
     raise AssertionError("a verifier judged its owner's family")
 assert allocate("claude", role="verifier", installed=both)["provider"] == "codex"
 assert allocate("claude", role="architect", installed=both)["model"] == "gpt-6.1-sol"
+assert allocate("codex", role="security-auditor", installed=both)["model"] == "claude-fable-5-1"
+frontier = allocate("codex", role="builder", tier="frontier", installed=both)
+assert frontier["model"] == "gpt-6-astra" and "Fable skipped" in frontier["route_reason"], frontier
+assert allocate("codex", role="builder", tier="frontier", installed={"claude"},
+                explicit_target=True)["model"] == "claude-fable-5-1"
+assert panel.alternate_route(frontier, installed={"claude"}, resolve_accounts=False) is None
+with patch.object(panel, "provider_catalog", return_value=[{
+        "provider": "claude", "installed": True, "binary": "claude", "access": ["read", "write"],
+        "exact_model_override": True, "models": ["claude-fable-5-1"]}]):
+    pinned = panel.selected_route("codex", "builder", None, "read", None,
+                                  target="claude", model="claude-fable-5-1", repo=project)
+    assert pinned["model"] == "claude-fable-5-1", pinned
+try:
+    allocate("codex", role="builder", tier="frontier", installed={"claude"})
+except ValueError as error:
+    assert "frontier" in str(error) and "Fable skipped" in str(error), error
+else:
+    raise AssertionError("reserved Fable was the only automatic candidate")
 # END review-role-model-pins
 for used, expected in ((89, "claude"), (90, "codex"), (100, "codex"),
                        (None, "claude"), (True, "claude"), ("90", "claude"), (101, "claude")):
@@ -239,8 +257,25 @@ for role, tier in routing_roles.items():
                 ("deep", "claude"): "claude-opus-5-5", ("deep", "codex"): "gpt-6.1-sol",
                 ("frontier", "claude"): "claude-fable-5-1", ("frontier", "codex"): "gpt-6-astra",
             }[(tier, expected)]
-for role in ("advisor", "architect", "critic", "reviewer"):
-    assert allocate("codex", role=role, tier="frontier", installed=both)["workload"] == "frontier"
+for role in ("advisor", "architect"):
+    assert allocate("codex", role=role, tier="frontier", installed=both)["model"] == "gpt-6-astra"
+for role in ("critic", "reviewer", "verifier"):
+    route = allocate("codex", role=role, tier="frontier", installed=both | {"antigravity"},
+                     catalogs={"antigravity": ["gemini-4-argon-high"]})
+    assert route["model"] == "gemini-4-argon-high", route
+    try:
+        allocate("codex", role=role, tier="frontier", installed=both)
+    except ValueError as error:
+        assert "claude: Fable reserved for security audits" in str(error), error
+    else:
+        raise AssertionError("reserved Fable was accepted for " + role)
+with patch("panel_routing.codex_sandbox_blocked", return_value=True):
+    try:
+        allocate("claude", role="builder", tier="frontier", access="write", installed=both)
+    except ValueError as error:
+        assert "Fable reserved for security audits" in str(error), error
+    else:
+        raise AssertionError("sandbox exhaustion accepted")
 # The frontier wording now lives in model-routing.md; the reference-token check below covers it.
 # END role-review-tier-cap
 

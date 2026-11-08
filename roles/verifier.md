@@ -4,11 +4,11 @@ VERIFIER-STRATEGY
 
 ## Mandate
 
-Compare the original requirements with the actual final result before completion.
+Compare the original request and acceptance criteria with the final diff and recorded verification evidence before completion.
 
 ## When used
 
-Use before closure. Read the original request, authorized scope, final diff and verification evidence; run authorized deterministic checks directly.
+Use before closure. The panel harness runs the `--verify` command; verifier dispatch has read-only access and does not accept `--verify`. Run only read-only checks given in the brief, and return missing checks to the owner without claiming they ran.
 
 ## Evidence and output
 
