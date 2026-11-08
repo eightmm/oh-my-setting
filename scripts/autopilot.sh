@@ -42,6 +42,7 @@ ALLOW_VERIFIER_CHANGE=0
 ALLOW_FLOOR_CHANGE_REASON=""
 DISCOVER=0
 COLLABORATION=off
+COLLABORATION_EXPLICIT=0
 REVIEW_MODE="shadow"
 REVIEW_MODE_EXPLICIT=0
 DRAFT_PR=0
@@ -175,9 +176,13 @@ Options:
   --worker-reasoning-effort E
   --reviewer-reasoning-effort E
                           auto, low, medium, high, xhigh, max, or ultra.
-  --collaboration MODE    off (default) or auto: bounded GPT-6/Claude planning
-                          debate, GPT-6-only Codex routes, opposite-provider
-                          review gate. The parent still reviews each proposal.
+  --collaboration MODE    off or auto: one planning council with the Codex,
+                          Claude and Antigravity seats of oms panel --council,
+                          GPT-6-only Codex routes, opposite-provider review
+                          gate. The parent still reviews each proposal.
+                          Default: auto when the review mode is gate, the routes
+                          satisfy that contract and all three council families
+                          are available; otherwise off with one line saying why.
   --review-mode MODE      shadow (default), gate, or off. Shadow reports a
                           semantic finding. With --draft-pr, gate is the
                           default unless this option is explicitly supplied.
@@ -294,7 +299,9 @@ while [ "$#" -gt 0 ]; do
     --reviewer-reasoning-effort)
       [ "$#" -ge 2 ] || fail "--reviewer-reasoning-effort requires a value"
       REVIEWER_REASONING_EFFORT="$2"; shift 2 ;;
-    --collaboration) [ "$#" -ge 2 ] || fail "--collaboration requires off or auto"; COLLABORATION="$2"; shift 2 ;;
+    --collaboration)
+      [ "$#" -ge 2 ] || fail "--collaboration requires off or auto"
+      COLLABORATION="$2"; COLLABORATION_EXPLICIT=1; shift 2 ;;
     --review-mode)
       [ "$#" -ge 2 ] || fail "--review-mode requires shadow, gate, or off"
       REVIEW_MODE="$2"; REVIEW_MODE_EXPLICIT=1; shift 2 ;;
@@ -513,7 +520,7 @@ verify_seconds="$(bash -c '. "$1/scripts/lib/peer-common.sh"; ma_verify_timeout_
 # A routed model call may spend primary + two safeguard recoveries + one
 # catalog alternate + one capacity fallback before returning.
 PLANNER_PHASE_WALL=$((planner_seconds * 5 + 60))
-# Two parallel seats, an opening and one rebuttal, then decomposition.
+# Parallel council seats, an opening and one rebuttal, then decomposition.
 [ "$COLLABORATION" != auto ] || PLANNER_PHASE_WALL=$((planner_seconds * 15 + 120))
 # goal-drive may spend up to five bounded model attempts per cycle. It also performs one
 # separately supervised repair attempt when enabled. These are ceilings only;
@@ -1026,13 +1033,38 @@ if [ -z "$REVIEWER" ]; then
   if [ "$WORKER" = codex ]; then REVIEWER=claude; else REVIEWER=codex; fi
 fi
 REVIEWER="$(oms_normalize_provider "$REVIEWER")" || fail "unknown reviewer provider"
-if [ "$COLLABORATION" = auto ]; then
+collaboration_routes() {  # Pin empty Codex routes, then validate every role.
   [ "$PLANNER" != codex ] || [ -n "$PLANNER_MODEL" ] || PLANNER_MODEL=gpt-6-astra
   [ "$WORKER" != codex ] || [ -n "$WORKER_MODEL" ] || WORKER_MODEL=gpt-6.1-sol
   [ "$REVIEWER" != codex ] || [ -n "$REVIEWER_MODEL" ] || REVIEWER_MODEL=gpt-6-astra
-  oms_collaboration_route_validate "$PLANNER" "$PLANNER_MODEL" "$PLANNER_FALLBACK_MODEL" || exit $?
-  oms_collaboration_route_validate "$WORKER" "$WORKER_MODEL" "$WORKER_FALLBACK_MODEL" || exit $?
-  oms_collaboration_route_validate "$REVIEWER" "$REVIEWER_MODEL" "$REVIEWER_FALLBACK_MODEL" || exit $?
+  oms_collaboration_route_validate "$PLANNER" "$PLANNER_MODEL" "$PLANNER_FALLBACK_MODEL" &&
+    oms_collaboration_route_validate "$WORKER" "$WORKER_MODEL" "$WORKER_FALLBACK_MODEL" &&
+    oms_collaboration_route_validate "$REVIEWER" "$REVIEWER_MODEL" "$REVIEWER_FALLBACK_MODEL"
+}
+if [ "$COLLABORATION_EXPLICIT" -eq 0 ]; then
+  # The default is part of the receipt contract, decided once per invocation.
+  collaboration_off=""
+  if [ "$REVIEW_MODE" != gate ]; then
+    collaboration_off="review mode is $REVIEW_MODE, not gate"
+  elif ! collaboration_off="$( (collaboration_routes) 2>&1)"; then
+    collaboration_off="${collaboration_off##*$'\n'}"; collaboration_off="${collaboration_off#error: }"
+  # A partial council never turns the default on, whatever the caller allows.
+  elif ! collaboration_off="$(OMS_COUNCIL_ALLOW_PARTIAL=0 oms_council_seats "$REPO" 2>&1)"; then
+    collaboration_off="${collaboration_off##*$'\n'}"
+  else
+    COLLABORATION=auto
+  fi
+  collaboration_off="${collaboration_off//$'\r'/}"
+  if [ "$COLLABORATION" = auto ]; then
+    PLANNER_PHASE_WALL=$((planner_seconds * 15 + 120))
+    validate_phase_wall planner "$PLANNER_PHASE_WALL" '--planner-timeout or --collaboration'
+    export OMS_AUTOPILOT_COLLABORATION=auto
+  else
+    echo "autopilot: collaboration off: $collaboration_off"
+  fi
+fi
+if [ "$COLLABORATION" = auto ]; then
+  collaboration_routes || exit $?
 fi
 if [ "$REVIEW_MODE" != off ] && [ "$REVIEWER" = "$WORKER" ]; then
   fail "semantic reviewer must differ from the implementation provider"

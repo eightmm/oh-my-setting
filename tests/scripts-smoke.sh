@@ -13474,6 +13474,12 @@ cat >/dev/null
 printf '{"candidates":[{"id":"debate-candidate","claim":"address the observed gap","lens":"gap critique","evidence_refs":["debate-ref"],"counterevidence":"none observed","smallest_check":"inspect the behavior","scope":"src/","expected_benefit":"clear behavior","expected_cost":"small","duplicate_disposition":"new"}],"tasks":[{"candidate_id":"debate-candidate","id":"t1","title":"fix: address observed gap","allowed":["src/"],"verify":"bash tests/run.sh","depends":[]}] }\n'
 EOF
   chmod +x "$peer_ask" "$discovery_readers"/* "$bin_dir/codex"
+  # The planning council seats Codex, Claude and Antigravity; stub the other two families.
+  local seat_cap="$project/seat-capabilities" seat
+  mkdir -p "$seat_cap"
+  for seat in claude agy; do printf '#!/bin/sh\nexit 0\n' > "$bin_dir/$seat"; chmod +x "$bin_dir/$seat"; done
+  printf 'gemini-4-argon-high\n' > "$seat_cap/antigravity.models"
+  local -x OMS_CAPABILITY_DIR="$seat_cap"
   OMS_WORK_DISCOVERY_SCRIPTS_DIR="$discovery_readers" OMS_WORK_DISCOVERY_OMS="$discovery_readers/oms" \
     OMS_AUTOPILOT_PEER_ASK="$peer_ask" HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
     PATH="$bin_dir:/usr/bin:/bin" \

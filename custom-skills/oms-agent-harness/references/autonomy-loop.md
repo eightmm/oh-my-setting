@@ -50,15 +50,22 @@ asking the user to approve routine transitions. A capability question alone
 does not start the loop. Keep small, clear edits local instead of paying for a
 planning council.
 
-The runtime triggers a two-seat GPT-6/Claude council at initial planning
-and at the single permitted remainder proposal. The Codex seat defaults to Astra
-and follows an explicit Codex planner model; Claude keeps its normal recovery
-router unless a Claude planner model is pinned. Each seat answers independently,
-then receives one rebuttal round. Both must complete; missing or dropped answers
-stop planning. The bounded synthesis feeds decomposition as untrusted evidence.
-Planner reasoning effort controls decomposition only; the council retains each
-provider's defaults. Do not forward it globally: provider effort scales differ,
-and changing the other seat's effort changes its cost and configuration.
+The runtime triggers the panel council at initial planning and at the single
+permitted remainder proposal: the seats come from the same policy as
+`oms panel --council` (Codex, Claude and Antigravity at the deep tier). Each
+seat answers independently, then receives one rebuttal round. Every seat must
+complete; missing or dropped answers stop planning. An unavailable family
+refuses before any call or artifact, and the message names that family: fix it
+and rerun. The GPT-6/Claude rule binds decomposition, workers and reviewers,
+not the council seats. The bounded synthesis feeds decomposition as untrusted
+evidence. Planner reasoning effort controls decomposition only; the council
+retains each provider's defaults. Do not forward it globally: provider effort
+scales differ, and changing another seat's effort changes its cost and
+configuration.
+Without `--collaboration`, `oms autopilot` turns this on only when the review
+mode is gate, the routes satisfy the GPT-6/Claude rule and all three council
+families are available (a partial council never counts); otherwise it stays
+off and prints one line saying why. `--collaboration off` opts out.
 Planning prints the council artifact directory and log before dispatch. Inspect
 that retained log after a timeout or interruption; an absent child summary is
 not evidence that the council never started or that it is safe to repeat.

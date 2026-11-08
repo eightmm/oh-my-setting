@@ -11,6 +11,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/smoke-env.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-autopilot.XXXXXX")"
 trap '[ "${KEEP_TMP:-0}" = 1 ] || rm -rf "$TMP"' EXIT HUP INT TERM
+# Empty cached catalogs keep the default collaboration probe off on every host:
+# the council's Antigravity seat needs a catalog entry.
+export OMS_CAPABILITY_DIR="$TMP/capabilities"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -3336,7 +3339,24 @@ JSON
 
 
 test_auto_collaboration() {
-  local repo="$TMP/auto-collab" bin="$TMP/auto-collab-bin" rc proposal sha
+  local repo="$TMP/auto-collab" bin="$TMP/auto-collab-bin" rc proposal sha seat_bin="$TMP/council-seat-bin"
+  # Seat CLIs plus cached catalogs make all three council families available; the
+  # real peer-ask case below receives their deliberation answers.
+  local -x PATH="$seat_bin:$PATH" OMS_CAPABILITY_DIR="$TMP/collab-cap"
+  mkdir -p "$seat_bin" "$OMS_CAPABILITY_DIR"
+  for seat in codex claude agy; do
+    cat > "$seat_bin/$seat" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'provider 1.0\n'; exit 0 ;; esac
+cat > /dev/null
+# agy answers arrive in its --output-format json envelope.
+emit() { if [ "${0##*/}" = agy ]; then python3 -c 'import json,sys; print(json.dumps({"conversation_id": "fixture", "status": "SUCCESS", "response": sys.stdin.read(), "usage": {}}))'; else cat; fi; }
+printf 'Answer: inspected the planning contract.\nAlternatives: do nothing.\nEvidence: council-seat-answer-marker.\nCounterargument: the task may be unnecessary.\nRisks: low.\nRecommendation: one bounded task.\nVerification: run the tests.\nChanged from previous round: none.\nRemaining disagreements: none.\n' | emit
+EOF
+    chmod +x "$seat_bin/$seat"
+  done
+  printf 'gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n' > "$OMS_CAPABILITY_DIR/codex.models"
+  printf 'gemini-4-argon-high\n' > "$OMS_CAPABILITY_DIR/antigravity.models"
   make_repo "$repo"
   mkdir -p "$bin" "$repo/calls"
   write_orchestration_stubs "$TMP/bin"
@@ -3465,7 +3485,14 @@ PYSHIM
       --planner codex --allowed src,tests --base main propose > "$repo/propose.out" 2>&1 || rc=$?
   [ "$rc" = 4 ] || fail "auto collaboration proposal: rc=$rc $(tail -8 "$repo/propose.out")"
   [ ! -e "$repo/.oms/plan/tasks.json" ] || fail "council applied its own proposal"
-  grep -Fq -- '--providers codex:model=gpt-6-astra,claude --artifact-dir' "$repo/calls/council" || fail 'council did not pin Codex while preserving Claude routing'
+  local seats
+  seats="$(bash -c '. "$1/scripts/lib/model-routing.sh"; oms_council_seats "$2"' _ "$ROOT" "$repo")" ||
+    fail 'panel council seat policy refused the fixture families'
+  case ",$seats" in *,codex:*) ;; *) fail "council policy lost codex: $seats" ;; esac
+  case ",$seats" in *,claude:*) ;; *) fail "council policy lost claude: $seats" ;; esac
+  case ",$seats" in *,antigravity:*) ;; *) fail "council policy lost antigravity: $seats" ;; esac
+  grep -Fq -- "--providers $seats --artifact-dir" "$repo/calls/council" ||
+    fail "planning council did not use the panel council seats: $(cat "$repo/calls/council")"
   grep -Fq -- '--repo-context' "$repo/calls/council" || fail 'automatic council missing tracked source context'
   grep -Fq -- '--deliberation' "$repo/calls/council" || fail 'council did not require deliberation'
   if grep -Fq 'Return ONLY one JSON object' "$repo/calls/council"; then
@@ -3513,9 +3540,9 @@ PYTEST
   sha="$(sha256_file "$proposal")"
   rc=0
   run_autopilot "$repo" --planner codex --worker-model gpt-6.1-sol \
-    --planner-model gpt-6-astra --review-mode gate --allowed src,tests --base main \
+    --planner-model gpt-6-astra --review-mode gate --collaboration off --allowed src,tests --base main \
     run --proposal "$proposal" --expected-proposal-sha256 "$sha" > "$repo/drop-mode.out" 2>&1 || rc=$?
-  [ "$rc" != 0 ] || fail 'resume silently dropped collaboration'
+  [ "$rc" != 0 ] || fail 'resume silently switched collaboration off'
   [ ! -e "$repo/calls/goal-drive" ] || fail 'changed collaboration reached worker'
   grep -Fq 'immutable contract changed (contract)' "$repo/drop-mode.out" || fail 'resume failed for an unrelated reason'
   [ ! -e "$repo/.oms/plan/tasks.json" ] || fail 'changed collaboration mutated plan'
@@ -3536,6 +3563,92 @@ PYTEST
     --repo "$failed" --to codex --collaboration auto > "$failed/dropped.out" 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail 'dropped rebuttal seat should stop planning'
   [ ! -e "$failed/calls/planner-prompt" ] || fail 'incomplete rebuttal reached planner'
+
+  # An unavailable family refuses before any council call or artifact, naming the family.
+  local absent="$TMP/auto-council-absent"
+  make_repo "$absent"; mkdir -p "$absent/calls" "$TMP/collab-cap-absent"
+  cp "$OMS_CAPABILITY_DIR/codex.models" "$TMP/collab-cap-absent/"
+  rc=0
+  OMS_CAPABILITY_DIR="$TMP/collab-cap-absent" OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" \
+    OMS_T_CALLS="$absent/calls" OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/plan-from-spec.sh" \
+    --repo "$absent" --to codex --collaboration auto > "$absent/absent.out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail 'council without antigravity should stop planning'
+  grep -Fq 'council: antigravity seat unavailable' "$absent/absent.out" ||
+    fail "missing family not named: $(cat "$absent/absent.out")"
+  [ ! -e "$absent/calls/council" ] && [ ! -e "$absent/calls/planner-prompt" ] ||
+    fail 'missing family reached the council or planner'
+  if compgen -G "$absent/.oms/plan/council.*" > /dev/null; then fail 'missing family left council artifacts'; fi
+
+  # A decomposition route outside the GPT-6/Claude rule refuses before seat selection.
+  local route_args
+  for route_args in '--to antigravity' '--to codex --model gpt-5.5' \
+    '--to codex --fallback-model gpt-5.6-terra' '--to codex --model gpt-6..1-sol'; do
+    rm -rf "$absent/calls" "$absent/.oms"; mkdir -p "$absent/calls"
+    rc=0
+    # shellcheck disable=SC2086 # route_args is a fixed word list.
+    OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$absent/calls" \
+      OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/plan-from-spec.sh" \
+      --repo "$absent" $route_args --collaboration auto > "$absent/route.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "bad planner route accepted ($route_args): rc=$rc $(tail -3 "$absent/route.out")"
+    grep -Fq 'error: auto collaboration' "$absent/route.out" || fail "planner route refusal unexplained: $route_args"
+    [ ! -e "$absent/calls/council" ] && [ ! -e "$absent/calls/planner-prompt" ] ||
+      fail "bad planner route reached the council or planner: $route_args"
+    if compgen -G "$absent/.oms/plan/council.*" > /dev/null; then fail "bad planner route left council artifacts: $route_args"; fi
+  done
+
+  # The real peer-ask runs the Antigravity seat; the campaign's transport rule must not reach it.
+  local live="$TMP/auto-council-live"
+  make_repo "$live"; mkdir -p "$live/calls" "$TMP/collab-home"
+  rc=0
+  HOME="$TMP/collab-home" OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$live/calls" \
+    "$ROOT/scripts/autopilot.sh" --repo "$live" --collaboration auto \
+      --planner codex --allowed src,tests --base main propose > "$live/propose.out" 2>&1 || rc=$?
+  [ "$rc" = 4 ] || fail "real three-family council failed: rc=$rc $(tail -12 "$live/propose.out")"
+  grep -Fq "summary: $(($(printf '%s' "$seats" | tr -cd , | wc -c) + 1))/$(($(printf '%s' "$seats" | tr -cd , | wc -c) + 1)) providers succeeded" \
+    "$live/propose.out" || fail "real council lost a seat: $(grep -F 'summary:' "$live/propose.out")"
+  grep -Fq 'council-seat-answer-marker' "$live/calls/planner-prompt" || fail 'real council evidence never reached planner'
+
+  # Default: gate review with all families turns the council on; anything else stays off with one line.
+  local default_repo default_case default_args expected_mode default_cap
+  local default_partial
+  for default_case in gate-available shadow gate-absent gate-partial gate-route explicit-off; do
+    default_repo="$TMP/auto-default-$default_case"
+    make_repo "$default_repo"; mkdir -p "$default_repo/calls"
+    default_args=(--review-mode gate); expected_mode=off; default_cap="$TMP/collab-cap-absent"; default_partial=0
+    case "$default_case" in
+      gate-available) expected_mode=auto; default_cap="$OMS_CAPABILITY_DIR" ;;
+      gate-route) default_cap="$OMS_CAPABILITY_DIR"; default_args+=(--worker-model gpt-5.5) ;;
+      gate-partial) default_partial=1 ;;
+      shadow) default_args=() ;;
+      explicit-off) default_args+=(--collaboration off) ;;
+    esac
+    rc=0
+    OMS_CAPABILITY_DIR="$default_cap" OMS_COUNCIL_ALLOW_PARTIAL="$default_partial" \
+      OMS_PLAN_FROM_SPEC_AGENT_CALL="$bin/agent-call" OMS_T_CALLS="$default_repo/calls" \
+      OMS_AUTOPILOT_PEER_ASK="$bin/peer-ask" "$ROOT/scripts/autopilot.sh" --repo "$default_repo" \
+      ${default_args[@]+"${default_args[@]}"} --planner codex --allowed src,tests --base main propose \
+      > "$default_repo/propose.out" 2>&1 || rc=$?
+    [ "$rc" = 4 ] || fail "default collaboration $default_case: rc=$rc $(tail -8 "$default_repo/propose.out")"
+    python3 - "$default_repo/.oms/plan/autopilot-run.json" "$expected_mode" <<'PYDEFAULT' ||
+import json, sys
+assert json.load(open(sys.argv[1]))["contract"]["collaboration"] == sys.argv[2]
+PYDEFAULT
+      fail "default collaboration $default_case did not record $expected_mode"
+    case "$default_case" in
+      gate-available|explicit-off)
+        if grep -q '^autopilot: collaboration off' "$default_repo/propose.out"; then fail "$default_case printed an off reason"; fi ;;
+      shadow) [ "$(grep -c '^autopilot: collaboration off: review mode is shadow, not gate$' "$default_repo/propose.out")" = 1 ] ||
+        fail "shadow default lacks one off line: $(cat "$default_repo/propose.out")" ;;
+      gate-absent|gate-partial) [ "$(grep -c '^autopilot: collaboration off: council: antigravity seat unavailable' "$default_repo/propose.out")" = 1 ] ||
+        fail "missing family default lacks one off line: $(cat "$default_repo/propose.out")" ;;
+      gate-route) [ "$(grep -c '^autopilot: collaboration off: auto collaboration requires a recognized GPT-6' "$default_repo/propose.out")" = 1 ] ||
+        fail "route default lacks one off line: $(cat "$default_repo/propose.out")" ;;
+    esac
+    case "$default_case" in
+      gate-available) [ -e "$default_repo/calls/council" ] || fail 'default auto skipped the council' ;;
+      *) [ ! -e "$default_repo/calls/council" ] || fail "$default_case ran a council" ;;
+    esac
+  done
 
   # A silent child timeout must leave a discoverable log before it returns.
   local timed="$TMP/auto-council-silent-timeout" log_path

@@ -49,6 +49,23 @@ oms_collaboration_route_validate() {
   return 2
 }
 
+# Peer-ask seat targets from the panel council's own policy (deep tier, one
+# rebuttal round), so the planning council never keeps a second seat list.
+# Reads cached catalogs only; on refusal prints the reason naming the family.
+oms_council_seats() {  # REPO
+  python3 - "$OMS_MODEL_ROUTING_LIB_DIR" "$1" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from terminal_panel import council_command
+try:
+    argv = council_command(sys.argv[2], "Planning council seat selection.", "autopilot-council",
+                           "Autopilot planning council", rounds=1, workload="deep")
+except ValueError as error:
+    raise SystemExit(str(error))
+print(argv[argv.index("--providers") + 1])
+PY
+}
+
 # Syntax only. Provider and model support are checked against the capability
 # snapshot below.
 oms_reasoning_validate() {

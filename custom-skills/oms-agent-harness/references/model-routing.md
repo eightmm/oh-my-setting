@@ -134,8 +134,10 @@ or unclear-failure work and low for mechanical edits, within the model's scale.
 8. The owner still admits patches and runs mechanical verification. Agreement
    is evidence, not a pass condition.
 
-`autopilot --collaboration auto` narrows this generic router to GPT-6 and Claude:
-Codex defaults are pinned before catalog recovery, older explicit models and
+`autopilot --collaboration auto` narrows this generic router to GPT-6 and Claude
+for decomposition, workers and reviewers; its planning council keeps the
+`oms panel --council` seats, Antigravity included. Codex defaults are pinned
+before catalog recovery, older explicit models and
 fallbacks are rejected, and reviewed Codex assignments require an exact Astra,
 Sol or Luna model. Claude follows the existing registry. This restriction is
 scoped to that campaign; it does not configure native Codex app subagents.

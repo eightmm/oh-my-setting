@@ -1200,13 +1200,15 @@ task-state contradictions, residual intents, and active/retired lineage conflict
 ### Collaborative planning
 
 With `--collaboration auto`, initial planning and the bounded remainder proposal trigger
-a GPT-6/Claude council with one rebuttal round (Codex defaults to Astra or the explicit
-Codex planner model). Both seats must finish and meet `--deliberation`'s per-seat
-response contract: alternatives, evidence, counterargument, verification and explicit
-deltas/disagreements. JSON-only task lists or empty sections fail closed. A seat whose
-answer is otherwise complete but lacks required headings is asked once, in the same
-round, to restate its own answer under every heading; the restatement is used only if it
-passes, and both answers stay in the artifacts.
+the panel council with one rebuttal round: its seats come from the same policy as
+`oms panel --council` (Codex, Claude and Antigravity at the deep tier), and an
+unavailable family refuses before any call, naming the family. Every seat must finish
+and meet `--deliberation`'s per-seat response contract: alternatives, evidence,
+counterargument, verification and explicit deltas/disagreements. JSON-only task lists
+or empty sections fail closed. A seat whose answer is otherwise complete but lacks
+required headings is asked once, in the same round, to restate its own answer under
+every heading; the restatement is used only if it passes, and both answers stay in the
+artifacts.
 
 The council receives only contract data; JSON decomposition instructions stay in the
 planner call. Structure is checked mechanically; reasoning still needs parent judgment.
@@ -1216,12 +1218,16 @@ available for parent inspection after early child failure, even when the child d
 emit its own summary. The bounded synthesis feeds the planner as untrusted evidence
 before normal exact parent proposal review.
 
-The durable contract retains this mode through resume and enforces gated
-opposite-provider review. Codex routes are pinned to a GPT-6-or-newer version of Astra,
-Sol, Terra or Luna, including reviewed assignments and optional capacity fallbacks.
+Without the option, `oms autopilot` selects auto only when the review mode is gate, the
+routes satisfy the rule below and all three council families are available (never a
+partial council); otherwise it stays off and prints one line saying why.
+`--collaboration off` opts out. The durable contract retains the effective mode through
+resume and enforces gated opposite-provider review. Codex routes for the planner,
+workers and reviewer (not the council seats) are pinned to a GPT-6-or-newer version of
+Astra, Sol, Terra or Luna, including reviewed assignments and optional capacity fallbacks.
 Claude Code can implement with `--worker claude`, leaving Codex as the reviewer; each
 campaign keeps one implementation transport to preserve independent review. The existing
-provider-neutral behavior is unchanged when the option is off. No background daemon or
+provider-neutral behavior is unchanged when the mode is off. No background daemon or
 publication permission is added.
 
 #### Whole-change review scope
