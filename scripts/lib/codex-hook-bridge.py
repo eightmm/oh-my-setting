@@ -79,8 +79,7 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
     # the session before hooks/list returns. Keep it open until the response
     # (or the deadline), read at most 1 MiB, and own the process group so a
     # broken CLI can neither hang the installer nor leave children behind.
-    group = ({"start_new_session": True} if os.name != "nt"
-             else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)})
+    group = {"start_new_session": True}
     limit = 1024 * 1024
     try:
         proc = subprocess.Popen([binary, "app-server", "--listen", "stdio://"],
@@ -120,13 +119,10 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
     except OSError:
         pass
     finally:
-        if os.name != "nt":
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-        elif proc.poll() is None:
-            proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
@@ -172,12 +168,11 @@ def hooks_list_trust(native_root, plugin_id, binary=None):
 
 
 def sync_directory(path):
-    if os.name != "nt":
-        descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    descriptor = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def native_verified(args):

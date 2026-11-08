@@ -484,11 +484,10 @@ def _attempt_history(repo):
     directory = None
     descriptor = None
     try:
-        if os.name != "nt":
-            directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                                | getattr(os, "O_NOFOLLOW", 0))
-            if not DURABLE["same_file"](parent_info, os.fstat(directory)):
-                raise ValueError("panel metrics lifecycle parent changed")
+        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                            | getattr(os, "O_NOFOLLOW", 0))
+        if not DURABLE["same_file"](parent_info, os.fstat(directory)):
+            raise ValueError("panel metrics lifecycle parent changed")
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(os.path.basename(target) if directory is not None else target,
                              flags, **({} if directory is None else {"dir_fd": directory}))

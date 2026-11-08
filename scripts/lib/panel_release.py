@@ -18,7 +18,6 @@ from panel_view import age_label
 import panel_host
 import room
 import panel_terminals
-from process_liveness import pid_alive
 
 
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
@@ -81,15 +80,11 @@ def process_refs(pid, kind):
 
 
 def identity_gone(refs, kind):
-    """Python runner PIDs are native; Windows probes must never use os.kill(pid, 0)."""
     pid, identity = refs.get("panel_" + kind + "_pid"), refs.get("panel_" + kind + "_identity")
     if (not isinstance(pid, str) or not re.fullmatch(r"[1-9][0-9]{0,9}", pid)
             or int(pid) > 2147483647 or not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{64}", identity)):
         return False
-    if os.name != "nt":
-        return panel_terminals.process_gone(int(pid), identity)
-    current = panel_terminals._process_helpers().process_identity(int(pid))
-    return current != identity if current else not pid_alive(int(pid), native_pid=int(pid))
+    return panel_terminals.process_gone(int(pid), identity)
 
 
 def tmux_identity():

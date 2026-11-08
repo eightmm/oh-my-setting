@@ -177,7 +177,7 @@ def directory(path):
     info = os.lstat(path)
     if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or D['is_reparse'](info) or
             (hasattr(os, 'getuid') and info.st_uid != os.getuid()) or
-            (os.name != 'nt' and stat.S_IMODE(info.st_mode) != 0o700)):
+            stat.S_IMODE(info.st_mode) != 0o700):
         raise ValueError('capture generation directory is not private')
     return info
 
@@ -1560,9 +1560,6 @@ def collect(repo, days, apply, private_only=""):
 
 def gc_quiescent(repo, days, apply, private_only=""):
     # Called only after landings -> marker-set -> plan; then lifecycle -> index.
-    if os.name == 'nt':
-        print('managed-landing-capture: preserved (private ACL/quarantine cleanup unsupported on this host)')
-        return
     engine = runpy.run_path(str(HERE / 'agent-events.py'))
     lifecycle_path = Path(repo) / '.oms/lifecycle/events.jsonl'
     lifecycle_lock = engine['file_lock'](lifecycle_path)
@@ -1611,9 +1608,6 @@ def gc_quiescent(repo, days, apply, private_only=""):
 
 def cleanup_rejected(repo, landing):
     """Parent holds landings; bound the whole remaining cleanup, not each lock."""
-    if os.name == 'nt':
-        print('managed-landing-capture: preserved (bounded private cleanup unsupported on this host)')
-        return
     deadline = time.monotonic() + 2
     inline = ('import runpy,sys; runpy.run_path(sys.argv[1])'
               '["gc_quiescent"](sys.argv[2],0,True,sys.argv[3])')
@@ -1661,9 +1655,6 @@ def gc(repo, days, apply):
     # Every supported CLI path takes landings -> marker-set -> plan before the
     # lifecycle and index locks. Keep this ordering in the native collector,
     # not only in the gc.sh caller, so direct helper invocation is safe too.
-    if os.name == 'nt':
-        print('managed-landing-capture: preserved (private ACL/quarantine cleanup unsupported on this host)')
-        return
     lock_env = dict(os.environ)
     try:
         configured_timeout = int(lock_env.get('OMS_LOCK_TIMEOUT', '300'))

@@ -75,13 +75,10 @@ def bounded_call(call, seconds):
 
 
 def stop_process(process):
-    if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    else:
-        process.kill()
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     process.wait()
 
 
@@ -93,7 +90,7 @@ def gh(args, seconds):
         timeout = min(30.0, max(0.001, float(seconds)))
         deadline = time.monotonic() + timeout
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   start_new_session=os.name == "posix")
+                                   start_new_session=True)
 
         def read_output():
             with process.stdout as stream:

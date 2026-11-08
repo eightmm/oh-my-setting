@@ -184,10 +184,7 @@ def _run(command: Any, *, timeout: int, input: Optional[str] = None,
             stdout, stderr = process.communicate(input=input, timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
-                if os.name == "nt":
-                    process.kill()
-                else:
-                    os.killpg(process.pid, signal.SIGKILL)
+                os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             process.communicate()

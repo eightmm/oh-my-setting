@@ -1362,10 +1362,6 @@ def work_journal_config_path() -> pathlib.Path:
     xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
     if xdg:
         return pathlib.Path(xdg).expanduser() / "oh-my-setting" / "work-journal.json"
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA", "").strip()
-        if base:
-            return pathlib.Path(base) / "oh-my-setting" / "work-journal.json"
     return pathlib.Path.home() / ".config" / "oh-my-setting" / "work-journal.json"
 
 
@@ -2322,14 +2318,11 @@ def _cold_atomic_write(path: pathlib.Path, content: bytes) -> None:
 
 
 def _cold_sync_directory(path: pathlib.Path) -> None:
-    # Windows cannot open directory handles through os.open. File fsync and
-    # replace still provide process-crash recovery there.
-    if os.name != "nt":
-        descriptor = os.open(str(path), os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def journal_storage(

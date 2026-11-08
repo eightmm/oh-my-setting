@@ -634,7 +634,7 @@ def main(argv=None):
         # session (switch-client, no nesting) and for --launch; inline stays an explicit choice.
         split = args.host not in ("inline", "herdr") and not panel_host.herdr_active() and (
             args.host == "tmux" or args.layout == "split" or (
-                args.layout == "auto" and shutil.which("tmux") and os.name != "nt"))
+                args.layout == "auto" and shutil.which("tmux")))
         if args.dry_run:
             resolution = resolve_main(args.launch, args.model) if args.launch else None
             launchable = resolution and not (

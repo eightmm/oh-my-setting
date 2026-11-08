@@ -99,8 +99,6 @@ def fsync_parent(path: Path) -> None:
         getattr(errno, "ENOTSUP", errno.EINVAL),
         getattr(errno, "EOPNOTSUPP", errno.EINVAL),
     }
-    if os.name == "nt":
-        unsupported.update({errno.EACCES, errno.EPERM, errno.EBADF})
     try:
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
         directory_fd = os.open(str(path.parent), flags)

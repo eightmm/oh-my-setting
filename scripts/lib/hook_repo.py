@@ -10,16 +10,6 @@ import subprocess
 def native_path(raw):
     if not isinstance(raw, str) or not raw:
         return None
-    # Payload/environment paths bypass Git Bash's argv conversion for native
-    # Windows Python. cygpath also handles mounted roots such as /tmp.
-    if os.name == "nt" and raw.startswith("/"):
-        try:
-            raw = subprocess.check_output(
-                ["cygpath", "-m", raw], text=True,
-                stderr=subprocess.DEVNULL, timeout=2,
-            ).strip()
-        except (OSError, subprocess.SubprocessError):
-            return None
     return raw or None
 
 

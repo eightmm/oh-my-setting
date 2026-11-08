@@ -196,8 +196,6 @@ def approval_path(repo: Path, *, create: bool = False) -> Path:
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
         base = Path(state_home).expanduser()
-    elif os.name == "nt" and os.environ.get("LOCALAPPDATA"):
-        base = Path(os.environ["LOCALAPPDATA"])
     else:
         base = Path.home() / ".local" / "state"
     directory = base / "oh-my-setting" / "approvals"
@@ -223,8 +221,6 @@ def runtime_lock_dir(path: Path) -> Path:
 
 
 def pid_alive(pid: int) -> bool:
-    # agent-events lock owners are native Python processes, so their stored
-    # pid is already in the Win32 domain on Windows.
     return process_pid_alive(pid, native_pid=pid)
 
 
@@ -232,51 +228,6 @@ def process_start_token(pid: int) -> Optional[str]:
     """Return a stable process-generation token when the host exposes one."""
     if pid <= 0:
         return None
-    if os.name == "nt":
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            process_query_limited_information = 0x1000
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            kernel32.OpenProcess.restype = wintypes.HANDLE
-            kernel32.GetProcessTimes.argtypes = [
-                wintypes.HANDLE,
-                ctypes.POINTER(wintypes.FILETIME),
-                ctypes.POINTER(wintypes.FILETIME),
-                ctypes.POINTER(wintypes.FILETIME),
-                ctypes.POINTER(wintypes.FILETIME),
-            ]
-            kernel32.GetProcessTimes.restype = wintypes.BOOL
-            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-            kernel32.CloseHandle.restype = wintypes.BOOL
-            handle = kernel32.OpenProcess(
-                process_query_limited_information, False, pid
-            )
-            if not handle:
-                return None
-            creation = wintypes.FILETIME()
-            exit_time = wintypes.FILETIME()
-            kernel = wintypes.FILETIME()
-            user = wintypes.FILETIME()
-            try:
-                ok = kernel32.GetProcessTimes(
-                    handle,
-                    ctypes.byref(creation),
-                    ctypes.byref(exit_time),
-                    ctypes.byref(kernel),
-                    ctypes.byref(user),
-                )
-                if not ok:
-                    return None
-                value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
-                return "win:%d" % value
-            finally:
-                kernel32.CloseHandle(handle)
-        except (AttributeError, OSError, ValueError):
-            return None
-
     proc_stat = Path("/proc") / str(pid) / "stat"
     try:
         line = proc_stat.read_text(encoding="utf-8", errors="replace")
@@ -405,38 +356,18 @@ def recovery_gate(lock: Path) -> Iterator[bool]:
             os.chmod(gate, 0o600)
         except OSError:
             pass
-        if os.name == "nt":
-            import msvcrt
+        import fcntl
 
-            if os.fstat(fd).st_size < 1:
-                os.write(fd, b"\0")
-            os.lseek(fd, 0, os.SEEK_SET)
-            try:
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-                acquired = True
-            except OSError:
-                acquired = False
-        else:
-            import fcntl
-
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except (BlockingIOError, OSError):
-                acquired = False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except (BlockingIOError, OSError):
+            acquired = False
         yield acquired
     finally:
         if acquired:
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(fd, fcntl.LOCK_UN)
+                fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
         os.close(fd)
@@ -530,11 +461,10 @@ def _ledger_fd(path: Path, *, write: bool = False, private: bool = False) -> Ite
     directory = None
     fd = None
     try:
-        if os.name != "nt":
-            directory = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                                | getattr(os, "O_NOFOLLOW", 0))
-            if not ledger_helpers["same_file"](parent, os.fstat(directory)):
-                raise OpsError("ledger parent changed before open")
+        directory = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                            | getattr(os, "O_NOFOLLOW", 0))
+        if not ledger_helpers["same_file"](parent, os.fstat(directory)):
+            raise OpsError("ledger parent changed before open")
         try:
             before = path.lstat()
         except FileNotFoundError:
@@ -566,7 +496,6 @@ def _ledger_fd(path: Path, *, write: bool = False, private: bool = False) -> Ite
 
         check_named()
         if private and hasattr(os, "fchmod"):
-            # Windows mode bits do not set an ACL; never chmod a raced pathname.
             os.fchmod(fd, 0o600)
         yield fd
         check_named()
