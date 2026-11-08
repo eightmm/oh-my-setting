@@ -1138,7 +1138,7 @@ fix_finding_blocks = ("- [P0] Validate `%s/scripts/fixture.py:7`.\n  Keep the ca
 fix_findings = "\n".join(fix_finding_blocks)
 original_fix_notice = panel._review_fix_notice
 for case_number, (case, expected_draft) in enumerate((
-        ("failed-gate", True), ("round-two", True), ("round-three", True),
+        ("failed-gate", True), ("round-two", False), ("round-three", False),
         ("truncated-summary", True), ("multiline-verify", True),
         ("notice-limit", True), ("notice-exact-limit", True),
         ("private-verifier", False),
@@ -1257,17 +1257,14 @@ for case_number, (case, expected_draft) in enumerate((
         else:
             assert len(delivered.encode("utf-8")) == 4000 and "truncated" not in delivered
         continue
+    if case in {"round-two", "round-three"}:
+        text = draft_mail[0]["text"]
+        assert "(review round %d)" % (2 if case == "round-two" else 3) in text, text
+        assert "The owner decides" in text and "finalize rejected" in text, text
+        assert "--continue" not in text and "manual command" not in text and "draft " not in text, text
+        assert "oms panel --results --task-id " + fix_task in text, text
     if expected_draft:
         draft_text = draft_file.read_text(encoding="utf-8")
-        if case == "round-two":
-            assert "(review round 2)" in draft_mail[0]["text"]
-            assert "## Design check before another fix round" not in draft_text
-            assert "consider whether the design is the problem" not in draft_mail[0]["text"]
-        elif case == "round-three":
-            assert "(review round 3)" in draft_mail[0]["text"]
-            assert "## Design check before another fix round" in draft_text
-            assert "the owner checks whether the design is the problem" in draft_text
-            assert "consider whether the design is the problem" in draft_mail[0]["text"]
         assert fix_task in draft_text and original_fix_brief in draft_text, draft_text
         for finding in fix_finding_blocks:
             relative_finding = (finding.replace(str(project) + "/", "").replace(str(fix_execution) + "/", "")
