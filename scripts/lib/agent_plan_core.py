@@ -901,8 +901,6 @@ def brief_text(t):
         lines.append("assignment: %s" % json.dumps(t["assignment"], sort_keys=True))
     if t.get("role"):
         lines.append("role: %s" % t["role"])
-    if t.get("role_suggestion"):
-        lines.append("role_suggestion: %s" % json.dumps(t["role_suggestion"]))
     return "\n".join(lines)
 
 read_only_actions = {"show", "evidence-snapshot", "list", "ready", "status", "next", "brief"}
@@ -1386,8 +1384,6 @@ if act == "add":
         "repair_artifact": "",
         "created": ts, "updated": ts,
     }
-    if env("OMS_ROLE_SUGGESTION"):
-        tasks[i]["role_suggestion"] = json.loads(env("OMS_ROLE_SUGGESTION"))
     save(d); print("plan: added %s (%s)" % (i, title)); sys.exit(0)
 
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):

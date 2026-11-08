@@ -1180,32 +1180,10 @@ free = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPr
 assert "[oms plan] Goal: Ship the shared plan board" in free and "1 of 3 verified · 1 cancelled" in free, free
 assert "yours:" not in free and "next ready: t2 Wire banner → oms agent-plan claim --id t2 --provider claude" in free, free
 assert "claim the next ready task before starting new work" in free and "t3" not in free.split("next ready:")[1], free
-suggested = {"id": "x", "state": "ready", "role_suggestion": {"role": "builder", "workload": "frontier", "role_probability": 0.81, "workload_probability": 0.81}}
-hint = hook_state.panel_next_ready_hint([suggested], "claude")
-assert "--dispatch builder --owner claude --task-id x --workload frontier (suggested builder/frontier 0.81)" in hint, hint
-suggested["role_suggestion"]["workload"] = "routine"
-hint = hook_state.panel_next_ready_hint([suggested], "claude")
-assert "--workload" not in hint and "suggested builder/routine 0.81" in hint, hint
-for probability in (0, 0.48):
-    suggested["role_suggestion"]["role_probability"] = probability
-    hint = hook_state.panel_next_ready_hint([suggested], "claude")
-    assert "--dispatch ROLE" in hint and ", unsure)" in hint, hint
-suggested["role_suggestion"]["role_probability"] = 0.5
-suggested["role_suggestion"]["workload"] = "frontier"
-for probability in (0, 0.49, None, "bad"):
-    suggested["role_suggestion"]["workload_probability"] = probability
-    hint = hook_state.panel_next_ready_hint([suggested], "claude")
-    assert "--dispatch builder" in hint and "--workload" not in hint and ", unsure)" in hint, hint
-suggested["role_suggestion"]["workload_probability"] = 0.5
-assert "--workload frontier" in hook_state.panel_next_ready_hint([suggested], "claude")
-suggested["role_suggestion"].update(role="researcher", workload="routine")
-hint = hook_state.panel_next_ready_hint([suggested], "claude")
-assert "--dispatch researcher" in hint and "--workload" not in hint and ", unsure)" in hint, hint
-suggested["role_suggestion"]["workload"] = "light"
-hint = hook_state.panel_next_ready_hint([suggested], "claude")
-assert "--dispatch researcher" in hint and "--workload" not in hint, hint
-suggested["role_suggestion"]["role"] = []
-assert "--dispatch ROLE" in hook_state.panel_next_ready_hint([suggested], "claude")
+stale = {"id": "x", "state": "ready", "role_suggestion": {"role": "builder", "workload": "frontier", "role_probability": 0.81, "workload_probability": 0.81}}
+hint = hook_state.panel_next_ready_hint([stale], "claude")
+assert "--dispatch ROLE --owner claude --task-id x" in hint and "--workload" not in hint and "suggested" not in hint, hint
+suggested = dict(stale)
 suggested["role"] = "reviewer"
 hint = hook_state.panel_next_ready_hint([suggested], "claude")
 assert "--dispatch reviewer" in hint and "suggested" not in hint, hint

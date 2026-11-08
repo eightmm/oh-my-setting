@@ -10,7 +10,6 @@ import re
 import shlex
 import sqlite3
 import stat
-import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -33,158 +32,6 @@ class CapError(ClientError):
 def auth_path():
     config = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
     return config / 'oh-my-setting' / 'openai-decisions.key'
-
-
-def config_path():
-    return auth_path().parent / 'decide.json'
-
-
-def read_config():
-    try:
-        data = json.loads(config_path().read_text(encoding='utf-8'))
-    except FileNotFoundError:
-        return {}
-    if not isinstance(data, dict) or type(data.get('task-classify', False)) is not bool:
-        raise ClientError('invalid automatic decisions config')
-    return data
-
-
-def auto_config(action):
-    data = read_config()
-    if action == 'status':
-        try:
-            get_auth()
-            configured = True
-        except (ClientError, OSError, UnicodeError):
-            configured = False
-        print('task-classify: %s; key: %s' % ('on' if data.get('task-classify', False) else 'off',
-                                              'configured' if configured else 'not configured'))
-        return
-    data['task-classify'] = action == 'on'
-    path = config_path()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='.decide-', dir=str(path.parent))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            json.dump(data, handle)
-            handle.write('\n')
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(name, path)
-    finally:
-        if os.path.exists(name):
-            os.unlink(name)
-
-
-OUTBOUND_SCANNER = Path(__file__).resolve().with_name('peer-common.sh')
-ABSOLUTE_PATH_RE = re.compile(
-    r'(?m)^/$'
-    r'|(?:^|[\s"\'`=(:<>\[,;{}-])(?:/|~/|-[A-Za-z0-9_.,:+-]*~?/)[^\s/"\'`,;][^\s"\'`,;]*'
-    r'|[A-Za-z]:(?:\\|/(?!/))[^\s"\'`,;]*'
-    r'|(?:\\\\|(?<!:)//)[^\\/\s"\'`,;]+[\\/][^\s"\'`,;]*'
-)
-ROLE_OUTPUTS = {
-    'researcher': 'fast source or document lookup with cited findings',
-    'scholar': 'multi-source literature research with verified citations',
-    'worker': 'bounded implementation or investigation patch and check results',
-    'builder': 'bounded feature or fix patch and test results',
-    'refactorer': 'structural code cleanup preserving behavior and contracts',
-    'documenter': 'documentation and handoff updates in assigned paths',
-    'release-engineer': 'release, packaging and rollback checklist',
-    'reviewer': 'independent diff review for correctness and regressions',
-    'verifier': 'requirement-by-requirement completion verification',
-    'security-auditor': 'security boundary, permission and hazard audit findings',
-    'architect': 'component structure, interface design and tradeoffs',
-    'critic': 'failure-condition analysis of a proposed design',
-    'integrator': 'branch integration and conflict-resolution changes',
-    'performance-engineer': 'profiling measurements and evidence-backed optimizations',
-    'advisor': 'direction recommendation with alternatives and tradeoffs',
-}
-TIER_DESCRIPTIONS = {
-    'light': 'mechanical edit with an exact spec (cheapest)',
-    'routine': 'bounded reversible change (default for builders)',
-    'deep': 'multi-file or unclear logic',
-    'frontier': 'reserved for security audits (most expensive; choose only for a security review)',
-}
-
-
-def outbound_clean(value):
-    # Closed before the scan: Windows cannot reopen a file held open for deletion.
-    with tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False) as candidate:
-        candidate.write(value)
-    try:
-        checked = subprocess.run(
-            ['bash', '-c', '. "$1"; ma_validate_outbound_prompt "$2"',
-             'oms-decisions-scan', str(OUTBOUND_SCANNER), candidate.name],
-            capture_output=True, text=True, timeout=10, check=False)
-    finally:
-        os.unlink(candidate.name)
-    return checked.returncode == 0 and not ABSOLUTE_PATH_RE.search(value)
-
-
-def classify_task():
-    try:
-        if not read_config().get('task-classify', False):
-            return
-        get_auth()
-        from panel_routing import policy, TIERS, WRITERS
-        raw_allowed = os.environ.get('OMS_ALLOWED', '')
-        given_role = os.environ.get('OMS_ROLE', '').strip()
-        payload = {'title': os.environ.get('OMS_TITLE', ''),
-                   'allowed_paths': [x for x in re.split(r'[,\s]+', raw_allowed) if x],
-                   'verify': os.environ.get('OMS_VERIFY', '')}
-        if given_role:
-            payload['role'] = given_role
-        if not outbound_clean('\n'.join([payload['title'], raw_allowed, *payload['allowed_paths'],
-                                         payload['verify'], given_role])):
-            print('plan: role suggestion skipped (sensitive)', file=sys.stderr)
-            return
-        roles = policy()['roles']
-        if payload['allowed_paths']:
-            roles = {role: value for role, value in roles.items() if role in WRITERS}
-        questions = [
-            {'name': 'role', 'type': 'choice',
-             'instructions': 'Choose the best panel role. Write tasks require a write role; read-only roles cannot edit files.',
-             'choices': [{'value': role,
-                          'description': '%s: %s' % ('write' if role in WRITERS else 'read-only',
-                                                     ROLE_OUTPUTS.get(role, role + ' deliverable'))}
-                         for role in roles]},
-            {'name': 'workload', 'type': 'choice',
-             'instructions': 'For researcher choose light only. Choose task complexity: light is a mechanical edit with an exact spec (cheapest); routine is a bounded reversible change (default for builders); deep is multi-file or unclear logic; frontier is reserved for security audits (most expensive; choose only for a security review).',
-             'choices': [{'value': tier, 'description': TIER_DESCRIPTIONS[tier]} for tier in TIERS]},
-        ]
-        task = json.dumps(payload)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'questions.json'
-            path.write_text(json.dumps(questions), encoding='utf-8')
-            result = subprocess.run([sys.executable, __file__, '--input', task, '--questions-file', str(path),
-                                     '--json', '--timeout', '10'], capture_output=True, text=True, timeout=14)
-        if result.returncode:
-            category = {3: 'refusal', 4: 'cap'}.get(result.returncode, 'request')
-            raise ClientError(category)
-        answers = {row['name']: row for row in json.loads(result.stdout)}
-        role, workload = answers['role'], answers['workload']
-        if (not given_role and role['choice'] not in roles) or workload['choice'] not in TIERS:
-            raise ValueError('choice')
-        if (given_role or role['choice']) == 'researcher' and workload['choice'] != 'light':
-            raise ValueError('choice')
-        probabilities = [workload['confidence']] if given_role else [role['confidence'], workload['confidence']]
-        if any(isinstance(p, bool) or not isinstance(p, (float, int)) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities):
-            raise ValueError('confidence')
-        suggestion = ({'role': given_role, 'role_given': True, 'workload': workload['choice'],
-                       'workload_probability': workload['confidence'],
-                       'source': 'openai-decisions', 'model': 'gpt-6-luna'}
-                      if given_role else
-                      {'role': role['choice'], 'workload': workload['choice'],
-                       'role_probability': role['confidence'], 'workload_probability': workload['confidence'],
-                       'source': 'openai-decisions', 'model': 'gpt-6-luna'})
-        print(json.dumps(suggestion))
-    except subprocess.TimeoutExpired:
-        print('plan: role suggestion skipped (timeout)', file=sys.stderr)
-    except (ClientError, OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
-        category = str(exc) if str(exc) in ('refusal', 'cap', 'request') else 'unavailable'
-        print('plan: role suggestion skipped (%s)' % category, file=sys.stderr)
 
 
 def validate_auth(value):
@@ -408,8 +255,6 @@ def run():
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--set-key', **{'action': 'store_true'})
     group.add_argument('--key-status', **{'action': 'store_true'})
-    group.add_argument('--auto', nargs=2, metavar=('FEATURE', 'ACTION'))
-    group.add_argument('--classify-task', action='store_true', help=argparse.SUPPRESS)
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument('--input')
     inputs.add_argument('--input-file')
@@ -423,14 +268,6 @@ def run():
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--timeout', type=float, default=60)
     args = parser.parse_args()
-    if args.auto:
-        if args.auto[0] != 'task-classify' or args.auto[1] not in ('on', 'off', 'status'):
-            raise ClientError('expected --auto task-classify on|off|status')
-        auto_config(args.auto[1])
-        return 0
-    if args.classify_task:
-        classify_task()
-        return 0
     if args.set_key:
         save_auth()
         return 0

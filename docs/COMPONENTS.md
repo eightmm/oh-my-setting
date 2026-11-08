@@ -2031,28 +2031,6 @@ provider system instructions and user-owned settings are not replaced.
 
 ### Decisions API
 
-Automatic task classification is off by default. `oms decide --auto task-classify on`
-enables it; use `off` to disable it or `status` to see the setting and whether a key is
-configured. When enabled, a parent `oms agent-plan add` sends the title, allowed paths,
-verify command and any given `--role` to OpenAI in one request for a panel role and
-workload suggestion (keeping the given role and storing the suggested workload when
-`--role` is set). Tasks with allowed paths restrict the role choices to write-capable
-roles; tasks without allowed paths keep all choices.
-
-The suggestion is stored with the task. The ready hint shows it for tasks without a
-given role, marking it unsure when the suggestion cannot supply a usable workload,
-including low confidence and non-light researcher workloads. A role below 0.5 is not
-used in the hint, and an uncertain workload is not added to its command. For a new
-dispatch with `--task-id`, a matching suggestion supplies the workload when its
-probability is at least 0.5 and the role was given or its probability is also at least
-0.5. An explicit `--workload`, `--to` or `--model` takes precedence; continuations
-retain their existing routing behavior.
-
-Researcher suggestions must use the light tier; other researcher workloads are ignored.
-A suggestion never dispatches a worker. Sensitive fields (secret-shaped text or absolute
-paths) and failures skip classification, leave task creation unchanged and print a short
-skip message.
-
 `oms decide --input TEXT --choice NAME --option VALUE=DESCRIPTION --option VALUE=DESCRIPTION --instructions TEXT`
 asks one choice question; `--predicate NAME --instructions TEXT` asks a predicate.
 For choice, predicate or score questions together, pass `--questions-file PATH`

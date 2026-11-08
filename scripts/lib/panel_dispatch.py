@@ -1052,8 +1052,6 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                             effort = refs["panel_effort"]
                             effort_explicit = True
                             inherited_route = last.get("attempt_id")
-    if task_id and not continue_task and not workload_explicit and workload is None and not target and not model:
-        workload = _suggested_workload(repo, task_id, role)
     try:
         route = selected_route(owner, role, workload, access, purpose, target, model, effort, repo=repo, main=main,
                                room_id=room_id, task_id=task_id, candidate=candidate, routing_readings=readings,
@@ -1303,34 +1301,6 @@ def _owned_scopes(repo, task_id, kind, scopes):
         print("Plan allowed paths not added to the declared scope: %s." % error, file=sys.stderr)
         return scopes
     return owned
-
-
-def suggested_workload(suggestion, role):
-    from panel_routing import TIERS
-    if not isinstance(suggestion, dict):
-        return None
-    workload = suggestion.get("workload")
-    probability = suggestion.get("workload_probability")
-    role_probability = suggestion.get("role_probability")
-    if (suggestion.get("role") == role and isinstance(workload, str) and workload in TIERS
-            and (role != "researcher" or workload == "light")
-            and isinstance(probability, (int, float)) and not isinstance(probability, bool)
-            and 0.5 <= probability <= 1
-            and (suggestion.get("role_given") is True or
-                 isinstance(role_probability, (int, float)) and not isinstance(role_probability, bool)
-                 and 0.5 <= role_probability <= 1)):
-        return workload
-    return None
-
-
-def _suggested_workload(repo, task_id, role):
-    from terminal_panel import _read
-    try:
-        raw = _read(Path(repo), ".oms/plan/tasks.json", 4 * 1024 * 1024, missing=True)
-        task = json.loads(raw).get("tasks", {}).get(task_id, {}) if raw else {}
-        return suggested_workload(task.get("role_suggestion"), role)
-    except (OSError, ValueError, TypeError, AttributeError):
-        return None
 
 
 def _plan_task_paths(repo, task_id):
