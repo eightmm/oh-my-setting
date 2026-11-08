@@ -167,7 +167,7 @@ def bootstrap(provider, repo):
         "Choose roles from source evidence and applicable triggers, not all advisors by default. Scratch stays "
         "outside the repository; investigation patches fail; finalize findings completed, never accepted. Start "
         "every independent non-overlapping ready task concurrently before waiting. Review, admit or re-dispatch "
-        "each completion as it arrives; refill without a wave barrier and respect the review backlog threshold. "
+        "each completion as it arrives; refill without a wave barrier and obey WIP limit 4 (running+awaiting). "
         "Send remaining findings via --continue; salvage stopped write work first with --salvage. Delegate with "
         "oms panel --dispatch ROLE --owner OWNER (ordinary roles use tier routing; see references for "
         "overrides); oms consult, oms peer-delegate and oms peer-review are the explicit cross-provider "

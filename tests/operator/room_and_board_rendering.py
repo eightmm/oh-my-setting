@@ -4262,8 +4262,8 @@ for pending_tasks in ({"admission-task"}, {"admission-task", "earlier-task"}):
     assert watched["awaiting_admission"] == ["admission-worker"] + ["earlier-worker"] * kept, watched
     assert ("earlier-worker" in {m["participant"] for m in graph_text.nodes(fresh)}) is kept
     import review_backlog
-    assert watched["review_backlog"] == review_backlog.project(fresh) == {"threshold": 8, "counts": {
-        "admission-main": 1 + kept}}, watched["review_backlog"]
+    assert watched["review_backlog"] == review_backlog.project(fresh) == {"threshold": 4, "counts": {
+        "admission-main": 1 + kept}, "running": {}}, watched["review_backlog"]
 # A board view reuses the projection only while every key it reads is the same object; a new decision projects again.
 from panel_cache import TickReads
 shared_tick = TickReads(Path("."))
@@ -5399,10 +5399,16 @@ inbox_room["plan"] = {"tasks": [{"id": "review-%s" % n, "state": "review",
 assert backlog_counts(inbox_room) == {"m1": 9}, backlog_counts(inbox_room)
 inbox_room["review_backlog"] = backlog_project(inbox_room)
 backlog_items = [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
-assert len(backlog_items) == 1 and backlog_items[0]["what"] == backlog_warning(9), backlog_items
+assert len(backlog_items) == 1 and backlog_items[0]["what"] == backlog_warning(0, 9), backlog_items
 # In the Attention queue the backlog warning is a decision and leads that class.
 backlog_decisions = [item["row_id"] for item in attention_items(inbox_room) if item["cls"] == "decide"]
 assert backlog_decisions[:1] == [("review-backlog", "m1")], backlog_decisions
+# Live write workers alone reach the limit; the warning names both numbers.
+inbox_room["review_backlog"] = {"threshold": 4, "counts": {}, "running": {"m1": 4}}
+backlog_items = [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
+assert [item["what"] for item in backlog_items] == [backlog_warning(4, 0)] and "4 running, 0 awaiting" in backlog_warning(4, 0), backlog_items
+inbox_room["review_backlog"]["running"] = {"m1": 3}
+assert not [item for item in inbox_items(inbox_room) if item["row_id"] == ("review-backlog", "m1")]
 del inbox_room["review_backlog"]
 many_patches = deepcopy(inbox_room)
 many_patches["plan"] = {"tasks": []}

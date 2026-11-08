@@ -395,7 +395,7 @@ for owner in panel.PROVIDERS:
             "paid compute needs the user's authority", "--purpose investigate", "oms job-digest",
             "one background wait or notification, not repeated polls", "not all advisors by default", "a context apart",
             "control tower: by default delegate", "Review, admit or re-dispatch each completion as it arrives",
-            "without a wave barrier", "review backlog threshold", "--continue",
+            "without a wave barrier", "WIP limit 4 (running+awaiting)", "--continue",
             "consumers in the worker brief", "public entry point", "--depends", "exactly one live main", "trust boundary changes",
             "The sole main lands only when publication is authorized", "PROJECT.md and its References",
             "--expected-proposal-sha256", "--finalize", "Claim ready tasks in confirmed plan order, dependencies first",
@@ -420,7 +420,7 @@ for owner in panel.PROVIDERS:
             "--purpose explain|investigate|implement", "--task-id ID --label TITLE",
             "Dispatch blocks until its worker ends", "each independent ready task",
             "separate concurrent/background call before waiting", "review and refill",
-            "A new write dispatch is refused", "results awaiting review exceed the backlog threshold",
+            "A new write dispatch is refused", "WIP limit 4 (running+awaiting)",
             "--continue TASK_ID --brief-file F", "--salvage TASK_ID",
             "oms inbox", "oms panel --results", "oms room updates", "oms session-handoff", "oms agent-memory recall",
             "oms plan-from-spec", "--apply --expected-proposal-sha256 DIGEST", "Applied tasks use the ordinary shared plan",
@@ -2806,7 +2806,8 @@ assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan pla
 before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()
 review_write = subprocess.run(write_plan_dispatch + ["--task-id", "plan-link", "--label", "Refused review write"],
                               env=room_env, capture_output=True, text=True)
-assert review_write.returncode != 0 and "is not this main's to run; finish or release it first" in review_write.stderr, review_write
+# The fixture holds 3 undecided write results plus the review task: exactly the WIP limit, which refuses first.
+assert review_write.returncode != 0 and "WIP limit 4 reached: 0 running, 4 awaiting decision" in review_write.stderr, review_write
 assert thread.read_bytes() == before_thread and worker_log.read_bytes() == before_provider, review_write
 (project / "write-brief.md").unlink()  # The later blocking reviewer must see only its source fixture.
 hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-link"] + final_args[final_args.index("--task-id") + 2:],
@@ -3591,8 +3592,8 @@ with patch.dict(os.environ, control_env, clear=True), \
     warning_report = {"room": {"id": shared, "participants": [dict(room.participant(
         room.status(project, shared), room_owner))]}, "attempts": {"recent": [], "active_recent": []},
         "plan": {"tasks": [{"id": "review-%s" % n, "state": "review",
-                             "claimed_by_participant": room_owner} for n in range(9)]},
-        "review_backlog": {"threshold": 8, "counts": {room_owner: 9}}}
+                             "claimed_by_participant": room_owner} for n in range(5)]},
+        "review_backlog": {"threshold": 4, "counts": {room_owner: 5}}}
     control_write_command = [sys.executable, "-c", "pass", "--repo", str(project),
                              "--verify", "true", "--task-id", "backlog-warning"]
     from contextlib import redirect_stderr
@@ -3624,7 +3625,7 @@ with patch.dict(os.environ, control_env, clear=True), \
                 patch.object(panel, "_reconcile_dispatch", wraps=panel._reconcile_dispatch) as reconciled:
             backlog_dispatch(warning_report, "backlog-warning")
     except ValueError as error:
-        assert str(error).startswith("9 results await review/admission; review first"), error
+        assert str(error).startswith("WIP limit 4 reached: 0 running, 5 awaiting decision; review first"), error
         assert "--finalize" in str(error) and "--continue" in str(error), error
     else:
         raise AssertionError("a write dispatch over the review backlog threshold was not refused")
@@ -3640,11 +3641,23 @@ with patch.dict(os.environ, control_env, clear=True), \
         status, text = backlog_dispatch(warning_report, None, continue_task="backlog-continue", brief=brief)
     assert status == 0 and "env" in control_launch, (status, text, control_launch)
     assert "results await review" not in text, text
+    # Live write workers count toward the same limit; read workers do not.
+    running_report = dict(warning_report, review_backlog={"threshold": 4, "counts": {room_owner: 1},
+                                                          "running": {room_owner: 3}})
+    try:
+        backlog_dispatch(running_report, "backlog-running")
+    except ValueError as error:
+        assert str(error).startswith("WIP limit 4 reached: 3 running, 1 awaiting decision; review first"), error
+    else:
+        raise AssertionError("running workers plus awaiting results at the limit did not refuse")
+    below = dict(warning_report, review_backlog={"threshold": 4, "counts": {room_owner: 1}, "running": {room_owner: 2}})
+    status, text = backlog_dispatch(below, "backlog-below", brief=os.path.relpath(brief, project))
+    assert status == 0 and "WIP limit" not in text, (status, text)
     # Read dispatches never add unreviewed write results.
     status, text = backlog_dispatch(warning_report, "backlog-read", access="read", prompt="Inspect the bounded source")
     assert status == 0 and "results await review" not in text, (status, text)
     status, warning_text = backlog_dispatch(dict(warning_report, review_backlog={
-        "threshold": 9, "counts": {room_owner: 9}}), "backlog-at-threshold", brief=os.path.relpath(brief, project))
+        "threshold": 6, "counts": {room_owner: 5}}), "backlog-at-threshold", brief=os.path.relpath(brief, project))
     assert status == 0, (status, warning_text)
     assert warning_text.splitlines() == [
         "plan backlog-at-threshold has no recorded task; panel left it unchanged; plan protection is absent"], \

@@ -2,7 +2,8 @@
 
 from dashboard_projection import listing, mapping
 
-THRESHOLD = 8
+# One work-in-progress limit per main: live write workers plus results awaiting decision.
+THRESHOLD = 4
 
 
 def counts(report):
@@ -71,20 +72,41 @@ def counts(report):
     return totals
 
 
-def warning(count):
-    return "%s results await review/admission; review first" % count
+def running(report):
+    """Return live write worker counts by owning main participant."""
+    from room_view import call_classifier, nodes
+    from call_ending import LIVE_STATES
+
+    members = nodes(report)
+    mains = {key: member["participant"] for member in members if member.get("role") == "main"
+             for key in (member.get("participant"), member.get("attempt")) if key}
+    classify = call_classifier(report)
+    totals = {}
+    for member in members:
+        owner = mains.get(member.get("parent"))
+        if (owner and member.get("role") != "main" and member.get("access") == "write"
+                and member.get("state") in LIVE_STATES and classify(member) == "live"):
+            totals[owner] = totals.get(owner, 0) + 1
+    return totals
+
+
+def warning(running_count, awaiting):
+    return ("WIP limit %s reached: %s running, %s awaiting decision; review first"
+            % (THRESHOLD, running_count, awaiting))
 
 
 def project(report):
-    """Capture the render-time warning threshold and counts once per snapshot."""
+    """Capture the render-time limit, running and awaiting counts once per snapshot."""
     try:
-        totals = counts(report)
+        totals, live = counts(report), running(report)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
-        totals = {}
-    return {"threshold": THRESHOLD, "counts": totals}
+        totals, live = {}, {}
+    return {"threshold": THRESHOLD, "counts": totals, "running": live}
 
 
 def warning_for(report, participant):
     projection = mapping(report.get("review_backlog"))
-    total = mapping(projection.get("counts")).get(participant, 0)
-    return warning(total) if total > projection.get("threshold", THRESHOLD) else None
+    awaiting = mapping(projection.get("counts")).get(participant, 0)
+    live = mapping(projection.get("running")).get(participant, 0)
+    limit = projection.get("threshold", THRESHOLD)
+    return warning(live, awaiting) if live + awaiting >= limit else None

@@ -1880,7 +1880,7 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "For experiments you authorize launches, since paid compute needs the user's authority; "
             "builders write run scripts and configs, a worker with --purpose investigate reports finished outputs "
             "(oms job-digest condenses a training or Slurm log), and you wait on jobs with one background wait or notification, not repeated polls. Dispatch blocks until its worker ends: start every independent ready task (non-overlapping scope) "
-            "in its own concurrent or background call before waiting; review, admit or re-dispatch each completion as it arrives, refill with the next ready task without a wave barrier; a new write dispatch is refused while your results awaiting review exceed the backlog threshold. "
+            "in its own concurrent or background call before waiting; review, admit or re-dispatch each completion as it arrives, refill with the next ready task without a wave barrier; a new write dispatch is refused at WIP limit 4 (running+awaiting). "
             "Send remaining review findings to a worker via --continue. "
             "Land your own work only when publication is authorized: oms scratch-worktree add starts detached; create a "
             "local nontracking branch with git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, "

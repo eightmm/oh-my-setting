@@ -1437,7 +1437,8 @@ and provider launch labels are measured separately.
 Wait on each dispatched call separately, with one notification per call; review, admit
 or re-dispatch it as soon as it finishes, never batch-wait for a wave. Start the next
 ready plan task or follow-up round in the same turn; a new write dispatch is refused
-while your results awaiting review exceed the backlog threshold. Send remaining review
+at the WIP limit 4 per main (live write workers plus results awaiting decision; an advisory
+snapshot check, so concurrent dispatches can briefly exceed it). Send remaining review
 findings to a worker with `--continue`. Edit directly for admitted-patch integration or
 conflict resolution, when the cause is known, the change is local (one or two files) and
 a brief costs more than the edit, or after a worker failed the same bounded task twice.
