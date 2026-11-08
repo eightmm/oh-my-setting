@@ -16,6 +16,40 @@ case "$(uname -s):${OSTYPE:-}" in
     ;;
 esac
 
+# Bash 5 floor. Everything above this block must stay parseable by Bash 3.2 so
+# macOS's system Bash can print the install hint; below it, Bash 5 is assumed.
+# Re-exec under the first usable Bash 5 (Homebrew locations, then PATH).
+# OMS_BASH_CANDIDATES (space-separated absolute paths) replaces the list.
+if [ "${BASH_VERSINFO[0]:-0}" -lt 5 ]; then
+  oms_bash_found=""
+  if [ -z "${OMS_INSTALL_BASH_REEXEC:-}" ]; then
+    for oms_bash_candidate in \
+      ${OMS_BASH_CANDIDATES-${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/bash} /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash 2>/dev/null || true)"}; do
+      case "$oms_bash_candidate" in /*) ;; *) continue ;; esac
+      [ -f "$oms_bash_candidate" ] && [ -x "$oms_bash_candidate" ] || continue
+      "$oms_bash_candidate" -c '[ "${BASH_VERSINFO[0]}" -ge 5 ]' >/dev/null 2>&1 || continue
+      oms_bash_found="$oms_bash_candidate"
+      break
+    done
+  fi
+  if [ -n "$oms_bash_found" ] && [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    OMS_INSTALL_BASH_REEXEC=1 exec "$oms_bash_found" "${BASH_SOURCE[0]}" "$@"
+  fi
+  if [ -n "$oms_bash_found" ]; then
+    echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); rerun the installer with $oms_bash_found" >&2
+  else
+    echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun the installer with it" >&2
+  fi
+  exit 1
+fi
+unset OMS_INSTALL_BASH_REEXEC
+# The interpreter every later step records and re-executes under.
+case "$BASH" in
+  /*) OMS_BASH="$BASH" ;;
+  *) OMS_BASH="$(command -v "$BASH" 2>/dev/null || printf '%s' "$BASH")" ;;
+esac
+export OMS_BASH
+
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
 INSTALLER_DEFAULT_REF="edge"
@@ -958,11 +992,11 @@ fi
 if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   export OH_MY_SETTING_REEXECED=1
   if grep -Fq 'OMS_INSTALL_LIFECYCLE_PROTOCOL=1' "$DEST/install.sh"; then
-    exec bash "$DEST/install.sh"
+    exec "$OMS_BASH" "$DEST/install.sh"
   fi
   # An older selected ref cannot adopt the lock. Keep it in this parent while
   # the old installer runs as a child, then release it on our EXIT trap.
-  bash "$DEST/install.sh"
+  "$OMS_BASH" "$DEST/install.sh"
   exit $?
 fi
 
@@ -991,6 +1025,7 @@ trap install_lifecycle_exit EXIT
 
 # shellcheck disable=SC1091
 . "$DEST/scripts/lib/platform.sh"
+oms_bash_enter
 ensure_python3
 
 # From here onward, OMS code runs under its exact uv-managed interpreter.

@@ -182,3 +182,23 @@ oms_lock_scalar() {  # oms_lock_scalar LOCK DOTTED.PATH
     END { exit found ? 0 : 1 }
   ' "$1"
 }
+
+# Children started through `#!/usr/bin/env bash` resolve the first bash on PATH,
+# which is the system Bash 3.2 under macOS cron/launchd/hook PATHs, and would
+# now hit the Bash 5 floor. Under Bash 5, name this interpreter for them and put
+# its directory first unless `bash` already resolves to it. Call before the
+# Python runtime is activated so its launcher directory stays ahead.
+oms_bash_enter() {
+  local first
+
+  [ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || return 0
+  case "${BASH:-}" in /*) ;; *) return 0 ;; esac
+  export OMS_BASH="$BASH"
+  first="$(command -v bash 2>/dev/null || true)"
+  if [ -n "$first" ] && [ "$first" -ef "$BASH" ]; then
+    return 0
+  fi
+  PATH="${BASH%/*}:$PATH"
+  export PATH
+  hash -r 2>/dev/null || true
+}

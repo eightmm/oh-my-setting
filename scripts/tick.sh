@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }; set -euo pipefail
 
 # Unattended maintenance tick for registered repos. Each run syncs the work
 # journal, reconciles dead attempts, closes idle threads and goal-less task
@@ -9,6 +9,9 @@ set -euo pipefail
 # retention floor is a per-repo decision. `install` wires an hourly user-level
 # timer (systemd, cron fallback) so sessions start on a swept tree.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/platform.sh
+. "$ROOT/scripts/lib/platform.sh"
+oms_bash_enter
 # shellcheck source=scripts/lib/install-contract.sh
 . "$ROOT/scripts/lib/install-contract.sh"
 # shellcheck source=scripts/lib/work-journal.sh
@@ -446,13 +449,21 @@ record_component() {  # best effort; only the receipt owner records
   oms_install_receipt_set_component tick "$1" "$receipt" >/dev/null 2>&1 || true
 }
 tool_path() {  # PATH for the trigger: user managers and cron do not see nvm or ~/.local/bin
-  local t d out=""
+  local t d out="" bash_bin
   for t in ntn codex gh claude agy; do
     d="$(command -v "$t" 2>/dev/null)" || continue
     d="$(dirname "$d")"
     case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
   done
+  # The recorded Bash 5 ahead of the system PATH, whose bash is 3.2 on macOS.
+  if bash_bin="$(oms_install_bash_interpreter 2>/dev/null)"; then out="${out:+$out:}${bash_bin%/*}"; fi
   printf '%s' "${out:+$out:}$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+}
+# Timers reach only the system PATH (Bash 3.2 on macOS): name the recorded Bash 5.
+launch_prefix() {
+  local bash_bin
+  bash_bin="$(oms_install_bash_interpreter 2>/dev/null)" && printf '"%s" ' "$bash_bin"
+  return 0
 }
 install_tick() {
   local method; method="$(oms_install_scheduler_method "$METHOD")" || exit 2
@@ -461,14 +472,14 @@ install_tick() {
     systemd)
       if [ "$DRY_RUN" = 1 ]; then echo "would install systemd user timer: $TIMER_FILE (hourly)"; return 0; fi
       mkdir -p "$SYSTEMD_DIR"
-      printf '[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\nEnvironment=PATH=%s\nExecStart="%s/scripts/tick.sh" run\n' "$(tool_path)" "$ROOT" > "$SERVICE_FILE"
+      printf '[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\nEnvironment=PATH=%s\nExecStart=%s"%s/scripts/tick.sh" run\n' "$(tool_path)" "$(launch_prefix)" "$ROOT" > "$SERVICE_FILE"
       printf '[Unit]\nDescription=Run oh-my-setting tick hourly\n[Timer]\nOnCalendar=hourly\nPersistent=true\nRandomizedDelaySec=10m\n[Install]\nWantedBy=timers.target\n' > "$TIMER_FILE"
       systemctl --user daemon-reload
       systemctl --user enable --now oh-my-setting-tick.timer >/dev/null
       echo "tick trigger: systemd timer installed (hourly)" ;;
     cron)
       local line
-      line="23 * * * * PATH=$(tool_path) \"$ROOT/scripts/tick.sh\" run >/dev/null 2>&1 $CRON_MARK"
+      line="23 * * * * PATH=$(tool_path) $(launch_prefix)\"$ROOT/scripts/tick.sh\" run >/dev/null 2>&1 $CRON_MARK"
       if [ "$DRY_RUN" = 1 ]; then echo "would install cron line: $line"; return 0; fi
       { crontab -l 2>/dev/null | grep -Fv "$CRON_MARK" || true; printf '%s\n' "$line"; } | crontab -
       echo "tick trigger: cron line installed (hourly)" ;;

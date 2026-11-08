@@ -94,7 +94,7 @@ esac
 
 unlink_all() {
   local receipt owner receipt_parent
-  local python_shim="$HOME/.local/bin/python3"
+  local python_shim="$HOME/.local/bin/python3" bash_record
 
   # Pre-split installs linked the repository overlay directly. Accept that
   # owned target so an interrupted upgrade can still restore user backups.
@@ -144,6 +144,15 @@ unlink_all() {
     else
       rm -f "$capability_receipt"
       echo "removed capability receipt $capability_receipt"
+    fi
+  fi
+  bash_record="$(oms_install_bash_record_path)"
+  if [ -f "$bash_record" ] && [ ! -L "$bash_record" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would remove bash interpreter record $bash_record"
+    else
+      rm -f "$bash_record"
+      echo "removed bash interpreter record $bash_record"
     fi
   fi
   if oms_install_python_shim_owned "$python_shim"; then

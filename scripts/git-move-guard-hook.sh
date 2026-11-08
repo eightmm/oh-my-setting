@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 2; }
 
 # PreToolUse hook (Bash): a panel main must not move the canonical checkout's
 # index or refs while OMS calls are live. The worker guard snapshots that index

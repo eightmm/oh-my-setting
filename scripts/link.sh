@@ -271,6 +271,7 @@ link_all() {
   # owner and are diagnosed as drift rather than certifying a mixed install.
   receipt="$(oms_install_receipt_path)"
   oms_install_write_receipt "$ROOT" "$receipt"
+  oms_install_bash_write_record
   echo "install receipt: $receipt"
 }
 

@@ -1089,6 +1089,12 @@ repair_install() {
   plugin_mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   echo "repairing canonical links from: $repair_root"
   "$repair_root/scripts/link.sh"
+  # link.sh records the Bash 5 interpreter; rewrite the scheduled trigger that
+  # names it. A receipt that never enabled auto-update keeps none.
+  if [ "${OH_MY_SETTING_AUTO_UPDATE:-0}" = 1 ] && [ -x "$repair_root/scripts/install-autoupdate.sh" ]; then
+    "$repair_root/scripts/install-autoupdate.sh" ||
+      echo 'warning: auto-update trigger refresh failed; run oms auto-update install' >&2
+  fi
   if [ "${OH_MY_SETTING_PEER_PERMISSIONS:-1}" != 0 ] && PATH="$HOME/.local/bin:$PATH" command -v agy >/dev/null 2>&1 &&
      [ -x "$repair_root/scripts/provider-permissions.sh" ]; then
     PATH="$HOME/.local/bin:$PATH" "$repair_root/scripts/provider-permissions.sh" --apply --profile delegate --allow-toolchains ||
@@ -1416,6 +1422,7 @@ PY
 
 check_install_receipt() {
   local recorded_commit
+  local recorded_bash
   local current_commit
   local recorded_plugin_hash
   local current_plugin_hash
@@ -1457,6 +1464,12 @@ check_install_receipt() {
         FAILED=1
       else
         echo "ok: install receipt plugin hash"
+      fi
+      recorded_bash="$(sed -n '1p' "$(oms_install_bash_record_path)" 2>/dev/null || true)"
+      if oms_install_bash_usable "$recorded_bash"; then
+        echo "ok: bash interpreter $recorded_bash"
+      else
+        echo "warn: no usable Bash 5 recorded in $(oms_install_bash_record_path); scheduled updates and hooks may start an older bash (run doctor --repair)"
       fi
       ;;
   esac

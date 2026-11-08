@@ -74,6 +74,13 @@ case "$MCP:$AGY_PLUGIN" in
   *) echo "error: invalid MCP/Antigravity opt-out" >&2; exit 2 ;;
 esac
 
+# The scheduler's PATH reaches only the system Bash on macOS (3.2), so the
+# trigger names the recorded Bash 5 explicitly instead of the script shebang.
+LAUNCH=""
+if bash_bin="$(oms_install_bash_interpreter 2>/dev/null)"; then
+  LAUNCH="\"$bash_bin\" "
+fi
+
 install_systemd() (
   if [ "$DRY_RUN" = "1" ]; then
     printf 'would install systemd user timer: %s (%s)\n' "$TIMER_FILE" "$MODE"
@@ -158,7 +165,7 @@ Environment=OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN
 Environment=OH_MY_SETTING_MCP=$MCP
 Environment=OH_MY_SETTING_AGY_PLUGIN=$AGY_PLUGIN
 Environment=OMS_AUTO_UPDATE_MANAGED=1
-ExecStart="$ROOT/scripts/auto-update.sh" $MODE
+ExecStart=${LAUNCH}"$ROOT/scripts/auto-update.sh" $MODE
 EOF
   cat > "$backup/timer.new" <<'EOF'
 [Unit]
@@ -196,7 +203,7 @@ install_cron() {
   local filtered
   local line
   local state
-  line="17 6 * * * OMS_AUTO_UPDATE_MANAGED=1 OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN OH_MY_SETTING_MCP=$MCP OH_MY_SETTING_AGY_PLUGIN=$AGY_PLUGIN \"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
+  line="17 6 * * * OMS_AUTO_UPDATE_MANAGED=1 OH_MY_SETTING_CLAUDE_HOOKS=$CLAUDE_HOOKS OH_MY_SETTING_CODEX_PLUGIN=$CODEX_PLUGIN OH_MY_SETTING_MCP=$MCP OH_MY_SETTING_AGY_PLUGIN=$AGY_PLUGIN ${LAUNCH}\"$ROOT/scripts/auto-update.sh\" $MODE >/dev/null 2>&1"
 
   current="$(mktemp)" || return
   filtered="$(mktemp)" || {

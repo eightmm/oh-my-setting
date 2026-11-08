@@ -1381,4 +1381,218 @@ ln -s "$backup_root/real" "$backup_root/link"
     fail "latest backup through a symlinked parent was '$found'"
 )
 
+# Bash 5 floor. BASH_VERSINFO is read-only, so a "Bash 3.2" is the real script
+# with its guard's version lookup falling back to OMS_FAKE_BASH_MAJOR, and a
+# "Bash 5 on a Homebrew path" is a wrapper that logs its calls.
+test_bash_floor() (
+  local d="$TMP/bash-floor" real_bash="$BASH" name src out rc log
+  local hint='Bash 5 or newer'
+  mkdir -p "$d/x" "$d/brew/bin" "$d/old" "$d/home" "$d/cfg"
+  fake_major() {  # SRC DST: version lookup consults OMS_FAKE_BASH_MAJOR first
+    sed 's|\${BASH_VERSINFO\[0\]:-0}|${OMS_FAKE_BASH_MAJOR:-${BASH_VERSINFO[0]:-0}}|g' "$1" > "$2"
+    grep -Fq OMS_FAKE_BASH_MAJOR "$2" || fail "no Bash version guard in $1"
+  }
+  log="$d/brew.log"
+  printf '%s\n' '#!/bin/sh' "echo \"\$0 \$*\" >> '$log'" \
+    "exec env -u OMS_FAKE_BASH_MAJOR '$real_bash' \"\$@\"" > "$d/brew/bin/bash"
+  printf '%s\n' '#!/bin/sh' 'exit 1' > "$d/old/bash"
+  chmod +x "$d/brew/bin/bash" "$d/old/bash"
+  export HOME="$d/home" OMS_INSTALL_RECEIPT="$d/cfg/install.json" \
+    OMS_PYTHON_RUNTIME_ROOT="$d/missing-runtime"
+  unset OMS_BASH OMS_INSTALL_BASH_REEXEC
+
+  # Entry points: the dispatcher, every hook script, and the scheduled ones.
+  for name in oms skill-router.sh turn-guard.sh fail-ledger-hook.sh syntax-guard-hook.sh \
+      git-move-guard-hook.sh panel-direct-work-hook.sh precompact-handoff.sh \
+      resume-hook.sh telemetry-hook.sh auto-update.sh tick.sh; do
+    fake_major "$ROOT/scripts/$name" "$d/x/$name"
+    rc=0
+    out="$(OMS_FAKE_BASH_MAJOR=3 bash "$d/x/$name" list </dev/null 2>&1)" || rc=$?
+    want=1
+    [ "$name" != git-move-guard-hook.sh ] || want=2
+    [ "$rc" -eq "$want" ] || fail "$name under Bash 3.2 exited $rc, want $want: $out"
+    case "$out" in "error: oh-my-setting needs $hint"*'brew install bash, then rerun') ;;
+      *) fail "$name under Bash 3.2 gave: $out" ;; esac
+  done
+  out="$(OMS_FAKE_BASH_MAJOR=5 bash "$d/x/oms" list 2>&1 || true)"
+  case "$out" in *"$hint"*) fail "dispatcher refused Bash 5: $out" ;; esac
+
+  # Hook launcher: nothing recorded fails closed, an unusable record too.
+  mkdir -p "$d/root/scripts/lib"
+  fake_major "$ROOT/scripts/lib/python-entry.sh" "$d/root/scripts/lib/python-entry.sh"
+  cp "$ROOT/scripts/lib/python-runtime.sh" "$ROOT/scripts/lib/platform.sh" "$d/root/scripts/lib/"
+  printf '%s\n' 'echo hook-ran' > "$d/root/scripts/dummy-hook.sh"
+  cp "$d/root/scripts/dummy-hook.sh" "$d/root/scripts/git-move-guard-hook.sh"
+  rc=0
+  out="$(OMS_FAKE_BASH_MAJOR=3 bash "$d/root/scripts/lib/python-entry.sh" bash "$d/root/scripts/dummy-hook.sh" 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ] && case "$out" in "error: oh-my-setting needs $hint"*) true ;; *) false ;; esac ||
+    fail "hook launcher without a record: $rc $out"
+  rc=0
+  OMS_FAKE_BASH_MAJOR=3 bash "$d/root/scripts/lib/python-entry.sh" bash "$d/root/scripts/git-move-guard-hook.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "git-move guard through the launcher exited $rc, want 2"
+  printf '%s\n' "$d/old/bash" > "$d/cfg/bash-interpreter"
+  rc=0
+  OMS_FAKE_BASH_MAJOR=3 bash "$d/root/scripts/lib/python-entry.sh" bash "$d/root/scripts/dummy-hook.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "launcher accepted a record that is not Bash 5 (exit $rc)"
+
+  # The record: written by install, replaced atomically, kept when nothing usable.
+  rm -f "$d/cfg/bash-interpreter"
+  (
+    . "$ROOT/scripts/lib/install-contract.sh"
+    OMS_BASH="$d/old/bash" BASH="$d/old/bash" oms_install_bash_write_record
+    [ ! -e "$d/cfg/bash-interpreter" ] || fail "recorded a Bash that is not 5"
+    OMS_BASH="$d/brew/bin/bash" oms_install_bash_write_record
+    [ "$(cat "$d/cfg/bash-interpreter")" = "$d/brew/bin/bash" ] || fail "record was not written"
+    OMS_BASH="$d/old/bash" BASH="$d/old/bash" oms_install_bash_write_record
+    [ "$(cat "$d/cfg/bash-interpreter")" = "$d/brew/bin/bash" ] || fail "record lost when nothing usable"
+    [ "$(find "$d/cfg" -name 'bash-interpreter.*' | wc -l)" -eq 0 ] || fail "record write left a stage file"
+  )
+
+  # A registered hook command, started by Bash 3.2, runs under the record.
+  hook_command="$(python3 - "$ROOT" "$d/root" "$d/root/scripts/dummy-hook.sh" <<'PY_ENTRY'
+import importlib.util, sys
+from pathlib import Path
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("hooks", Path(sys.argv[1]) / "scripts/lib/claude-hook-surfaces.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.entry_command(sys.argv[2], "bash", sys.argv[3]))
+PY_ENTRY
+)"
+  : > "$log"
+  out="$(OMS_FAKE_BASH_MAJOR=3 bash -c "$hook_command" 2>&1)" || fail "hook under Bash 3.2 failed: $out"
+  [ "$out" = 'hook-ran' ] || fail "hook output was: $out"
+  grep -Fq "$d/brew/bin/bash $d/root/scripts/lib/python-entry.sh bash $d/root/scripts/dummy-hook.sh" "$log" &&
+    grep -Fq "$d/brew/bin/bash $d/root/scripts/dummy-hook.sh" "$log" ||
+    fail "hook command did not run under the recorded Bash: $(cat "$log")"
+  rm -f "$d/cfg/bash-interpreter"
+
+  # Children of a Bash 5 launch must not fall back to the system Bash 3.2 that
+  # a cron/hook PATH puts first. Here the fake version is a `major` file beside
+  # the interpreter that runs the script (copies, so they differ by inode): the stub on PATH is "3.2", the
+  # recorded one (off PATH) is real.
+  mkdir -p "$d/stub32" "$d/brew2/bin" "$d/root2/scripts/lib"
+  cp "$real_bash" "$d/stub32/bash"
+  printf '3\n' > "$d/stub32/major"
+  cp "$real_bash" "$d/brew2/bin/bash"
+  fake_dir_major() {  # SRC DST
+    sed 's~\${BASH_VERSINFO\[0\]:-0}~$(cat "${BASH%/*}/major" 2>/dev/null || echo "${BASH_VERSINFO[0]:-0}")~g' "$1" > "$2"
+    grep -Fq '/major' "$2" || fail "no Bash version guard in $1"
+  }
+  fake_dir_major "$ROOT/scripts/oms" "$d/oms.dirfake"
+  { sed -n 1,2p "$d/oms.dirfake"; echo 'echo child-ran'; } > "$d/root2/scripts/child.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'exec "${0%/*}/child.sh"' > "$d/root2/scripts/hook.sh"
+  chmod +x "$d/root2/scripts/child.sh" "$d/root2/scripts/hook.sh"
+  fake_dir_major "$ROOT/scripts/lib/python-entry.sh" "$d/root2/scripts/lib/python-entry.sh"
+  cp "$ROOT/scripts/lib/python-runtime.sh" "$ROOT/scripts/lib/platform.sh" "$d/root2/scripts/lib/"
+  rc=0
+  PATH="$d/stub32:$PATH" "$d/root2/scripts/child.sh" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "control: the floor-guarded child ran under the stub Bash 3.2 (exit $rc)"
+  printf '%s\n' "$d/brew2/bin/bash" > "$d/cfg/bash-interpreter"
+  out="$(PATH="$d/stub32:$PATH" "$d/stub32/bash" "$d/root2/scripts/lib/python-entry.sh" bash "$d/root2/scripts/hook.sh" 2>&1)" ||
+    fail "a hook's floor-guarded child failed under the recorded Bash: $out"
+  [ "$out" = child-ran ] || fail "hook child output was: $out"
+
+  # tick.sh started under the recorded Bash: its oms calls and its timer PATH.
+  farm="$d/farm"
+  mkdir -p "$farm/scripts/lib"
+  for src in "$ROOT"/*; do
+    [ "${src##*/}" = scripts ] || ln -s "$src" "$farm/${src##*/}"
+  done
+  for src in "$ROOT"/scripts/* "$ROOT"/scripts/lib/*; do
+    case "$src" in */scripts/oms|*/scripts/tick.sh|*/scripts/auto-update.sh|*/scripts/lib) continue ;; esac
+    ln -s "$src" "${farm}/${src#"$ROOT"/}"
+  done
+  fake_dir_major "$ROOT/scripts/oms" "$farm/scripts/oms"
+  sed -i '2a echo "$*" >> "$OMS_TEST_OMS_LOG"' "$farm/scripts/oms"
+  fake_dir_major "$ROOT/scripts/tick.sh" "$farm/scripts/tick.sh"
+  chmod +x "$farm/scripts/oms" "$farm/scripts/tick.sh"
+  mkdir -p "$d/tick-repo/.oms" "$d/state" "$d/rt"
+  git -C "$d/tick-repo" init -q
+  printf '*\n' > "$d/tick-repo/.oms/.gitignore"
+  export OMS_TEST_OMS_LOG="$d/tick-oms.log"
+  : > "$OMS_TEST_OMS_LOG"
+  XDG_CONFIG_HOME="$d/xdg" XDG_RUNTIME_DIR="$d/rt" XDG_STATE_HOME="$d/state" \
+    OMS_WORK_JOURNAL_CONFIG="$d/no-journal.json" OMS_HARNESS_CHILD=0 \
+    PATH="$d/stub32:$PATH" "$d/brew2/bin/bash" "$farm/scripts/tick.sh" run --repo "$d/tick-repo" \
+    >"$d/tick.out" 2>&1 || fail "tick under the recorded Bash failed: $(cat "$d/tick.out")"
+  grep -Fq 'agent-events' "$OMS_TEST_OMS_LOG" ||
+    fail "tick's oms calls hit the floor guard under the stub Bash: $(cat "$d/tick.out")"
+  out="$(XDG_CONFIG_HOME="$d/xdg" "$d/brew2/bin/bash" "$farm/scripts/tick.sh" install --method cron --dry-run 2>&1)"
+  case "$out" in *":$d/brew2/bin:"*|*"=$d/brew2/bin:"*) ;; *) fail "tick timer PATH lacks the recorded Bash: $out" ;; esac
+
+  # auto-update.sh enters Bash 5 before it activates Python and runs update.sh.
+  rm "$farm/scripts/lib/python-runtime.sh"
+  printf '%s\n' 'oms_python_runtime_activate_if_present() { echo "OMS_BASH=${OMS_BASH:-unset} bash=$(command -v bash)" > "$OMS_TEST_OMS_LOG"; }' \
+    > "$farm/scripts/lib/python-runtime.sh"
+  fake_dir_major "$ROOT/scripts/auto-update.sh" "$farm/scripts/auto-update.sh"
+  chmod +x "$farm/scripts/auto-update.sh"
+  PATH="$d/stub32:$PATH" "$d/brew2/bin/bash" "$farm/scripts/auto-update.sh" status >/dev/null 2>&1 || true
+  [ "$(cat "$OMS_TEST_OMS_LOG")" = "OMS_BASH=$d/brew2/bin/bash bash=$d/brew2/bin/bash" ] ||
+    fail "auto-update.sh did not enter Bash 5 first: $(cat "$OMS_TEST_OMS_LOG")"
+
+  # The interpreter lookup falls back to the Homebrew locations (what a repair
+  # run under Bash 3.2 has), and to nothing when none is usable.
+  rm -f "$d/cfg/bash-interpreter"
+  (
+    . "$ROOT/scripts/lib/install-contract.sh"
+    unset OMS_BASH
+    BASH="$d/old/bash"
+    out="$(OMS_BASH_CANDIDATES="$d/none/bash $d/brew2/bin/bash" oms_install_bash_interpreter)" ||
+      fail "no fallback to the Homebrew candidates"
+    [ "$out" = "$d/brew2/bin/bash" ] || fail "fallback chose $out"
+    ! OMS_BASH_CANDIDATES="" oms_install_bash_interpreter >/dev/null ||
+      fail "an empty candidate list still found an interpreter"
+    ! OMS_BASH_CANDIDATES="$d/old/bash" oms_install_bash_interpreter >/dev/null ||
+      fail "a Bash that is not 5 was accepted as a fallback"
+  )
+  # Call sites that cannot run to completion here: install.sh enters after its
+  # checkout is final, and repair refreshes the trigger that names the record.
+  grep -A1 'lib/platform.sh"$' "$ROOT/install.sh" | grep -Fq oms_bash_enter ||
+    fail "install.sh does not enter Bash 5 for its child scripts"
+  grep -Fq 'install-autoupdate.sh' "$ROOT/scripts/doctor.sh" ||
+    fail "doctor --repair does not refresh the auto-update trigger"
+  rm -f "$d/cfg/bash-interpreter"
+
+  # install.sh: re-exec under a found Bash 5, or stop with the hint.
+  fake_major "$ROOT/install.sh" "$d/install.sh"
+  : > "$log"
+  out="$(OMS_FAKE_BASH_MAJOR=3 OMS_BASH_CANDIDATES="$d/none/bash $d/old/bash $d/brew/bin/bash" \
+    bash "$d/install.sh" --help 2>&1)" || fail "install.sh did not re-exec under Bash 5: $out"
+  case "$out" in Usage:*) ;; *) fail "re-executed install.sh printed: $out" ;; esac
+  grep -Fq "$d/brew/bin/bash $d/install.sh --help" "$log" || fail "install.sh did not use the Homebrew Bash"
+  for candidates in "$d/none/bash $d/old/bash" ""; do
+    : > "$log"
+    rc=0
+    out="$(OMS_FAKE_BASH_MAJOR=3 OMS_BASH_CANDIDATES="$candidates" bash "$d/install.sh" --help 2>&1)" || rc=$?
+    [ "$rc" -eq 1 ] && case "$out" in *'brew install bash'*) true ;; *) false ;; esac ||
+      fail "install.sh without a Bash 5 exited $rc: $out"
+    [ ! -s "$log" ] || fail "install.sh ran a Bash that is not 5"
+  done
+  rc=0
+  out="$(OMS_INSTALL_BASH_REEXEC=1 OMS_FAKE_BASH_MAJOR=3 OMS_BASH_CANDIDATES="$d/brew/bin/bash" \
+    bash "$d/install.sh" --help 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ] && [ ! -s "$log" ] || fail "install.sh re-executed twice: $rc $out"
+  rc=0
+  out="$(OMS_FAKE_BASH_MAJOR=3 OMS_BASH_CANDIDATES="$d/brew/bin/bash" bash -s -- --help < "$d/install.sh" 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ] && case "$out" in *"rerun the installer with $d/brew/bin/bash"*) true ;; *) false ;; esac ||
+    fail "piped install.sh gave: $rc $out"
+
+  # Uninstall removes the record with the receipt.
+  mkdir -p "$d/home/.local/bin"
+  (
+    . "$ROOT/scripts/lib/install-contract.sh"
+    oms_install_write_receipt "$ROOT" >/dev/null
+    OMS_BASH="$d/brew/bin/bash" oms_install_bash_write_record
+  )
+  [ -f "$d/cfg/bash-interpreter" ] || fail "fixture record missing"
+  bash "$ROOT/scripts/unlink.sh" --dry-run >/dev/null 2>&1 || true
+  [ -f "$d/cfg/bash-interpreter" ] || fail "dry-run removed the record"
+  bash "$ROOT/scripts/unlink.sh" >/dev/null 2>&1 || fail "unlink failed"
+  [ ! -e "$d/cfg/bash-interpreter" ] && [ ! -e "$d/cfg/install.json" ] ||
+    fail "unlink left the interpreter record or receipt"
+  echo 'bash-floor: ok'
+)
+test_bash_floor
+
 echo "platform-portability: ok"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }
 
 # Feedback only. Other sessions avoid the interpreter and failures stay silent.
 [ -n "${OMS_PANEL_MAIN_ATTEMPT:-}" ] || exit 0

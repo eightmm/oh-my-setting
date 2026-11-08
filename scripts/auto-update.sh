@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-set -euo pipefail
+[ "${BASH_VERSINFO[0]:-0}" -ge 5 ] || { echo "error: oh-my-setting needs Bash 5 or newer (running ${BASH_VERSION:-unknown}); on macOS run: brew install bash, then rerun" >&2; exit 1; }; set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_bash_enter
+fi
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
   . "$ROOT/scripts/lib/python-runtime.sh"

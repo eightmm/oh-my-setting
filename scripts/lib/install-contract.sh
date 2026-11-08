@@ -260,6 +260,62 @@ oms_install_receipt_path() {
   printf '%s\n' "${OMS_INSTALL_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/install.json}"
 }
 
+# The Bash 5 interpreter OMS runs under, recorded beside the install receipt
+# (one absolute path, line 1) the way the Python runtime is recorded for
+# GUI/hook/cron launches whose PATH reaches only the system Bash 3.2.
+# install.sh exports OMS_BASH for the interpreter it selected; the record is
+# the fallback once that environment is gone.
+oms_install_bash_record_path() {
+  local receipt
+
+  receipt="$(oms_install_receipt_path)"
+  printf '%s\n' "${receipt%/*}/bash-interpreter"
+}
+
+oms_install_bash_usable() {  # PATH
+  case "$1" in /*) ;; *) return 1 ;; esac
+  [ -f "$1" ] && [ -x "$1" ] &&
+    "$1" -c '[ "${BASH_VERSINFO[0]}" -ge 5 ]' >/dev/null 2>&1
+}
+
+oms_install_bash_interpreter() {
+  local candidate
+
+  for candidate in "${OMS_BASH:-}" "${BASH:-}" \
+    "$(sed -n '1p' "$(oms_install_bash_record_path)" 2>/dev/null || true)"; do
+    if oms_install_bash_usable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  # Neither the environment nor the record names one (a repair or timer
+  # install under the system Bash 3.2): the Homebrew locations, as install.sh.
+  # shellcheck disable=SC2086
+  for candidate in ${OMS_BASH_CANDIDATES-${HOMEBREW_PREFIX:+$HOMEBREW_PREFIX/bin/bash} /opt/homebrew/bin/bash /usr/local/bin/bash}; do
+    if oms_install_bash_usable "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Replace the record atomically (a kill leaves the old record or the new one,
+# never a partial line). With no usable interpreter the previous record stays.
+oms_install_bash_write_record() {
+  local want path stage
+
+  want="$(oms_install_bash_interpreter)" || return 0
+  path="$(oms_install_bash_record_path)"
+  [ "$(sed -n '1p' "$path" 2>/dev/null || true)" != "$want" ] || return 0
+  mkdir -p "${path%/*}" || return 1
+  stage="$(mktemp "$path.XXXXXX")" || return 1
+  printf '%s\n' "$want" > "$stage" && mv -f "$stage" "$path" || {
+    rm -f "$stage"
+    return 1
+  }
+}
+
 oms_install_physical_root() {
   (cd "$1" 2>/dev/null && pwd -P)
 }
