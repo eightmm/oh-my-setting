@@ -218,7 +218,7 @@ user-wide lifecycle lock.
 Installation and scheduled updates use a private uv-managed Python pinned in
 `tools.lock.json`; system/project Python is only a bootstrap, not the timer's
 interpreter. Automatic updates preserve local checkout edits and report them as
-`blocked`. Keep private policy in user skills outside the tracked install tree.
+`skipped`. Keep private policy in user skills outside the tracked install tree.
 Systemd installs report whether logout persistence is available; explicitly set
 `OH_MY_SETTING_AUTO_UPDATE_LINGER=1` when installing the trigger to enable it
 (host permission may be required), or use cron. Linger applies to all this
@@ -226,6 +226,41 @@ account's user services, so OMS does not silently enable it by default.
 
 The daily updater applies clean fast-forwards by default and skips dirty or
 diverged checkouts.
+
+### Verification policy
+
+The entry points intentionally accept different evidence. A successful workflow
+does not by itself mean that the full test selection ran.
+
+| Entry point | Accepted evidence and explicit exception |
+|---|---|
+| Fresh installation | Installs the selected ref, defaulting to `edge` (the remote default branch), then runs the selected installation checks. CI success is not a prerequisite. |
+| Manual `oms update` | Applies the selected ref through the update transaction and runs link/doctor checks unless explicitly skipped. This is the same manual edge exception; it does not query or claim CI success. |
+| Scheduled auto-update | Requires a successful `test.yml` push run for the exact selected SHA. Both full and affected selections are accepted. If scope cannot be read, the confirmed workflow success remains sufficient and the state says `scope=unknown; ...; workflow success only`. |
+| `oms land` installation | Requires CI success for the pushed SHA plus a full local gate or a CI run proving the full selection. Affected-only or unreadable CI scope supplies no full proof; a full local gate can still supply it. Skipped or failed CI never authorizes installation. |
+
+Auto-update and land use the same exact-SHA CI query and scope classifier.
+Auto-update's existing `message` records the selected SHA, CI success, and
+`scope=full`, `scope=affected`, or `scope=unknown`; land records its proof in the
+existing `ci.scope` and `update.authority` fields. Neither a missing query result
+nor an unknown scope is labeled full verification. Fresh and manual edge installs
+remain deliberate exceptions; the installer default and receipt schemas are unchanged.
+
+The core capability profile does not require GitHub login or install `gh`.
+CI queries prefer `gh`; when it cannot start or authenticate, the public
+`eightmm/oh-my-setting` repository can use an unauthenticated, read-only GitHub
+API fallback for `test.yml`. Other repositories, private remotes, enterprise
+hosts, and credential-bearing URLs require a working `gh` configuration.
+Fallback requests use the fixed HTTPS API host, reject redirects, and are bounded
+to 30 seconds per query attempt and 1 MiB per response. Scope requires the exact
+run attempt and a complete job list of at most 100 jobs; incomplete evidence is
+reported as unknown, never full.
+
+Pending, failed, cancelled, missing, and unavailable CI evidence remain distinct.
+If the target has no confirmed success, auto-update searches at most 20 commits
+on its first-parent history for a successful descendant of the installed commit.
+Without one it records a normal skip, with an unavailable query distinguished
+from a failed workflow. Rate limits and network errors do not authorize an update.
 
 After refreshing provider tools, updates run a bounded integration audit of
 Claude hooks, the Codex plugin, and enabled MCP/Antigravity interfaces. A failed

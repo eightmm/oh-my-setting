@@ -1020,8 +1020,16 @@ test_schema1_auto_update_reuses_update_transaction() {
   cp "$ROOT/scripts/auto-update.sh" "$repo/scripts/auto-update.sh"
   cat > "$repo/scripts/lib/ci-query.py" <<'PY'
 import os, sys
+if sys.argv[1] == "scope":
+    scope = os.environ.get("OMS_TEST_CI_SCOPE", "full")
+    if scope == "unknown":
+        raise SystemExit(4)
+    print(scope)
+    raise SystemExit(0)
 sha = sys.argv[2]
 result = os.environ.get("OMS_TEST_CI_RESULT", "success")
+if result == "unavailable":
+    raise SystemExit(4)
 if result == "eventual-success" and sha == os.environ["OMS_TEST_UPDATE_TARGET"]:
     if sys.argv[3] != "2400":
         raise SystemExit("auto-update did not pass the bounded CI wait budget")
@@ -1090,29 +1098,39 @@ PY
     fail "schema-1 auto-update check bypassed the canonical updater"
 
   counter="$home/ci-counter"
-  local ci_result expected_target inherited_target
-  for ci_result in eventual-success cancelled failed no-green; do
+  local ci_result ci_scope expected_target inherited_target
+  for ci_result in eventual-success cancelled failed no-green pending unavailable affected unknown; do
     : > "$marker"
     rm -f "$counter"
     expected_target="$target"
+    ci_scope=full
     case "$ci_result" in
       cancelled|no-green) OMS_TEST_CI_RESULT=cancelled ;;
       failed) OMS_TEST_CI_RESULT=failure ;;
+      pending|unavailable) OMS_TEST_CI_RESULT="$ci_result" ;;
+      affected|unknown) OMS_TEST_CI_RESULT=success; ci_scope="$ci_result" ;;
       *) OMS_TEST_CI_RESULT=eventual-success ;;
     esac
-    if [ "$ci_result" = cancelled ]; then expected_target="$green_parent"; fi
+    if [ "$ci_result" = cancelled ]; then expected_target="$green_parent"; ci_scope=affected; fi
     if [ "$ci_result" = no-green ]; then OMS_TEST_CI_RESULT=cancelled; fi
     HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$receipt" \
       OH_MY_SETTING_AUTO_UPDATE_STATE="$state" OH_MY_SETTING_AUTO_UPDATE_LOG="$home/auto-update.log" \
       OMS_TEST_CI_RESULT="$OMS_TEST_CI_RESULT" OMS_TEST_CI_COUNTER="$counter" \
+      OMS_TEST_CI_SCOPE="$ci_scope" \
       OMS_TEST_CI_GREEN_SHA="$([ "$ci_result" = cancelled ] && printf '%s' "$green_parent")" \
       OMS_TEST_UPDATE_MARKER="$marker" OMS_TEST_UPDATE_TARGET="$target" \
       OMS_TEST_EXPECTED_TARGET="$expected_target" \
       "$repo/scripts/auto-update.sh" apply >/dev/null
-    if [ "$ci_result" = eventual-success ] || [ "$ci_result" = cancelled ]; then
+    if [ "$ci_result" = eventual-success ] || [ "$ci_result" = cancelled ] || \
+       [ "$ci_result" = affected ] || [ "$ci_result" = unknown ]; then
       [ "$(git -C "$repo" rev-parse HEAD)" = "$expected_target" ] ||
         fail "CI $ci_result did not apply the expected target"
       grep -Fq 'status=applied' "$state" || fail "CI $ci_result apply outcome missing"
+      grep -Fq "CI success; scope=$ci_scope; checked $expected_target" "$state" ||
+        fail "CI $ci_result did not report its selected SHA and actual scope"
+      if [ "$ci_result" = unknown ]; then
+        grep -Fq 'workflow success only' "$state" || fail "unknown scope claimed full verification"
+      fi
       if [ "$ci_result" = cancelled ]; then
         grep -Fq -- "target-commit=$expected_target" "$marker" ||
           fail "CI $ci_result did not pass the selected commit through the internal target contract"
@@ -1136,6 +1154,11 @@ PY
       grep -Fq 'CI success not confirmed' "$state" || fail "CI deferral reason missing"
       if [ "$ci_result" = failed ]; then
         grep -Fq 'failed' "$state" || fail "failed CI reason missing"
+      elif [ "$ci_result" = unavailable ]; then
+        grep -Fq 'query unavailable (exit 4)' "$state" || fail "unavailable CI was reported as failure"
+        if grep -Fq 'failed' "$state"; then fail "unavailable evidence must not claim a failed CI run"; fi
+      elif [ "$ci_result" = pending ]; then
+        grep -Fq 'in progress past budget' "$state" || fail "pending CI reason missing"
       else
         grep -Fq 'no green descendant' "$state" || fail "no green descendant reason missing"
       fi
@@ -1239,6 +1262,147 @@ PY
     fail "ci-query timed out a successful response with a zero poll budget"
   [ "$result" = '42 success' ] || fail "zero-budget ci-query missed successful evidence: $result"
   [ "$(cat "$counter")" = 1 ] || fail "zero-budget ci-query made more than one request"
+
+  # Exercise the real helper with absent/auth-failing gh and in-memory HTTP.
+  # Every public request is intercepted; no GitHub account or network is used.
+  python3 - "$ROOT/scripts/lib/ci-query.py" "$TMP" "$sha" <<'PY'
+import contextlib
+import copy
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from unittest import mock
+import urllib.error
+import urllib.parse
+
+spec = importlib.util.spec_from_file_location("ci_query", sys.argv[1])
+ci = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ci)
+temporary, sha = Path(sys.argv[2]), sys.argv[3]
+missing = str(temporary / "absent-gh")
+auth = temporary / "auth-failing-gh"
+auth.write_text("#!/bin/sh\nexit 4\n")
+auth.chmod(0o755)
+oversize = temporary / "oversized-gh"
+oversize.write_text("#!%s\nimport sys\nsys.stdout.write('x' * %s)\n" %
+                    (sys.executable, ci.MAX_QUERY_BYTES + 1))
+oversize.chmod(0o755)
+destination = "https://github.com/eightmm/oh-my-setting.git"
+run = {"id": 42, "head_sha": sha, "event": "push", "path": ci.PUBLIC_WORKFLOW,
+       "repository": {"full_name": ci.PUBLIC_REPO}, "head_branch": "main",
+       "status": "completed", "conclusion": "success", "run_attempt": 2}
+success_gh = temporary / "successful-gh"
+success_gh.write_text("#!%s\nprint(%r)\n" %
+                     (sys.executable, json.dumps([{"databaseId": 42, "headSha": sha,
+                                                   "status": "completed", "conclusion": "success"}])))
+success_gh.chmod(0o755)
+
+class Response(io.BytesIO):
+    def __init__(self, data, link=""):
+        super().__init__(data if isinstance(data, bytes) else json.dumps(data).encode())
+        self.headers = {"Link": link}
+
+def exercise(method, args, replies, gh_bin=missing):
+    opener = mock.Mock()
+    opener.open.side_effect = replies
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.dict(os.environ, {"OMS_GH_BIN": str(gh_bin)}), \
+            mock.patch.object(ci.urllib.request, "build_opener", return_value=opener), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = method(*args)
+    return rc, out.getvalue().strip(), err.getvalue(), opener.open.call_args_list
+
+def listed(row):
+    return Response({"total_count": 1, "workflow_runs": [row]})
+
+args = (destination, sha, "0", "main", "test.yml")
+rc, out, _, calls = exercise(ci.latest_run, args, [], success_gh)
+assert (rc, out) == (0, "42 success") and not calls, "working gh path used public fallback"
+for gh_bin in (missing, auth):
+    rc, out, err, calls = exercise(ci.latest_run, args, [listed(run)], gh_bin)
+    assert (rc, out) == (0, "42 success"), (rc, out, err)
+    assert len(calls) == 1
+    request = calls[0].args[0]
+    url = urllib.parse.urlparse(request.full_url)
+    assert url.scheme == "https" and url.netloc == "api.github.com"
+    assert url.path == "/repos/eightmm/oh-my-setting/actions/workflows/test.yml/runs"
+    assert urllib.parse.parse_qs(url.query) == {
+        "head_sha": [sha], "event": ["push"], "branch": ["main"], "per_page": ["1"]}
+    assert not any(key.lower() == "authorization" for key in request.headers)
+    assert 0 < calls[0].kwargs["timeout"] <= 30
+    assert ("could not start" if gh_bin == missing else "authentication") in err
+
+for status, conclusion, expected in (("completed", "failure", "42 failure"),
+                                     ("in_progress", None, "42 pending")):
+    rc, out, _, _ = exercise(ci.latest_run, args,
+                            [listed(dict(run, status=status, conclusion=conclusion))])
+    assert (rc, out) == (0, expected), (rc, out)
+rc, out, _, _ = exercise(ci.latest_run, args, [Response({"total_count": 0, "workflow_runs": []})])
+assert (rc, out) == (0, "0 missing")
+for changes in ({"head_sha": "0" * 40}, {"path": ".github/workflows/other.yml"},
+                {"event": "pull_request"}, {"repository": {"full_name": "private/repo"}},
+                {"head_branch": "other"}, {"id": True}):
+    rc, out, _, _ = exercise(ci.latest_run, args, [listed(dict(run, **changes))])
+    assert rc == 2 and not out, changes
+for reply, expected in ((Response(b"invalid JSON"), 2),
+                        (Response(b"x" * (ci.MAX_QUERY_BYTES + 1)), 2),
+                        (TimeoutError(), 124), (OSError("offline"), 1)):
+    rc, out, _, _ = exercise(ci.latest_run, args, [reply])
+    assert rc == expected and not out, (rc, expected, out)
+for status in (301, 403, 429, 500):
+    error = urllib.error.HTTPError("https://api.github.com/", status, "fixture", {}, None)
+    rc, out, _, _ = exercise(ci.latest_run, args, [error])
+    assert rc == 1 and not out, status
+assert ci.NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid") is None
+for remote in ("https://github.com/other/oh-my-setting.git",
+               "https://github.example/eightmm/oh-my-setting.git",
+               "https://token@github.com/eightmm/oh-my-setting.git"):
+    rc, out, _, calls = exercise(ci.latest_run, (remote,) + args[1:], [])
+    assert rc == 127 and not out and not calls, remote
+rc, out, _, calls = exercise(ci.latest_run, args[:-1] + ("other.yml",), [])
+assert rc == 127 and not out and not calls
+rc, out, _, calls = exercise(ci.latest_run, args, [], oversize)
+assert rc == 2 and not out and not calls, "oversized gh output triggered public fallback"
+
+jobs = [{"name": name, "conclusion": "success", "run_id": 42,
+         "head_sha": sha, "run_attempt": 2} for name in ci.FULL_JOBS]
+scope_args = (destination, "42", sha, "0")
+rc, out, _, calls = exercise(ci.run_scope, scope_args,
+                            [Response(run), Response({"total_count": len(jobs), "jobs": jobs})])
+assert (rc, out) == (0, "full"), (rc, out)
+assert calls[1].args[0].full_url.endswith("/actions/runs/42/attempts/2/jobs?per_page=100")
+affected = [dict(job, conclusion="skipped" if job["name"] == "lint" else "success")
+            for job in jobs if job["name"] in ("lint", "affected_plan", "gate")]
+rc, out, _, _ = exercise(ci.run_scope, scope_args,
+                         [Response(run), Response({"total_count": len(affected), "jobs": affected})])
+assert (rc, out) == (0, "affected")
+for data, link in (({"total_count": len(jobs) + 1, "jobs": jobs}, ""),
+                   ({"total_count": len(jobs), "jobs": jobs}, '<next>; rel="next"')):
+    rc, out, _, _ = exercise(ci.run_scope, scope_args, [Response(run), Response(data, link)])
+    assert rc == 2 and not out, "truncated job list proved full scope"
+for changes in ({"run_id": 43}, {"head_sha": "0" * 40}, {"run_attempt": 1}):
+    wrong = copy.deepcopy(jobs)
+    wrong[0].update(changes)
+    rc, out, _, _ = exercise(ci.run_scope, scope_args,
+                             [Response(run), Response({"total_count": len(wrong), "jobs": wrong})])
+    assert rc == 2 and not out, changes
+rc, out, _, calls = exercise(ci.run_scope, scope_args, [Response(dict(run, id=43))])
+assert rc == 2 and not out and len(calls) == 1
+
+class SlowResponse(Response):
+    def read(self, size):
+        time.sleep(1)
+        return super().read(size)
+
+start = time.monotonic()
+result, _, _, _ = exercise(ci.public_json, ("actions/runs/42", 0.05), [SlowResponse(run)])
+assert result[0] == 124 and time.monotonic() - start < 0.5, "public read exceeded wall budget"
+print("ci-query public fallback fixtures: ok")
+PY
 }
 
 test_schema2_auto_update_apply_skips_dirty_and_diverged() {
