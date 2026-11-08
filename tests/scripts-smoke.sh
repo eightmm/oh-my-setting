@@ -26994,10 +26994,6 @@ PY
   "$sh" --repo "$project" show --id markerless | grep -F '"state": "running"' > /dev/null ||
     fail "state-CAS recovery changed a task after its observed transition"
 
-  # The supported-host path must not invoke the retired path converter.
-  if sed -n '/^python_path_for_host()/,/^}/p' "$sh" | grep -q cygpath; then
-    fail "plan path normalization must not invoke the retired converter"
-  fi
   if grep -Eq "taskkill|start_new_session=os.name" "$ROOT/scripts/check.sh"; then
     fail "check supervisor must use the supported POSIX process path"
   fi

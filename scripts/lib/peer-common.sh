@@ -121,7 +121,6 @@ print(Path(sys.argv[1]).resolve())
 PY
 )" || return 2
       artifact="${artifact//$'\r'/}"
-      artifact="$(ma_artifact_index_shell_path "$artifact")" || return 2
       case "$artifact" in "$MA_READ_SOURCE_REPO"/*)
         echo 'error: cross-repository read artifacts cannot enter the source repository' >&2
         return 2 ;;
@@ -1659,31 +1658,16 @@ print("%s\t%s" % (lineage, active_task_id))
   return 3
 }
 
-# The kernel name never changes within a process, and the path normalizers
-# below run several times per artifact-index append; ask uname once.
+# Kept for external callers that normalize Python-produced paths.
+ma_artifact_index_shell_path() {
+  local value="$1"
+  printf '%s\n' "${value//$'\r'/}"
+}
+
+# Panel salvage still depends on native path conversion.
 ma_kernel_name() {
   [ -n "${MA_KERNEL_NAME:-}" ] ||
     MA_KERNEL_NAME="$(uname -s 2>/dev/null || printf unknown)"
-}
-
-ma_artifact_index_shell_path() {
-  local value="$1"
-  local platform
-
-  value="${value//$'\r'/}"
-  ma_kernel_name
-  platform="${MSYSTEM:-}:${OSTYPE:-}:$MA_KERNEL_NAME"
-  case "$platform" in
-    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
-      command -v cygpath >/dev/null 2>&1 || {
-        echo "error: artifact index: cygpath is required for a Windows lock path" >&2
-        return 1
-      }
-      value="$(cygpath -u "$value")" || return 1
-      value="${value//$'\r'/}"
-      ;;
-  esac
-  printf '%s\n' "$value"
 }
 
 ma_artifact_index_python_path() {
@@ -1711,10 +1695,6 @@ ma_artifact_index_python_path() {
   printf '%s\n' "$value"
 }
 
-ma_artifact_index_native_python() {
-  MSYS2_ARG_CONV_EXCL='*' python3 "$@"
-}
-
 # Capture usage while a delegate artifact still contains only provider output.
 # Some failure receipts append a later Output section before indexing, so their
 # final artifact cannot be used to recover the earlier provider section.
@@ -1725,10 +1705,11 @@ ma_artifact_provider_usage_json() {  # REPO PROVIDER ARTIFACT
   local native_repo native_artifact native_telemetry_helper
 
   repo="$(cd "$repo" && pwd -P)" || return 1
-  native_repo="$(ma_artifact_index_python_path "$repo")" || return 1
-  native_artifact="$(ma_artifact_index_python_path "$artifact")" || return 1
-  native_telemetry_helper="$(ma_artifact_index_python_path "$(ma_scripts_dir)/lib/artifact-telemetry.py")" || return 1
-  MSYS2_ARG_CONV_EXCL='*' python3 - "$native_repo" "$provider" \
+  native_repo="${repo//$'\r'/}"
+  native_artifact="${artifact//$'\r'/}"
+  native_telemetry_helper="$(ma_scripts_dir)/lib/artifact-telemetry.py"
+  native_telemetry_helper="${native_telemetry_helper//$'\r'/}"
+  python3 - "$native_repo" "$provider" \
     "$native_artifact" "$native_telemetry_helper" <<'PY'
 import json, os, runpy, sys
 repo, provider, artifact, helper = sys.argv[1:]
@@ -1754,10 +1735,6 @@ ma_append_artifact_index() {
   local repo="$1"
   local kind="$2"
   local provider="$3"
-  # Filled here, in the parent shell, so the eight path normalizations below
-  # (each a command substitution, so a subshell) inherit it instead of each
-  # asking uname again.
-  ma_kernel_name
   local exit_code="$4"
   local artifact="$5"
   local patch_file="${6:-}"
@@ -1791,23 +1768,23 @@ ma_append_artifact_index() {
     echo "error: artifact index append needs python3; row not recorded" >&2
     return 1
   }
-  native_repo="$(ma_artifact_index_python_path "$repo")" || return 1
-  native_repo_input="$(ma_artifact_index_python_path "$repo_spelling")" || return 1
-  native_index_input="$(ma_artifact_index_python_path "$index")" || return 1
-  native_store_helper="$(ma_artifact_index_python_path "$store_helper")" || return 1
-  native_telemetry_helper="$(ma_artifact_index_python_path "$telemetry_helper")" || return 1
-  native_artifact="$(ma_artifact_index_python_path "$artifact")" || return 1
-  native_patch_file="$(ma_artifact_index_python_path "$patch_file")" || return 1
-  native_source_artifact="$(ma_artifact_index_python_path "$source_artifact")" || return 1
-  if ! native_index="$(MSYS2_ARG_CONV_EXCL='*' python3 \
+  native_repo="${repo//$'\r'/}"
+  native_repo_input="${repo_spelling//$'\r'/}"
+  native_index_input="${index//$'\r'/}"
+  native_store_helper="${store_helper//$'\r'/}"
+  native_telemetry_helper="${telemetry_helper//$'\r'/}"
+  native_artifact="${artifact//$'\r'/}"
+  native_patch_file="${patch_file//$'\r'/}"
+  native_source_artifact="${source_artifact//$'\r'/}"
+  if ! native_index="$(python3 \
       "$native_store_helper" canonical --repo "$native_repo_input" \
       --index "$native_index_input" 2>/dev/null)"; then
-    native_index="$(MSYS2_ARG_CONV_EXCL='*' python3 \
+    native_index="$(python3 \
       "$native_store_helper" canonical --repo "$native_repo" \
       --index "$native_index_input")" || return 1
   fi
   native_index="${native_index//$'\r'/}"
-  index="$(ma_artifact_index_shell_path "$native_index")" || return 1
+  index="$native_index"
 
   if [ -n "$prompt_file" ] && [ -f "$prompt_file" ]; then
     prompt_hash="$(oms_sha256_file "$prompt_file" || true)"
@@ -1847,7 +1824,7 @@ ma_append_artifact_index() {
   OMS_INDEX_SELECTED_REASONING_EFFORT="${OMS_REASONING_SELECTED:-}" \
   OMS_INDEX_FALLBACK_REASONING_EFFORT="${OMS_REASONING_FALLBACK:-}" \
   OMS_INDEX_TRACE_LIB="$(ma_scripts_dir)/lib" \
-  oms_with_file_lock "$index" ma_artifact_index_native_python \
+  oms_with_file_lock "$index" python3 \
     - "$native_repo" "$native_index" "$kind" "$provider" \
     "$exit_code" "$native_artifact" "$native_patch_file" "$prompt_hash" \
     "$verify_exit" "$task_goal" "$native_source_artifact" \

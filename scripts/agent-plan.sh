@@ -526,7 +526,7 @@ if [ -n "$PROVIDER" ]; then
     fail "unknown provider: inspect 'oms models' for registered transports"
 fi
 
-python_path_for_host() {  # PATH
+resolve_physical_path() {  # PATH
   local value="$1" parent base physical_parent
   parent="$(dirname "$value")"
   base="$(basename "$value")"
@@ -536,17 +536,17 @@ python_path_for_host() {  # PATH
   printf '%s\n' "$value"
 }
 
-PY_REPO="$(python_path_for_host "$REPO")" || fail "cannot normalize repository path for Python"
-PY_STATE_REPO="$(python_path_for_host "$STATE_REPO")" || fail "cannot normalize repository path for Python"
+PY_REPO="$(resolve_physical_path "$REPO")" || fail "cannot normalize repository path for Python"
+PY_STATE_REPO="$(resolve_physical_path "$STATE_REPO")" || fail "cannot normalize repository path for Python"
 if [ -n "$LANDED_COMMIT" ] || [ "$ACTION" = satisfy ]; then
   # Match land.sh's shared-worktree state directory.
   LAND_RECEIPTS_DIR="$(oms_land_state_dir "$REPO")" || fail "cannot resolve land state directory"
-  LAND_RECEIPTS_DIR="$(python_path_for_host "$LAND_RECEIPTS_DIR")" || fail "cannot normalize land state path for Python"
+  LAND_RECEIPTS_DIR="$(resolve_physical_path "$LAND_RECEIPTS_DIR")" || fail "cannot normalize land state path for Python"
 fi
-PY_PLAN_FILE="$(python_path_for_host "$PLAN_FILE")" || fail "cannot normalize plan path for Python"
+PY_PLAN_FILE="$(resolve_physical_path "$PLAN_FILE")" || fail "cannot normalize plan path for Python"
 PY_MARKERS_DIR=""
 if [ -n "$MARKERS_DIR" ]; then
-  PY_MARKERS_DIR="$(python_path_for_host "$MARKERS_DIR")" ||
+  PY_MARKERS_DIR="$(resolve_physical_path "$MARKERS_DIR")" ||
     fail "cannot normalize worker marker path for Python"
 fi
 
@@ -799,7 +799,7 @@ if [ "$ACTION" = accept-research ] || [ "$ACTION" = accept-main-research ] || [ 
     exit "$completion_status"
   }
   trap completion_cleanup EXIT
-  OMS_COMPLETION_SNAPSHOT_FILE="$(python_path_for_host "$completion_snapshot_file")" ||
+  OMS_COMPLETION_SNAPSHOT_FILE="$(resolve_physical_path "$completion_snapshot_file")" ||
     fail "cannot normalize completion snapshot path"
   export OMS_COMPLETION_SNAPSHOT_FILE
   completion_run_locked > "$completion_snapshot_file" || exit $?

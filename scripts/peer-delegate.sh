@@ -1600,9 +1600,6 @@ if [ "$DRY_RUN" != "1" ]; then
   delegation_lock_target="$REPO/.oms/delegations/.marker-set-lock-target"
   mkdir -p "$(dirname "$liveness_file")"
   agent_memory_ensure_oms_ignore_for_path "$liveness_file" 2>/dev/null || true
-  # $$ is an MSYS pid on Git Bash. Resolve its long-lived backing WINPID from
-  # /proc rather than from a native child, whose parent may be a transient
-  # MSYS launcher that exits before recovery inspects this marker.
   DELEGATION_NATIVE_PID="$(oms_process_native_pid "$$")" ||
     fail "could not resolve the worker's native process identity"
   DELEGATION_NATIVE_PID="${DELEGATION_NATIVE_PID//$'\r'/}"
@@ -1616,14 +1613,6 @@ if [ "$DRY_RUN" != "1" ]; then
     fail "worker native pid source is invalid"
   [ "$DELEGATION_NATIVE_PID" -gt 0 ] || fail "worker native pid is invalid"
   liveness_python_file="$liveness_file"
-  case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*|CYGWIN*)
-      command -v cygpath >/dev/null 2>&1 ||
-        fail "cygpath is required to write worker markers from Git Bash"
-      liveness_python_file="$(cygpath -m "$liveness_file" | tr -d '\r')" ||
-        fail "could not normalize the worker marker path for native Python"
-      ;;
-  esac
   write_delegation_marker() {
     OMS_DL_OBSERVATION="$OBSERVED_BINDING" python3 - "$(ma_scripts_dir)/lib" <<'PY'
 import json, os, sys, tempfile
@@ -1635,7 +1624,6 @@ if os.environ.get("OMS_DL_OBSERVATION"):
     from terminal_panel import PlanBinding
     try:
         binding = PlanBinding.parse(os.environ["OMS_DL_OBSERVATION"])
-        # OMS_DL_FILE already uses native Python's path spelling on Git Bash.
         binding.validate(Path(os.environ["OMS_DL_FILE"]).parents[2], os.environ, {
             "provider": os.environ["OMS_DL_PROVIDER"], "model": os.environ["OMS_DL_MODEL"],
             "reasoning_effort": os.environ["OMS_DL_REASONING_EFFORT"],
