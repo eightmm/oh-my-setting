@@ -1909,6 +1909,39 @@ PY
   done
   mv "$TMP/agy-runtime/launchers/$locked_version/python3.good" "$TMP/agy-runtime/launchers/$locked_version/python3"
 
+  # Versioned launchers from the retired template (native-Windows candidate)
+  # are rewritten in place and selected; bin/python3 and current stay as-is.
+  # The retired-copy probe never opens a FIFO alias, which would block.
+  versioned_launcher="$TMP/agy-runtime/launchers/$locked_version/python3"
+  rm -f "${versioned_launcher%3}"
+  mkfifo "${versioned_launcher%3}"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    timeout 60 bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-fifo.out" 2>&1 ||
+    fail "FIFO launcher alias blocked or broke packaging: $(cat "$TMP/agy-fifo.out")"
+  rm -f "${versioned_launcher%3}"
+  cp "$versioned_launcher" "$TMP/good-launcher"
+  sed 's#^    "$root/envs/$version/bin/python"; do$#    "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do#' \
+    "$TMP/good-launcher" > "$TMP/retired-launcher"
+  ! cmp -s "$TMP/good-launcher" "$TMP/retired-launcher" || fail "retired launcher fixture matches the current template"
+  cp "$TMP/retired-launcher" "$versioned_launcher"
+  cp "$TMP/retired-launcher" "${versioned_launcher%3}"
+  cp "$TMP/agy-runtime/bin/python3" "$TMP/stable-before"
+  cp "$TMP/agy-runtime/current" "$TMP/current-before"
+  PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
+    OMS_PYTHON_RUNTIME_ROOT="$TMP/agy-runtime" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
+    bash "$ROOT/scripts/install-agy-plugin.sh" > "$TMP/agy-retired.out" 2>&1 ||
+    fail "retired versioned launcher was not refreshed: $(cat "$TMP/agy-retired.out")"
+  cmp -s "$TMP/good-launcher" "$versioned_launcher" && cmp -s "$TMP/good-launcher" "${versioned_launcher%3}" ||
+    fail "retired versioned launchers were not rewritten"
+  cmp -s "$TMP/stable-before" "$TMP/agy-runtime/bin/python3" && cmp -s "$TMP/current-before" "$TMP/agy-runtime/current" ||
+    fail "retired launcher refresh touched bin/python3 or current"
+  OMS_T_DIR="$capture" OMS_T_CMD="$runtime_phys/launchers/$locked_version/python3" python3 - <<'PY' || fail "retired launcher refresh did not select the versioned launcher"
+import json, os
+server = json.load(open(os.path.join(os.environ["OMS_T_DIR"], "mcp_config.json")))["mcpServers"]["oh-my-setting"]
+assert server["command"] == os.environ["OMS_T_CMD"], server
+PY
+
   # Both POSIX spellings (bin/python when bin/python3 is absent) and supported
   # managed symlink candidates inside envs/V/bin retain behavior.
   mv "$TMP/agy-runtime/envs/$locked_version/bin/python3" "$TMP/agy-runtime/envs/$locked_version/bin/python"
@@ -2029,16 +2062,23 @@ PY
 
   # No-versioned direct B + matching guarded stable B succeeds and executes B;
   # stable fallback's mutable alias follows a subsequent supported bin/python3 rewrite.
+  # A stable B from the retired template is rewritten to the current one first.
   rm -rf "$lifecycle_rt/launchers"
   printf '3.12.8\n' > "$lifecycle_rt/current"
   (
     . "$ROOT/scripts/lib/python-runtime.sh"
     oms_python_runtime_write_launcher "$lifecycle_rt" "3.12.8" python3 bin
   )
+  cp "$lifecycle_rt/bin/python3" "$TMP/good-stable"
+  sed 's#^    "$root/envs/$version/bin/python"; do$#    "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do#' \
+    "$TMP/good-stable" > "$lifecycle_rt/bin/python3"
+  ! cmp -s "$TMP/good-stable" "$lifecycle_rt/bin/python3" || fail "retired stable fixture matches the current template"
   PATH="$bin:/usr/bin:/bin" HOME="$TMP/agy-home" OMS_AGY_BIN="$bin/agy" \
     OMS_PYTHON_RUNTIME_ROOT="$lifecycle_rt" OMS_CAPABILITY_DIR="$TMP/agy-caps-default" \
     bash "$ROOT/scripts/install-agy-plugin.sh" >/dev/null ||
     fail "no-versioned direct B with matching stable B should succeed"
+  cmp -s "$TMP/good-stable" "$lifecycle_rt/bin/python3" || fail "retired stable launcher was not rewritten"
+  [ ! -e "$lifecycle_rt/launchers" ] || fail "retired stable refresh created versioned launchers"
   OMS_T_CFG="$capture/mcp_config.json" OMS_T_RT="$lifecycle_phys" python3 - <<'PY' || fail "direct B stable fallback failed"
 import json, os, subprocess
 cmd = json.load(open(os.environ["OMS_T_CFG"]))["mcpServers"]["oh-my-setting"]["command"]

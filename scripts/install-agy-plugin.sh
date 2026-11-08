@@ -406,6 +406,8 @@ fi
 
 # shellcheck source=scripts/lib/python-runtime.sh
 . "$ROOT/scripts/lib/python-runtime.sh"
+# shellcheck source=scripts/lib/file-lock.sh
+. "$ROOT/scripts/lib/file-lock.sh"
 
 agy_managed_selected_env() {
   local raw_root="${1:-}" selected="${2:-}"
@@ -575,6 +577,38 @@ agy_launcher_candidate_matches() {
     cmp -s "$expected_file" "$candidate"
 }
 
+# Launchers written before the native-Windows candidate was retired differ
+# from the current template only by that candidate, and update rewrites
+# launchers only on the managed path. Rewrite exact retired copies for the
+# selected version (the bytes embed it, so bin/python3 keeps its version)
+# through the canonical writer, under the runtime lock, so an update does not
+# refuse its own runtime; any other byte difference still fails closed and
+# current stays untouched.
+agy_is_retired_launcher() {  # RETIRED_FILE CANDIDATE; never opens a FIFO or device
+  [ ! -L "$2" ] && [ -f "$2" ] && cmp -s "$1" "$2"
+}
+
+agy_rewrite_retired_launchers() {  # RUNTIME VERSION RETIRED_FILE
+  local spec name dir
+  for spec in "python3 launchers/$2" "python launchers/$2" "python3 bin"; do
+    name="${spec%% *}" dir="${spec#* }"
+    agy_is_retired_launcher "$3" "$1/$dir/$name" || continue
+    oms_python_runtime_write_launcher "$1" "$2" "$name" "$dir" || return 1
+  done
+}
+
+agy_refresh_retired_launchers() {
+  local runtime_phys="$1" version="$2" expected_file="$3" retired="$4/retired-launcher"
+  sed 's#^    "$root/envs/$version/bin/python"; do$#    "$root/envs/$version/bin/python" "$root/envs/$version/Scripts/python.exe"; do#' \
+    "$expected_file" > "$retired" || return 1
+  ! cmp -s "$expected_file" "$retired" || return 1
+  agy_is_retired_launcher "$retired" "$runtime_phys/launchers/$version/python3" ||
+    agy_is_retired_launcher "$retired" "$runtime_phys/launchers/$version/python" ||
+    agy_is_retired_launcher "$retired" "$runtime_phys/bin/python3" || return 0
+  OMS_PYTHON_RUNTIME_ROOT="$runtime_phys" oms_with_file_lock "$runtime_phys/current" \
+    agy_rewrite_retired_launchers "$runtime_phys" "$version" "$retired"
+}
+
 agy_select_managed_launcher() {
   local raw_root="${1:-}" selected="${2:-}" ref_work="${3:-}"
   local env_info runtime_phys selected_version selected_env_python
@@ -592,6 +626,7 @@ EOF_ENV
 
   expected_file="$ref_work/expected-launcher"
   agy_build_expected_launcher "$ref_work" "$runtime_phys" "$selected_version" "$expected_file" || return 1
+  agy_refresh_retired_launchers "$runtime_phys" "$selected_version" "$expected_file" "$ref_work" || return 1
 
   versioned_candidate="$runtime_phys/launchers/$selected_version/python3"
   stable_candidate="$runtime_phys/bin/python3"
