@@ -28,6 +28,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Contributing](../CONTRIBUTING.md) | Scoped checks, publication, style and compatibility |
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
+| [Stabilization plan](STABILIZATION-PLAN.md) | Prioritized reliability work and bounded offline verification |
 
 ## Migration notes
 
