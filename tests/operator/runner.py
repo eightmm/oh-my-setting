@@ -347,8 +347,11 @@ def self_check(total):
     expected_units = [(name, None) for name in names if name != "dispatch-results"]
     expected_units += [("dispatch-results", case) for case in case_markers(body("dispatch-results")[0])]
     expected_units.append(("dispatch-results", DISPATCH_REMAINDER))
-    if Counter((name, case) for name, case, _ in assignments(total)) != Counter(expected_units):
-        raise ValueError("operator execution units are unassigned or duplicated")
+    assigned = Counter((name, case) for name, case, _ in assignments(total))
+    if assigned != Counter(expected_units):
+        delta = (assigned - Counter(expected_units)) + (Counter(expected_units) - assigned)
+        raise ValueError("operator execution units are unassigned or duplicated (register dispatch-results "
+                         "cases in DISPATCH_SECONDS): " + ", ".join(sorted("%s[%s]" % unit for unit in delta)))
     if selected("1/1") != names or requested_sections(",".join(names)) != names:
         raise ValueError("serial and focused section manifests differ")
     execution_contract(total)
