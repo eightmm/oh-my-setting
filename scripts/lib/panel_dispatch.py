@@ -245,14 +245,15 @@ def selected_route(owner, role, workload, access, purpose, target=None, model=No
     if owner not in MAIN_OWNERS:
         owner = provider_catalog(owner)[0]["provider"]
     owner_model = None
-    if owner in ("pi", "antigravity") and role in ("reviewer", "verifier", "security-auditor", "critic"):
-        from terminal_panel import active_mains, child_environment
+    if role in ("reviewer", "verifier", "security-auditor", "critic"):
+        from terminal_panel import active_mains, child_environment, repository
         repo = repo or os.environ.get("OMS_ROOM_REPO") or os.getcwd()
         environment = child_environment(owner, repo)
         ident = room_id or environment.get("OMS_ROOM_ID")
         if ident:
-            state = room.status(repo, ident)
-            mains = active_mains(repo, ident, state, owner, caller=main or environment.get("OMS_ROOM_PARTICIPANT"),
+            main_repo = repository(environment.get("OMS_ROOM_REPO") or repo)
+            state = room.status(main_repo, ident)
+            mains = active_mains(main_repo, ident, state, owner, caller=main or environment.get("OMS_ROOM_PARTICIPANT"),
                                  attempt=environment.get("OMS_PANEL_MAIN_ATTEMPT"))
             if len(mains) == 1:
                 owner_model = next(iter(mains.values())).get("refs", {}).get("panel_model")
