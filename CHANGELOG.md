@@ -8,6 +8,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms panel --metrics` reports organization-level coordination: concurrent
+  write pairs with overlapping scopes (duplicate work), the input growth of later
+  write rounds over the first (handoff rework), blocking reviews split by same or
+  different provider family with later accepted fixes (cross-agent catches), and
+  owner decisions per provider and role; undecidable rows count as unknown.
+
 - The project graph records environment variables as `env:<NAME>` nodes with
   `reads_env` edges from the shell and Python code that reads them, so
   `oms graph project blast` and `find` name an env var's consumers; cached
@@ -101,6 +107,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   data (including linked objects, refs or HEAD) or special files is kept.
 
 ### Changed
+
+- The second consecutive blocking review stops automatic fix drafts: the owner
+  narrows and re-dispatches, fixes directly, or finalizes rejected.
+- `oms panel --council --rounds N` drops later same-family seats, latest first,
+  only until seats x rounds fit the 12-call budget, and names the maximum rounds
+  when even one seat per family does not fit.
+- The macOS native CI lane provisions Bash 5, and the lifecycle smoke runs OMS
+  scripts with the interpreter running the test.
+- Land gate failures are classified `verifier_failed` instead of unknown.
 
 - Entry points require Bash 5.0 or newer (macOS through Homebrew) and put the
   recorded interpreter first on PATH for the scripts they start; `oms doctor
@@ -768,6 +783,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - The next action for a timed-out panel worker no longer mentions a revision-round cap and owner override that do not exist.
 
 ### Removed
+
+- Automatic task classification (`oms decide --auto task-classify`, the
+  `oms agent-plan add` request and the dispatch workload suggestion): it changed
+  no route in the recorded tasks and could delay each plan add. `oms decide`
+  itself is unchanged; stored `role_suggestion` fields are ignored.
+- The direct-work nag hook and its `direct_work` metric; the Claude hook schema
+  moves to 10 so `--repair` removes the old registration.
 
 - Dead native-Windows branches and helpers in the peer shell, Python hooks,
   landing and panel Python.
