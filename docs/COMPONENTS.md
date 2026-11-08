@@ -1929,13 +1929,22 @@ workflow alone does not protect the branch. Deployment via `oms land` verifies t
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
 pushes its SHA, waits for CI success, then updates only to that SHA when a full local
-gate or the run's jobs prove the full selection. Failed or skipped CI, and an
-affected-only run or one whose scope cannot be read, cannot refresh the installation.
+gate or the run's jobs prove the full selection. Failed or skipped CI cannot
+refresh the installation. An affected-only run or one whose scope cannot be read
+does not supply full proof; an existing full local gate can supply that proof.
 
 A moving update target is rejected by the updater. Local CI-parity hides registry
 provider CLIs, parses changed shell files with Bash 3.2, and adds operator-tools when
 tier-routing inputs change. The receipt's `update.authority` records the full proof used
 for installation.
+
+The [installation verification policy](INSTALL.md#verification-policy) records the
+explicit differences between land, scheduled updates, and fresh/manual edge installs.
+Scheduled updates continue to accept successful affected-only CI and report the
+actual scope in their existing state message. Both automated paths share
+`ci-query.py` for exact-SHA conclusions and scope; that helper can read public OMS
+CI without `gh` or user authentication. This does not grant affected-only CI the
+full-proof authority required by land.
 
 
 ### Landing coordination and retries

@@ -380,21 +380,44 @@ auto_update_provider_health() {
   oms_install_check_provider_health "$ROOT"
 }
 
+auto_update_ci_selected() {
+  local destination="$1" sha="$2" result="$3" scope scope_rc=0
+  CI_SELECTED_TARGET="$sha"
+  # Use land's scope reader, while preserving the unattended policy: exact
+  # workflow success is sufficient, including affected-only selections. A
+  # scope lookup failure is reported as unknown, never as full verification.
+  scope="$(python3 "$ROOT/scripts/lib/ci-query.py" scope "$destination" \
+    "${result%% *}" "$sha" 30 2>/dev/null)" || scope_rc=$?
+  [ "$scope_rc" -eq 0 ] || scope=unknown
+  case "$scope" in full|affected) ;; *) scope=unknown ;; esac
+  CI_SELECTED_EVIDENCE="CI success; scope=$scope; checked $sha"
+  [ "$scope" != unknown ] || CI_SELECTED_EVIDENCE="$CI_SELECTED_EVIDENCE; workflow success only"
+}
+
 auto_update_ci_ready() {
   local sha="$1" remote="${2:-origin}" destination result query_rc=0
   local conclusion reason installed candidate candidates candidate_result candidate_rc
   local walked=0 scan_limit=20 scan_bound_hit=0
   CI_SELECTED_TARGET="$sha"
+  CI_SELECTED_EVIDENCE=""
   destination="$(git -C "$ROOT" remote get-url "$remote" 2>/dev/null)" || destination=""
   result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$sha" 2400 "" test.yml 2>/dev/null)" || query_rc=$?
   conclusion="${result##* }"
-  [ "$query_rc" -eq 0 ] && [ "$conclusion" = success ] && return 0
-  case "$conclusion" in
-    pending) reason="in progress past budget" ;;
-    cancelled|canceled) reason="cancelled" ;;
-    missing) reason="no green descendant" ;;
-    *) reason="failed" ;;
-  esac
+  if [ "$query_rc" -eq 0 ] && [ "$conclusion" = success ]; then
+    auto_update_ci_selected "$destination" "$sha" "$result"
+    return 0
+  fi
+  if [ "$query_rc" -ne 0 ]; then
+    reason="query unavailable (exit $query_rc)"
+  else
+    case "$conclusion" in
+      pending) reason="in progress past budget" ;;
+      cancelled|canceled) reason="cancelled" ;;
+      missing) reason="no run for target" ;;
+      skipped) reason="skipped" ;;
+      *) reason="failed" ;;
+    esac
+  fi
 
   installed="$(git -C "$ROOT" rev-parse HEAD)"
   # The target was already queried above; bound the fallback history walk so
@@ -411,16 +434,12 @@ auto_update_ci_ready() {
     candidate_rc=0
     candidate_result="$(python3 "$ROOT/scripts/lib/ci-query.py" "$destination" "$candidate" 0 "" test.yml 2>/dev/null)" || candidate_rc=$?
     if [ "$candidate_rc" -eq 0 ] && [ "${candidate_result##* }" = success ]; then
-      CI_SELECTED_TARGET="$candidate"
+      auto_update_ci_selected "$destination" "$candidate" "$candidate_result"
       return 0
     fi
   done
 
-  if [ "$reason" != "in progress past budget" ] && [ "$reason" != "cancelled" ]; then
-    reason="failed; no green descendant"
-  else
-    reason="$reason; no green descendant"
-  fi
+  reason="$reason; no green descendant"
   if [ "$scan_bound_hit" = 1 ]; then
     reason="$reason; fallback scan limit reached ($scan_limit commits)"
   fi
@@ -580,7 +599,7 @@ receipt_transaction_update() {
     message="already up to date"
     write_state up_to_date "$message" "$remote" "$remote" "$upstream"
   else
-    message="updated: ${current:0:7} -> ${remote:0:7}"
+    message="updated: ${current:0:7} -> ${remote:0:7}; $CI_SELECTED_EVIDENCE"
     write_state applied "$message" "$remote" "$remote" "$upstream"
   fi
   print_status
@@ -741,7 +760,7 @@ auto_update_apply_locked() {
     write_state failed "provider update failed after apply" "$new_full" "$remote_full" "$upstream"
     return 1
   fi
-  state_message="updated: $old_short -> $new_short"
+  state_message="updated: $old_short -> $new_short; $CI_SELECTED_EVIDENCE"
   if [ "$doctor_status" -ne 0 ]; then
     write_state failed "doctor failed after apply at $new_short" "$new_full" "$remote_full" "$upstream"
     echo "auto-update: doctor failed after apply" >&2
@@ -753,7 +772,7 @@ auto_update_apply_locked() {
     return 1
   fi
   write_state applied "$state_message" "$new_full" "$remote_full" "$upstream"
-  echo "auto-update: applied ($old_short -> $new_short)"
+  echo "auto-update: applied ($old_short -> $new_short; $CI_SELECTED_EVIDENCE)"
 }
 
 [ "$#" -le 1 ] || {

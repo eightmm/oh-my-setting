@@ -9,12 +9,21 @@ ci-query.py scope DESTINATION RUN_ID SHA SECONDS
     prove exits 2.
 """
 import json
+import math
 import os
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+MAX_QUERY_BYTES = 1024 * 1024
+PUBLIC_REPO = "eightmm/oh-my-setting"
+PUBLIC_WORKFLOW = ".github/workflows/test.yml"
 
 # test.yml's full selection: lint, four focused lanes, four smoke shards, the
 # Linux copy lifecycle, the selector and the stable gate. An affected-only run
@@ -34,33 +43,198 @@ def repo_slug(destination):
     return re.sub(r"\.git/?$", "", destination).rstrip("/")
 
 
+def public_destination(destination):
+    # Never turn an arbitrary, private, credential-bearing or enterprise remote
+    # into a public API request. These are the normal spellings of our one repo.
+    return re.fullmatch(
+        r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:|github\.com/)?"
+        r"eightmm/oh-my-setting(?:\.git)?/?", destination) is not None
+
+
+def bounded_call(call, seconds):
+    """Bound wall time, including DNS/slow reads, without retaining large output."""
+    result = {}
+    done = threading.Event()
+
+    def invoke():
+        try:
+            result["value"] = call()
+        except Exception as exc:  # Pass the original exception back to the caller.
+            result["error"] = exc
+        finally:
+            done.set()
+
+    # A timed-out HTTP reader cannot hold this short-lived CLI open. Its socket
+    # also has a timeout; no further query is made after this request times out.
+    threading.Thread(target=invoke, daemon=True).start()
+    if not done.wait(max(0, seconds)):
+        raise TimeoutError
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
+def stop_process(process):
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    else:
+        process.kill()
+    process.wait()
+
+
 def gh(args, seconds):
     """Return (rc, stdout); rc is nonzero after a printed, credential-free reason."""
     cmd = [os.environ.get("OMS_GH_BIN", "gh")] + args
+    process = None
     try:
-        timeout = min(30.0, max(0.1, float(seconds)))
+        timeout = min(30.0, max(0.001, float(seconds)))
+        deadline = time.monotonic() + timeout
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   text=True, start_new_session=os.name == "posix")
-        output, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:
-            process.kill()
-        process.wait()
+                                   start_new_session=os.name == "posix")
+
+        def read_output():
+            with process.stdout as stream:
+                return stream.read(MAX_QUERY_BYTES + 1)
+
+        output = bounded_call(read_output, max(0, deadline - time.monotonic()))
+        if len(output) > MAX_QUERY_BYTES:
+            stop_process(process)
+            print("CI query returned oversized evidence", file=sys.stderr)
+            return 2, ""
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+    except (subprocess.TimeoutExpired, TimeoutError):
+        stop_process(process)
         print("CI query timed out", file=sys.stderr)
         return 124, ""
     except OSError:
+        if process is not None:
+            stop_process(process)
         print("CI query unavailable: gh could not start", file=sys.stderr)
         return 127, ""
     if process.returncode:
         # Do not copy credential-bearing remote URLs from a CLI error to receipts.
-        print("CI query failed: check gh authentication, access and connectivity", file=sys.stderr)
+        print("CI query unavailable: check gh authentication, access and connectivity", file=sys.stderr)
         return process.returncode, ""
-    return 0, output
+    try:
+        return 0, output.decode("utf-8")
+    except UnicodeDecodeError:
+        print("CI query returned invalid text", file=sys.stderr)
+        return 2, ""
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def public_json(path, seconds):
+    """Read only the public OMS API; never use tokens, CLI auth or redirects."""
+    timeout = min(30.0, max(0, seconds))
+    if timeout <= 0:
+        return 124, None
+    request = urllib.request.Request(
+        "https://api.github.com/repos/" + PUBLIC_REPO + "/" + path,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "oms-ci-query",
+                 "X-GitHub-Api-Version": "2022-11-28"})
+
+    def read_response():
+        opener = urllib.request.build_opener(NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(MAX_QUERY_BYTES + 1)
+            if len(raw) > MAX_QUERY_BYTES:
+                raise ValueError("oversized response")
+            return json.loads(raw), response.headers.get("Link", "")
+
+    try:
+        return 0, bounded_call(read_response, timeout)
+    except TimeoutError:
+        print("CI query unavailable: public API timed out", file=sys.stderr)
+        return 124, None
+    except urllib.error.HTTPError as exc:
+        print("CI query unavailable: public API HTTP %s" % exc.code, file=sys.stderr)
+        return 1, None
+    except (OSError, urllib.error.URLError):
+        print("CI query unavailable: public API connectivity failed", file=sys.stderr)
+        return 1, None
+    except (ValueError, UnicodeError):
+        print("CI query returned invalid or oversized public API evidence", file=sys.stderr)
+        return 2, None
+
+
+def public_run(row, sha, run_id=None, branch=""):
+    if (not isinstance(row, dict) or row.get("head_sha") != sha
+            or row.get("event") != "push" or row.get("path") != PUBLIC_WORKFLOW
+            or row.get("repository", {}).get("full_name") != PUBLIC_REPO
+            or type(row.get("id")) is not int or row["id"] <= 0
+            or (run_id is not None and row["id"] != int(run_id))
+            or (branch and row.get("head_branch") != branch)):
+        raise ValueError("mismatched public run")
+    return {"databaseId": row["id"], "headSha": row["head_sha"],
+            "status": row["status"], "conclusion": row["conclusion"]}
+
+
+def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_id=None):
+    """Keep gh first; a failed client may use bounded public OMS evidence."""
+    deadline = time.monotonic() + min(30.0, max(0, seconds))
+    rc, output = gh(args, seconds)
+    if not rc or rc in (2, 124) or not public_destination(destination) \
+            or workflow not in ("test.yml", PUBLIC_WORKFLOW) \
+            or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        return rc, output
+    params = {"head_sha": sha, "event": "push", "per_page": 1}
+    if branch:
+        params["branch"] = branch
+    path = ("actions/runs/" + run_id if run_id else
+            "actions/workflows/test.yml/runs?" + urllib.parse.urlencode(params))
+    rc, payload = public_json(path, deadline - time.monotonic())
+    if rc:
+        return rc, ""
+    try:
+        data, link = payload
+        if run_id is None:
+            rows = data["workflow_runs"]
+            if not isinstance(rows, list) or len(rows) > 1 \
+                    or type(data["total_count"]) is not int or data["total_count"] < len(rows) \
+                    or (not rows and data["total_count"]):
+                raise ValueError("invalid run list")
+            return 0, json.dumps([public_run(row, sha, branch=branch) for row in rows])
+        run = public_run(data, sha, run_id)
+        attempt = data["run_attempt"]
+        if type(attempt) is not int or attempt <= 0:
+            raise ValueError("invalid run attempt")
+        rc, payload = public_json("actions/runs/%s/attempts/%s/jobs?per_page=100" %
+                                  (run_id, attempt), deadline - time.monotonic())
+        if rc:
+            return rc, ""
+        jobs, link = payload
+        rows = jobs["jobs"]
+        if not isinstance(rows, list) or len(rows) > 100 \
+                or type(jobs["total_count"]) is not int or jobs["total_count"] != len(rows) \
+                or re.search(r'rel="?next\b', link):
+            raise ValueError("truncated jobs")
+        if any(type(row["run_id"]) is not int or row["run_id"] != int(run_id)
+               or row["head_sha"] != sha or type(row["run_attempt"]) is not int
+               or row["run_attempt"] != attempt for row in rows):
+            raise ValueError("mismatched jobs")
+        run["jobs"] = rows
+        return 0, json.dumps(run)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        print("CI query returned invalid or mismatched public API evidence", file=sys.stderr)
+        return 2, ""
+
+
+def run_conclusion(run, sha):
+    """One exact-SHA conclusion contract for both eligibility and scope reads."""
+    if run["headSha"] != sha or run["status"] not in (
+            "completed", "queued", "in_progress", "pending", "waiting", "requested"):
+        raise ValueError("run identity or status is invalid")
+    conclusion = run["conclusion"] if run["status"] == "completed" else "pending"
+    if not isinstance(conclusion, str) or not re.fullmatch(r"[a-z_]+", conclusion):
+        raise ValueError("run conclusion is invalid")
+    return conclusion
 
 
 def latest_run(destination, sha, seconds, branch, workflow):
@@ -72,6 +246,8 @@ def latest_run(destination, sha, seconds, branch, workflow):
         args += ["--workflow", workflow]
     try:
         budget = max(0.0, float(seconds))
+        if not math.isfinite(budget):
+            raise ValueError
     except ValueError:
         print("CI query wait budget is invalid", file=sys.stderr)
         return 2
@@ -80,7 +256,8 @@ def latest_run(destination, sha, seconds, branch, workflow):
     while True:
         remaining = max(0.0, deadline - time.monotonic())
         # Only an explicit zero budget gets a full single-request timeout.
-        rc, output = gh(args, remaining if budget > 0 else 30)
+        rc, output = query(destination, sha, args, remaining if budget > 0 else 30,
+                           branch, workflow)
         if rc:
             if rc == 124 and budget > 0 and pending_id is not None:
                 print(pending_id, "pending")
@@ -94,14 +271,10 @@ def latest_run(destination, sha, seconds, branch, workflow):
                 print("0 missing")
                 return 0
             row = rows[0]
-            if (row["headSha"] != sha or type(row["databaseId"]) is not int
-                    or row["databaseId"] <= 0):
+            if type(row["databaseId"]) is not int or row["databaseId"] <= 0:
                 raise ValueError
-            status = row["status"]
-            conclusion = row["conclusion"] if status == "completed" else "pending"
-            if not isinstance(conclusion, str) or not re.fullmatch(r"[a-z_]+", conclusion):
-                raise ValueError
-            if status == "completed":
+            conclusion = run_conclusion(row, sha)
+            if row["status"] == "completed":
                 print(row["databaseId"], conclusion)
                 return 0
             pending_id = row["databaseId"]
@@ -125,18 +298,25 @@ def run_scope(destination, run_id, sha, seconds):
     if not re.fullmatch(r"[1-9][0-9]*", run_id):
         print("CI scope needs a run id", file=sys.stderr)
         return 2
-    deadline = time.monotonic() + max(0.0, float(seconds))
+    try:
+        budget = max(0.0, float(seconds))
+        if not math.isfinite(budget):
+            raise ValueError
+    except ValueError:
+        print("CI query wait budget is invalid", file=sys.stderr)
+        return 2
+    deadline = time.monotonic() + budget
     args = ["run", "view", run_id, "--repo", repo_slug(destination),
             "--json", "headSha,status,conclusion,jobs"]
     while True:
         remaining = max(0.0, deadline - time.monotonic())
-        rc, output = gh(args, remaining)
+        rc, output = query(destination, sha, args, remaining if budget > 0 else 30,
+                           run_id=run_id)
         if rc:
             return rc
         try:
             run = json.loads(output)
-            if (run["headSha"] != sha or run["status"] != "completed"
-                    or run["conclusion"] != "success" or not isinstance(run["jobs"], list)):
+            if run_conclusion(run, sha) != "success" or not isinstance(run["jobs"], list):
                 raise ValueError("run is not a completed success for this commit")
             results = {}
             for job in run["jobs"]:

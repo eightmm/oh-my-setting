@@ -7,7 +7,7 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/oms-profile.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 
 plan="$("$ROOT/scripts/install-profile.sh" --plan --profile core --primary-provider codex)"
-printf '%s' "$plan" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["managed_tools"] == ["node","codex"]; assert r["notion_optional"]'
+printf '%s' "$plan" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["managed_tools"] == ["node","codex"]; assert r["github_optional"] and r["notion_optional"]'
 full="$("$ROOT/scripts/install-profile.sh" --plan --profile full --primary-provider codex)"
 printf '%s' "$full" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert {"node","codex","claude","agy","gh","ntn","uv"} <= set(r["managed_tools"])'
 
