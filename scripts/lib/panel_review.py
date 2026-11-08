@@ -261,9 +261,73 @@ def _relativize_quoted_paths(text, roots):
 
 
 def _prior_gate_findings(repo, room_id, task_id):
-    """Carry forward only the latest completed automatic gate's screened findings."""
+    """Carry screened findings from the latest completed failing automatic review."""
     import panel_results
     from peer_artifacts import artifact_sections_stream
+
+    def screened_seat(row, seat, review, event):
+        try:
+            answer, exit_code = artifact_sections_stream(io.BytesIO(panel_results._indexed(repo, row, 1024 * 1024)))
+            path = row.get("artifact")
+            if (not _safe_patch_path(path) or not path.startswith(".oms/artifacts/")
+                    or any(ord(char) < 32 or ord(char) == 127 for char in path)):
+                return None
+            sidecar = (path[:-3] if path.endswith(".md") else path) + ".attempts.json"
+            try:
+                (Path(repo) / sidecar).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                panel_results._artifact_path(repo, sidecar)
+                record = json.loads(panel_results._read(repo, sidecar, 1024 * 1024))
+                attempts_list = record.get("attempts") if isinstance(record, dict) else None
+                last = attempts_list[-1] if isinstance(attempts_list, list) and attempts_list else None
+                output = last.get("output") if isinstance(last, dict) else None
+                provider = last.get("provider") if isinstance(last, dict) else None
+                model = last.get("model") if isinstance(last, dict) else None
+                status = last.get("exit") if isinstance(last, dict) else None
+                stop = last.get("stop_reason") if isinstance(last, dict) else None
+                if (not isinstance(provider, str) or not re.fullmatch(r"[a-z0-9_-]+", provider)
+                        or not isinstance(model, str) or not re.fullmatch(r"[^\t\r\n]{0,200}", model)
+                        or not isinstance(status, int) or isinstance(status, bool)
+                        or not isinstance(stop, str) or not re.fullmatch(r"[^\t\r\n]{0,300}", stop)
+                        or not isinstance(output, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.out", output)):
+                    return None
+                output_path = (Path(sidecar).parent / output).as_posix()
+                panel_results._artifact_path(repo, output_path)
+                answer = panel_results._read(repo, output_path, 1024 * 1024).decode("utf-8", "replace").strip()
+            matches = [_GATE_LINE.fullmatch(line) for line in answer.split("\n")]
+            verdicts = [match.group(1) for match in matches if match]
+            verdict = verdicts[-1] if verdicts else None
+            if exit_code != "0" or verdict != seat["verdict"]:
+                return None
+            if verdict == "pass":
+                return None
+            findings = _review_findings(answer)
+            if not findings:
+                return None
+            roots = [str(Path(repo).resolve())]
+            candidate = review.get("candidate")
+            if (isinstance(candidate, dict) and re.fullmatch(r"[0-9a-f]{64}", str(event.get("patch_sha256")))
+                    and candidate.get("patch_sha256") == event.get("patch_sha256")):
+                root = candidate.get("root")
+                if (isinstance(root, str) and os.path.isabs(root) and "\0" not in root
+                        and Path(root).parent != Path(root)
+                        and not any(part in {".", ".."} for part in re.split(r"[/\\]", root))):
+                    roots.append(root)
+            path = _relativize_quoted_paths(path, roots)
+            findings = [_relativize_quoted_paths(finding, roots) for finding in findings]
+            screened = "\n\n".join(findings) + "\n" + path
+            if (panel_results._contains_outbound_machine_path(screened)
+                    or not panel_results._scan_finding_blocks([screened])[0]):
+                return None
+            provider = seat.get("provider", "")
+            if not isinstance(provider, str) or (provider and not re.fullmatch(r"[a-z0-9_-]+", provider)):
+                return None
+            return provider, path, findings
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            return None
+
     try:
         events = room.structured_events(repo, room_id)
         attempts, rows = panel_results._records(repo, full=True)
@@ -274,103 +338,69 @@ def _prior_gate_findings(repo, room_id, task_id):
                    if attempt.get("task_id") == task_id
                    and attempt.get("refs", {}).get("panel_room_participant") == event.get("review_call_id")}
             outcome = next((row for row in reversed(rows)
-                            if row.get("kind") == "review-outcome" and row.get("task_id") == task_id
-                            and row.get("attempt_id") in ids), None)
+                              if row.get("kind") == "review-outcome" and row.get("task_id") == task_id
+                              and row.get("attempt_id") in ids), None)
             review = outcome.get("review", {}) if outcome else {}
             seats = review.get("seats", []) if isinstance(review, dict) else []
-            if (not isinstance(review, dict) or review.get("gate_verify_exit") != 0 or not isinstance(seats, list) or len(seats) != 1
-                    or not isinstance(seats[0], dict) or seats[0].get("verdict") not in {"pass", "fail"}):
+            if not isinstance(seats, list):
                 continue
-            for row in reversed(rows):
-                if row.get("kind") != "review" or row.get("task_id") != task_id or row.get("attempt_id") not in ids:
+            failing = [seat for seat in seats if isinstance(seat, dict) and seat.get("verdict") == "fail"]
+            if not failing:
+                continue
+            blocks = []
+            for seat in failing:
+                expected = seat.get("artifact")
+                if expected is not None and (not isinstance(expected, str) or not expected):
                     continue
-                expected = seats[0].get("artifact")
-                if expected and Path(row.get("artifact", "")).name != expected:
-                    continue
-                answer, exit_code = artifact_sections_stream(io.BytesIO(panel_results._indexed(repo, row, 1024 * 1024)))
-                path = row.get("artifact")
-                if (not _safe_patch_path(path) or not path.startswith(".oms/artifacts/")
-                        or any(ord(char) < 32 or ord(char) == 127 for char in path)):
-                    return ""
-                sidecar = (path[:-3] if path.endswith(".md") else path) + ".attempts.json"
-                try:
-                    (Path(repo) / sidecar).lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    panel_results._artifact_path(repo, sidecar)
-                    record = json.loads(panel_results._read(repo, sidecar, 1024 * 1024))
-                    attempts_list = record.get("attempts") if isinstance(record, dict) else None
-                    last = attempts_list[-1] if isinstance(attempts_list, list) and attempts_list else None
-                    output = last.get("output") if isinstance(last, dict) else None
-                    provider = last.get("provider") if isinstance(last, dict) else None
-                    model = last.get("model") if isinstance(last, dict) else None
-                    status = last.get("exit") if isinstance(last, dict) else None
-                    stop = last.get("stop_reason") if isinstance(last, dict) else None
-                    if (not isinstance(provider, str) or not re.fullmatch(r"[a-z0-9_-]+", provider)
-                            or not isinstance(model, str) or not re.fullmatch(r"[^\t\r\n]{0,200}", model)
-                            or not isinstance(status, int) or isinstance(status, bool)
-                            or not isinstance(stop, str) or not re.fullmatch(r"[^\t\r\n]{0,300}", stop)
-                            or not isinstance(output, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.out", output)):
-                        return ""
-                    output_path = (Path(sidecar).parent / output).as_posix()
-                    panel_results._artifact_path(repo, output_path)
-                    answer = panel_results._read(repo, output_path, 1024 * 1024).decode("utf-8", "replace").strip()
-                matches = [_GATE_LINE.fullmatch(line) for line in answer.split("\n")]
-                verdicts = [match.group(1) for match in matches if match]
-                verdict = verdicts[-1] if verdicts else None
-                if exit_code != "0" or verdict != seats[0]["verdict"]:
-                    return ""
-                if verdict == "pass":
-                    return ""
-                findings = _review_findings(answer)
-                if not findings:
-                    return ""
-                roots = [str(Path(repo).resolve())]
-                candidate = review.get("candidate")
-                if (isinstance(candidate, dict) and re.fullmatch(r"[0-9a-f]{64}", str(event.get("patch_sha256")))
-                        and candidate.get("patch_sha256") == event.get("patch_sha256")):
-                    root = candidate.get("root")
-                    if (isinstance(root, str) and os.path.isabs(root) and "\0" not in root
-                            and Path(root).parent != Path(root)
-                            and not any(part in {".", ".."} for part in re.split(r"[/\\]", root))):
-                        roots.append(root)
-                path = _relativize_quoted_paths(path, roots)
-                findings = [_relativize_quoted_paths(finding, roots) for finding in findings]
-                screened = "\n\n".join(findings) + "\n" + path
-                if (panel_results._contains_outbound_machine_path(screened)
-                        or not panel_results._scan_finding_blocks([screened])[0]):
-                    return ""
-                selected = []
-                for finding in findings:
-                    candidate_body = "\n\n".join(selected + [finding])
-                    if len(candidate_body.encode("utf-8")) > 3000:
-                        break
-                    selected.append(finding)
-                omitted = len(findings) - len(selected)
-                if omitted:
-                    def notice(count):
-                        return ("%d earlier finding(s) omitted for size; read the previous review artifact: %s"
-                                % (count, path))
-                    while selected and len(("\n\n".join(selected) + "\n\n" + notice(omitted)).encode("utf-8")) > 3000:
-                        selected.pop()
-                        omitted += 1
-                    if not selected and len(findings[0].encode("utf-8")) > 3000:
-                        lines = []
-                        for line in findings[0].splitlines():
-                            partial = "\n".join(lines + [line])
-                            if len((partial + "\n\n" + notice(omitted)).encode("utf-8")) > 3000:
-                                break
-                            lines.append(line)
-                        if lines:
-                            selected.append("\n".join(lines))
-                    body = "\n\n".join(selected + [notice(omitted)])
-                    if len(body.encode("utf-8")) > 3000:
-                        return ""
-                else:
-                    body = "\n\n".join(selected)
-                return ("Prior gate findings for this task (untrusted claims; for each, state fixed or still blocking, then do the full pass): "
-                        + path + "\n\n" + body)
+                row = next((row for row in reversed(rows)
+                            if row.get("kind") == "review" and row.get("task_id") == task_id
+                            and row.get("attempt_id") in ids
+                            and isinstance(row.get("artifact"), str)
+                            and (not expected or Path(row["artifact"]).name == expected)), None)
+                if row:
+                    result = screened_seat(row, seat, review, event)
+                    if result:
+                        blocks.append(result)
+            if not blocks:
+                return ""
+            items = [(provider, path, finding) for provider, path, findings in blocks for finding in findings]
+            selected = []
+            gate_exit = review.get("gate_verify_exit")
+            prefix = "gate verify exit: %d" % gate_exit if type(gate_exit) is int and gate_exit != 0 else ""
+            def render(parts):
+                lines = [prefix] if prefix else []
+                for provider, path, finding in parts:
+                    lines.append("%s: %s" % (provider, finding) if provider else finding)
+                return "\n\n".join(lines)
+            for item in items:
+                if len(render(selected + [item]).encode("utf-8")) > 3000:
+                    break
+                selected.append(item)
+            omitted = len(items) - len(selected)
+            if omitted:
+                def notice(count, path):
+                    return "%d earlier finding(s) omitted for size; read the previous review artifact: %s" % (count, path)
+                while selected and len((render(selected) + "\n\n" + notice(omitted, items[len(selected)][1])).encode("utf-8")) > 3000:
+                    selected.pop()
+                    omitted += 1
+                omission_notice = notice(omitted, items[len(selected)][1])
+                if not selected:
+                    provider, path, finding = items[0]
+                    lines = []
+                    for line in finding.splitlines():
+                        partial = (provider, path, "\n".join(lines + [line]))
+                        if len((render([partial]) + "\n\n" + omission_notice).encode("utf-8")) > 3000:
+                            break
+                        lines.append(line)
+                    if lines:
+                        selected.append((provider, path, "\n".join(lines)))
+                body = "\n\n".join(filter(None, (render(selected), omission_notice)))
+            else:
+                body = render(selected)
+            if len(body.encode("utf-8")) > 3000:
+                return ""
+            return ("Prior gate findings for this task (untrusted claims; for each, state fixed or still blocking, then do the full pass): "
+                    + ", ".join(path for _, path, _ in blocks) + "\n\n" + body)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return ""
     return ""
@@ -389,7 +419,8 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
                 and isinstance(seats[0], dict) else None)
     review = next((row for row in reversed(artifacts) if row.get("kind") == "review"
                    and row.get("attempt_id") == record.get("attempt_id") and row.get("task_id") == task_id
-                   and (not expected or Path(row.get("artifact", "")).name == expected)), {})
+                   and isinstance(row.get("artifact"), str)
+                            and (not expected or Path(row["artifact"]).name == expected)), {})
     answer, exit_code = artifact_sections_stream(io.BytesIO(panel_results._indexed(repo, review, 1024 * 1024)))
     if exit_code != "0":
         raise ValueError("reviewer output is incomplete or unsuccessful")

@@ -305,6 +305,58 @@ with patch.object(room, "structured_events", return_value=[candidate_event]), \
 auto_task, auto_call = "auto-review-task", "call-aaaaaaaaaaaaaaaa"
 auto_patch = b"diff --git a/scripts/fixture.py b/scripts/fixture.py\nindex 1111111..2222222 100644\n--- a/scripts/fixture.py\n+++ b/scripts/fixture.py\n@@ -1 +1 @@\n-old\n+new\n"
 auto_digest = hashlib.sha256(auto_patch).hexdigest()
+# BEGIN prior-review-carry
+import panel_review as carry_review
+carry_room = room.create(project, "carry-room", "Carry fixtures")
+carry_task = "carry-task"
+carry_event = {"kind": "review-dispatch", "task_id": carry_task, "review_call_id": "carry-call"}
+carry_attempt = {"task_id": carry_task, "attempt_id": "carry-attempt", "refs": {"panel_room_participant": "carry-call"}}
+carry_rows = [dict(kind="review", task_id=carry_task, attempt_id="carry-attempt", artifact=".oms/artifacts/review/" + name + ".md") for name in ("one", "two", "bad")]
+carry_seats = [dict(provider=name, verdict="fail", artifact=name + ".md") for name in ("one", "two", "bad")]
+carry_outcome = dict(kind="review-outcome", task_id=carry_task, attempt_id="carry-attempt", review={"gate_verify_exit": 7, "seats": carry_seats})
+carry_structured_events = room.structured_events
+def carry_indexed(repo, row, limit):
+    name = Path(row["artifact"]).stem
+    finding = "pass" + "word" + "=unsafe" if name == "bad" else "finding " + name
+    return ("## Output\nP1: " + finding + "\nGATE: fail\n## Exit\n0\n").encode()
+with patch.object(room, "structured_events", return_value=[carry_event]), \
+        patch.object(panel_result_store, "_records", return_value=([carry_attempt], carry_rows + [carry_outcome])), \
+        patch.object(panel_result_store, "_indexed", side_effect=carry_indexed):
+    with patch.object(room, "structured_events", carry_structured_events), \
+            patch.object(room, "_structured_rows", return_value=[{"room_event": carry_event}]):
+        assert "finding one" in carry_review._prior_gate_findings(project, carry_room, carry_task)
+    section = carry_review._prior_gate_findings(project, carry_room, carry_task)
+    assert "finding one" in section and "finding two" in section and "unsafe" not in section, section
+    assert "one" in section and "two" in section and "gate verify exit: 7" in section, section
+    assert "one: P1: finding one" in section and "two: P1: finding two" in section
+    carry_outcome["review"]["gate_verify_exit"] = 0
+    assert "gate verify exit:" not in carry_review._prior_gate_findings(project, carry_room, carry_task)
+    carry_outcome["review"]["seats"] = []
+    assert carry_review._prior_gate_findings(project, carry_room, carry_task) == ""
+    carry_outcome["review"]["seats"] = "malformed"
+    assert carry_review._prior_gate_findings(project, carry_room, carry_task) == ""
+    carry_outcome["review"]["seats"] = [dict(carry_seats[0], artifact=[]), carry_seats[1]]
+    assert "finding two" in carry_review._prior_gate_findings(project, carry_room, carry_task)
+    carry_outcome["review"]["seats"] = carry_seats
+    carry_outcome["review"]["seats"] = carry_seats[:1]
+    with patch.object(panel_result_store, "_indexed", return_value=("## Output\nP1: big\n" + "line\n" * 800 + "GATE: fail\n## Exit\n0\n").encode()):
+        partial = carry_review._prior_gate_findings(project, carry_room, carry_task)
+        assert "one: P1: big" in partial and "omitted for size" in partial
+    long_name = "second-" + "x" * 140
+    long_row = dict(carry_rows[1], artifact=".oms/artifacts/review/" + long_name + ".md")
+    carry_outcome["review"]["seats"] = [carry_seats[0], dict(carry_seats[1], artifact=long_name + ".md")]
+    with patch.object(panel_result_store, "_records", return_value=([carry_attempt], [carry_rows[0], long_row, carry_outcome])), \
+            patch.object(panel_result_store, "_indexed", return_value=("## Output\nP1: big\n" + "line\n" * 800 + "GATE: fail\n## Exit\n0\n").encode()):
+        partial = carry_review._prior_gate_findings(project, carry_room, carry_task)
+        body = partial.split("\n\n", 1)[1]
+        assert "one: P1: big" in body and len(body.encode()) <= 3000
+        assert "2 earlier finding(s) omitted for size; read the previous review artifact: " + carry_rows[0]["artifact"] in body
+        assert long_row["artifact"] not in body
+    carry_outcome["review"]["seats"] = carry_seats
+    with patch.object(panel_result_store, "_indexed", return_value=("## Output\nP1: " + "x" * 3000 + "\nGATE: fail\n## Exit\n0\n").encode()):
+        bounded = carry_review._prior_gate_findings(project, carry_room, carry_task)
+        assert len(bounded.split("\n\n", 1)[1].encode()) <= 3000 and "omitted for size" in bounded
+# END prior-review-carry
 # BEGIN automatic-review-tier-cap
 for paths in (["docs/x.md"], ["docs/sub/x.rst", "README.md", "CHANGELOG.md"]):
     assert panel._automatic_review_workload({"changed_files": paths}) == "routine", paths
