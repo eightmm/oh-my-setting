@@ -401,7 +401,6 @@ TASK_RECEIPT_TITLE=""
 TASK_RECEIPT_STATE=""
 TASK_RECEIPT_PROVIDER=""
 TASK_RECEIPT_LEASE=""
-TASK_RECEIPT_LEASE_EPOCH=0
 TASK_RECEIPT_REVIEW_LEASE=""
 TASK_RECEIPT_VERIFY=""
 TASK_RECEIPT_PATCH=""
@@ -1155,7 +1154,6 @@ assignments={
  "TASK_RECEIPT_ID":d.get("id", ""),"TASK_RECEIPT_TITLE":d.get("title", ""),
  "TASK_RECEIPT_STATE":d.get("state", ""),"TASK_RECEIPT_PROVIDER":d.get("provider", ""),
  "TASK_RECEIPT_LEASE":d.get("lease_id", ""),
- "TASK_RECEIPT_LEASE_EPOCH":str(epoch),
  "TASK_RECEIPT_REVIEW_LEASE":d.get("review_lease_id", ""),
  "TASK_RECEIPT_VERIFY":d.get("verify", ""),"TASK_RECEIPT_PATCH":d.get("patch", ""),
  "TASK_RECEIPT_ARTIFACT":d.get("artifact", ""),
