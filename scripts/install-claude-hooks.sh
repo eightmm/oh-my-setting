@@ -60,7 +60,7 @@ claude_auto_compact_supported() {
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=9
+HOOKS_SCHEMA=10
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12

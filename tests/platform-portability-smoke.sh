@@ -1403,7 +1403,7 @@ test_bash_floor() (
 
   # Entry points: the dispatcher, every hook script, and the scheduled ones.
   for name in oms skill-router.sh turn-guard.sh fail-ledger-hook.sh syntax-guard-hook.sh \
-      git-move-guard-hook.sh panel-direct-work-hook.sh precompact-handoff.sh \
+      git-move-guard-hook.sh precompact-handoff.sh \
       resume-hook.sh telemetry-hook.sh auto-update.sh tick.sh; do
     fake_major "$ROOT/scripts/$name" "$d/x/$name"
     rc=0

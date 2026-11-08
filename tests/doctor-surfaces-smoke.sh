@@ -16,8 +16,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=9
-EXPECTED_SURFACES_SHA256=3cc3f2cf77f84796bf614d4adb0de5fdbd5178dd1928393b2b3dd12228764250
+EXPECTED_HOOKS_SCHEMA=10
+EXPECTED_SURFACES_SHA256=119ca83c12125bc1a21600966b0a27a3587c8826f7cfd69bed074d895ecaf041
 
 # A fixture HOME with a receipt this checkout owns, an empty harness repo for
 # the event stream, and a settings.json built from --print-expected so the
