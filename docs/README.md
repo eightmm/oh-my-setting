@@ -33,6 +33,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 | [Implementation review](CONTROL-PLANE-IMPLEMENTATION-REVIEW.md) | Recent implementation findings, reproductions and UX tradeoffs |
+| [Standalone gap backlog](STANDALONE-GAPS-20261110.md) | Proposed: what OMS lacks to close work without companion tools, by area, with priorities, companions and non-goals |
 
 ## Migration notes
 
