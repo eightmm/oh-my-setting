@@ -954,8 +954,10 @@ def add_main_window(repo, session, launch, view, attention_only, env, resume=Non
 MAX_LIVE_MAINS = 1
 
 
-def live_mains(repo, session, room_id, pending_window=None):
-    """Panel-wide: joined mains with a live panel-main attempt in any room this panel's windows belong to, plus windows opened but not yet enrolled."""
+def live_mains(repo, session, room_id, pending_window=None, released=frozenset()):
+    """Panel-wide: joined mains with a live panel-main attempt in any room this panel's windows belong to, plus windows opened but not yet enrolled.
+
+    RELEASED names attempts proven dead but not yet released; they never count as live."""
     from terminal_panel import _LAUNCH_HARNESSES, main_history, tmux_command
     found = subprocess.run(tmux_command("list-windows", "-t", "=" + session, "-F",
                                         "#{@oms_panel_owner}\t#{@oms_panel_room}\t#{@oms_panel_room_participant}\t#{window_name}\t#{window_id}\t#{@oms_panel_harness}"),
@@ -984,7 +986,7 @@ def live_mains(repo, session, room_id, pending_window=None):
         try:
             joined = {p["participant"] for p in room.status(repo, ident)["participants"]
                       if p["joined"] and p["role"] == "main"}
-            history = main_history(repo, ident)
+            history = [row for row in main_history(repo, ident) if row.get("attempt_id") not in released]
         except (ValueError, OSError):
             raise ValueError("main lifecycle status unavailable; existing sessions preserved")
         for row in history:

@@ -476,6 +476,7 @@ case "\$1" in
   display-message) [ -n "\${WAKE_MODE:-}" ] && printf '%s\\n' "\$WAKE_MODE" ;;
   capture-pane) [ -f "\${WAKE_SCREEN:-}" ] && cat "\$WAKE_SCREEN" ;;
   send-keys) exit 0 ;;
+  list-windows) [ -n "\${WAKE_WINDOWS+x}" ] && printf '%b' "\$WAKE_WINDOWS" || exit 1 ;;
   *) exit 1 ;;
 esac
 EOF_TMUX
@@ -547,7 +548,8 @@ def keys():
 history = []
 @contextlib.contextmanager
 def main(submit=None):
-    with patch.object(panel_native, "live_main_pane", return_value=("%7", "codex")), \
+    with patch.object(panel_interaction, "_live_main_blocker", return_value="a panel main is live"), \
+            patch.object(panel_native, "live_main_pane", return_value=("%7", "codex")), \
             patch.object(panel_native, "_swap_main_window", return_value=("@1", attempt, "%7", member, "room-wake")), \
             patch.object(terminal_panel, "resolve_session", return_value=("oms-wake", str(repo))), \
             patch.object(terminal_panel, "main_history", side_effect=lambda *a: history), \
@@ -655,6 +657,12 @@ with main() as typed:
     receipt.symlink_to(bare / ".oms" / "plan" / "elsewhere.json")
     assert panel_interaction.wake_main(bare, now=now) == "skipped: autopilot receipt unavailable or unsafe"
     assert typed.call_count == 5
+    # One pool with the headless resumes: six spent by autopilot rows leave an interactive wake none, five leave one.
+    seed(6, main="autopilot", outcome="resumed")
+    assert wake() == "skipped: call-wake reached 6 wakes today" and typed.call_count == 5
+    seed(3, main="autopilot", outcome="resumed")
+    assert wake().startswith("woke ") and typed.call_count == 6 and len(wakes()) == 4
+    seed(0)
 # Through the real submit and the tmux stub: a draft gets no keys at all; an empty line gets the text, then Enter.
 with main(submit=True):
     tmux_log.unlink()
@@ -699,6 +707,246 @@ for kind in symlink hardlink; do
   rm -f "$wk/.oms/tick/last.json"
 done
 rm -f "$wk/.oms/tick/elsewhere.json"
+
+# --- no live main: the opt-in tick resumes an approved autopilot contract --------
+# Receipts come from the autopilot's own row builder, so its validators judge them. The spawn seam is stubbed at the
+# process boundary: nothing here starts autopilot.sh or a provider.
+rs="$TMP/resume"; make_committed_repo "$rs"
+cat > "$TMP/resume_fx.py" <<'PY'
+import argparse, hashlib, json, os, runpy, subprocess
+from pathlib import Path
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def build(lib, repo, stage, text="spec\n", diagnostic=None, state=None):
+    repo = Path(repo)  # the execution checkout; STATE holds the receipt and plan (a scratch worktree runs from its parent)
+    state = Path(state or repo)
+    rules = runpy.run_path(os.path.join(lib, "autopilot-receipt.py"))
+    base_file = state / ".oms" / "fx-base"
+    if not base_file.exists():
+        base_file.write_text(git(state, "symbolic-ref", "--short", "HEAD"))
+    base, plan = base_file.read_text(), state / ".oms" / "plan"
+    (repo / "PROJECT.md").write_text(text)
+    plan.mkdir(parents=True, exist_ok=True)
+    proposal = plan / "proposal-fx.json"
+    proposal.write_bytes(b'{"tasks": []}\n')
+    branch = "oms/autopilot-" + hashlib.sha256(b"spec\n").hexdigest()[:12]
+    onto = base if stage in ("proposing", "proposal-review", "parked") else branch
+    head = subprocess.run(["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "HEAD"], capture_output=True, text=True)
+    if head.stdout.strip() != onto:
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-B", onto], check=True)
+    diag = (diagnostic or {}) if stage == "parked" else {}
+    args = argparse.Namespace(
+        stage=stage, repo=str(repo), spec_sha256=hashlib.sha256(b"spec\n").hexdigest(), planner="claude",
+        worker="codex", reviewer="claude", provider_timeout="5m", planner_model="", planner_fallback_model="",
+        planner_reasoning_effort="auto", planner_timeout="15m", worker_model="", worker_fallback_model="",
+        worker_reasoning_effort="auto", worker_timeout="30m", reviewer_model="", reviewer_fallback_model="",
+        reviewer_reasoning_effort="auto", reviewer_timeout="20m", allowed="scripts", base=base,
+        base_sha=git(repo, "rev-parse", base), remote="origin", max_cycles=3, initial_tasks=2, replan_tasks=1,
+        auto_repair=False, retry_known=False, allow_verifier_change=False, allow_floor_change="",
+        review_mode="shadow", collaboration="off", draft_pr=False,
+        proposal="" if stage == "proposing" else str(proposal),
+        proposal_sha256="" if stage == "proposing" else hashlib.sha256(proposal.read_bytes()).hexdigest(),
+        branch=branch, owner_id="", updated="2026-11-09T00:00:00Z", diagnostic_phase=diag.get("phase", ""),
+        diagnostic_reason_code=diag.get("code", ""), diagnostic_reason=diag.get("reason", ""),
+        diagnostic_semantic_verdict="unknown", diagnostic_evidence_path="")
+    row = rules["row_from_args"](args)
+    (plan / "autopilot-run.json").write_bytes((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
+    return rules, row
+PY
+rs_managed="$TMP/resume-managed"
+rs_scratch="$(OMS_HARNESS_CHILD=0 OMS_HARNESS_DELEGATE_DEPTH=0 OMS_DELEGATE_WORKTREE_ROOT="$rs_managed" "$ROOT/scripts/scratch-worktree.sh" add --repo "$rs" --owner-pid $$)" ||
+  fail "resume scratch fixture creation failed"
+PATH="$TMP/wake-bin:$PATH" OMS_ROOT="$ROOT" OMS_HARNESS_DELEGATE_DEPTH=0 OMS_DELEGATE_WORKTREE_ROOT="$rs_managed" python3 - "$rs" "$TMP" "$rs_scratch" <<'PY' || fail "no-main autopilot resume decisions are wrong"
+import contextlib, json, os, sys, time
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, os.environ["OMS_ROOT"] + "/scripts/lib")
+sys.path.insert(0, sys.argv[2])
+import panel_interaction, panel_release, resume_fx, room, terminal_panel
+repo, tmp, lib = Path(sys.argv[1]), Path(sys.argv[2]), os.environ["OMS_ROOT"] + "/scripts/lib"
+scratch = Path(sys.argv[3])
+now = float(int(time.time()))
+day = time.strftime("%Y-%m-%d", time.gmtime(now))
+ledger, receipt_file = repo / ".oms" / "tick" / "last.json", repo / ".oms" / "plan" / "autopilot-run.json"
+state = {"n": 0}
+def marker():
+    state["n"] += 1
+    return str(tmp / ("resume-marker-%d" % state["n"]))
+def seed(count, **extra):
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"schema": 1, "wakes": [
+        dict({"day": day, "main": "call-other", "key": "k%d" % n}, **extra) for n in range(count)]}))
+def rows():
+    return json.loads(ledger.read_text()).get("wakes", []) if ledger.exists() else []
+def resume(**kw):
+    return panel_interaction.wake_main(repo, now=now, once=kw.pop("once", None) or marker(), **kw)
+def stage(name, **kw):
+    return resume_fx.build(lib, repo, name, **kw)
+
+with patch.object(panel_interaction, "_spawn_continuation", return_value=4242) as spawn:
+    # No main (the real evidence: no attempts, no session) and a validated driving contract: exactly one spawn.
+    rules, row = stage("driving")
+    argv = rules["option_args"](row)
+    first_marker = marker()
+    status = resume(once=first_marker)
+    assert status.startswith("resumed autopilot (stage driving, receipt "), status
+    assert spawn.call_count == 1, spawn.call_args_list
+    (command, log, cwd), unused = spawn.call_args
+    assert command[0] == "bash" and command[1] == os.environ["OMS_ROOT"] + "/scripts/autopilot.sh" and command[2:] == argv[2:], command
+    assert command[-2:] == ["--expected-proposal-sha256", row["proposal"]["sha256"]] and "propose" not in command[2:], command
+    assert cwd == row["repo"] and log.startswith(str(repo / ".oms" / "tick" / "autopilot-")), (cwd, log)
+    assert os.path.exists(first_marker)
+    # The launch is recorded in the wake ledger before the spawn is observable, and carries the receipt digest.
+    assert [(w["main"], w["outcome"], w["stage"]) for w in rows()] == [("autopilot", "resumed", "driving")], rows()
+    # The same receipt bytes never launch twice in a day; the next state does, but not twice in one tick run.
+    assert "already resumed today at this receipt state" in resume() and spawn.call_count == 1
+    receipt_file.write_text(receipt_file.read_text().replace("2026-11-09T00:00:00Z", "2026-11-09T00:00:01Z"))
+    status = resume(once=first_marker)
+    assert "this tick run already resumed one autopilot" in status and spawn.call_count == 1, status
+    assert resume().startswith("resumed ") and spawn.call_count == 2 and len(rows()) == 2, rows()
+    # Dry run: the command it would run; no spawn, marker or ledger row.
+    receipt_file.write_text(receipt_file.read_text().replace("2026-11-09T00:00:01Z", "2026-11-09T00:00:02Z"))
+    before, dry_marker = ledger.read_text(), marker()
+    shown = resume(dry_run=True, once=dry_marker)
+    assert shown.startswith("would resume autopilot (stage driving") and "--expected-proposal-sha256 " in shown, shown
+    assert spawn.call_count == 2 and ledger.read_text() == before and not os.path.exists(dry_marker)
+    # Daily cap, one pool with the wake rows: six spent leave none, five leave one, skipped rows and yesterday's do not count.
+    stage("driving")
+    seed(6, outcome="woke")
+    assert "6 wakes already spent today; resumes when the UTC day rolls over" in resume() and spawn.call_count == 2
+    seed(6, outcome="skipped", reason="main input line holds text")
+    assert resume().startswith("resumed ") and spawn.call_count == 3
+    stage("driving"); seed(5, outcome="woke")
+    assert resume().startswith("resumed ") and spawn.call_count == 4 and len(rows()) == 6
+    stage("driving"); seed(0)
+    # Never resumed: a proposal in review, a parked receipt, a finished run, a proposing contract, an invalid or absent one.
+    expected = {
+        "proposal-review": ("autopilot proposal-review: a proposal awaits parent review", "runs the printed `oms autopilot run --proposal"),
+        "parked": ("autopilot parked: the run is parked for an operator decision; resolve the park reason or abandon; next step: "
+                   "inspect the wall (wall-kill)", "the operator resolves the park"),
+        "done": ("autopilot done: the run is complete", "a new `oms autopilot propose`"),
+        "proposing": ("autopilot continuation at stage proposing is not an approved `run`", "oms autopilot run --proposal FILE"),
+    }
+    for name, (why, until) in expected.items():
+        seed(0)
+        stage(name, diagnostic={"phase": "driving", "code": "wall-kill", "reason": "inspect the wall"} if name == "parked" else None)
+        status = resume()
+        assert status.startswith("skipped: ") and why in status and until in status, (name, status)
+    stage("driving", text="spec changed\n")
+    status = resume()
+    assert "autopilot receipt invalid" not in status and "digest gate: PROJECT.md differs from the outer receipt" in status, status
+    for bad in ("{", "[]", ""):
+        receipt_file.write_text(bad)
+        status = resume()
+        assert status.startswith("skipped: autopilot receipt invalid"), (bad, status)
+    receipt_file.unlink()
+    receipt_file.symlink_to(repo / ".oms" / "plan" / "elsewhere.json")
+    assert resume().startswith("skipped: autopilot receipt invalid"), resume()
+    receipt_file.unlink()
+    assert "no live main and no autopilot contract; resumes when" in resume()
+    assert spawn.call_count == 4, spawn.call_count
+    # A living claimant (the run is already held) is the autopilot's own refusal: nothing a second time.
+    stage("driving"); seed(0)
+    receipt_file.with_name("autopilot-reentries.jsonl").write_text(json.dumps({
+        "schema": 1, "kind": "autopilot-drive-claim", "spec_sha256": row["spec_sha256"], "branch": row["branch"],
+        "owner_id": "", "claim_pid": os.getpid(), "updated": "2026-11-09T00:00:00Z"}) + "\n")
+    status = resume()
+    assert status.startswith("skipped: autopilot driving: this run is already held by a live session") and spawn.call_count == 4, status
+    receipt_file.with_name("autopilot-reentries.jsonl").unlink()
+    # A live main (or unverified liveness) goes the idle-main wake path; nothing is resumed or spawned.
+    for blocker in ("a panel main is live", "main liveness unverified: tmux status unavailable"):
+        with patch.object(panel_interaction, "_live_main_blocker", return_value=blocker):
+            status = resume()
+        assert status.startswith("skipped: ") and "resumed" not in status and "contract" not in status, status
+    assert spawn.call_count == 4 and rows() == [], rows()
+    # Without a pane to type into, the blocker's reason and its recovery command are the skip result, not "no ready work".
+    hint = "this panel already has a live main or unverified owner; if crashed: oms panel --release-main att_" + "a" * 32
+    for dry in (False, True):
+        with patch.object(panel_interaction, "_live_main_blocker", return_value=hint):
+            status = resume(dry_run=dry)
+        assert status.startswith("skipped: no live main pane to type into") and status.endswith(hint), status
+    assert spawn.call_count == 4 and rows() == [], rows()
+    # A receipt bound to another checkout of this state root (a scratch worktree) is refused before the per-run
+    # marker, the ledger and the spawn: the caller is the checkout the tick runs for, never the receipt's own repo.
+    foreign_marker = marker()
+    resume_fx.build(lib, scratch, "driving", state=repo)
+    foreign = resume(once=foreign_marker)
+    assert foreign.startswith("skipped: autopilot driving: digest gate: outer receipt belongs to a different repository"), foreign
+    assert not os.path.exists(foreign_marker) and rows() == [] and spawn.call_count == 4, (foreign, rows())
+    assert panel_interaction.wake_main(repo, dry_run=True, now=now).startswith("skipped: autopilot driving: digest gate"), "dry"
+    stage("driving")
+    # A control-only session holding a releasable dead main is not occupied: the resume goes ahead, and the tick
+    # releases nothing (release stays the panel's job). The same history without the release proof does block.
+    dead = {"tool": "panel-main", "terminal": False, "state": "working", "attempt_id": "att_" + "d" * 32,
+            "refs": {"panel_role": "main", "panel_room_participant": "call-dead", "panel_room_id": "room-dead"}}
+    os.environ["WAKE_WINDOWS"] = "\t\t\tcontrol\t@0\t\n"
+    def session(releasable):
+        return (patch.object(terminal_panel, "events", return_value=json.dumps([dead])),
+                patch.object(terminal_panel, "resolve_session", return_value=("oms-dead", str(repo))),
+                patch.object(terminal_panel, "recorded_room", return_value="room-dead"),
+                patch.object(panel_release, "classify", return_value={
+                    "releasable": [{"attempt": dead["attempt_id"]}] if releasable else [], "unverifiable": []}),
+                patch.object(room, "resolve", side_effect=lambda unused, ident: ident),
+                patch.object(room, "same_room", return_value=True),
+                patch.object(room, "status", return_value={"participants": [
+                    {"participant": "call-dead", "joined": True, "role": "main"}]}),
+                patch.object(panel_release, "release_held", side_effect=AssertionError("the tick must not release")))
+    with contextlib.ExitStack() as stack:
+        for item in session(True):
+            stack.enter_context(item)
+        assert panel_interaction._live_main_blocker(repo) == ""
+        status = resume()
+        assert status.startswith("resumed autopilot (stage driving"), status
+    assert spawn.call_count == 5 and len(rows()) == 1
+    seed(0)
+    with contextlib.ExitStack() as stack:
+        for item in session(False):
+            stack.enter_context(item)
+        assert panel_interaction._live_main_blocker(repo) != ""
+    del os.environ["WAKE_WINDOWS"]
+    stage("driving"); seed(0)
+    # A held start lock and a malformed ledger stop the resume before any record or spawn; the ledger is kept as found.
+    with terminal_panel._lock(repo, "panel-main-start"):
+        assert resume() == "skipped: panel typing lock held"
+    ledger.write_text("{")
+    status = resume()
+    assert status.startswith("refused: ") and "kept as found" in status and ledger.read_text() == "{" and spawn.call_count == 5
+    ledger.unlink()
+    # An unwritable marker fails closed.
+    assert "cannot claim this tick run's resume marker" in resume(once=str(tmp / "no-such-dir" / "m")) and spawn.call_count == 5
+# The real spawn seam: detached (its own session), output to the log, never waited on.
+log = tmp / "spawn.log"
+pid = panel_interaction._spawn_continuation(["bash", "-c", "echo spawned; exit 0"], str(log), str(tmp))
+assert os.getsid(pid) == pid or not os.path.exists("/proc/%d" % pid)
+deadline = time.time() + float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "60"))
+while "spawned" not in (log.read_text() if log.exists() else "") and time.time() < deadline:
+    time.sleep(.05)
+assert log.read_text() == "spawned\n", log.read_text()
+for argv in ([str(repo), "--once"], [str(repo), "--dry-run", "--once"]):
+    with contextlib.redirect_stderr(open(os.devnull, "w")):
+        assert panel_interaction.wake_cli(argv) == 2, argv
+PY
+# Through the tick: a dry run shows the command it would run; a real sweep with a parked contract spawns nothing and says why.
+rs_stage() { OMS_ROOT="$ROOT" python3 -c 'import os, sys; sys.path[:0] = [sys.argv[1], os.environ["OMS_ROOT"] + "/scripts/lib"]; import resume_fx; resume_fx.build(os.environ["OMS_ROOT"] + "/scripts/lib", sys.argv[2], sys.argv[3], diagnostic={"phase": "driving", "code": "wall-kill", "reason": "inspect the wall"})' "$TMP" "$rs" "$1"; }
+rm -rf "$rs/.oms/tick"
+rs_stage driving
+out="$(PATH="$TMP/wake-bin:$PATH" OMS_TICK_WAKE=1 "$TICK" run --repo "$rs" --dry-run)"
+printf '%s' "$out" | grep >/dev/null "^wake $rs: would resume autopilot (stage driving, receipt .*--expected-proposal-sha256 " ||
+  fail "a dry-run tick must show the approved continuation: $out"
+[ ! -e "$rs/.oms/tick" ] || fail "a dry-run resume must write nothing"
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$rs")"
+printf '%s' "$out" | grep >/dev/null '^wake ' && fail "the resume must be off unless OMS_TICK_WAKE=1: $out"
+rs_stage parked
+mkdir -p "$TMP/tickrun"
+out="$(PATH="$TMP/wake-bin:$PATH" TMPDIR="$TMP/tickrun" OMS_TICK_WAKE=1 "$TICK" run --repo "$rs")"
+printf '%s' "$out" | grep >/dev/null "^wake $rs: skipped: autopilot parked: .*next step: inspect the wall (wall-kill); resumes when the operator resolves the park" &&
+  printf '%s' "$out" | grep >/dev/null 'wake=0' || fail "a parked contract must stay parked with its reason: $out"
+[ -z "$(find "$rs/.oms/tick" -name 'autopilot-*.log' 2>/dev/null)" ] && [ -z "$(ls "$TMP/tickrun")" ] ||
+  fail "a skipped resume leaves no log, and the run scratch is removed"
 
 # --- install / status / uninstall through the stub --------------------------
 ci_repo="$TMP/ci-owner"; make_committed_repo "$ci_repo"

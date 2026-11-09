@@ -7,7 +7,8 @@
 # resolves mechanically recovered or superseded artifact failures, and refreshes
 # a stale Codex plugin cache; gc stays opt-in (OMS_TICK_GC=1) because its
 # retention floor is a per-repo decision. The idle-main wake is opt-in too
-# (OMS_TICK_WAKE=1): it types into a person's live CLI. `install` wires an hourly
+# (OMS_TICK_WAKE=1): it types into a person's live CLI, or with no live panel main
+# resumes the autopilot contract the user already approved. `install` wires an hourly
 # user-level timer (systemd, cron fallback) so sessions start on a swept tree.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/platform.sh
@@ -60,8 +61,13 @@ Environment:
   OMS_TICK_WAKE=1              prompt a panel main idle 30+ min with no live child
                                and a provably empty input line (no pending draft)
                                when plan work is ready or an autopilot proposal
-                               waits in proposal-review (default off; at most one
-                               per main per run and 6 per UTC day; --dry-run prints)
+                               waits in proposal-review; with no live panel main,
+                               resume an approved autopilot contract headlessly
+                               (its own validated `run` continuation; never a
+                               proposal, a parked receipt or a new contract).
+                               Default off; at most one per main per run, one
+                               resume per run, 6 per UTC day in all;
+                               --dry-run prints
   OMS_TICK_STEP_TIMEOUT        seconds per step when `timeout` exists (600)
 EOF
 }
@@ -98,7 +104,7 @@ case "$IDLE_DAYS$TASK_IDLE_DAYS$PLAN_IDLE_DAYS$FAILURE_STALE_DAYS$STEP_TIMEOUT" 
 
 repo_root() { git -C "${1:-$PWD}" rev-parse --show-toplevel 2>/dev/null || (cd "${1:-$PWD}" && pwd -P); }
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout "$STEP_TIMEOUT" "$@"; else "$@"; fi; }
-wake_main() {  # ROOT [--dry-run] -> one status line from the panel's own lock, checks and submit
+wake_main() {  # ROOT [--dry-run] [--once MARKER] -> one status line from the panel's own lock, checks and submit
   bounded python3 - "$ROOT/scripts/lib" "$@" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -401,8 +407,8 @@ except (OSError, ValueError, KeyError, TypeError):
   fi
   if [ "${OMS_TICK_GC:-0}" = 1 ]; then gc=0; bounded "$oms" gc --repo "$root" --apply >/dev/null 2>&1 || gc=$?; fi
   if [ "${OMS_TICK_WAKE:-0}" = 1 ]; then
-    wake_note="$(wake_main "$root" 2>&1 | tail -n 1)" || true  # a failed wake never stops the receipt
-    case "$wake_note" in "woke "*) wake=1 ;; *) wake=0 ;; esac
+    wake_note="$(wake_main "$root" --once "$RESUME_MARK" 2>&1 | tail -n 1)" || true  # a failed wake never stops the receipt
+    case "$wake_note" in "woke "*|"resumed "*) wake=1 ;; *) wake=0 ;; esac
     echo "wake $root: ${wake_note:-no status}"
   fi
   mkdir -p "$root/.oms/tick"
@@ -452,8 +458,16 @@ $(oms_provider_discovered_names)
 EOF_NAMES
 }
 
+RESUME_MARK=/dev/null/resume  # one headless autopilot resume per run: its first claimant creates this file
+RUN_SCRATCH=""
 run_tick() {
   local root
+  if [ "${OMS_TICK_WAKE:-0}" = 1 ] && [ "$DRY_RUN" != 1 ] && RUN_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/oms-tick-run.XXXXXX" 2>/dev/null)"; then
+    RESUME_MARK="$RUN_SCRATCH/resume"
+    trap 'rm -rf -- "$RUN_SCRATCH"' EXIT
+  else
+    RUN_SCRATCH=""
+  fi
   if [ "$DRY_RUN" = 1 ]; then dry_run_catalogs; else oms_capability_refresh_stale_catalogs; fi
   if [ "${#REPOS[@]}" -eq 0 ] && [ -f "$REGISTRY" ]; then
     while IFS= read -r root; do [ -n "$root" ] && REPOS+=("$root"); done < "$REGISTRY"
@@ -507,7 +521,7 @@ install_tick() {
     systemd)
       if [ "$DRY_RUN" = 1 ]; then echo "would install systemd user timer: $TIMER_FILE (hourly)"; return 0; fi
       mkdir -p "$SYSTEMD_DIR"
-      printf '[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\nEnvironment=PATH=%s\nExecStart=%s"%s/scripts/tick.sh" run\n' "$(tool_path)" "$(launch_prefix)" "$ROOT" > "$SERVICE_FILE"
+      printf '[Unit]\nDescription=oh-my-setting tick\n[Service]\nType=oneshot\nKillMode=process\nEnvironment=PATH=%s\nExecStart=%s"%s/scripts/tick.sh" run\n' "$(tool_path)" "$(launch_prefix)" "$ROOT" > "$SERVICE_FILE"
       printf '[Unit]\nDescription=Run oh-my-setting tick hourly\n[Timer]\nOnCalendar=hourly\nPersistent=true\nRandomizedDelaySec=10m\n[Install]\nWantedBy=timers.target\n' > "$TIMER_FILE"
       systemctl --user daemon-reload
       systemctl --user enable --now oh-my-setting-tick.timer >/dev/null

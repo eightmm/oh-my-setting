@@ -224,13 +224,150 @@ def _record_wake(repo, receipt, wakes):
         raise
 
 
-def wake_main(repo, dry_run=False, now=None):
+RESUME_SUBJECT = "autopilot"
+_RESUME_AFTER = {
+    "proposal-review": "the parent reviews the proposal and runs the printed `oms autopilot run --proposal FILE --expected-proposal-sha256 SHA`",
+    "parked": "the operator resolves the park (`oms autopilot --repo . status`) or abandons it",
+    "done": "a new `oms autopilot propose` binds the next contract",
+}
+
+
+def _live_main_blocker(repo):
+    """"" only when no panel main is live; otherwise why one may be. Unverified liveness counts as live.
+
+    The start path's evidence, read-only: an open panel-main attempt blocks unless its host and native process are
+    proven gone (the proof start uses to release it), and a session window for this checkout blocks while it holds a main."""
+    import panel_release
+    from panel_native import live_main_refusal, live_mains
+    from terminal_panel import events, recorded_room, resolve_session
+    try:
+        history = json.loads(events(repo, "list", "--json", output=True))
+        if not isinstance(history, list) or any(not isinstance(row, dict) for row in history):
+            raise ValueError("main lifecycle status unavailable")
+        dead = {item["attempt"] for item in panel_release.classify(history)["releasable"]}
+        if any(row.get("tool") == "panel-main" and row.get("terminal") is not True and row.get("attempt_id") not in dead
+               for row in history):
+            return _one_line(live_main_refusal(repo, history))[:200]
+        if shutil.which("tmux"):
+            session, owner = resolve_session(repo, wait=False)
+            if owner == str(repo):
+                # Releasable dead attempts (released by the panel, never here) must not make a control-only session
+                # look occupied.
+                if live_mains(repo, session, recorded_room(session, checked=True), released=dead) > 0:
+                    return "a panel main window is live"
+        return ""
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        return "main liveness unverified: " + _one_line(error)[:160]
+
+
+def _spawn_continuation(argv, log, cwd):
+    """Start the approved continuation detached (own session, no inherited descriptors); returns its pid, never waits."""
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        return subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fd, stderr=subprocess.STDOUT,
+                                close_fds=True, start_new_session=True).pid
+    finally:
+        os.close(fd)
+
+
+def resume_autopilot(repo, dry_run=False, now=None, once=None):
+    """No live panel main: run the receipt's own `autopilot run` continuation headlessly, once; returns a status line.
+
+    Only a contract the user already approved resumes: the receipt must load, pass the digest gate every resume passes
+    (reenter_judgment: not done, proposal-review or parked, no living claimant) and print a run continuation carrying
+    its approved proposal digest. Nothing is created, applied or overridden. The launch is recorded in the wake ledger
+    (one pool of WAKE_DAILY_LIMIT per UTC day) before the spawn; ONCE is claimed so a tick run starts at most one."""
+    import hashlib
+    import runpy
+    import shlex
+    from terminal_panel import _lock
+    repo = Path(repo)
+    now = time.time() if now is None else now
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    receipt_path = repo / ".oms" / "plan" / "autopilot-run.json"
+    state_repo = os.path.realpath(repo)
+
+    def skip(why, until):
+        return "skipped: %s; resumes when %s" % (why, until)
+
+    def attempt():
+        ledger, wakes = _wake_ledger(repo, day)
+        blocker = _live_main_blocker(repo)
+        if blocker:
+            return skip("a panel main may be live (%s)" % blocker, "it exits or its termination is proven")
+        if not os.path.lexists(receipt_path):
+            return skip("no live main and no autopilot contract", "`oms autopilot propose` and a reviewed `run --proposal` bind one")
+        rules = runpy.run_path(str(Path(__file__).with_name("autopilot-receipt.py")))
+        status = "`oms autopilot --repo %s status` shows a valid receipt" % repo
+        try:
+            rules["validate_receipt_location"](receipt_path, state_repo)
+            row, payload = rules["load_receipt"](receipt_path)
+            # The caller is the checkout this tick runs for: a receipt bound to any other checkout (a scratch
+            # worktree) is refused by validate_live, as it is for `autopilot run` from the state root.
+            refusal = rules["reenter_judgment"](receipt_path, row, state_repo, 0, 0, True, state_repo)[0]
+        except (OSError, ValueError, KeyError, TypeError, rules["ReceiptError"]) as error:
+            return skip("autopilot receipt invalid (%s)" % _one_line(error)[:120], status + " or it is abandoned and re-proposed")
+        stage, digest = row["stage"], rules["digest"](payload)
+        if refusal:
+            diagnostic = row.get("diagnostic") if stage == "parked" else None
+            reason = refusal + ("; next step: %s (%s)" % (_one_line(diagnostic.get("reason")), _one_line(diagnostic.get("reason_code")))
+                                if isinstance(diagnostic, dict) else "")
+            return skip("autopilot %s: %s" % (stage, reason),
+                        _RESUME_AFTER.get(stage, status + " and no live session holds the run"))
+        argv, proposal = rules["option_args"](row), row["proposal"]
+        if (argv[:2] != ["oms", "autopilot"]
+                or argv[-5:] != ["run", "--proposal", proposal["path"], "--expected-proposal-sha256", proposal["sha256"]]):
+            return skip("autopilot continuation at stage %s is not an approved `run`" % stage,
+                        "the parent approves a proposal with `oms autopilot run --proposal FILE --expected-proposal-sha256 SHA`")
+        spent = [w for w in wakes if w.get("outcome") != "skipped"]
+        key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
+        if any(w["main"] == RESUME_SUBJECT and w.get("key") == key for w in spent):
+            return skip("autopilot already resumed today at this receipt state", "the receipt changes or the UTC day rolls over")
+        if len(spent) >= WAKE_DAILY_LIMIT:
+            return skip("%d wakes already spent today" % len(spent), "the UTC day rolls over")
+        command = ["bash", str(Path(__file__).resolve().parents[1] / "autopilot.sh")] + argv[2:]
+        shown = " ".join(shlex.quote(part) for part in argv)
+        if dry_run:
+            return "would resume autopilot (stage %s, receipt %s): %s" % (stage, digest[:12], shown)
+        try:
+            if once:
+                os.close(os.open(once, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            return skip("this tick run already resumed one autopilot", "the next tick run")
+        except OSError as error:
+            return skip("cannot claim this tick run's resume marker (%s)" % _one_line(error)[:80], "the marker is writable")
+        log = repo / ".oms" / "tick" / ("autopilot-%s.log" % digest[:12])
+        _record_wake(repo, ledger, wakes + [{"day": day, "main": RESUME_SUBJECT, "key": key, "outcome": "resumed",
+                                             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                                             "stage": stage, "receipt": digest}])
+        pid = _spawn_continuation(command, str(log), state_repo)
+        return "resumed autopilot (stage %s, receipt %s, pid %d, output %s): %s" % (
+            stage, digest[:12], pid, log.relative_to(repo), shown)
+
+    try:
+        if dry_run:
+            return attempt()
+        # Main start takes this lock too, so no main can start between the liveness proof and the spawn.
+        with _lock(repo, "panel-main-start", timeout=.1):
+            return attempt()
+    except LedgerRefused as error:
+        return ("refused: %s; .oms/tick/last.json is kept as found: inspect it, then move it aside to reset "
+                "today's wake ledger" % error)
+    except ValueError as error:
+        if "busy" in str(error):
+            return "skipped: panel typing lock held"
+        return "skipped: " + _one_line(error)[:200]
+
+
+def wake_main(repo, dry_run=False, now=None, once=None):
     """Tick's opt-in wake: at most one prompt into an idle panel main while shared work waits; returns a status line.
+
+    With no live main it resumes an approved autopilot contract instead (resume_autopilot; ONCE is its per-run marker).
 
     The wake is recorded before it is typed, so a retried or killed tick never submits it twice. A pane whose
     input line is not provably empty is skipped and the skip recorded; nothing is cleared, typed or entered."""
     import hashlib
-    from panel_native import input_line_empty
+    from panel_native import input_line_empty, live_main_pane
     from terminal_panel import _lock, _swap_submit
     repo = Path(repo)
     now = time.time() if now is None else now
@@ -239,11 +376,11 @@ def wake_main(repo, dry_run=False, now=None):
     def attempt():
         receipt, wakes = _wake_ledger(repo, day)
         pane, member = _wake_target(repo, now)
-        mine = [row for row in wakes if row["main"] == member and row.get("outcome") != "skipped"]
+        spent = [row for row in wakes if row.get("outcome") != "skipped"]
         key = hashlib.sha256("\0".join((member, day, reason)).encode()).hexdigest()[:16]
-        if any(row.get("key") == key for row in mine):
+        if any(row["main"] == member and row.get("key") == key for row in spent):
             return "skipped: %s already woken today for this work" % member
-        if len(mine) >= WAKE_DAILY_LIMIT:
+        if len(spent) >= WAKE_DAILY_LIMIT:
             return "skipped: %s reached %d wakes today" % (member, WAKE_DAILY_LIMIT)
         prompt = wake_prompt(reason)
         empty, why = input_line_empty(pane)
@@ -258,6 +395,14 @@ def wake_main(repo, dry_run=False, now=None):
         return "woke %s: %s" % (member, prompt)
 
     try:
+        blocker = _live_main_blocker(repo)
+        if not blocker:
+            return resume_autopilot(repo, dry_run, now, once)
+        try:
+            live_main_pane(repo)
+        except ValueError as error:
+            # Neither a pane to type into nor proof the main is gone: say why, with the recovery command if it has one.
+            return "skipped: no live main pane to type into (%s); %s" % (_one_line(error)[:100], blocker)
         reason = wake_reason(repo)
         if not reason:
             return "skipped: no ready plan work or pending proposal"
@@ -276,12 +421,18 @@ def wake_main(repo, dry_run=False, now=None):
 
 
 def wake_cli(argv):
-    """`oms tick` entry: REPO [--dry-run]; prints one status line."""
-    if len(argv) not in (1, 2) or argv[1:] not in ([], ["--dry-run"]):
-        print("usage: wake REPO [--dry-run]", file=sys.stderr)
+    """`oms tick` entry: REPO [--dry-run] [--once MARKER]; prints one status line."""
+    repo, rest, dry, once = argv[:1], argv[1:], False, None
+    while rest and rest[0] in ("--dry-run", "--once"):
+        if rest[0] == "--once":
+            once, rest = (rest[1] if len(rest) > 1 else None), rest[2:]
+        else:
+            dry, rest = True, rest[1:]
+    if len(repo) != 1 or rest or (argv.count("--once") and not once):
+        print("usage: wake REPO [--dry-run] [--once MARKER]", file=sys.stderr)
         return 2
     try:
-        print(wake_main(argv[0], dry_run=argv[1:] == ["--dry-run"]))
+        print(wake_main(repo[0], dry_run=dry, once=once))
     except (OSError, subprocess.SubprocessError) as error:
         print("skipped: " + _one_line(error)[:200])
     return 0
