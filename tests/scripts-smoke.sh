@@ -12945,7 +12945,7 @@ EOF
   # The same preflight lints requirement quality. The warnings are advisory:
   # stderr only, the exit code and the acceptance verdict stay what they were,
   # and a spec with nothing to say about produces none.
-  local lint="$project/lint" spec_lint
+  local lint="$project/lint"
   mkdir -p "$lint"
   spec_lint() {  # NAME -> $lint/NAME.out (stdout) and $lint/NAME.err (stderr)
     "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --validate-spec "$lint/$1.md" \
