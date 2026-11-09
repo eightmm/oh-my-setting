@@ -60,7 +60,7 @@ claude_auto_compact_supported() {
 # "the installed harness predates this list" instead of silently comparing
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
-HOOKS_SCHEMA=10
+HOOKS_SCHEMA=11
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -82,6 +82,15 @@ PostToolUse|fail-ledger-hook.sh|Bash|5
 # session exits on one environment check) and points at `oms sync-shared`.
 # Matcher-scoped to Bash; a 5s ceiling bounds the git lookups behind a deny.
 PreToolUse|git-move-guard-hook.sh|Bash|5
+
+# A short list of commands that destroy work or a machine in one step (rm -rf
+# of a root, home, the checkout or its .git; git reset --hard; git clean -fd;
+# a bare force push; git stash drop; mkfs; dd onto a device; a download piped
+# into a shell) is refused with the reason and the safer spelling. A seatbelt,
+# not a sandbox: it reads the command text and fails open. OMS_COMMAND_GUARD=0
+# in the session environment turns it off; unrelated commands exit on a
+# shell-only precheck.
+PreToolUse|command-guard-hook.sh|Bash|5
 
 # A file that does not parse after an edit is reported in the same turn, as
 # feedback, never a block. Matcher-scoped to the edit tools (the matcher may

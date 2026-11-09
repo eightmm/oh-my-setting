@@ -16,8 +16,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # The expected surface list, recorded. Both literals move together or the gate
 # below fails; see test_expected_surface_list_is_bump_gated.
-EXPECTED_HOOKS_SCHEMA=10
-EXPECTED_SURFACES_SHA256=119ca83c12125bc1a21600966b0a27a3587c8826f7cfd69bed074d895ecaf041
+EXPECTED_HOOKS_SCHEMA=11
+EXPECTED_SURFACES_SHA256=4bbadf82e8df36c939a76bb4363034c361496021da2088c26d0d8c53b4734f84
 
 # A fixture HOME with a receipt this checkout owns, an empty harness repo for
 # the event stream, and a settings.json built from --print-expected so the
@@ -150,6 +150,7 @@ pairs = [(s["event"], s["script"]) for s in doc["surfaces"]]
 assert ("SessionEnd", "precompact-handoff.sh") in pairs, pairs
 assert ("PostToolUse", "fail-ledger-hook.sh") in pairs, pairs
 assert ("PreToolUse", "git-move-guard-hook.sh") in pairs, pairs
+assert ("PreToolUse", "command-guard-hook.sh") in pairs, pairs
 assert ("UserPromptSubmit", "skill-router.sh") in pairs, pairs
 assert ("PreToolUse", "tier-guard-hook.sh") not in pairs, pairs
 assert ("PostToolUse", "telemetry-hook.sh") not in pairs, pairs
@@ -271,11 +272,13 @@ commands = [h.get("command", "") for entries in hooks.values()
             for entry in entries for h in entry.get("hooks", [])]
 assert not any("old oms" in c for c in commands), commands
 assert "SubagentStop" not in hooks, hooks
-# before["PreToolUse"] = [the current Bash guard, the retired owned row, an unverifiable root]
+# before["PreToolUse"] = [the two current Bash guards, the retired owned row, an unverifiable root]
 assert hooks["PreToolUse"] == [
     {"matcher": "Bash",
      "hooks": [{"type": "command", "command": own("git-move-guard-hook.sh"), "timeout": 5}]},
-    before["PreToolUse"][2],
+    {"matcher": "Bash",
+     "hooks": [{"type": "command", "command": own("command-guard-hook.sh"), "timeout": 5}]},
+    before["PreToolUse"][3],
 ], hooks["PreToolUse"]
 assert not any("telemetry-hook.sh" in h["command"]
                for entry in hooks["PostToolUse"] for h in entry["hooks"]), hooks
