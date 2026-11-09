@@ -8,7 +8,7 @@ import re
 
 from dashboard_projection import clean, fit, listing, mapping
 from panel_view import PROVIDER_NAMES, TERMINAL_STATES, wrapped, call_identity, status_tag
-from panel_results import MAX_RESULT as MAX_SEAT_ANSWER
+from panel_results import MAX_RESULT as MAX_SEAT_ANSWER, nonanswer_quality
 
 MAX_DEBATES, MAX_SYNTHESIS = 10, 64 * 1024
 DISAGREE = re.compile(r"disagree|conflict|dissent", re.I)
@@ -132,11 +132,17 @@ def _seats(calls):
     for call in calls:
         if call.get("kind") != "ask":
             continue
-        round_ = re.search(r"-r(\d+)\.md$", call.get("artifact") or "")
+        round_ = re.search(r"-r(\d+)(?:-repair)?\.md$", call.get("artifact") or "")
         key = call.get("selected_model") or call.get("artifact") or "unknown"
-        seat = seats.setdefault(key, {"model": call.get("selected_model"), "provider": _provider(call), "rounds": {}, "truncated": {}})
-        if call.get("answer"):
-            number = int(round_[1]) if round_ else 1
+        seat = seats.setdefault(key, {"model": call.get("selected_model"), "provider": _provider(call), "rounds": {}, "truncated": {}, "quality": {}})
+        number = int(round_[1]) if round_ else 1
+        quality = nonanswer_quality(call)
+        if quality:
+            seat["quality"][number] = quality
+            seat["rounds"].pop(number, None)
+            seat["truncated"].pop(number, None)
+        elif call.get("answer"):
+            seat["quality"].pop(number, None)
             seat["rounds"][number] = call["answer"]
             seat["truncated"][number] = ({"path": clean(call.get("artifact"), MAX_SEAT_ANSWER)}
                                           if call.get("answer_truncated") is True else None)
@@ -238,10 +244,11 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     dash, arrow = ("—", "→") if unicode else ("-", "->")
     if state.get("seat") is not None and state["seat"] < len(seats):
         seat = seats[state["seat"]]
-        latest = max(seat["rounds"]) if seat["rounds"] else 0
+        latest = max(seat["rounds"]) if seat["rounds"] else max(seat["quality"], default=0)
         title = "%s %s round %s answer · Esc back" % (
             call_identity("council", seat["model"]), dash, latest)
-        text = readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True)
+        text = ("no usable answer (%s)" % seat["quality"][latest] if latest in seat["quality"] else
+                readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True))
         body = [(title, None, False)]
         notice = seat["truncated"].get(latest)
         if notice:
@@ -269,7 +276,10 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     mark = "▸ " if unicode else "> "
     for i, seat in enumerate(seats):
         model = call_identity("council", seat["model"])
-        if seat["rounds"]:
+        if not seat["rounds"] and seat["quality"]:
+            latest = max(seat["quality"])
+            text = "%s %s no usable answer (%s)" % (model, dash, seat["quality"][latest])
+        elif seat["rounds"]:
             first, last = seat["rounds"][min(seat["rounds"])], seat["rounds"][max(seat["rounds"])]
             stance = fit(clean(_stance(last)[1], 400) or "No answer recorded", 140)
             note = ""

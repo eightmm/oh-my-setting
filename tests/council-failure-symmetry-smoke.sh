@@ -299,8 +299,83 @@ assert "allow-rule" not in notes[0].get("text", ""), notes[0]
 PY
     fail "a seat that never answered belongs in the thread, named not quoted"
 
+  OMS_T_INDEX="$project/.oms/artifacts/index.jsonl" python3 - <<'PYTEST' || fail "index must distinguish the non-answer"
+import json, os
+rows = [json.loads(line) for line in open(os.environ["OMS_T_INDEX"], encoding="utf-8")]
+calls = [row for row in rows if row.get("kind") == "ask"]
+assert next(row for row in calls if row["provider"] == "codex")["answer_quality"] == "blocked", calls
+assert all("answer_quality" not in row for row in calls if row["provider"] != "codex"), calls
+PYTEST
+
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" OMS_AGENT=claude OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    "$ROOT/scripts/peer-review.sh" --repo "$project" --providers codex,claude,antigravity \
+    --no-diff --no-memory --no-task --prompt test > "$project/review-out" 2> "$project/review-err" ||
+    fail "review council should retain quorum: $(cat "$project/review-err")"
+  OMS_T_INDEX="$project/.oms/artifacts/index.jsonl" python3 - <<'PYTEST' || fail "review index must distinguish the non-answer"
+import json, os
+rows = [json.loads(line) for line in open(os.environ["OMS_T_INDEX"], encoding="utf-8")]
+calls = [row for row in rows if row.get("kind") == "review"]
+assert next(row for row in calls if row["provider"] == "codex")["answer_quality"] == "blocked", calls
+assert all("answer_quality" not in row for row in calls if row["provider"] != "codex"), calls
+PYTEST
+
   [ ! -f "$project/.oms/failures.jsonl" ] ||
     fail "an exit-0 non-answer is not a failed command: $(cat "$project/.oms/failures.jsonl")"
+
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}:${2:-}" in --version:|--help:|exec:--help) printf 'codex 1.0\n'; exit 0 ;; esac
+input="$(cat)"
+if [[ "$input" == *'Deliberation repair:'* ]]; then
+  [ "${OMS_TEST_EMPTY_REPAIR:-0}" != 1 ] || exit 7
+  cat <<'REPAIR'
+Answer: Keep the guard.
+Alternatives: Remove it.
+Evidence: The guard limits changes.
+Counterargument: It can delay work.
+Risks: Delay.
+Recommendation: Keep the guard.
+Verification: Run the checks.
+Changed from previous round: none
+Remaining disagreements: none
+REPAIR
+  [ "${OMS_TEST_ACCEPTED_REPAIR:-0}" != 1 ] || exit 0
+  exit 7
+fi
+cat <<'ANSWER'
+Answer: Keep the guard.
+Alternatives: Remove it.
+Evidence: The guard limits changes.
+Counterargument: It can delay work.
+Risks: Delay.
+Verification: Run the checks.
+Changed from previous round: none
+Remaining disagreements: none
+ANSWER
+EOF
+  chmod +x "$bin_dir/codex"
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" OMS_AGENT=claude OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex,claude --debate 1 --deliberation \
+    --no-memory --no-task --no-ml-context --prompt repair > "$project/repair-out" 2> "$project/repair-err" || :
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" OMS_AGENT=claude OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    OMS_TEST_EMPTY_REPAIR=1 "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex,claude --debate 1 --deliberation \
+    --no-memory --no-task --no-ml-context --prompt empty-repair > "$project/empty-repair-out" 2> "$project/empty-repair-err" || :
+  HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" OMS_AGENT=claude OMS_PEER_TIMEOUT=2 OMS_PEER_KILL_AFTER=1 \
+    OMS_TEST_ACCEPTED_REPAIR=1 "$ROOT/scripts/peer-ask.sh" --repo "$project" --providers codex,claude --debate 1 --deliberation \
+    --no-memory --no-task --no-ml-context --prompt accepted-repair > "$project/accepted-out" 2> "$project/accepted-err" || :
+  OMS_T_PROJECT="$project" python3 - <<'PYTEST' || fail "rejected repair must not have an indexed call"
+import json, os
+from pathlib import Path
+project = Path(os.environ["OMS_T_PROJECT"])
+rows = [json.loads(line) for line in (project / ".oms/artifacts/index.jsonl").read_text().splitlines()]
+repairs = [row for row in rows if row.get("kind") == "ask" and row.get("artifact", "").endswith("-repair.md")]
+assert len(repairs) == 1 and repairs[0]["exit"] == 0, repairs
+assert "accepted-repair" in repairs[0]["artifact"] and (project / repairs[0]["artifact"]).is_file(), repairs
+assert "answer_quality" not in repairs[0], repairs
+rejected = list((project / ".oms/artifacts/ask").glob("*-repair-rejected.md"))
+assert len(rejected) == 2, rejected
+PYTEST
+
 }
 
 test_optional_timeout_skips_debate() {

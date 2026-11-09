@@ -1959,9 +1959,14 @@ def render_results(report, width=100, compact=False, heading=None):
         else:
             add("Owner summary pending. Model exit does not establish acceptance.", "  ")
         records = []
+        from panel_results import nonanswer_quality
         for call in calls:
             model = call.get("served_model") or call.get("selected_model") or call.get("requested_model")
-            if call.get("answer"):
+            quality = nonanswer_quality(call)
+            if quality:
+                label = " ".join(part for part in (MODEL_NAMES.get(model, model), call.get("kind")) if part)
+                add((label + ": " if label else "") + "no usable answer (%s)" % quality, "  ")
+            elif call.get("answer"):
                 label = " ".join(part for part in (MODEL_NAMES.get(model, model), call.get("kind")) if part)
                 add((label + " answer:") if label else "Answer:", "  ", 3)
                 prose(call["answer"], "    ")

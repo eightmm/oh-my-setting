@@ -708,6 +708,79 @@ with patch.object(panel_results, "_records", return_value=(
         patch.object(panel_results, "_indexed", return_value=report_artifact):
     kept_answer = panel_results.results(project, task_id="report-body")["rows"][0]["calls"][0]["answer"]
 assert "BODY TEXT" in kept_answer and "FINDING TEXT" in kept_answer and "passed" in kept_answer, kept_answer
+with patch.object(panel_results, "_records", return_value=(
+        [{"attempt_id": "a2", "task_id": "quality", "state": "done", "refs": {}}],
+        [{"kind": "ask", "task_id": "quality", "attempt_id": "a2", "exit": 0, "answer_quality": "empty", "ts": "1"}])):
+    quality_call = panel_results.results(project, task_id="quality")["rows"][0]["calls"][0]
+assert quality_call["answer_quality"] == "empty", quality_call
+# Project real evidence through results, then display both seats in each public view.
+import hashlib
+quality_dir = project / ".oms/artifacts/ask"
+quality_dir.mkdir(parents=True, exist_ok=True)
+quality_rows = []
+for name, body, quality in (("empty", b"", "empty"), ("usable", b"A usable seat answer.\n", None),
+                            ("blocked", b"add an allow-rule and retry.\n", "blocked")):
+    data = b"# Peer call\n## Output\n" + body + b"## Exit\n0\n"
+    path = quality_dir / (name + ".md")
+    path.write_bytes(data)
+    row = {"kind": "ask", "task_id": "quality-view", "attempt_id": name, "exit": 0,
+           "selected_model": name, "artifact": ".oms/artifacts/ask/" + name + ".md",
+           "artifact_sha256": hashlib.sha256(data).hexdigest(), "ts": "1"}
+    if quality:
+        row["answer_quality"] = quality
+    quality_rows.append(row)
+quality_attempts = [{"attempt_id": name, "task_id": "quality-view", "state": "done", "refs": {}}
+                    for name in ("empty", "usable", "blocked")]
+with patch.object(panel_results, "_records", return_value=(quality_attempts, quality_rows)):
+    quality_report = panel_results.results(project, task_id="quality-view")
+quality_calls = quality_report["rows"][0]["calls"]
+assert "answer" not in quality_calls[0] and "usable seat answer" in quality_calls[1]["answer"] and "answer" not in quality_calls[2], quality_calls
+quality_screen = render_results(quality_report, 120)
+assert quality_screen.count("no usable answer (empty)") == 1 and "usable seat answer" in quality_screen, quality_screen
+assert "no usable answer (blocked)" in quality_screen and "allow-rule" not in quality_screen, quality_screen
+quality_entry = {"task": "quality-view", "main": "main-1", "title": "quality", "state": "done", "time": ""}
+quality_nav = {"debate_view": {"shown": ("quality-view", "main-1"), "report": quality_report}}
+with patch.object(panel.panel_debate, "debates", return_value=[quality_entry]):
+    quality_board = panel.panel_debate.tab_body({}, "main-1", 120, 30, quality_nav, {}, unicode=False)
+    quality_nav["debate_view"]["seat"] = 0
+    quality_detail = panel.panel_debate.tab_body({}, "main-1", 120, 30, quality_nav, {}, unicode=False)
+quality_text = "\n".join(row[0] for row in quality_board)
+assert quality_text.count("no usable answer (empty)") == 1 and "usable seat answer" in quality_text, quality_text
+assert "no usable answer (blocked)" in quality_text and "allow-rule" not in quality_text, quality_text
+assert "no usable answer (empty)" in "\n".join(row[0] for row in quality_detail), quality_detail
+# Later repairs keep their round, and an unanswered later round retains the last answer.
+round_calls = [
+    {"kind": "ask", "exit": 0, "selected_model": "repair-seat", "artifact": "seat.md", "answer": "Initial position."},
+    {"kind": "ask", "exit": 0, "selected_model": "repair-seat", "artifact": "seat-r2-repair.md", "answer": "Repaired position."},
+    {"kind": "ask", "exit": 0, "selected_model": "retained-seat", "artifact": "other.md", "answer": "Retained position."},
+    {"kind": "ask", "exit": 0, "selected_model": "retained-seat", "artifact": "other-r2.md", "answer_quality": "empty"},
+]
+round_report = {"rows": [{"calls": round_calls}]}
+round_nav = {"debate_view": {"shown": ("quality-view", "main-1"), "report": round_report}}
+with patch.object(panel.panel_debate, "debates", return_value=[quality_entry]):
+    round_board = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
+    round_nav["debate_view"]["seat"] = 0
+    repaired_detail = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
+    round_nav["debate_view"].update(seat=1, scroll=0)
+    retained_detail = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
+round_text = "\n".join(row[0] for row in round_board)
+assert "Repaired position." in round_text and "Retained position." in round_text and "no usable answer" not in round_text, round_text
+assert "round 2 answer" in "\n".join(row[0] for row in repaired_detail), repaired_detail
+assert "round 1 answer" in "\n".join(row[0] for row in retained_detail) and "Retained position." in "\n".join(row[0] for row in retained_detail), retained_detail
+# Delegate failures and legacy rows retain their diagnostic or worker summary.
+for failure in ({"kind": "delegate", "exit": 1, "verify_exit": 1},
+                {"kind": "delegate", "exit": 1}, {"kind": "ask"}):
+    failed_row = dict(quality_rows[1], **failure)
+    if "exit" not in failure:
+        failed_row.pop("exit", None)
+    with patch.object(panel_results, "_records", return_value=(quality_attempts, [failed_row])):
+        failed_call = panel_results.results(project, task_id="quality-view")["rows"][0]["calls"][0]
+    assert "usable seat answer" in failed_call["answer"], failed_call
+assert panel_results.nonanswer_quality(dict(failed_call, exit=7, answer_quality="empty")) is None
+
+for value in (None, "", 0, "unknown", []):
+    assert panel_results.nonanswer_quality({"answer_quality": value}) is None
+
 # A worker's detail lists the changed files of its recorded patch, only while the digest matches.
 import hashlib
 patch_dir = project / ".oms/artifacts/delegate"

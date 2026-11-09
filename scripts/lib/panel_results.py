@@ -2532,6 +2532,11 @@ def settled_pending_admissions(repo, task_ids, _tick=None, _outcomes=None):
     return pending
 
 
+def nonanswer_quality(call):
+    quality = call.get('answer_quality')
+    return quality if call.get('exit') == 0 and quality in ('empty', 'truncated', 'blocked', 'invalid-deliberation') else None
+
+
 def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None, _records_data=None,
             include_preflight=False, offset=0, limit=20):
     """Read one result page using call-local task, attempt and room snapshots."""
@@ -2642,12 +2647,13 @@ def results(repo, task_id=None, room_participant=None, _shared=False, _tick=None
             call = {k: row[k] for k in ('kind', 'exit', 'verify_exit', 'verify_status', 'state', 'reason_code', 'guard',
                                        'provider_error_exit', 'artifact', 'patch', 'patch_sha256', 'event_id',
                                        'selected_model', 'requested_model', 'served_model', 'attempt_id', 'tokens',
-                                       'provider_usage', 'base_sha') if k in row}
+                                       'provider_usage', 'base_sha', 'answer_quality') if k in row}
             attempt_meta = next((a for a in matching if a.get('attempt_id') == row.get('attempt_id')), {})
             alias = attempt_meta.get('refs', {}).get('panel_alias')
             if alias:
                 call['alias'] = alias
-            if (task_id or room_participant) and row.get('artifact') and row.get('kind') in ('ask', 'call', 'consult', 'delegate', 'review'):
+            if ((task_id or room_participant) and row.get('artifact') and
+                    not nonanswer_quality(call) and row.get('kind') in ('ask', 'call', 'consult', 'delegate', 'review')):
                 try:
                     verified_bytes = _indexed(repo, row, 1024 * 1024)
                     answer = (_final_attempt_output(repo, row['artifact'])

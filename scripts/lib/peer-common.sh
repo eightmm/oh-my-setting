@@ -1777,6 +1777,7 @@ ma_append_artifact_index() {
   base_sha="$(git -C "${OMS_INDEX_BASE_REPO:-$repo}" rev-parse --short "${10:-HEAD}" 2>/dev/null || true)"
   base_sha="${base_sha//$'\r'/}"
 
+  OMS_INDEX_ANSWER_QUALITY="${OMS_INDEX_ANSWER_QUALITY:-}" \
   OMS_INDEX_PROMPT_BYTES="$prompt_bytes" \
   OMS_INDEX_BASE_SHA="$base_sha" OMS_INDEX_TASK_ID="${OMS_TASK_ID:-}" \
   OMS_INDEX_PLAN_ID="${OMS_INDEX_PLAN_ID:-}" \
@@ -1870,6 +1871,9 @@ row = {
     "provider": provider,
     "exit": int(exit_code),
 }
+answer_quality = os.environ.get("OMS_INDEX_ANSWER_QUALITY", "")
+if answer_quality in ("empty", "truncated", "blocked", "invalid-deliberation"):
+    row["answer_quality"] = answer_quality
 scratch_path = os.environ.get("OMS_INDEX_SCRATCH_PATH", "")
 if kind == "delegate" and scratch_path:
     row["scratch_path"] = scratch_path
@@ -5167,7 +5171,7 @@ run_provider() {
       printf 'No prompt content was written to this artifact.\n'
       printf '\n\n## Exit\n\n3\n'
     } > "$artifact"
-    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 3 "$artifact" "" "$prompt_file" || true
+    [ "${MA_SKIP_REPAIR_INDEX:-0}" = 1 ] || ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 3 "$artifact" "" "$prompt_file" || true
     echo "blocked: $provider sensitive outbound context -> $artifact"
     # 3 = blocked by scrubber, distinct from provider failure (1).
     return 3
@@ -5191,7 +5195,7 @@ run_provider() {
       "$OMS_MODEL_PRIMARY" "${OMS_MODEL_FALLBACK:--}" \
       "$OMS_REASONING_RESOLVED" "$OMS_REASONING_FALLBACK" >> "$artifact"
     printf 'DRY RUN: provider command skipped.\n' >> "$artifact"
-    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 0 "$artifact" "" "$prompt_file" || true
+    [ "${MA_SKIP_REPAIR_INDEX:-0}" = 1 ] || ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 0 "$artifact" "" "$prompt_file" || true
     echo "dry-run: $provider -> $artifact"
     return 0
   fi
@@ -5202,7 +5206,7 @@ run_provider() {
   if ! command -v "$binary" >/dev/null 2>&1; then
     printf 'SKIPPED: command not found: %s\n' "$binary" >> "$artifact"
     printf '\n\n## Exit\n\n127\n' >> "$artifact"
-    ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 127 "$artifact" "" "$prompt_file" || true
+    [ "${MA_SKIP_REPAIR_INDEX:-0}" = 1 ] || ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" 127 "$artifact" "" "$prompt_file" || true
     # A capability receipt turns the generic absence into its actual name: on
     # a core install the missing seat is an uninstalled council capability,
     # not a defect. Behavior is identical either way — only the message says
@@ -5244,7 +5248,14 @@ PY_SEAT
   if [ -s "${artifact}.read-guard" ]; then
     printf '\nread guard: %s\n' "$(head -n 1 "${artifact}.read-guard" | tr -d '\r')" >> "$artifact"
   fi
-  ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" "$status" "$artifact" "" "$prompt_file" || true
+  local index_quality=""
+  if [ "$status" -eq 0 ] && { [ "${MA_KIND:-}" = ask ] || [ "${MA_KIND:-}" = review ] ||
+    [ "${MA_DELIBERATION:-0}" = 1 ]; }; then
+    index_quality="$(ma_council_nonanswer "$artifact")"
+  fi
+  if [ "${MA_SKIP_REPAIR_INDEX:-0}" != 1 ]; then
+    OMS_INDEX_ANSWER_QUALITY="$index_quality" ma_append_artifact_index "${REPO:-}" "$MA_KIND" "$provider" "$status" "$artifact" "" "$prompt_file" || true
+  fi
   if [ "$status" -eq 0 ]; then
     echo "ok: $provider -> $artifact"
   else
@@ -5402,10 +5413,14 @@ ma_council_call() {
         if [ "$(LC_ALL=C wc -c < "$prompt")" -le "$cap" ]; then
           repair="${3%.md}-repair.md"
           rejected="${3%.md}-repair-rejected.md"
-          run_provider "$1" "$prompt" "$repair" || repair_rc=$?
+          # Rejected repairs are renamed; publish their index only after acceptance.
+          MA_SKIP_REPAIR_INDEX=1 run_provider "$1" "$prompt" "$repair" || repair_rc=$?
           rm -f "${repair}.outbound-evidence"
           if [ "$repair_rc" -ne 0 ] || [ -n "$(ma_council_nonanswer "$repair")" ]; then
             [ ! -f "$repair" ] || mv -f "$repair" "$rejected"
+          else
+            ma_append_artifact_index "${REPO:-}" "$MA_KIND" "${OMS_PROVIDER_SELECTED:-$(ma_target_provider "$1")}" \
+              "$repair_rc" "$repair" "" "$prompt" || true
           fi
         fi
         rm -f "$tmp" "$prompt"
