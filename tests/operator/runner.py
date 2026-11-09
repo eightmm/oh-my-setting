@@ -10,8 +10,10 @@ import ast
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
@@ -23,7 +25,7 @@ SOURCE = ROOT / "tests/operator-tools-smoke.sh"
 # in land gate logs available 2026-11-08 (one host; source and contention vary).
 # dispatch-results was 906/1211/1117/1340s, rather than the old 287s weight.
 # Sharded dispatch-results timing rows now cover subsets; refresh its total
-# from a serial section timing or the sum of all shards, not one subset row.
+# from the sum of all shard timings, not a wall-time or subset row.
 # core/room-protocol stays one section: its later phases reuse the state its
 # earlier phases build (room_env, shared, main_attempts, plan_cli).
 SECTIONS = (
@@ -385,6 +387,69 @@ def execute(name, temporary, case=None, spec=None):
         exec(compile(code, filename, "exec"), namespace)
 
 
+def run_dispatch_shards(directory):
+    children = []
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def interrupted(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        for index in (1, 2):
+            shard_dir = directory / str(index)
+            shard_dir.mkdir()
+            output = tempfile.TemporaryFile(mode="w+b")
+            try:
+                command = [sys.executable, str(HERE / "runner.py"), "--execute-shard",
+                           str(shard_dir), "dispatch-results", "%s/2" % index]
+                process = subprocess.Popen(command, cwd=shard_dir, stdout=output,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
+            except BaseException:
+                output.close()
+                raise
+            children.append((index, process, output))
+        pending = list(children)
+        failure = 0
+        while pending:
+            for item in pending[:]:
+                index, process, output = item
+                result = process.poll()
+                if result is None:
+                    continue
+                output.seek(0)
+                sys.stdout.flush()
+                data = output.read().decode("utf-8", errors="replace")
+                if data:
+                    print(data, end="" if data.endswith("\n") else "\n", flush=True)
+                print("operator-section: dispatch-results shard %s/2 %s" %
+                      (index, "ok" if result == 0 else "FAILED (exit %s)" % result), flush=True)
+                failure = failure or result
+                pending.remove(item)
+            if pending:
+                time.sleep(0.1)
+        return failure
+    finally:
+        for _, process, output in children:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        for _, process, output in children:
+            if process.poll() is None:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+            output.close()
+        signal.signal(signal.SIGTERM, previous)
+
+
 def run_sections(names, temporary, case=None, spec=None):
     partial, failure = False, 0
     for name in names:
@@ -412,15 +477,18 @@ def run_sections(names, temporary, case=None, spec=None):
                 command[2] = "--execute-shard"
                 command.append(spec)
         print("operator-section: " + name + " started", flush=True)
-        result = subprocess.run(command, cwd=directory)
+        if name == "dispatch-results" and case is None and spec is None:
+            returncode = run_dispatch_shards(directory)
+        else:
+            returncode = subprocess.run(command, cwd=directory).returncode
         elapsed = int(time.monotonic() - started)
         timing = os.environ.get("OMS_OPERATOR_TIMINGS")
         if timing:
             with open(timing, "a", encoding="utf-8") as output:
                 output.write("%s\t%s\n" % (elapsed, name))
-        if result.returncode:
-            failure = failure or result.returncode
-            print("operator-section: %s FAILED (exit %s)" % (name, result.returncode), flush=True)
+        if returncode:
+            failure = failure or returncode
+            print("operator-section: %s FAILED (exit %s)" % (name, returncode), flush=True)
         else:
             print("operator-section: %s ok (%ds)" % (name, elapsed), flush=True)
     return failure or (77 if partial else 0)
@@ -445,6 +513,32 @@ def execution_contract(total):
 
     names = [name for name, _, _ in SECTIONS]
     manifests = []
+    for exit_code in (0, 1, 77):
+        with tempfile.TemporaryDirectory(prefix="oms-operator-contract-") as directory, \
+            patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()) as captured:
+            observed = []
+            timing = Path(directory) / "timings"
+            os.environ["OMS_OPERATOR_TIMINGS"] = str(timing)
+
+            class Child:
+                def __init__(self, command, cwd, **kwargs):
+                    observed.append((command, cwd))
+                    self.returncode = exit_code if command[-1] == "1/2" else 0
+                    kwargs["stdout"].write((command[-1] + " output\n").encode())
+
+                def poll(self):
+                    assert len(observed) == 2, "both shards must start before waiting"
+                    return self.returncode
+
+            with patch.object(subprocess, "Popen", Child), \
+                    patch.object(subprocess, "run", side_effect=AssertionError("bare section launched serially")):
+                result = run_sections(["dispatch-results"], Path(directory))
+            assert result == exit_code and [command[-1] for command, _ in observed] == ["1/2", "2/2"]
+            assert all(command[2] == "--execute-shard" for command, _ in observed)
+            assert len({cwd for _, cwd in observed}) == 2
+            assert "1/2 output\n" in captured.getvalue() and "2/2 output\n" in captured.getvalue()
+            rows = timing.read_text(encoding="utf-8").splitlines()
+            assert len(rows) == 1 and re.fullmatch(r"[0-9]+\tdispatch-results", rows[0]), rows
     with tempfile.TemporaryDirectory(prefix="oms-operator-contract-") as directory, \
             patch.dict(os.environ, {}, clear=True), redirect_stdout(io.StringIO()):
         fixtures = Path(directory) / "fixtures"
@@ -467,7 +561,11 @@ def execution_contract(total):
                 return subprocess.CompletedProcess(command, int(mode == "failure" and name == names[0]))
 
             groups = [[name] for name in names] if mode == "focused" else [names]
-            with patch.object(subprocess, "run", side_effect=launch):
+            def bare(directory):
+                command = [sys.executable, str(HERE / "runner.py"), "--execute", str(directory), "dispatch-results"]
+                return launch(command, directory).returncode
+
+            with patch.object(subprocess, "run", side_effect=launch), patch.dict(globals(), run_dispatch_shards=bare):
                 results = [run_sections(group, parent) for group in groups]
             assert set(observed) == set(names), (mode, observed)
             assert results == ([1] if mode == "failure" else [0] * len(groups)), (mode, results)
