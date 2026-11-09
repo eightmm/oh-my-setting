@@ -1628,7 +1628,17 @@ reference docs require `--full-docs` and never overwrite existing files.
 ML/Slurm workflows use local-first experiment controls:
 
 - `oms run new/current/show/timeline` for the run spine.
-- `oms run capsule` for reproducibility capture and replay metadata.
+- `oms run capsule` for reproducibility capture and replay metadata. Its
+  environment block records what is present and null otherwise: interpreter,
+  python/torch/cuda, GPU names and count, package freeze digest, host and CPU
+  count, loaded modules (`LOADEDMODULES`), the active conda environment with
+  the digest of its `env export --no-builds` (the export, without its machine
+  prefix, is saved beside the capsule unless it looks sensitive), and only the
+  variables `CUDA_VISIBLE_DEVICES`, `OMP_NUM_THREADS`, `SLURM_JOB_ID`,
+  `SLURM_ARRAY_TASK_ID`, `SLURM_JOB_NODELIST` and `SLURM_JOB_PARTITION`.
+  `verify` and `oms run diff` report conda and module differences as
+  information; only commit and uncommitted-diff drift fail `verify`.
+  `OMS_RUN_CAPSULE_CONDA_TIMEOUT` (1–600 seconds, default 30) bounds the export.
 - `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
   studies; `oms runtime experiment launch` pre-registers a single command
   through the same run ledger (replacing `research-runner`).

@@ -320,6 +320,17 @@ line("dirty", ga.get("dirty"), gb.get("dirty"))
 ea, eb = a.get("env", {}), b.get("env", {})
 for k in ("python", "torch", "cuda"):
     line(k, ea.get(k), eb.get(k))
+# Where each run executed; shown only when a capsule recorded it, so older capsules diff as before.
+def conda_label(block):
+    if not isinstance(block, dict) or not block.get("env"):
+        return "(none)"
+    digest = block.get("export_sha256")
+    return "%s@%s" % (block["env"], digest[:12]) if isinstance(digest, str) and digest else str(block["env"])
+def modules_label(items):
+    return ",".join(str(item) for item in items) if isinstance(items, list) and items else "(none)"
+for k, label in (("conda", conda_label), ("modules", modules_label), ("host", lambda value: value)):
+    if k in ea or k in eb:
+        line(k, label(ea.get(k)), label(eb.get(k)))
 line("seeds", ",".join(a.get("seeds", [])) or "-", ",".join(b.get("seeds", [])) or "-")
 
 # config files by path -> sha

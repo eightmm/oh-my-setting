@@ -20308,6 +20308,7 @@ test_cli_unknown_subcommands_fail() {
   fi
 }
 
+# smoke-weight: 6
 test_run_capsule_captures_and_reproduces() {
   local proj="$TMP/capsule-basic"
   local runs="$proj/.oms/runs"
@@ -20332,8 +20333,28 @@ case "$2" in
 esac
 STUB
   chmod +x "$proj/.venv/bin/python"
+  # Conda stand-in: the export carries a machine prefix and, in one mode, a credential-shaped channel.
+  local stub="$TMP/capsule-conda-bin" calls="$TMP/capsule-conda-calls"
+  mkdir -p "$stub"
+  cat > "$stub/conda" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CONDA_STUB_CALLS"
+case "${CONDA_STUB_MODE:-ok}" in
+  fail) echo 'conda: broken install' >&2; exit 1 ;;
+  hang) exec sleep 30 ;;
+esac
+printf 'name: chem\nchannels:\n  - conda-forge\n'
+[ "${CONDA_STUB_MODE:-ok}" != secret ] || printf '  - https://repo.example/t/aws_secret_access_''key=EXAMPLEVALUE/private\n'
+[ "${CONDA_STUB_MODE:-ok}" != token ] || printf '  - https://conda.anaconda.org/t/tk-EXAMPLETOKEN123/private\n'
+printf 'dependencies:\n  - rdkit=2026.03.1\nprefix: /ho''me/someone/miniconda3/envs/chem\n'
+printf 'variables:\n  SLURM_JOB_USER: alice\n  CAPSULE_FIXTURE_EXTRA: unlisted-value-9f3c\n'
+STUB
+  chmod +x "$stub/conda"
+  : > "$calls"
 
-  id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_AGENT=claude \
+  id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_AGENT=claude PATH="$stub:$PATH" CONDA_STUB_CALLS="$calls" \
+    CONDA_DEFAULT_ENV=chem LOADEDMODULES='gcc/12.2:cuda/12.1' CUDA_VISIBLE_DEVICES=0 SLURM_JOB_ID=4242 \
+    SLURM_JOB_USER=alice CAPSULE_FIXTURE_EXTRA=unlisted-value-9f3c \
     "$ROOT/scripts/run-capsule.sh" run --note cap --config config.yaml \
     --output file.txt --seed 7 --metrics metrics.json --no-ledger \
     -- bash -c 'echo trained' 2>/dev/null)"
@@ -20350,6 +20371,24 @@ STUB
   assert_file_contains "$cap" '"seed'
   assert_file_contains "$cap" 'config.yaml'
   assert_file_contains "$runs/$id/output.log" "trained"
+  # Where the run executed: present things are recorded, the export without its machine prefix, and no
+  # variable outside the fixed list is read.
+  python3 - "$cap" "$runs/$id/env.conda.yml" <<'PY' || fail "capsule did not record the execution environment"
+import hashlib, json, sys
+env = json.load(open(sys.argv[1]))["env"]
+export = open(sys.argv[2], "rb").read()
+assert export == b"name: chem\nchannels:\n  - conda-forge\ndependencies:\n  - rdkit=2026.03.1\n", export
+assert env["conda"] == {"env": "chem", "tool": "conda", "export_sha256": hashlib.sha256(export).hexdigest()}, env["conda"]
+assert env["modules"] == ["gcc/12.2", "cuda/12.1"], env["modules"]
+assert env["env_vars"] == {"CUDA_VISIBLE_DEVICES": "0", "SLURM_JOB_ID": "4242"}, env["env_vars"]
+assert isinstance(env["host"], str) and env["host"] and "." not in env["host"], env["host"]
+assert type(env["cpu_count"]) is int and env["cpu_count"] > 0, env["cpu_count"]
+assert env["gpu_count"] is None or env["gpu_count"] == len(env["gpu_names"]) > 0, env
+PY
+  if grep -Fq -e 'unlisted-value-9f3c' -e 'alice' -e '/ho''me/someone' "$cap" "$runs/$id/env.conda.yml"; then
+    fail "capsule captured a variable outside the allow-list or the machine prefix"
+  fi
+  [ "$(cat "$calls")" = 'env export --no-builds' ] || fail "conda should be asked once for the export"
 
   # reproduce prints the exact checkout + diff-apply for the captured state.
   local repro
@@ -20361,14 +20400,65 @@ STUB
   [ -f "$runs/$id/env.uv.lock" ] || [ -f "$runs/$id/env.freeze.txt" ] ||
     fail "no reconstructable env lock saved"
   printf '%s' "$repro" | grep >/dev/null -E 'uv sync|pip install' || fail "reproduce missing env recreate step"
+  contains "$repro" "conda env create -f $runs/$id/env.conda.yml" || fail "reproduce missing the conda export"
+  contains "$repro" "# modules at capture: gcc/12.2 cuda/12.1" || fail "reproduce missing the loaded modules"
 
   # verify: clean against the same tree, drift after a change.
   local vout
-  vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
+  vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" env -u CONDA_DEFAULT_ENV -u LOADEDMODULES \
+    "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
     fail "verify should pass on the unchanged tree"
   contains "$vout" "env-python" || fail "verify missing env-drift report"
   contains "$vout" "ok    env-python: capsule=9.8.7 current=9.8.7" || fail "verify must re-probe with the project interpreter"
   contains "$vout" "env-interpreter" || fail "verify missing interpreter line"
+  # Without the conda environment and modules the capsule ran under, verify warns but tree drift alone fails it.
+  contains "$vout" "WARN  env-conda: capsule=chem@" || fail "verify should warn that the conda environment differs"
+  contains "$vout" "WARN  env-modules: capsule=gcc/12.2,cuda/12.1 current=(none)" || fail "verify should warn that modules differ"
+  contains "$vout" "info env-host:" || fail "verify missing host line"
+  vout="$(cd "$proj" && OMS_RUNS_DIR="$runs" PATH="$stub:$PATH" CONDA_STUB_CALLS="$calls" CONDA_DEFAULT_ENV=chem \
+    LOADEDMODULES='gcc/12.2:cuda/12.1' "$ROOT/scripts/run-capsule.sh" verify "$id" 2>&1)" ||
+    fail "verify should pass under the captured environment"
+  contains "$vout" "ok    env-conda: capsule=chem@" || fail "verify should match the same conda export"
+  contains "$vout" "ok    env-modules: capsule=gcc/12.2,cuda/12.1 current=gcc/12.2,cuda/12.1" || fail "verify should match the same modules"
+  [ ! -f "$proj/env.conda.yml" ] || fail "verify must not save an export"
+
+  # Detection only. No active environment: conda is never run and the block is null, as are unset modules and
+  # variables. A failing, hanging or credential-bearing export never fails the capture.
+  local case_id mode
+  : > "$calls"
+  case_id="$(cd "$proj" && OMS_RUNS_DIR="$runs" PATH="$stub:$PATH" CONDA_STUB_CALLS="$calls" \
+    env -u CONDA_DEFAULT_ENV -u LOADEDMODULES -u CUDA_VISIBLE_DEVICES -u OMP_NUM_THREADS -u SLURM_JOB_ID \
+      -u SLURM_ARRAY_TASK_ID -u SLURM_JOB_NODELIST -u SLURM_JOB_PARTITION \
+    "$ROOT/scripts/run-capsule.sh" run --no-ledger -- true 2>/dev/null)"
+  [ ! -s "$calls" ] || fail "conda must not run without an active environment"
+  [ ! -f "$runs/$case_id/env.conda.yml" ] || fail "no export should be saved without an active environment"
+  python3 - "$runs/$case_id/capsule.json" <<'PY' || fail "absent environment details must be null"
+import json, sys
+env = json.load(open(sys.argv[1]))["env"]
+assert env["conda"] is None and env["modules"] is None and env["env_vars"] is None, env
+PY
+  if ! command -v conda >/dev/null 2>&1 && ! command -v mamba >/dev/null 2>&1; then
+    case_id="$(cd "$proj" && OMS_RUNS_DIR="$runs" CONDA_DEFAULT_ENV=chem \
+      "$ROOT/scripts/run-capsule.sh" run --no-ledger -- true 2>/dev/null)"
+    assert_file_contains "$runs/$case_id/capsule.json" '"conda": null'
+  fi
+  for mode in fail hang secret token; do
+    case_id="$(cd "$proj" && OMS_RUNS_DIR="$runs" PATH="$stub:$PATH" CONDA_STUB_CALLS="$calls" \
+      CONDA_STUB_MODE="$mode" CONDA_DEFAULT_ENV=chem OMS_RUN_CAPSULE_CONDA_TIMEOUT=1 \
+      "$ROOT/scripts/run-capsule.sh" run --no-ledger -- true 2>"$proj/capsule-$mode.err")" ||
+      fail "a $mode conda export must not fail the capture"
+    [ ! -f "$runs/$case_id/env.conda.yml" ] || fail "a $mode conda export must not be saved"
+    assert_file_contains "$runs/$case_id/capsule.json" '"env": "chem"'
+    case "$mode" in
+      secret|token)
+        assert_file_contains "$proj/capsule-$mode.err" 'conda export contains sensitive-looking content; kept its digest only'
+        grep -Eq '"export_sha256": "[0-9a-f]{64}"' "$runs/$case_id/capsule.json" || fail "a withheld export keeps its digest"
+        ! grep -Fq -e 'EXAMPLEVALUE' -e 'EXAMPLETOKEN123' "$runs/$case_id/capsule.json" || fail "the credential-shaped channel reached the capsule"
+        ! grep -Fq 'unlisted-value-9f3c' "$runs/$case_id/capsule.json" || fail "a variables block reached the capsule"
+        compgen -G "$runs/$case_id/*conda*" >/dev/null && fail "a withheld export left a file in the bundle" ;;
+      *) assert_file_contains "$runs/$case_id/capsule.json" '"export_sha256": null' ;;
+    esac
+  done
   printf 'changed\n' >> "$proj/file.txt"
   if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
     fail "verify should report drift after a change"
@@ -21449,16 +21539,18 @@ test_oms_run_diff_compares_capsules() {
   printf '{"auc": 0.74, "ok": false, "label": "old", "empty": null}\n' > "$d/mA.json"
   printf '{"auc": 0.82, "ok": true, "label": "new", "empty": null}\n' > "$d/mB.json"
   a="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
-  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$a" \
+  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$a" env -u LOADEDMODULES \
     "$cap" run --seed 1 --metrics mA.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run A failed"
   b="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
-  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$b" \
+  ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$b" LOADEDMODULES='cuda/12.1' \
     "$cap" run --seed 2 --metrics mB.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run B failed"
 
   out="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" "$b" 2>/dev/null)"
   contains "$out" "metric:auc" || fail "diff missing metric line"
   contains "$out" "0.08" || fail "diff missing metric delta"
   contains "$out" "seeds" || fail "diff missing seeds line"
+  printf '%s\n' "$out" | grep -E '^modules +!=  \(none\)  \|  cuda/12\.1$' > /dev/null || fail "diff missing the modules line"
+  printf '%s\n' "$out" | grep -E '^host +== ' > /dev/null || fail "diff missing the host line"
   printf '%s\n' "$out" | grep -F "metric:ok" > "$d/okline" || fail "diff missing bool metric"
   if grep -Fq "(Δ" "$d/okline"; then
     fail "bool metrics must not be treated as numeric deltas"

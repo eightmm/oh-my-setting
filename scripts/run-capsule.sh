@@ -30,6 +30,7 @@ declare -a CONFIGS=()
 declare -a OUTPUTS=()
 declare -a SEEDS=()
 SCAN_FILE=""
+CONDA_SCRATCH=""
 cleanup_done=0
 
 usage() {
@@ -62,6 +63,18 @@ verify <id>        Compare the current tree/env to the capsule; nonzero on drift
 
 Capture is mechanical (no model). The command line is recorded verbatim —
 do not put secrets in arguments.
+
+The environment block records what is present and null otherwise: interpreter,
+python/torch/cuda, GPU names and count, package freeze digest, host and CPU
+count, loaded modules ($LOADEDMODULES), the active conda environment with the
+digest of its `env export --no-builds` (conda or mamba on PATH; the export is
+saved beside the capsule unless it looks sensitive), and only these variables:
+CUDA_VISIBLE_DEVICES, OMP_NUM_THREADS, SLURM_JOB_ID, SLURM_ARRAY_TASK_ID,
+SLURM_JOB_NODELIST, SLURM_JOB_PARTITION.
+
+Environment:
+  OMS_RUN_CAPSULE_CONDA_TIMEOUT  seconds the conda export may take, 1..600
+                                 (default 30); past it the digest is null.
 EOF
 }
 
@@ -76,6 +89,7 @@ cleanup() {
   [ "$cleanup_done" = 0 ] || return 0
   cleanup_done=1
   [ -z "$SCAN_FILE" ] || rm -f "$SCAN_FILE"
+  [ -z "$CONDA_SCRATCH" ] || rm -f "$CONDA_SCRATCH"
 }
 cleanup_signal() {
   local code="$1"
@@ -111,11 +125,96 @@ project_python() {
   fi
 }
 
+# Seconds the conda export may take before its digest is recorded as unknown.
+conda_probe_timeout() {
+  local value="${OMS_RUN_CAPSULE_CONDA_TIMEOUT:-30}"
+  case "$value" in
+    ""|*[!0-9]*) value=30 ;;
+  esac
+  [ "$value" -ge 1 ] && [ "$value" -le 600 ] || value=30
+  printf '%s\n' "$value"
+}
+
+# What the project interpreter cannot report about where a run executed: the
+# active conda environment, loaded HPC modules, the host, and a fixed allow-list
+# of variables. Detection only: a missing tool or variable is null, a failed
+# probe never fails the capture, and no variable outside the list is read.
+# With BUNDLE, the conda export is also saved there (machine prefix removed).
+capture_env_extra_json() {
+  OMS_CONDA_TIMEOUT="$(conda_probe_timeout)" python3 <<'PY'
+import hashlib, json, os, platform, re, shutil, subprocess
+
+ALLOWED = ("CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "SLURM_JOB_ID", "SLURM_ARRAY_TASK_ID",
+           "SLURM_JOB_NODELIST", "SLURM_JOB_PARTITION")
+EXPORT_MAX = 1048576
+
+def text(value, limit):
+    value = "".join(ch if ch.isprintable() else " " for ch in str(value))
+    return " ".join(value.split())[:limit]
+
+extra = {"host": None, "cpu_count": None, "modules": None, "conda": None, "env_vars": None}
+try:
+    extra["host"] = text(platform.node().split(".")[0], 64) or None
+except Exception:
+    pass
+count = os.cpu_count()
+if isinstance(count, int) and count > 0:
+    extra["cpu_count"] = count
+loaded = [text(item, 128) for item in os.environ.get("LOADEDMODULES", "").split(":")]
+extra["modules"] = [item for item in loaded if item][:128] or None
+extra["env_vars"] = {name: text(os.environ[name], 256) for name in ALLOWED if os.environ.get(name)} or None
+
+name = text(os.environ.get("CONDA_DEFAULT_ENV", ""), 128)
+tool = next((candidate for candidate in ("conda", "mamba") if shutil.which(candidate)), None)
+if name and tool:
+    conda = {"env": name, "tool": tool, "export_sha256": None}
+    try:
+        done = subprocess.run([tool, "env", "export", "--no-builds"], capture_output=True, text=True,
+                              timeout=int(os.environ["OMS_CONDA_TIMEOUT"]), stdin=subprocess.DEVNULL)
+        body = done.stdout if done.returncode == 0 else ""
+    except Exception:
+        body = ""
+    # The prefix line is this machine's install path and the variables block holds arbitrary values set by
+    # `conda env config vars set`; without them the digest compares across machines and honours the allow-list.
+    kept, skipping = [], False
+    for line in body.splitlines(True):
+        if line.startswith("prefix:"):
+            continue
+        if re.match(r"variables:", line):
+            skipping = True
+            continue
+        if skipping and (line.startswith((" ", "\t", "-")) or not line.strip()):
+            continue
+        skipping = False
+        kept.append(line)
+    body = "".join(kept)
+    if body.strip():
+        data = body.encode("utf-8", "replace")
+        conda["export_sha256"] = hashlib.sha256(data).hexdigest()
+        # Channel URLs can embed credentials (/t/<token>/ or user:secret@host); never offer such an export.
+        leaky = re.search(r"://[^/\s@]*@|/t/[^/\s]+/", body)
+        # The export goes to a scratch file the caller scans and moves into the bundle, so an interrupted
+        # capture never leaves it in the persistent capsule.
+        out = os.environ.get("OMS_ENV_EXPORT_OUT")
+        if out and not leaky and len(data) <= EXPORT_MAX:
+            try:
+                with open(out, "wb") as handle:
+                    handle.write(data)
+            except OSError:
+                pass
+        elif leaky:
+            conda["withheld"] = True
+    extra["conda"] = conda
+print(json.dumps(extra))
+PY
+}
+
 capture_env_json() {
   # Best-effort environment fingerprint; every probe degrades to null/empty.
-  local py
+  local py extra
   py="$(project_python)"
-  OMS_PROJECT_PY="$py" "$py" <<'PY'
+  extra="$(capture_env_extra_json 2>/dev/null)" || extra=""
+  OMS_PROJECT_PY="$py" OMS_ENV_EXTRA="$extra" "$py" <<'PY'
 import json, os, platform, shutil, subprocess
 
 def run(cmd):
@@ -145,6 +244,8 @@ if shutil.which("nvidia-smi"):
     env["nvidia_driver"] = (drv.splitlines() or [None])[0]
     names = run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
     env["gpu_names"] = [n.strip() for n in names.splitlines() if n.strip()]
+# A probe that listed nothing cannot tell "no GPU" from "probe failed": unknown, not zero.
+env["gpu_count"] = len(env["gpu_names"]) or None
 
 freeze = ""
 if shutil.which("uv"):
@@ -155,6 +256,12 @@ env["freeze_sha256"] = None
 if freeze:
     import hashlib
     env["freeze_sha256"] = hashlib.sha256(freeze.encode()).hexdigest()
+try:
+    extra = json.loads(os.environ.get("OMS_ENV_EXTRA") or "{}")
+except ValueError:
+    extra = {}
+for key in ("host", "cpu_count", "modules", "conda", "env_vars"):
+    env[key] = extra.get(key) if isinstance(extra, dict) else None
 print(json.dumps(env))
 PY
 }
@@ -291,8 +398,21 @@ cmd_run() {
 
   local git_json env_json cfg_json out_json
   git_json="$(capture_git_json "$bundle")"
-  env_json="$(capture_env_json)"
+  CONDA_SCRATCH="$(mktemp)" || fail "mktemp failed"
+  : > "$CONDA_SCRATCH"
+  env_json="$(OMS_ENV_EXPORT_OUT="$CONDA_SCRATCH" capture_env_json)"
   save_env_lock "$bundle"
+  # The export names channels, which can embed credentials; the digest alone still identifies it.
+  if [ -s "$CONDA_SCRATCH" ]; then
+    if agent_memory_file_has_sensitive_content "$CONDA_SCRATCH"; then
+      echo "capsule: conda export contains sensitive-looking content; kept its digest only" >&2
+    else
+      mv "$CONDA_SCRATCH" "$bundle/env.conda.yml"
+    fi
+  elif printf '%s' "$env_json" | grep -Fq '"withheld": true'; then
+    echo "capsule: conda export contains sensitive-looking content; kept its digest only" >&2
+  fi
+  rm -f "$CONDA_SCRATCH"; CONDA_SCRATCH=""
   cfg_json="$(configs_json)"
 
   # The command's combined output is teed to the bundle log (part of the
@@ -517,6 +637,13 @@ if os.path.exists(os.path.join(bundle, "env.uv.lock")):
 elif os.path.exists(os.path.join(bundle, "env.freeze.txt")):
     print("uv pip install -r %s/env.freeze.txt   # or: pip install -r ..." % bundle)
 print("# env at capture: python=%s torch=%s cuda=%s" % (e.get("python"), e.get("torch"), e.get("cuda")))
+conda = e.get("conda") if isinstance(e.get("conda"), dict) else None
+if conda and os.path.exists(os.path.join(bundle, "env.conda.yml")):
+    print("# conda env at capture: %s; recreate with: conda env create -f %s/env.conda.yml" % (conda.get("env"), bundle))
+elif conda:
+    print("# conda env at capture: %s (export not saved)" % conda.get("env"))
+if isinstance(e.get("modules"), list) and e["modules"]:
+    print("# modules at capture: %s" % " ".join(str(m) for m in e["modules"]))
 if cap.get("seeds"):
     print("# seeds: %s" % ", ".join(cap["seeds"]))
 print("# command:")
@@ -540,9 +667,11 @@ cmd_verify() {
       fi
     fi
   fi
-  local py
+  local py cur_extra
   py="$(project_python)"
-  OMS_CUR_COMMIT="$cur_commit" OMS_CUR_DIFF="$cur_diff" OMS_PROJECT_PY="$py" "$py" - "$p" <<'PY'
+  cur_extra="$(capture_env_extra_json 2>/dev/null)" || cur_extra=""
+  OMS_CUR_COMMIT="$cur_commit" OMS_CUR_DIFF="$cur_diff" OMS_PROJECT_PY="$py" OMS_CUR_EXTRA="$cur_extra" \
+    "$py" - "$p" <<'PY'
 import json, os, sys
 cap = json.load(open(sys.argv[1]))
 g = cap.get("git", {})
@@ -578,6 +707,28 @@ for k in ("python", "torch", "cuda"):
     want, got = e.get(k), cur.get(k)
     tag = "ok   " if want == got else "WARN "
     print("%s env-%s: capsule=%s current=%s" % (tag, k, want, got))
+# Fields a capsule did not record are not compared, so an older capsule reads as before. The allow-listed
+# variables are not compared either: job ids and node lists differ on every run by design.
+def conda_label(block):
+    # "name@digest12", the name alone when its export was unreadable, "(none)" without an active environment.
+    if not isinstance(block, dict) or not block.get("env"):
+        return "(none)"
+    digest = block.get("export_sha256")
+    return "%s@%s" % (block["env"], digest[:12]) if isinstance(digest, str) and digest else str(block["env"])
+def modules_label(items):
+    return ",".join(str(item) for item in items) if isinstance(items, list) and items else "(none)"
+try:
+    extra = json.loads(os.environ.get("OMS_CUR_EXTRA") or "{}")
+except ValueError:
+    extra = {}
+extra = extra if isinstance(extra, dict) else {}
+for k, label in (("conda", conda_label), ("modules", modules_label)):
+    if k in e:
+        want, got = label(e.get(k)), label(extra.get(k))
+        tag = "ok   " if want == got else "WARN "
+        print("%s env-%s: capsule=%s current=%s" % (tag, k, want, got))
+if "host" in e:
+    print("info env-host: capsule=%s current=%s" % (e.get("host"), extra.get("host")))
 sys.exit(1 if drift else 0)
 PY
 }
