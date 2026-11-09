@@ -459,8 +459,8 @@ strict_remote() {
     fail "remote $REMOTE is not an accepted GitHub remote"
   push_slug="$(python3 "$REMOTE_PARSER" "$REMOTE_PUSH_URL")" ||
     fail "push URL for $REMOTE is not an accepted GitHub remote"
-  fetch_fold="$(printf '%s' "$fetch_slug" | tr '[:upper:]' '[:lower:]')"
-  push_fold="$(printf '%s' "$push_slug" | tr '[:upper:]' '[:lower:]')"
+  fetch_fold="${fetch_slug,,}"
+  push_fold="${push_slug,,}"
   [ "$fetch_fold" = "$push_fold" ] ||
     fail "fetch and push URLs target different GitHub repositories"
   REMOTE_SLUG="$fetch_slug"
@@ -492,8 +492,8 @@ PY
 )" || park "github-permission-unreadable" "check repository access"
   owner="$(printf '%s\n' "$parsed" | sed -n 1p)"
   permission="$(printf '%s\n' "$parsed" | sed -n 2p)"
-  expected="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')"
-  actual="$(printf '%s' "$owner" | tr '[:upper:]' '[:lower:]')"
+  expected="${slug,,}"
+  actual="${owner,,}"
   [ "$actual" = "$expected" ] ||
     park "github-repository-mismatch" "check gh authentication and the remote"
   case "$permission" in
@@ -1071,8 +1071,7 @@ publish_locked() {
   "$GIT" check-ref-format --branch "$branch" >/dev/null 2>&1 || fail "intent branch is invalid"
   "$GIT" check-ref-format --branch "$BASE" >/dev/null 2>&1 || fail "intent base is invalid"
   strict_remote
-  [ "$(printf '%s' "$REMOTE_SLUG" | tr '[:upper:]' '[:lower:]')" = \
-    "$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')" ] ||
+  [ "${REMOTE_SLUG,,}" = "${slug,,}" ] ||
     park "remote-changed" "restore the reviewed GitHub remote"
   [ "$REMOTE_FETCH_URL" = "$fetch_url" ] && [ "$REMOTE_PUSH_URL" = "$push_url" ] ||
     park "remote-url-changed" "restore the exact reviewed fetch/push URLs"

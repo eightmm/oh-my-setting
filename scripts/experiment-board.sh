@@ -99,7 +99,7 @@ trap 'cleanup_signal 130' INT
 trap 'cleanup_signal 143' TERM
 
 slugify() {
-  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' \
+  printf '%s' "${1,,}" | tr -cs '[:alnum:]' '-' \
     | sed 's/^-//;s/-$//;s/--*/-/g' | cut -c1-40
 }
 

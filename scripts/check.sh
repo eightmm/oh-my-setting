@@ -975,7 +975,7 @@ plan_affected_operator() {
   affected_operator_paths=()
   affected_operator_sections=""
   affected_operator_has_suite=0
-  for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+  for affected_test in "${AFFECTED_TESTS[@]}"; do
     case "$affected_test" in
       tests/operator/*) affected_operator_paths[${#affected_operator_paths[@]}]="$affected_test" ;;
       tests/operator-tools-smoke.sh) affected_operator_has_suite=1 ;;
@@ -1257,7 +1257,7 @@ if [ "$RUN_AFFECTED" = 1 ] && [ "$AFFECTED_MODE" = affected ]; then
       AFFECTED_REASONS="${AFFECTED_REASONS:-}; operator-tools deferred to the affected_operator CI job"
     fi
   fi
-  for affected_test in ${AFFECTED_TESTS[@]+"${AFFECTED_TESTS[@]}"}; do
+  for affected_test in "${AFFECTED_TESTS[@]}"; do
     [ "$affected_test" = tests/run-smoke-shard.sh ] && continue
     # Operator section fragments only run inside their suite, once.
     case "$affected_test" in tests/operator/*) affected_test=tests/operator-tools-smoke.sh ;; esac
