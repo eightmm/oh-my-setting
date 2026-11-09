@@ -531,6 +531,14 @@ UNPROVEN = {
     "cursor before undimmed text": ("› " + E + "[7ma" + E + "[27mbc\n", "holds text"),
     "two cursor cells": ("› " + E + "[7mab" + E + "[27m" + E + "[2mhint" + E + "[22m\n", "holds text"),
     "cursor after the placeholder": ("› " + E + "[2mType" + E + "[7mx" + E + "[0m\n", "holds text"),
+    # A choice dialog draws its selection with the prompt marker; typing there would answer the dialog.
+    "claude permission dialog": ("╭──────────────────────────────╮\n│ Do you want to proceed?      │\n"
+                                 "│ ❯ 1. Yes                     │\n│   2. No, and tell Claude what to do differently (esc) │\n"
+                                 "╰──────────────────────────────╯\n", "holds text"),
+    "claude question dialog": ("────────\n Which approach?\n\n" + E + "[38;5;153m❯ 1. Keep the cache" + E + "[39m\n"
+                               "  2. Drop the cache\n────────\n Enter to select · Esc to cancel\n", "holds text"),
+    "codex approval dialog": ("  Would you like to run the following command?\n\n› 1. Yes, proceed (y)\n"
+                              "  2. No, and tell Codex what to do differently (esc)\n", "holds text"),
     "no prompt": ("Working (esc to interrupt)\n", "no input prompt"),
     "empty capture": ("", "no input prompt"),
 }
