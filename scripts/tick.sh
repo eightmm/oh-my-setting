@@ -6,8 +6,9 @@
 # packets, retires idle all-done plans and stale one-shot failure records,
 # resolves mechanically recovered or superseded artifact failures, and refreshes
 # a stale Codex plugin cache; gc stays opt-in (OMS_TICK_GC=1) because its
-# retention floor is a per-repo decision. `install` wires an hourly user-level
-# timer (systemd, cron fallback) so sessions start on a swept tree.
+# retention floor is a per-repo decision. The idle-main wake is opt-in too
+# (OMS_TICK_WAKE=1): it types into a person's live CLI. `install` wires an hourly
+# user-level timer (systemd, cron fallback) so sessions start on a swept tree.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/platform.sh
 . "$ROOT/scripts/lib/platform.sh"
@@ -34,8 +35,9 @@ Usage: tick.sh run [--repo PATH ...] [--dry-run]
 
 run        Sweep the given repos, or every registered one: journal and CI sync,
            attempt reconcile, stale thread/task close, plan and failure
-           retirement, artifact-failure resolution, optional gc, and a Codex
-           plugin cache refresh when the cache no longer matches the install.
+           retirement, artifact-failure resolution, optional gc, an optional
+           idle-main wake, and a Codex plugin cache refresh when the cache no
+           longer matches the install.
            At most daily, refresh installed provider catalogs older than 7 days.
            Each completed sweep gets .oms/tick/last.json. A repo under
            verification or another sweep is deferred until a later tick.
@@ -55,6 +57,11 @@ Environment:
   OMS_TICK_RETIRE=0            skip task, plan, and failure retirement (default on)
   OMS_CI_TICK=0                skip periodic CI result collection
   OMS_TICK_GC=1                also run `oms gc --apply` per repo (default off)
+  OMS_TICK_WAKE=1              prompt a panel main idle 30+ min with no live child
+                               and a provably empty input line (no pending draft)
+                               when plan work is ready or an autopilot proposal
+                               waits in proposal-review (default off; at most one
+                               per main per run and 6 per UTC day; --dry-run prints)
   OMS_TICK_STEP_TIMEOUT        seconds per step when `timeout` exists (600)
 EOF
 }
@@ -91,6 +98,14 @@ case "$IDLE_DAYS$TASK_IDLE_DAYS$PLAN_IDLE_DAYS$FAILURE_STALE_DAYS$STEP_TIMEOUT" 
 
 repo_root() { git -C "${1:-$PWD}" rev-parse --show-toplevel 2>/dev/null || (cd "${1:-$PWD}" && pwd -P); }
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout "$STEP_TIMEOUT" "$@"; else "$@"; fi; }
+wake_main() {  # ROOT [--dry-run] -> one status line from the panel's own lock, checks and submit
+  bounded python3 - "$ROOT/scripts/lib" "$@" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import panel_interaction
+raise SystemExit(panel_interaction.wake_cli(sys.argv[2:]))
+PY
+}
 
 registered() { [ -f "$REGISTRY" ] && grep -Fxq "$1" "$REGISTRY"; }
 register_repo() {
@@ -264,7 +279,11 @@ sweep_repo() (
   local root
   root="$(cd "$1" && pwd -P)" || exit 1
   [ -d "$root/.oms" ] || { echo "skip $root: no .oms"; exit 0; }
-  if [ "$DRY_RUN" = 1 ]; then echo "would sweep $root"; exit 0; fi
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "would sweep $root"
+    [ "${OMS_TICK_WAKE:-0}" != 1 ] || echo "wake $root: $(wake_main "$root" --dry-run 2>&1 | tail -n 1)"
+    exit 0
+  fi
   if ! oms_hold_file_lock "$root/.oms/tick/last.json" 8; then
     echo "deferred $root: maintenance already running"
     exit 0
@@ -285,7 +304,7 @@ sweep_repo_unlocked() {  # receipt in .oms/tick/last.json
   local tasks_closed=0 plans_retired=0 plan_file plan_check plan_sha plan_retire_rc=skipped
   local artifacts_resolved=0 artifact_resolve_out artifact_resolve_rc=skipped
   local artifacts_superseded=0 artifact_supersede_out artifact_supersede_rc=skipped
-  local failures_retired=0 failure_list failure_candidates failure_fingerprint
+  local failures_retired=0 failure_list failure_candidates failure_fingerprint wake=skipped wake_note=""
   if work_journal_enabled; then
     bounded bash -c '
       . "$1/scripts/lib/work-journal.sh"
@@ -381,11 +400,25 @@ except (OSError, ValueError, KeyError, TypeError):
     done < <(printf '%s\n' "$failure_candidates")
   fi
   if [ "${OMS_TICK_GC:-0}" = 1 ]; then gc=0; bounded "$oms" gc --repo "$root" --apply >/dev/null 2>&1 || gc=$?; fi
+  if [ "${OMS_TICK_WAKE:-0}" = 1 ]; then
+    wake_note="$(wake_main "$root" 2>&1 | tail -n 1)" || true  # a failed wake never stops the receipt
+    case "$wake_note" in "woke "*) wake=1 ;; *) wake=0 ;; esac
+    echo "wake $root: ${wake_note:-no status}"
+  fi
   mkdir -p "$root/.oms/tick"
-  python3 - "$root/.oms/tick/last.json" "$journal" "$reconcile" "$gc" "$tasks_closed" "$plans_retired" "$plan_retire_rc" "$artifacts_resolved" "$artifact_resolve_rc" "$artifacts_superseded" "$artifact_supersede_rc" "$failures_retired" "${closed[@]}" <<'PY'
+  python3 - "$ROOT/scripts/lib" "$root/.oms/tick/last.json" "$journal" "$reconcile" "$gc" "$tasks_closed" "$plans_retired" "$plan_retire_rc" "$artifacts_resolved" "$artifact_resolve_rc" "$artifacts_superseded" "$artifact_supersede_rc" "$failures_retired" "$wake" "${closed[@]}" <<'PY'
 import datetime, json, os, sys, tempfile
-path, journal, reconcile, gc, tasks_closed, plans_retired, plan_retire_rc, artifacts_resolved, artifact_resolve_rc, artifacts_superseded, artifact_supersede_rc, failures_retired, *closed = sys.argv[1:]
-row = {"schema": 1, "ran_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+lib, path, journal, reconcile, gc, tasks_closed, plans_retired, plan_retire_rc, artifacts_resolved, artifact_resolve_rc, artifacts_superseded, artifact_supersede_rc, failures_retired, wake, *closed = sys.argv[1:]
+sys.path.insert(0, lib)
+from panel_interaction import LedgerRefused, read_tick_receipt
+now = datetime.datetime.now(datetime.timezone.utc)
+try:  # the wake's daily cap and dedupe live in this file: the wake's own check decides, and a refusal keeps it
+    ledger = read_tick_receipt(path)[1]
+except LedgerRefused as error:
+    print("tick receipt kept: %s: %s; inspect it, then move it aside so the next sweep writes a fresh receipt and wake ledger" % (path, error))
+    raise SystemExit(0)
+ledger = [w for w in ledger if w["day"] == now.strftime("%Y-%m-%d")]
+row = {"schema": 1, "ran_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
        "journal_rc": int(journal), "reconcile_rc": int(reconcile),
        "gc": "skipped" if gc == "skipped" else int(gc), "threads_closed": closed,
        "tasks_closed": int(tasks_closed), "plans_retired": int(plans_retired),
@@ -394,13 +427,15 @@ row = {"schema": 1, "ran_at": datetime.datetime.now(datetime.timezone.utc).strft
        "artifact_resolve_rc": "skipped" if artifact_resolve_rc == "skipped" else int(artifact_resolve_rc),
        "artifacts_superseded": int(artifacts_superseded),
        "artifact_supersede_rc": "skipped" if artifact_supersede_rc == "skipped" else int(artifact_supersede_rc),
-       "failures_retired": int(failures_retired)}
+       "failures_retired": int(failures_retired), "wake": "skipped" if wake == "skipped" else int(wake)}
+if ledger:
+    row["wakes"] = ledger
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tick.")
 with os.fdopen(fd, "w", encoding="utf-8") as fh:
     json.dump(row, fh, ensure_ascii=False, sort_keys=True); fh.write("\n")
 os.replace(tmp, path)
 PY
-  echo "swept $root: journal=$journal reconcile=$reconcile gc=$gc threads_closed=${#closed[@]} tasks_closed=$tasks_closed plans_retired=$plans_retired artifacts_resolved=$artifacts_resolved artifacts_superseded=$artifacts_superseded failures_retired=$failures_retired"
+  echo "swept $root: journal=$journal reconcile=$reconcile gc=$gc threads_closed=${#closed[@]} tasks_closed=$tasks_closed plans_retired=$plans_retired artifacts_resolved=$artifacts_resolved artifacts_superseded=$artifacts_superseded failures_retired=$failures_retired wake=$wake"
 }
 
 dry_run_catalogs() {  # the refresh's own selection, with no stamp, state or probe

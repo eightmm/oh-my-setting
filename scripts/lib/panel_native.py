@@ -1236,6 +1236,102 @@ def _swap_submit(pane, text):
     subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3, stdin=subprocess.DEVNULL)
 
 
+_INPUT_MARK = re.compile(r"^(?:\s*[│┃|])?\s*[>❯›](?: |$)")
+_INPUT_SIDES = "│┃|"
+_INPUT_RULES = set("─━═╌┄╭╮╰╯┌┐└┘├┤┬┴┼")
+_ESCAPE = re.compile(r"\x1b\[([0-9;:?]*)([A-Za-z])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.?")
+
+
+def _sgr(state, params):
+    codes = [int(code) if code.isdigit() else 0 for code in re.split("[;:]", params)]
+    index = 0
+    while index < len(codes):
+        code = codes[index]
+        if code == 0:
+            state.update(faint=False, inverse=False, grey=False)
+        elif code in (2, 22):
+            state["faint"] = code == 2
+        elif code in (7, 27):
+            state["inverse"] = code == 7
+        elif 30 <= code <= 37 or 90 <= code <= 97 or code == 39:
+            state["grey"] = code == 90
+        elif code in (38, 48) and index + 2 < len(codes) and codes[index + 1] == 5:
+            if code == 38:
+                state["grey"] = codes[index + 2] == 8 or 232 <= codes[index + 2] <= 250
+            index += 2
+        elif code in (38, 48) and index + 4 < len(codes) and codes[index + 1] == 2:
+            if code == 38:
+                rgb = codes[index + 2:index + 5]
+                state["grey"] = max(rgb) - min(rgb) <= 24 and 64 <= max(rgb) <= 200
+            index += 4
+        index += 1
+
+
+def _screen_cells(text):
+    """Per captured line, (char, placeholder, inverse) cells; attributes carry across lines as tmux emits them."""
+    state, lines = {"faint": False, "inverse": False, "grey": False}, []
+    for raw in text.split("\n"):
+        cells, position = [], 0
+        for match in list(_ESCAPE.finditer(raw)) + [None]:
+            end = match.start() if match else len(raw)
+            cells += [(char, state["faint"] or state["grey"], state["inverse"]) for char in raw[position:end]]
+            if match:
+                if match.group(2) == "m":
+                    _sgr(state, match.group(1))
+                position = match.end()
+        lines.append(cells)
+    return lines
+
+
+def input_line_empty(pane):
+    """(True, "") only when the live pane proves the native CLI's input line holds no user text; else (False, why).
+
+    Provider-neutral and fail-closed. Out of copy mode, the input region is the last visible prompt-marker line
+    (`>`, `❯` or `›`, optionally inside a box) and the lines around it up to the nearest border or rule line
+    above and below (else the capture's edge). The region must hold exactly one marker line; after the marker,
+    that line and every later region line may hold only blanks, box sides and dim/grey placeholder text. One
+    drawn cursor (an inverse cell) counts as empty only as the first non-blank cell with dim placeholder text
+    immediately after it; anywhere else it is a typed character. Ambiguous screens refuse."""
+    from terminal_panel import tmux_command
+    quiet = dict(capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    mode = subprocess.run(tmux_command("display-message", "-p", "-t", pane, "#{pane_in_mode}"), **quiet)
+    if mode.returncode or mode.stdout.strip() != "0":
+        return False, "main pane is in copy mode or unreadable"
+    capture = subprocess.run(tmux_command("capture-pane", "-p", "-e", "-t", pane), **quiet)
+    if capture.returncode or len(capture.stdout) > 1048576:
+        return False, "main pane capture unavailable"
+    lines = _screen_cells(capture.stdout.replace("\r", ""))
+    plain = ["".join(cell[0] for cell in cells) for cells in lines]
+    marks = [row for row, text in enumerate(plain) if _INPUT_MARK.match(text)]
+    if not marks:
+        return False, "no input prompt line visible in the main pane"
+    mark = marks[-1]
+    rules = [row for row, text in enumerate(plain)
+             if set(text.strip()) & _INPUT_RULES and set(text) <= _INPUT_RULES | set(_INPUT_SIDES) | {" "}]
+    top = max([row for row in rules if row < mark], default=-1)
+    bottom = min([row for row in rules if row > mark], default=len(lines))
+    if any(top < row < mark for row in marks):
+        return False, "more than one prompt line in the main input region"
+    rest = lines[mark][_INPUT_MARK.match(plain[mark]).end():]
+    while rest and rest[-1][0] == " ":
+        rest = rest[:-1]
+    if rest and rest[-1][0] in _INPUT_SIDES:
+        rest = rest[:-1]
+    first = next((index for index, cell in enumerate(rest) if cell[0] != " "), None)
+    if first is not None and rest[first][2]:
+        after = rest[first + 1] if first + 1 < len(rest) else (" ", False, False)
+        if after[0] == " " or not after[1] or after[2]:
+            return False, "main input line holds text"
+        rest = rest[first + 1:]
+    if any(char != " " and (inverse or not placeholder) for char, placeholder, inverse in rest):
+        return False, "main input line holds text"
+    for cells in lines[mark + 1:bottom]:
+        if any(char != " " and char not in _INPUT_SIDES and (inverse or not placeholder)
+               for char, placeholder, inverse in cells):
+            return False, "main input may continue below its prompt line"
+    return True, ""
+
+
 def live_main_pane(repo):
     """(pane, harness) of the one verified working tmux panel main, with swap_main's ownership proofs."""
     from terminal_panel import live_mains, main_history, resolve_session

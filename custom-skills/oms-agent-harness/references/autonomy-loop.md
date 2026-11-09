@@ -128,6 +128,16 @@ This is an agent-driven loop while a parent is running, not an always-on daemon
 or an app notification service. Session wakeups need a separately configured
 scheduler. Publication and expensive compute retain their own authorization.
 
+The one built-in wakeup is opt-in: with `OMS_TICK_WAKE=1`, the hourly `oms tick`
+types a single prompt into an idle panel main (30 minutes idle, no live child
+call, panel lock free) when plan tasks are ready or an autopilot proposal waits
+in `proposal-review`. The prompt is ordinary text, not `/goal`, so any provider's
+main receives it; it names that reason and asks the main to continue the shared
+plan within its existing authority. It is typed only when the live pane proves
+the input line empty, so a user's draft is never submitted (keys typed in the
+about 0.8 s between that check and Enter still can be); it never starts a
+main or worker, and is capped at one per main per run and 6 per UTC day.
+
 ## Task Loop
 
 1. Orient: inspect repository instructions and the worktree; consult existing

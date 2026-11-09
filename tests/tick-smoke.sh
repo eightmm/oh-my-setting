@@ -464,6 +464,242 @@ set -e
 [ "$bad_failure_stale_rc" -eq 2 ] && printf '%s' "$bad_failure_stale" | grep >/dev/null 'must be integers' ||
   fail "a non-numeric failure stale threshold must be rejected: $bad_failure_stale"
 
+# --- opt-in idle-main wake ----------------------------------------------------
+# A tmux stub with no sessions keeps the real server out: it logs every call,
+# serves WAKE_MODE and the WAKE_SCREEN file as the main pane, and accepts keys.
+# The panel main itself is stubbed in Python below.
+wk="$TMP/wake"; make_repo "$wk"; mkdir -p "$TMP/wake-bin"
+cat > "$TMP/wake-bin/tmux" <<EOF_TMUX
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$TMP/tmux.log"
+case "\$1" in
+  display-message) [ -n "\${WAKE_MODE:-}" ] && printf '%s\\n' "\$WAKE_MODE" ;;
+  capture-pane) [ -f "\${WAKE_SCREEN:-}" ] && cat "\$WAKE_SCREEN" ;;
+  send-keys) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF_TMUX
+chmod +x "$TMP/wake-bin/tmux"
+"$PLAN" --repo "$wk" init --goal wake-goal --accept true >/dev/null
+"$PLAN" --repo "$wk" add --id t1 --title wake-task >/dev/null
+out="$(PATH="$TMP/wake-bin:$PATH" OMS_TICK_WAKE=1 "$TICK" run --repo "$wk" --dry-run)"
+printf '%s' "$out" | grep >/dev/null "^wake $wk: skipped: " || fail "a dry-run wake must report its probe: $out"
+[ ! -e "$wk/.oms/tick" ] && [ ! -e "$wk/.oms/artifacts/panel-main-start.lock" ] ||
+  fail "a dry-run wake must write nothing"
+rm -f "$TMP/tmux.log"
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$wk")"
+printf '%s' "$out" | grep >/dev/null 'wake=skipped' || fail "the wake must be off by default: $out"
+if printf '%s' "$out" | grep >/dev/null "^wake "; then fail "a disabled wake must not probe: $out"; fi
+[ ! -e "$TMP/tmux.log" ] || fail "a disabled wake must not query tmux"
+out="$(PATH="$TMP/wake-bin:$PATH" OMS_TICK_WAKE=1 "$TICK" run --repo "$wk")"
+printf '%s' "$out" | grep >/dev/null 'wake=0' && printf '%s' "$out" | grep >/dev/null "^wake $wk: skipped: " ||
+  fail "an enabled wake without a panel main must submit nothing: $out"
+if grep -q send-keys "$TMP/tmux.log"; then fail "a wake without a verified main must not type"; fi
+PATH="$TMP/wake-bin:$PATH" OMS_ROOT="$ROOT" python3 - "$wk" "$TMP/wake-proposal" "$TMP/tmux.log" <<'PY' || fail "idle-main wake decisions are wrong"
+import contextlib, json, os, sys, time
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, os.environ["OMS_ROOT"] + "/scripts/lib")
+import panel_interaction, panel_native, terminal_panel
+repo, bare, tmux_log = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
+member, attempt, now = "call-wake", "att_" + "a" * 32, float(int(time.time()))
+activity = repo / ".oms" / "hooks" / "panel-activity" / (member + ".json")
+activity.parent.mkdir(parents=True)
+ledger = repo / ".oms" / "tick" / "last.json"
+E = "\x1b"
+# Screens the stub tmux serves: Codex (the main under test is Codex; the proof is provider-neutral) and Claude shapes.
+CODEX_EMPTY = "› " + E + "[2mAsk Codex to do anything" + E + "[22m\n\n  " + E + "[2m⏎ send   ⌃J newline" + E + "[0m\n\n"
+EMPTY = {
+    "codex placeholder": CODEX_EMPTY,
+    "claude box": ("> earlier question\n  an answer\n╭──────────────────────╮\n│ > " + E + "[7mT" + E + "[27m" + E +
+                   "[2mry \"fix lint\"" + E + "[22m   │\n╰──────────────────────╯\n  ? for shortcuts\n"),
+    "claude rule": "────────\n" + E + "[38;2;153;153;153m❯ " + E + "[0m" + E + "[7m " + E + "[0m\n────────\n  accept edits on\n",
+    "grey 256-colour placeholder": "› " + E + "[38;5;244mType a message" + E + "[39m\n",
+    "bright-black placeholder": "│ > " + E + "[90mType your message" + E + "[39m │\n╰─────╯\n",
+}
+UNPROVEN = {
+    "codex draft": ("› fix the tests\n\n  " + E + "[2m⏎ send" + E + "[0m\n", "holds text"),
+    "claude draft": ("│ > half typed reply   │\n╰──────╯\n", "holds text"),
+    "cursor over a typed character": ("│ > " + E + "[7ma" + E + "[27m   │\n╰──╯\n", "holds text"),
+    "malformed colour": ("› " + E + "[38;5mtyped\n", "holds text"),
+    "multi-line draft": ("│ > " + E + "[7m " + E + "[27m   │\n│   second line   │\n╰──╯\n", "continue below"),
+    "undimmed text below": ("› \n\nnot dim\n", "continue below"),
+    "boxed draft ending in a bare prompt": ("│ > Please review: │\n│ >   │\n╰──╯\n", "more than one prompt"),
+    "draft ending in a bare prompt": ("› Please review:\n\n› \n", "more than one prompt"),
+    "one typed character, then a hint": ("› " + E + "[7ma" + E + "[27m " + E + "[2mhint" + E + "[22m\n", "holds text"),
+    "cursor before undimmed text": ("› " + E + "[7ma" + E + "[27mbc\n", "holds text"),
+    "two cursor cells": ("› " + E + "[7mab" + E + "[27m" + E + "[2mhint" + E + "[22m\n", "holds text"),
+    "cursor after the placeholder": ("› " + E + "[2mType" + E + "[7mx" + E + "[0m\n", "holds text"),
+    "no prompt": ("Working (esc to interrupt)\n", "no input prompt"),
+    "empty capture": ("", "no input prompt"),
+}
+screen = Path(str(tmux_log) + ".screen")
+def show(text, mode="0"):
+    screen.write_text(text)
+    os.environ.update(WAKE_SCREEN=str(screen), WAKE_MODE=mode)
+def idle(age, state="idle", who=attempt):
+    activity.write_text(json.dumps({"schema": 1, "participant": member, "state": state, "since": now - age,
+                                    "updated_at": now - age, "attempt": who, "room": "room-wake"}))
+def wakes():
+    return json.loads(ledger.read_text()).get("wakes", []) if ledger.exists() else []
+def keys():
+    return [line for line in tmux_log.read_text().splitlines() if line.startswith("send-keys")] if tmux_log.exists() else []
+history = []
+@contextlib.contextmanager
+def main(submit=None):
+    with patch.object(panel_native, "live_main_pane", return_value=("%7", "codex")), \
+            patch.object(panel_native, "_swap_main_window", return_value=("@1", attempt, "%7", member, "room-wake")), \
+            patch.object(terminal_panel, "resolve_session", return_value=("oms-wake", str(repo))), \
+            patch.object(terminal_panel, "main_history", side_effect=lambda *a: history), \
+            (patch.object(terminal_panel, "_swap_submit") if submit is None else contextlib.nullcontext()) as typed:
+        yield typed
+show(CODEX_EMPTY)
+wake = lambda **k: panel_interaction.wake_main(repo, now=now, **k)
+with main() as typed:
+    # Busy: missing, malformed, recent (one second short), waiting or another attempt's record.
+    assert "not idle" in wake(), wake()
+    activity.write_text("{")
+    assert "not idle" in wake()
+    for args in ((1799,), (3600, "waiting"), (3600, "busy"), (3600, "idle", "att_" + "b" * 32)):
+        idle(*args)
+        assert "not idle" in wake(), args
+    idle(1800)
+    history[:] = [{"terminal": False, "refs": {"panel_role": "worker"}}]
+    assert wake() == "skipped: main has a live child call", wake()
+    history[:] = [{"terminal": True, "refs": {"panel_role": "reviewer"}}]
+    with terminal_panel._lock(repo, "panel-main-start"):
+        assert wake() == "skipped: panel typing lock held"
+    typed.assert_not_called()
+    assert wakes() == []
+    # Dry run: the prompt it would type, and nothing typed or recorded.
+    shown = wake(dry_run=True)
+    assert shown.startswith("would wake call-wake: OMS tick wake: ready plan tasks t1. "), shown
+    typed.assert_not_called()
+    assert wakes() == []
+    # Idle at exactly the threshold with ready work: one submit, recorded first; a retry never repeats it.
+    assert wake() == "woke call-wake: " + shown.split(": ", 1)[1]
+    assert typed.call_count == 1 and typed.call_args.args == ("%7", shown.split(": ", 1)[1]), typed.call_args
+    assert "\n" not in typed.call_args.args[1] and "/goal" not in typed.call_args.args[1]
+    assert len(wakes()) == 1 and wakes()[0]["main"] == member and wakes()[0]["outcome"] == "woke", wakes()
+    assert "already woken today" in wake() and typed.call_count == 1
+    # Daily cap: five prior wakes leave room for a sixth; six leave none; yesterday's do not count.
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    def seed(count, when=day, **extra):
+        ledger.write_text(json.dumps({"schema": 1, "wakes": [
+            dict({"day": when, "main": member, "key": "k%d" % n}, **extra) for n in range(count)]}))
+    seed(6)
+    assert wake() == "skipped: call-wake reached 6 wakes today" and typed.call_count == 1
+    seed(5)
+    assert wake().startswith("woke ") and typed.call_count == 2 and len(wakes()) == 6
+    seed(6, "2000-01-01")
+    assert wake().startswith("woke ") and typed.call_count == 3 and len(wakes()) == 1
+    # The input line: only a provably empty one is typed into; any other pane is skipped, recorded, never entered.
+    for name, text in EMPTY.items():
+        seed(0)
+        show(text)
+        assert wake(dry_run=True).startswith("would wake "), name
+    for name, (text, why) in UNPROVEN.items():
+        seed(0)
+        show(text)
+        assert wake(dry_run=True).startswith("would skip call-wake: ") and wakes() == [], name
+        status = wake()
+        assert status.startswith("skipped: call-wake; ") and why in status, (name, status)
+        assert [(w["outcome"], w["reason"]) for w in wakes()] == [("skipped", status.split("; ", 1)[1])], wakes()
+    for mode in ("1", ""):
+        seed(0)
+        show(CODEX_EMPTY, mode)
+        assert "copy mode or unreadable" in wake(), mode
+    seed(0)
+    os.environ["WAKE_SCREEN"] = str(screen) + ".missing"
+    os.environ["WAKE_MODE"] = "0"
+    assert "capture unavailable" in wake()
+    assert typed.call_count == 3
+    # Skips hold neither the dedupe key nor the cap: six skips today, then an empty line wakes.
+    seed(6, outcome="skipped", reason="main input line holds text")
+    show(CODEX_EMPTY)
+    assert wake().startswith("woke ") and typed.call_count == 4
+    # A malformed or unreadable ledger refuses the wake and is kept byte for byte.
+    for bad in ("", "{", "[]", '{"wakes": {}}', '{"wakes": [1]}', '{"wakes": [{"day": 1, "main": "x"}]}', '{"wakes": [{"day": "d"}]}'):
+        ledger.write_text(bad)
+        for dry in (False, True):
+            status = wake(dry_run=dry)
+            assert status.startswith("refused: ") and "kept as found" in status, (bad, status)
+            assert ledger.read_text() == bad
+    # Only a missing receipt is empty history: a linked or non-regular one refuses and stays as found.
+    ledger.unlink()
+    ledger.mkdir()
+    assert wake().startswith("refused: tick receipt is a symlink, a hard link or not a regular file")
+    ledger.rmdir()
+    target = ledger.with_name("elsewhere.json")
+    target.write_text('{"wakes": []}')
+    for link in (ledger.symlink_to, lambda path: os.link(path, ledger)):
+        link(target)
+        for dry in (False, True):
+            assert wake(dry_run=dry).startswith("refused: tick receipt is a symlink, a hard link"), link
+        assert target.read_text() == '{"wakes": []}' and ledger.exists()
+        ledger.unlink()
+    target.unlink()
+    assert typed.call_count == 4
+    # No shared work: nothing to wake for, however idle; a proposal under review is a reason.
+    (bare / ".oms" / "plan").mkdir(parents=True)
+    bare_activity = bare / activity.relative_to(repo)
+    bare_activity.parent.mkdir(parents=True)
+    bare_activity.write_text(activity.read_text())
+    assert panel_interaction.wake_main(bare, now=now) == "skipped: no ready plan work or pending proposal"
+    (bare / ".oms" / "plan" / "autopilot-run.json").write_text(json.dumps({"stage": "proposing"}))
+    assert panel_interaction.wake_main(bare, now=now).startswith("skipped: no ready")
+    (bare / ".oms" / "plan" / "autopilot-run.json").write_text(json.dumps({"stage": "proposal-review"}))
+    assert "autopilot proposal waits in proposal-review" in panel_interaction.wake_main(bare, now=now)
+    receipt = bare / ".oms" / "plan" / "autopilot-run.json"
+    receipt.unlink()
+    receipt.symlink_to(bare / ".oms" / "plan" / "elsewhere.json")
+    assert panel_interaction.wake_main(bare, now=now) == "skipped: autopilot receipt unavailable or unsafe"
+    assert typed.call_count == 5
+# Through the real submit and the tmux stub: a draft gets no keys at all; an empty line gets the text, then Enter.
+with main(submit=True):
+    tmux_log.unlink()
+    show(UNPROVEN["codex draft"][0])
+    assert wake().startswith("skipped: call-wake; ") and keys() == [], keys()
+    show(CODEX_EMPTY)
+    typed_text = wake().split(": ", 1)[1]
+    assert keys() == ["send-keys -t %7 -l " + typed_text, "send-keys -t %7 Enter"], keys()
+for argv in ([], [str(repo), "--apply"], [str(repo), "--dry-run", "x"]):
+    with contextlib.redirect_stderr(open(os.devnull, "w")):
+        assert panel_interaction.wake_cli(argv) == 2, argv
+PY
+# The sweep receipt carries today's wake ledger forward, so the cap survives later ticks.
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$wk")"
+python3 - "$wk/.oms/tick/last.json" <<'PY' || fail "the sweep receipt must keep today's wake ledger: $(cat "$wk/.oms/tick/last.json")"
+import json, sys
+r = json.load(open(sys.argv[1]))
+outcomes = [w["outcome"] for w in r["wakes"] if w["main"] == "call-wake"]
+assert r["wake"] == "skipped" and outcomes == ["skipped", "woke"], r
+PY
+# A malformed receipt is never rewritten: the sweep keeps it and prints one recovery line.
+for bad in '' '{' '{"wakes": "x"}'; do
+  printf '%s' "$bad" > "$wk/.oms/tick/last.json"
+  out="$(PATH="$TMP/wake-bin:$PATH" OMS_TICK_WAKE=1 "$TICK" run --repo "$wk")"
+  [ -f "$wk/.oms/tick/last.json" ] && [ "$(cat "$wk/.oms/tick/last.json")" = "$bad" ] || fail "a malformed receipt must be kept: $bad"
+  [ "$(printf '%s\n' "$out" | grep -c '^tick receipt kept: ')" -eq 1 ] && printf '%s' "$out" | grep >/dev/null "^wake $wk: refused: " ||
+    fail "a malformed receipt must refuse the wake and print one recovery line: $out"
+done
+rm -f "$wk/.oms/tick/last.json"
+# A symlinked or hard-linked receipt is neither followed nor replaced: the link and its target stay as found.
+printf '{"wakes": []}' > "$wk/.oms/tick/elsewhere.json"
+for kind in symlink hardlink; do
+  if [ "$kind" = symlink ]; then ln -s elsewhere.json "$wk/.oms/tick/last.json"; else ln "$wk/.oms/tick/elsewhere.json" "$wk/.oms/tick/last.json"; fi
+  dry="$(PATH="$TMP/wake-bin:$PATH" OMS_TICK_WAKE=1 "$TICK" run --dry-run --repo "$wk")"
+  out="$(PATH="$TMP/wake-bin:$PATH" OMS_TICK_WAKE=1 "$TICK" run --repo "$wk")"
+  printf '%s' "$dry" | grep >/dev/null "refused: tick receipt is a symlink" && printf '%s' "$out" | grep >/dev/null "^wake $wk: refused: " &&
+    [ "$(printf '%s\n' "$out" | grep -c '^tick receipt kept: ')" -eq 1 ] || fail "a $kind receipt must refuse the wake and the sweep: $dry / $out"
+  [ "$(cat "$wk/.oms/tick/elsewhere.json")" = '{"wakes": []}' ] && [ "$(find "$wk/.oms/tick" -name '.tick.*' -o -name '.wake.*' | wc -l)" -eq 0 ] ||
+    fail "a $kind receipt's target must stay unchanged with no temp file left"
+  if [ "$kind" = symlink ]; then [ -L "$wk/.oms/tick/last.json" ]; else [ ! -L "$wk/.oms/tick/last.json" ] && [ "$(cat "$wk/.oms/tick/last.json")" = '{"wakes": []}' ]; fi ||
+    fail "a $kind receipt must not be replaced"
+  rm -f "$wk/.oms/tick/last.json"
+done
+rm -f "$wk/.oms/tick/elsewhere.json"
+
 # --- install / status / uninstall through the stub --------------------------
 ci_repo="$TMP/ci-owner"; make_committed_repo "$ci_repo"
 git -C "$ci_repo" remote add origin https://github.com/example/fixture.git

@@ -92,84 +92,199 @@ def raw_keys():
     return terminal_style()[0] and os.name == "posix" and sys.stdin.isatty()
 
 
-GOAL_LIMIT = 4000  # Claude Code's /goal condition limit
-_GOAL_HEAD = ("Work the OMS shared plan for this repository. Met when `oms agent-plan list` shows every task done%s, "
-              "with %s shown in this conversation. Also met when the next step needs the user's "
-              "decision, authority you do not have, or a hard blocker; state which and stop. Goal: ")
+WAKE_IDLE_SECONDS = 1800
+WAKE_DAILY_LIMIT = 6
+_CHILD_ROLES = ("worker", "advisor", "reviewer", "researcher")
 
 
 def _one_line(text):
     return " ".join("".join(" " if unicodedata.category(c).startswith("C") else c for c in str(text)).split())
 
 
-def goal_condition(goal, has_accept=False):
-    """The /goal condition for the shared plan; only the goal text is shortened to fit the limit.
-
-    The stored acceptance command is run by `oms agent-plan accept` (which refuses a plan without one), never copied."""
-    head = _GOAL_HEAD % ((" and `oms agent-plan accept` passes", "both outputs") if has_accept else ("", "its output"))
-    room_left = GOAL_LIMIT - len(head)
-    goal = _one_line(goal)
-    return head + (goal if len(goal) <= room_left else goal[:room_left - 1].rstrip() + "\u2026")
-
-
-def plan_goal(repo):
-    """(goal, has_accept) from the stored plan's own fields; the board's report keeps neither in full."""
-    from terminal_panel import _read
-    plan = json.loads(_read(repo, ".oms/plan/tasks.json", 4 * 1024 * 1024))
-    if not isinstance(plan, dict):
-        raise ValueError("plan is unreadable")
-    goal, accept = plan.get("goal"), plan.get("accept")
-    return (_one_line(goal) if isinstance(goal, str) else "",
-            isinstance(accept, str) and bool(accept.strip()))
-
-
 def help_rows(rows, width, unicode=True):
-    """Expose the room prerequisite alongside the goal-drive key in expanded help."""
+    """Expose the room prerequisite in expanded help."""
     from panel_view import box_row
-    return rows[:-1] + [box_row("ROOM".ljust(9) + "[o] Rooms before main/task shortcuts in roomless control", width, unicode),
-                       box_row("GOAL".ljust(9) + "[d] Drive goal", width, unicode)] + rows[-1:]
+    return rows[:-1] + [box_row("ROOM".ljust(9) + "[o] Rooms before main/task shortcuts in roomless control",
+                                width, unicode)] + rows[-1:]
 
 
-def drive_goal(repo, state, harness, view="auto", attention_only=False):
-    """Send the plan goal to the panel's Claude main as /goal after the person confirms; returns a status line."""
-    from room_view import _plan_finished, plan_summary
-    from terminal_panel import _lock, _swap_submit, main_occupied, managed_session, open_native, panel_room, read_field
-    if not plan_summary(state):
-        return "no active plan goal to drive"
-    if _plan_finished(state):
-        return "plan finished; retire or init the next goal first"
-    goal, has_accept = plan_goal(repo)
-    if not goal:
-        return "no active plan goal to drive"
-    live = main_occupied(state)
-    if live and not managed_session():
-        return "goal drive needs a tmux panel to type into the live main"
-    if not live and harness != "claude":
-        return "goal drive needs a Claude main; %s has no verified /goal" % harness
-    condition = goal_condition(goal, has_accept)
-    print("/goal " + condition)
-    answer = read_field("Enter to send / type replacement text / n to cancel: ", required=False)
-    if answer == "n":
-        return "goal drive cancelled"
-    if answer:
-        condition = _one_line(answer)[:GOAL_LIMIT]
-    if live:
-        from panel_native import live_main_pane
-        try:
-            # swap_main verifies and types under this lock; so must a goal, or the two could interleave their keys.
-            with _lock(repo, "panel-main-start", timeout=.1):
-                pane, live_harness = live_main_pane(repo)
-                if live_harness != "claude":
-                    return "goal drive needs a Claude main; the live main is %s" % live_harness
-                _swap_submit(pane, "/goal " + condition)
-        except ValueError as error:
-            if "busy" in str(error):
-                return "main start or swap in progress; retry"
-            raise
-        return "goal sent to claude"
-    os.environ["OMS_ROOM_ID"] = panel_room(repo, title="Plan goal")
-    status = open_native("claude", repo, task="/goal " + condition, view=view, attention_only=attention_only)
-    return "goal sent to claude (new main) / exit=%s" % status
+def wake_reason(repo):
+    """Why an idle main should continue, or "" when no shared work waits: ready plan tasks, a proposal under review."""
+    from terminal_panel import ENTRY, _read
+    reasons = []
+    listed = subprocess.run(["bash", str(ENTRY), "agent-plan", "--repo", str(repo), "ready"], capture_output=True,
+                            text=True, check=False, timeout=60, stdin=subprocess.DEVNULL)
+    # Sorted, so the same waiting work always yields the same dedupe key.
+    ready = sorted({_one_line(line)[:80] for line in listed.stdout.splitlines() if line.strip()}) if listed.returncode == 0 else []
+    if ready:
+        reasons.append("ready plan tasks " + ", ".join(ready[:8]) + (" (+%d more)" % (len(ready) - 8) if len(ready) > 8 else ""))
+    raw = _read(repo, ".oms/plan/autopilot-run.json", 1024 * 1024, missing=True, label="autopilot receipt")
+    try:
+        receipt = json.loads(raw) if raw else {}
+    except ValueError:
+        receipt = {}
+    if isinstance(receipt, dict) and receipt.get("stage") == "proposal-review":
+        reasons.append("an autopilot proposal waits in proposal-review")
+    return "; ".join(reasons)
+
+
+def wake_prompt(reason):
+    """One provider-neutral line; send-keys types it literally, so it must hold no newline."""
+    return _one_line("OMS tick wake: %s. Continue the shared plan (oms agent-plan list) within your existing "
+                     "authority; if the next step needs the user's decision, authority you do not have, or a hard "
+                     "blocker, say which and stop." % reason)
+
+
+def _wake_target(repo, now):
+    """(pane, participant) of the one verified panel main when it has no live child and has idled long enough."""
+    from panel_native import _swap_main_window, live_main_pane
+    from terminal_panel import _read, main_history, resolve_session
+    pane, unused = live_main_pane(repo)
+    session, unused = resolve_session(repo, wait=False)
+    unused, attempt, main_pane, member, ident = _swap_main_window(repo, session)
+    if main_pane != pane:
+        raise ValueError("main pane changed during verification")
+    if any(row.get("terminal") is False and (row.get("refs") or {}).get("panel_role") in _CHILD_ROLES
+           for row in main_history(repo, ident)):
+        raise ValueError("main has a live child call")
+    raw = _read(repo, ".oms/hooks/panel-activity/" + member + ".json", 4096, missing=True, label="panel activity")
+    try:
+        row = json.loads(raw) if raw else {}
+    except ValueError:
+        row = {}
+    since = row.get("since") if isinstance(row, dict) else None
+    # No idle record (a provider without the activity hook) is not proof of idleness.
+    if (not isinstance(row, dict) or row.get("state") != "idle" or row.get("attempt") != attempt
+            or type(since) not in (int, float) or not 0 <= since <= now or now - since < WAKE_IDLE_SECONDS):
+        raise ValueError("main is not idle for %d minutes" % (WAKE_IDLE_SECONDS // 60))
+    return pane, member
+
+
+class LedgerRefused(ValueError):
+    """The tick receipt holding the wake ledger cannot be trusted; it is left as found."""
+
+
+TICK_RECEIPT_MAX = 1024 * 1024
+
+
+def read_tick_receipt(path):
+    """(receipt, wakes) of a tick receipt; the one check both the wake and `oms tick run` apply before writing it.
+
+    Only a missing file is empty history. An empty, symlinked, hard-linked, non-regular, oversized or malformed
+    receipt raises LedgerRefused, and its file must be kept as found so the wake's cap and dedupe never reset."""
+    import stat
+    try:
+        named = os.lstat(path)
+    except FileNotFoundError:
+        return {}, []
+    except OSError as error:
+        raise LedgerRefused("tick receipt cannot be inspected") from error
+    if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+        raise LedgerRefused("tick receipt is a symlink, a hard link or not a regular file")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            raw = handle.read(TICK_RECEIPT_MAX + 1)
+    except OSError as error:
+        raise LedgerRefused("tick receipt is unreadable") from error
+    if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or opened.st_nlink != 1
+            or len(raw) > TICK_RECEIPT_MAX):
+        raise LedgerRefused("tick receipt changed while read or is too large")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as error:
+        raise LedgerRefused("tick receipt is empty or not JSON") from error
+    wakes = receipt.get("wakes", []) if isinstance(receipt, dict) else None
+    if not isinstance(wakes, list) or not all(
+            isinstance(row, dict) and isinstance(row.get("day"), str) and isinstance(row.get("main"), str)
+            for row in wakes):
+        raise LedgerRefused("tick receipt or its wakes ledger is malformed")
+    return receipt, wakes
+
+
+def _wake_ledger(repo, day):
+    """(receipt, today's wake rows) from the receipt `oms tick run` also writes."""
+    receipt, wakes = read_tick_receipt(str(Path(repo) / ".oms" / "tick" / "last.json"))
+    return receipt, [row for row in wakes if row["day"] == day]
+
+
+def _record_wake(repo, receipt, wakes):
+    import tempfile
+    directory = Path(repo) / ".oms" / "tick"
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=str(directory), prefix=".wake.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(dict(receipt, wakes=wakes), output, ensure_ascii=False, sort_keys=True)
+            output.write("\n")
+        os.replace(temporary, str(directory / "last.json"))
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def wake_main(repo, dry_run=False, now=None):
+    """Tick's opt-in wake: at most one prompt into an idle panel main while shared work waits; returns a status line.
+
+    The wake is recorded before it is typed, so a retried or killed tick never submits it twice. A pane whose
+    input line is not provably empty is skipped and the skip recorded; nothing is cleared, typed or entered."""
+    import hashlib
+    from panel_native import input_line_empty
+    from terminal_panel import _lock, _swap_submit
+    repo = Path(repo)
+    now = time.time() if now is None else now
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+
+    def attempt():
+        receipt, wakes = _wake_ledger(repo, day)
+        pane, member = _wake_target(repo, now)
+        mine = [row for row in wakes if row["main"] == member and row.get("outcome") != "skipped"]
+        key = hashlib.sha256("\0".join((member, day, reason)).encode()).hexdigest()[:16]
+        if any(row.get("key") == key for row in mine):
+            return "skipped: %s already woken today for this work" % member
+        if len(mine) >= WAKE_DAILY_LIMIT:
+            return "skipped: %s reached %d wakes today" % (member, WAKE_DAILY_LIMIT)
+        prompt = wake_prompt(reason)
+        empty, why = input_line_empty(pane)
+        if dry_run:
+            return ("would wake %s: %s" % (member, prompt)) if empty else "would skip %s: %s" % (member, why)
+        row = {"day": day, "main": member, "key": key, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
+        if not empty:
+            _record_wake(repo, receipt, wakes + [dict(row, outcome="skipped", reason=why)])
+            return "skipped: %s; %s" % (member, why)
+        _record_wake(repo, receipt, wakes + [dict(row, outcome="woke")])
+        _swap_submit(pane, prompt)
+        return "woke %s: %s" % (member, prompt)
+
+    try:
+        reason = wake_reason(repo)
+        if not reason:
+            return "skipped: no ready plan work or pending proposal"
+        if dry_run:
+            return attempt()
+        # swap_main verifies and types under this lock; a wake must not interleave with a swap or start.
+        with _lock(repo, "panel-main-start", timeout=.1):
+            return attempt()
+    except LedgerRefused as error:
+        return ("refused: %s; .oms/tick/last.json is kept as found: inspect it, then move it aside to reset "
+                "today's wake ledger" % error)
+    except ValueError as error:
+        if "busy" in str(error):
+            return "skipped: panel typing lock held"
+        return "skipped: " + _one_line(error)[:200]
+
+
+def wake_cli(argv):
+    """`oms tick` entry: REPO [--dry-run]; prints one status line."""
+    if len(argv) not in (1, 2) or argv[1:] not in ([], ["--dry-run"]):
+        print("usage: wake REPO [--dry-run]", file=sys.stderr)
+        return 2
+    try:
+        print(wake_main(argv[0], dry_run=argv[1:] == ["--dry-run"]))
+    except (OSError, subprocess.SubprocessError) as error:
+        print("skipped: " + _one_line(error)[:200])
+    return 0
 
 
 def menu_input():
@@ -626,8 +741,6 @@ def interactive(repo, view="auto", attention_only=False):
                 status = council(repo, provider, task_id, label, prompt, workload=workload)
                 previous = "council exit=%s / owner decision pending" % status
                 read_field("Press Enter to return: ", required=False)
-            elif choice == "d":
-                previous = drive_goal(repo, cache.get("state", {}), harness, view, attention_only)
             elif choice == "f":
                 previous = finalize_selection(repo, provider, navigation, cache.get("state", {}))
             elif choice == "n":
