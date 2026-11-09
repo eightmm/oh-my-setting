@@ -13,6 +13,9 @@ MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_ROWS = 4096
 MAX_NUMBER = (1 << 53) - 1
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+# context._slice appends "\n[TRUNCATED: N bytes omitted]\n": 29 bytes plus the
+# digits of N, where N = bytes_before - bytes_selected; retained bytes share the payload with it.
+TRUNCATION_MARKER_BASE = 29
 PHASES = {"orientation", "implementation", "verification", "review", "research"}
 
 
@@ -92,7 +95,9 @@ def _validated(data):
         if (not isinstance(selection, str) or selection not in {"full", "head", "middle", "tail"}
                 or omitted > before or payload > before
                 or selection == "full" and (omitted != 0 or payload != before)
-                or selection != "full" and omitted == 0):
+                or selection != "full" and omitted == 0
+                or omitted and before - omitted > 0 and before - omitted + TRUNCATION_MARKER_BASE
+                + len(str(before - payload)) > payload):
             raise InspectionError("invalid context manifest: inconsistent source selection")
         selected.append({"path": _path(row.get("path")),
                          "reason": _text(row.get("reason"), "reason"),
@@ -102,7 +107,8 @@ def _validated(data):
     index = {row["path"]: row for row in selected}
     if len(index) != len(selected) or sum(row["bytes_selected"] for row in selected) > used:
         raise InspectionError("invalid context manifest: duplicate source or payload exceeds bundle")
-    if any(path not in index or index[path]["omitted_bytes"] == 0 for path in truncated):
+    partial = {path for path, row in index.items() if row["omitted_bytes"]}
+    if any(path not in partial for path in truncated) or (partial & set(missing)) - set(truncated):
         raise InspectionError("invalid context manifest: truncated required source")
     full_paths = {path for path, row in index.items() if row["omitted_bytes"] == 0}
     if not set(targets) - full_paths <= set(missing):

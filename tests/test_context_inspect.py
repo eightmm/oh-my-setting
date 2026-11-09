@@ -66,14 +66,14 @@ class ProjectionTests(unittest.TestCase):
 
     def test_partial_source_and_required_debt_are_preserved(self):
         data = manifest()
-        data["selected"][0].update(bytes_selected=60, omitted_bytes=60, selection="head")
+        data["selected"][0].update(bytes_selected=75, omitted_bytes=60, selection="head")
         data.update(context_debt=2, missing_required=["src.py", "required.md"],
                     truncated_required=["src.py"], sufficient=False)
         data["omitted"] = [{"path": "required.md", "reason": "budget exhausted", "bytes": 300}]
         value = inspector.inspect_manifest(data)
         self.assertEqual(value["debt"]["reported"], 2)
         self.assertFalse(value["debt"]["reported_sufficient"])
-        self.assertEqual(value["sources"]["items"][0]["bytes_selected"], 60)
+        self.assertEqual(value["sources"]["items"][0]["bytes_selected"], 75)
         self.assertEqual(value["omissions"]["items"][0]["reason"], "budget exhausted")
 
     def test_zero_length_source_and_empty_pack(self):
@@ -120,6 +120,33 @@ class ProjectionTests(unittest.TestCase):
                                      truncated_required=["absent"], sufficient=False); variants.append(data)
         for data in variants:
             with self.subTest(data=data):
+                with self.assertRaises(ERROR):
+                    inspector.inspect_manifest(data)
+
+    def test_impossible_truncation_and_undercounted_truncated_required_are_rejected(self):
+        data = manifest()
+        data["selected"][0].update(bytes_selected=1, omitted_bytes=1, selection="head")
+        with self.assertRaises(ERROR):
+            inspector.inspect_manifest(data)
+        data = manifest()
+        data["selected"][0].update(bytes_selected=75, omitted_bytes=60, selection="head")
+        data.update(context_debt=1, missing_required=["src.py"], sufficient=False)
+        with self.assertRaises(ERROR):
+            inspector.inspect_manifest(data)
+        data["truncated_required"] = ["src.py"]
+        inspector.inspect_manifest(data)
+
+    def test_marker_sized_slices_the_compiler_can_produce_are_accepted(self):
+        for policy_name in ("head", "tail"):
+            data = manifest()
+            # 100 bytes in 50: marker "\n[TRUNCATED: 50 bytes omitted]\n" is 31 bytes, 19 retained.
+            data["selected"][0].update(bytes_selected=50, omitted_bytes=81, selection=policy_name)
+            data.update(context_debt=1, missing_required=["src.py"],
+                        truncated_required=["src.py"], sufficient=False)
+            with self.subTest(policy=policy_name):
+                inspector.inspect_manifest(data)
+            data["selected"][0]["omitted_bytes"] = 80
+            with self.subTest(policy=policy_name, retained=20):
                 with self.assertRaises(ERROR):
                     inspector.inspect_manifest(data)
 
