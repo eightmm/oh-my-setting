@@ -353,10 +353,6 @@ else
     local rest=""
     local value=""
 
-    case "$(uname -s 2>/dev/null || true)" in
-      MINGW*|MSYS*|CYGWIN*) return 0 ;;
-    esac
-
     if [ -r "/proc/$pid/stat" ]; then
       IFS= read -r line < "/proc/$pid/stat" || line=""
       rest="${line##*) }"
@@ -769,9 +765,6 @@ run_as_root() {
 # and gzip that locked tool archives need; install only what is missing.
 install_system_packages_if_missing() {
   local missing=() package
-  # Git for Windows ships git, tar, gzip and find; its PATH may also reach
-  # System32's unrelated find.exe, so there is nothing to check or install.
-  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; esac
   # A musl libc host (Alpine) cannot run the pinned glibc uv, Python or Node;
   # stop before installing anything instead of leaving half an install.
   if [ "$(uname -s)" = Linux ] && ls /lib/ld-musl-* >/dev/null 2>&1; then
@@ -853,15 +846,6 @@ ensure_python3() {
      env -u PYTHONHOME -u PYTHONPATH python3 -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
     return 0
   fi
-  if oms_platform_is_windows; then
-    if command -v python >/dev/null 2>&1 &&
-       env -u PYTHONHOME -u PYTHONPATH python -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-      candidate=python
-    elif command -v py >/dev/null 2>&1 &&
-         env -u PYTHONHOME -u PYTHONPATH py -3 -I -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-      candidate=py
-    fi
-  fi
   # uv-only machines (fresh workstations, cluster accounts) carry a managed
   # CPython without exposing any python3 command. Adopt it through a managed
   # shim only as the bootstrap interpreter: once the OMS runtime exists the
@@ -880,7 +864,7 @@ ensure_python3() {
 
   # Missing or older system Python (including Ubuntu 20.04/22.04 and macOS
   # Command Line Tools): build the pinned OMS runtime and expose it.
-  if [ -z "$candidate" ] && ! oms_platform_is_windows; then
+  if [ -z "$candidate" ]; then
     # shellcheck disable=SC1091
     . "$DEST/scripts/lib/file-lock.sh"
     # shellcheck disable=SC1091
@@ -891,11 +875,7 @@ ensure_python3() {
   fi
 
   if [ -z "$candidate" ]; then
-    if oms_platform_is_windows; then
-      echo "error: Python 3.9+ is required; install Python and rerun" >&2
-    else
-      echo "error: no Python 3.11+ 'python3' and the pinned uv could not build one; see the error above" >&2
-    fi
+    echo "error: no Python 3.11+ 'python3' and the pinned uv could not build one; see the error above" >&2
     exit 1
   fi
 
@@ -913,10 +893,6 @@ ensure_python3() {
   fi
   mkdir -p "$HOME/.local/bin"
   case "$candidate" in
-    py)
-      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-        'exec py -3 "$@"' > "$shim"
-      ;;
     uv)
       printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
         'exec "$(uv python find)" "$@"' > "$shim"
@@ -926,10 +902,6 @@ ensure_python3() {
         printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting'
         oms_install_python_shim_runtime_line "$(oms_python_runtime_root)"
       } > "$shim"
-      ;;
-    *)
-      printf '%s\n' '#!/usr/bin/env bash' '# managed by oh-my-setting' \
-        'exec python "$@"' > "$shim"
       ;;
   esac
   chmod +x "$shim"

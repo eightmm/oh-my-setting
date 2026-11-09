@@ -133,12 +133,9 @@ configure_usage() {
   local plan
   local loaded_before=0
   local -a notify=()
-  # Codex turn notifications reach the Claude terminal through a tty escape;
-  # Windows consoles have no such target.
-  case "$action:$(uname -s 2>/dev/null)" in
-    install:MINGW*|install:MSYS*|install:CYGWIN*) ;;
-    install:*) notify=(--notify-script "$ROOT/scripts/lib/codex_turn_notify.py") ;;
-  esac
+  if [ "$action" = install ]; then
+    notify=(--notify-script "$ROOT/scripts/lib/codex_turn_notify.py")
+  fi
   if [ "$DRY_RUN" = "1" ]; then
     python3 "$USAGE_CONFIG_HELPER" "$action" "$CODEX_CONFIG" --dry-run ${notify[@]+"${notify[@]}"}
     return

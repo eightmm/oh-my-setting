@@ -466,7 +466,7 @@ EOF
   (
     export HOME="$d/failed-bootstrap" DEST="$d/repo" PATH="$d/bin:/usr/bin:/bin"
     export OMS_TEST_REAL_PYTHON="$real_python" OMS_TEST_HOST_VERSION=3.10 OMS_TEST_BOOTSTRAP_FAIL=1
-    if bash -c 'oms_platform_is_windows() { return 1; }; . "$1"; ensure_python3' _ "$d/ensure.sh" > "$d/failure.out" 2>&1; then
+    if bash -c '. "$1"; ensure_python3' _ "$d/ensure.sh" > "$d/failure.out" 2>&1; then
       fail "bootstrap failure was accepted"
     fi
     grep -Fq "no Python 3.11+ 'python3'" "$d/failure.out" || fail "bootstrap failure omitted the required floor"
@@ -636,16 +636,6 @@ printf "%s\n" "$file_sum"
   fi
 done
 
-[ "$(OMS_PLATFORM_OVERRIDE=windows oms_platform_name)" = windows ] ||
-  fail "Windows platform override was not detected"
-[ "$(OMS_PLATFORM_OVERRIDE=windows oms_install_link_mode)" = copy ] ||
-  fail "Windows must default to copy mode"
-# Native Windows has no locked payloads: never fall back to another target.
-if OMS_PLATFORM_OVERRIDE=windows oms_tool_platform > "$TMP/tool-platform.out" 2>&1; then
-  fail "native Windows selected a locked tool payload: $(cat "$TMP/tool-platform.out")"
-fi
-grep -Fqx 'error: unsupported tool platform: native Windows' "$TMP/tool-platform.out" ||
-  fail "wrong native Windows tool platform refusal: $(cat "$TMP/tool-platform.out")"
 for kernel in Linux Darwin; do
   for machine in x86_64 amd64 aarch64 arm64; do
     selected="$(OMS_PLATFORM_OVERRIDE='' OMS_PLATFORM_KERNEL="$kernel" OMS_PLATFORM_MACHINE="$machine" oms_tool_platform)" ||
@@ -671,7 +661,7 @@ done
 source_file="$TMP/source.txt"
 target_file="$TMP/target.txt"
 printf 'v1\n' > "$source_file"
-OMS_PLATFORM_OVERRIDE=windows oms_install_materialize "$source_file" "$target_file"
+OH_MY_SETTING_LINK_MODE=copy oms_install_materialize "$source_file" "$target_file"
 assert_regular_copy "$source_file" "$target_file"
 [ "$(python3 "$ROOT/scripts/lib/managed-target.py" inspect \
   "$source_file" "$target_file")" = current ] ||
@@ -692,14 +682,14 @@ fi
 oms_install_target_owned "$source_file" "$target_file" ||
   fail "untouched stale copy lost its ownership"
 oms_install_remove_managed_target "$target_file"
-OMS_PLATFORM_OVERRIDE=windows oms_install_materialize "$source_file" "$target_file"
+OH_MY_SETTING_LINK_MODE=copy oms_install_materialize "$source_file" "$target_file"
 assert_regular_copy "$source_file" "$target_file"
 
 source_dir="$TMP/source-dir"
 target_dir="$TMP/target-dir"
 mkdir -p "$source_dir/nested"
 printf 'nested\n' > "$source_dir/nested/value.txt"
-OMS_PLATFORM_OVERRIDE=windows oms_install_materialize "$source_dir" "$target_dir"
+OH_MY_SETTING_LINK_MODE=copy oms_install_materialize "$source_dir" "$target_dir"
 assert_regular_copy "$source_dir" "$target_dir"
 oms_install_target_matches "$source_dir" "$target_dir" ||
   fail "fresh directory copy was not recognized"
@@ -1242,7 +1232,7 @@ chmod +x "$crlf_bin/python3"
 crlf_source="$TMP/crlf-source.txt"
 crlf_target="$TMP/crlf-target.txt"
 printf 'v1\n' > "$crlf_source"
-OMS_PLATFORM_OVERRIDE=windows oms_install_materialize "$crlf_source" "$crlf_target"
+OH_MY_SETTING_LINK_MODE=copy oms_install_materialize "$crlf_source" "$crlf_target"
 
 state="$(PATH="$crlf_bin:$PATH" oms_install_target_state "$crlf_source" "$crlf_target")"
 [ "$state" = copy-current ] ||

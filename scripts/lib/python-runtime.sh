@@ -263,7 +263,6 @@ oms_python_runtime_bootstrap() {  # REPO_ROOT; needs platform.sh and file-lock.s
   local lock="$1/tools.lock.json" platform uv_version url expected archive
   local version root uv_dir tmp name src stage
   platform="$(oms_tool_platform)" || return
-  case "$platform" in windows-*) return 1 ;; esac
   uv_version="$(oms_lock_scalar "$lock" uv.version)" &&
     url="$(oms_lock_scalar "$lock" "uv.platforms.$platform.url")" &&
     expected="$(oms_lock_scalar "$lock" "uv.platforms.$platform.sha256")" &&

@@ -91,13 +91,7 @@ oms_install_link_mode() {
   local mode="${OH_MY_SETTING_LINK_MODE:-auto}"
 
   case "$mode" in
-    auto)
-      if oms_platform_is_windows; then
-        printf 'copy\n'
-      else
-        printf 'symlink\n'
-      fi
-      ;;
+    auto) printf 'symlink\n' ;;
     copy|symlink)
       printf '%s\n' "$mode"
       ;;
@@ -108,13 +102,9 @@ oms_install_link_mode() {
   esac
 }
 
-# The locked tool archive for this host, e.g. linux-amd64. Native Windows has
-# no locked payloads; an override naming it fails rather than picking Linux.
+# The locked tool archive for this host, e.g. linux-amd64.
 oms_tool_platform() {
   local os arch
-  if oms_platform_is_windows; then
-    echo "error: unsupported tool platform: native Windows" >&2; return 1
-  fi
   case "$OMS_PLATFORM_KERNEL" in
     Linux) os=linux ;;
     Darwin) os=darwin ;;

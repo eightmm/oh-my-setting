@@ -428,7 +428,6 @@ doctor_npm_global_root() {
 
 doctor_locked_platform() {
   local os arch
-  oms_platform_is_windows && return 1
   case "$OMS_PLATFORM_KERNEL" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
   case "$OMS_PLATFORM_MACHINE" in
     x86_64|amd64) arch=amd64 ;;

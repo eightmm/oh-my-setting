@@ -104,7 +104,6 @@ else
   # Transaction fixtures and upgrades from pre-portability commits can briefly
   # have the contract without its new helper. Preserve the historical POSIX
   # symlink behavior until the complete checkout is present.
-  oms_platform_is_windows() { return 1; }
   # Unrecognized rather than owned: without the helper this cannot prove the
   # shim is ours, and the safe answer to "may I delete this" is no.
   oms_install_python_shim_owned() { return 1; }
@@ -216,11 +215,7 @@ oms_install_target_owned_source_under() {
   fi
   source="$(oms_install_managed_target source-under "$source_root" "$target")" ||
     return
-  if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
-    cygpath -u "$source"
-  else
-    printf '%s\n' "$source"
-  fi
+  printf '%s\n' "$source"
 }
 
 oms_install_target_mode() {
@@ -386,11 +381,7 @@ except Exception:
 PY
 )" || return
   owner="$(oms_strip_cr "$owner")"
-  if oms_platform_is_windows && command -v cygpath >/dev/null 2>&1; then
-    cygpath -u "$owner"
-  else
-    printf '%s\n' "$owner"
-  fi
+  printf '%s\n' "$owner"
 }
 
 oms_install_receipt_field() {
