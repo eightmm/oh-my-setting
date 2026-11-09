@@ -21,7 +21,11 @@ scope, installation proof and direct-push requirements.
 
 ## Style
 
-- Bash 3.2, `set -euo pipefail`, GNU/BSD-compatible on Linux, WSL2 and macOS.
+- Bash 5.0 or newer, `set -euo pipefail`, GNU/BSD-compatible on Linux, WSL2 and macOS.
+  Only the lines above an entry point's Bash 5 floor check (the `install.sh`
+  preamble and the version guard that opens `scripts/oms` and the scripts that
+  carry it) stay parseable by Bash 3.2, so macOS's system Bash can print the
+  install hint or re-exec under an installed Bash 5.
 - Keep changes task-scoped; match the surrounding script's conventions.
 - Extend the canonical test or fixture; add a new test only for an uncovered
   path, and look for coverage it supersedes. The smoke runner discovers every
