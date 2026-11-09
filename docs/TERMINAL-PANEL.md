@@ -114,8 +114,9 @@ still requires the user's authority; a local result can be completed first.
 
 The `s` board key lists installed main targets and their weekly quota readings, then
 requests a bounded handoff before swapping. `oms panel --swap-main PROVIDER [--model
-MODEL]` is the command form. It requires an existing tmux panel, one verified live main
-and an inactive landing operation. The current main is asked for a handoff of at most
+MODEL]` is the command form. It requires an existing tmux panel, one verified live main.
+A land in flight does not block it; the handoff names the land and its
+`oms land status --repo PATH` command. The current main is asked for a handoff of at most
 3000 bytes (90 seconds by default via `OMS_PANEL_SWAP_HANDOFF_SECONDS`, capped at 300);
 if none arrives, OMS uses a recorded-state digest. Before asking the main to exit, OMS
 validates the target's durable owner/harness pair, prepares the replacement command and
@@ -143,8 +144,8 @@ does not trigger a swap. Codex target ranking reads up to 64 recently modified
 session logs and chooses their newest unexpired weekly event. Before handoff,
 the automatic swap checks the target's weekly quota again. Below 100% usage it
 postpones the swap if the main does not provide a handoff; at 100% it may use
-the recorded-state digest. It checks for an active land again before exit;
-neither a postponed handoff nor an active land starts the cooldown.
+the recorded-state digest. An active land does not hold the swap back; the
+handoff names it. A postponed handoff does not start the cooldown.
 
 ### Installation deferral while workers are live
 

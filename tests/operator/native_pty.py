@@ -154,7 +154,7 @@ if os.name == "posix":
         with ExitStack() as swap_patches:
             commands = swap_patches.enter_context(patch.object(panel.subprocess, "run",
                 return_value=subprocess.CompletedProcess([], 0, '{"active":false}', "")))
-            transfer = swap_patches.enter_context(patch.object(panel.room, "swap_main"))
+            transfer = swap_patches.enter_context(patch.object(panel.room, "swap_main", return_value={"room": "pi-room"}))
             submit = swap_patches.enter_context(patch.object(panel, "_swap_submit",
                 side_effect=lambda pane, text: pi_exit_requested.append(text) if text == "/quit" else None))
             launch = swap_patches.enter_context(patch.object(panel, "launch_command", return_value="fresh replacement",
@@ -820,33 +820,33 @@ if os.name == "posix":
                     patch.object(panel.sys, "stderr", uninstalled_error):
                 uninstalled_status = panel.main(["--repo", str(project), "--swap-main", "pi"])
             assert uninstalled_status != 0 and "unknown or not installed" in uninstalled_error.getvalue()
+            # An active or unknown land lock no longer refuses a swap; the digest names the land.
+            import panel_native
+            for code, status in ((3, {"active": True}), (4, {"active": None, "state": "running"})):
+                with patch.object(panel_native.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        ["land", "status"], code, json.dumps(status), "")):
+                    lines = panel_native._swap_land_lines(project)
+                assert len(lines) == 1 and "oms land status --repo" in lines[0], lines
+            for code, status in ((0, {"active": False}), (4, {"active": None, "state": "passed"}), (1, {})):
+                with patch.object(panel_native.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        ["land", "status"], code, json.dumps(status), "")):
+                    assert panel_native._swap_land_lines(project) == [], (code, status)
             with patch.object(panel, "main_installed", return_value=True), \
+                    patch.object(panel, "resolve_session", side_effect=ValueError("probe passed")), \
                     patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
-                    ["land", "status"], 3, '{"active":true}', "")) as land_probe:
+                    ["land", "status"], 3, '{"active":true}', "")):
                 try:
                     panel.swap_main(project, "codex")
                 except ValueError as error:
-                    assert "land is in progress" in str(error), error
+                    assert "probe passed" in str(error), error
                 else:
-                    raise AssertionError("main swap passed an active landing")
-                assert land_probe.call_count == 1, "land refusal touched a native pane"
-            for state, expected in (("running", "land is in progress"), ("passed", "probe passed")):
-                with patch.object(panel, "main_installed", return_value=True), \
-                        patch.object(panel, "resolve_session", side_effect=ValueError("probe passed")), \
-                        patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess(
-                        ["land", "status"], 4, json.dumps({"active": None, "state": state}), "")):
-                    try:
-                        panel.swap_main(project, "codex")
-                    except ValueError as error:
-                        assert expected in str(error), (state, error)
-                    else:
-                        raise AssertionError("main swap ignored an unknown land lock")
+                    raise AssertionError("fixture should stop at the session probe")
             swapped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                                        "--swap-main", "codex", "--model", "gpt-6.1-sol", "--json"],
                                       dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="15")))
             assert swapped["handoff"] == "main" and swapped["window"] == swap_window, swapped
             assert swapped["room"] == menu_room and swapped["participant"] == swap_member, swapped
-            handoff_path = project / ".oms" / "handoffs" / ("room-%s-swap-%s.md" % (menu_room, swap_attempt))
+            handoff_path = next((project / ".oms" / "handoffs").glob("room-%s-swap-%s-*.md" % (menu_room, swap_attempt)))
             assert "Source: main" in handoff_path.read_text() and "Goal fixture" in handoff_path.read_text()
             released = json.loads(panel.events(project, "show", "--attempt", swap_attempt, "--json", output=True))
             assert released["state"] == "abandoned" and released["reason_code"] == "main_swapped"
@@ -873,7 +873,7 @@ if os.name == "posix":
                                         "--swap-main", "claude", "--json"],
                                        dict(env, OMS_PANEL_SWAP_HANDOFF_SECONDS="1")))
             assert fallback["handoff"] == "automatic_digest" and fallback["window"] == swap_window, fallback
-            fallback_path = project / ".oms" / "handoffs" / ("room-%s-swap-%s.md" % (menu_room, codex_attempt))
+            fallback_path = next((project / ".oms" / "handoffs").glob("room-%s-swap-%s-*.md" % (menu_room, codex_attempt)))
             assert "Source: automatic_digest" in fallback_path.read_text()
             assert "swap-held" in fallback_path.read_text() and worker_attempt in fallback_path.read_text()
             tmux_wait(["capture-pane", "-p", "-t", swap_pane], "NATIVE_FIXTURE_READY")

@@ -1724,10 +1724,11 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
     swap_window = ("@1", swap_attempt, "%1", "preflight-main", "preflight-room")
     swap_directory = temporary / ("preflight-" + str(preflight_failure))
     (swap_directory / ".oms").mkdir(parents=True)
-    swap_handoff = swap_directory / ".oms/handoffs" / ("room-preflight-room-swap-" + swap_attempt + ".md")
+    swap_handoffs = lambda: sorted((swap_directory / ".oms/handoffs").glob("room-preflight-room-swap-" + swap_attempt + "*.md"))
+    stale_handoff = swap_directory / ".oms/handoffs" / ("room-preflight-room-swap-" + swap_attempt + ".md")
     if preflight_failure == "existing":
-        swap_handoff.parent.mkdir(parents=True)
-        swap_handoff.write_text("Existing recovery handoff\n")
+        stale_handoff.parent.mkdir(parents=True)
+        stale_handoff.write_text("Existing recovery handoff\n")
     swap_resolution = dict(harness="pi", owner=selected_owner, model="gpt-6.1-sol", transport="gateway", effort="high")
     with ExitStack() as contexts:
         for context in (patch.dict(os.environ, OMS_PANEL_SWAP_HANDOFF_SECONDS="0"),
@@ -1767,7 +1768,7 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
                     swap_exited.append(text)
                     raise ValueError("exit delivery uncertain")
             panel._swap_submit.side_effect = fail_exit_submit
-        swapped = contexts.enter_context(patch.object(room, "swap_main"))
+        swapped = contexts.enter_context(patch.object(room, "swap_main", return_value={"room": "preflight-room"}))
         launch = contexts.enter_context(patch.object(panel, "launch_command", return_value="replacement",
             side_effect=ValueError("invalid command") if preflight_failure == "command" else
                 KeyboardInterrupt() if preflight_failure == "interrupt" else None))
@@ -1776,16 +1777,12 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
                 panel.swap_main(project, "pi")
             except (OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt):
                 swapped.assert_not_called()
-                if preflight_failure in ("exit", "existing"):
-                    assert swap_handoff.is_file(), preflight_failure
-                    if preflight_failure == "existing":
-                        assert not swap_exited
-                        assert swap_handoff.read_text() == "Existing recovery handoff\n"
-                    else:
-                        assert swap_exited == ["/exit"]
+                if preflight_failure == "exit":
+                    assert len(swap_handoffs()) == 1, preflight_failure
+                    assert swap_exited == ["/exit"]
                 else:
                     assert not swap_exited, (preflight_failure, swap_exited)
-                    assert not swap_handoff.exists(), (preflight_failure, "handoff blocks retry")
+                    assert not swap_handoffs(), (preflight_failure, "handoff blocks retry")
                     swap_resolution["owner"] = swap_new["provider"] = "codex"
                     launch.side_effect = window_check.side_effect = liveness_check.side_effect = None
                     room_check.side_effect = swap_process.side_effect = None
@@ -1793,15 +1790,20 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
                     assert panel.swap_main(project, "pi")["provider"] == "pi"
                     assert handoff_write.call_count == writes_before_retry + 1
                     assert swap_exited == ["/exit"]
-                    assert swap_handoff.is_file()
+                    assert len(swap_handoffs()) == 1
                     swapped.assert_called_once()
             else:
-                raise AssertionError("invalid swap stopped the current main")
+                if preflight_failure != "existing":
+                    raise AssertionError("invalid swap stopped the current main")
+                # A handoff file left by an earlier attempt neither blocks the retry nor is overwritten.
+                assert swap_exited == ["/exit"] and len(swap_handoffs()) == 2
+                assert stale_handoff.read_text() == "Existing recovery handoff\n"
+                swapped.assert_called_once()
         else:
             assert panel.swap_main(project, "pi")["provider"] == "pi"
             assert launch.call_args.kwargs["model"] is None, "default Pi became an explicit uncached model"
             assert swap_exited == ["/exit"]
-            assert swap_handoff.is_file()
+            assert len(swap_handoffs()) == 1
             swapped.assert_called_once_with(project, "preflight-room", "preflight-main", "codex", "gpt-6.1-sol", swap_attempt, "pi")
 for swap_model in ("x" * 160, "", 0, "x" * 161, "-option", "bad model"):
     candidate_event = dict(kind="main-swap", participant="preflight-main", provider="codex", harness="pi",
@@ -2466,6 +2468,36 @@ for new_owner, harness, model in (("codex", "pi", "gpt-6.1-sol"),
     else:
         raise AssertionError("unknown swap owner accepted")
     assert room.records(project, owner_room) == before_invalid
+# Worker mail may roll the room over between the handoff wait and the swap record: the swap lands on the tail.
+rolled_room = room.create(project, "swap-rolled", "Swap across rollover")
+rolled_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + rolled_room,
+    "--ref", "panel_harness=claude", "--then", "starting", "--then", "working", output=True)
+room.join(project, rolled_room, rolled_main, "claude", model="claude-opus-5-5")
+panel.events(project, "transition", "--attempt", rolled_main, "--state", "blocked", "--then", "abandoned",
+             "--reason-code", "main_swapped")
+rolled_tail = room.rollover(project, rolled_room, rolled_main)
+assert rolled_tail != rolled_room
+with patch.object(panel, "provider_catalog", return_value=[{"catalog_models": []}]):
+    rolled = room.swap_main(project, rolled_room, rolled_main, "codex", "gpt-6.1-sol", rolled_main, "codex")
+assert rolled["room"] == rolled_tail, rolled
+assert room.status(project, rolled_tail)["swaps"][-1]["to"] == "codex"
+assert room.swap_main(project, rolled_tail, rolled_main, "codex", "gpt-6.1-sol", rolled_main, "codex")["room"] == rolled_tail
+# A rollover between resolve and append settles onto the successor; the returned room is where the row landed.
+raced_room = room.create(project, "swap-raced", "Swap races a rollover")
+raced_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_room_id=" + raced_room,
+    "--ref", "panel_harness=claude", "--then", "starting", "--then", "working", output=True)
+room.join(project, raced_room, raced_main, "claude", model="claude-opus-5-5")
+panel.events(project, "transition", "--attempt", raced_main, "--state", "blocked", "--then", "abandoned",
+             "--reason-code", "main_swapped")
+raced_tail = room.rollover(project, raced_room, raced_main)
+real_resolve, stale_answers = room.resolve, iter((True, True))
+with patch.object(panel, "provider_catalog", return_value=[{"catalog_models": []}]), \
+        patch.object(room, "resolve", side_effect=lambda repo, ident, fresh=False: (
+            raced_room if next(stale_answers, None) else real_resolve(repo, ident, fresh))):
+    raced = room.swap_main(project, raced_room, raced_main, "codex", "gpt-6.1-sol", raced_main, "codex")
+assert raced["room"] == raced_tail and room.status(project, raced_tail)["swaps"][-1]["to"] == "codex", raced
 
 
 def test_main_swap_replay():

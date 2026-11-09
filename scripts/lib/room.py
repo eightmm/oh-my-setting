@@ -971,11 +971,12 @@ def _rollover_lock(repo, old, timeout=30):
     return _lock(repo, name, timeout=timeout)
 
 
-def append(repo, room, event, text):
-    """Write to the room an id now names; a writer that raced a rollover lets its carry finish and retries once."""
+def _append_to(repo, room, event, text):
+    """append(), also naming the room the row was written to."""
     literal = identifier(room, "room")
     try:
-        return _write(repo, resolve(repo, literal), event, text)
+        target = resolve(repo, literal)
+        return _write(repo, target, event, text), target
     except ValueError as error:
         unfinished = "room carry is unfinished" in str(error)
         if "room continues as" not in str(error) and not unfinished:
@@ -983,7 +984,12 @@ def append(repo, room, event, text):
         target = settle(repo, literal)
         if target == literal and not unfinished:
             raise
-    return _write(repo, target, event, text)
+    return _write(repo, target, event, text), target
+
+
+def append(repo, room, event, text):
+    """Write to the room an id now names; a writer that raced a rollover lets its carry finish and retries once."""
+    return _append_to(repo, room, event, text)[0]
 
 
 def review_ids(call_id, digest, attempt):
@@ -1508,8 +1514,9 @@ def swap_main(repo, ident, who, provider, model, attempt, harness):
     """Retain one main's participant and worker mailbox after its native attempt was released."""
     event = {"kind": "main-swap", "participant": who, "provider": provider,
              "model": model, "attempt": attempt, "harness": harness}
-    append(repo, ident, event, "Main swapped to " + model)
-    return event
+    # Worker mail may have rolled the room over while the old main wrote its handoff and exited.
+    _, used = _append_to(repo, resolve(repo, ident, fresh=True), event, "Main swapped to " + model)
+    return dict(event, room=used)
 
 
 def scope(repo, ident, who, owns):

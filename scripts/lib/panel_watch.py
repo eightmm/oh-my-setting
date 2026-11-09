@@ -204,8 +204,7 @@ def automatic_swap(repo, target, expected, provider, consumer):
     try:
         return swap_main(repo, target, precondition=precondition, auto_handoff=handoff_check, auto_commit=commit)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        if (not committed[0] and not str(error).startswith("automatic main swap postponed;")
-                and str(error) != "land is in progress; swap refused"):
+        if not committed[0] and not str(error).startswith("automatic main swap postponed;"):
             _auto_claim(repo, expected, time.time())
         raise
 
@@ -240,7 +239,7 @@ def auto_swap_plan(state, attempt, installed):
 def consider_auto_swap(repo, state, attempt, installed, spawns, navigation, plan=None, before_spawn=None):
     from terminal_panel import start_spawn
     if (os.environ.get("OMS_PANEL_AUTO_SWAP") == "0" or not attempt
-            or state.get("land", {}).get("active") or navigation.get("auto_seen") == attempt):
+            or navigation.get("auto_seen") == attempt):
         return
     plan = plan if plan is not None else auto_swap_plan(state, attempt, installed)
     if not plan:
@@ -516,7 +515,6 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         update_context_header(state, main_attempt, repo, navigation)
                         if (status == 0 and state.get("collection", {}).get("ok") is True
                                 and os.environ.get("OMS_PANEL_AUTO_SWAP") != "0" and main_attempt
-                                and not state.get("land", {}).get("active")
                                 and navigation.get("auto_seen") != main_attempt and not auto_reads.pending
                                 and pane_local_option("@oms_panel_main_watch") == "1"):
                             due, next_auto = auto_check_due(time.monotonic(), next_auto)

@@ -367,7 +367,7 @@ assert not auto_case(dict(auto_reading, observed_at=auto_now - 601))[1]
 with patch("panel_watch.time.time", return_value=auto_now):
     assert auto_case(dict(auto_reading, observed_at=auto_now - 600))[1]
     assert not auto_case(dict(auto_reading, resets_at=auto_now))[1]
-assert not auto_case(auto_reading, land=True)[1]
+assert auto_case(auto_reading, land=True)[1], "an active land no longer blocks the automatic swap"
 assert not auto_case(auto_reading, disabled=True)[1]
 nav, spawned = auto_case(auto_reading, {"used": 90})
 assert not spawned and "no other main" in nav["notice"]
@@ -485,7 +485,7 @@ with patch("panel_native.swap_main", side_effect=lambda repo, target, **kwargs: 
             assert "postponed" in str(error)
     assert postponed_messages.call_count == 2 and not postponed_claim.called
     assert postponed_messages.call_args_list[0].kwargs["message_id"] == postponed_messages.call_args_list[1].kwargs["message_id"]
-# Automatic swaps preserve the main when no handoff arrives below 100%, or a land starts during the wait.
+# Automatic swaps preserve the main when no handoff arrives below 100%; a land in flight is carried, not refused.
 import panel_native
 from contextlib import ExitStack, nullcontext
 from subprocess import CompletedProcess
@@ -494,9 +494,10 @@ swap_window = ("@1", swap_attempt, "%1", "fixture-main", "fixture-room")
 swap_old = {"attempt_id": swap_attempt, "provider": "claude", "tool": "panel-main", "terminal": False,
             "state": "working", "refs": {"panel_room_participant": "fixture-main", "panel_host": "tmux",
                                            "panel_harness": "claude"}}
-for usage, land_active, ack, manual in ((97, False, False, False), (100, False, False, False),
-                                        (100, True, False, False), (97, True, True, False),
-                                        (97, False, True, False), (97, False, False, True)):
+for usage, land_active, ack, manual, rolled in ((97, False, False, False, False), (100, False, False, False, False),
+                                                (100, True, False, False, False), (97, True, True, False, False),
+                                                (97, False, True, False, False), (97, False, False, True, False),
+                                                (97, True, True, False, True)):
     shown = dict(auto_reading, used=usage)
     with ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, {"OMS_PANEL_SWAP_HANDOFF_SECONDS": "1" if ack else "0"}))
@@ -517,13 +518,15 @@ for usage, land_active, ack, manual in ((97, False, False, False), (100, False, 
         stack.enter_context(patch.object(room, "status", return_value={"id": "fixture-room", "messages": messages}))
         stack.enter_context(patch.object(room, "participant", return_value={"role": "main", "provider": "claude"}))
         stack.enter_context(patch.object(room, "validate_main_swap"))
+        # A room that rolled over during the handoff wait is the same ownership, and the replacement joins the tail.
+        stack.enter_context(patch.object(room, "resolve", side_effect=lambda repo, ident, fresh=False:
+            "fixture-room-2" if rolled else ident))
         notices = stack.enter_context(patch.object(room, "send"))
         stack.enter_context(patch.object(panel, "_swap_digest", return_value="fixture digest"))
-        stack.enter_context(patch.object(panel, "_swap_handoff_file", return_value=project / "fixture-handoff"))
-        stack.enter_context(patch.object(panel, "launch_command", return_value="fixture"))
-        land_flags = iter((False, land_active))
+        handoff_written = stack.enter_context(patch.object(panel, "_swap_handoff_file", return_value=project / "fixture-handoff"))
+        launched = stack.enter_context(patch.object(panel, "launch_command", return_value="fixture"))
         runs = stack.enter_context(patch.object(panel_native.subprocess, "run", side_effect=lambda command, **kwargs:
-            CompletedProcess(command, 0, json.dumps({"active": next(land_flags)}) if "land" in command else "", "")))
+            CompletedProcess(command, 0, json.dumps({"active": land_active}) if "land" in command else "", "")))
         stack.enter_context(patch.object(panel_metrics, "current_weekly_reading", return_value=shown))
         stack.enter_context(patch.object(panel_metrics, "weekly_reading", return_value={}))
         claims = stack.enter_context(patch.object(panel_watch, "_auto_claim", return_value=True))
@@ -536,13 +539,21 @@ for usage, land_active, ack, manual in ((97, False, False, False), (100, False, 
             assert False, "fixture should stop the swap"
         except ValueError as error:
             assert str(error) == ("automatic main swap postponed; handoff not received" if usage < 100 and not ack and not manual else
-                                  "land is in progress; swap refused" if land_active else "fixture exit"), error
-        assert claims.call_count == (1 if not manual and (usage == 100 or ack) and not land_active else 0)
+                                  "fixture exit"), error
+        assert claims.call_count == (1 if not manual and (usage == 100 or ack) else 0)
         assert notices.call_count == (1 if usage < 100 and not ack and not manual else 0)
         if notices.called:
             assert notices.call_args.kwargs["message_id"] == "auto-swap-postponed-" + swap_attempt
-        assert typed.call_count == (2 if (usage == 100 or ack or manual) and not land_active else 1)
-        assert sum("land" in call.args[0] for call in runs.call_args_list) == (1 if manual or usage < 100 and not ack else 2)
+        reached = usage == 100 or ack or manual
+        assert typed.call_count == (2 if reached else 1)
+        # An active land no longer refuses the swap; the replacement's prompt names it instead.
+        assert sum("land" in call.args[0] for call in runs.call_args_list) == (1 if reached else 0)
+        if reached:
+            task = launched.call_args.kwargs["task"]
+            assert ("Land in progress" in task and "oms land status --repo" in task) == land_active, task
+            assert launched.call_args.kwargs["room_id"] == ("fixture-room-2" if rolled else "fixture-room")
+            assert handoff_written.call_args.args[1] == launched.call_args.kwargs["room_id"]
+            assert ("Land in progress" in handoff_written.call_args.args[3]) == land_active
 clock = [0.0]
 class StalledRead:
     pending = False

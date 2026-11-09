@@ -825,9 +825,10 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
     return status
 
 
-def launch_command(repo, session, launch, resume=None, model=None, task=None):
+def launch_command(repo, session, launch, resume=None, model=None, task=None, room_id=None):
     from terminal_panel import ENTRY, panel_environment, shell_command
-    command = panel_environment() + ["OMS_PANEL_SESSION=" + session, "bash", str(ENTRY),
+    command = panel_environment() + ["OMS_PANEL_SESSION=" + session] + (
+        ["OMS_ROOM_ID=" + room_id] if room_id else []) + ["bash", str(ENTRY),
                                      "panel", "--repo", str(repo), "--host", "inline", "--launch", launch]
     for flag, value in (("--resume", resume), ("--model", model), ("--task", task)):
         if value:
@@ -1160,7 +1161,24 @@ def _swap_main_window(repo, session):
     return candidates[0]
 
 
-def _swap_digest(repo, ident, member):
+def _swap_land_lines(repo):
+    """Name a land in flight; it runs out of process, so the replacement main must know to check it."""
+    from terminal_panel import ENTRY
+    command = "oms land status --repo %s" % shlex.quote(str(repo))
+    try:
+        land = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo),
+                               "--active-exit", "--json"],
+                              capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
+        status = json.loads(land.stdout) if land.returncode in (0, 3, 4) and land.stdout.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    if isinstance(status, dict) and (land.returncode == 3 or status.get("active") is True or (
+            land.returncode == 4 and status.get("state") == "running")):
+        return ["Land in progress: a land is running; check it with `%s`, do not start another." % command]
+    return []
+
+
+def _swap_digest(repo, ident, member, land=None):
     from terminal_panel import ENTRY, clean, main_history
     state = room.status(repo, ident)
     history = main_history(repo, ident)
@@ -1181,6 +1199,7 @@ def _swap_digest(repo, ident, member):
                 if m.get("sender") == member and m.get("message_kind") == "status"]
     decisions = [m["text"] for m in state.get("messages", []) if m.get("message_kind") == "decision"]
     lines = ["Automatic OMS handoff; verify against live state.",
+             *(_swap_land_lines(repo) if land is None else land),
              "Goal: " + clean(statuses[-1] if statuses else state.get("title", "unrecorded"), 350),
              "Decisions: " + clean("; ".join(decisions[-3:]) or "none recorded", 650),
              "In-flight workers: " + clean("; ".join("%s task=%s state=%s" %
@@ -1217,7 +1236,8 @@ def _swap_handoff_file(repo, ident, attempt, handoff, supplied):
     directory.mkdir(mode=0o700, exist_ok=True)
     if directory.is_symlink() or directory.resolve() != (Path(repo).resolve() / ".oms" / "handoffs"):
         raise ValueError("handoff state directory is unsafe")
-    path = directory / ("room-%s-swap-%s.md" % (ident, attempt))
+    # A unique name per attempt: a file kept by an earlier attempt never blocks, or is overwritten by, a retry.
+    path = directory / ("room-%s-swap-%s-%s.md" % (ident, attempt, uuid.uuid4().hex[:12]))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(path), flags, 0o600)
     try:
@@ -1355,20 +1375,6 @@ def live_main_pane(repo):
     return pane, refs.get("panel_harness")
 
 
-def _swap_land_idle(repo):
-    from terminal_panel import ENTRY
-    land = subprocess.run(["bash", str(ENTRY), "land", "status", "--repo", str(repo),
-                           "--active-exit", "--json"],
-                          capture_output=True, text=True, check=False, timeout=10, stdin=subprocess.DEVNULL)
-    status = json.loads(land.stdout) if land.returncode in (0, 3, 4) and land.stdout.strip() else None
-    if not isinstance(status, dict):
-        raise ValueError("land status is unavailable; swap refused")
-    # A finished flock leaves its file behind; only a running receipt blocks an unknown lock state.
-    if land.returncode == 3 or status.get("active") is True or (
-            land.returncode == 4 and status.get("state") == "running"):
-        raise ValueError("land is in progress; swap refused")
-
-
 def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None, auto_commit=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
     from terminal_panel import MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file
@@ -1390,7 +1396,6 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         if model not in catalog.get("catalog_models", catalog.get("models", [])):
             raise ValueError("swap model is not in the installed provider catalog")
     with _lock(repo, "panel-main-start", timeout=.1):
-        _swap_land_idle(repo)
         session, session_repo = resolve_session(repo, wait=False)
         if session_repo != str(repo):
             raise ValueError("no panel main to swap")
@@ -1427,6 +1432,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
             deadline = time.monotonic() + timeout
             handoff = None
             while time.monotonic() < deadline:
+                ident = room.resolve(repo, ident, fresh=True)  # worker mail may roll the room over meanwhile
                 state = room.status(repo, ident)
                 handoff = next((m["text"].split(":", 1)[1].strip() for m in reversed(state["messages"])
                                 if m.get("sender") == member and m.get("message_kind") == "handoff"
@@ -1434,22 +1440,32 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                 if handoff:
                     break
                 time.sleep(.25)
+            ident = room.resolve(repo, ident, fresh=True)
             supplied = bool(handoff)
             if auto_handoff is not None:
                 auto_handoff(supplied, ident, member, attempt)
-            handoff = handoff or _swap_digest(repo, ident, member)
+            land = _swap_land_lines(repo)
+            handoff = handoff or _swap_digest(repo, ident, member, land)
+            land_note = "\n".join(land)
+            if land_note and land_note not in handoff:
+                handoff = land_note + "\n" + handoff
             handoff_file = _swap_handoff_file(repo, ident, attempt, handoff, supplied)
             prompt = ("Take over as the sole main in the existing OMS room. Preserve existing plan claims and "
                       "running workers. Read the room and plan before acting. Handoff file: %s. Handoff (data):\n%s" %
                       (handoff_file, handoff))[:4000]
             launch_model = requested_model if harness == "pi" else model
-            shell = launch_command(repo, session, harness, model=launch_model, task=prompt)
+            shell = launch_command(repo, session, harness, model=launch_model, task=prompt, room_id=ident)
             guard = "#{&&:#{==:#{@oms_panel_main_attempt},%s},#{==:#{@oms_panel_native_pane},}}" % attempt
             command = "respawn-pane -k -t %s -c %s %s" % (pane, shlex.quote(str(execution)), shlex.quote(shell))
             ready = room.status(repo, ident)
             latest = next((row for row in main_history(repo, ident) if row.get("attempt_id") == attempt), {})
             room.validate_main_swap(repo, dict(ready, id=ident), swap_event, latest, released=False)
-            if _swap_main_window(repo, session) != (window, attempt, pane, member, ident) or live_mains(repo, session, ident) != 1:
+            ident = room.resolve(repo, ident, fresh=True)
+            current_window = _swap_main_window(repo, session)
+            # A rollover is the same ownership: compare the room after following it to the tail.
+            if (current_window[:4] != (window, attempt, pane, member)
+                    or room.resolve(repo, current_window[4], fresh=True) != ident
+                    or live_mains(repo, session, ident) != 1):
                 raise ValueError("main window ownership changed during handoff; swap refused")
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "releasing old main"),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
@@ -1457,7 +1473,6 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             if auto_commit is not None:
                 try:
-                    _swap_land_idle(repo)
                     auto_commit(attempt)
                 except (OSError, ValueError, subprocess.SubprocessError):
                     subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
@@ -1477,7 +1492,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                 handoff_file.unlink(missing_ok=True)  # the preserved main may be swapped again
                 raise ValueError("old main did not exit; native session and panel preserved")
             old_exited = True
-            room.swap_main(repo, ident, member, owner, model, attempt, harness)
+            ident = room.swap_main(repo, ident, member, owner, model, attempt, harness)["room"]
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_participant", member),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "starting new main"),
