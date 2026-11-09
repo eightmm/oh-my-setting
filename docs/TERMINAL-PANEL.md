@@ -1744,6 +1744,12 @@ Plan shows the shared repository plan:
 the goal, then one row per task (state glyph, id, title, claimant by the board's
 main name or provider, verify command) ordered verified, review, running or
 claimed, ready, blocked.
+A ready task whose dependencies are not all done reads `ready (waiting on ID, ID +N)`,
+and a blocked task adds its recorded reason (up to 60 characters). A task's Detail
+snapshot lists each dependency with its listed state, the unfinished ones under
+`Waiting on:`, and a blocked task's full reason with its `oms agent-plan reopen`
+command. Only a done dependency satisfies a claim; a cancelled or unlisted one
+never does. These notes are display-only.
 
 #### Debate
 

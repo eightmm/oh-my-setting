@@ -336,7 +336,23 @@ def navigate(repo, action, state, navigation, width):
                  "State: " + clean(task.get("state"))]
         depends = task.get("depends") or []
         if depends:
-            lines.append("Depends: " + ", ".join(clean(item) for item in depends))
+            # Each dependency carries its listed state: only done satisfies a claim, and cancelled never will.
+            from room_view import task_wait
+            states = {t.get("id"): t.get("state") for t in state.get("room", {}).get("repo_tasks", [])
+                      if isinstance(t, dict)}
+            lines.append("Depends: " + ", ".join("%s (%s)" % (
+                clean(item), clean(states.get(item) if isinstance(item, str) else None, 20) or "not in this plan")
+                for item in depends))
+            pending = task_wait(task, states)[0]
+            if pending:
+                lines.append("Waiting on: " + ", ".join(pending))
+        if task.get("state") == "blocked":
+            reason = clean(task.get("reason"), 240)
+            if reason:
+                lines.append("Blocked: " + reason)
+            # An unverified completion only reads as blocked; its stored state is not one reopen accepts.
+            if "stored_state" not in task:
+                lines.append("Next: oms agent-plan reopen --id %s returns it to ready" % clean(task.get("id")))
         # Plan records name the claiming provider; the lease itself stays out of the panel.
         claimant = task.get("provider") if task.get("claimed_at") or task.get("state") in ("claimed", "running") else None
         if claimant:
