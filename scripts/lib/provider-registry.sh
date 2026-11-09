@@ -323,9 +323,7 @@ oms_provider_supports_access() {
     return 0
   fi
   IFS=',' read -r -a oms_write_adapters <<< "${OMS_PROVIDER_WRITE_ADAPTERS:-}"
-  # Bash 3.2 + set -u abort on expanding an empty array; the guard keeps the
-  # DENY branch a typed refusal instead of a shell death on macOS.
-  for candidate in ${oms_write_adapters[@]+"${oms_write_adapters[@]}"}; do
+  for candidate in "${oms_write_adapters[@]}"; do
     candidate="$(printf '%s' "$candidate" | tr -d '[:space:]')"
     [ "$candidate" = "$provider" ] && return 0
   done
@@ -552,7 +550,7 @@ oms_provider_model_family() {
 
   provider="$(oms_provider_normalize "$1")" || return $?
   model="$2"
-  lower="$(LC_ALL=C printf '%s' "$model" | tr '[:upper:]' '[:lower:]')"
+  lower="$(LC_ALL=C; printf '%s' "${model,,}")"
 
   case "$lower" in
     *glm*|zai/*|zhipu*) inferred=zhipu ;;

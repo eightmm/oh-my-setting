@@ -36,8 +36,8 @@ oms_check_parallel_run() {
   mkdir -p "$logs"
   cleanup_parallel() {
     local pid
-    oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
-    for pid in ${pids[@]+"${pids[@]}"}; do
+    oms_parallel_terminate_running "${pids[@]}"
+    for pid in "${pids[@]}"; do
       [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
     done
   }
@@ -66,7 +66,7 @@ oms_check_parallel_run() {
         case "$alive" in *" ${pids[$k]} "*) continue ;; esac
         if ! wait "${pids[$k]}"; then
           pids[$k]=""
-          oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
+          oms_parallel_terminate_running "${pids[@]}"
           cat "$logs/${names[$k]}.log"
           omitted=""; separator=""
           for ((j=0; j<${#planned[@]}; j++)); do
@@ -167,8 +167,8 @@ oms_operator_parallel() (
   cleanup_operator() {
     local pid
     trap - EXIT HUP INT TERM
-    oms_parallel_terminate_running ${pids[@]+"${pids[@]}"}
-    for pid in ${pids[@]+"${pids[@]}"}; do
+    oms_parallel_terminate_running "${pids[@]}"
+    for pid in "${pids[@]}"; do
       [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
     done
     rm -rf "$logs"
