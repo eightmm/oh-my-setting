@@ -253,7 +253,8 @@ def exercise_observed_worker_leases():
         else:
             argv += ["--purpose", purpose, "--brief-file", str(brief)]
         if access == "write":
-            argv += ["--verify", ":"]
+            # Disjoint scopes: an earlier fixture task's undecided write would otherwise claim the repository.
+            argv += ["--verify", ":", "--scope", "fixture-" + task_id]
         argv += ["--task-id", task_id]
         child_process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -293,7 +294,7 @@ def exercise_observed_worker_leases():
                 assert observed_binding["claim_provider"] != observed_binding["owner_provider"], observed_binding
             enrolled = room.participant(room.project(room.records(project, test_room)), observed["participant"])
             assert enrolled["parent"] == main_member and observed["parent"] == main_attempt, enrolled
-            assert enrolled["role"] == role and enrolled["owns"] == [], enrolled
+            assert enrolled["role"] == role and enrolled["owns"] == (["fixture-" + task_id] if access == "write" else []), enrolled
             route = fixture_selected_route(owner, role, None, access, purpose if role == "worker" else None,
                                            worker, model, effort)
             validation_route = dict(provider=route["provider"], model=route["model"],

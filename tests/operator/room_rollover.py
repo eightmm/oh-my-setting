@@ -467,6 +467,15 @@ with patch.dict(os.environ, {}):
                     room.bind(where, raced, "m1", "sess-two", replaces=consumer)
                     room.acknowledge(where, raced, "m1", [m["id"] for m in room.messages(where, raced)
                                                           if m["sender"] == "m2"])
+                # A call that rescopes and then finishes before the seal: the carry replays its scope regardless.
+                with bound(raced, "call-x"):
+                    room.scope(where, raced, "call-x", ["lib"])
+                with bound(raced, "m1"):
+                    room.append(where, raced, {"kind": "call-result", "event_id": "call-result-raced",
+                                               "task_id": "raced-task", "call_id": "call-x",
+                                               "attempt_id": "attempt-raced", "role": "worker", "access": "write",
+                                               "exit": 0, "verify_status": "passed", "verify_exit": 0, "needs_review": False},
+                                "Structured call result")
                 room.send(where, raced, "call-x", "m1", "Call exit=0; done", "handoff", message_id="result-call-x")
                 return moved
             raise subprocess.TimeoutExpired("thread append", 15)
@@ -492,6 +501,7 @@ with patch.dict(os.environ, {}):
         assert healed["carried"] and healed["call_results"]["call-x"]["exit"] == 0, healed["call_results"]
         people = {p["participant"]: p for p in healed["participants"]}
         assert not people["m3"]["joined"] and people["m2"]["owns"] == ["src"], people
+        assert people["call-x"]["owns"] == ["lib"], people["call-x"]
         assert people["m4"]["joined"] and people["m4"]["consumer"] == freed, people["m4"]
         assert people["pi1"]["consumer"] == hashlib.sha256(b"pi-two").hexdigest()[:32], people["pi1"]
         assert people["m1"]["label_override"] == "Second work" and people["m1"]["consumer"] != consumer

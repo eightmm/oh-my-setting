@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
+import io
+import panel_dispatch
 from panel_routing import main_owner_matches
 import re
 import shlex
@@ -13,6 +15,284 @@ import subprocess
 import sys
 import tempfile
 import panel_native
+
+# BEGIN write-scope-lock
+def test_scope_declarations_refuse_overlapping_write_dispatches_and_clear_on_release():
+    import panel_dispatch
+    from concurrent.futures import ThreadPoolExecutor
+    scope_room = "scope-lock-case"
+    scope_had_state = (project / ".oms").exists()
+    with patch.dict(os.environ, {"OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": "",
+                                  "XDG_STATE_HOME": str(temporary / "scope-control")}):
+        room.create(project, scope_room)
+        room.join(project, scope_room, "scope-main", "claude")
+        with patch.dict(os.environ, OMS_ROOM_PARTICIPANT="scope-main"):
+            room.scope(project, scope_room, "scope-main", ["src"])
+        # The check and declaration share the thread append lock, including racing controllers.
+        def scope_join(number):
+            try:
+                room.join(project, scope_room, "call-scope-writer-%s" % number, "codex", role="worker",
+                          parent="scope-main", owns=["src"], task_id="scope-task-%s" % number)
+                return "joined"
+            except ValueError as error:
+                return str(error)
+        scope_notice = io.StringIO()
+        with redirect_stderr(scope_notice), ThreadPoolExecutor(max_workers=2) as pool:
+            scope_outcomes = list(pool.map(scope_join, (1, 2)))
+        assert scope_outcomes.count("joined") == 1, scope_outcomes
+        scope_refusal = next(value for value in scope_outcomes if value != "joined")
+        assert "Scope overlap" in scope_refusal, scope_refusal
+        assert "scope-task-" in scope_notice.getvalue() and "scope-writer-" in scope_notice.getvalue(), scope_notice.getvalue()
+        assert "src" in scope_notice.getvalue() and "wait" in scope_notice.getvalue(), scope_notice.getvalue()
+        scope_winner = next(p for p in room.status(project, scope_room)["participants"] if p.get("task_id"))
+        room.join(project, scope_room, scope_winner["participant"], "codex", role="worker", parent="scope-main",
+                  owns=["src"], task_id=scope_winner["task_id"])
+        scope_state = room.status(project, scope_room)
+        with patch.object(panel, "snapshot", side_effect=AssertionError("scope predicate read a full snapshot")):
+            assert panel.scope_overlaps(project, scope_room, scope_state, "scope-main", ["."])
+            assert not panel.scope_overlaps(project, scope_room, scope_state, "scope-main", ["src2"])
+            assert panel.scope_overlaps(project, scope_room, scope_state, "scope-main", ["src"]), \
+                "live continuation admitted"
+        assert room.validate_event(room.records(project, scope_room), {
+            "kind": "join", "participant": "scope-no-repository", "provider": "codex", "role": "worker",
+            "model": None, "label": "Validation without repository", "parent": "scope-main", "owns": ["src"],
+            "task_id": "scope-no-repository"}, "Joined") is True
+        # A refusal first delivers this main's own finished calls, then returns without a rollover or claim.
+        scope_main_record = {"attempt_id": "scope-main-attempt", "tool": "panel-main", "provider": "claude",
+                             "terminal": False, "refs": {"panel_room_participant": "scope-main", "panel_room_id": scope_room}}
+        scope_route = {"kind": "worker", "role": "worker", "provider": "codex", "model": "fixture",
+                       "workload": "light", "purpose": "implement", "effort": None}
+        scope_env = {"OMS_ROOM_ID": scope_room, "OMS_ROOM_PARTICIPANT": "scope-main",
+                     "OMS_PANEL_MAIN_ATTEMPT": "scope-main-attempt"}
+        with patch.dict(os.environ, OMS_ROOM_REPO=""), \
+                patch.object(panel, "_validate_dispatch_verifier"), \
+                patch.object(panel, "routed_command", return_value=["delegate", "--repo", str(project),
+                                                                   "--verify", "true", "--task-id", "refused"]), \
+                patch.object(panel, "child_environment", return_value=scope_env), \
+                patch.object(panel, "events", return_value=json.dumps(scope_main_record)), \
+                patch.object(panel, "active_mains", return_value={"scope-main": scope_main_record}), \
+                patch.object(panel.shutil, "which", return_value="fixture"), \
+                patch.object(panel, "snapshot", return_value=({"room": scope_state}, 0)), \
+                patch.object(panel, "_rollover_if_needed", side_effect=AssertionError("rollover before refusal")) as scope_roll, \
+                patch.object(panel, "_reconcile_dispatch") as scope_settle, \
+                patch.object(panel, "plan_link", side_effect=AssertionError("claim before refusal")) as scope_claim, \
+                redirect_stderr(io.StringIO()):
+            scope_before = room.records(project, scope_room)
+            try:
+                panel.run_dispatch(project, "claude", "worker", "write", None, None, "true", "refused", False,
+                                   None, scope_route, "scope-main", None, ["src"], work_repo=project)
+            except ValueError as error:
+                assert "Scope overlap" in str(error), error
+            else:
+                raise AssertionError("overlapping dispatch did not refuse")
+            assert not scope_roll.called and not scope_claim.called
+            scope_settle.assert_called_once()
+            assert scope_settle.call_args.args[3:] == ("scope-main", "scope-main-attempt"), scope_settle.call_args
+            assert room.records(project, scope_room) == scope_before
+        # Reconciliation may settle only this main's calls and its own attempt lineage.
+        scope_foreign = dict(scope_winner, participant="foreign-worker", parent="foreign-main", task_id="foreign-task")
+        scope_rows = [{"parent_attempt_id": "scope-main-attempt", "task_id": scope_winner["task_id"], "refs": {
+                          "panel_room_participant": scope_winner["participant"], "panel_room_id": scope_room}},
+                      {"parent_attempt_id": "foreign-attempt", "task_id": "unrelated-task", "refs": {
+                          "panel_room_participant": scope_winner["participant"], "panel_room_id": scope_room}}]
+        with patch.object(panel, "events", return_value=json.dumps(scope_rows)), \
+                patch.object(panel_dispatch.dispatch_store, "orphan_members", return_value=[]), \
+                patch.object(panel, "_dispatch_call_record", side_effect=lambda repo, ident, member: member) as scope_record, \
+                patch.object(panel, "_dispatch_released", return_value=False), \
+                patch.object(panel, "_dispatch_pending", side_effect=lambda repo, call: dict(call, exit=0)), \
+                patch.object(panel, "_dispatch_call_finished", return_value=True), \
+                patch.object(panel, "deliver_result") as scope_deliver:
+            panel._reconcile_dispatch(project, scope_room, {"participants": [scope_winner, scope_foreign]},
+                                      "scope-main", "scope-main-attempt")
+            scope_record.assert_called_once_with(project, scope_room, scope_winner)
+            scope_deliver.assert_called_once_with(project, scope_room, scope_winner["participant"],
+                                                 "scope-main", scope_winner["task_id"], 0)
+        room.join(project, scope_room, "scope-reader", "codex", role="researcher", parent="scope-main")
+        room.join(project, scope_room, "scope-disjoint", "codex", role="worker", parent="scope-main",
+                  owns=["docs"], task_id="scope-docs")
+        for invalid_scope in ([], ["../escape"], ["./src"]):
+            try:
+                room.join(project, scope_room, "scope-invalid", "codex", role="worker", parent="scope-main",
+                          owns=invalid_scope, task_id="scope-invalid")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid write declaration accepted: %r" % invalid_scope)
+        for bad_task in ("", 0, "../escape", "x" * 161):
+            try:
+                room.join(project, scope_room, "bad-task", "codex", role="worker", parent="scope-main",
+                          owns=["limits"], task_id=bad_task)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("malformed task accepted: %r" % bad_task)
+        room.join(project, scope_room, "scope-limit", "codex", role="worker", parent="scope-main",
+                  owns=["limits"], task_id="x" * 160)
+        scope_state = room.status(project, scope_room)
+        assert panel.scope_overlaps(project, scope_room, scope_state, "scope-main", ["src"])
+        # Result delivery, rather than a platform-dependent containment snapshot, gates same-task continuation.
+        with patch.object(panel_dispatch.sys, "platform", "darwin"):
+            scope_launch = panel._prepare_dispatch_call(project, scope_room, scope_winner["participant"], "scope-main",
+                                                         task_id=scope_winner["task_id"])
+        assert scope_launch["backend"] == "unsupported"
+        scope_guard = panel.events(project, "start", "--provider", "codex", "--tool", "peer-delegate",
+            "--task-id", scope_winner["task_id"], "--ref", "panel_role=worker", "--ref", "panel_access=write",
+            "--ref", "panel_room_id=" + scope_room, "--ref", "panel_room_participant=" + scope_winner["participant"],
+            "--then", "starting", "--then", "working", output=True)
+        panel.events(project, "transition", "--attempt", scope_guard, "--state", "failed",
+                     "--reason-code", "worker_authority_violation")
+        def scope_blockers_now():
+            return [item["participant"] for item in panel.scope_overlaps(
+                project, scope_room, room.status(project, scope_room), "scope-main", ["src"])]
+        assert scope_winner["participant"] in scope_blockers_now()
+        room.send(project, scope_room, scope_winner["participant"], "scope-main", "Call exit=2; guard stop awaiting decision.",
+                  kind="handoff", message_id="result-" + scope_winner["participant"])
+        assert scope_winner["participant"] in scope_blockers_now(), "a handoff message counted as the controller's delivery"
+        panel._call_result_event(project, scope_room, scope_winner["participant"], scope_winner["task_id"], 2)
+        scope_state = room.status(project, scope_room)
+        # The controller's structured result releases the declaration, for continuations and other tasks alike.
+        assert not panel.scope_overlaps(project, scope_room, scope_state, "scope-main", ["src"]), "delivered call kept its lock"
+        # Long refusals retain every blocker beyond the panel's bounded exception summary.
+        scope_blockers = ["scope-many-%s" % number for number in range(10)]
+        for blocker in scope_blockers:
+            room.join(project, scope_room, blocker, "codex", role="worker", parent="scope-main",
+                      owns=["many/" + blocker], task_id=blocker)
+        scope_notice = io.StringIO()
+        try:
+            with redirect_stderr(scope_notice):
+                room.join(project, scope_room, "scope-many-request", "codex", role="worker", parent="scope-main",
+                          owns=["many"], task_id="scope-many-request")
+        except ValueError as error:
+            assert "Scope overlap" in str(error), error
+        else:
+            raise AssertionError("multiple live declarations did not refuse")
+        assert len(scope_notice.getvalue()) > 1000, scope_notice.getvalue()
+        for blocker in scope_blockers:
+            assert "task " + blocker + " participant " + blocker + " scope many/" + blocker in scope_notice.getvalue(), blocker
+        # A rollover carries an undelivered call with its task and scope, so a new controller still sees it.
+        room.join(project, scope_room, "scope-after-final", "codex", role="worker", parent="scope-main",
+                  owns=["src"], task_id=scope_winner["task_id"])
+        scope_successor = room.rollover(project, scope_room, "scope-main")
+        scope_carried = room.status(project, scope_successor)
+        assert room.participant(scope_carried, "scope-after-final")["task_id"] == scope_winner["task_id"]
+        def successor_lock(scope="src"):
+            return [item["participant"] for item in panel.scope_overlaps(
+                project, scope_successor, room.status(project, scope_successor), "scope-main", [scope])
+                if item["role"] == "worker"]
+        assert successor_lock() == ["scope-after-final"], "a rollover dropped an undelivered declaration"
+        # A call cannot release its own lock by leaving; its parent main records the departure.
+        scope_child_leave = {"OMS_ROOM_ID": scope_successor, "OMS_ROOM_PARTICIPANT": "scope-after-final"}
+        with patch.dict(os.environ, scope_child_leave):
+            try:
+                room.append(project, scope_successor, {"kind": "leave", "participant": "scope-after-final"}, "Left")
+            except ValueError as error:
+                assert "a call leaves through its parent main scope-main" in str(error), error
+            else:
+                raise AssertionError("a call left the room under its own identity")
+        assert successor_lock() == ["scope-after-final"], "a refused leave released the lock"
+        with patch.dict(os.environ, dict(scope_child_leave, OMS_ROOM_PARTICIPANT="scope-other")):
+            try:
+                room.append(project, scope_successor, {"kind": "leave", "participant": "scope-after-final"}, "Left")
+            except ValueError as error:
+                assert "parent main" in str(error), error
+            else:
+                raise AssertionError("a non-parent recorded a call's departure")
+        with patch.dict(os.environ, dict(scope_child_leave, OMS_ROOM_PARTICIPANT="scope-main")):
+            room.append(project, scope_successor, {"kind": "leave", "participant": "scope-after-final"}, "Left")
+        assert successor_lock() == []
+        # A call's lock ends with the controller's structured result or its parent's read of the call's handoff;
+        # rollover carries exactly the calls still holding one, and a call whose parent left holds nothing.
+        rounds_room = "scope-rounds-case"
+        room.create(project, rounds_room)
+        room.join(project, rounds_room, "rounds-main", "claude")
+        def rounds_finish(member, parent, task, read):
+            room.send(project, rounds_room, member, parent, "Call exit=0; done.", kind="handoff",
+                      message_id="result-" + member)
+            if task:
+                panel._call_result_event(project, rounds_room, member, task, 0)
+            if read:
+                with patch.dict(os.environ, OMS_ROOM_ID=rounds_room, OMS_ROOM_PARTICIPANT=parent):
+                    room.acknowledge(project, rounds_room, parent, ["result-" + member])
+        for rounds_member, rounds_parent, rounds_scope, rounds_task, rounds_delivered, rounds_read in (
+                ("rounds-one", "rounds-main", "first", "rounds-task", True, False),
+                ("rounds-two", "rounds-main", "second", "rounds-task", True, True),
+                ("rounds-handoff", "rounds-main", "third", "rounds-handoff-task", False, True),
+                ("rounds-unread", "rounds-main", "fourth", None, False, False)):
+            room.join(project, rounds_room, rounds_member, "codex", role="worker", parent=rounds_parent,
+                      owns=[rounds_scope], task_id=rounds_task)
+            rounds_finish(rounds_member, rounds_parent, rounds_task if rounds_delivered else None, rounds_read)
+        def rounds_lock(rounds_at, scope):
+            return [item["participant"] for item in panel.scope_overlaps(
+                project, rounds_at, room.status(project, rounds_at), "rounds-main", [scope])]
+        # A finished write call's id is single-use: its old delivery evidence must never release a new declaration.
+        with patch.dict(os.environ, OMS_ROOM_ID=rounds_room, OMS_ROOM_PARTICIPANT="rounds-main"):
+            room.append(project, rounds_room, {"kind": "leave", "participant": "rounds-two"}, "Left")
+        try:
+            room.join(project, rounds_room, "rounds-two", "codex", role="worker", parent="rounds-main",
+                      owns=["second"], task_id="rounds-task")
+        except ValueError as error:
+            assert "single-use" in str(error), error
+        else:
+            raise AssertionError("a finished write call rejoined with a declaration")
+        # The refusal's stale-declaration recovery is self-contained: repository and room are named.
+        refusal = io.StringIO()
+        with redirect_stderr(refusal):
+            try:
+                panel_dispatch._refuse_scope_overlaps(panel.scope_overlaps(
+                    project, rounds_room, room.status(project, rounds_room), "other", ["fourth"]))
+            except ValueError:
+                pass
+        assert ("oms room scope --repo %s --id %s --participant rounds-unread --clear"
+                % (shlex.quote(str(project)), rounds_room)) in refusal.getvalue(), refusal.getvalue()
+        orphan_room = "scope-orphan-case"
+        room.create(project, orphan_room)
+        room.join(project, orphan_room, "orphan-main", "codex")
+        room.join(project, orphan_room, "orphan-call", "codex", role="worker", parent="orphan-main",
+                  owns=["fifth"], task_id="orphan-task")
+        assert rounds_lock(orphan_room, "fifth") == ["orphan-call"], "a running call lost its lock"
+        with patch.dict(os.environ, OMS_ROOM_ID=orphan_room, OMS_ROOM_PARTICIPANT="orphan-main"):
+            room.append(project, orphan_room, {"kind": "leave", "participant": "orphan-main"}, "Left")
+        assert rounds_lock(orphan_room, "fifth") == [], "a call whose parent left kept its lock"
+        # Liveness is joined state, never join order: a superseded main that never left, and a call enrolled under
+        # it, still lock the newer main out of their scopes (over-lock, not under-lock), whatever the carried order.
+        superseded = {"call_results": {}, "participants": [
+            {"participant": "old-main", "role": "main", "joined": True, "seq": 3, "owns": ["sixth"]},
+            {"participant": "old-call", "role": "worker", "joined": True, "seq": 4, "parent": "old-main",
+             "owns": ["seventh"], "task_id": "old-task"},
+            {"participant": "new-main", "role": "main", "joined": True, "seq": 1}]}
+        for caller in ("new-main", "other"):
+            assert {item["participant"] for item in panel.scope_overlaps(
+                project, orphan_room, superseded, caller, ["sixth", "seventh"])} == {"old-main", "old-call"}, caller
+        rounds_next = room.rollover(project, rounds_room, "rounds-main")
+        rounds_members = {p["participant"] for p in room.status(project, rounds_next)["participants"]}
+        assert {"rounds-one", "rounds-unread"} <= rounds_members, rounds_members
+        assert not {"rounds-two", "rounds-handoff"} & rounds_members, rounds_members
+        assert all(rounds_lock(rounds_next, scope) == [] for scope in ("first", "second", "third")), \
+            "a delivered or read call kept its lock"
+        assert rounds_lock(rounds_next, "fourth") == ["rounds-unread"], "an unread handoff released its scope"
+        # Single use holds across the lineage: an id the successor never carried, and a carried delivered call
+        # re-scoping itself, are both refused before anything is appended.
+        for reuse in (lambda: room.join(project, rounds_next, "rounds-two", "codex", role="worker",
+                                        parent="rounds-main", owns=["second"], task_id="rounds-task"),
+                      lambda: room.append(project, rounds_next, {"kind": "scope", "participant": "rounds-one",
+                                                                 "owns": ["first", "more"]}, "Scope")):
+            before = room.status(project, rounds_next)["participants"]
+            try:
+                with patch.dict(os.environ, OMS_ROOM_ID=rounds_next, OMS_ROOM_PARTICIPANT=""):
+                    reuse()
+            except ValueError as error:
+                assert "single-use" in str(error), error
+            else:
+                raise AssertionError("a finished call id declared scope again in the successor room")
+            assert room.status(project, rounds_next)["participants"] == before
+        with patch.dict(os.environ, OMS_ROOM_ID=rounds_next, OMS_ROOM_PARTICIPANT="rounds-main"):
+            room.acknowledge(project, rounds_next, "rounds-main", ["result-rounds-unread"])
+        assert rounds_lock(rounds_next, "fourth") == [], "the parent's read of a carried handoff did not release it"
+    if not scope_had_state:
+        shutil.rmtree(project / ".oms")
+
+test_scope_declarations_refuse_overlapping_write_dispatches_and_clear_on_release()
+# END write-scope-lock
 
 # BEGIN council missing family
 with patch.object(panel, "provider_catalog", return_value=[
@@ -2661,6 +2941,9 @@ for refused_flags, refused_text in ((["--access", "read"], "--continue requires 
                              env=dict(room_env, OMS_AGENT="claude"), capture_output=True, text=True, timeout=30)
     assert refused.returncode == 2 and refused_text in refused.stderr, (refused_flags, refused)
     assert worker_log.read_bytes() == before, "refused short-form continuation launched a worker"
+# Decide this patch before starting an independent writer in the same repository scope.
+call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize", "--owner", "claude",
+      "--task-id", "cross-repo-write", "--summary-file", str(summary), "--outcome", "completed"], room_env)
 # A named writer's recorded purpose is its role: continuing as a plain worker keeps the implement default.
 named_env = dict(room_env, OMS_AGENT="claude", PANEL_TEST_MODE="write", PANEL_TEST_VERIFY_LOG=str(verify_log))
 call(["bash", str(panel.ENTRY), "panel", "--repo", str(other_project), "--room", shared, "--dispatch", "builder",
@@ -2671,6 +2954,8 @@ named_plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(o
                               "--brief-file", cross_brief.name, "--continue", "cross-repo-named", "--dry-run"],
                              named_env))
 assert named_plan["route"]["purpose"] == "implement" and named_plan["route"]["role"] == "worker", named_plan
+call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize", "--owner", "claude",
+      "--task-id", "cross-repo-named", "--summary-file", str(summary), "--outcome", "completed"], room_env)
 cross_brief.unlink()
 board = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--results", "--json"], room_env))
 assert {row["task_id"] for row in board["rows"]} >= {
@@ -2799,6 +3084,8 @@ missing_before = worker_log.read_bytes()
 legacy = subprocess.run(write_plan_dispatch + ["--task-id", "plan-not-recorded", "--label", "Legacy write"],
                         env=dict(room_env, PANEL_TEST_MODE="write"), capture_output=True, text=True)
 assert legacy.returncode == 0 and worker_log.read_bytes() != missing_before, legacy
+call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--finalize", "--owner", "claude",
+      "--task-id", "plan-not-recorded", "--summary-file", str(summary), "--outcome", "completed"], room_env)
 finish_fixture_reviews()
 call(plan_cli + ["review", "--id", "plan-link", "--lease-id", held["lease_id"]])
 closed = subprocess.run(plan_dispatch, env=room_env, capture_output=True, text=True)
@@ -2806,8 +3093,8 @@ assert closed.returncode == 0 and plan_task()["state"] == "review" and "plan pla
 before_thread, before_provider = thread.read_bytes(), worker_log.read_bytes()
 review_write = subprocess.run(write_plan_dispatch + ["--task-id", "plan-link", "--label", "Refused review write"],
                               env=room_env, capture_output=True, text=True)
-# The fixture holds 3 undecided write results plus the review task: exactly the WIP limit, which refuses first.
-assert review_write.returncode != 0 and "WIP limit 4 reached: 0 running, 4 awaiting decision" in review_write.stderr, review_write
+# Independent write results were decided before the next task; this review task still refuses a new write.
+assert review_write.returncode != 0 and "plan task plan-link is not this main's to run" in review_write.stderr, review_write
 assert thread.read_bytes() == before_thread and worker_log.read_bytes() == before_provider, review_write
 (project / "write-brief.md").unlink()  # The later blocking reviewer must see only its source fixture.
 hinted = subprocess.run(final_args[:final_args.index("--task-id") + 1] + ["plan-link"] + final_args[final_args.index("--task-id") + 2:],
@@ -3599,13 +3886,16 @@ with patch.dict(os.environ, control_env, clear=True), \
     from contextlib import redirect_stderr
     def backlog_dispatch(report, task, access="write", **options):
         output = io.StringIO()
+        # Override only the WIP totals; scope checks still need the room's real results and decisions.
+        dispatch_report = dict(panel.snapshot(project, shared)[0], review_backlog=report["review_backlog"])
         if access == "write":
             options.update(brief=options.get("brief", brief), verify="true")
+            options.setdefault("scopes", ["wip-fixture/" + (task or "continued")])
         with patch.dict(os.environ, control_env, clear=True), \
                 patch.object(panel, "provider_catalog", return_value=[control_codex, control_claude]), \
                 patch.object(panel.shutil, "which", return_value="/fixture/provider"), \
                 patch.object(panel, "routed_command", return_value=control_write_command), \
-                patch.object(panel, "snapshot", return_value=(report, 0)), \
+                patch.object(panel, "snapshot", return_value=(dispatch_report, 0)), \
                 patch.object(panel.subprocess, "Popen", side_effect=observe_control_launch), \
                 redirect_stderr(output):
             status = panel.dispatch(project, "claude", "worker", "light", access,
@@ -3905,17 +4195,19 @@ scoped_dispatch = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", s
                                   "--dispatch", "worker", "--owner", "claude", "--access", "write", "--purpose", "implement",
                                   "--brief-file", str(brief), "--verify", "test -f value.txt", "--scope", "./scripts/lib/",
                                   "--scope", "docs", "--dry-run"], env=room_env, capture_output=True, text=True, timeout=60)
-assert scoped_dispatch.returncode == 0, scoped_dispatch
-scoped_plan = json.loads(scoped_dispatch.stdout)
-assert sorted((o["participant"], o["scope"]) for o in scoped_plan["overlaps"]) == sorted(
-    [(other_main, "scripts/lib/room.py"), ("scope-live", "scripts"),
-     ("scope-done", "scripts/lib/panel_view.py")]), scoped_plan
-assert scoped_dispatch.stderr.count("Scope overlap") == 1 and other_main in scoped_dispatch.stderr, scoped_dispatch.stderr
+assert scoped_dispatch.returncode != 0 and not scoped_dispatch.stdout, scoped_dispatch
+assert "Scope overlap" in scoped_dispatch.stderr and other_main in scoped_dispatch.stderr, scoped_dispatch.stderr
+assert "scope-live" in scoped_dispatch.stderr and "scripts" in scoped_dispatch.stderr, scoped_dispatch.stderr
 assert room.records(project, shared) == scope_before_preview, "scope preview changed the room"
-unscoped = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
-                            "--owner", "claude", "--access", "write", "--purpose", "implement", "--brief-file", str(brief),
-                            "--verify", "test -f value.txt", "--dry-run"], room_env))
-assert "overlaps" not in unscoped, unscoped
+unscoped = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--room", shared, "--dispatch", "worker",
+                           "--owner", "claude", "--access", "write", "--purpose", "implement", "--brief-file", str(brief),
+                           "--verify", "test -f value.txt", "--dry-run"], env=room_env, capture_output=True, text=True, timeout=60)
+assert unscoped.returncode != 0 and "Scope overlap" in unscoped.stderr, unscoped
+# Release fixture declarations before exercising successful write dispatches below.
+with patch.dict(os.environ, OMS_ROOM_PARTICIPANT=other_main):
+    room.scope(project, shared, other_main, [])
+for scope_member in ("scope-live", "scope-done"):
+    room.append(project, shared, {"kind": "leave", "participant": scope_member}, "Fixture declaration released")
 fake_bin = temporary / "dispatch-bin"
 fake_bin.mkdir()
 provider_marker = temporary / "provider-invoked"
@@ -3978,7 +4270,8 @@ assert not provider_marker.exists(), "dry-run invoked the fake provider"
 call(plan_cli + ["add", "--id", "preflight-refusal", "--title", "Refused before worker start"])
 refusal_task = call(plan_cli + ["show", "--id", "preflight-refusal"])
 workers_before_refusal = worker_log.read_text()
-refused_write = subprocess.run(blocked_brief.args[:-1] + ["--task-id", "preflight-refusal"],
+# A disjoint scope keeps the earlier backlog fixtures' undecided writes from refusing first.
+refused_write = subprocess.run(blocked_brief.args[:-1] + ["--task-id", "preflight-refusal", "--scope", "preflight-fixture"],
                                env=room_env, capture_output=True, text=True, timeout=90)
 assert refused_write.returncode != 0 and "preflight refused before task claim" in refused_write.stderr, refused_write
 assert call(plan_cli + ["show", "--id", "preflight-refusal"]) == refusal_task
@@ -3987,7 +4280,7 @@ assert worker_log.read_text() == workers_before_refusal, "preflight refusal invo
 shutil.rmtree(project / ".oms/plan")  # later board fixtures expect a project with no plan
 scoped_run = subprocess.run(scoped_dispatch.args[:-1], env=dict(room_env, PANEL_TEST_MODE="write"),
                             capture_output=True, text=True, timeout=90)
-assert scoped_run.returncode == 0 and "Scope overlap" in scoped_run.stderr, scoped_run
+assert scoped_run.returncode == 0 and "Scope overlap" not in scoped_run.stderr, scoped_run
 # Its patch now gets its own automatic reviewer even when an earlier call returned identical bytes.
 scoped_call = [p for p in room.status(project, shared)["participants"]
                if p["participant"].startswith("call-") and p["role"] != "reviewer"][-1]
@@ -4012,8 +4305,7 @@ for plan_id, allowed_paths, expected_owns, note in (
 shutil.rmtree(project / ".oms/plan")
 with patch.dict(os.environ, {"OMS_ROOM_PARTICIPANT": room_owner}):
     room.scope(project, shared, room_owner, [])
-for who in ("scope-advisor", "scope-live", "scope-done"):
-    room.append(project, shared, {"kind": "leave", "participant": who}, "Left")
+room.append(project, shared, {"kind": "leave", "participant": "scope-advisor"}, "Left")
 import hook_state
 with patch.dict(os.environ, {"OMS_PANEL_MAIN_ATTEMPT": room_owner, "OMS_PANEL_SESSION": "oms-fixture"}):
     tower = hook_state.panel_main_hint({"hook_event_name": "UserPromptSubmit"})

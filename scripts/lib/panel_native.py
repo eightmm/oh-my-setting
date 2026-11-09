@@ -183,7 +183,7 @@ def bootstrap(provider, repo):
         "builders write run scripts and configs, a worker with --purpose investigate reports finished outputs "
         "(oms job-digest condenses a training or Slurm log), and you wait on jobs with one background wait or "
         "notification, not repeated polls. Before editing shared files, declare oms room scope --owns PATH and "
-        "pass --scope PATH to write workers; overlap warnings never lock. A CLI option, JSON field, exit code "
+        "pass --scope PATH; live writes and undecided results block overlaps (plan or repo). A CLI option, JSON field, exit code "
         "or file format change names its consumers in the worker brief, tests through the public entry point, "
         "and orders consumer tasks with --depends. Plan/results use OMS_ROOM_REPO, including scratch worktrees. "
         "Outline large files before whole reads. For PROJECT.md goals, first read the request, PROJECT.md and "

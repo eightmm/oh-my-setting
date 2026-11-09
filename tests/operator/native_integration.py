@@ -35,7 +35,7 @@ with patch.object(panel_native, "_claude_supports_name", return_value=False), \
             "Edit directly for admitted-patch integration or conflict resolution",
             "same review gate (oms peer-review --gate --verify)",
             "Serialize shared release bookkeeping", "one background wait or notification, not repeated polls",
-            "oms room scope --owns PATH", "--scope PATH", "overlap warnings never lock",
+            "oms room scope --owns PATH", "--scope PATH", "live writes and undecided results block overlaps",
             "consumers in the worker brief", "public entry point", "--depends",
             "OMS_ROOM_REPO", "PROJECT.md and its References", "--expected-proposal-sha256",
             "dependencies first", "never release them manually",

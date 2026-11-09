@@ -24972,8 +24972,13 @@ for name in log_only:
 for member in ('call-older', 'call-latest'):
     call = panel.dispatch_store.read(repo, member + '-launch.json')['call']
     assert panel._dispatch_call_finished(repo, call['room'], call), 'continuation lost historical worker exit proof'
-assert panel.scope_overlaps(repo, 'gc-open-dispatch', panel.room.status(repo, 'gc-open-dispatch'),
-                            'owner', ['scripts']) == [], 'settled open-room call became a false overlap'
+# A settled call holds its scope until the controller delivers its structured result.
+def open_lock():
+    return [item['participant'] for item in panel.scope_overlaps(
+        repo, 'gc-open-dispatch', panel.room.status(repo, 'gc-open-dispatch'), 'owner', ['scripts'])]
+assert open_lock() == [open_member], 'an undelivered open-room call lost its scope'
+panel._call_result_event(repo, 'gc-open-dispatch', open_member, 'open-room', 0)
+assert open_lock() == [], 'a delivered open-room call became a false overlap'
 assert '- dispatch-logs: 0 pair(s), 0 file(s), 0 bytes' in run('--apply'), 'repeat cleanup was not idempotent'
 
 # Freeze the retention clock to exercise equality, zero, and empty input without sleeps.

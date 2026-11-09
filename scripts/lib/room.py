@@ -506,6 +506,14 @@ def validate_main_swap(repo, state, event, old, released=True):
         raise ValueError("swapped main release is unverified" if released else "current main ownership is unverified")
 
 
+def _refuse_finished_call(repo, state, ident):
+    # Delivery and read evidence are keyed by call id across the whole lineage, so a finished call never
+    # declares scope again: its old evidence would release the new declaration at once.
+    results = state.get("call_results")
+    if (results if results is not None else status(repo, state["id"])["call_results"]).get(ident):
+        raise ValueError("a finished write call id is single-use; dispatch a new call")
+
+
 def validate_event(rows, event, text, repo=None):
     """Validate while thread.sh holds its existing file lock; no membership grants authority."""
     if not isinstance(event, dict) or event.get("kind") not in {"created", "join", "main-swap", "bind", "scope", "describe", "leave", "closed", "message", "received", "publication", "successor", "carried", "call-result", "review-dispatch", "review-dispatch-failed"}:
@@ -515,7 +523,7 @@ def validate_event(rows, event, text, repo=None):
     carry = _carrying()
     keys = {"created": {"kind", "task_id", "participant", "predecessor"},
             "join": {"kind", "participant", "provider", "model", "role", "label", "consumer", "owns", "parent",
-                     "dispatch_role", "purpose", "state", "alias"},
+                     "dispatch_role", "purpose", "state", "alias", "task_id"},
             "main-swap": {"kind", "participant", "provider", "model", "attempt", "harness"},
             "bind": {"kind", "participant", "consumer", "previous"},
             "scope": {"kind", "participant", "owns"},
@@ -677,6 +685,8 @@ def validate_event(rows, event, text, repo=None):
             raise ValueError("only a participant can declare its own scope")
         member = participant(state, event["participant"])
         declared_scopes(member["role"], event["owns"])
+        if repo is not None and not carry and member.get("parent") and event["owns"]:
+            _refuse_finished_call(repo, state, event["participant"])
         if member.get("owns", []) == event["owns"]:
             return False
     elif kind == "publication":
@@ -727,15 +737,27 @@ def validate_event(rows, event, text, repo=None):
                             and p["participant"] != event["participant"] for p in state["participants"]):
             raise ValueError("native session already has a participant in this room")
         declared_scopes(event["role"], event.get("owns", []))
+        prior = next((p for p in state["participants"] if p["participant"] == event["participant"]), None)
+        if event.get("task_id") is not None:
+            identifier(event["task_id"], "task")
+            if not event.get("parent") or event["role"] != "worker":
+                raise ValueError("write task declaration needs a worker and parent")
+            if not event.get("owns") and not carry and not (prior is not None and not prior.get("owns")):
+                raise ValueError("write task declaration needs an initial scope")
         if event.get("parent"):
             participant(state, event["parent"])
-        prior = next((p for p in state["participants"] if p["participant"] == event["participant"]), None)
-        if prior and any(prior.get(k) != event.get(k) for k in ("provider", "role", "model", "parent")):
+        if prior and any(prior.get(k) != event.get(k) for k in ("provider", "role", "model", "parent", "task_id")):
             raise ValueError("participant identity is immutable; use a new participant id")
         if prior and all(prior.get(k) == v for k, v in event.items()) and prior["joined"]:
             return False
         if prior and prior["joined"]:
             raise ValueError("leave before changing participant metadata")
+        if repo is not None and not carry and event.get("parent") and event.get("owns"):
+            _refuse_finished_call(repo, state, event["participant"])
+        if repo is not None and event.get("task_id") is not None and not carry:
+            from panel_dispatch import scope_overlaps, _refuse_scope_overlaps
+            # validate_event runs inside thread append's lock: check and join cannot race.
+            _refuse_scope_overlaps(scope_overlaps(repo, state["id"], state, event["parent"], event["owns"]))
         if prior is None:
             called = bool(event.get("parent"))
             peers = sum(bool(p.get("parent")) == called for p in state["participants"])
@@ -782,8 +804,14 @@ def validate_event(rows, event, text, repo=None):
             # it never authorizes a different participant to join alongside a live main.
     elif kind == "leave":
         caller = os.environ.get("OMS_ROOM_PARTICIPANT")
-        if caller and (caller != event.get("participant") or not _bound_room(rows, repo)):
-            raise ValueError("leave must name this session's participant and room")
+        if caller and not carry:
+            member = participant(state, event.get("participant"))
+            # A call's departure releases its write declaration, so its parent records it, never the call itself.
+            if member.get("parent"):
+                if caller != member["parent"] or not _bound_room(rows, repo):
+                    raise ValueError("a call leaves through its parent main %s" % member["parent"])
+            elif caller != event.get("participant") or not _bound_room(rows, repo):
+                raise ValueError("leave must name this session's participant and room")
         participant(state, event.get("participant"))
     elif kind == "call-result":
         identifier(event.get("event_id"), "event")
@@ -911,7 +939,12 @@ def command(repo, *args, env=None):
     run = subprocess.run(["bash", str(ENTRY), "thread", "--repo", str(repo)] + list(args), env=env,
                          capture_output=True, text=True, check=False, timeout=15, stdin=subprocess.DEVNULL)
     if run.returncode:
-        raise ValueError(clean(run.stderr or run.stdout, 300))
+        detail = run.stderr or run.stdout
+        if "Scope overlap:" in detail:
+            # The panel's bounded exception display must not hide later blocking declarations.
+            print(clean(detail, max(1, len(detail))), file=sys.stderr)
+            raise ValueError("Scope overlap: write dispatch refused; resolve the blockers listed above")
+        raise ValueError(clean(detail, 300))
     return run.stdout.strip()
 
 
@@ -1139,6 +1172,8 @@ def carry_plan(state, current=None, bounded=True):
                      "model": p.get("model"), "label": p["label"], "owns": list(p.get("owns", []))}
             if p.get("parent"):
                 event["parent"] = p["parent"]
+            if p.get("task_id"):
+                event["task_id"] = p["task_id"]
             # A rebound main joins with the session it first joined with and is rebound below, so resume ownership
             # still recognizes that session; unless another carried member now holds it.
             first = p.get("initial_consumer")
@@ -1295,7 +1330,7 @@ def rollover(repo, old, actor=None):
 
 
 def join(repo, room, who, provider, role="main", model=None, label=None, native_session=None, owns=None, parent=None,
-         dispatch_role=None, purpose=None, state=None, alias=None):
+         dispatch_role=None, purpose=None, state=None, alias=None, task_id=None):
     result = subprocess.run(["bash", "-c", '. "$1"; oms_provider_normalize "$2"', "room-provider",
                              str(ROOT / "scripts/lib/provider-registry.sh"), provider],
                             capture_output=True, text=True, check=False, timeout=5, stdin=subprocess.DEVNULL)
@@ -1309,6 +1344,8 @@ def join(repo, room, who, provider, role="main", model=None, label=None, native_
         native_session = current_session()
     event = {"kind": "join", "participant": identifier(who, "participant"), "provider": provider,
              "role": role, "model": model, "label": label or who, "owns": owns or []}
+    if task_id is not None:
+        event["task_id"] = identifier(task_id, "task")
     if dispatch_role is not None:
         event["dispatch_role"] = dispatch_role
     if purpose is not None:
@@ -1476,7 +1513,7 @@ def swap_main(repo, ident, who, provider, model, attempt, harness):
 
 
 def scope(repo, ident, who, owns):
-    """Replace who's declared scopes; an empty list clears them. Declarations coordinate, they never lock."""
+    """Replace who's declared scopes; an empty list clears them. Write dispatches enforce overlap exclusion."""
     event = {"kind": "scope", "participant": identifier(who, "participant"), "owns": list(owns)}
     append(repo, ident, event, "Scope: " + (", ".join(owns) or "cleared"))
     return event
@@ -2172,7 +2209,7 @@ def main(argv=None):
     parser.add_argument("--model")
     parser.add_argument("--label")
     parser.add_argument("--native-session", help="native session id, or current inside Claude; stored only as a hash")
-    parser.add_argument("--owns", action="append", help="declared relative scope, not a write grant or file lock")
+    parser.add_argument("--owns", action="append", help="declared relative scope checked by write dispatch, not a write grant")
     parser.add_argument("--clear", action="store_true", help="scope only: clear the declared scopes")
     parser.add_argument("--parent")
     parser.add_argument("--topic", default="Shared work")

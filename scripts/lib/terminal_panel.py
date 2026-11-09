@@ -136,7 +136,7 @@ def main(argv=None):
     parser.add_argument("--dispatch", choices=tuple(KINDS), metavar="ROLE", help="run one bounded role task: " + ", ".join(KINDS))
     parser.add_argument("--main", help="assert the dispatch caller's own main participant (never select another main)")
     parser.add_argument("--scope", action="append", metavar="PATH",
-                        help="repeatable repo-relative scope a write worker declares; overlaps warn, never lock")
+                        help="repeatable repo-relative write scope (default: the plan task's allowed paths, else the whole repository); conflicting writes or undecided results refuse dispatch")
     parser.add_argument("--council", action="store_true", help="run the Codex, Claude and Antigravity debate (deep tier by default)")
     parser.add_argument("--rounds", type=int, help="council debate rounds, 1 or 2; --lenses requires 0 (default with lenses)")
     parser.add_argument("--lenses", help="--council only: 2..12 unique comma-separated names [a-z0-9-]+, 1..32 characters each; one blind seat each")

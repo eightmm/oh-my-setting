@@ -129,7 +129,7 @@ id and repository. Do not join unrelated work through the global CURRENT pointer
   delivery to happen: it cannot interrupt a model thinking or a long tool call.
   Clients without those hooks use the same explicit incremental read.
 - Reuse plan leases, isolated worktrees, change guards, and exact patch landing
-  for overlap. A message cannot grant a worker another path, lease, or permission.
+  for overlap; write dispatches refuse overlapping write scopes of calls whose results are undelivered and unread, and omitted scope uses plan paths or the repository. A message cannot grant a worker another path, lease, or permission.
   Delegated workers retain their existing restrictions; the parent coordinates
   their results. Independent worktrees use explicit `--repo` to read the chosen
   canonical log; separate machines still require an authorized transport.

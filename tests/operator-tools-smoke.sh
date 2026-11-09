@@ -1223,8 +1223,9 @@ CONTINUATION
             assert receipt["all_reaped"] and receipt["exit"] == 0, "supervisor did not attest child exhaustion"
             assert panel._dispatch_call_finished(project, shared, member), "confirmed termination kept scope"
             assert panel._dispatch_descendants(process.pid) == [], "absent leader prevented session observation"
-            assert not any(row["participant"] == name for row in panel.scope_overlaps(
-                project, shared, state, room_owner, ["value.txt"])), "verified proof kept completed scope"
+            # Exit proof alone is not delivery: the scope is held exactly until the structured result exists.
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, state, room_owner, ["value.txt"])) == (lambda r: r.get("kind") != "call-result" and not r.get("read"))(room.status(project, shared)["call_results"].get(name) or {}), "exit proof changed scope authority"
             private = panel.dispatch_store.store(project)
             receipt_name = name + "-supervisor.json"
             for forged in (dict(receipt, launch_sha256="0" * 64),
@@ -1255,14 +1256,17 @@ CONTINUATION
             assert panel._dispatch_call_finished(project, shared, member), "independent exit evidence required a receipt"
             # A fresh controller accepts durable evidence, but never reconstructs authority from repository bytes.
             probe = ("import json,sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); "
-                     "import terminal_panel as p; repo=Path(sys.argv[2]); m=json.loads(sys.argv[4]); "
+                     "import terminal_panel as p, room; repo=Path(sys.argv[2]); m=json.loads(sys.argv[4]); "
                      "expected=sys.argv[5]=='yes'; "
                      "assert p._dispatch_call_finished(repo,sys.argv[3],m)==expected; "
                      "assert any(r['participant']==m['participant'] for r in "
-                     "p.scope_overlaps(repo,sys.argv[3],{'participants':[m]},m['parent'],['value.txt']))!=expected")
+                     "p.scope_overlaps(repo,sys.argv[3],{'participants':[m,{'participant':m['parent'],'joined':True,"
+                     "'role':'main'}]},m['parent'],['value.txt']))"
+                     "==(lambda r: r.get('kind')!='call-result' and not r.get('read'))("
+                     "room.status(repo,sys.argv[3])['call_results'].get(m['participant']) or {})")
             args = [sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared, json.dumps(member)]
             fresh = subprocess.run(args + ["yes"], capture_output=True, text=True)
-            assert fresh.returncode == 0, "completed scope reappeared in a new controller: " + fresh.stderr
+            assert fresh.returncode == 0, "a new controller changed exit proof or scope authority: " + fresh.stderr
             anchor_name = name + "-launch.json"
             anchor = panel.dispatch_store.read(project, anchor_name)
             (private / anchor_name).unlink()
@@ -1433,8 +1437,8 @@ CONTINUATION
                 assert after["call_results"][name]["exit"] == pending_status, "deferred status did not survive reconciliation"
                 if topology == "shared":
                     assert current["terminal"] and after["call_results"][name]["exit"] == 0, "observed normal tree lost successful settlement"
-                assert not any(row["participant"] == name for row in panel.scope_overlaps(
-                    project, shared, after, room_owner, ["value.txt"])), "reaped survivor kept scope"
+                assert any(row["participant"] == name for row in panel.scope_overlaps(
+                    project, shared, after, room_owner, ["value.txt"])) == (lambda r: r.get("kind") != "call-result" and not r.get("read"))(room.status(project, shared)["call_results"].get(name) or {}), "reaped survivor scope disagreed with delivery"
                 assert panel._dispatch_released(project, call), "reconciliation did not persist release"
                 assert room.participant(after, name)["joined"], "settlement changed participant identity"
                 fresh = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared,
@@ -1467,11 +1471,13 @@ CONTINUATION
         def send_assignment(*args, **kwargs):
             if stage == "assignment" and args[4].startswith("Assigned:"):
                 try:
-                    room.append(project, shared, {"kind": "leave", "participant": args[3]}, "Foreign leave")
+                    # Leaving releases a call's declaration, so only its parent main records it.
+                    with patch.dict(os.environ, OMS_ROOM_PARTICIPANT=args[3]):
+                        room.append(project, shared, {"kind": "leave", "participant": args[3]}, "Own leave")
                 except ValueError as error:
-                    assert "leave must name this session's participant and room" in str(error), error
+                    assert "a call leaves through its parent main" in str(error), error
                 else:
-                    raise AssertionError("parent bypassed the ordinary leave guard")
+                    raise AssertionError("an unstarted call left the room under its own identity")
                 raise failure
             return real_send(*args, **kwargs)
         def prepare_launch(*args, **kwargs):
@@ -1650,8 +1656,8 @@ while not Path(PID).exists(): time.sleep(.01)
             assert panel_terminals.process_gone(orphan, None) or not Path('/proc/' + str(orphan)).exists()
             panel._settle_dispatch(project, shared, name, 1)
             assert panel._dispatch_released(project, call)
-            assert not any(row["participant"] == name for row in panel.scope_overlaps(
-                project, shared, room.status(project, shared), room_owner, ["value.txt"]))
+            assert any(row["participant"] == name for row in panel.scope_overlaps(
+                project, shared, room.status(project, shared), room_owner, ["value.txt"])) == (lambda r: r.get("kind") != "call-result" and not r.get("read"))(room.status(project, shared)["call_results"].get(name) or {}), "settlement scope disagreed with delivery"
             fresh = subprocess.run([sys.executable, "-c", probe, str(root / "scripts/lib"), str(project), shared,
                                     json.dumps(member)], capture_output=True, text=True)
             assert fresh.returncode == 0, fresh.stderr
@@ -1737,9 +1743,8 @@ time.sleep(60)
         if menu_backend == "linux":
             assert interrupted["state"] == "cancelled" and interrupted["reason_code"] == "panel_call_interrupted", interrupted
             assert cleaned_file.read_text() == "cleaned" and settled["call_results"][member]["exit"] == 143
-            assert room.participant(settled, member)["joined"] and panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == []
-            with patch.object(panel, "main_history", return_value=[dict(interrupted, state="review", terminal=False)]):
-                assert panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"]) == [], "verified exit receipt did not release scope"
+            assert room.participant(settled, member)["joined"] and any(row["participant"] == member for row in
+                panel.scope_overlaps(project, shared, settled, room_owner, ["value.txt"])) == (lambda r: r.get("kind") != "call-result" and not r.get("read"))(room.status(project, shared)["call_results"].get(member) or {}), "interrupted result scope disagreed with delivery"
         else:
             assert cleaned_file.read_text() == "cleaned", "unsupported backend interrupted provider cleanup"
             assert interrupted["state"] == "working" and not interrupted["terminal"], "unsupported menu settled without tree proof"

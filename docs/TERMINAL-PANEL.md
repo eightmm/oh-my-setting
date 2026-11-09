@@ -1470,7 +1470,7 @@ checkout. Mains in sessions outside this panel may land independently:
 a concurrent `oms land` exits 75 if the lock stays held past `OMS_LOCK_TIMEOUT` (default 300s); retry after the active land finishes.
 Worker guard stop diagnostics identify the snapshot, path and kind that caused
 the stop. The worker guard treats `oms/*` branches and harness worktrees belonging to
-mains in other sessions as soft, and `oms room scope` warns about overlapping files before the work
+mains in other sessions as soft, and `oms panel` refuses overlapping write dispatches against declared scopes before the work
 starts.
 
 
@@ -2501,15 +2501,17 @@ docs/TERMINAL-PANEL.md` replaces that participant's declared scopes and `--clear
 empties them. Only the participant itself may declare (the inherited
 `OMS_ROOM_PARTICIPANT` must match; workers cannot); at most sixteen normalized
 repo-relative scopes; advisors and reviewers own none. A write dispatch takes repeatable
-`--scope PATH`; the worker joins with those scopes, and before launch the panel compares
-them with every other joined main's scopes (including mains from sessions outside this
-panel) and every live write call's (no result handoff, no terminal attempt).
+`--scope PATH`; omitted scope uses the plan task’s allowed paths or the whole repository (`.`), and the worker records its task id with its scopes.
 
 Two scopes overlap when one equals the other or is a path-component prefix of it
 (`scripts/lib` overlaps `scripts/lib/room.py`, not `scripts/li`; `.` overlaps
-everything; globs compare literally). Overlaps print one stderr warning and appear as
-`overlaps` in `--dry-run` JSON. The launch is never refused: declarations coordinate
-work, they are not locks. The main detail view shows `Scope: …`. Finalizing as
+everything; globs compare literally).
+Write dispatches, including `--dry-run` (also from a rebound main whose environment lost its room id), refuse overlaps with a joined main's declaration or with a call's joined write declaration until the controller records that call's structured call result or its parent main reads the call's result handoff; a same-task `--continue` waits the same way.
+An unread handoff is not delivery. A rollover carries exactly the calls still holding a declaration, so the successor room's participants are the whole lock. A call whose parent main left holds nothing, because nobody remains to integrate it. Liveness is read from joined state, never from join order: a superseded main that never left, and its calls, keep their declarations (an over-lock, never an under-lock). Once its process has stopped, a stale declaration clears with `OMS_ROOM_PARTICIPANT= oms room scope --repo PATH --id ROOM --participant ID --clear`; the refusal prints that exact command. A finished write call's id is single-use: rejoining it with a declaration is refused, so old delivery evidence never releases a new declaration.
+Delivery releases the declaration even while the result awaits the owner's decision: the WIP limit, not the lock, paces undecided results.
+A write dispatch first delivers its own main's finished calls, then checks declarations, and rolls the room over only after they pass. A call cannot leave the room as itself: its parent main records the departure, including the controller's rollback of an unstarted call.
+A dispatch that loses the atomic check at enrollment keeps its plan claim and prints the lease and the exact `oms agent-plan release` command: releasing automatically could race another dispatch of the same task on the shared lease.
+The refusal identifies each blocking task, participant and scope; there is no override. The main detail view shows `Scope: …`. Finalizing as
 `accepted` refuses write-worker patches outside their declared scopes (including rename
 sources and destinations), using glob-aware path matching; `completed` remains allowed,
 and workers without declared scopes keep the existing behavior.

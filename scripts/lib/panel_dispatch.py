@@ -939,69 +939,41 @@ def moved_main(repo, owner, env):
 
 
 def scope_overlaps(repo, room_id, state, caller, scopes):
-    """Other mains', live write calls' and unresolved finished patches' scopes; coordination, not a lock."""
-    from terminal_panel import _dispatch_call_finished
-    review_state = state.get("scope_review_state", {})
-    if not isinstance(review_state, dict):
-        review_state = {}
-    report_room = review_state.get("room")
-    call_results = review_state.get("call_results", report_room.get("call_results", {}) if isinstance(report_room, dict) else {})
-    attempts = review_state.get("room_attempts", {})
-    finalized = review_state.get("finalized")
-    projected = {}
-    classify = None
-    if isinstance(review_state.get("room"), dict):
-        from room_view import call_classifier, nodes
-        projected = {call.get("participant"): call for call in nodes(review_state)}
-        classify = call_classifier(review_state)
+    """Joined write declarations this dispatch overlaps.
+
+    A main's declaration holds while it stays joined. A call's holds while its parent stays joined, until the
+    controller's structured result exists or the parent has read the call's result handoff; an unread handoff is
+    not delivery. Liveness is read from joined state only, never inferred from join order: a superseded main that
+    never left keeps its declarations, which over-locks rather than under-locks. Rollover carries exactly these
+    calls, so the successor room's participants are the whole lock."""
+    results = state.get("call_results")
+    if results is None:
+        results = room.status(repo, room_id)["call_results"]
+    joined = {p["participant"] for p in state["participants"] if p.get("joined")}
     found = []
     for other in state["participants"]:
-        if not other["joined"] or other["participant"] == caller or not other.get("owns"):
+        ident = other["participant"]
+        if ident not in joined or not other.get("owns") or ident == caller:
             continue
         if other.get("parent"):
-            # Terminal attempts describe outcomes, not the lifetime of provider descendants.
-            if _dispatch_call_finished(repo, room_id, other):
-                result = call_results.get(other["participant"], {}) if isinstance(call_results, dict) else {}
-                attempt = attempts.get(other["participant"], {}) if isinstance(attempts, dict) else {}
-                task_id = result.get("task_id") if isinstance(result, dict) else None
-                if (not task_id and isinstance(attempt, dict)):
-                    task_id = attempt.get("task_id")
-                from room_view import DECIDED
-                pending_patch = (isinstance(finalized, dict) and isinstance(task_id, str) and task_id
-                                 and finalized.get(task_id) not in DECIDED and isinstance(result, dict)
-                                 and result.get("task_id") == task_id and result.get("patch")
-                                 and result.get("needs_review") is True and isinstance(attempt, dict)
-                                 and attempt.get("task_id") == task_id and attempt.get("state") in {"review", "done"})
-                if pending_patch and classify is not None:
-                    call = projected.get(other["participant"])
-                    pending_patch = call is not None and classify(call) != "past"
-                    if pending_patch and call.get("attempt"):
-                        try:
-                            from panel_cache import read_shared
-                            from panel_results import _records, _scan_admissions
-                            records = review_state.get("admission_records")
-                            if records is None:
-                                records = read_shared(repo, 'result-records', lambda: _records(repo))
-                            rows = records[1]
-                            has_patch = any(row.get("task_id") == task_id and row.get("attempt_id") == call["attempt"]
-                                            and row.get("patch") and row.get("kind") in
-                                            {"ask", "call", "consult", "delegate", "review", "ask-synthesis"}
-                                            for row in rows)
-                            if has_patch:
-                                pending_patch = bool(_scan_admissions(records[0], rows, {task_id}, call["attempt"])[0])
-                        except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, subprocess.SubprocessError):
-                            pass
-                if pending_patch:
-                    found += [{"participant": other["participant"], "role": other["role"],
-                               "scope": theirs, "status": "finished, patch awaiting decision"}
-                              for theirs in other["owns"]
-                              if any(room.overlaps(mine, theirs) for mine in scopes)]
+            result = results.get(ident) or {}
+            if other["parent"] not in joined or result.get("kind") == "call-result" or result.get("read"):
                 continue
-        elif other["role"] != "main":
-            continue
-        found += [{"participant": other["participant"], "role": other["role"], "scope": theirs}
-                  for theirs in other["owns"] if any(room.overlaps(mine, theirs) for mine in scopes)]
+        found.extend({"participant": ident, "role": other["role"], "task_id": other.get("task_id") or ident,
+                      "scope": theirs, "repo": str(repo), "room": room_id}
+                     for theirs in other["owns"] if any(room.overlaps(mine, theirs) for mine in scopes))
     return found
+
+
+def _refuse_scope_overlaps(found):
+    if found:
+        print("Scope overlap: " + "; ".join(
+            "task %s participant %s scope %s; wait for its result to be delivered or read, or for the declaration to be "
+            "released; once that process has stopped, a stale one clears with OMS_ROOM_PARTICIPANT= oms room scope "
+            "--repo %s --id %s --participant %s --clear"
+            % (item["task_id"], item["participant"], item["scope"], shlex.quote(item["repo"]), item["room"],
+               item["participant"]) for item in found), file=sys.stderr)
+        raise ValueError("Scope overlap: write dispatch refused; resolve the blockers listed above")
 
 
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
@@ -2246,7 +2218,7 @@ def _dispatch_released(repo, call):
 
 
 def _reconcile_dispatch(repo, room_id, state, caller, parent):
-    """Only dispatch actions may settle deferred calls; board reads stay observational."""
+    """Only dispatch actions may settle this main's deferred calls; board reads stay observational."""
     from terminal_panel import _dispatch_call_finished, _dispatch_call_record, _dispatch_pending
     from terminal_panel import _dispatch_released, _settlement_delivery_pending, deliver_result, events
     rows = json.loads(events(repo, "list", "--json", output=True))
@@ -2482,10 +2454,11 @@ def _settle_dispatch(repo, room_id, member, status):
 
 
 def _rollback_dispatch_enrollment(repo, room_id, member):
-    # Until Popen succeeds the controller owns this unstarted identity. Bind only
-    # the cleanup subprocess; ordinary leave/session and harness-child guards apply.
+    # Until Popen succeeds the controller owns this unstarted identity. Bind only the cleanup subprocess,
+    # as the call's parent main: a call never leaves as itself. Ordinary leave/session and harness-child guards apply.
     from terminal_panel import ENTRY, clean
-    env = dict(os.environ, OMS_ROOM_ID=room_id, OMS_ROOM_REPO=str(repo), OMS_ROOM_PARTICIPANT=member)
+    actor = room.participant(room.project(room.records(repo, room.resolve(repo, room_id))), member).get("parent") or member
+    env = dict(os.environ, OMS_ROOM_ID=room_id, OMS_ROOM_REPO=str(repo), OMS_ROOM_PARTICIPANT=actor)
     result = subprocess.run(["bash", str(ENTRY), "room", "leave", "--repo", str(repo),
                              "--id", room_id, "--participant", member], env=env,
                             capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
@@ -2606,12 +2579,18 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         room.declared_scopes(route["kind"], scopes)
     owned = (_owned_scopes(repo, task_id, route["kind"], scopes)
              if role in WRITERS and access == "write" else scopes)
-    if dry_run and not main and not (scopes and os.environ.get("OMS_ROOM_ID")):
+    if role in WRITERS and access == "write" and not owned:
+        owned = ["."]
+    env = child_environment(owner, repo)
+    moved = moved_main(repo, owner, env)
+    if moved:
+        env["OMS_ROOM_ID"] = moved[0]
+    # A rebound main's room comes from its session binding, so its preview still checks declarations.
+    if dry_run and not main and not (owned and access == "write" and env.get("OMS_ROOM_ID")):
         print(json.dumps(dict(plan, overlaps=[]) if scopes else plan))
         return 0
     if not dry_run and not shutil.which(route.get("binary", route["provider"])):
         raise ValueError("%s is not installed; this exact role route cannot run" % route["provider"])
-    env = child_environment(owner, repo)
     account_fallback = bool(fallback and fallback.get("account") and fallback["provider"] == "codex")
     overflow = next_account_route(route) if account_overflow and not resume and route.get("account") else None
     deferred_fallback = bool(overflow or account_fallback
@@ -2641,9 +2620,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         record = json.loads(events(repo, "show", "--attempt", parent, "--json", output=True))
         if record.get("tool") != "panel-main" or record.get("provider") != owner or record.get("terminal"):
             raise ValueError("panel main identity does not match this owner")
-    moved = moved_main(repo, owner, env)
-    if moved:
-        env["OMS_ROOM_ID"] = moved[0]
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"], OMS_PANEL_STRATEGY=route["role"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
@@ -2681,7 +2657,6 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     caller = env.get("OMS_ROOM_PARTICIPANT")
     if room_id:
         state = room.project(room.records(repo, room_id))
-        scope_review_state = None
         caller = caller or (record.get("refs", {}).get("panel_room_participant", parent) if parent
                             else moved[1] if moved else None)
         candidates = active_mains(repo, room_id, state, owner, caller=caller, attempt=parent)
@@ -2698,7 +2673,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
             raise ValueError("panel main and room caller identities disagree")
         if parent and not room.same_room(repo, record.get("refs", {}).get("panel_room_id", room_id), room_id):
             raise ValueError("panel main and selected room identities disagree")
-        # Refuse before rollover or reconciliation can seal a room or deliver results.
+        # The backlog refusal comes before rollover or reconciliation can seal a room or deliver results.
         if not dry_run and access == "write" and continuation_patch is None:
             from review_backlog import warning_for
             try:
@@ -2709,37 +2684,33 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                         and room.same_room(repo, report_room.get("id"), room_id)):
                     report = snapshot(repo, room_id)[0]
                 notice = warning_for(report, caller)
-                report_room = report.get("room", {}) if isinstance(report, dict) else {}
-                finalized = report.get("finalized") if isinstance(report, dict) else None
-                if (isinstance(report_room, dict) and room.same_room(repo, report_room.get("id"), room_id)
-                        and isinstance(finalized, dict)):
-                    scope_review_state = dict(report, call_results=report_room.get("call_results", {}))
             except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
                 notice = None  # throughput policy fails open; an unreadable backlog never blocks work
             if notice:
                 raise ValueError(notice + "; admit or reject each result, or settle it with oms panel --finalize "
                                  "--owner %s --task-id ID, or send findings back with --continue" % owner)
+        reconciled = False
+        if owned and access == "write":
+            if not dry_run and parent:
+                # This main's own finished calls are delivered first, so they do not hold their scopes as live.
+                _reconcile_dispatch(repo, room_id, state, caller, parent)
+                state = room.project(room.records(repo, room_id))
+                reconciled = True
+            found = scope_overlaps(repo, room_id, state, caller, owned)
+            _refuse_scope_overlaps(found)
+            if dry_run:
+                print(json.dumps(dict(plan, overlaps=found)))
+                return 0
         if not dry_run and parent:
+            # A refusal must not roll the room over; it rolls only after the declarations pass.
             moved_to = _rollover_if_needed(repo, room_id, state, caller)
             if moved_to:
                 room_id = env["OMS_ROOM_ID"] = moved_to
                 state = room.project(room.records(repo, room_id))
             _dispatch_capacity(room_id, state)
-            _reconcile_dispatch(repo, room_id, state, caller, parent)
-            state = room.project(room.records(repo, room_id))
-        if owned:
-            overlap_state = dict(state)
-            if scope_review_state is not None:
-                overlap_state["scope_review_state"] = scope_review_state
-            found = scope_overlaps(repo, room_id, overlap_state, caller, owned)
-            if found:
-                print("Scope overlap (coordinate before editing): " + ", ".join(
-                    "%s %s%s" % (item["participant"], item["scope"],
-                                  " (" + item["status"] + ")" if item.get("status") else "")
-                    for item in found), file=sys.stderr)
-            if dry_run:
-                print(json.dumps(dict(plan, overlaps=found)))
-                return 0
+            if moved_to or not reconciled:
+                _reconcile_dispatch(repo, room_id, state, caller, parent)
+                state = room.project(room.records(repo, room_id))
         if dry_run:
             print(json.dumps(plan))
             return 0
@@ -2784,17 +2755,26 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
         if forbidden:
             env["OMS_PANEL_FORBIDDEN_PATHS"] = ", ".join(forbidden)
     if room_id:
-        if not continue_call or alias is None:
-            attempts = json.loads(events(repo, "list", "--json", output=True))
-            call_rows = [row for row in attempts
-                         if row.get("refs", {}).get("panel_alias")
-                         and room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)]
-            alias = _reserve_alias(repo, room_id, role, alias, call_rows)
         member = member_id or "call-" + uuid.uuid4().hex[:16]
         room_label = result_label or route["purpose"]
-        room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], room_label,
-                  owns=owned, parent=caller, dispatch_role=route["role"], purpose=route["purpose"], state="queued",
-                  alias=alias)
+        try:
+            if not continue_call or alias is None:
+                attempts = json.loads(events(repo, "list", "--json", output=True))
+                call_rows = [row for row in attempts
+                             if row.get("refs", {}).get("panel_alias")
+                             and room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)]
+                alias = _reserve_alias(repo, room_id, role, alias, call_rows)
+            room.join(repo, room_id, member, route["provider"], route["kind"], route["model"], room_label,
+                      owns=owned, parent=caller, dispatch_role=route["role"], purpose=route["purpose"],
+                      state="queued", alias=alias, task_id=task_id if access == "write" else None)
+        except ValueError as error:
+            # A concurrent enrollment won the atomic check after the preliminary one. The plan claim stays with
+            # this main: releasing it automatically could race the same task's other dispatch on the shared lease.
+            if str(error).startswith("Scope overlap") and binding:
+                print("plan %s stays claimed by this main (lease %s): re-dispatch it once the scope frees, or "
+                      "release it with oms agent-plan --repo %s release --id %s --lease-id %s"
+                      % (task_id, binding.lease_id, shlex.quote(str(repo)), task_id, binding.lease_id), file=sys.stderr)
+            raise
         try:
             # A rollover that sealed the room meanwhile carried the join; enroll the call where it now lives.
             room_id = room.settle(repo, room_id)
@@ -3009,7 +2989,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                       shlex.quote(str(repo)) + " --id " + room_id + " --participant " + member + " --clear", file=sys.stderr)
                 print("Cancel matching attempts with oms agent-events --repo " + shlex.quote(str(repo)) +
                       " transition --attempt ATTEMPT_ID --state cancelled --reason-code manual_clear; " +
-                      "then oms room leave --repo " + shlex.quote(str(repo)) + " --id " + room_id +
+                      "then, from the main's session, oms room leave --repo " + shlex.quote(str(repo)) + " --id " + room_id +
                       " --participant " + member + ".", file=sys.stderr)
             elif process and not exit_verified:
                 status = status or 1

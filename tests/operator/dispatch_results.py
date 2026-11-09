@@ -1025,58 +1025,30 @@ def exercise_public_only_routing():
 exercise_public_only_routing()
 
 # BEGIN settled overlap warning
-# A finished write call keeps its declared scope in the advisory while its patch awaits a decision.
+# Only the controller's structured result releases a call's write scope; a main's declaration never lapses.
 finished_worker = {"participant": "W1", "joined": True, "parent": "main", "role": "worker",
-                   "owns": ["src/shared.py"]}
-finished_room = {"participants": [finished_worker]}
-finished_scope_state = {
-    "call_results": {"W1": {"task_id": "finished-patch-task", "patch": ".oms/artifacts/patches/W1.patch",
-                             "needs_review": True}},
-    "room_attempts": {"W1": {"task_id": "finished-patch-task", "state": "review"}},
-    "finalized": {},
-}
-with patch.object(panel, "_dispatch_call_finished", return_value=True), \
-        patch.object(panel, "_dispatch_call_record", side_effect=AssertionError("unexpected call-record lookup")), \
-        patch.object(panel, "results", side_effect=AssertionError("unexpected full result lookup")):
-    overlap_room = dict(finished_room, scope_review_state=finished_scope_state)
-    overlap = dispatch.scope_overlaps(temporary, "room", overlap_room, "main", ["src/shared.py"])
-    assert overlap == [{"participant": "W1", "role": "worker", "scope": "src/shared.py",
-                        "status": "finished, patch awaiting decision"}], overlap
-    finalized_scope_state = dict(finished_scope_state, finalized={"finished-patch-task": "rejected"})
-    finalized_room = dict(finished_room, scope_review_state=finalized_scope_state)
-    assert dispatch.scope_overlaps(temporary, "room", finalized_room, "main", ["src/shared.py"]) == []
-    assert dispatch.scope_overlaps(temporary, "room", finished_room, "main", ["src/shared.py"]) == []
-
-    report = {"room": dict(finished_room, id="room", call_results=finished_scope_state["call_results"]),
-              "call_results": finished_scope_state["call_results"],
-              "room_attempts": finished_scope_state["room_attempts"], "finalized": {},
-              "awaiting_admission": ["W1"]}
-    def warnings(snapshot):
-        return dispatch.scope_overlaps(temporary, "room", dict(finished_room, scope_review_state=snapshot),
-                                       "main", ["src/shared.py"])
-    assert warnings(report)
-    assert not warnings(dict(report, finalized={"finished-patch-task": "admitted"}))
-    assert not warnings(dict(report, plan={"tasks": [{"id": "finished-patch-task", "state": "done"}]}))
-    later = dict(finished_worker, participant="W2", owns=[], seq=2)
-    newer = dict(report, room=dict(report["room"], participants=[dict(finished_worker, seq=1), later]),
-                 room_attempts=dict(report["room_attempts"], W2={"task_id": "finished-patch-task", "state": "review"}))
-    assert not warnings(newer)
-    assert warnings(dict(report, finalized={"finished-patch-task": "failed"}))
-    done = dict(report, room_attempts={"W1": {"task_id": "finished-patch-task", "state": "done"}})
-    assert warnings(done)
-    assert not warnings(dict(done, awaiting_admission=[]))
-    attempt = {"attempt_id": "att-w1", "task_id": "finished-patch-task", "state": "review", "refs": {}}
-    patch_row = {"kind": "delegate", "attempt_id": "att-w1", "task_id": "finished-patch-task",
-                 "patch": "w.patch", "patch_sha256": "a" * 64}
-    recorded = dict(report, room_attempts={"W1": attempt}, admission_records=([attempt], [patch_row]))
-    assert warnings(recorded)
-    for kind in ("patch-admit", "patch-land"):
-        receipt = {"kind": kind, "task_id": "finished-patch-task", "patch_sha256": "a" * 64}
-        assert not warnings(dict(recorded, admission_records=([attempt], [patch_row, receipt])))
-    owner = {"participant": "main", "joined": True, "role": "main", "seq": 0}
-    exited = dict(report, room=dict(report["room"], participants=[owner, finished_worker]),
-                  room_attempts=dict(report["room_attempts"], main={"state": "done"}))
-    assert not warnings(exited)
+                   "owns": ["src/shared.py"], "task_id": "finished-patch-task", "seq": 1}
+finished_owner = {"participant": "main", "joined": True, "role": "main", "provider": "codex", "seq": 0}
+finished_room = {"participants": [finished_owner, finished_worker], "call_results": {}}
+with patch.object(panel, "_dispatch_call_record", side_effect=AssertionError("unexpected call-record lookup")), \
+        patch.object(panel, "snapshot", side_effect=AssertionError("scope predicate read a full snapshot")), \
+        patch.object(saved, "outcomes", side_effect=AssertionError("scope predicate read owner decisions")):
+    def warnings(state, caller="main"):
+        return dispatch.scope_overlaps(temporary, "room", state, caller, ["src/shared.py"])
+    unreconciled = warnings(finished_room)
+    assert unreconciled == [{"participant": "W1", "role": "worker", "scope": "src/shared.py",
+                             "task_id": "finished-patch-task", "repo": str(temporary), "room": "room"}], unreconciled
+    handoff_only = dict(finished_room, call_results={"W1": {"exit": 0}})
+    assert warnings(handoff_only), "a handoff message counted as delivery"
+    delivered_room = dict(finished_room, call_results={"W1": {"kind": "call-result", "exit": 0}})
+    assert not warnings(delivered_room), "a delivered call kept its scope"
+    owner_scope = dict(finished_owner, owns=["src"])
+    assert [item["participant"] for item in warnings(dict(delivered_room, participants=[owner_scope, finished_worker]),
+                                                     caller="other-main")] == ["main"], "a main's declaration lapsed"
+    legacy_worker = {key: value for key, value in finished_worker.items() if key != "task_id"}
+    assert [item["task_id"] for item in warnings(dict(finished_room, participants=[finished_owner, legacy_worker]))] == ["W1"]
+    assert not warnings(dict(delivered_room, participants=[finished_owner, legacy_worker]))
+    overlap = unreconciled
 
     route = {"kind": "worker", "provider": "codex", "model": "test", "role": "worker",
              "purpose": "implement", "workload": "routine"}
@@ -1098,19 +1070,31 @@ with patch.object(panel, "_dispatch_call_finished", return_value=True), \
             patch.object(dispatch, "_plan_task_paths", return_value=(["./src/shared.py"], [])), \
             patch.object(panel, "scope_overlaps", return_value=overlap) as overlap_check, \
             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
-        def preview(role, access, scopes):
+        def preview(role, access, scopes, main="main"):
             return dispatch.run_dispatch(root, "codex", role, access, None, None, "true", "plan-task",
-                                         True, None, dict(route, role=role), "main", None, scopes, work_repo=root)
-        assert preview("worker", "write", None) == 0
+                                         True, None, dict(route, role=role), main, None, scopes, work_repo=root)
+        def refuse_preview(scopes, main="main"):
+            try:
+                preview("worker", "write", scopes, main)
+            except ValueError as error:
+                assert "Scope overlap" in str(error), error
+            else:
+                raise AssertionError("overlapping preview was not refused")
+        refuse_preview(None)
         assert overlap_check.call_args.args[-1] == ["src/shared.py"]
-        assert preview("worker", "write", ["extra.py"]) == 0
+        refuse_preview(["extra.py"])
         assert overlap_check.call_args.args[-1] == ["extra.py", "src/shared.py"]
+        # A rebound main whose environment lost its room id still previews against the declarations.
+        with patch.object(panel, "moved_main", return_value=("room", "main")), \
+                patch.object(panel, "child_environment", return_value={}):
+            refuse_preview(None, main=None)
         overlap_check.reset_mock()
         assert preview("researcher", "read", None) == 0
         assert not overlap_check.called
         with patch.object(dispatch, "_plan_task_paths", return_value=(["../bad*"], [])):
-            assert preview("worker", "write", None) == 0
-            assert not overlap_check.called
+            refuse_preview(None)
+            assert overlap_check.call_args.args[-1] == ["."]
+        overlap_check.return_value = []
         def check_declaration():
             for paths, expected in (([], []), (["p%d" % n for n in range(16)], ["p%d" % n for n in range(16)]),
                                     (["p%d" % n for n in range(17)], []), (["../bad*"], [])):
@@ -1134,7 +1118,35 @@ with patch.object(panel, "_dispatch_call_finished", return_value=True), \
                         assert str(error) == "joined"
                 declared = join.call_args.kwargs["owns"]
                 assert declared == ["src/shared.py"]
-                assert warnings(dict(report, room=dict(report["room"], participants=[dict(finished_worker, owns=declared)])))
+                assert join.call_args.kwargs["task_id"] == "plan-task"
+                assert warnings(dict(finished_room, participants=[finished_owner, dict(finished_worker, owns=declared)]))
+            # Losing the atomic enrollment check keeps this main's plan claim and names its exact release.
+            refusal = io.StringIO()
+            binding = Mock(lease_id="lease-fixture", _asdict=lambda: {"lease_id": "lease-fixture"})
+            with patch.object(dispatch.shutil, "which", return_value="delegate"), \
+                    patch.object(panel, "work_repository", return_value=root), \
+                    patch.object(panel, "snapshot", side_effect=ValueError("no snapshot")), \
+                    patch.object(panel, "_rollover_if_needed", return_value=None), \
+                    patch.object(panel, "_dispatch_capacity"), patch.object(panel, "_reconcile_dispatch"), \
+                    patch.object(dispatch.subprocess, "run", return_value=Mock(returncode=0)) as plan_run, \
+                    patch.object(panel, "plan_link", return_value=binding), \
+                    patch.object(dispatch, "_reserve_alias", return_value="worker"), \
+                    patch.object(dispatch.room, "join", side_effect=ValueError("Scope overlap: write dispatch refused")), \
+                    patch.object(panel, "events", side_effect=[json.dumps(main_record), "[]"]), \
+                    redirect_stderr(refusal):
+                try:
+                    dispatch.run_dispatch(root, "codex", "worker", "write", None, None, "true", "plan-task",
+                                          False, None, route, "main", None, None, work_repo=root)
+                except ValueError as error:
+                    assert str(error).startswith("Scope overlap"), error
+                else:
+                    raise AssertionError("a losing enrollment was not refused")
+            assert not any("release" in call.args[0] for call in plan_run.call_args_list if call.args), \
+                "a refused enrollment released the plan claim"
+            assert ("plan plan-task stays claimed by this main (lease lease-fixture)" in refusal.getvalue()
+                    and "--lease-id lease-fixture" in refusal.getvalue()
+                    and "oms agent-plan --repo %s release" % shlex.quote(str(root)) in refusal.getvalue()), \
+                refusal.getvalue()
         check_declaration()
 # END settled overlap warning
 
@@ -7983,7 +7995,8 @@ os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL
             if verify:
                 argv[argv.index("--verify") + 1] = verify
             argv += route_args or []
-            argv += ["--continue" if continuing else "--task-id", name]
+            # Disjoint scopes: each fixture task's undecided write would otherwise claim the repository.
+            argv += ["--continue", name] if continuing else ["--task-id", name, "--scope", "fixture-" + name]
             before = len(seen.read_text().splitlines()) if seen.exists() else 0
             call_env = dict(env, **(extra or {}))
             if legacy_account or missing_anchor or writable_home:
@@ -8143,7 +8156,7 @@ os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL
             primary = routing.allocate("codex", role="builder", tier="deep", access="write", installed={"claude"})
             fallback = dict(primary, provider="codex", binary="codex", model="gpt-6.1-sol", account="credits")
             result = dispatch.run_dispatch(project, "claude", "builder", "write", None, str(brief), "true",
-                "account-provider-fallback", False, None, primary, None, None, [], fallback=fallback)
+                "account-provider-fallback", False, None, primary, None, None, ["fixture-account-provider-fallback"], fallback=fallback)
         rows = [json.loads(line) for line in seen.read_text().splitlines()][before:]
         assert result == 6 and [row["home"] for row in rows] == [env["CODEX_HOME"], str(homes[0])], (result, rows)
         attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(project), "list", "--json"], env))
@@ -8155,7 +8168,7 @@ os.execv(os.environ["ACCOUNT_TEST_ORIGINAL"], [os.environ["ACCOUNT_TEST_ORIGINAL
             primary = routing.allocate("claude", role="builder", tier="deep", access="write", installed={"codex"})
             unbound = {key: value for key, value in primary.items() if key not in ("account", "account_reason")}
             result = dispatch.run_dispatch(project, "claude", "builder", "write", None, str(brief), "true",
-                "account-unbound-codex-fallback", False, None, primary, None, None, [], fallback=unbound,
+                "account-unbound-codex-fallback", False, None, primary, None, None, ["fixture-account-unbound-codex-fallback"], fallback=unbound,
                 account_overflow=False)
         rows = [json.loads(line) for line in seen.read_text().splitlines()][before:]
         assert result != 0 and [row["home"] for row in rows] == [str(homes[0]), env["CODEX_HOME"]], (result, rows)
