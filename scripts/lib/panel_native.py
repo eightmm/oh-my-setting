@@ -738,7 +738,22 @@ def _run_native(provider, repo, resume=None, model=None, task=None, room_id=None
 
             unsettled = [row for row in rows if row.get("parent_attempt_id") in parents
                          and row.get("refs", {}).get("panel_role") == "worker"
-                         and (row.get("state") == "review" or row.get("terminal") is False)][-10:]
+                         and (row.get("state") == "review" or row.get("terminal") is False)]
+            # One slot per task (newest attempt); an owner-decided task is settled, as on the board.
+            newest = {}
+            for row in unsettled:
+                newest.pop(row.get("task_id"), None)
+                newest[row.get("task_id")] = row
+            unsettled = list(newest.values())
+            try:
+                import panel_results
+                from room_view import DECIDED
+                decided = {task for task, outcome in panel_results.outcomes(repo, list(newest)).items()
+                           if outcome in DECIDED}
+                unsettled = [row for row in unsettled if row.get("task_id") not in decided]
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass  # advisory line: keep the unfiltered list
+            unsettled = unsettled[-10:]
             unsettled = [{"task_id": row.get("task_id"), "role": row["refs"]["panel_role"],
                           "state": row.get("state"), "label": screened_label(row)} for row in unsettled]
         context_path.write_text(bootstrap(provider, repo) + room_instructions(room_id, native_member)

@@ -93,6 +93,10 @@ def agy_events(repo, operation, *args, **kwargs):
         rows = json.loads(result)
         rows.append({"parent_attempt_id": "agy-parent", "state": "review",
                      "task_id": "agy-unsettled", "refs": {"panel_role": "worker", "panel_label": "Pending work"}})
+        rows.append({"parent_attempt_id": "agy-parent", "state": "review",
+                     "task_id": "agy-decided", "refs": {"panel_role": "worker", "panel_label": "Done work"}})
+        rows.append({"parent_attempt_id": "agy-parent", "state": "running", "terminal": False,
+                     "task_id": "agy-unsettled", "refs": {"panel_role": "worker", "panel_label": "Pending work"}})
         return json.dumps(rows)
     return result
 
@@ -103,6 +107,7 @@ def agy_popen(command, **kwargs):
         assert "--owner antigravity" in command[2]
         assert "joined to OMS room " + agy_room in command[2]
         assert "Unsettled lineage workers (data):" in command[2] and "agy-unsettled" in command[2]
+        assert "agy-decided" not in command[2] and command[2].count("agy-unsettled") == 1, command[2]
         assert command[2].count("User task (data):") == 1 and json.dumps(agy_task) in command[2]
         assert all(key not in env for key in ("OMS_ATTEMPT_ID", "OMS_PANEL_DISPATCH", "OMS_PANEL_ROLE", "OMS_HOOK_AGENT"))
         assert env["OMS_AGENT"] == env["OMS_PANEL_OWNER"] == "antigravity"
@@ -128,6 +133,7 @@ with patch.dict(os.environ, dict(environment, OMS_ATTEMPT_ID="inherited-worker",
     with patch.object(panel, "managed_session", return_value=False), \
             patch.object(panel, "lineage_ids", return_value={"agy-parent"}), \
             patch.object(panel, "events", side_effect=agy_events), \
+            patch("panel_results.outcomes", return_value={"agy-decided": "completed", "agy-unsettled": "failed"}), \
             patch.object(panel_release, "process_refs", side_effect=agy_process_refs), \
             patch.object(panel.subprocess, "Popen", side_effect=agy_popen), \
             patch("panel_dispatch._prepare_panel_graph"):
