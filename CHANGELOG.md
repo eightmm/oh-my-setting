@@ -8,6 +8,20 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
+  summary on stdin, when a call or message newly waits; one notifier runs at a
+  time, its process group is killed after a timeout or when the panel
+  re-executes (PR #28).
+- Run capsules record the conda environment, loaded modules, host and a fixed
+  list of environment variables; withheld exports leave no file (PR #29).
+- Memory recall returns how a failure was fixed and its recorded next step,
+  each only when the text passes the secret scan in both its raw and indexed
+  spelling (PR #30).
+- `oms ci-status` protection reports whether the gate job is a required check
+  on the branch (PR #33).
+- The resume block can carry the newest pins and the notes ranked for the
+  active task's goal (PR #35).
+
 - A main swap no longer waits for an active land, and it follows a room
   rollover that happens during the handoff.
 - One panel key table drives the root bindings, the F12 summary, the `?`
@@ -634,6 +648,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - A carried prior finding that the outbound scan flags is replaced by an omission line naming its artifact. Before this, quoted reviewer text could block every later `--continue` or `--task-id` dispatch for that task.
 
 ### Fixed
+
+- A refresh that removes the selected inbox row moves the cursor to a nearby
+  row, and the next Enter asks again instead of opening a different row.
+- The launch context's unsettled lineage list drops tasks its owner already
+  decided and gives each task one slot, newest attempt first.
 
 - The Debate tab treats a seat's newest round as the union of answer and
   non-answer rounds. A failure after an earlier answer now shows as that round's
