@@ -2175,9 +2175,22 @@ def past_event(event, navigation, tab="past"):
 PLAN_ORDER = {"running": 0, "review": 1, "landing": 1, "claimed": 2, "ready": 3, "blocked": 4, "done": 5, "cancelled": 6}
 
 
+def task_wait(task, states):
+    """Why a plan task cannot move yet: (unfinished dependencies of a ready task, reason of a blocked one).
+
+    A dependency counts only while its listed state is done, as `oms agent-plan claim` requires; a cancelled
+    or unlisted one never completes. Display-only: claim and reopen keep their own checks."""
+    task = mapping(task)
+    pending = [clean(dep, 40) for dep in listing(task.get("depends"))
+               if isinstance(dep, str) and states.get(dep) != "done"] if task.get("state") == "ready" else []
+    reason = clean(task.get("reason"), 240) or "" if task.get("state") == "blocked" else ""
+    return pending, reason
+
+
 def plan_rows(report, labels, width, unicode, navigation=None):
     """Open tasks first; the dock folds completed and cancelled tasks under one summary."""
     tasks = listing(mapping(report.get("room")).get("repo_tasks")) or listing(mapping(report.get("plan")).get("tasks"))
+    states = {t.get("id"): t.get("state") for t in map(mapping, tasks)}
     closed = [t for t in tasks if t.get("state") in {"done", "cancelled"}]
     if navigation is not None:
         tasks = [t for t in tasks if t.get("state") not in {"done", "cancelled"}]
@@ -2190,6 +2203,12 @@ def plan_rows(report, labels, width, unicode, navigation=None):
         word = "in review" if t.get("state") == "review" else clean(t.get("state"), 20) or "unknown"
         if t.get("state") == "running" and t.get("id") in ended | awaiting:
             word += " (worker ended)" if t["id"] in ended else " (awaiting decision)"
+        pending, reason = task_wait(t, states)
+        if pending:
+            # A ready task is claimable only once every dependency is done; the row says which ones it waits on.
+            word += " (waiting on %s%s)" % (", ".join(pending[:2]), " +%d" % (len(pending) - 2) if len(pending) > 2 else "")
+        elif reason:
+            word += " (%s)" % clean(reason, 60)
         if word == "done":
             kind = t.get("completion_kind")
             if kind == "research-accepted":

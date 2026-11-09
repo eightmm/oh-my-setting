@@ -768,6 +768,28 @@ completion_hits = [action for _, action in render_plan_rows(completion_report, {
 assert completion_hits == [("task", task_id) for task_id in ("running-kind", "legacy", "research", "main-read", "satisfied", "unknown-kind", "bad-kind")], completion_hits
 assert next(row for row, action in render_plan_rows(completion_report, {}, 120, False) if action and action[1] == "legacy").startswith("+ ")
 assert next(row for row, action in render_plan_rows(completion_report, {}, 120, True) if action and action[1] == "legacy").startswith("✓ ")
+# A ready task names the dependencies it still waits on and a blocked task its recorded reason; the row stays one line.
+wait_report = deepcopy(msg_report)
+wait_report["room"]["repo_tasks"] = [
+    {"id": "base", "title": "Base", "state": "done"}, {"id": "lib", "title": "Lib", "state": "running"},
+    {"id": "gone", "title": "Gone", "state": "cancelled"},
+    {"id": "free", "title": "Free", "state": "ready", "depends": ["base"]},
+    {"id": "held", "title": "Held", "state": "ready", "depends": ["base", "lib", "gone", "absent"]},
+    {"id": "one", "title": "One", "state": "ready", "depends": ["lib"]},
+    {"id": "stuck", "title": "Stuck", "state": "blocked", "reason": "needs the dataset license\x1b[31m\n" + "x" * 80},
+    {"id": "mute", "title": "Mute", "state": "blocked"}]
+wait_rows = [row for row, _ in render_plan_rows(wait_report, {}, 120, True)]
+wait_plan = "\n".join(wait_rows)
+assert "free · ready · Free" in wait_plan and "one · ready (waiting on lib) · One" in wait_plan, wait_plan
+assert "held · ready (waiting on lib, gone +1) · Held" in wait_plan, wait_plan
+stuck_row = next(row for row in wait_rows if " stuck " in row)
+assert "stuck · blocked (needs the dataset license" in stuck_row and "...) · Stuck" in stuck_row, stuck_row
+assert "\x1b" not in stuck_row and len(stuck_row.split(" · ")[1]) <= len("blocked ()") + 60, stuck_row
+assert "mute · blocked · Mute" in wait_plan and "lib · running · Lib" in wait_plan, wait_plan
+# The folded summary's closed rows carry no wait note, and the open rows read the same with or without the fold.
+wait_nav = {"plan_closed": True}
+folded = [row for row, _ in render_plan_rows(wait_report, {}, 120, True, wait_nav)]
+assert "held · ready (waiting on lib, gone +1) · Held" in "\n".join(folded) and any("base · done · Base" in row for row in folded), folded
 foot = plan.split("\n")[-1]
 assert "wheel Scroll" in foot and "Tab Next tab" in foot and "Enter Chat" not in foot and "Ask advisor" not in foot, foot
 assert "✓ t-ver" not in plan and "○ t-rdy" in plan and "✗ t-blk" in plan, plan

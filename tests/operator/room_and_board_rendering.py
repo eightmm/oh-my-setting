@@ -6364,6 +6364,31 @@ with patch.object(panel, "managed_session", return_value=False), \
 assert "Depends:" not in snapshot_nav["detail"]["text"]
 assert "Claimed by:" not in snapshot_nav["detail"]["text"]
 assert "Verify:" not in snapshot_nav["detail"]["text"]
+assert "Waiting on:" not in snapshot_nav["detail"]["text"] and "Blocked:" not in snapshot_nav["detail"]["text"]
+# The snapshot says what a task waits for: each dependency's listed state, the unfinished ones, a block reason.
+wait_tasks = [{"id": "base", "title": "Base", "state": "done"}, {"id": "lib", "title": "Lib", "state": "cancelled"},
+    {"id": "wait", "title": "Waits", "state": "ready", "depends": ["base", "lib", "absent"]},
+    {"id": "odd", "title": "Odd", "state": "ready", "depends": ["base", ["nested"], 7]},
+    {"id": "met", "title": "Met", "state": "ready", "depends": ["base"]},
+    {"id": "stop", "title": "Stopped", "state": "blocked", "depends": ["base"], "reason": "license\x1b[31m pending"},
+    {"id": "unproven", "title": "Unproven", "state": "blocked", "stored_state": "done", "reason": "not verified"}]
+wait_text = {}
+for wait_id in ("wait", "met", "stop", "unproven", "odd"):
+    snapshot_nav = {"room_id": "snapshot-room"}
+    with patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel.room, "status", return_value={"participants": []}):
+        panel.navigate(project, ("task", wait_id), {"room": {"repo_tasks": wait_tasks}}, snapshot_nav, 100)
+    wait_text[wait_id] = snapshot_nav["detail"]["text"]
+assert "Depends: base (done), lib (cancelled), absent (not in this plan)" in wait_text["wait"], wait_text["wait"]
+assert "Waiting on: lib, absent" in wait_text["wait"] and "Blocked:" not in wait_text["wait"], wait_text["wait"]
+assert "Depends: base (done)" in wait_text["met"] and "Waiting on:" not in wait_text["met"], wait_text["met"]
+assert "Blocked: license?[31m pending" in wait_text["stop"] and "\x1b" not in wait_text["stop"], wait_text["stop"]
+assert "Next: oms agent-plan reopen --id stop returns it to ready" in wait_text["stop"], wait_text["stop"]
+assert "Waiting on:" not in wait_text["stop"], wait_text["stop"]
+assert "Blocked: not verified" in wait_text["unproven"] and "reopen" not in wait_text["unproven"], wait_text["unproven"]
+# A malformed dependency entry is shown as unlisted instead of failing the snapshot.
+assert "Depends: base (done), ['nested'] (not in this plan), 7 (not in this plan)" in wait_text["odd"], wait_text["odd"]
+assert "Waiting on:" not in wait_text["odd"], wait_text["odd"]
 long_answer = "\n".join("Answer line %s" % n for n in range(40)) + "\n" + "x" * 900 + " END_OF_ANSWER"
 long_result = {"rows": [{"task_id": "long-result", "summary": "Owner summary",
     "calls": [{"kind": "call", "exit": 0, "answer": long_answer,
