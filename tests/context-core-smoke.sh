@@ -121,6 +121,12 @@ test_real_ml_signals_are_ml() {
     fail "declared torch dependency was not classified as ml"
 }
 
+test_context_manifest_inspector() {
+  PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/test_context_inspect.py" --cli ||
+    fail "saved context inspection failed"
+}
+
+test_context_manifest_inspector
 test_context_body_obeys_hard_cap
 test_capped_context_keeps_valid_utf8
 test_shell_keyword_mentions_stay_general

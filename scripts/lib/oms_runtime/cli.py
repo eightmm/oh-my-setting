@@ -89,6 +89,14 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             value = classify_failure(args.text, args.exit, args.code) if args.failure_action == 'classify' else failure_catalog()
             emit(value, args.pretty)
             return 0
+        if args.command == 'context-inspect':
+            from .context_inspect import InspectionError, inspect_files
+            try:
+                value = inspect_files(repo, args.manifest, compare=args.compare, limit=args.limit)
+            except InspectionError as exc:
+                raise CoreError(str(exc)) from None
+            emit(value, args.pretty)
+            return 0
         if args.command == 'context':
             value = plan_context(repo, targets=args.target, explicit=[_file_reason(item) for item in args.file], required=args.require, max_bytes=args.max_bytes, bundle_path=_path(repo, args.bundle) if args.bundle else None, manifest_path=_path(repo, args.manifest) if args.manifest else None, allow_external=args.allow_external, phase=args.phase)
             emit(value, args.pretty)

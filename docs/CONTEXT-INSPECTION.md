@@ -1,0 +1,92 @@
+# Saved context inspection
+
+`oms runtime context-inspect` reads an existing OMS context manifest. It does
+not compile a new pack, open the listed source/bundle files, contact a provider,
+write state, or verify current evidence. It is an agent-facing read surface for
+[NF-03](CONTROL-PLANE-UX-AND-FEATURES.md#nf-03--context-budget-inspector), not a new
+panel or a replacement context compiler.
+
+```bash
+oms runtime context-inspect .oms/runtime/context/MANIFEST.json --pretty
+oms runtime context-inspect before.json --compare after.json --limit 10 --pretty
+```
+
+Use the exact `manifest_path` returned by `oms runtime context`, or explicitly
+choose another saved manifest in the selected `--repo`. There is no implicit
+latest-file discovery. Both operands of `--compare` must be in that repository.
+
+## Reading the result
+
+The schema-1 `oms-context-inspection` object reports recorded budget, used and
+remaining bytes, selected source payload and framing bytes, source rows sorted
+by size, omission reasons and required-context debt. `--limit` is 1–100
+(default 10); each bounded list has `total`, `items`, and `omitted`.
+
+`bytes_selected` includes any truncation marker the original compiler inserted;
+framing bytes are the recorded bundle total minus these payload sizes. This is
+not a tokenizer, API bill, account quota, or measurement of the provider's full
+context. Repeated full-source hashes identify candidates for inspection only:
+two truncated selections of the same source need not repeat the same bytes.
+Nothing is removed from a pack automatically.
+
+`validation: recorded-metadata-only`, `sources_current: null` and
+`bundle_verified: false` are intentional. A pack can report `sufficient: true`
+for its original selection while the source tree has subsequently changed.
+This command does not establish freshness, authenticity, approval or acceptance.
+The manifest's `reported_sufficient` is preserved under `debt`, not promoted.
+
+The `oms-context-comparison` object reports added/removed selected paths,
+changed source metadata, byte/debt deltas and differences in recorded phase,
+targets and contract-state digest. A missing contract digest makes recorded
+scope unknown. Matching recorded scope is not proof of identical repositories,
+current tasks or valid experiment controls. No winning run, quality improvement,
+token saving or billing saving is inferred. Existing `experiment compare` and
+`benchmark compare` retain their separate contracts.
+
+## Bounds, authority and compatibility
+
+Only explicitly selected, own-UID, single-link regular files inside the selected
+repository are read. Descriptor-relative opens refuse symlinks in path
+components, parent traversal, special files, files over 4 MiB and detected
+in-place changes while reading. A manifest list has at most 4,096 rows and path
+traversal at most 64 components. JSON duplicate keys, non-finite numbers,
+unsupported schema and inconsistent byte/debt data fail closed.
+
+This first version supports repo-relative source labels. Manifests with external
+or invalid required-path labels are refused rather than normalized into a
+misleading local source. Source paths are identifiers only and are never opened.
+Unknown additional manifest fields are ignored, not echoed. Display reasons are
+bounded and terminal controls are neutralized; this is not a secret-redaction
+service. Treat metadata names/reasons as private and do not publish them blindly.
+
+A marked harness child may inspect or compare; its existing `context` compilation
+write prohibition is unchanged. No install setting, model route, permission,
+network listener, persistent cache or existing schema is modified. The new
+runtime subcommand and its output kinds are additive public interfaces.
+
+Exit 0 means a valid metadata query, even when it reports context debt or scope
+mismatch. Exit 2 means usage/unsupported/invalid input; Ctrl-C is 130 through the
+runtime entrypoint. Exit 0 is never a verification pass. The original compiler's
+exit 3 for insufficient context remains unchanged.
+
+## Verification
+
+`tests/test_context_inspect.py` exercises the actual stdlib implementation using
+synthetic manifests and real temporary files (including symlink/hardlink/FIFO,
+malformed JSON, concurrent change, list caps and metadata-only comparison).
+The existing `tests/context-core-smoke.sh` invokes it with `--cli`, adding an
+end-to-end compiler → saved manifest → inspector/compare test through
+`scripts/runtime.sh`. That test removes the listed source and bundle before
+inspection and checks repository bytes remain unchanged. It also checks the
+child boundary and invalid-limit exit.
+
+Run the nearest registered suite, not a new CI lane:
+
+```bash
+bash tests/context-core-smoke.sh
+```
+
+The standalone Python invocation tests the module only; it is not the full
+runtime integration test. No real model, provider login, GPU or Slurm job is
+needed by either path. Roll back the scoped commit to remove the command; no
+stored records need migration.
