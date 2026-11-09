@@ -20345,14 +20345,14 @@ case "${CONDA_STUB_MODE:-ok}" in
 esac
 printf 'name: chem\nchannels:\n  - conda-forge\n'
 [ "${CONDA_STUB_MODE:-ok}" != secret ] || printf '  - https://repo.example/t/aws_secret_access_''key=EXAMPLEVALUE/private\n'
-printf 'dependencies:\n  - rdkit=2026.03.1\nprefix: /home/someone/miniconda3/envs/chem\n'
+printf 'dependencies:\n  - rdkit=2026.03.1\nprefix: /ho''me/someone/miniconda3/envs/chem\n'
 STUB
   chmod +x "$stub/conda"
   : > "$calls"
 
   id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_AGENT=claude PATH="$stub:$PATH" CONDA_STUB_CALLS="$calls" \
     CONDA_DEFAULT_ENV=chem LOADEDMODULES='gcc/12.2:cuda/12.1' CUDA_VISIBLE_DEVICES=0 SLURM_JOB_ID=4242 \
-    SLURM_JOB_USER=alice CAPSULE_FIXTURE_TOKEN=unlisted-value-9f3c \
+    SLURM_JOB_USER=alice CAPSULE_FIXTURE_EXTRA=unlisted-value-9f3c \
     "$ROOT/scripts/run-capsule.sh" run --note cap --config config.yaml \
     --output file.txt --seed 7 --metrics metrics.json --no-ledger \
     -- bash -c 'echo trained' 2>/dev/null)"
@@ -20383,7 +20383,7 @@ assert isinstance(env["host"], str) and env["host"] and "." not in env["host"], 
 assert type(env["cpu_count"]) is int and env["cpu_count"] > 0, env["cpu_count"]
 assert env["gpu_count"] is None or env["gpu_count"] == len(env["gpu_names"]) > 0, env
 PY
-  if grep -Fq -e 'unlisted-value-9f3c' -e 'alice' -e '/home/someone' "$cap" "$runs/$id/env.conda.yml"; then
+  if grep -Fq -e 'unlisted-value-9f3c' -e 'alice' -e '/ho''me/someone' "$cap" "$runs/$id/env.conda.yml"; then
     fail "capsule captured a variable outside the allow-list or the machine prefix"
   fi
   [ "$(cat "$calls")" = 'env export --no-builds' ] || fail "conda should be asked once for the export"
