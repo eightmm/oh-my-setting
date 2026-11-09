@@ -29,6 +29,9 @@ auth/privacy, destructive or expensive work, Slurm resources, dependencies,
 and acceptance criteria only when relevant.
 
 Broad work and managed bootstrap still require a confirmed contract.
+Before confirming, reread each requirement as a reader who saw none of this
+conversation: one that cannot be restated with its acceptance check from the
+contract and cited sources alone is still an open decision.
 After bootstrap, continue implementation already authorized by the request.
 
 Keep build/test commands and project facts in the existing contract. Add a
