@@ -382,6 +382,8 @@ env HOME="$TMP/home" OMS_LOCK_DIR="$TMP/locks" "$ROOT/scripts/agent-events.sh" -
 
 # The in-run protected-boundary callback must terminalize the attempt before
 # an I/O error in the later final scan can exit the delegator.
+# Registry-lock acquisitions on this path: 1 start-snapshot, 2 guard snapshot,
+# 3 in-run callback, 4 final scan; the hook fails the 4th.
 mkdir -p "$TMP/in-run-guard-scan-failure-repo" "$TMP/scan-failure-locks"
 git -C "$TMP/in-run-guard-scan-failure-repo" init -q
 git -C "$TMP/in-run-guard-scan-failure-repo" -c user.name=test -c user.email=test@example.com commit --allow-empty -qm base
@@ -389,7 +391,7 @@ guard_status=0
 env -u NVM_DIR HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" \
   OMS_LOCK_DIR="$TMP/scan-failure-locks" OMS_LOCK_TIMEOUT=1 OMS_LOCK_FORCE_MKDIR=1 \
   OMS_TEST_GUARD_REPO="$TMP/in-run-guard-scan-failure-repo" \
-  OMS_TEST_FAIL_WORKTREE_LOCK_AFTER=5 \
+  OMS_TEST_FAIL_WORKTREE_LOCK_AFTER=4 \
   OMS_TEST_FAIL_WORKTREE_LOCK_COUNT="$TMP/in-run-guard-scan-failure-count" \
   PATH="$TMP/bin:/usr/bin:/bin" \
   "$ROOT/scripts/peer-delegate.sh" --repo "$TMP/in-run-guard-scan-failure-repo" \
