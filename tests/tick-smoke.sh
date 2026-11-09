@@ -737,7 +737,10 @@ def build(lib, repo, stage, text="spec\n", diagnostic=None, state=None):
     onto = base if stage in ("proposing", "proposal-review", "parked") else branch
     head = subprocess.run(["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "HEAD"], capture_output=True, text=True)
     if head.stdout.strip() != onto:
-        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-B", onto], check=True)
+        held = [ln for ln in git(repo, "worktree", "list", "--porcelain").splitlines() if ln == "branch refs/heads/" + onto]
+        # Newer git refuses -B onto a branch another worktree holds: the scratch fixture then detaches at it.
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "--detach", onto] if held else
+                       ["git", "-C", str(repo), "checkout", "-q", "-B", onto], check=True)
     diag = (diagnostic or {}) if stage == "parked" else {}
     args = argparse.Namespace(
         stage=stage, repo=str(repo), spec_sha256=hashlib.sha256(b"spec\n").hexdigest(), planner="claude",
