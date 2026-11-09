@@ -20901,7 +20901,7 @@ test_experiment_board_stale_reclaim() {
 }
 
 
-# smoke-weight: 16
+# smoke-weight: 11
 test_experiment_board_claim_is_atomic() {
   local d="$TMP/exp-claim-race"
   local board="$d/.oms/experiments.jsonl"
@@ -28923,7 +28923,7 @@ test_precompact_handoff_records_refusal_in_fail_ledger() {
     fail "refusal row must name the pre-compact capture"
 }
 
-# smoke-weight: 8
+# smoke-weight: 11
 test_resume_hook_prints_bounded_resume_block() {
   local repo="$TMP/resume-hook-repo"
   local crlf_bin="$TMP/resume-hook-crlf-bin"
@@ -29124,6 +29124,94 @@ EOF
     fail "a malformed receipt must not produce an autopilot line: $out"
   fi
   rm -f "$repo/.oms/plan/autopilot-run.json"
+
+  # Shared memory rides the block only on request (OMS_RESUME_MEMORY=1). Off,
+  # or on with nothing written yet, the block is byte-for-byte what it was.
+  local plain memory section pins_file="$repo/.oms/memory/pins.md"
+  plain="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  memory="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MEMORY=1 "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume hook with memory must exit 0"
+  [ "$memory" = "$plain" ] || fail "empty memory must add nothing to the resume block: $memory"
+  "$ROOT/scripts/agent-memory.sh" --repo "$repo" pin --agent codex --text "Hook rows are pipe-delimited." >/dev/null 2>&1 ||
+    fail "pinning a resume fixture note failed"
+  "$ROOT/scripts/agent-memory.sh" --repo "$repo" append --agent claude \
+    --text "The resume surface must stay under the hook byte cap." >/dev/null 2>&1 ||
+    fail "appending a resume fixture note failed"
+  "$ROOT/scripts/agent-memory.sh" --repo "$repo" append --agent codex \
+    --text "Ship the surface behind the plugin wrapper as well." >/dev/null 2>&1
+  "$ROOT/scripts/agent-memory.sh" --repo "$repo" append --agent claude --text "Unrelated tmux binding note." >/dev/null 2>&1
+  out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
+  [ "$out" = "$plain" ] || fail "memory must stay out of the resume block unless asked for: $out"
+  memory="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MEMORY=1 "$ROOT/scripts/resume-hook.sh")"
+  contains "$memory" '- memory (reference only; not approval or verification evidence):' ||
+    fail "resume memory section missing its reference-only label: $memory"
+  printf '%s\n' "$memory" | grep -E >/dev/null '^  pin mem-[^ ]+: Hook rows are pipe-delimited\.$' ||
+    fail "resume memory missing the pin with its event id: $memory"
+  printf '%s\n' "$memory" | grep -E >/dev/null '^  recall mem-[^ ]+: The resume surface must stay under the hook byte cap\.$' ||
+    fail "resume memory missing the note ranked for the task goal: $memory"
+  printf '%s\n' "$memory" | grep -E >/dev/null '^  recall mem-[^ ]+: Ship the surface behind the plugin wrapper as well\.$' ||
+    fail "resume memory must give each ranked note as its text alone: $memory"
+  if contains "$memory" 'tmux binding'; then fail "resume memory recalled a note unrelated to the goal: $memory"; fi
+  contains "$memory" '  more: oms agent-memory recall QUERY' || fail "resume memory missing its pointer: $memory"
+  # The section is the block's tail, before the footer: everything above it is unchanged.
+  [ "${memory%%- memory (reference only*}" = "${plain%- more: oms state}" ] ||
+    fail "memory must be appended after the existing resume lines: $memory"
+  # The same section reaches Codex through the plugin's SessionStart wrapper.
+  OMS_RESUME_MEMORY=1 CLAUDE_PLUGIN_ROOT="$ROOT/plugins/oh-my-setting" \
+    OMS_CODEX_HOME="$TMP/codex-home" OMS_LOCK_DIR="$TMP/locks" \
+    bash "$ROOT/plugins/oh-my-setting/scripts/harness-hook.sh" resume-hook \
+    < "$TMP/codex-sessionstart-input.json" > "$TMP/codex-sessionstart-memory.json" ||
+    fail "Codex SessionStart hook with memory must exit 0"
+  grep -Fq 'Hook rows are pipe-delimited.' "$TMP/codex-sessionstart-memory.json" ||
+    fail "Codex SessionStart context lost the memory section"
+
+  # Bounded: the newest three pins, each cut to one short line, and the whole
+  # section under its byte cap however much was pinned.
+  local pin
+  for pin in 1 2 3 4; do
+    OMS_AGENT_MEMORY_PIN_CHARS=900 "$ROOT/scripts/agent-memory.sh" --repo "$repo" pin --agent codex \
+      --text "pin-$pin $(printf 'word%.0s ' {1..150})tail-$pin" >/dev/null 2>&1 || fail "pinning long note $pin failed"
+  done
+  memory="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MEMORY=1 "$ROOT/scripts/resume-hook.sh")"
+  section="$(printf '%s\n' "$memory" | sed -n '/^- memory (reference only/,/^  more: oms agent-memory/p')"
+  [ "$(printf '%s\n' "$section" | grep -c '^  pin ')" = 3 ] || fail "resume memory must show three pins: $section"
+  contains "$section" ': pin-4 word' && contains "$section" ': pin-2 word' ||
+    fail "resume memory must show the newest pins: $section"
+  if contains "$section" 'pin-1 word' || contains "$section" 'Hook rows' || contains "$section" 'tail-'; then
+    fail "resume memory kept an older or uncut pin: $section"
+  fi
+  [ "$(printf '%s\n' "$section" | wc -c)" -le 1200 ] || fail "resume memory section exceeds its byte cap"
+  [ "$(printf '%s' "$memory" | wc -c)" -le 4096 ] || fail "resume block with memory exceeds its byte cap"
+
+  # What the memory layer withholds from provider context is withheld here: a
+  # pins file that looks sensitive contributes nothing, and the block survives.
+  cp "$pins_file" "$TMP/resume-pins.bak"
+  printf -- '- 2026-01-01T00:00:00Z [codex] deploy with API_TOK''EN=abcd1234abcd1234abcd\n' >> "$pins_file"
+  memory="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MEMORY=1 "$ROOT/scripts/resume-hook.sh")" ||
+    fail "a withheld pins file broke resume"
+  if contains "$memory" 'abcd1234' || printf '%s\n' "$memory" | grep >/dev/null '^  pin '; then
+    fail "a sensitive-looking pins file reached the resume block: $memory"
+  fi
+  contains "$memory" 'Ship the resume surface' || fail "a withheld pins file hid the active task"
+  cp "$TMP/resume-pins.bak" "$pins_file"
+
+  # A memory lookup that hangs is dropped at its bound; the block is unchanged.
+  # Only the hook's own lookup stalls: every other reader gets the real library.
+  local slow_root="$TMP/resume-slow-root" entry
+  mkdir -p "$slow_root/scripts/lib"
+  for entry in agent-task.sh fail-ledger.sh auto-update.sh; do
+    ln -s "$ROOT/scripts/$entry" "$slow_root/scripts/$entry"
+  done
+  cp "$ROOT/scripts/resume-hook.sh" "$slow_root/scripts/resume-hook.sh"
+  for entry in "$ROOT"/scripts/lib/*; do ln -s "$entry" "$slow_root/scripts/lib/${entry##*/}"; done
+  rm -f "$slow_root/scripts/lib/agent-memory-common.sh"
+  printf '[ "$0" != oms-resume-memory ] || sleep 30\n. "%s/scripts/lib/agent-memory-common.sh"\n' "$ROOT" \
+    > "$slow_root/scripts/lib/agent-memory-common.sh"
+  plain="$(printf '{"cwd":"%s"}' "$repo" | bash "$slow_root/scripts/resume-hook.sh")"
+  memory="$(printf '{"cwd":"%s"}' "$repo" | OMS_RESUME_MEMORY=1 bash "$slow_root/scripts/resume-hook.sh")" ||
+    fail "a hung memory lookup broke resume"
+  [ "$memory" = "$plain" ] && contains "$memory" 'Ship the resume surface' ||
+    fail "a hung memory lookup must leave the resume block unchanged: $memory"
 
   # Outside an adopted repo, and when disabled: exit 0 with no output.
   out="$(printf '{"session_id":"me","cwd":"%s"}' "$TMP" | "$ROOT/scripts/resume-hook.sh")" ||
