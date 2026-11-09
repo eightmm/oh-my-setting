@@ -128,15 +128,6 @@ with patch.object(terminals.subprocess, 'run', side_effect=subprocess.TimeoutExp
 with patch.object(terminals, 'tmux', side_effect=['$42\t123\tfixture', 'foreign']):
     result, lines = refusal_call()
     check(result == 1 and lines[-1] == 'category: caller-not-managed', 'foreign session category')
-with patch.object(workspaces, 'open_workspace', side_effect=RuntimeError('debug marker')), \
-     patch.dict(os.environ, {'OMS_DEBUG': '1'}):
-    try:
-        refusal_call()
-    except RuntimeError:
-        pass
-    else:
-        check(False, 'debug mode hid unexpected exception')
-
 with patch.object(terminals, 'session_proof', return_value={}), \
      patch.object(workspaces, '_fields', return_value=['$42', '@1', '%7', 'bad', '0']), \
      patch.dict(os.environ, {'TMUX_PANE': '%7'}):

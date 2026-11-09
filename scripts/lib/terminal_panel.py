@@ -174,7 +174,6 @@ def main(argv=None):
                         help="finalize verifier timeout in seconds, 1..86400 (default: 1800)")
     parser.add_argument("--notify", action="store_true", help="deliver the recorded result to Codex app")
     parser.add_argument("--retry-delivery", action="store_true", help="retry delivery of a saved task result without its original summary file")
-    parser.add_argument("--result-id", help="saved result revision for --retry-delivery")
     parser.add_argument("--workload", choices=TIERS,
                         help="capability tier instead of the role's default; council accepts routine, deep or frontier")
     parser.add_argument("--access", choices=("read", "write"))
@@ -324,8 +323,6 @@ def main(argv=None):
         parser.error("finalization options require --finalize")
     if args.retry_delivery and not args.task_id:
         parser.error("--retry-delivery requires --task-id")
-    if args.result_id and not args.retry_delivery:
-        parser.error("--result-id requires --retry-delivery")
     if args.dry_run and (args.results or args.accept or args.finalize or args.retry_delivery or args.providers or args.chats):
         parser.error("--dry-run only plans a launch, role dispatch or council")
     if (args.message is not None or args.expected_patch_sha256 is not None) and not args.accept:
@@ -578,7 +575,7 @@ def main(argv=None):
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
         if args.retry_delivery:
-            print(json.dumps(retry_delivery(repo, args.task_id, args.result_id), ensure_ascii=False, indent=2))
+            print(json.dumps(retry_delivery(repo, args.task_id), ensure_ascii=False, indent=2))
             return 0
         if args.dispatch:
             brief = Path(args.brief_file).expanduser() if args.brief_file else None

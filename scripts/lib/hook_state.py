@@ -2655,7 +2655,7 @@ def start_codex_notify(cwd: Path, payload: dict[str, Any], message: str) -> None
         return
     started = load_state(turn_state_path(notify, payload)).get("prompt_at")
     elapsed = time.time() - started if isinstance(started, (int, float)) else None
-    if elapsed is None or elapsed < env_int("OMS_CODEX_NOTIFY_MIN_SEC", 30, minimum=0):
+    if elapsed is None or elapsed < 30:
         return
     # A turn that leaves background work stays silent; the turn it wakes into
     # when the last task ends announces the whole run once.

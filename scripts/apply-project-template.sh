@@ -28,13 +28,12 @@ The agent-facing files are hidden from git locally (see project-private.sh);
 EOF
 }
 
-# --private/--no-private/--python-ci/--full-docs/--help may appear anywhere, so
+# --no-private/--python-ci/--full-docs/--help may appear anywhere, so
 # strip them before the positional style/dir/files parse below.
 KEPT_ARGS=()
 for arg in "$@"; do
   case "$arg" in
     --no-private) PRIVATE=0 ;;
-    --private) PRIVATE=1 ;;
     --python-ci) PYTHON_CI=1 ;;
     --full-docs) ML_FULL_DOCS=1 ;;
     -h|--help) usage; exit 0 ;;

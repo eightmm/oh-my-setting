@@ -1320,11 +1320,10 @@ if [ -f "$OMS/lifecycle/events.jsonl" ]; then
   fi
 fi
 
-# 4.4) Retain opt-in and historical usage under OMS_USAGE_TTL.
+# 4.4) Retain opt-in and historical usage for 30 days.
 usage_file="$OMS/usage.jsonl"
 if [ -f "$usage_file" ] && [ ! -L "$usage_file" ]; then
-  usage_ttl="${OMS_USAGE_TTL:-2592000}"
-  case "$usage_ttl" in *[!0-9]*|"") usage_ttl=2592000 ;; esac
+  usage_ttl=2592000
   usage_gc_locked() {
     local before after stage py_status=0
     before="$(wc -l < "$usage_file" | tr -d ' ')"

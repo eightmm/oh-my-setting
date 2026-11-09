@@ -2389,17 +2389,16 @@ def finalize(repo, owner, task_id, summary_file, outcome, verify=None, evidence=
         raise
 
 
-def retry_delivery(repo, task_id, revision=None):
+def retry_delivery(repo, task_id):
     _owner()
-    if not ID.fullmatch(task_id) or (revision and not REVISION.fullmatch(revision)):
+    if not ID.fullmatch(task_id):
         raise ValueError('invalid saved result ID')
     with _lock(repo):
         _, rows = _records(repo, full=True, task_id=task_id)
         matching = [r for r in rows if r.get('kind') == 'panel-result' and r.get('task_id') == task_id]
         for row in reversed(matching):
             payload = _load_result(repo, row)
-            if not revision or payload['revision'] == revision:
-                return _deliver(repo, payload, row['artifact'], rows, retry=True)
+            return _deliver(repo, payload, row['artifact'], rows, retry=True)
     raise ValueError('saved result not found in retained evidence')
 
 

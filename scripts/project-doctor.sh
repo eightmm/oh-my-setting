@@ -401,11 +401,11 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
     big_tracked=""
     big_count=0
     scanned=0
-    max_scan="${OMS_DOCTOR_MAX_SCAN:-2000}"
+    max_scan=2000
     while IFS= read -r -d '' p; do
       scanned=$((scanned + 1))
       if [ "$scanned" -gt "$max_scan" ]; then
-        warn "big-file scan stopped at $max_scan tracked files (OMS_DOCTOR_MAX_SCAN)"
+        warn "big-file scan stopped at $max_scan tracked files"
         break
       fi
       f="$PROJECT_DIR/$p"

@@ -118,7 +118,7 @@ while [ "$#" -gt 0 ]; do
       STRATEGY="$2"
       shift 2
       ;;
-    --no-strategy|--no-role)
+    --no-strategy)
       INCLUDE_STRATEGY=0
       shift
       ;;

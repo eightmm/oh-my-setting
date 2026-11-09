@@ -716,8 +716,6 @@ def cli_main(argv=None):
         print(json.dumps(result, ensure_ascii=True))
         return 0
     except Exception as error:
-        if not isinstance(error, RefusalError) and os.environ.get("OMS_DEBUG") == "1":
-            raise
         print(str(error) if isinstance(error, CapacityError) else
               "managed terminal action refused: ownership or target unavailable", file=sys.stderr)
         print("category: " + (error.category if isinstance(error, RefusalError) else "unexpected"),
