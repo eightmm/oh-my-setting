@@ -52,7 +52,7 @@ from panel_layout import (
     BOARD_SHARE, BOARD_HEIGHT_SHARE, MIN_CHAT, parse_split, split_text, top_text, split_cells, NATIVE_MIN,
     board_split_cells, work_split_cells, cycle_panel_mode, terminal_window, board_split, panel_geometry,
     PanelModeSync, SplitSync, source_stamps, REJECTED_RELOAD, reload_ready, panel_panes, reopen_panel, bind_window,
-    keys_help, bind_main_keys)
+    keys_help, bind_main_keys, PANEL_KEYS)
 from panel_state import (
     ensure_room, room_instructions, repository, git_toplevel, panel_repository, child_environment, events,
     update_activity, active_mains, session_stored, lineage_ids, lineage_ids_from_rows, owning_attempt, tmux_command,
@@ -83,12 +83,14 @@ from panel_interaction import (
 
 KEYS_HELP = keys_help()
 # Text inside tmux's conditional cannot contain commas or closing braces.
-MAIN_KEYS = (("F9", "select-pane -t :.+"),
+_MAIN_COMMANDS = dict((("F9", "select-pane -t :.+"),
              ("F5", 'if-shell -F "#{==:#{window_name},control}" "select-window -l" "select-window -t :=control"'),
              ("F8", 'if-shell -F "#{==:#{@oms_panel_mode},overview}" "set-option -w @oms_panel_mode focus" '
                     '"if-shell -F \\"#{==:#{@oms_panel_mode},focus}\\" \\"set-option -w @oms_panel_mode work\\" '
                     '\\"set-option -w @oms_panel_mode overview\\""'),
-             ("F12", 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % KEYS_HELP))
+             ("F12", 'display-message -d 8000 "#{?#{==:#{window_name},control},%s,%s}"' % KEYS_HELP)))
+MAIN_KEYS = tuple((key, _MAIN_COMMANDS[key]) for key in dict.fromkeys(
+    row[0] for row in PANEL_KEYS if "root" in row[2]))
 
 
 def main(argv=None):

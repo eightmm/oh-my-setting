@@ -12,6 +12,87 @@ import subprocess
 import sys
 import time
 
+# The same definitions drive the root bindings and all panel key descriptions.
+# Labels with multiple entries reflect context-specific actions for the same key.
+PANEL_KEYS = (
+    ('?', 'Hide', ('board',), 'question_hide'),
+    ('?', 'Keys', ('board',), 'question_keys'),
+    ('enter', 'Chat', ('board',), 'enter_chat'),
+    ('enter', 'Collapse', ('board',), 'enter_collapse'),
+    ('enter', 'Detail', ('board',), 'enter_detail'),
+    ('enter', 'Expand', ('board',), 'enter_expand'),
+    ('enter', 'Finalize', ('board',), 'enter_finalize'),
+    ('enter', 'Fold', ('board',), 'enter_fold'),
+    ('enter', 'Open', ('board',), 'enter_open'),
+    ('enter', 'Open right', ('board',), 'enter_open_right'),
+    ('enter', 'Plan', ('board',), 'enter_plan'),
+    ('enter', 'Show', ('board',), 'enter_show'),
+    ('escape', 'Back', ('board',), 'esc_back'),
+    ('escape', 'Back to graph', ('board',), 'esc_back_to_graph'),
+    ('escape', 'Close', ('board',), 'esc_close'),
+    ('escape', 'Close right', ('board',), 'esc_close_right'),
+    ('F12', 'Keys', ('root',), 'f12_keys'),
+    ('F5', 'Control', ('root',), 'f5_control'),
+    ('F9', 'Chat<>Board', ('root',), 'f9_chat_board_ascii'),
+    ('F9', 'Chat⇄Board', ('root',), 'f9_chat_board_unicode'),
+    ('F9', 'Swap', ('root',), 'f9_swap'),
+    ('shift-drag', 'Copy', ('board',), 'shift_drag_copy'),
+    (' ', 'Fold', ('board',), 'space_fold'),
+    ('tab', 'Next tab', ('board',), 'tab_next_tab'),
+    ('a', 'Ask advisor', ('board',), 'a_ask_advisor'),
+    ('b', 'Attention', ('board',), 'b_attention'),
+    ('c', 'Cancel call', ('board',), 'c_cancel_call'),
+    ('f', 'Full result', ('board',), 'f_full_result'),
+    ('f', 'Full text', ('board',), 'f_full_text'),
+    ('f', 'Open right', ('board',), 'f_open_right'),
+    ('g', 'Graph', ('board',), 'g_graph'),
+    ('k', 'Capacity', ('board',), 'k_capacity'),
+    ('m', 'Modes', ('board',), 'm_modes'),
+    ('n', 'New main', ('board',), 'n_new_main'),
+    ('q', 'Quit', ('board',), 'q_quit'),
+    ('s', 'Swap main', ('board',), 's_swap_main'),
+    ('t', 'Tree', ('board',), 't_tree'),
+    ('u', 'Refresh', ('board',), 'u_refresh'),
+    ('v', 'Expand', ('board',), 'v_expand'),
+    ('w', 'Worktree', ('board',), 'w_worktree'),
+    ('wheel', 'Scroll', ('reader',), 'wheel_scroll'),
+    ('v', 'Collapse', ('board',), 'v_collapse'),
+    ('F9', 'Chat/Board', ('root',), 'f9_chat_board'),
+    ('F8', 'Modes', ('root',), 'f8_modes'),
+    ('?', 'More', ('board',), 'question_more'),
+    ('F5', 'Back', ('root',), 'f5_back'),
+    ('i', 'Headers', ('board',), 'i_headers'),
+    ('1', 'Claude', ('board',), '1_claude'),
+    ('2', 'Pi', ('board',), '2_pi'),
+    ('0', 'Codex', ('board',), '0_codex'),
+    ('vertical', 'Move', ('board',), 'move'),
+    ('vertical', 'Message', ('board',), 'message'),
+    ('vertical', 'Seat', ('board',), 'seat'),
+    ('vertical', 'Call', ('board',), 'call'),
+    ('vertical', 'Task', ('board',), 'task'),
+    ('horizontal', 'Filter', ('board',), 'filter'),
+    ('horizontal', 'Target', ('board',), 'target'),
+    ('x', 'Transcript', ('board',), 'transcript'),
+    ('[', '', ('board',), 'previous_filter'),
+    (']', '', ('board',), 'next_filter'),
+    ('pageup', '', ('board', 'reader'), 'pageup'),
+    ('pagedown', '', ('board', 'reader'), 'pagedown'),
+    ('up', '', ('board', 'reader'), 'up'),
+    ('down', '', ('board', 'reader'), 'down'),
+    ('left', '', ('board', 'reader'), 'left'),
+    ('right', '', ('board', 'reader'), 'right'),
+    ('home', '', ('board', 'reader'), 'home'),
+    ('end', '', ('board', 'reader'), 'end'),
+)
+_HINTS = {name: (key, label) for key, label, contexts, name in PANEL_KEYS}
+
+
+def panel_hint(name, unicode=True):
+    key, label = _HINTS[name]
+    key = {"vertical": "↑↓" if unicode else "^v", "horizontal": "←→" if unicode else "<>", "escape": "Esc", "enter": "Enter", "tab": "Tab", " ": "Space", "shift-drag": "Shift-drag"}.get(key, key)
+    return key + " " + label
+
+
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 
 
@@ -669,10 +750,10 @@ def bind_window(pane, launch, view, attention_only, model=None):
 def keys_help(installed=None):
     from terminal_panel import main_installed
     installed = set(name for name in ("claude", "pi", "codex") if main_installed(name)) if installed is None else set(installed)
-    starts = [label for name, label in (("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex"))
+    starts = [panel_hint(label) for name, label in (("claude", "1_claude"), ("pi", "2_pi"), ("codex", "0_codex"))
               if name in installed]
-    return (" ".join(starts + ["s Swap main", "? More F5 Back"]),
-            "F9 Chat/Board F8 Modes F5 Control ? Keys m Modes i Headers")
+    return (" ".join(starts + [panel_hint("s_swap_main"), panel_hint("question_more") + " " + panel_hint("f5_back")]),
+            " ".join(panel_hint(name) for name in ("f9_chat_board", "f8_modes", "f5_control", "question_keys", "m_modes", "i_headers")))
 
 
 def bind_main_keys():

@@ -1072,6 +1072,39 @@ with patch.object(panel.subprocess, "run", side_effect=cycle_answer) as mode_run
 assert cycled == ["overview", "focus", "work"] and mode[0] == "work", cycled
 assert [call.args[0][1:] for call in mode_run.call_args_list if call.args[0][1] == "set-option"] == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_mode", name] for name in cycled]
+# Keep direct board event comparisons and tmux root bindings covered by the shared key table.
+import ast
+import inspect
+import panel_layout
+import panel_watch
+import panel_input
+import panel_navigation
+import panel_reader
+
+def event_keys(function):
+    found = set()
+    for node in ast.walk(ast.parse(inspect.getsource(function))):
+        if not isinstance(node, ast.Compare):
+            continue
+        left = node.left
+        if not (isinstance(left, ast.Name) and left.id == "kind" or
+                isinstance(left, ast.Subscript) and isinstance(left.value, ast.Name) and left.value.id == "event"):
+            continue
+        for operand in node.comparators:
+            values = operand.elts if isinstance(operand, (ast.Set, ast.Tuple, ast.List)) else [operand]
+            found.update(item.value for item in values if isinstance(item, ast.Constant) and isinstance(item.value, str))
+    return found - {"click", "eof", "repaint", "scroll"}
+
+board_keys = set().union(*(event_keys(function) for function in
+    (panel_watch.watch, panel_input.choose, panel_navigation.tab_event, panel_reader.picked)))
+table_keys = {row[0] for row in panel_layout.PANEL_KEYS}
+assert board_keys <= table_keys, board_keys - table_keys
+assert {key for key, command in panel.MAIN_KEYS} == {row[0] for row in panel_layout.PANEL_KEYS if "root" in row[2]}
+# Direction pairs and terminal copy/scroll gestures are display aliases for input events.
+aliases = {"vertical", "horizontal", "shift-drag", "wheel"}
+assert table_keys <= board_keys | aliases | set(dict(panel.MAIN_KEYS)) | {"left", "right"}, table_keys - board_keys - aliases - set(dict(panel.MAIN_KEYS)) - {"left", "right"}
+assert set(panel._MAIN_COMMANDS) == set(dict(panel.MAIN_KEYS))
+
 assert "F8" in dict((key, command) for key, command in panel.MAIN_KEYS)
 assert all(hint in panel.keys_help(())[1] for hint in ("F9 Chat/Board", "F8 Modes", "F5 Control", "? Keys", "m Modes", "i Headers")) and all(
     key not in panel.keys_help(("claude", "pi", "codex"))[1] for key in ("1 Claude", "2 Pi", "0 Codex"))

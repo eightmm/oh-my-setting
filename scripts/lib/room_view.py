@@ -4,6 +4,8 @@ import calendar
 import re
 import time
 
+from panel_layout import panel_hint
+
 from dashboard_projection import clean, count as valid_count, display_width, listing, mapping
 from panel_view import (_RenderReport, amount, token_amount, token_pair, _usage_label, call_tokens, ATTENTION_STATES, MODEL_NAMES, LIVE_STATES, TERMINAL_STATES, box_edge, box_row,
                         plan_tail_columns, format_tail_row, clipped, fixed_column, message_rows, main_occupied, menu_rows, status_alerts, worker_rows, wrapped,
@@ -2279,8 +2281,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     tabs = navigation.get("tab_strip_visible")
     selected = navigation.get("selected")
     kind = selected[0] if selected else "chat"
-    arrows, move = ("←→", "↑↓") if unicode else ("<>", "^v")
-    toggle = "F9 Chat⇄Board" if unicode else "F9 Chat<>Board"
+    toggle = panel_hint('f9_chat_board_unicode') if unicode else panel_hint('f9_chat_board_ascii')
     worktree = bool(member and kind == "result" and str(member.get("location") or "").startswith("worktree:"))
     cancel_owner = navigation.get("cancel_owner") or {}
     cancelable = bool(navigation.get("cancel_allowed", True) and member and kind == "result"
@@ -2289,22 +2290,22 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                       and member.get("parent") == cancel_owner.get("participant"))
     mail = bool(navigation.get("full_mail") and navigation.get("tab", "log") == "detail"
                 and navigation.get("tab_body_visible") and not navigation.get("detail"))
-    mail_hint = ("f Open right" if managed else "f Full text") if mail else ""
+    mail_hint = (panel_hint('f_open_right') if managed else panel_hint('f_full_text')) if mail else ""
     message_call = tabs and navigation.get("tab") == "messages" and navigation.get("message_has_call")
     if navigation.get("keys_help"):
-        keys = ["? Hide", "Esc Back", "F5 Control" if managed else "", "k Capacity", "u Refresh",
-                ("Enter Collapse" if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else "Enter Expand") if tabs and navigation.get("tab") == "messages" else
-                "Enter Open right" if managed and kind in {"result", "debate"} else "Enter Open",
-                move + " Move", "Space Fold", "a Ask advisor",
-                "w Worktree" if worktree else "", "c Cancel call" if cancelable else "",
-                mail_hint if mail else "f Open right" if message_call or managed and navigation.get("full_result") else
-                "f Full result" if navigation.get("full_result") else "",
-                "Tab Next tab" if tabs else "", "g Graph", "t Tree",
-                "n New main" if managed and not navigation.get("main_occupied") else "",
-                "s Swap main" if managed and navigation.get("main_occupied") else "",
-                "v " + ("Collapse" if navigation.get("expanded") else "Expand"), "b Attention",
-                "Shift-drag Copy" if managed else "", "m Modes" if managed else "",
-                toggle if managed else "q Quit", "F12 Keys" if managed else ""]
+        keys = [panel_hint('question_hide'), panel_hint('esc_back'), panel_hint('f5_control') if managed else "", panel_hint('k_capacity'), panel_hint('u_refresh'),
+                (panel_hint('enter_collapse') if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else panel_hint('enter_expand')) if tabs and navigation.get("tab") == "messages" else
+                panel_hint('enter_open_right') if managed and kind in {"result", "debate"} else panel_hint('enter_open'),
+                panel_hint('move', unicode), panel_hint('space_fold'), panel_hint('a_ask_advisor'),
+                panel_hint('w_worktree') if worktree else "", panel_hint('c_cancel_call') if cancelable else "",
+                mail_hint if mail else panel_hint('f_open_right') if message_call or managed and navigation.get("full_result") else
+                panel_hint('f_full_result') if navigation.get("full_result") else "",
+                panel_hint('tab_next_tab') if tabs else "", panel_hint('g_graph'), panel_hint('t_tree'),
+                panel_hint('n_new_main') if managed and not navigation.get("main_occupied") else "",
+                panel_hint('s_swap_main') if managed and navigation.get("main_occupied") else "",
+                panel_hint('v_collapse' if navigation.get('expanded') else 'v_expand'), panel_hint('b_attention'),
+                panel_hint('shift_drag_copy') if managed else "", panel_hint('m_modes') if managed else "",
+                toggle if managed else panel_hint('q_quit'), panel_hint('f12_keys') if managed else ""]
         lines = [""]
         for key in [k for k in keys if k]:
             key = clipped(key, width)
@@ -2318,37 +2319,37 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
     right = managed and (kind in {"result", "debate"} or navigation.get("preview") and
                         navigation["preview"].get("target", (None,))[0] in {"result", "debate"})
     expanded_message = navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") and navigation.get("messages_view", {}).get("open") is not None
-    contextual = (["Enter Collapse" if expanded_message else "Enter Expand", "f Open right", move + " Message", arrows + " Filter"] if tab == "messages" and navigation.get("message_has_call")
-                  else [move + " Message", "Enter Collapse" if expanded_message else "Enter Expand", arrows + " Filter"] if tab == "messages"
-                  else [move + " Seat", "Enter Open right" if managed else "Enter Open", arrows + " Target"] if tab == "debate" and not navigation.get("debate_empty")
-                  else ["Tab Next tab"] if tab == "debate"
-                  else [move + " Call", "Enter Finalize" if tab == "needs" and past_pick(navigation, "needs") in navigation.get("needs_finalize", {}) else
-                        "Enter Expand" if kind == "past-group" else "Enter Plan" if kind == "tab" else "Enter Detail",
-                        ("f Open right" if managed else "f Full result") if (tab == "past" and kind != "past-group") or kind in {"result", "debate"} else ""]
+    contextual = ([panel_hint('enter_collapse') if expanded_message else panel_hint('enter_expand'), panel_hint('f_open_right'), panel_hint('message', unicode), panel_hint('filter', unicode)] if tab == "messages" and navigation.get("message_has_call")
+                  else [panel_hint('message', unicode), panel_hint('enter_collapse') if expanded_message else panel_hint('enter_expand'), panel_hint('filter', unicode)] if tab == "messages"
+                  else [panel_hint('seat', unicode), panel_hint('enter_open_right') if managed else panel_hint('enter_open'), panel_hint('target', unicode)] if tab == "debate" and not navigation.get("debate_empty")
+                  else [panel_hint('tab_next_tab')] if tab == "debate"
+                  else [panel_hint('call', unicode), panel_hint('enter_finalize') if tab == "needs" and past_pick(navigation, "needs") in navigation.get("needs_finalize", {}) else
+                        panel_hint('enter_expand') if kind == "past-group" else panel_hint('enter_plan') if kind == "tab" else panel_hint('enter_detail'),
+                        (panel_hint('f_open_right') if managed else panel_hint('f_full_result')) if (tab == "past" and kind != "past-group") or kind in {"result", "debate"} else ""]
                   if tab in {"past", "needs"}
-                  else (["Enter Collapse" if navigation.get("plan_closed") else "Enter Expand"] if navigation.get("plan_pick") == ("plan-closed", "toggle") else []) +
-                       [move + " Task", "wheel Scroll", "Tab Next tab"] if tab == "plan" else None)
+                  else ([panel_hint('enter_collapse') if navigation.get("plan_closed") else panel_hint('enter_expand')] if navigation.get("plan_pick") == ("plan-closed", "toggle") else []) +
+                       [panel_hint('task', unicode), panel_hint('wheel_scroll'), panel_hint('tab_next_tab')] if tab == "plan" else None)
     if tab in {"past", "needs"} and tab + "_ids" in navigation and not navigation.get(tab + "_ids"):
-        contextual = ["Tab Next tab"]
+        contextual = [panel_hint('tab_next_tab')]
     if tab == "messages" and "message_ids" in navigation and not navigation.get("message_ids"):
-        contextual = [arrows + " Filter", "Tab Next tab"]
-    contextual = contextual or (["Esc Back to graph", "g Graph"] if navigation.get("group_tree") else []) + [
-                  "Enter Open right" if right else "",
-                  "f Open right" if managed and navigation.get("full_result") else "f Full result" if navigation.get("full_result") else "",
-                  "Esc Close" if navigation.get("detail") or navigation.get("preview") and
+        contextual = [panel_hint('filter', unicode), panel_hint('tab_next_tab')]
+    contextual = contextual or ([panel_hint('esc_back_to_graph'), panel_hint('g_graph')] if navigation.get("group_tree") else []) + [
+                  panel_hint('enter_open_right') if right else "",
+                  panel_hint('f_open_right') if managed and navigation.get("full_result") else panel_hint('f_full_result') if navigation.get("full_result") else "",
+                  panel_hint('esc_close') if navigation.get("detail") or navigation.get("preview") and
                   navigation.get("tab_body_visible", True) else "",
-                  "Enter Chat" if kind == "chat" else "Enter Fold" if kind == "group" else "" if right else "Enter Show",
-                  "a Ask advisor" if kind == "chat" else "w Worktree" if worktree else "",
-                  "Tab Next tab" if tabs and not navigation.get("detail") else "",
-                  "Space Fold" if kind == "group" or kind == "chat" and not graph else ""]
+                  panel_hint('enter_chat') if kind == "chat" else panel_hint('enter_fold') if kind == "group" else "" if right else panel_hint('enter_show'),
+                  panel_hint('a_ask_advisor') if kind == "chat" else panel_hint('w_worktree') if worktree else "",
+                  panel_hint('tab_next_tab') if tabs and not navigation.get("detail") else "",
+                  panel_hint('space_fold') if kind == "group" or kind == "chat" and not graph else ""]
     if navigation.get("cancel_pending"):
         contextual.insert(0, "Confirm in tmux prompt")
     elif cancelable:
-        contextual.insert(0, "c Cancel call")
+        contextual.insert(0, panel_hint('c_cancel_call'))
     if navigation.get("reader_open"):
-        contextual.insert(0, "Esc Close right")
+        contextual.insert(0, panel_hint('esc_close_right'))
     if not tabs:
-        contextual.append("v Expand")
+        contextual.append(panel_hint('v_expand'))
     contextual.sort(key=lambda hint: 0 if hint.startswith("Enter ") or hint.startswith("f ") or hint.startswith("Esc ") else 1)
     def pack(reserved):
         packed = []
@@ -2360,13 +2361,13 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
         return packed
 
     if managed:
-        keys = ["F12 Keys", "? Keys"] if width >= 64 else ["? Keys"]
-        if width >= 64 and (pack([toggle] + keys) != pack([toggle, "? Keys"]) or
-                            pack([toggle, "m Modes"] + keys) != pack([toggle, "m Modes", "? Keys"])):
-            keys = ["? Keys"]
-        base_reserved = ([toggle] if width >= 64 else ["F9"]) + keys
-        swap_reserved = ["F9 Swap"] + keys
-        mode_reserved = ([toggle, "m Modes"] if width >= 64 else ["F9 Swap", "m Modes"]) + keys
+        keys = [panel_hint('f12_keys'), panel_hint('question_keys')] if width >= 64 else [panel_hint('question_keys')]
+        if width >= 64 and (pack([toggle] + keys) != pack([toggle, panel_hint('question_keys')]) or
+                            pack([toggle, panel_hint('m_modes')] + keys) != pack([toggle, panel_hint('m_modes'), panel_hint('question_keys')])):
+            keys = [panel_hint('question_keys')]
+        base_reserved = ([toggle] if width >= 64 else [panel_hint('f9_swap').split()[0]]) + keys
+        swap_reserved = [panel_hint('f9_swap')] + keys
+        mode_reserved = ([toggle, panel_hint('m_modes')] if width >= 64 else [panel_hint('f9_swap'), panel_hint('m_modes')]) + keys
         reserved = base_reserved
         if width < 64 and pack(swap_reserved) == pack(base_reserved):
             reserved = swap_reserved
@@ -2375,7 +2376,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 and display_width("  ".join(mode_reserved)) <= width):
             reserved = mode_reserved
     else:
-        reserved = ["q Quit", "? Keys"]
+        reserved = [panel_hint('q_quit'), panel_hint('question_keys')]
     packed = pack(reserved)
     tail = "  ".join(reserved)
     return ["  ".join(packed + reserved)] if display_width(tail) <= width else [clipped(tail, width)]
