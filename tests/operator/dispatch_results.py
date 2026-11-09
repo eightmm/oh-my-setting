@@ -1301,31 +1301,32 @@ def run_continue(anchor, *flags):
     def enrolled(*args, **kwargs):
         seen_continue["work_repo"] = args[14]
         return 0
-    with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "0", "OMS_HARNESS_DELEGATE_DEPTH": "0"}), \
-         patch.object(panel, "continuation_defaults", return_value={"role": "builder", "scope": [],
-                      "workload": "routine", "verify": None, "purpose": "implement"}), \
-         patch.object(panel, "panel_repository", return_value=home_repo), \
-         patch.object(panel, "git_toplevel", return_value=home_repo), \
-         patch.object(panel, "work_repository", side_effect=lambda value: __import__("pathlib").Path(value).resolve()), \
-         patch.object(panel, "routed_command", return_value=[]), \
-         patch.object(panel, "child_environment", return_value={}), \
-         patch.object(dispatch.room, "resolve", return_value="room"), \
-         patch.object(panel, "routing_status", return_value={}), \
-         patch.object(panel, "resolve_call_alias", return_value="task"), \
-         patch.object(panel, "owning_attempt", return_value=["parent"]), \
-         patch.object(panel, "events", return_value=json.dumps([
-             {"attempt_id": "parent", "terminal": False, "refs": {"panel_room_participant": "owner"}},
-             {"attempt_id": "attempt", "parent_attempt_id": "parent", "task_id": "task", "provider": "codex",
-              "refs": {"panel_role": "worker", "panel_room_id": "room", "panel_room_participant": "member"}}])), \
-         patch.object(panel, "_dispatch_call_record", return_value={"schema": 2, "task_id": "task"}), \
-         patch.object(dispatch.dispatch_store, "read", return_value=anchor), \
-         patch.object(dispatch, "_require_assigned_route"), \
-         patch.object(panel, "results", return_value={"rows": []}), \
-         patch.object(panel, "run_dispatch", side_effect=enrolled), \
-         patch.object(panel, "selected_route", return_value={"provider": "codex", "model": "m", "effort": None,
-                                                              "workload": "routine", "kind": "worker", "role": "builder",
-                                                              "access": "write", "purpose": "implement"}), \
-         contextlib.redirect_stderr(io.StringIO()) as err:
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {"OMS_HARNESS_CHILD": "0", "OMS_HARNESS_DELEGATE_DEPTH": "0"}))
+        stack.enter_context(patch.object(panel, "continuation_defaults", return_value={"role": "builder", "scope": [],
+            "workload": "routine", "verify": None, "purpose": "implement"}))
+        stack.enter_context(patch.object(panel, "panel_repository", return_value=home_repo))
+        stack.enter_context(patch.object(panel, "git_toplevel", return_value=home_repo))
+        stack.enter_context(patch.object(panel, "work_repository", side_effect=lambda value: __import__("pathlib").Path(value).resolve()))
+        stack.enter_context(patch.object(panel, "routed_command", return_value=[]))
+        stack.enter_context(patch.object(panel, "child_environment", return_value={}))
+        stack.enter_context(patch.object(dispatch.room, "resolve", return_value="room"))
+        stack.enter_context(patch.object(panel, "routing_status", return_value={}))
+        stack.enter_context(patch.object(panel, "resolve_call_alias", return_value="task"))
+        stack.enter_context(patch.object(panel, "owning_attempt", return_value=["parent"]))
+        stack.enter_context(patch.object(panel, "events", return_value=json.dumps([
+            {"attempt_id": "parent", "terminal": False, "refs": {"panel_room_participant": "owner"}},
+            {"attempt_id": "attempt", "parent_attempt_id": "parent", "task_id": "task", "provider": "codex",
+            "refs": {"panel_role": "worker", "panel_room_id": "room", "panel_room_participant": "member"}}])))
+        stack.enter_context(patch.object(panel, "_dispatch_call_record", return_value={"schema": 2, "task_id": "task"}))
+        stack.enter_context(patch.object(dispatch.dispatch_store, "read", return_value=anchor))
+        stack.enter_context(patch.object(dispatch, "_require_assigned_route"))
+        stack.enter_context(patch.object(panel, "results", return_value={"rows": []}))
+        stack.enter_context(patch.object(panel, "run_dispatch", side_effect=enrolled))
+        stack.enter_context(patch.object(panel, "selected_route", return_value={"provider": "codex", "model": "m", "effort": None,
+            "workload": "routine", "kind": "worker", "role": "builder",
+            "access": "write", "purpose": "implement"}))
+        err = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
         try:
             status = panel.main(["--owner", "codex", "--continue", "task", "--brief-file", str(continue_brief), *flags])
         except (RuntimeError, ValueError) as error:

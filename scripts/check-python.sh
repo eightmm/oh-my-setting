@@ -203,6 +203,24 @@ def undefined_globals(tree, source, filename):
     return sorted(set((name, line) for name, line in problems if name not in allowed and
                       not (name.startswith('__') and name.endswith('__')))), None
 
+# Python 3.11, the floor, refuses more than 20 statically nested blocks per code
+# object; newer interpreters compile the same file, so count a lower bound here.
+def nested_blocks(node, depth=0):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                         ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        depth = 0
+    inner = {ast.For: 1, ast.AsyncFor: 1, ast.While: 1, ast.Try: 1}.get(type(node), 0)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        inner = len(node.items)
+    deepest = depth
+    for field, value in ast.iter_fields(node):
+        # A handler body sits under the handler and its cleanup block.
+        nested = depth + inner + (field == 'handlers') if field in ('body', 'handlers', 'finalbody') else depth
+        for child in value if isinstance(value, list) else [value]:
+            if isinstance(child, ast.AST):
+                deepest = max(deepest, nested, nested_blocks(child, nested))
+    return deepest
+
 failed = 0
 checked = 0
 seen = set()
@@ -224,6 +242,8 @@ for directory in sys.argv[1:]:
         try:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path), mode="exec", feature_version=11)
+            if nested_blocks(tree) > 20:
+                raise SyntaxError("more than 20 statically nested blocks (the Python 3.11 limit)")
             compile(source, str(path), "exec")
             problems, skip_reason = undefined_globals(tree, source, str(path))
             for name, line in problems:

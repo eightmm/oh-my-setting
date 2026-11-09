@@ -19606,6 +19606,13 @@ EOF
   fi
   contains "$out" "$del_file:3: undefined name absent_after_del" ||
     fail "del globals()['name'] must preserve undefined-name diagnostic: $out"
+  # Newer interpreters accept what the 3.11 floor refuses: 19 context managers
+  # around a try whose handler body is the 21st block.
+  python3 -c 'print("def deep():\n    with " + ", ".join(["open(0)"] * 19) + ":\n        try:\n            pass\n        except ValueError:\n            pass")' > "$del_file"
+  if out="$(bash "$ROOT/scripts/check-python.sh" "$del_file" 2>&1)"; then
+    fail "the syntax gate must refuse nesting past the Python 3.11 block limit"
+  fi
+  contains "$out" "more than 20 statically nested blocks" || fail "nesting diagnostic missing: $out"
 
   isolated_checker="$isolated_repo/scripts/check-python.sh"
   isolated_operator="$isolated_repo/tests/operator/fixture.py"
