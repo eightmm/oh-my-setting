@@ -67,12 +67,22 @@ def _bounded(value, limit):
     return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", value)).strip()[:limit]
 
 
+# The same two transient phrases the provider-error scanner treats as agy's own stream failure.
+AGY_STREAM_CUT = re.compile(r"stream was interrupted|stream idle timeout", re.I)
+AGY_TOKEN_LIMIT = re.compile(r"output token limit|max_tokens", re.I)
+
+
 def agy_turn_error(doc):
-    error = _bounded(doc.get("error"), 240)
+    # The cause is read from the whole error field (the envelope is already bounded to 1 MiB); only the
+    # displayed copy is cut, so a long message cannot lose its cause to the display limit.
+    cause = _bounded(doc.get("error"), 1048576)
+    error = cause[:240]
     if doc.get("status") != "ERROR" and not error:
         return None
     finished = re.sub(r"[^A-Za-z0-9_.-]", "", _bounded(doc.get("finished_reason"), 40)) or "error"
-    reason = "max_tokens" if re.search(r"output token limit|max_tokens", error, re.I) else "stream_truncated"
+    # Only a recognised cause is named; any other error stays a failed turn rather than a stream cut.
+    reason = ("max_tokens" if AGY_TOKEN_LIMIT.search(cause) else
+              "stream_truncated" if AGY_STREAM_CUT.search(cause) else "turn_failed")
     message = "antigravity turn ended with status=%s finished_reason=%s error=%s" % (
         _bounded(doc.get("status"), 20) or "unknown", finished, error or "none")
     stop = "stop-reason: provider=antigravity reason=%s subtype=%s is_error=1" % (reason, finished)

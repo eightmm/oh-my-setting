@@ -6341,6 +6341,9 @@ case "$AGY_MODE" in
   err_idle) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"API error (attempt 1): request failed: stream idle timeout (5m0s): context deadline exceeded","usage":{}}' ;;
   err_tokens) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"cut","error":"Your previous response was cut off because it exceeded the output token limit","usage":{}}' ;;
   err_unknown) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"something else broke","usage":{}}' ;;
+  err_auth) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"authentication failed","usage":{}}' ;;
+  err_quoted) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"The log said: The stream was interrupted. It also hit the output token limit.","error":"something else broke","usage":{}}' ;;
+  err_long) python3 -c 'import json; print(json.dumps({"conversation_id": "id1", "status": "ERROR", "finished_reason": "error", "response": "cut", "error": "x" * 241 + " exceeded the output token limit", "usage": {}}, separators=(",", ":")))' ;;
   zero) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"zero usage","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0}}' ;;
   *) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"Answer: hello\n","usage":{"input_tokens":7,"output_tokens":3,"thinking_tokens":2,"cache_read_tokens":4,"total_tokens":12}}' ;;
 esac
@@ -6410,7 +6413,7 @@ SH
           ! grep -Fq 'earlier answer' "$project/output" || exit 22 ;;
       esac
     done
-    for mode in err_interrupted err_idle err_tokens err_unknown; do
+    for mode in err_interrupted err_idle err_tokens err_unknown err_auth err_quoted err_long; do
       export AGY_MODE="$mode"
       if ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
           provider-default '' test '' ''; then exit 50; fi
@@ -6422,10 +6425,14 @@ SH
         err_interrupted|err_idle)
           grep -Fxq 'stop-reason: provider=antigravity reason=stream_truncated subtype=error is_error=1' "$project/output" || exit 55
           [ "$OMS_PROVIDER_ERROR_CLASSIFICATION" = provider_down ] || exit 56 ;;
-        err_tokens)
+        # The cause is classified before the displayed error is cut to 240 characters.
+        err_tokens|err_long)
           grep -Fxq 'stop-reason: provider=antigravity reason=max_tokens subtype=error is_error=1' "$project/output" || exit 57
           [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 58 ;;
-        err_unknown) [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 59 ;;
+        # An unrecognised cause is a failed turn, not a stream cut; phrases quoted in the response do not count.
+        err_unknown|err_auth|err_quoted)
+          grep -Fxq 'stop-reason: provider=antigravity reason=turn_failed subtype=error is_error=1' "$project/output" || exit 60
+          [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 59 ;;
       esac
     done
     for mode in plain empty malformed failed invalid_utf8 oversized banner_error; do
