@@ -24,6 +24,8 @@ def child_action_is_read_only(args: argparse.Namespace) -> bool:
         return True
     if command == "failure":
         return getattr(args, "failure_action", None) in ("classify", "catalog")
+    if command == "context-inspect":
+        return True
     if command == "context":
         return False
     if command == "profile":
