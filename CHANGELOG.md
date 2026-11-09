@@ -8,6 +8,27 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- Write dispatches refuse a scope that overlaps a joined main's declaration or
+  a call's joined write declaration until the controller records that call's
+  structured result or its parent reads the call's result handoff; there is no
+  override. Liveness is read from joined state only, so a superseded main that
+  never left keeps its scopes (an over-lock). A finished write call's id is
+  single-use across the room lineage, and the refusal prints the exact
+  `oms room scope --repo PATH --id ROOM --participant ID --clear` recovery.
+- A failing automatic review launches one rework continuation from durable
+  facts: the reviewer's recorded reservation, the writer's recorded delivery,
+  and the reworked attempt still being the newest of its task. A newer manual
+  continuation makes it refuse with a recorded reason.
+- `OMS_TICK_WAKE=1` lets the hourly tick prompt an idle panel main that has
+  ready plan work or a waiting autopilot proposal. With no live panel main, it
+  instead resumes the approved autopilot contract headlessly through the
+  receipt's own `oms autopilot run --proposal FILE --expected-proposal-sha256
+  SHA` continuation, once per run. It never creates a proposal, overrides a
+  park or starts an interactive main. Wakes and resumes share 6 per UTC day.
+- An idle main with no ready plan work runs discovery bound to the current
+  plan, and artifact index rows carry their task and review round.
+- Every `oms patch-land` rejection names its next step in the failure ledger.
+
 - A reviewed worker patch landed inside a batch commit finalizes `--outcome
   accepted --landed-commit SHA` and closes its plan task when the landed range
   contains a commit that applies that exact patch, the landed tree still holds
@@ -114,9 +135,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
-- One WIP limit of four per main (live write workers plus results awaiting
+- One WIP limit of six per main (live write workers plus results awaiting
   decision) refuses new write dispatches and drives the panel warning, replacing
   the review backlog threshold of eight; it is an advisory snapshot check.
+  Verifies admitted through the shared slot pool run under `nice -n 10`.
+- Planning councils (`plan-from-spec`) use the panel's three-family seat policy
+  and run by default under gate review.
+- Every Git worktree registry add, remove and prune takes the worker guard's
+  registry lock, so a guard scan never sees a half-written registry.
+- CI runs the native macOS leg only for core lifecycle portability changes
+  (install, update, uninstall, link, doctor, Python runtime, platform, install
+  and lock libraries, workflows) and on weekly and manual runs. The affected
+  plan's new `python` output keeps the Python 3.11 lane for every changed
+  Python file.
 - Re-reviews receive the prior findings of every failing seat from the latest
   failing automatic review of the task, including reviews from predecessor
   rooms and reviews whose gate verify failed, within the 3000-byte bound.
@@ -197,6 +228,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   WSL2; an override cannot hide the real host identity. The Windows CI job is
   removed, and `oms-windows-final` tags the last release with native Windows
   support for uninstalling existing installs.
+- The installer, platform shell and remaining scripts drop their last native
+  Windows code paths, and environment knobs with no setter, docs or tests are
+  removed with their defaults kept.
 - The remaining native Windows branches are gone from the durable writers,
   locks, liveness and deletion paths, the plan, state and check paths, and the
   workflow, panel and peer commands, with their Windows-only tests and the CI

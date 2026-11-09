@@ -45,9 +45,11 @@
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
 - CI scopes PRs and main pushes alike. Full selections keep Linux lint, focused,
-  smoke and copy lifecycle coverage. Install/lifecycle/portability/Python
-  compatibility changes and weekly/manual runs cover native macOS lifecycle
-  with Homebrew Bash 5 and BSD userland fixtures, plus Python 3.11 compatibility.
+  smoke and copy lifecycle coverage. Core lifecycle changes (install, update,
+  uninstall, link, doctor, Python runtime, platform/install/lock libraries,
+  workflows) and weekly/manual runs cover native macOS lifecycle with Homebrew
+  Bash 5 and BSD userland fixtures; every changed Python file and every full
+  selection run Python 3.11 compatibility.
   Only plan-authorized skips pass the stable
   gate. CI remains authoritative. Smoke shards and focused lanes balance by
   measured cost (`# smoke-weight:` lines, focused registration order); refresh
