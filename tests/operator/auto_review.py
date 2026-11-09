@@ -1583,6 +1583,9 @@ for compact_size in (0, 1, 300, 4000, 4001):
     assert ("[Summary truncated.]" in compact_body) == (compact_size >= 4000)
 # END compact completion notice
 # BEGIN provider-error-review
+for reason in ("", None, 0, "worker_authority_violation", "unknown"):
+    assert panel_review_impl._judgment_type(reason) == "authority"
+assert panel_review_impl._judgment_type("second_blocking_review") == "design"
 room_owner = "provider-owner"
 room_env = dict(environment, OMS_ROOM_REPO=str(project), OMS_ROOM_PARTICIPANT=room_owner)
 provider_room = room.create(project, "provider-error-review", "Provider failure fixtures")
@@ -1618,6 +1621,10 @@ for label, verify_exit, guard, access, patch_present, verifier, expected in (
         assert "worker exited nonzero" in prompt and "provider reported failure" in prompt and "patch may be partial" in prompt
     handoff = next(m for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)
     assert "Call exit=1" in handoff["text"] and "status ERROR; stream idle timeout" in handoff["text"]
+    assert "needs judgment (authority):" in handoff["text"]
+    assert handoff["text"].endswith("Ask the user before acting; this is outside delegated authority or ambiguous.")
+    if guard:
+        assert "worker guard stopped the call" in handoff["text"]
 for label, exit_code, reason, missing, possible in (
         ("missing-repo", 1, None, True, False),
         ("possible-launch", 1, None, False, True),
@@ -1651,6 +1658,17 @@ for label, exit_code, reason, missing, possible in (
         messages = room.status(project, provider_room)["messages"]
         assert any("manual review is needed" in m["text"] for m in messages if m.get("sender") == member)
         assert panel.dispatch_store.read(project, panel._settlement_claim_path(member))["steps"]["auto_review"] is True
+member = "call-" + hashlib.sha256(b"judgment-truncation").hexdigest()[:16]
+room.join(project, provider_room, member, "antigravity", "worker", parent=room_owner)
+panel._prepare_dispatch_call(project, provider_room, member, room_owner)
+with patch.object(panel, "_call_result_event", return_value=({"role": "worker", "access": "read"}, {})), \
+        patch.object(panel, "results", return_value={"rows": [{"calls": [{"answer": "x" * 5000}]}]}), \
+        patch.dict(os.environ, provider_env, clear=True):
+    panel.deliver_result(project, provider_room, member, room_owner, "provider-task", 1)
+truncated = next(m["text"] for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)
+assert "needs judgment (authority):" in truncated and "[Notice truncated.]" in truncated
+assert truncated.endswith("Ask the user before acting; this is outside delegated authority or ambiguous.")
+assert len(truncated.encode("utf-8")) <= 4000
 member = "call-" + hashlib.sha256(b"independent-refusal").hexdigest()[:16]
 room.join(project, provider_room, member, "codex", "worker", parent=room_owner)
 panel._prepare_dispatch_call(project, provider_room, member, room_owner, "true", project)
@@ -1989,7 +2007,8 @@ with patch.dict(os.environ, rework_env, clear=True), \
     rework_active = second = rework_fixture("second", task=first["task"])
     assert rework_run(second) == 0
     judgment = next(m for m in room.status(project, rework_room)["messages"] if m["id"] == "result-" + second["reviewer"])
-    assert "automatic rework was already used" in judgment["text"] and "The owner decides" in judgment["text"]
+    assert "automatic rework was already used" in judgment["text"] and "needs judgment (design):" in judgment["text"]
+    assert judgment["text"].endswith("Decide it as a design question with oms panel --council over the review findings, record consensus and dissent, then implement.")
     assert len(rework_launched) == after_round_two
 
     for label, gate_exit, findings, provider_exit, review_status in (("no-findings", 0, False, 0, 1),

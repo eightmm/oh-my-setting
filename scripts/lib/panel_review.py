@@ -412,6 +412,17 @@ def _prior_gate_findings(repo, room_id, task_id):
     return ""
 
 
+def _judgment_type(reason):
+    return {"second_blocking_review": "design"}.get(reason, "authority")
+
+
+def _judgment_guidance(kind):
+    if kind == "design":
+        return ("Decide it as a design question with oms panel --council over the review findings, "
+                "record consensus and dissent, then implement.")
+    return "Ask the user before acting; this is outside delegated authority or ambiguous."
+
+
 def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, rework=None):
     """Draft verified findings and reserve controller rework without launching it."""
     from terminal_panel import MAX_PROMPT, WRITERS, _dispatch_call_record, _read, _rework_history
@@ -472,9 +483,11 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, 
     if rework_used or review_round >= 2:
         reason = ("automatic rework was already used" if rework_used else
                   "the second consecutive blocking review; automatic fix drafts stop here")
-        return ("Review gate failed (GATE: fail) for task %s (review round %d): %s. "
-                "The owner decides: narrow the brief and dispatch fresh, fix directly, or finalize rejected."
-                % (task_id, review_round, reason))
+        return ("Task %s needs judgment (%s): Review gate failed (GATE: fail) "
+                "(review round %d): %s. The owner decides: narrow the brief and dispatch fresh, "
+                "fix directly, or finalize rejected. %s"
+                % (task_id, _judgment_type("second_blocking_review"), review_round, reason,
+                   _judgment_guidance("design")))
     finding_text = "\n\n".join(findings)
     roots = {str(repo), str(anchor.get("execution_repo") or repo)}
     candidate = outcome.get("candidate") if isinstance(outcome, dict) else None
@@ -1039,17 +1052,9 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim,
                              "from the answer artifact in the continuation brief; they are not transferred automatically)."
                              % (shlex.quote(dispatch_role), shlex.quote(task_id), purpose_option, verify_option,
                                 evidence_pointer, results_pointer))
-        judgment = "Task %s needs judgment: %s (exit %s).%s" % (task_id, reason, status, recovery)
-        if len(judgment.encode("utf-8")) > 4000:
-            marker = " [Notice truncated.]"
-            base = "Task %s needs judgment: %s (exit %s)." % (task_id, reason, status)
-            base_bytes = base.encode("utf-8")
-            if len(base_bytes) + len(marker.encode("utf-8")) >= 4000:
-                judgment = base_bytes[:4000 - len(marker.encode("utf-8"))].decode("utf-8", "ignore") + marker
-            else:
-                hint_budget = 4000 - len(base_bytes) - len(marker.encode("utf-8"))
-                hint = recovery.encode("utf-8")[:hint_budget].decode("utf-8", "ignore")
-                judgment = base + hint + marker
+        kind = _judgment_type(reason)
+        judgment = "Task %s needs judgment (%s): %s (exit %s).%s %s" % (
+            task_id, kind, reason, status, recovery, _judgment_guidance(kind))
         judgment_notice(judgment)
     worker_reviewable = status == 0
     if status not in (0, 124, 129, 130, 143) and result_event and type(result_event.get("verify_exit")) is int and result_event["verify_exit"] == 0:
@@ -1231,9 +1236,17 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim,
         full = (" Full answer: " + artifact + "." if _safe_patch_path(artifact)
                 and artifact.startswith(".oms/artifacts/") and len(artifact.encode("utf-8")) <= 1000 else "")
         pointer = judge_suffix + " Read findings: oms panel --results --task-id " + task_id + " --participant " + member + "." + full
+        guidance = ""
+        for kind in ("authority", "design"):
+            ending = _judgment_guidance(kind)
+            if review_notice.endswith(ending):
+                review_notice = review_notice[:-len(ending)].rstrip()
+                guidance = " " + ending
+                break
         review_notice = prefix.strip() + " " + verification + review_notice
         if not answer_artifact:
             review_notice += " " + str(summary)
+        pointer += guidance
         message = review_notice + pointer
         if len(message.encode("utf-8")) > 4000:
             pointer = " [Notice truncated.]" + pointer

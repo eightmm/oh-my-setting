@@ -273,7 +273,10 @@ posts the task, review artifact and fix brief to the owner. The reservation is d
 on the writer attempt (`panel_auto_rework` names the reviewer run) across the task's
 main lineage; replay cannot launch it again. A controller exit after reservation may
 lose the launch; the fix-brief notice remains for owner recovery. A second blocking
-review needs owner judgment and states that automatic rework was already used.
+review needs design judgment: the main runs `oms panel --council` over the findings,
+records consensus and dissent, then decides whether to dispatch a narrowed brief, fix
+directly, or finalize rejected, and implements the decision. Worker failures and guard
+stops require authority judgment and asking the user before acting.
 Continuation retains the task's WIP slot. A refused or failed continuation is reported
 and leaves the manual notice available. It runs in the writer's recorded execution
 repository; room state stays in the state repository, and the fix brief is passed by
