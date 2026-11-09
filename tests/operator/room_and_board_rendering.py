@@ -4262,7 +4262,7 @@ for pending_tasks in ({"admission-task"}, {"admission-task", "earlier-task"}):
     assert watched["awaiting_admission"] == ["admission-worker"] + ["earlier-worker"] * kept, watched
     assert ("earlier-worker" in {m["participant"] for m in graph_text.nodes(fresh)}) is kept
     import review_backlog
-    assert watched["review_backlog"] == review_backlog.project(fresh) == {"threshold": 4, "counts": {
+    assert watched["review_backlog"] == review_backlog.project(fresh) == {"threshold": 6, "counts": {
         "admission-main": 1 + kept}, "running": {}}, watched["review_backlog"]
 # A board view reuses the projection only while every key it reads is the same object; a new decision projects again.
 from panel_cache import TickReads

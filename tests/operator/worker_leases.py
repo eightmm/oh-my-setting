@@ -75,7 +75,7 @@ def exercise_observed_worker_leases():
             brief, "git diff --check", argv_binding.task_id, False, "Capacity call",
             fixture_selected_route("claude", "worker", "light", "write", "implement"), None, None, scopes)
         state = {"messages": [{}] * (room.MAX_MESSAGES - 1 if scenario in {"full", "full-write"} else 1),
-                 "closed": scenario == "closed", "participants": [{
+                 "closed": scenario == "closed", "call_results": {}, "participants": [{
                      "participant": argv_binding.owner_participant, "role": "main",
                      "provider": "claude", "joined": True}]}
         if scenario in {"calls-full", "calls-stuck"}:
