@@ -202,6 +202,11 @@ def passive_click(event, navigation):
 def choose(event, navigation):
     """Use only the last rendered hit map, never row numbers from a new snapshot."""
     kind = event[0]
+    if kind in ("up", "down", "left", "right", "home", "end", "pageup", "pagedown", "scroll", "click"):
+        navigation.pop("selection_moved", None)
+    elif kind == "enter" and navigation.pop("selection_moved", False):
+        navigation["notice"] = "Selection changed; press Enter again"
+        return None
     items = navigation.get("items", [])
     selected = navigation.get("selected")
     inbox_rows = navigation.get("row_ids", []) if navigation.get("surface") == "inbox" else []

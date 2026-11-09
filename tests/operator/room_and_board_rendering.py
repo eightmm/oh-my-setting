@@ -5843,6 +5843,64 @@ assert [h["action"] for h in nav["hits"]] == [("result", "w2"), ("result", "w1")
 assert nav["items"][0] == ("result", "w2") and nav["selected"] == ("result", "w2")
 choose(("down",), nav)
 assert nav["selected"] == nav["items"][1]
+# A refresh may reorder the inbox, but Enter must keep the selected destination.
+refresh_nav = {}
+render(inbox_room, "codex", 100, 28, menu=True, navigation=refresh_nav)
+choose(("down",), refresh_nav)
+assert refresh_nav["selected"] == ("result", "w1")
+refreshed_room = deepcopy(inbox_room)
+refreshed_room["attempts"]["active_recent"][1]["updated_at"] = "2026-10-07T00:03:00Z"
+refreshed_room["room"]["participants"].append(dict(refreshed_room["room"]["participants"][2], participant="w4"))
+refreshed_room["attempts"]["active_recent"].append(dict(refreshed_room["attempts"]["active_recent"][2],
+    attempt_id="a5", updated_at="2026-10-07T00:04:00Z", panel=dict(
+        refreshed_room["attempts"]["active_recent"][2]["panel"], room_participant="w4")))
+render(refreshed_room, "codex", 100, 28, menu=True, navigation=refresh_nav)
+assert refresh_nav["items"][:3] == [("result", "w4"), ("result", "w1"), ("result", "w2")], refresh_nav
+assert choose(("enter",), refresh_nav) == ("result", "w1"), refresh_nav
+# If the selected call disappears, Enter must not open the replacement row.
+refreshed_room["room"]["participants"] = [p for p in refreshed_room["room"]["participants"] if p["participant"] != "w1"]
+refreshed_room["attempts"]["active_recent"] = [a for a in refreshed_room["attempts"]["active_recent"] if a["attempt_id"] != "a2"]
+render(refreshed_room, "codex", 100, 28, menu=True, navigation=refresh_nav)
+assert refresh_nav["selected"] == ("result", "w2"), refresh_nav
+assert choose(("enter",), refresh_nav) is None, refresh_nav
+assert "Selection changed" in refresh_nav.get("notice", ""), refresh_nav
+assert "Selection changed" in render(refreshed_room, "codex", 100, 28, menu=True, navigation=refresh_nav)
+assert choose(("enter",), refresh_nav) == ("result", "w2"), refresh_nav
+for key in (("up",), ("down",), ("home",), ("end",), ("pageup",), ("pagedown",), ("scroll", 1, 1, 1)):
+    moved_nav = {}
+    render(inbox_room, "codex", 100, 28, menu=True, navigation=moved_nav)
+    choose(("down",), moved_nav)
+    render(refreshed_room, "codex", 100, 28, menu=True, navigation=moved_nav)
+    choose(key, moved_nav)
+    assert choose(("enter",), moved_nav) == moved_nav["selected"], (key, moved_nav)
+click_nav = {}
+render(inbox_room, "codex", 100, 28, menu=True, navigation=click_nav)
+choose(("down",), click_nav)
+render(refreshed_room, "codex", 100, 28, menu=True, navigation=click_nav)
+hit = click_nav["hits"][0]
+assert choose(("click", hit["x1"], hit["y"]), click_nav) == hit["action"]
+assert choose(("enter",), click_nav) == hit["action"]
+# An empty refresh and a disappearing last row also keep the acknowledgement safe.
+edge_nav = {}
+render(inbox_room, "codex", 100, 28, menu=True, navigation=edge_nav)
+choose(("end",), edge_nav)
+render(refreshed_room, "codex", 100, 28, menu=True, navigation=edge_nav)
+empty_refresh = deepcopy(refreshed_room)
+empty_refresh["room"]["participants"] = []
+empty_refresh["room"]["messages"] = []
+empty_refresh["attempts"]["active_recent"] = []
+empty_refresh["awaiting_admission"] = []
+render(empty_refresh, "codex", 100, 28, menu=True, navigation=edge_nav)
+assert not edge_nav["items"] and choose(("enter",), edge_nav) is None
+assert "Selection changed" in edge_nav.get("notice", "")
+clamp_nav = {}
+render(inbox_room, "codex", 100, 28, menu=True, navigation=clamp_nav)
+choose(("end",), clamp_nav)
+without_mail = deepcopy(inbox_room)
+without_mail["room"]["messages"] = []
+render(without_mail, "codex", 100, 28, menu=True, navigation=clamp_nav)
+assert clamp_nav["selected"] == clamp_nav["items"][-1]
+assert choose(("enter",), clamp_nav) is None and choose(("enter",), clamp_nav) == clamp_nav["selected"]
 # Two newer broadcasts to the same main remain separate rows and keyboard choices.
 duplicate_room = deepcopy(inbox_room)
 duplicate_room["room"]["participants"] = duplicate_room["room"]["participants"][:2]

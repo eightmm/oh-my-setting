@@ -1219,6 +1219,12 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         row_ids.append((key, occurrence))
     selected = navigation.get("selected")
     selected_row = navigation.get("selected_row")
+    old_rows = navigation.get("row_ids", [])
+    if selected_row is not None and selected_row in old_rows and selected_row not in row_ids:
+        old_index = old_rows.index(selected_row)
+        selected_row = row_ids[min(old_index, len(row_ids) - 1)] if row_ids else None
+        selected = shown[row_ids.index(selected_row)]["action"] if selected_row else None
+        navigation["selection_moved"] = True
     if selected_row not in row_ids or selected != shown[row_ids.index(selected_row)]["action"]:
         selected_row = next((row_ids[n] for n, item in enumerate(shown) if item["action"] == selected),
                             row_ids[0] if shown else None)
@@ -1285,7 +1291,7 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     # Nothing from the prior room remains selectable or clickable.
     for key in ("selected", "primary", "preview", "surface", "bands", "band_offsets", "box",
                 "full_result", "graph_selected", "main_attempt", "body_rows", "preview_signature", "geometry",
-                "selected_row", "row_ids", "detail"):
+                "selected_row", "row_ids", "selection_moved", "detail"):
         navigation.pop(key, None)
     navigation.update(hits=[], items=[], positions={}, offset=0, viewport=0)
     budget = height - int(menu)

@@ -811,8 +811,9 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                     os.environ.get("TMUX_PANE", ""), name, value),
                                     check=False, timeout=2, stdin=subprocess.DEVNULL)
                         else:
+                            refused_selection = event[0] == "enter" and navigation.get("selection_moved")
                             action = choose(("down",) if event[0] == "tab" and not navigation.get("tab_strip_visible", False) else event, navigation)
-                            shown = None if action else panel_reader.picked(event, navigation)
+                            shown = None if action or refused_selection else panel_reader.picked(event, navigation)
                             if shown:
                                 # A click or Enter previews in the board; the call's full content opens on the right.
                                 close_call() if shown[0] == "chat" else open_call(shown)
