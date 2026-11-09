@@ -29592,10 +29592,11 @@ assert len(notice) == 1 and notice[0]["matcher"] == "permission_prompt|elicitati
 assert "telemetry-hook.sh" in notice[0]["hooks"][0]["command"] and notice[0]["hooks"][0]["timeout"] == 5, notice
 assert sum(
     len(entry["hooks"]) for entries in d["hooks"].values() for entry in entries
-) == 12 + 1, d["hooks"]  # the twelve OMS registrations plus the user router
+) == 13 + 1, d["hooks"]  # the thirteen OMS registrations plus the user router
 pre = d["hooks"]["PreToolUse"]
-assert len(pre) == 1 and pre[0]["matcher"] == "Bash", pre
+assert len(pre) == 2 and all(row["matcher"] == "Bash" for row in pre), pre
 assert "git-move-guard-hook.sh" in pre[0]["hooks"][0]["command"] and pre[0]["hooks"][0]["timeout"] == 5, pre
+assert "command-guard-hook.sh" in pre[1]["hooks"][0]["command"] and pre[1]["hooks"][0]["timeout"] == 5, pre
 assert not any(
     "telemetry-hook.sh" in h.get("command", "")
     for entry in d["hooks"].get("PostToolUse", []) for h in entry.get("hooks", [])
@@ -43252,6 +43253,7 @@ agent-ml-context
 check
 check-python
 detect-project-style
+command-guard-hook
 fail-ledger-hook
 git-move-guard-hook
 generate-slurm-reference

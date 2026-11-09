@@ -1820,6 +1820,34 @@ Model routing stays explicit in
 delegate/run commands; direct edits do not pay for a separate policy hook.
 
 
+#### Destructive command guard
+
+A PreToolUse hook on Bash refuses a short list of commands that destroy work
+or a machine in one step, prints the reason and names the safer spelling:
+
+- `rm -rf` of `/`, the home directory, `.`, `..`, the checkout's top level or
+  its `.git`;
+- `git reset --hard`, `git clean -fd`/`-x`, a bare `git push --force`/`-f`
+  (`--force-with-lease` passes), `git stash drop`/`clear`, and
+  `git checkout -- .`/`git restore .` at the top level;
+- `mkfs*`, `dd of=/dev/...`, and `curl`/`wget` piped into a shell.
+
+It is a seatbelt against accidents, not a sandbox. It reads the command text
+only and fails open: a payload it cannot parse, a command spelled through a
+variable, `eval`, a subshell or a script file all pass, and what a script does
+once it runs (`oms` included) is never judged. An OMS worker in its own
+worktree skips the git rules and keeps the others.
+
+Coverage is Claude Code only. The Codex plugin registers no pre-tool hook and
+the Antigravity plugin carries only certified lifecycle hooks (prompt and
+Stop), so their behaviour is unchanged.
+
+The switch belongs to the person, not the command: `OMS_COMMAND_GUARD=0` in the
+environment the session was started from turns the guard off, while the same
+text typed inside a command does nothing because the provider starts the hook.
+A person who means a refused command can also run it in their own shell.
+
+
 #### Hook ownership and audits
 
 Reinstalling converges each OMS hook's
