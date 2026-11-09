@@ -2318,6 +2318,23 @@ standalone `--watch` rings itself on a terminal. The bell carries no text: tmux 
 the window and applies your own `bell-action`, `monitor-bell` and `visual-bell`
 settings. It is off by default.
 
+Set `OMS_PANEL_ATTENTION_CMD` to a command line to run your own notifier on the same
+events, with the same seeding and the same one-board rule. The command is split into
+arguments and run without a shell, detached from the board's terminal and stopped
+after 10 seconds; an event that arrives while the previous notifier still runs is
+skipped, and a failing notifier never affects the board. It receives one JSON line
+on standard input:
+
+```json
+{"schema": 1, "kind": "oms-panel-attention", "repo": "my-project", "new": {"needs": 1},
+ "waiting": {"needs": 1, "failed": 2, "decide": 1}, "ids": ["3f2a9c0d5b7e1a46"], "ts": "2026-11-10T03:04:05Z"}
+```
+
+`new` and `waiting` count items by attention class, `ids` are hashes of the new items
+and `repo` is the repository directory name. The payload never carries a label,
+prompt, command, path or message text; whatever the notifier sends onward, such as a
+desktop or phone notification, is its own choice. OMS itself opens no connection.
+
 ### Reader-facing status labels
 
 Board text is written for
