@@ -997,7 +997,9 @@ def _write_candidates(repo, workers, admissions, attempts, owner, main_id=None, 
                 if anchor not in lineages:
                     main = next((a for a in attempts if a.get('attempt_id') == anchor), {})
                     try:
-                        lineages[anchor] = (_participant_parents(attempts, main)
+                        # Superseding a failed worker needs its main proven gone (host probes); another
+                        # provider's main joins only as a room-recorded swap anchor.
+                        lineages[anchor] = (_participant_parents(attempts, main, repo=repo)
                                             if main.get('provider') == owner else set())
                     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                         lineages[anchor] = set()
@@ -1053,14 +1055,18 @@ def _finalize_owns_task(repo, owner, task_id, main_id, attempts, binding):
         except (OSError, TypeError, ValueError, AttributeError) as error:
             raise ValueError('finalize task %s is not owned by the calling main: %s'
                              % (task_id, error)) from error
-        return
+    _descends_from_main(repo, owner, task_id, main_id, attempts)
+
+
+def _descends_from_main(repo, owner, task_id, main_id, attempts):
+    """Every attempt of the task descends from the calling main or its proven lineage, including swaps."""
     task_attempts = [a for a in attempts if a.get('task_id') == task_id]
     if not task_attempts:
         return
     from panel_state import lineage_ids_from_rows
     # The snapshot validates this main; continuation evidence is needed for earlier parents.
     eligible = {main_id}
-    eligible.update(lineage_ids_from_rows(attempts, owner, os.environ.get('OMS_ROOM_PARTICIPANT'), main_id))
+    eligible.update(lineage_ids_from_rows(attempts, owner, os.environ.get('OMS_ROOM_PARTICIPANT'), main_id, repo))
     by_id = {a.get('attempt_id'): a for a in attempts}
     for attempt in task_attempts:
         ident, seen = attempt.get('attempt_id'), set()
@@ -1215,6 +1221,18 @@ def _plan_command(execution, *args, panel_accept=None):
     return result.stdout
 
 
+def _swap_lineage(repo, attempts, main_id):
+    """Attempts of the calling main and its participant's mains released by a room-recorded swap."""
+    from panel_state import swap_lineage
+    return swap_lineage(repo, attempts, os.environ.get('OMS_ROOM_PARTICIPANT'), main_id)
+
+
+def _owns_worker(repo, attempts, worker, main_id):
+    parent = worker.get('parent_attempt_id')
+    return bool(parent) and (parent == main_id
+                             or parent in {a['attempt_id'] for a in _swap_lineage(repo, attempts, main_id)})
+
+
 def _owned_task(repo, execution, owner, task_id):
     from panel_state import active_mains
     from panel_dispatch import PlanBinding
@@ -1238,8 +1256,16 @@ def _owned_task(repo, execution, owner, task_id):
         raise ValueError('plan task is unavailable')
     # The CLI projection adds elapsed claim age, which cannot fence mutations.
     task = dict(stored, plan_id=plan.get('plan_id'))
+    providers = {owner}
+    if task.get('provider') != owner:
+        # A swapped main inherits the claim its predecessors made under their own provider.
+        try:
+            providers.update(a.get('provider') for a in _swap_lineage(repo, _query(repo, 'agent-events', 'list'),
+                                                                        main_id))
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+            pass
     if (task.get('id') != task_id or task.get('claimed_by_participant') != caller
-            or task.get('provider') != owner or not re.fullmatch(r'lease_[0-9a-f]{32}', task.get('lease_id', ''))
+            or task.get('provider') not in providers or not re.fullmatch(r'lease_[0-9a-f]{32}', task.get('lease_id', ''))
             or not re.fullmatch(r'plan_[0-9a-f]{32}', task.get('plan_id', ''))):
         raise ValueError('plan task owner/lease does not match the current main')
     return task
@@ -1289,7 +1315,7 @@ def _accept_preflight(repo, execution, owner, task_id, verify, expected=None, ap
     candidates = [r for r in rows if r.get('kind') == 'delegate' and r.get('task_id') == task_id
                   and r.get('attempt_id') == worker['attempt_id'] and r.get('patch_sha256')]
     if (len(candidates) != 1 or candidates[0].get('exit') != 0
-            or worker.get('parent_attempt_id') != main_id
+            or not _owns_worker(repo, attempts, worker, main_id)
             or worker.get('refs', {}).get('panel_lease_id') != task['lease_id']
             or candidates[0].get('plan_id') != task['plan_id']):
         raise ValueError('candidate is ambiguous or does not match the current main/plan lease')
@@ -1683,14 +1709,14 @@ def _accepted_review_snapshot(repo, execution, owner, task_id, verify, record, l
     if not verify or verify.replace('\r', '') != task.get('verify', '').replace('\r', ''):
         raise ValueError('--verify does not match the plan task verify contract')
     main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
-    _, _, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
+    _, attempts, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
     if len(workers) != 1 or workers[0].get('task_id') != task_id:
         raise ValueError('accepted task no longer has one unique worker candidate')
     worker = workers[0]
     candidates = [row for row in rows if row.get('kind') == 'delegate' and row.get('task_id') == task_id
                   and row.get('attempt_id') == worker.get('attempt_id') and row.get('patch_sha256')]
     if (len(candidates) != 1 or candidates[0].get('exit') != 0
-            or worker.get('parent_attempt_id') != main_id
+            or not _owns_worker(repo, attempts, worker, main_id)
             or worker.get('refs', {}).get('panel_lease_id') != task.get('lease_id')
             or candidates[0].get('plan_id') != task.get('plan_id')):
         raise ValueError('accepted candidate is ambiguous or no longer matches the task lease')
@@ -1937,7 +1963,7 @@ def _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_
             if not verify or verify.replace('\r', '') != task.get('verify', '').replace('\r', ''):
                 raise ValueError('--verify does not match the plan task verify contract')
             main_id = os.environ.get('OMS_PANEL_MAIN_ATTEMPT')
-            _, _, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
+            _, attempts, rows, _, workers, admissions = _finalize_snapshot(repo, owner, task_id, main_id, [])
             if len(workers) != 1 or workers[0].get('task_id') != task_id:
                 raise ValueError('reviewed batch landing requires one unique worker candidate')
             worker = workers[0]
@@ -1947,7 +1973,7 @@ def _validate_landed_acceptance(repo, execution, owner, task_id, verify, landed_
                 raise ValueError('reviewed batch landing requires one unambiguous candidate')
             candidate = candidates[0]
             if (candidate.get('task_id') != task_id or candidate.get('exit') != 0
-                    or worker.get('parent_attempt_id') != main_id
+                    or not _owns_worker(repo, attempts, worker, main_id)
                     or worker.get('refs', {}).get('panel_lease_id') != task.get('lease_id')
                     or candidate.get('plan_id') != task.get('plan_id')):
                 raise ValueError('reviewed batch candidate is missing or does not match the current task lease')

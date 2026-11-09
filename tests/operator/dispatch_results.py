@@ -3682,6 +3682,7 @@ def finalize_plan_fixture(label, assigned, allowed="value.txt"):
         room.join(repo, env["OMS_ROOM_ID"], env["OMS_ROOM_PARTICIPANT"], "claude")
     env["OMS_PANEL_MAIN_ATTEMPT"] = call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(repo),
         "start", "--provider", "claude", "--tool", "panel-main", "--ref", "panel_role=main",
+        "--ref", "panel_owner=claude",
         "--ref", "panel_room_id=" + env["OMS_ROOM_ID"],
         "--ref", "panel_room_participant=" + env["OMS_ROOM_PARTICIPANT"],
         "--ref", "panel_harness=claude", "--then", "starting", "--then", "working"], env).strip()
@@ -3769,6 +3770,340 @@ def exercise_finalize_ownership_snapshot():
     call(["bash", str(panel.ENTRY), "agent-events", "--repo", str(bound_repo), "transition",
           "--attempt", bound_env["OMS_PANEL_MAIN_ATTEMPT"], "--state", "cancelled"], bound_env)
 exercise_finalize_ownership_snapshot()
+# A swapped main acts on what its released predecessors launched, and only on that.
+import panel_state
+def exercise_swapped_main_lineage(repo_path, env, task, prior, prior_worker, swapped):
+    participant = env["OMS_ROOM_PARTICIPANT"]
+    attempts = saved._records(repo_path, full=True)[0]
+    by_id = {row["attempt_id"]: row for row in attempts}
+    assert {row["attempt_id"] for row in panel_state.swap_lineage(repo_path, attempts, participant, swapped)} == {prior, swapped}
+    lease_ref = "panel_lease" + "_id"
+    worker = dict(by_id[prior_worker], refs=dict(by_id[prior_worker]["refs"], panel_access="write",
+                                                 panel_role="worker", **{lease_ref: task["lease_id"]}))
+    candidate = dict(kind="delegate", task_id="owned-task", attempt_id=prior_worker, patch_sha256="a" * 64,
+                     exit=0, plan_id=saved._owned_task(repo_path, repo_path, "codex", "owned-task")["plan_id"])
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(saved, "_finalize_snapshot", return_value=(
+            {}, attempts, [candidate], None, [worker], [None])))
+        for name, value in (("_review_preflight", ["pass"]), ("verified_patch", b""), ("_indexed", b"")):
+            stack.enter_context(patch.object(saved, name, return_value=value))
+        accepted = saved._accept_preflight(repo_path, repo_path, "codex", "owned-task", "true")
+        assert accepted["worker"]["attempt_id"] == prior_worker and accepted["task"]["provider"] == "claude", accepted
+        # A worker of a different parent, or one whose parent is not in the swapped lineage, stays refused.
+        for parent in ("att_" + "f" * 32, "", None):
+            stack.enter_context(patch.object(saved, "_finalize_snapshot", return_value=(
+                {}, attempts, [candidate], None, [dict(worker, parent_attempt_id=parent)], [None])))
+            try:
+                saved._accept_preflight(repo_path, repo_path, "codex", "owned-task", "true")
+            except ValueError as error:
+                assert "current main/plan lease" in str(error), error
+            else:
+                raise AssertionError("worker outside the main's lineage accepted")
+    # Cancelling: the new main stops a call its predecessor launched.
+    call_row = dict(by_id[prior_worker], refs=dict(by_id[prior_worker]["refs"], panel_room_id=env["OMS_ROOM_ID"],
+                                                   panel_room_participant="call-swapped"))
+    nav = {"selected": ("result", "call-swapped"), "cancel_owner": {"participant": participant, "attempt": swapped}}
+    cancel_state = {"room": {"id": env["OMS_ROOM_ID"]}, "room_attempts": {"call-swapped": call_row}}
+    members = {"participants": [{"participant": participant, "joined": True, "role": "main"},
+                                {"participant": "call-swapped", "joined": True, "role": "worker", "parent": participant}]}
+
+    def shown(_repo, verb, *args, **_kw):
+        return json.dumps(attempts if verb == "list" else (call_row if args[1] == prior_worker else by_id[args[1]]))
+
+    def cancel(rows=None):
+        with patch.object(panel, "_cancel_watch_authority", return_value=True), \
+                patch.object(room, "status", return_value=members), \
+                patch.object(panel, "events", side_effect=(shown if rows is None else
+                    lambda _repo, verb, *args, **_kw: json.dumps(rows if verb == "list" else shown(_repo, verb, *args)))), \
+                patch.object(panel, "_dispatch_call_record", return_value={"parent": participant, "backend": "subreaper"}), \
+                patch.object(panel, "_dispatch_supervisor_snapshot", return_value=(
+                    {"all_reaped": False, "exit": None}, {"pid": 1, "identity": "fixture", "group": 1})):
+            return panel.cancel_selected_call(repo_path, cancel_state, nav, swapped)
+    assert cancel() == "ready"
+    # Refusals: every way a row could pose as a swapped predecessor without a room swap record behind it.
+    live = by_id[swapped]
+    real = by_id[prior]
+
+    def with_prior(**changes):
+        refs = dict(real["refs"], **changes.pop("refs", {}))
+        return [dict(real, refs=refs, **changes) if row["attempt_id"] == prior else row for row in attempts]
+    forged_id = "att_" + "d" * 32
+    missing_owner = [dict(row, refs={k: v for k, v in row["refs"].items() if k != "panel_owner"})
+                     if row["attempt_id"] == prior else row for row in attempts]
+    forged = {
+        "ended without a swap": with_prior(reason_code="manual_clear"),
+        "forged owner": with_prior(refs={"panel_owner": "codex"}),
+        "missing owner": missing_owner,
+        "second live main": attempts + [dict(live, attempt_id="att_" + "e" * 32)],
+        "other participant": with_prior(refs={"panel_room_participant": "swap-other"}),
+        "different room": with_prior(refs={"panel_room_id": "other-room-lineage"}),
+        # The recorded attempt id is not enough: the row must hold the provider the swap released.
+        "rewritten provider": with_prior(provider="antigravity", refs={"panel_owner": "antigravity"}),
+    }
+    for state in ("cancelled", "failed", "done", "timed_out"):
+        forged["terminal " + state] = with_prior(state=state)
+    import panel_dispatch
+    caller_call = {"participant": "call-swapped", "joined": True, "parent": participant}
+
+    def settles(rows):
+        # Deferred settlement reaches the pending record only for a call the caller's lineage launched.
+        listed = [dict(call_row, parent_attempt_id=row.get("parent_attempt_id")) if row["attempt_id"] == prior_worker
+                  else row for row in rows]
+        with patch.object(panel, "events", return_value=json.dumps(listed)), \
+                patch.object(panel_dispatch.dispatch_store, "orphan_members", return_value=[]), \
+                patch.object(panel, "_dispatch_call_record", return_value={"parent": participant}), \
+                patch.object(panel, "_dispatch_released", return_value=True), \
+                patch.object(panel, "_settlement_delivery_pending", return_value=False), \
+                patch.object(panel, "_dispatch_pending", side_effect=ValueError("probe")) as pending:
+            panel._reconcile_dispatch(repo_path, env["OMS_ROOM_ID"], {"participants": [caller_call]},
+                                      participant, swapped)
+        return pending.called
+
+    def descends(rows):
+        try:
+            saved._finalize_owns_task(repo_path, "codex", "owned-task", swapped, rows, {})
+        except ValueError as error:
+            assert "does not descend" in str(error) or "not owned by the calling main" in str(error), error
+            return False
+        return True
+    assert settles(attempts) and descends(attempts)
+    orphaned = [dict(row, parent_attempt_id="att_" + "f" * 32) if row["attempt_id"] == prior_worker else row
+                for row in attempts]
+    assert not settles(orphaned) and not descends(orphaned)
+    # An unreadable, oversized or unsealed room history proves no swap; neither does malformed or unbound input.
+    for name in ("records", "_sealed_predecessors"):
+        with patch.object(room, name, side_effect=ValueError("room log is oversized")):
+            assert panel_state.swap_anchors(repo_path, attempts, participant, swapped) == frozenset(), name
+            assert prior not in panel_state.lineage_ids_from_rows(attempts, "codex", participant, swapped, repo_path)
+            assert not settles(attempts) and not descends(attempts), name
+            try:
+                saved._finalize_owns_task(repo_path, "codex", "owned-task", swapped, attempts, None)
+            except ValueError as error:
+                assert "does not descend" in str(error), error
+            else:
+                raise AssertionError("unbound finalize inherited a swap the room log could not prove: " + name)
+    assert panel_state.swap_anchors(repo_path, attempts, participant, swapped) == frozenset({prior})
+    saved._finalize_owns_task(repo_path, "codex", "owned-task", swapped, attempts, None)
+    assert panel_state.swap_anchors(repo_path, attempts + ["junk"], participant, swapped) == frozenset()
+    assert panel_state.swap_anchors(repo_path, [], participant, swapped) == frozenset()
+    # The ordered chain: join, each swap from -> to, and a rollover's carried join; anything else is unproven.
+    def event(kind, who=participant, **fields):
+        return {"room_event": dict(fields, kind=kind, participant=who)}
+    joined, carried = event("join", role="main", provider="claude"), event("join", role="main", provider="codex")
+    first, second = event("main-swap", attempt="a1", provider="codex"), event("main-swap", attempt="a2", provider="pi")
+    assert panel_state.room_swap_chain(repo_path, env["OMS_ROOM_ID"], participant)[1] == (
+        ((prior, "claude", "codex"),), "codex")
+    assert panel_state.swap_chain([[joined, first, event("main-swap", "other", attempt="a9", provider="pi")],
+                                   [carried, second]], participant) == (
+        (("a1", "claude", "codex"), ("a2", "codex", "pi")), "pi")
+    for logs in ([], [[]], [[first, joined]], [[joined, event("main-swap", attempt=None, provider="pi")]],
+                 [[event("join", role="worker", provider="claude")]]):
+        assert panel_state.swap_chain(logs, participant) is None, logs
+    with patch.dict(os.environ, {"OMS_ROOM_REPO": ""}):
+        assert panel_state.swap_anchors(None, attempts, participant, swapped) == frozenset()
+    for label, rows in forged.items():
+        assert cancel(rows) != "ready", label
+        assert not settles(rows) and not descends(rows), label
+        assert prior not in {row["attempt_id"] for row in panel_state.swap_lineage(repo_path, rows, participant, swapped)}, label
+        assert prior not in panel_state.lineage_ids_from_rows(rows, "codex", participant, swapped, repo_path), label
+        with patch.object(saved, "_query", return_value=rows):
+            assert not saved._owns_worker(repo_path, rows, worker, swapped), label
+            try:
+                saved._owned_task(repo_path, repo_path, "codex", "owned-task")
+            except ValueError as error:
+                assert "owner/lease" in str(error), error
+            else:
+                raise AssertionError("task claimed under a foreign provider was accepted: " + label)
+    # A main row with no matching room swap record cannot join the lineage next to the real predecessor.
+    extra = attempts + [dict(real, attempt_id=forged_id, refs=dict(real["refs"]))]
+    assert not panel_state.lineage_ids_from_rows(extra, "codex", participant, swapped, repo_path)
+    assert {row["attempt_id"] for row in panel_state.swap_lineage(repo_path, extra, participant, swapped)} == set()
+    assert not settles(extra) and not descends(extra)
+    # The room's chain is claude -> codex: a live main of a third provider inherits nothing from it.
+    forged_main = "att_" + "b" * 32
+    foreign = [row for row in attempts if row["attempt_id"] != swapped] + [dict(
+        live, attempt_id=forged_main, provider="antigravity",
+        refs=dict(live["refs"], panel_owner="antigravity", panel_harness="agy"))]
+    assert panel_state.swap_anchors(repo_path, foreign, participant, forged_main) == frozenset()
+    assert prior not in panel_state.lineage_ids_from_rows(foreign, "antigravity", participant, forged_main, repo_path)
+    assert prior not in {row["attempt_id"] for row in panel_state.swap_lineage(repo_path, foreign, participant, forged_main)}
+    with patch.object(panel, "events", return_value=json.dumps(foreign)):
+        assert prior not in panel_state.lineage_ids(repo_path, "antigravity", participant, forged_main)
+    assert not saved._owns_worker(repo_path, foreign, worker, forged_main)
+    try:
+        saved._finalize_owns_task(repo_path, "antigravity", "owned-task", forged_main, foreign, None)
+    except ValueError as error:
+        assert "does not descend" in str(error), error
+    else:
+        raise AssertionError("a provider outside the room's swap chain finalized its predecessor's task")
+    # Review settlement uses the same chain and the bound repository, not OMS_ROOM_REPO.
+    import review_settlement
+    import panel_release
+    unbound = {key: value for key, value in os.environ.items() if key != "OMS_ROOM_REPO"}
+    with patch.dict(os.environ, unbound, clear=True):
+        assert {prior, swapped} <= review_settlement._parents(repo_path, attempts, main_id=swapped)
+    try:
+        review_settlement._parents(repo_path, foreign, main_id=forged_main)
+    except ValueError as error:
+        assert "ownership is unknown" in str(error), error
+    else:
+        raise AssertionError("review settlement adopted a provider outside the swap chain")
+    dead = [dict(live, state="done", terminal=True) if row["attempt_id"] == swapped else row for row in attempts]
+    with patch.object(panel_release, "prove_host_absent"), patch.object(panel_release, "prove_native_absent"):
+        assert review_settlement._parents(repo_path, dead, main_id=swapped, require_dead=True) == {prior, swapped}
+        unrecorded = dead + [dict(real, attempt_id=forged_id, refs=dict(real["refs"]))]
+        for rows in (unrecorded, [row for row in foreign if row["attempt_id"] != forged_main]
+                     + [dict(live, attempt_id=forged_main, provider="antigravity", state="done", terminal=True,
+                             refs=dict(live["refs"], panel_owner="antigravity"))]):
+            ended = next(row["attempt_id"] for row in rows if row["state"] == "done" and row.get("tool") == "panel-main")
+            try:
+                review_settlement._parents(repo_path, rows, main_id=ended, require_dead=True)
+            except ValueError as error:
+                assert "ownership is unknown" in str(error), error
+            else:
+                raise AssertionError("settle-review --owner-attempt adopted a cross-provider main without a swap")
+    # Accepting and landing a reviewed result re-check that the worker descends from the caller's swap chain.
+    reviewed = dict(task, state="review", review_lease_id=task["lease_id"], verify="true", panel_accept=None,
+                    plan_id=candidate["plan_id"], artifact=None, patch=None)
+    blob = hashlib.sha256(b"").hexdigest()
+    stored = {"task_id": "owned-task", "plan_id": candidate["plan_id"], "lease_id": task["lease_id"],
+              "candidate_event_id": None, "candidate_attempt_id": prior_worker, "patch_sha256": blob,
+              "artifact": None, "patch": None, "review_gate": "pass"}
+
+    def reviewed_result(check, rows, parent):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(saved, "_owned_task", return_value=reviewed))
+            stack.enter_context(patch.object(saved, "_finalize_snapshot", return_value=(
+                {}, rows, [dict(candidate, patch_sha256=blob)], None,
+                [dict(worker, parent_attempt_id=parent)], [None])))
+            for name, value in (("_review_preflight", ["pass"]), ("verified_patch", b""), ("_indexed", b""),
+                                ("_batch_finish_preflight", "base"), ("_publication_contains_acceptance", None)):
+                stack.enter_context(patch.object(saved, name, return_value=value))
+            try:
+                if check == "accepted":
+                    saved._accepted_review_snapshot(repo_path, repo_path, "codex", "owned-task", "true", stored, "c")
+                else:
+                    saved._validate_landed_acceptance(repo_path, repo_path, "codex", "owned-task", "true", "c")
+            except ValueError as error:
+                assert "no longer matches" in str(error) or "does not match the current task" in str(error), error
+                return False
+            return True
+    for check in ("accepted", "landed"):
+        assert reviewed_result(check, attempts, prior), check
+        for rows, parent in ((attempts, "att_" + "f" * 32), (extra, prior), (foreign, prior), (dead, prior)):
+            assert not reviewed_result(check, rows, parent), check
+    # The swap record names the original participant: a rewritten ref does not move the predecessor.
+    elsewhere = dict(live, attempt_id="att_" + "c" * 32, state="working", terminal=False,
+                     refs=dict(live["refs"], panel_room_participant="swap-other"))
+    ended_live = dict(live, state="done", terminal=True)
+    for moved in (with_prior(refs={"panel_room_participant": "swap-other"}), attempts):
+        crowd = [ended_live if row["attempt_id"] == swapped else row for row in moved] + [elsewhere]
+        adopted = panel_state.lineage_ids_from_rows(crowd, "codex", "swap-other", elsewhere["attempt_id"], repo_path)
+        assert prior not in adopted, adopted
+    # Review fix drafts and plan completion follow the same chain.
+    import panel_review
+    assert panel_review._worker_parents(repo_path, attempts, participant, "claude", prior) == ({prior, swapped}, True)
+    assert panel_review._worker_parents(repo_path, attempts, participant, "codex", swapped)[1] is False
+    for label, rows in forged.items():
+        assert panel_review._worker_parents(repo_path, rows, participant, "claude", prior) == (set(), False), label
+    # A failed review of a released main's writer drafts the fix brief but reserves no automatic rework.
+    import peer_artifacts
+    fix_worker = dict(worker, refs=dict(worker["refs"], panel_room_participant="call-swapped", panel_owner="claude",
+                                        panel_room_id=env["OMS_ROOM_ID"]))
+    fix_rows = [fix_worker if row["attempt_id"] == prior_worker else row for row in attempts]
+    launch = {"verify": "true", "rework": {"role": "builder", "scope": ["value.txt"], "brief": ".oms/artifacts/b.md",
+                                           "brief_sha256": hashlib.sha256(b"brief").hexdigest()}}
+    review_row = {"kind": "review", "attempt_id": "review-attempt", "task_id": "owned-task",
+                  "artifact": ".oms/artifacts/review/r.md"}
+    with ExitStack() as stack:
+        for owner_module, name, value in (
+                (saved, "_records", (fix_rows, [review_row])), (saved, "_indexed", b""),
+                (peer_artifacts, "artifact_sections_stream", ("answer", "0")),
+                (peer_artifacts, "debate_sections", ("answer", [])),
+                (panel_review, "_review_findings", ["finding"]), (panel_review, "_review_verdict", "fail"),
+                (panel_review.dispatch_store, "read", launch), (panel, "_dispatch_call_record", {"schema": 2}),
+                (panel, "_read", b"brief"), (panel, "_write_brief_artifact", None),
+                (panel, "_validate_dry_run_inputs", None)):
+            stack.enter_context(patch.object(owner_module, name, return_value=value))
+        reserve = stack.enter_context(patch.object(panel_review, "_reserve_review_rework"))
+        notice = panel_review._review_fix_notice(
+            repo_path, env["OMS_ROOM_ID"], "review-call", participant, "owned-task",
+            {"attempt_id": "review-attempt", "review": {}},
+            {"kind": "review-dispatch", "task_id": "owned-task", "call_id": "call-swapped",
+             "review_call_id": "review-call"}, rework=True)
+        assert notice and "Review gate failed" in notice and not reserve.called, (notice, reserve.call_args)
+    core = runpy.run_path(str(root / "scripts/lib/plan-completion.py"))
+    room_id = env["OMS_ROOM_ID"]
+    refs = {"panel_role": "main", "panel_room_id": room_id, "panel_room_participant": participant}
+
+    def history(ident, provider, final=None, reason="", **changes):
+        base = dict(refs, **{"panel_owner": provider, **changes})
+        events = [dict(event_type="attempt.created", attempt_id=ident, provider=provider, tool="panel-main", refs=base)]
+        if final:
+            events.append(dict(event_type="attempt.state_changed", attempt_id=ident, to_state=final, reason_code=reason))
+        return events
+    swaps = core["swap_released"](str(repo_path), room_id, participant)
+    assert swaps == {prior: ("claude", "codex")}, swaps
+    assert core["swap_released"](str(repo_path), "other-room-lineage", participant) == {}
+    assert core["swap_released"](str(repo_path), room_id, "swap-other") == {}
+    assert core["swap_released"](str(repo_path), "../escape", participant) == {}
+    chain = history(prior, "claude", "abandoned", "main_swapped") + history("new", "codex")
+    bindings = core["related_native_bindings"](chain, participant, "codex", room_id, swaps)
+    assert set(bindings) == {prior, "new"} and core["swapped_providers"](swaps, bindings) == {"codex"}
+    refused = {
+        "unrecorded swap": (chain, {}),
+        "other attempt id": (history("old", "claude", "abandoned", "main_swapped") + history("new", "codex"), swaps),
+        "ended without a swap": (history(prior, "claude", "abandoned", "manual_clear") + history("new", "codex"), swaps),
+        "not abandoned": (history(prior, "claude", "cancelled", "main_swapped") + history("new", "codex"), swaps),
+        "still running": (history(prior, "claude", "blocked", "main_swapped") + history("new", "codex"), swaps),
+        "owner differs": (history(prior, "claude", "abandoned", "main_swapped", panel_owner="codex")
+                          + history("new", "codex"), swaps),
+        "owner differs from provider": (history("new", "codex", panel_owner="claude"), swaps),
+    }
+    refused["recorded from another provider"] = (chain, {prior: ("antigravity", "codex")})
+    for label, (events, released) in refused.items():
+        try:
+            core["related_native_bindings"](events, participant, "codex", room_id, released)
+        except ValueError as error:
+            assert "contradictory native participant history" in str(error), (label, error)
+        else:
+            raise AssertionError("native history accepted: " + label)
+    core["membership_epoch"](str(repo_path), room_id, participant, "codex", swapped_to={"codex"})
+    for provider, via in (("codex", set()), ("agy", {"codex"}), ("claude", {"codex"}), ("agy", set())):
+        try:
+            core["membership_epoch"](str(repo_path), room_id, participant, provider, swapped_to=via)
+        except ValueError as error:
+            assert "completion:" in str(error), error
+        else:
+            raise AssertionError("room membership accepted a provider outside the swap chain: " + provider)
+    # A READ child of the released main is judged by that main's provider only when the room recorded its release.
+    native_room = "room-" + "a" * 12
+    owned = dict(refs, panel_room_id=native_room, panel_owner="claude")
+    lifecycle = [dict(event_type="attempt.created", event_id="p1", attempt_id=prior, provider="claude",
+                      tool="panel-main", refs=owned),
+                 dict(event_type="attempt.state_changed", event_id="p2", attempt_id=prior, to_state="working"),
+                 dict(event_type="attempt.created", event_id="c1", attempt_id="read-child", ts="2099-01-01T00:00:00Z")]
+    finished = lifecycle[2:] + [dict(event_type="attempt.state_changed", event_id="c2", attempt_id="read-child",
+                                     to_state="done", ts="2099-01-01T00:00:01Z")]
+    epochs = []
+    for released, accepted in ((swaps, True), ({}, False), ({prior: ("antigravity", "codex")}, False)):
+        with patch.dict(core["read_parent"].__globals__, {"swap_released": lambda *_: released,
+                                                          "membership_epoch": lambda *args: epochs.append(args)}):
+            try:
+                core["read_parent"](str(repo_path), lifecycle, real, finished, participant, "codex")
+            except ValueError as error:
+                assert not accepted and "contradictory native participant history" in str(error), error
+            else:
+                assert accepted and epochs[-1][3] == "claude", epochs
+    other = dict(env, OMS_ROOM_PARTICIPANT="swap-other")
+    with patch.dict(os.environ, other):
+        assert not saved._owns_worker(repo_path, attempts, worker, swapped)
+        try:
+            saved._owned_task(repo_path, repo_path, "codex", "owned-task")
+        except ValueError as error:
+            assert "not live" in str(error) or "owner/lease" in str(error), error
+        else:
+            raise AssertionError("another participant's main took over the task")
 # Finalize authorization follows participant lineage, including a resumed main.
 def exercise_finalize_task_ownership():
     foreign_task = "finalize-read-task"
@@ -3818,7 +4153,8 @@ def exercise_finalize_task_ownership():
     swap_env.update(OMS_AGENT="codex", OMS_PANEL_MAIN_ATTEMPT=swapped)
     with patch.dict(os.environ, swap_env, clear=True):
         assert prior in panel.lineage_ids_from_rows(saved._records(swap_repo, full=True)[0],
-            "codex", swap_env["OMS_ROOM_PARTICIPANT"], swapped)
+            "codex", swap_env["OMS_ROOM_PARTICIPANT"], swapped, swap_repo)
+        exercise_swapped_main_lineage(swap_repo, swap_env, swap_task, prior, prior_worker, swapped)
         result = saved.finalize(swap_repo, "codex", "owned-task", str(summary), "completed")
         assert result["owner"] == "codex" and result["main_attempt_id"] == swapped, result
         stored = json.loads((swap_repo / ".oms/plan/tasks.json").read_text())["tasks"]["owned-task"]

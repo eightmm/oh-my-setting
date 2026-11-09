@@ -783,30 +783,71 @@ def native_binding(attempt, who, provider, room):
     refs = attempt.get('refs', {})
     if (native_participant(attempt) != who or attempt.get('tool') != 'panel-main' or
             attempt.get('provider') != provider or refs.get('panel_role') != 'main' or
-            refs.get('panel_room_id') != room):
+            refs.get('panel_owner', provider) != provider or refs.get('panel_room_id') != room):
         fail('contradictory native participant history')
 
 
-def native_binding_history(own_events, who, provider, room):
+def released_by_swap(attempt, released):
+    """A main a recorded swap released while it held that swap's `from` provider, as explicit owner too."""
+    refs = attempt.get('refs', {})
+    step = released.get(attempt.get('attempt_id')) if isinstance(released, dict) else None
+    return (isinstance(step, tuple) and attempt.get('provider') == step[0] and
+            attempt.get('state') == 'abandoned' and attempt.get('reason_code') == 'main_swapped' and
+            isinstance(refs, dict) and refs.get('panel_owner') == attempt.get('provider'))
+
+
+@functools.lru_cache(maxsize=1)
+def swap_chain_projection():
+    # The single swap-lineage projection, shared with panel ownership checks; it reads only the given rows.
+    return runpy.run_path(str(HERE / 'panel_state.py'))['swap_chain']
+
+
+def swap_released(repo, room, who):
+    """{released attempt: (from provider, to provider)} from the participant's ordered swap chain.
+
+    The chain covers the room and the rooms it continues as; every native binding shares this room id, so a
+    swap lands there. Unreadable or oversized logs yield nothing, which refuses any provider change.
+    """
+    try:
+        rel = '.oms/threads/' + room + '.jsonl'
+        if (repo, rel) not in _HISTORICAL and not read(repo, rel, MAX_STREAM, missing=True):
+            return {}
+        records, content_sha = rows(repo, rel)
+        logs = [records] + [later for later, _ in successor_rooms(repo, room_records(records, room, content_sha))]
+        chain = swap_chain_projection()(logs, who)
+        return {attempt: (source, target) for attempt, source, target in chain[0]} if chain else {}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, SystemExit):
+        return {}
+
+
+def swapped_providers(swaps, bindings):
+    return {swaps[ident][1] for ident, binding in bindings.items() if released_by_swap(binding, swaps)}
+
+
+def native_binding_history(own_events, who, provider, room, released=frozenset()):
     if not own_events or own_events[0].get('event_type') != 'attempt.created':
         fail('native participant creation is unproven')
     original = own_events[0]
     current = {'attempt_id': original['attempt_id'], 'provider': original.get('provider'),
-               'tool': original.get('tool'), 'refs': {}, 'state': 'queued'}
+               'tool': original.get('tool'), 'refs': {}, 'state': 'queued', 'reason_code': ''}
     for event in own_events:
         refs = event.get('refs', {})
         if (not isinstance(refs, dict) or event.get('attempt_id') != current['attempt_id'] or
                 any(key in event and event[key] != current[key] for key in ('provider', 'tool'))):
             fail('malformed or contradictory native participant history')
         current['refs'].update(refs)
-        native_binding(current, who, provider, room)
+        native_binding(current, who, current['provider'], room)
         if event['event_type'] == 'attempt.state_changed':
             current['state'] = event['to_state']
+            current['reason_code'] = event.get('reason_code', '')
     current['terminal'] = current['state'] in ('done', 'failed', 'cancelled', 'timed_out', 'abandoned')
+    # Only a main whose release the room recorded may differ in provider from the participant's current main.
+    if current['provider'] != provider and not released_by_swap(current, released):
+        fail('contradictory native participant history')
     return current
 
 
-def related_native_bindings(events, who, provider, room):
+def related_native_bindings(events, who, provider, room, released=frozenset()):
     related = set()
     # Association precedes every provider/room/tool filter, including refs
     # superseded later in the same attempt's history.
@@ -817,16 +858,17 @@ def related_native_bindings(events, who, provider, room):
         if event['attempt_id'] == who or refs.get('panel_room_participant') == who:
             related.add(event['attempt_id'])
     return {ident: native_binding_history([e for e in events if e['attempt_id'] == ident],
-                                         who, provider, room) for ident in related}
+                                         who, provider, room, released) for ident in related}
 
 
-def membership_epoch(repo, room, who, provider, read_window=None):
+def membership_epoch(repo, room, who, provider, read_window=None, swapped_to=frozenset()):
     records, content_sha = rows(repo, '.oms/threads/' + room + '.jsonl')
     state = room_records(records, room, content_sha)
     related = [r for r in records if r.get('room_event', {}).get('participant') == who]
     joins = [r for r in related if r['room_event'].get('kind') == 'join']
-    if not joins or any(joins[0]['room_event'].get(k) != v for k, v in
-                        (('provider', provider), ('role', 'main'))):
+    # A swap changes the member's provider; the join names the first one and each verified swap the next.
+    if not joins or joins[0]['room_event'].get('role') != 'main' or (
+            provider != joins[0]['room_event'].get('provider') and provider not in swapped_to):
         fail('original native room membership is unproven')
     leaves = [r for r in related if r['room_event'].get('kind') == 'leave']
     if read_window is not None:
@@ -900,13 +942,14 @@ def caller_owner(repo, bundle, task):
         fail('actual parent caller differs from current declared claim owner')
     events, attempts = attempts_for(repo)
     provider = bundle['owner']['parent_provider']
-    bindings = related_native_bindings(events, who, provider, room)
+    swaps = swap_released(repo, room, who)
+    bindings = related_native_bindings(events, who, provider, room, swaps)
     active = [attempts[ident] for ident in bindings if attempts[ident].get('terminal') is not True]
     if (len(active) != 1 or active[0].get('attempt_id') != aid or
             active[0].get('terminal') is not False or active[0].get('state') not in
             ('starting', 'working', 'waiting_input', 'waiting_approval', 'verifying', 'review')):
         fail('current native panel-main owner binding is unproven or ambiguous')
-    membership_epoch(repo, room, who, provider)
+    membership_epoch(repo, room, who, provider, swapped_to=swapped_providers(swaps, bindings))
     return {'participant': who, 'parent_provider': provider, 'room_id': room}
 
 
@@ -1085,7 +1128,11 @@ def read_parent(repo, events, parent, child_events, who, provider):
     room = historical[0].get('refs', {}).get('panel_room_id') if historical else None
     if not isinstance(room, str) or not re.fullmatch(r'room-[0-9a-f]{12}', room):
         fail('exact historical native room is unproven')
-    bindings = related_native_bindings(events[:boundary], who, provider, room)
+    # The parent may have been a main that a recorded swap has since released; judge it by its own provider then.
+    swaps = swap_released(repo, room, who)
+    if parent.get('provider') != provider and released_by_swap(parent, swaps):
+        provider = parent['provider']
+    bindings = related_native_bindings(events[:boundary], who, provider, room, swaps)
     active = [binding for binding in bindings.values() if not binding['terminal']]
     if (len(active) != 1 or active[0]['attempt_id'] != parent.get('attempt_id') or
             active[0]['state'] not in ('starting', 'working', 'waiting_input', 'waiting_approval', 'verifying', 'review')):
@@ -1094,7 +1141,7 @@ def read_parent(repo, events, parent, child_events, who, provider):
     terminal = [e for e in child_events if e.get('event_type') == 'attempt.state_changed' and e.get('to_state') == 'done']
     if len(terminal) != 1:
         fail('READ successful terminal boundary is unproven')
-    membership_epoch(repo, room, who, provider, (created['ts'], terminal[0]['ts']))
+    membership_epoch(repo, room, who, provider, (created['ts'], terminal[0]['ts']), swapped_providers(swaps, bindings))
     return binding
 
 
@@ -1469,12 +1516,14 @@ def validate_main_reviewer(repo, bundle, reviewer, bundle_sha, provenance):
                     reviewer['room_id'] != provenance['room_id']):
                 fail('immutable main reviewer binding mismatch')
             events, attempts = attempts_for(repo)
+            swaps = swap_released(repo, reviewer['room_id'], reviewer['participant'])
             bindings = related_native_bindings(events, reviewer['participant'],
-                                               reviewer['parent_provider'], reviewer['room_id'])
+                                               reviewer['parent_provider'], reviewer['room_id'], swaps)
             active = [attempts[ident] for ident in bindings if attempts[ident].get('terminal') is not True]
             if len(active) != 1 or active[0].get('attempt_id') != reviewer['attempt_id']:
                 fail('captured main reviewer was not the unique native owner')
-            membership_epoch(repo, reviewer['room_id'], reviewer['participant'], reviewer['parent_provider'])
+            membership_epoch(repo, reviewer['room_id'], reviewer['participant'], reviewer['parent_provider'],
+                             swapped_to=swapped_providers(swaps, bindings))
             return
         if bundle['reviewer']['kind'] != 'codex-desktop-main':
             fail('Desktop reviewer cannot replace the native panel contract')

@@ -191,6 +191,21 @@ def _other_rework_reservation(rows, attempt_id, member):
                for row in rows)
 
 
+def _worker_parents(repo, attempts, caller, owner, parent):
+    """Mains whose workers this caller owns, and whether the worker predates a room-recorded main swap."""
+    from terminal_panel import lineage_ids_from_rows
+    from panel_state import swap_lineage
+    ids = lineage_ids_from_rows(attempts, owner, caller, parent, repo)
+    if ids:
+        return ids, False
+    live = [row["attempt_id"] for row in attempts if row.get("tool") == "panel-main" and row.get("terminal") is False
+            and row.get("refs", {}).get("panel_room_participant", row.get("attempt_id")) == caller]
+    if len(live) != 1 or parent == live[0]:
+        return set(), False
+    ids = {row["attempt_id"] for row in swap_lineage(repo, attempts, caller, live[0])}
+    return (ids, True) if parent in ids else (set(), False)
+
+
 def _write_brief_artifact(repo, relative, content):
     from terminal_panel import DURABLE, MAX_PROMPT
     body = content.encode("utf-8")
@@ -426,7 +441,7 @@ def _judgment_guidance(kind):
 def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, rework=None):
     """Draft verified findings and reserve controller rework without launching it."""
     from terminal_panel import MAX_PROMPT, WRITERS, _dispatch_call_record, _read, _rework_history
-    from terminal_panel import _validate_dry_run_inputs, _write_brief_artifact, lineage_ids_from_rows
+    from terminal_panel import _validate_dry_run_inputs, _write_brief_artifact
     import panel_results
     from peer_artifacts import artifact_sections_stream, debate_sections
     attempts, artifacts = panel_results._records(repo, full=True)
@@ -474,7 +489,8 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, 
     refs = worker.get("refs", {})
     if worker.get("task_id") != task_id or refs.get("panel_access") != "write":
         raise ValueError("original write attempt unavailable")
-    parents = lineage_ids_from_rows(attempts, refs.get("panel_owner"), caller, worker.get("parent_attempt_id"))
+    parents, swapped = _worker_parents(repo, attempts, caller, refs.get("panel_owner"),
+                                       worker.get("parent_attempt_id"))
     earlier = _rework_history(attempts, task_id, parents)
     if not earlier or earlier[-1].get("attempt_id") != worker.get("attempt_id"):
         raise ValueError("review no longer names the latest owned worker")
@@ -538,7 +554,8 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, 
     if len(notice.encode("utf-8")) > 3800:
         raise ValueError("draft notification exceeds the room message limit")
     _write_brief_artifact(repo, draft, content)
-    if rework is not None:
+    # Automatic rework relaunches under the worker's own main; a swapped-out main cannot, so the notice stands.
+    if rework is not None and not swapped:
         request = {"task_id": task_id, "attempt_id": worker["attempt_id"],
                    "parent_attempt_id": worker["parent_attempt_id"], "owner": refs["panel_owner"],
                    "review_artifact": review["artifact"], "brief": draft, "arguments": arguments[1:]}
@@ -557,7 +574,7 @@ def _reserve_review_rework(repo, room_id, member, caller, request):
     import panel_results
     with _lock(repo, "panel-auto-rework"):
         attempts, _ = panel_results._records(repo, full=True)
-        parents = lineage_ids_from_rows(attempts, request["owner"], caller, request["parent_attempt_id"])
+        parents = lineage_ids_from_rows(attempts, request["owner"], caller, request["parent_attempt_id"], repo)
         history = _rework_history(attempts, request["task_id"], parents)
         if (not history or history[-1].get("attempt_id") != request["attempt_id"]
                 or _other_rework_reservation(history, request["attempt_id"], member)):
@@ -604,7 +621,7 @@ def _launch_review_rework(repo, room_id, writer, caller):
                 or request.get("owner") != refs.get("panel_owner")
                 or request.get("parent_attempt_id") != worker.get("parent_attempt_id")):
             return
-        parents = lineage_ids_from_rows(attempts, request["owner"], caller, request["parent_attempt_id"])
+        parents = lineage_ids_from_rows(attempts, request["owner"], caller, request["parent_attempt_id"], repo)
         history = _rework_history(attempts, request["task_id"], parents)
         if not history or history[-1].get("attempt_id") != request["attempt_id"]:
             with _lock(repo, "panel-call-settle"):

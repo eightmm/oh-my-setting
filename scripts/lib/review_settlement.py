@@ -29,8 +29,10 @@ def _legacy_main(row):
                    for key in refs)
 
 
-def _participant_parents(attempts, main, require_dead=False, legacy_older_than=None):
-    """Validate one participant's chain; age substitutes for absent refs only by explicit recovery policy."""
+def _participant_parents(attempts, main, require_dead=False, legacy_older_than=None, repo=None):
+    """Validate one participant's chain; age substitutes for absent refs only by explicit recovery policy.
+
+    Another provider's main belongs to the chain only when the room recorded the swap that released it."""
     import panel_release
     from panel_view import TERMINAL_STATES
     member = main.get("refs", {}).get("panel_room_participant", main.get("attempt_id"))
@@ -48,6 +50,11 @@ def _participant_parents(attempts, main, require_dead=False, legacy_older_than=N
                 and row["terminal"] == (row["state"] in TERMINAL_STATES) for row in history)
             or sum(row["terminal"] is False for row in history) > (0 if require_dead else 1)):
         raise ValueError("review settlement ownership is unknown")
+    if any(row.get("provider") != main.get("provider") for row in history):
+        from panel_state import swap_anchors
+        anchors = swap_anchors(repo, attempts, member, main["attempt_id"])
+        if any(row.get("provider") != main.get("provider") and row["attempt_id"] not in anchors for row in history):
+            raise ValueError("review settlement ownership is unknown")
     for row in history:
         if row["terminal"]:
             if require_dead and legacy_older_than is not None and _legacy_main(row):
@@ -71,9 +78,10 @@ def _parents(repo, attempts, owner=None, main_id=None, require_dead=False, legac
         if require_dead:
             # The continuation helper requires one live main. Recovery instead
             # owns only this participant's fully terminal chain.
-            return _participant_parents(attempts, main, require_dead=True, legacy_older_than=legacy_older_than)
+            return _participant_parents(attempts, main, require_dead=True, legacy_older_than=legacy_older_than,
+                                        repo=repo)
         parents = panel.lineage_ids_from_rows(attempts, main["provider"],
-            main.get("refs", {}).get("panel_room_participant", main_id), main_id)
+            main.get("refs", {}).get("panel_room_participant", main_id), main_id, repo)
         if not parents:
             raise ValueError("review settlement ownership is unknown")
         return parents

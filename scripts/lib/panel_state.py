@@ -171,13 +171,89 @@ def lineage_ids(repo, owner, participant, current_attempt):
     from terminal_panel import events
     try:
         rows = json.loads(events(repo, "list", "--json", output=True))
-        return lineage_ids_from_rows(rows, owner, participant, current_attempt)
+        return lineage_ids_from_rows(rows, owner, participant, current_attempt, repo)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return set()
 
 
-def lineage_ids_from_rows(rows, owner, participant, current_attempt):
-    """Apply the continuation ownership checks to already collected attempt evidence."""
+def swap_chain(logs, participant):
+    """One participant's ordered main providers from room logs given oldest first; None if it never joined as main.
+
+    Returns (steps, provider): each step is (released attempt, from provider, to provider) in record order, and
+    provider is the chain's current one. A join, including a rollover's carried join, names the provider; each
+    `main-swap` moves it on. This is the only source of swap lineage: lifecycle rows and refs are writable by any
+    local process, while `main-swap` is validated under the room lock (room.validate_main_swap).
+    """
+    provider, steps = None, []
+    for log in logs:
+        for row in log:
+            event = row.get("room_event", {})
+            if not isinstance(event, dict) or event.get("participant") != participant:
+                continue
+            if event.get("kind") == "join" and event.get("role") == "main":
+                provider = event.get("provider")
+            elif event.get("kind") == "main-swap":
+                if provider is None or not isinstance(event.get("attempt"), str):
+                    return None
+                steps.append((event["attempt"], provider, event.get("provider")))
+                provider = event.get("provider")
+    return None if not isinstance(provider, str) else (tuple(steps), provider)
+
+
+def room_swap_chain(repo, room_id, participant):
+    """(head room, swap_chain) over a room, its rollover successor and its sealed predecessors; raises when unproven.
+
+    Whole bounded logs are read, so an oversized, unreadable or unsealed history raises instead of dropping swaps.
+    """
+    # Read where swap_main writes: a recent rollover must not hide a swap in the successor.
+    head = room.resolve(repo, room_id, fresh=True)
+    if not isinstance(head, str) or not head:
+        raise ValueError("room is unknown")
+    logs = [room.records(repo, old) for old in reversed(list(room._sealed_predecessors(repo, head)))]
+    return head, swap_chain(logs + [room.records(repo, head)], participant)
+
+
+def swap_anchors(repo, rows, participant, current_attempt):
+    """Ids of this participant's mains released by a recorded swap before current_attempt; empty when unproven.
+
+    The current attempt must hold the chain's current provider, or, when a swap released it, that swap's `from`
+    provider; each anchor must hold the `from` provider of the swap that released it.
+    """
+    try:
+        current = next((row for row in rows if row.get("attempt_id") == current_attempt), None)
+        repo = repo or os.environ.get("OMS_ROOM_REPO")
+        if not current or not repo:
+            return frozenset()
+        who = participant or current.get("refs", {}).get("panel_room_participant", current_attempt)
+        head, chain = room_swap_chain(repo, current.get("refs", {}).get("panel_room_id"), who)
+        if not chain:
+            return frozenset()
+        steps, provider = chain
+        released = [step[0] for step in steps]
+        if current_attempt in released:
+            provider = steps[released.index(current_attempt)][1]
+            steps = steps[:released.index(current_attempt)]
+        if current.get("provider") != provider:
+            return frozenset()
+        origin = {attempt: source for attempt, source, _ in steps}
+        return frozenset(
+            row["attempt_id"] for row in rows
+            if row.get("attempt_id") in origin and row.get("provider") == origin[row["attempt_id"]]
+            and row.get("tool") == "panel-main"
+            and row["refs"].get("panel_room_participant", row["attempt_id"]) == who
+            and row.get("terminal") is True and row.get("state") == "abandoned"
+            and row.get("reason_code") == "main_swapped"
+            and row["refs"].get("panel_owner") == row.get("provider")
+            and room.same_room(repo, row["refs"].get("panel_room_id"), head))
+    except (AttributeError, KeyError, TypeError, OSError, ValueError, subprocess.SubprocessError):
+        return frozenset()
+
+
+def lineage_ids_from_rows(rows, owner, participant, current_attempt, repo=None):
+    """Apply the continuation ownership checks to already collected attempt evidence.
+
+    Only the caller's own participant may include mains of another provider, and only those a recorded room
+    swap released (swap_anchors); repo defaults to OMS_ROOM_REPO."""
     from datetime import datetime
     from panel_view import TERMINAL_STATES
     try:
@@ -199,10 +275,16 @@ def lineage_ids_from_rows(rows, owner, participant, current_attempt):
                     return set()
                 groups.setdefault(member, []).append(row)
         own = groups.get(participant, [])
+        anchors = []
 
-        def confirmed(row):
-            prior_swap = row.get("terminal") is True and row.get("reason_code") == "main_swapped"
-            return (row.get("tool") == "panel-main" and (row.get("provider") == owner or prior_swap)
+        def swapped(row):
+            if not anchors:
+                anchors.append(swap_anchors(repo, rows, participant, current_attempt))
+            return row["attempt_id"] in anchors[0]
+
+        def confirmed(row, inherits=False):
+            return (row.get("tool") == "panel-main"
+                    and (row.get("provider") == owner or inherits and row.get("terminal") is True and swapped(row))
                     and row["refs"].get("panel_role") == "main"
                     and row["refs"].get("panel_owner", row.get("provider")) == row.get("provider")
                     and type(row.get("terminal")) is bool
@@ -210,7 +292,7 @@ def lineage_ids_from_rows(rows, owner, participant, current_attempt):
                         "queued", "starting", "working", "verifying", "review", "blocked",
                         "waiting_input", "waiting_approval"}
                     and row["terminal"] == (row["state"] in TERMINAL_STATES))
-        if (current not in own or not all(confirmed(row) for row in own)
+        if (current not in own or not all(confirmed(row, True) for row in own)
                 or current.get("terminal") is not False
                 or sum(row["terminal"] is False for row in own) != 1):
             return set()
@@ -231,6 +313,21 @@ def lineage_ids_from_rows(rows, owner, participant, current_attempt):
         return eligible
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return set()
+
+
+def swap_lineage(repo, rows, participant, current_attempt):
+    """The live main plus this participant's earlier mains released by a recorded swap; empty when unproven.
+
+    Narrower than lineage_ids_from_rows: no other participant's history and no predecessor that ended otherwise.
+    """
+    try:
+        current = next((row for row in rows if isinstance(row, dict) and row.get("attempt_id") == current_attempt), None)
+        if not current or not lineage_ids_from_rows(rows, current.get("provider"), participant, current_attempt, repo):
+            return []
+        anchors = swap_anchors(repo, rows, participant, current_attempt)
+        return [row for row in rows if row is current or row.get("attempt_id") in anchors]
+    except (AttributeError, KeyError, TypeError):
+        return []
 
 
 def owning_attempt(repo, owner, main, env):

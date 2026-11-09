@@ -2183,9 +2183,15 @@ def cancel_selected_call(repo, state, navigation, main_attempt, send=False):
             return "Selected call is no longer running"
         current = json.loads(events(repo, "show", "--attempt", attempt.get("attempt_id"), "--json", output=True))
         refs = current.get("refs") or {}
+        parent = current.get("parent_attempt_id")
+        if parent != main_attempt:
+            # A swapped main may cancel what its released predecessors launched.
+            from panel_state import swap_lineage
+            if parent not in {row["attempt_id"] for row in swap_lineage(
+                    repo, json.loads(events(repo, "list", "--json", output=True)), owner, main_attempt)}:
+                return "Selected call is no longer running"
         if (current.get("attempt_id") != attempt.get("attempt_id") or current.get("terminal")
                 or current.get("state") not in {"starting", "working", "verifying"}
-                or current.get("parent_attempt_id") != main_attempt
                 or not room.same_room(repo, refs.get("panel_room_id"), room_id)
                 or refs.get("panel_room_participant") != member["participant"]):
             return "Selected call is no longer running"
@@ -2262,6 +2268,11 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
     from terminal_panel import _dispatch_call_finished, _dispatch_call_record, _dispatch_pending
     from terminal_panel import _dispatch_released, _settlement_delivery_pending, deliver_result, events
     rows = json.loads(events(repo, "list", "--json", output=True))
+    owners = {parent}
+    if any(row.get("reason_code") == "main_swapped" for row in rows):
+        # Calls a released predecessor launched settle here only when the room recorded that swap.
+        from panel_state import swap_lineage
+        owners.update(row["attempt_id"] for row in swap_lineage(repo, rows, caller, parent))
     for orphan in dispatch_store.orphan_members(repo):
         reported = getattr(_reconcile_dispatch, "_reported_orphans", set())
         if orphan not in reported:
@@ -2273,7 +2284,7 @@ def _reconcile_dispatch(repo, room_id, state, caller, parent):
     for member in state["participants"]:
         if not member.get("joined") or member.get("parent") != caller:
             continue
-        live = [row for row in rows if row.get("parent_attempt_id") == parent and not row.get("terminal")
+        live = [row for row in rows if row.get("parent_attempt_id") in owners and not row.get("terminal")
                 and row.get("refs", {}).get("panel_room_participant") == member["participant"]
                 and room.same_room(repo, row.get("refs", {}).get("panel_room_id", room_id), room_id)]
         call = _dispatch_call_record(repo, room_id, member)

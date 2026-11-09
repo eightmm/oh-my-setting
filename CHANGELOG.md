@@ -29,9 +29,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   exit code and acceptance verdict do not change (PR #36).
 - The resume block can carry the newest pins and the notes ranked for the
   active task's goal (PR #35).
+- `oms context-inspect --verify-current` re-hashes each recorded pack's
+  sources on disk and reports them unchanged, changed, missing or unreadable;
+  symlinks are not followed and reads stop at 2 MiB. It refuses `--compare`.
 
 - A main swap no longer waits for an active land, and it follows a room
   rollover that happens during the handoff.
+- A swapped-in main inherits its predecessor's workers, reviews and plan
+  completions only through the room's ordered swap chain; an attempt from a
+  different provider or another repository is not adopted.
 - One panel key table drives the root bindings, the F12 summary, the `?`
   overlay and the footer hints, so they cannot drift apart.
 - Plan rows and task Detail say what a ready or blocked task waits on (PR #19).
@@ -933,6 +939,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Removed
 
+- Knobs and flags no caller reached: `oms plan-run --claimed-lease`,
+  `oms apply-project-template --private`, `oms advise --no-role`,
+  `oms panel --retry-delivery --result-id`, and the `OMS_DOCTOR_MAX_SCAN`,
+  `OMS_USAGE_TTL`, `OMS_CODEX_NOTIFY_MIN_SEC` and `OMS_DEBUG` variables.
 - `oms goal-drive --max-parallel-tasks` and `oms autopilot --max-parallel-tasks`
   batch mode: panel dispatch is the parallel execution engine. The option is
   rejected as unknown; a legacy `max_parallel_tasks` field in stored autopilot
