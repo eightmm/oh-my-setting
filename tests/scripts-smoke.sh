@@ -35325,6 +35325,45 @@ test_worker_guard_still_fails_on_a_local_branch_ref_change() {
 
 # smoke-weight: 126
 test_worker_guard_reports_foreign_checkout_ref_moves() {
+  local registry_project="$TMP/registry-contention" registry_root="$TMP/registry-contention-root"
+  make_guard_repo "$registry_project"
+  local registry_bin="$TMP/registry-bin" registry_mkdir
+  registry_mkdir="$(command -v mkdir)"
+  mkdir -p "$registry_bin"
+  cat > "$registry_bin/mkdir" <<'SH'
+#!/usr/bin/env bash
+if ! "$REGISTRY_REAL_MKDIR" "$@"; then
+  case "$*" in *.lock*) : > "$REGISTRY_WAITING" ;; esac
+  exit 1
+fi
+SH
+  chmod +x "$registry_bin/mkdir"
+  (
+    . "$ROOT/scripts/lib/harness-residue.sh"
+    registry_hold() {
+      : > "$TMP/registry-held"
+      local tries=$(( ${OMS_TEST_CALL_TIMEOUT:-120} * 10 ))
+      while [ ! -e "$TMP/registry-release" ] && [ "$tries" -gt 0 ]; do sleep 0.1; tries=$((tries - 1)); done
+      [ -e "$TMP/registry-release" ]
+    }
+    OMS_LOCK_FORCE_MKDIR=1 oms_with_worktree_registry_lock "$registry_project" registry_hold
+  ) &
+  local registry_holder=$! registry_writer tries=$(( ${OMS_TEST_CALL_TIMEOUT:-120} * 10 ))
+  while [ ! -e "$TMP/registry-held" ] && [ "$tries" -gt 0 ]; do sleep 0.1; tries=$((tries - 1)); done
+  [ -e "$TMP/registry-held" ] || fail "registry holder did not start"
+  PATH="$registry_bin:$PATH" REGISTRY_REAL_MKDIR="$registry_mkdir" REGISTRY_WAITING="$TMP/registry-waiting" \
+    OMS_LOCK_FORCE_MKDIR=1 OMS_DELEGATE_WORKTREE_ROOT="$registry_root" \
+    "$ROOT/scripts/oms" scratch-worktree add --repo "$registry_project" --owner-pid "$$" >"$TMP/registry-output" 2>"$TMP/registry-error" &
+  registry_writer=$!
+  tries=$(( ${OMS_TEST_CALL_TIMEOUT:-120} * 10 ))
+  while [ ! -e "$TMP/registry-waiting" ] && kill -0 "$registry_writer" 2>/dev/null && [ "$tries" -gt 0 ]; do sleep 0.1; tries=$((tries - 1)); done
+  local registry_waited=0
+  [ -e "$TMP/registry-waiting" ] && [ ! -s "$TMP/registry-output" ] && registry_waited=1
+  : > "$TMP/registry-release"
+  wait "$registry_holder" || fail "registry holder failed"
+  wait "$registry_writer" || fail "scratch writer failed: $(cat "$TMP/registry-error")"
+  [ "$registry_waited" = 1 ] || fail "scratch writer did not wait for registry lock"
+  [ -s "$TMP/registry-output" ] || fail "scratch writer did not finish after release"
   local mixed_project="$TMP/guard-mixed-ref"
   local mixed_ready="$TMP/guard-mixed-ref-ready" mixed_fired="$TMP/guard-mixed-ref-fired"
   local mixed_hook="$TMP/guard-mixed-ref-hook.sh" mixed_old mixed_next mixed_index mixed_result
@@ -35917,13 +35956,16 @@ PY
 
   rm -f "$baseline_ready" "$baseline_release" "$ready" "$done"
   : > "$baseline_capture_count"
+  # Registration waits for the guard's registry lock, so the scratch exists first and only its branch
+  # moves inside the paused baseline window.
+  local baseline_scratch
+  baseline_scratch="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
+    "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid "$$")" ||
+    fail "baseline-window scratch worktree could not be created"
   (
     local tries=0
     while [ ! -f "$baseline_ready" ] && [ "$tries" -lt 100 ]; do sleep 0.1; tries=$((tries + 1)); done
     [ -f "$baseline_ready" ] || exit 1
-    local baseline_scratch
-    baseline_scratch="$(OMS_DELEGATE_WORKTREE_ROOT="$managed_root" \
-      "$ROOT/scripts/scratch-worktree.sh" add --repo "$project" --owner-pid "$$")" || exit 1
     git -C "$baseline_scratch" checkout -q --no-track -b oms/baseline-created || exit 1
     git -C "$baseline_scratch" -c user.name=test -c user.email=test@example.invalid \
       commit -q --allow-empty -m baseline-follow-up || exit 1

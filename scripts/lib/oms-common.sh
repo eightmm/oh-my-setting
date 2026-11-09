@@ -2,6 +2,16 @@
 # Cross-cutting primitives shared by the run and worktree tools. Sourced, not
 # executed.
 
+oms_with_worktree_registry_lock() {
+  local repo="$1" common
+  shift
+  common="$(oms_harness_git_path_physical "$repo" --git-common-dir)" || {
+    echo "error: cannot resolve Git worktree registry for delegation" >&2
+    return 1
+  }
+  oms_with_file_lock "$common/worktrees" "$@"
+}
+
 oms_require_current_task_contract() {
   printf '%s' "$1" | python3 -c '
 import json,sys

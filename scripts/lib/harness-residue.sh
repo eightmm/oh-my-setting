@@ -3,6 +3,8 @@
 
 # shellcheck source=file-lock.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/file-lock.sh"
+# shellcheck source=oms-common.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/oms-common.sh"
 
 OMS_HARNESS_RESIDUE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OMS_HARNESS_RESIDUE_REMOVED=0
@@ -767,7 +769,7 @@ oms_harness_prune_stale_worktrees() {
     printf 'would prune: %s stale git worktree registration(s)\n' "$before"
     OMS_HARNESS_RESIDUE_WOULD_REMOVE=$((OMS_HARNESS_RESIDUE_WOULD_REMOVE + before))
   else
-    git -C "$repo" worktree prune >/dev/null 2>&1 || true
+    oms_with_worktree_registry_lock "$repo" git -C "$repo" worktree prune >/dev/null 2>&1 || true
     printf 'pruned: %s stale git worktree registration(s)\n' "$before"
     OMS_HARNESS_RESIDUE_REMOVED=$((OMS_HARNESS_RESIDUE_REMOVED + before))
   fi
@@ -938,13 +940,13 @@ oms_harness_cleanup_temp_dirs() {
           OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
           continue
         fi
-        if ! git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \
+        if ! oms_with_worktree_registry_lock "$OMS_HARNESS_SAFE_RESIDUE_REPO" git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree remove --force \
             "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >/dev/null 2>&1; then
           printf 'kept: %s (worktree removal failed)\n' "$dir"
           OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
           continue
         fi
-        git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree prune >/dev/null 2>&1 || true
+        oms_with_worktree_registry_lock "$OMS_HARNESS_SAFE_RESIDUE_REPO" git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" worktree prune >/dev/null 2>&1 || true
       fi
       if ! (
         cd "$dir" 2>/dev/null && [ "$(pwd -P)" = "$physical_dir" ] || exit 1

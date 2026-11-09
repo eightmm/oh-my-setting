@@ -811,7 +811,7 @@ ma_agy_read_dir() {
      oms_git_assert_safe_execution_config "$repo" diff-read >/dev/null 2>&1 &&
      git -C "$repo" rev-parse --verify HEAD >/dev/null 2>&1 &&
      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-       GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+       GIT_CONFIG_NOSYSTEM=1 oms_with_worktree_registry_lock "$repo" git -c core.hooksPath=/dev/null \
        -c core.fsmonitor=false -C "$repo" \
        worktree add --detach "$read_tree" HEAD >/dev/null 2>&1; then
     oms_seed_local_agent_files "$repo" "$read_tree"
@@ -832,7 +832,7 @@ ma_agy_read_cleanup() {
     */tree|*/tree-*)
       base="${dir%/*}"
       if [ -n "$repo" ]; then
-        git -C "$repo" worktree remove --force "$dir" >/dev/null 2>&1 || true
+        oms_with_worktree_registry_lock "$repo" git -C "$repo" worktree remove --force "$dir" >/dev/null 2>&1 || true
       fi
       ;;
   esac

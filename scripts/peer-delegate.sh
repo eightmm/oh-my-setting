@@ -855,21 +855,8 @@ load_user_tool_paths
 agent_memory_ensure_oms_ignore_for_path "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
 
-# A guard scan can read a sibling's admin leaves before removal and validate
-# its marker after removal. Coordinate peer-delegate registry writes with its
-# guard reads, keyed by physical common directory. patch-admit, checkpoint,
-# scratch-worktree, peer-common, and residue writers do not take this lock.
-# Providers run outside it; guard checks stay intact.
-delegate_with_worktree_registry_lock() {
-  local repo="$1" common
-  shift
-  common="$(oms_harness_git_path_physical "$repo" --git-common-dir)" || {
-    echo "error: cannot resolve Git worktree registry for delegation" >&2
-    return 1
-  }
-  oms_with_file_lock "$common/worktrees" "$@"
-}
-
+# Serialize registry writes and guard reads by physical common directory.
+# Provider runs remain outside the lock.
 delegate_surface_snapshot() {
   oms_worker_surface_snapshot "$@" && return 0
   # The lock runs in a subshell, so report the snapshot's diagnostic here.
@@ -877,8 +864,7 @@ delegate_surface_snapshot() {
   return 1
 }
 
-delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
-  oms_harness_prune_stale_worktrees "$delegate_worktree_repo" 0 >/dev/null
+oms_harness_prune_stale_worktrees "$delegate_worktree_repo" 0 >/dev/null
 [ "$DRY_RUN" = 1 ] || oms_harness_reap_dead_delegation_markers "$REPO"
 prompt_file="$(mktemp)" || fail "mktemp failed"
 repair_prompt_file="$prompt_file.repair"
@@ -949,7 +935,7 @@ cleanup_delegated_worktree() {
       "$worker_identity_common_dir" "$worker_identity_gitfile_sha" \
       "$worker_identity_backpointer_sha" "$worker_identity_worktree_stat" \
       "$worker_identity_gitdir_stat" 2>/dev/null)"; then
-    if delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+    if oms_with_worktree_registry_lock "$delegate_worktree_repo" \
       git -C "$delegate_worktree_repo" worktree remove --force "$worktree" >/dev/null 2>&1; then
       worktree_created=0
       rm -rf "$worktree_parent"
@@ -1307,7 +1293,7 @@ PY
   esac
 fi
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-  GIT_CONFIG_NOSYSTEM=1 delegate_with_worktree_registry_lock "$DELEGATE_SOURCE_REPO" \
+  GIT_CONFIG_NOSYSTEM=1 oms_with_worktree_registry_lock "$DELEGATE_SOURCE_REPO" \
   git -c core.hooksPath=/dev/null \
   -c core.fsmonitor=false -C "$DELEGATE_SOURCE_REPO" \
   worktree add --detach "$worktree" "$continuation_base" >/dev/null 2>&1
@@ -2273,7 +2259,7 @@ EOF_GUARD_TARGETS
   worker_guard_dir="$worktree_parent/worker-guard"
   worker_guard_snapshot_error_file="$worktree_parent/worker-guard-snapshot.error"
   worker_guard_snapshot_time="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  if delegate_with_worktree_registry_lock "$REPO" \
+  if oms_with_worktree_registry_lock "$REPO" \
     delegate_surface_snapshot "$REPO" "$worker_guard_dir" \
     "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
     worker_receipts_snapshot_sha="$(oms_worker_gitmeta_receipts_fingerprint "$worker_guard_dir")" ||
@@ -2301,7 +2287,7 @@ EOF_GUARD_TARGETS
     if [ "$delegate_worktree_repo" != "$REPO" ]; then
       worker_source_guard_dir="$worker_guard_dir/source"
       if ! OMS_WORKER_GUARD_EXCLUDE="$worker_source_guard_exclude" \
-        delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+        oms_with_worktree_registry_lock "$delegate_worktree_repo" \
         delegate_surface_snapshot "$delegate_worktree_repo" "$worker_source_guard_dir" \
         "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
         snapshot_error="$(cat "$worker_guard_snapshot_error_file" 2>/dev/null || true)"
@@ -2382,14 +2368,14 @@ worker_protected_surface_diff() {
   # Provider scratch is private; sibling classification uses the snapshot's base.
   local TMPDIR="$worker_guard_tmp_base"
   oms_worker_gitmeta_receipts_assert_unchanged "$worker_guard_dir" "$worker_receipts_snapshot_sha" || return 2
-  changed="$(OMS_WG_RECEIPTS_SHA="$worker_receipts_snapshot_sha" delegate_with_worktree_registry_lock "$REPO" \
+  changed="$(OMS_WG_RECEIPTS_SHA="$worker_receipts_snapshot_sha" oms_with_worktree_registry_lock "$REPO" \
     oms_worker_surface_diff "$REPO" "$worker_guard_dir" \
     "$worker_operation_snapshot_sha" "$worker_guard_worktree_physical")" || return 2
   if [ -n "$worker_source_guard_dir" ]; then
     oms_worker_gitmeta_receipts_assert_unchanged "$worker_source_guard_dir" "$worker_source_receipts_snapshot_sha" || return 2
     source_changed="$(OMS_WORKER_GUARD_EXCLUDE="$worker_source_guard_exclude" \
       OMS_WG_RECEIPTS_SHA="$worker_source_receipts_snapshot_sha" \
-      delegate_with_worktree_registry_lock "$delegate_worktree_repo" \
+      oms_with_worktree_registry_lock "$delegate_worktree_repo" \
       oms_worker_surface_diff "$delegate_worktree_repo" "$worker_source_guard_dir" \
       "" "$worker_guard_worktree_physical")" || return 2
     if [ -n "$source_changed" ]; then

@@ -242,7 +242,7 @@ checkpoint_verify_raw() {
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/oms-checkpoint-verify.XXXXXX")" || return 1
   worktree="$tmp/worktree"
-  if git -C "$REPO" worktree add --detach --quiet "$worktree" "$head" >/dev/null 2>&1; then
+  if oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree add --detach --quiet "$worktree" "$head" >/dev/null 2>&1; then
     added=1
   else
     echo "error: could not create a temporary worktree to verify $id" >&2
@@ -266,10 +266,10 @@ checkpoint_verify_raw() {
     echo "error: checkpoint patches cannot reproduce their saved tracked state: $id" >&2
   fi
   if [ "$added" -eq 1 ]; then
-    git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   fi
   rm -rf "$tmp"
-  git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+  oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree prune >/dev/null 2>&1 || true
   return "$rc"
 }
 

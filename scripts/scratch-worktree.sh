@@ -161,7 +161,7 @@ cmd_add() {
   # The marker precedes the registration: a worker guard capturing between the
   # two sees a pending entry whose live marker already vouches for it.
   oms_harness_mark_tmpdir "$parent_physical" "$REPO_PHYSICAL" "$worktree" "$OWNER_PID"
-  if ! git -C "$REPO_PHYSICAL" -c core.fsmonitor=false worktree add --quiet --detach \
+  if ! oms_with_worktree_registry_lock "$REPO_PHYSICAL" git -C "$REPO_PHYSICAL" -c core.fsmonitor=false worktree add --quiet --detach \
       "$worktree" "$sha" >&2; then
     rm -rf "$parent_physical"
     echo "error: git worktree add failed" >&2
@@ -216,7 +216,7 @@ cmd_remove() {
     fi
     remove_args=(worktree remove)
     [ "$FORCE" = 0 ] || remove_args+=(--force)
-    git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" "${remove_args[@]}" "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >&2 ||
+    oms_with_worktree_registry_lock "$OMS_HARNESS_SAFE_RESIDUE_REPO" git -C "$OMS_HARNESS_SAFE_RESIDUE_REPO" "${remove_args[@]}" "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" >&2 ||
       { echo "error: git worktree remove failed (uncommitted changes need --force)" >&2; exit 1; }
   else
     # An interrupted removal left the checkout gone but its entry registered.
@@ -238,7 +238,7 @@ cmd_remove() {
       gitfile="$(sed -n '1p' "$entry/gitdir")"
       gitfile="${gitfile//$'\r'/}"
       [ "$gitfile" = "$worktree/.git" ] || [ "$gitfile" = "$M_WORKTREE/.git" ] || continue
-      rm -rf "$entry"
+      oms_with_worktree_registry_lock "$M_REPO" rm -rf "$entry"
     done
   fi
   # The marker goes last so every intermediate state above stays vouched for.

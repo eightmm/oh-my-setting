@@ -132,13 +132,13 @@ cleanup() {
   fi
   oms_reference_stop "$reference_state" >/dev/null 2>&1 || true
   if [ -n "$floor_worktree" ] && [ "$floor_worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
-    git -C "$REPO" worktree remove --force "$floor_worktree" >/dev/null 2>&1 || true
+    oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree remove --force "$floor_worktree" >/dev/null 2>&1 || true
   fi
   if [ -n "$floor_worktree_parent" ] && [ "$KEEP_WORKTREE" = 0 ]; then
     rm -rf "$floor_worktree_parent"
   fi
   if [ -n "$worktree" ] && [ "$worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
-    git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+    oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree remove --force "$worktree" >/dev/null 2>&1 || true
   fi
   if [ -n "$worktree_parent" ] && [ "$KEEP_WORKTREE" = 0 ]; then
     rm -rf "$worktree_parent"
@@ -348,7 +348,7 @@ if [ "$apply_ok" = 1 ]; then
   worktree="$worktree_parent/wt-${worktree_parent##*.}"
   oms_harness_mark_tmpdir "$worktree_parent" "$REPO" "$worktree"
   if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+    GIT_CONFIG_NOSYSTEM=1 oms_with_worktree_registry_lock "$REPO" git -c core.hooksPath=/dev/null \
     -c core.fsmonitor=false -C "$REPO" worktree add --quiet --detach \
     "$worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
     worktree_created=1
@@ -936,7 +936,7 @@ for t in tests:
         floor_worktree="$floor_worktree_parent/wt-${floor_worktree_parent##*.}"
         oms_harness_mark_tmpdir "$floor_worktree_parent" "$REPO" "$floor_worktree"
         if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-          GIT_CONFIG_NOSYSTEM=1 git -c core.hooksPath=/dev/null \
+          GIT_CONFIG_NOSYSTEM=1 oms_with_worktree_registry_lock "$REPO" git -c core.hooksPath=/dev/null \
           -c core.fsmonitor=false -C "$REPO" worktree add --quiet --detach \
           "$floor_worktree" "${base_full_sha:-HEAD}" >/dev/null 2>&1; then
           floor_worktree_created=1
