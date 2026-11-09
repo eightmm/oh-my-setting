@@ -8,12 +8,6 @@ case "${BASH_SOURCE[0]}" in
   *) OMS_FILE_LOCK_LIB_DIR="$(pwd)" ;;
 esac
 
-# The kernel name cannot change within a process; ask uname once. Not
-# exported, so a child started with a different PATH still asks its own.
-oms_lock_kernel() {
-  [ -n "${OMS_LOCK_KERNEL:-}" ] ||
-    OMS_LOCK_KERNEL="${OMS_PLATFORM_KERNEL:-$(uname -s 2>/dev/null || true)}"
-}
 if [ -f "$OMS_FILE_LOCK_LIB_DIR/poll.sh" ]; then
   # shellcheck source=scripts/lib/poll.sh
   . "$OMS_FILE_LOCK_LIB_DIR/poll.sh"

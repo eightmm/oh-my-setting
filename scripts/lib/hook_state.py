@@ -2666,7 +2666,7 @@ def start_codex_notify(cwd: Path, payload: dict[str, Any], message: str) -> None
     minutes = int(elapsed // 60)
     text = "🔔 Claude Code 작업 완료 · %s (%s)\n%s" % (
         cwd.name, "%d분" % minutes if minutes else "%d초" % int(elapsed),
-        sanitize_text(message[-2000:], env_int("OMS_CODEX_NOTIFY_BYTES", 300, minimum=0, maximum=2000)))
+        sanitize_text(message[-2000:], 300))
     subprocess.Popen(
         [sys.executable, str(Path(__file__).with_name("codex_app_notify.py")), "send", str(cwd), text],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

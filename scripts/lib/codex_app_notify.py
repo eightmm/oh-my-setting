@@ -176,7 +176,7 @@ def send(repo: Path, text: str) -> int:
     path = socket_path()
     if not path.exists():
         return 0
-    client = Client(path, float(os.environ.get("OMS_CODEX_NOTIFY_TIMEOUT", "30")))
+    client = Client(path, 30.0)
     try:
         client.call("initialize", {"clientInfo": {"name": "oms-codex-notify", "version": "1"}})
         client.notify("initialized")
@@ -353,7 +353,7 @@ def deliver(repo: Path, text: str, timeout: float = None) -> dict:
     if not tid or not path.exists():
         return _receipt("absent", tid)
     try:
-        budget = float(timeout if timeout is not None else os.environ.get("OMS_CODEX_NOTIFY_TIMEOUT", "30"))
+        budget = float(timeout if timeout is not None else 30.0)
         if not 0 < budget <= 120:
             return _receipt("invalid_timeout", tid)
     except (TypeError, ValueError):

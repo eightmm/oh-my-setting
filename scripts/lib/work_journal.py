@@ -1541,8 +1541,6 @@ def notion_excluded_repos() -> List[str]:
     raw = notion.get("excluded_repos") if isinstance(notion, Mapping) else None
     if isinstance(raw, list):
         entries.extend(str(item) for item in raw if str(item or "").strip())
-    env = os.environ.get("OMS_WORK_JOURNAL_NOTION_EXCLUDE", "")
-    entries.extend(part for part in env.split(":") if part.strip())
     resolved: List[str] = []
     for entry in entries:
         try:

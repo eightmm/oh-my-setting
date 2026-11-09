@@ -10,7 +10,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPER="$ROOT/scripts/lib/hook_state.py"
 
-[ "${OMS_TELEMETRY_HOOK:-1}" = 1 ] || exit 0
 [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || exit 0
 [ -f "$HELPER" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
