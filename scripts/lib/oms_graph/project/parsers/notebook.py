@@ -10,39 +10,39 @@ from typing import Any, Dict, List, Optional, Tuple
 from .base import ParseResult, Parser
 from .python import PythonParser
 
-# One JSON token: a string, a structural character, or a bare literal.
-_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\]:,]|[^\s{}\[\]:,"]+')
+# One JSON lexeme: a string, a structural character, or a bare literal.
+_LEXEME = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\]:,]|[^\s{}\[\]:,"]+')
 _PYTHON_SYMBOLS = ("class", "function", "method")
 
 
 def _cell_fragments(text: str) -> Optional[Dict[int, Dict[str, Any]]]:
     """{cell index: {"type", "source": [(physical line, decoded string), ...]}} for the top-level `cells` array.
 
-    A position-keeping walk over the JSON tokens: `json` reports no source positions, and a symbol's line
+    A position-keeping walk over the JSON lexemes: `json` reports no source positions, and a symbol's line
     must be the line of the notebook file, whatever layout the file was written in."""
     frames: List[List[Any]] = []  # [bracket, current key, element index]
     cells: Dict[int, Dict[str, Any]] = {}
     line = 1
     cursor = 0
     try:
-        for match in _TOKEN.finditer(text):
+        for match in _LEXEME.finditer(text):
             line += text.count("\n", cursor, match.start())
             cursor = match.start()
-            token = match.group(0)
-            if token in ("{", "["):
-                frames.append([token, None, 0])
-            elif token in ("}", "]"):
+            lexeme = match.group(0)
+            if lexeme in ("{", "["):
+                frames.append([lexeme, None, 0])
+            elif lexeme in ("}", "]"):
                 frames.pop()
-            elif token == ",":
+            elif lexeme == ",":
                 if frames and frames[-1][0] == "[":
                     frames[-1][2] += 1
                 elif frames:
                     frames[-1][1] = None
-            elif token == ":":
+            elif lexeme == ":":
                 continue
             elif frames and frames[-1][0] == "{" and frames[-1][1] is None:
-                frames[-1][1] = json.loads(token)
-            elif token.startswith('"'):
+                frames[-1][1] = json.loads(lexeme)
+            elif lexeme.startswith('"'):
                 depth = len(frames)
                 if (depth < 3 or frames[0][0] != "{" or frames[0][1] != "cells"
                         or frames[1][0] != "[" or frames[2][0] != "{"):
@@ -50,9 +50,9 @@ def _cell_fragments(text: str) -> Optional[Dict[int, Dict[str, Any]]]:
                 cell = cells.setdefault(frames[1][2], {"type": None, "source": []})
                 key = frames[2][1]
                 if depth == 3 and key == "cell_type":
-                    cell["type"] = json.loads(token)
+                    cell["type"] = json.loads(lexeme)
                 elif key == "source" and (depth == 3 or (depth == 4 and frames[3][0] == "[")):
-                    cell["source"].append((line, json.loads(token)))
+                    cell["source"].append((line, json.loads(lexeme)))
     except (IndexError, TypeError, ValueError):
         return None
     return cells
