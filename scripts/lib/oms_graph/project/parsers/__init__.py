@@ -9,9 +9,10 @@ from .base import Parser
 
 def registry() -> Dict[str, Parser]:
     """Extension (with leading dot) -> parser instance."""
-    from . import config, markdown, python, shell
+    from . import config, markdown, notebook, python, shell
     result: Dict[str, Parser] = {}
-    for parser in (python.PythonParser(), shell.ShellParser(), markdown.MarkdownParser(), config.ConfigParser()):
+    for parser in (python.PythonParser(), shell.ShellParser(), markdown.MarkdownParser(), config.ConfigParser(),
+                   notebook.NotebookParser()):
         for extension in parser.extensions:
             result[extension] = parser
     return result

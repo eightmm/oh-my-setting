@@ -1492,7 +1492,8 @@ build|check|map|find|api|search|neighbors|trace|blast|affected|context`) is a
 deterministic structural graph of the repository — file, module, class/function/method,
 test, config, and document nodes with `contains`, `imports`, `calls`, `references`, and
 `tests` edges — extracted by stdlib parsers (Python `ast`, bounded shell regexes,
-Markdown path references) without a model, key, or network. Every edge carries
+Markdown path references, Jupyter notebook code cells through the same `ast`
+pass, outputs never read) without a model, key, or network. Every edge carries
 `EXTRACTED`, `INFERRED`, or `AMBIGUOUS` confidence, so inference is never presented as
 fact. Deterministic source summaries improve task ranking; `api` projects signatures
 without bodies, `search` groups exhaustive literal hits by enclosing symbol, and

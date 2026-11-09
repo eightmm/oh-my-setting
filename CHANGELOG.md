@@ -17,6 +17,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - Memory recall returns how a failure was fixed and its recorded next step,
   each only when the text passes the secret scan in both its raw and indexed
   spelling (PR #30).
+- The Project Graph indexes Jupyter notebook code cells as Python symbols
+  anchored to their cell and file line; outputs and Markdown cells are never
+  read, line magics are blanked only where a new logical line starts, and
+  notebooks stay out of search, context ranking and test-path edges (PR #32).
 - `oms ci-status` protection reports whether the gate job is a required check
   on the branch (PR #33).
 - The resume block can carry the newest pins and the notes ranked for the

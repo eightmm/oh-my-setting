@@ -47,6 +47,8 @@ def _rank_entries(repo: Path, index: Graph, tokens: Sequence[str]) -> List[Dict[
         if not path or path in sources:
             continue
         sources[path] = []
+        if path.lower().endswith(".ipynb"):  # raw lines are JSON that includes cell outputs
+            continue
         try:
             target = root / path
             target.resolve().relative_to(root)

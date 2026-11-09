@@ -116,7 +116,8 @@ def extract_file(repo: Path, relpath: str) -> Dict[str, Any]:
     parsed["nodes"] = [file_node] + parsed["nodes"]
     # Tests name implementation paths frequently without a language-specific
     # parser reference; preserve those direct assertions as test edges.
-    if is_test:
+    # A notebook's raw lines are JSON that includes cell outputs, which are never read.
+    if is_test and parser.language != "notebook":
         source = node_id(file_kind, relpath)
         for number, line in enumerate(text.splitlines(), 1):
             for match in PATH_LITERAL_RE.finditer(line):
