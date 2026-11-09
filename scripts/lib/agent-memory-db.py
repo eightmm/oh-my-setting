@@ -12,6 +12,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -241,6 +242,56 @@ def parse_pins(text: str) -> list[Entry]:
     return entries
 
 
+FAILURE_NOTE_CAP = 240
+FAILURE_NOTE_SCAN_BYTES = 8192
+SECRET_SCAN = (
+    '. "$1" || exit 2; shift; for f in "$@"; do rc=0; '
+    'agent_memory_file_secret_status "$f" 2>/dev/null || rc=$?; printf "%s\\n" "$rc"; done'
+)
+
+
+def secret_free(texts: list[str]) -> set[str]:
+    """The texts the shared secret scanner clears; a text it flags, cannot read
+    or never reaches is left out.
+
+    The ledger scans a failure's command and summary before it stores them,
+    but `record --next` and `resolve --how` are stored as given. They pass the
+    same scanner here before they can enter the index, and a scan that fails
+    clears nothing."""
+    wanted = [text for text in dict.fromkeys(texts)
+              if text and len(text.encode("utf-8")) <= FAILURE_NOTE_SCAN_BYTES]
+    if not wanted:
+        return set()
+    library = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-memory-common.sh")
+    try:
+        with tempfile.TemporaryDirectory(prefix="oms-failure-notes.") as directory:
+            paths = []
+            for index, text in enumerate(wanted):
+                path = os.path.join(directory, str(index))
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(text + "\n")
+                paths.append(path)
+            scan = subprocess.run(
+                ["bash", "-c", SECRET_SCAN, "secret-scan", library, *paths],
+                capture_output=True, text=True, check=False, timeout=30,
+                stdin=subprocess.DEVNULL,
+            )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return set()
+    verdicts = scan.stdout.split()
+    if scan.returncode != 0 or len(verdicts) != len(wanted):
+        return set()
+    # 1 is the scanner's "clean"; 0 is a hit and anything else a failed scan.
+    return {text for text, verdict in zip(wanted, verdicts) if verdict == "1"}
+
+
+def failure_note(value: object) -> str:
+    """One bounded line of a ledger note, or "" when it carries no text."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())
+
+
 def parse_failures(text: str) -> list[Entry]:
     """Index the failure ledger. Exact-fingerprint `check --cmd` answers "this
     same command failed"; indexing the rows makes the softer question — have we
@@ -252,9 +303,16 @@ def parse_failures(text: str) -> list[Entry]:
     open one. The ledger is append-only and chronological, so the last event
     for a fingerprint is its current state and a later failure re-opens it.
     Field names here follow fail-ledger.sh, which writes exactly two events
-    (`fail`, `resolved`) and stores the git state as `state_fingerprint`."""
+    (`fail`, `resolved`) and stores the git state as `state_fingerprint`.
+
+    What went wrong is half of the memory. The newest failure of a resolved
+    fingerprint also carries how it was fixed (`resolve --how`), and an open
+    failure its recorded next step (`record --next`), so a recall of the
+    symptom returns the remedy instead of a pointer to `fail-ledger show`."""
     rows: list[dict] = []
     resolved: dict[str, bool] = {}
+    fixes: dict[str, str] = {}
+    newest: dict[str, int] = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -269,13 +327,33 @@ def parse_failures(text: str) -> list[Entry]:
         if str(row.get("event") or "") == "resolved":
             if fingerprint:
                 resolved[fingerprint] = True
+                value = row.get("how")
+                fixes[fingerprint] = value if isinstance(value, str) else ""
             continue
         if fingerprint:
             resolved[fingerprint] = False
+            fixes.pop(fingerprint, None)
+            newest[fingerprint] = len(rows)
         rows.append(row)
 
+    raw = ([fix for fingerprint, fix in fixes.items() if resolved.get(fingerprint)]
+           + [row.get("next") if isinstance(row.get("next"), str) else "" for row in rows
+              if not resolved.get(str(row.get("fingerprint") or ""), False)])
+    # Both spellings are scanned: the raw note keeps runs of spaces, the indexed one joins split lines.
+    cleared = secret_free(raw + [failure_note(value) for value in raw])
+
+    def note(label: str, value: str) -> str:
+        if value not in cleared or failure_note(value) not in cleared:
+            return ""
+        value = failure_note(value)
+        if not value:
+            return ""
+        if len(value) > FAILURE_NOTE_CAP:
+            value = value[:FAILURE_NOTE_CAP - 3] + "..."
+        return " | %s: %s" % (label, value)
+
     entries: list[Entry] = []
-    for row in rows:
+    for position, row in enumerate(rows):
         command = str(row.get("cmd") or "")
         summary = str(row.get("summary") or "")
         fingerprint = str(row.get("fingerprint") or "")
@@ -295,6 +373,13 @@ def parse_failures(text: str) -> list[Entry]:
         is_resolved = resolved.get(fingerprint, False)
         if is_resolved:
             body = "resolved — %s" % body
+            # One resolution clears every failure of the fingerprint; its fix
+            # rides the newest of them rather than repeating on each row.
+            if newest.get(fingerprint) == position:
+                body += note("fixed", fixes.get(fingerprint, ""))
+        else:
+            value = row.get("next")
+            body += note("next", value if isinstance(value, str) else "")
         metadata = {
             "kind": "failure-resolved" if is_resolved else "failure",
             "task_id": str(row.get("task") or row.get("task_id") or ""),

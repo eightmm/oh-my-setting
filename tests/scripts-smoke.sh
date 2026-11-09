@@ -40687,7 +40687,7 @@ test_memory_recall_spans_notes_and_recorded_failures() {
     fail "recall should still reach the notes: $out"
 }
 
-# smoke-weight: 6
+# smoke-weight: 14
 test_memory_recall_marks_a_resolved_failure() {
   local project="$TMP/memory-failures-resolved"
   local gate='bash -c "grep -q fixed state.txt || { echo ERROR: state.txt not fixed; exit 1; }; echo ok"'
@@ -40718,6 +40718,95 @@ test_memory_recall_marks_a_resolved_failure() {
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "state.txt" --json)"
   contains "$out" '"kind": "failure"' ||
     fail "a failure recorded after a resolution must recall as open: $out"
+
+  # What fixed it is half of the memory. An open failure recalls its recorded
+  # next step; once resolved, the newest failure of the fingerprint recalls how
+  # it was fixed, once, and no longer offers the next step.
+  local probe='python3 tools/split_probe.py'
+  local ledger="$ROOT/scripts/fail-ledger.sh"
+  "$ledger" --repo "$project" record --cmd "$probe" --exit 2 --summary "split probe crashed" \
+    --next "try the older loader first" >/dev/null 2>&1 || fail "recording a failure with a next step failed"
+  "$ledger" --repo "$project" record --cmd "$probe" --exit 2 --summary "split probe crashed" \
+    --next "regenerate the manifest with the cluster seed" >/dev/null 2>&1 || fail "recording the second failure failed"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "cluster seed")"
+  contains "$out" 'split probe crashed' && contains "$out" '| next: regenerate the manifest with the cluster seed' ||
+    fail "an open failure should recall its recorded next step: $out"
+  "$ledger" --repo "$project" resolve --cmd "$probe" \
+    --how "pinned the scaffold seed and rebuilt the manifest" >/dev/null 2>&1 || fail "resolving with --how failed"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "rebuilt the manifest")"
+  contains "$out" 'resolved' && contains "$out" '| fixed: pinned the scaffold seed and rebuilt the manifest' ||
+    fail "a resolved failure should recall how it was fixed: $out"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "split probe crashed" --json)"
+  [ "$(printf '%s' "$out" | grep -o 'fixed: pinned the scaffold seed' | wc -l | tr -d ' ')" = 1 ] ||
+    fail "the fix belongs to the newest failure of the fingerprint only: $out"
+  ! contains "$out" 'next: ' || fail "a resolved failure must not still offer its next step: $out"
+
+  # A later failure re-opens the fingerprint and drops the fix it invalidates.
+  "$ledger" --repo "$project" record --cmd "$probe" --exit 2 --summary "split probe crashed" >/dev/null 2>&1 ||
+    fail "re-recording the failure failed"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "split probe crashed" --json)"
+  ! contains "$out" 'fixed: ' || fail "a re-opened failure must not recall the old fix: $out"
+  contains "$out" 'next: regenerate the manifest with the cluster seed' ||
+    fail "a re-opened failure should recall the next steps again: $out"
+
+  # The ledger scans a command and summary before storing them but stores the
+  # next step and the fix as given, so each passes the secret scanner before it
+  # is indexed: a flagged note is left out and the failure itself still recalls.
+  "$ledger" --repo "$project" record --cmd 'python3 tools/upload.py' --exit 1 --summary "upload refused" \
+    --next 'retry with API_TOK''EN=abcd1234abcd1234abcd' >/dev/null 2>&1 || fail "recording the flagged next step failed"
+  "$ledger" --repo "$project" record --cmd 'python3 tools/long.py' --exit 1 --summary "long note case" \
+    --next "$(printf 'step %.0s' {1..80})end-of-note" >/dev/null 2>&1 || fail "recording the long next step failed"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "upload refused")"
+  contains "$out" 'upload refused' || fail "the failure with a flagged note should still recall: $out"
+  ! contains "$out" 'abcd1234' && ! contains "$out" 'next: retry' ||
+    fail "a secret-looking next step must not enter the index: $out"
+  # A long note is cut to one bounded line.
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "long note case")"
+  contains "$out" '| next: step step' && contains "$out" 'step st...' && ! contains "$out" 'end-of-note' ||
+    fail "a long next step should be cut at its bound: $out"
+  # A scanner that cannot run clears nothing: notes are left out, failures stay.
+  out="$(PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/agent-memory-db.py" "$project/.oms/failures.jsonl" <<'FAILCLOSED'
+import importlib.util, subprocess, sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("memory_db", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules["memory_db"] = module
+spec.loader.exec_module(module)
+text = open(sys.argv[2], encoding="utf-8").read()
+normal = [entry.body for entry in module.parse_failures(text)]
+assert any("| next: " in body for body in normal), normal
+for broken in (subprocess.CompletedProcess([], 2, "", ""), subprocess.CompletedProcess([], 0, "1\n", "")):
+    with patch.object(module.subprocess, "run", return_value=broken):
+        bodies = [entry.body for entry in module.parse_failures(text)]
+    assert len(bodies) == len(normal) and not any("next: " in body or "fixed: " in body for body in bodies), bodies
+with patch.object(module.subprocess, "run", side_effect=OSError("no bash")):
+    bodies = [entry.body for entry in module.parse_failures(text)]
+assert len(bodies) == len(normal) and not any("next: " in body for body in bodies), bodies
+print("fail-closed")
+FAILCLOSED
+)" || fail "the failure-note scan should fail closed: $out"
+  [ "$out" = fail-closed ] || fail "the failure-note scan should fail closed: $out"
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$ROOT/scripts/lib/agent-memory-db.py" <<'WHITESPACE' || fail "failure notes must be scanned before whitespace normalization"
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("memory_db", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules["memory_db"] = module
+spec.loader.exec_module(module)
+value = "fixture  value with spaces"
+os.environ["OMS_TEST_" + "PASS" + "WORD"] = value
+rows = [
+    {"event": "fail", "fingerprint": "a", "summary": "open case", "next": value},
+    {"event": "fail", "fingerprint": "b", "summary": "resolved case"},
+    {"event": "resolved", "fingerprint": "b", "how": value},
+    {"event": "fail", "fingerprint": "c", "summary": "clean case", "next": "clean  note"},
+    # A pattern split across lines only matches after the note is joined into one line.
+    {"event": "fail", "fingerprint": "d", "summary": "split case", "next": "Bear" + "er\n" + "abcd1234" * 3},
+]
+bodies = [entry.body for entry in module.parse_failures("\n".join(map(json.dumps, rows)))]
+assert len(bodies) == 4, bodies
+assert "next:" not in bodies[0] and "fixed:" not in bodies[1] and "next:" not in bodies[3], bodies
+assert "next: clean note" in bodies[2], bodies
+WHITESPACE
 }
 
 test_memory_index_upgrades_a_schema_two_database() {
