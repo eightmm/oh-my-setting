@@ -834,6 +834,10 @@ Codex mains) their native usage. External sessions, other repos and other hosts 
 read: `native_index` matches only enrolled consumer hashes inside one repo's room.
 Native rows (subagents, advisor) are read-only and are never participants, task owners,
 leases or acceptance evidence; a recent file write is shown as `active`, never as liveness.
+A Claude main's transcript is read only while it is the single copy of its session ID
+under the projects folder. That proof is repeated when the projects folder changes and at
+least every 60 seconds, so a copy that appears later under another project folder stops
+both from being read; a scan cut at the 4096-folder bound proves nothing and reads nothing.
 
 `oms panel --metrics` reports retained owner decisions for write tasks by provider and
 model, counting a task once per model it touched and grouping attempts without a

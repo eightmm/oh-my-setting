@@ -38,7 +38,8 @@ OVERSIZED_USAGE = re.compile(rb'"usage"\s*:\s*')
 OVERSIZED_ID = re.compile(rb'"id"\s*:\s*"(msg_[A-Za-z0-9_-]{1,120})"')
 USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 ADVISOR_MODELS = (("fable", "Fable 5.1"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"))
-_transcripts = {}
+TRANSCRIPT_RECHECK = 60      # seconds a proven-unique main transcript is reused before the folders are scanned again
+_transcripts = {}  # consumer -> (path, projects folder generation, monotonic time of the scan that proved it unique)
 _usage = {}  # transcript path -> read offset, file identity and per-message token totals
 _codex_usage_cache = {}  # Codex rollout path -> read offset, file identity and last token_count total
 _refresh = [0]  # counts native_subagents() calls, so entries not shown in the latest one are dropped
@@ -152,20 +153,37 @@ def _claude_mains(members):
 
 
 def _main_transcript(home, consumer):
-    """The main's own transcript, resolved once per consumer."""
-    path = _transcripts.get(consumer)
-    if path is None:
-        sids = native_index({consumer})["claude"].get(consumer) or ()
-        for sid in sorted(sids)[:1]:
-            matches = []
-            with os.scandir(home / "projects") as slugs:
-                for slug in list(slugs)[:MAX_FILES]:
-                    candidate = Path(slug.path) / (sid + ".jsonl")
-                    if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
-                        matches.append(candidate)
-            if len(matches) == 1:  # one session ID in two project folders is ambiguous: read neither
-                path = _transcripts[consumer] = matches[0]
-    return path
+    """The main's own transcript while it is provably the only copy of its session ID.
+
+    A proven path is reused only while the projects folder is unchanged and its proving scan is younger than
+    TRANSCRIPT_RECHECK; a copy added later under another project folder is then found by the next scan and
+    neither is read. A scan cut at MAX_FILES cannot prove uniqueness, so nothing is read or cached."""
+    try:
+        info = os.stat(home / "projects")
+    except OSError:
+        _transcripts.pop(consumer, None)
+        return None
+    generation, now = (info.st_ino, info.st_mtime_ns, info.st_nlink), time.monotonic()
+    proven = _transcripts.get(consumer)
+    if proven and proven[1] == generation and 0 <= now - proven[2] < TRANSCRIPT_RECHECK:
+        return proven[0]
+    _transcripts.pop(consumer, None)
+    # A consumer is the hash of one session ID, so a proven path already names it; only a cold lookup scans the index.
+    sids = (proven[0].stem,) if proven else sorted(native_index({consumer})["claude"].get(consumer) or ())
+    for sid in sids[:1]:
+        matches, complete = [], True
+        with os.scandir(home / "projects") as slugs:
+            for count, slug in enumerate(slugs):
+                if count >= MAX_FILES:
+                    complete = False
+                    break
+                candidate = Path(slug.path) / (sid + ".jsonl")
+                if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
+                    matches.append(candidate)
+        if complete and len(matches) == 1:  # one session ID in two project folders is ambiguous: read neither
+            _transcripts[consumer] = (matches[0], generation, now)
+            return matches[0]
+    return None
 
 
 def native_advisors(members):

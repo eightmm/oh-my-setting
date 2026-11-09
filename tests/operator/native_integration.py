@@ -1833,27 +1833,48 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     moved_dir.mkdir()
     moved_log = moved_dir / advisor_log.name
     advisor_log.rename(moved_log)
-    assert panel_chats.native_advisors([claude_main]) == {}
+    # A new project folder changes the projects generation, so the proven path is scanned again at once.
     advisor_log = moved_log
     open_call = panel_chats.native_advisors([claude_main])
     assert open_call["adv-main"]["running"] is True, open_call
+    assert panel_chats._transcripts[advisor_consumer][0] == moved_log
     moved_log.rename(original_advisor_log)
     advisor_log = original_advisor_log
-    panel_chats._transcripts.pop(advisor_consumer, None)
+    # The rename left the projects folder itself unchanged: the stale path fails to read, then the next call finds it.
+    assert panel_chats.native_advisors([claude_main]) == {} and advisor_consumer not in panel_chats._transcripts
     open_call = panel_chats.native_advisors([claude_main])
     assert open_call["adv-main"]["running"] is True, open_call
     # The same session ID under a second project folder is ambiguous: neither copy is read, nothing is cached.
+    # No cache is cleared by hand here: a warm, proven path must notice the copy by itself.
+    assert panel_chats._transcripts[advisor_consumer][0] == original_advisor_log
     twin_dir = advisor_home / "projects" / "twin-slug"
     twin_dir.mkdir()
     twin_log = twin_dir / advisor_log.name
     twin_log.write_bytes(advisor_log.read_bytes())
-    panel_chats._transcripts.pop(advisor_consumer, None)
     assert panel_chats.native_advisors([claude_main]) == {}
     assert panel_chats.native_subagents([claude_main]) == {}
     assert advisor_consumer not in panel_chats._transcripts
     twin_log.unlink()
     twin_dir.rmdir()
-    panel_chats._transcripts.pop(advisor_consumer, None)
+    assert panel_chats.native_advisors([claude_main])["adv-main"]["running"] is True
+    # A copy placed in a folder that already existed leaves the projects folder unchanged: the proven path is
+    # kept until its recheck is due, then the scan finds the copy. The index is not consulted for a proven path.
+    inner_copy = moved_dir / advisor_log.name
+    inner_copy.write_bytes(advisor_log.read_bytes())
+    with patch.object(panel_chats, "native_index", side_effect=AssertionError("warm recheck scanned the index")):
+        assert panel_chats.native_advisors([claude_main])["adv-main"]["running"] is True
+        with patch.object(panel_chats, "TRANSCRIPT_RECHECK", 0):
+            assert panel_chats.native_advisors([claude_main]) == {}
+    assert advisor_consumer not in panel_chats._transcripts
+    inner_copy.unlink()
+    assert panel_chats.native_advisors([claude_main])["adv-main"]["running"] is True
+    # A scan cut at the folder cap proves nothing: the path is neither returned nor kept.
+    with patch.object(panel_chats, "TRANSCRIPT_RECHECK", 0), patch.object(panel_chats, "MAX_FILES", 1), \
+            patch.object(panel_chats, "native_index", side_effect=AssertionError("capped recheck scanned the index")):
+        assert panel_chats._main_transcript(advisor_home, advisor_consumer) is None
+    assert advisor_consumer not in panel_chats._transcripts
+    moved_dir.rmdir()
+    assert panel_chats._main_transcript(advisor_home / "absent", advisor_consumer) is None
     advisor_log.write_text(advisor_log.read_text() + json.dumps({"timestamp": (advisor_start + timedelta(seconds=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"id": "msg-advisor-1", "content": [
         {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1", "content": "ciphertext"}], "usage": {"iterations": [
             {"type": "message", "model": "main-model", "input_tokens": 999999},
