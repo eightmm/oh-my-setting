@@ -276,7 +276,8 @@ lose the launch; the fix-brief notice remains for owner recovery. A second block
 review needs design judgment: the main runs `oms panel --council` over the findings,
 records consensus and dissent, then decides whether to dispatch a narrowed brief, fix
 directly, or finalize rejected, and implements the decision. Worker failures and guard
-stops require authority judgment and asking the user before acting.
+stops require authority judgment: the main acts within its delegated authority and asks
+the user only when the next step exceeds it or is ambiguous.
 Continuation retains the task's WIP slot. A refused or failed continuation is reported
 and leaves the manual notice available. It runs in the writer's recorded execution
 repository; room state stays in the state repository, and the fix brief is passed by

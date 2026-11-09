@@ -1622,7 +1622,7 @@ for label, verify_exit, guard, access, patch_present, verifier, expected in (
     handoff = next(m for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)
     assert "Call exit=1" in handoff["text"] and "status ERROR; stream idle timeout" in handoff["text"]
     assert "needs judgment (authority):" in handoff["text"]
-    assert handoff["text"].endswith("Ask the user before acting; this is outside delegated authority or ambiguous.")
+    assert handoff["text"].endswith("Act only within delegated authority; ask the user when the next step exceeds it or is ambiguous.")
     if guard:
         assert "worker guard stopped the call" in handoff["text"]
 for label, exit_code, reason, missing, possible in (
@@ -1667,7 +1667,7 @@ with patch.object(panel, "_call_result_event", return_value=({"role": "worker", 
     panel.deliver_result(project, provider_room, member, room_owner, "provider-task", 1)
 truncated = next(m["text"] for m in room.status(project, provider_room)["messages"] if m["id"] == "result-" + member)
 assert "needs judgment (authority):" in truncated and "[Notice truncated.]" in truncated
-assert truncated.endswith("Ask the user before acting; this is outside delegated authority or ambiguous.")
+assert truncated.endswith("Act only within delegated authority; ask the user when the next step exceeds it or is ambiguous.")
 assert len(truncated.encode("utf-8")) <= 4000
 member = "call-" + hashlib.sha256(b"independent-refusal").hexdigest()[:16]
 room.join(project, provider_room, member, "codex", "worker", parent=room_owner)

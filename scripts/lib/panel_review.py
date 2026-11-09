@@ -420,7 +420,7 @@ def _judgment_guidance(kind):
     if kind == "design":
         return ("Decide it as a design question with oms panel --council over the review findings, "
                 "record consensus and dissent, then implement.")
-    return "Ask the user before acting; this is outside delegated authority or ambiguous."
+    return "Act only within delegated authority; ask the user when the next step exceeds it or is ambiguous."
 
 
 def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, rework=None):
