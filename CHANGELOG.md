@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- A main swap no longer waits for an active land, and it follows a room
+  rollover that happens during the handoff.
+- One panel key table drives the root bindings, the F12 summary, the `?`
+  overlay and the footer hints, so they cannot drift apart.
+- Plan rows and task Detail say what a ready or blocked task waits on (PR #19).
+  Boards publish attention counts as a tmux window option (PR #20). An opt-in
+  terminal bell rings when a call or message newly waits on the person (PR #18).
 - Council seats that exit 0 without a usable answer (empty, blocked,
   truncated or a broken deliberation) record `answer_quality`, review-council
   seats included, and `oms panel --results` and the Debate tab label them as
@@ -628,6 +635,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- The Debate tab treats a seat's newest round as the union of answer and
+  non-answer rounds. A failure after an earlier answer now shows as that round's
+  non-answer, with the older answer labelled "earlier valid answer, round N".
+- An Antigravity turn error is classified from the error before the 240-character
+  display cut. Only confirmed limit, interrupt and idle phrases become
+  `max_tokens` or `stream_truncated`; any other cause is `turn_failed`.
+- Native panel readers refuse hard-linked transcript files and linked subagent
+  folders, and revalidate a cached main transcript.
+- Task Detail shows a blocked reason up to 500 characters instead of cutting
+  it at 240.
+- CONTRIBUTING.md states the Bash 5 floor. Only `install.sh`'s prelude stays
+  Bash 3.2-parseable.
 - Panel footers show `? Keys` beside `F12 Keys` and draw key names in a
   brighter hint colour; the F12 key summary lists the chat-window keys.
 - A Claude session ID found under two project folders is ambiguous, so the
