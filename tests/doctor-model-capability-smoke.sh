@@ -411,5 +411,12 @@ sleep 1
 [ "$(wc -l < "$TMP/lazy-lists" | tr -d ' ')" = 1 ] || fail 'a harness child listed a catalog'
 lazy_models > "$TMP/lazy4.out"
 grep -Fq 'a background refresh was started' "$TMP/lazy4.out" || fail 'outside a child the same stale state must start a refresh'
+# Let that detached refresh list and release its lock before the EXIT trap removes TMP.
+waited=0
+until [ "$(wc -l < "$TMP/lazy-lists" | tr -d ' ')" = 2 ]; do
+  waited=$((waited + 1)); [ "$waited" -le $(( ${OMS_TEST_CALL_TIMEOUT:-60} * 10 )) ] || fail 'the second background refresh never listed the catalog'
+  sleep 0.1
+done
+( OMS_LOCK_TIMEOUT="${OMS_TEST_CALL_TIMEOUT:-60}"; . "$ROOT/scripts/lib/file-lock.sh"; oms_with_file_lock "$lazy_state/oh-my-setting/catalog-refresh.stamp" true ) || fail 'the background refresh never released its lock'
 
 echo 'doctor-model-capability-smoke: ok'
