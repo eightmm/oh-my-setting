@@ -15177,6 +15177,13 @@ PYCASE
       ! grep -q '^usage detail:' "$dir/output" || fail 'malformed Pi output reported usage'
     fi
   done
+  printf '%s\n' 'stop-reason: provider=pi reason=max_tokens subtype=length is_error=0' > "$dir/attempt"
+  bash -c '. "$1/scripts/lib/peer-common.sh"; ma_record_attempt "$2/seat.md" pi model "" 0 "" "$2/attempt"' _ "$ROOT" "$dir"
+  python3 - "$dir/seat.attempts.json" <<'PYATTEMPT' || fail 'Pi attempt stop reason missing'
+import json, sys
+row = json.load(open(sys.argv[1]))['attempts'][0]
+assert row['stop_reason'] == 'provider=pi reason=max_tokens subtype=length is_error=0', row
+PYATTEMPT
   python3 - "$ROOT" "$dir" <<'PYCASE' || fail 'Pi JSON edge cases failed'
 import json, pathlib, subprocess, sys
 root, directory = map(pathlib.Path, sys.argv[1:])
@@ -15197,6 +15204,15 @@ for name, events in [('empty', [])]:
     assert output == raw, (name, output)
 raw, output = convert('invalid-count', [{'type': 'message_end', 'message': dict(message, usage={'input': -1})}, end])
 assert output == 'zero\n', output
+for stop, expected in [('length', 'max_tokens'), ('max_output', 'max_tokens'), ('stop', 'stop'), ('', '')]:
+    final = dict(message, stopReason=stop)
+    earlier = dict(message, stopReason='length')
+    raw, output = convert('stop-case', [{'type': 'message_end', 'message': earlier},
+                                       {'type': 'agent_end', 'messages': [earlier, final]}])
+    if expected:
+        assert output.startswith('stop-reason: provider=pi reason=%s subtype=%s is_error=0\n' % (expected, stop)), output
+    else:
+        assert output.startswith('zero\n'), output
 raw, output = convert('no-assistant', [{'type': 'agent_end', 'messages': []}])
 assert output == raw, output
 PYCASE
@@ -15242,7 +15258,7 @@ for name, raw in [('retry', ''.join(json.dumps(e) + '\n' for e in events)),
     '''
     subprocess.run(['bash', '-c', command, '_', str(root), str(directory)], env=env, check=True)
     output = (directory / 'output').read_text()
-    assert output.startswith('new\n') and 'node warning' not in output, (name, output)
+    assert output.startswith('stop-reason: provider=pi reason=stop subtype=stop is_error=0\nnew\n') and 'node warning' not in output, (name, output)
     usage = json.loads(next(line.split(': ', 1)[1] for line in output.splitlines() if line.startswith('usage detail: ')))
     field = 'input_' + 'to' + 'kens'
     assert usage[field] == (2 if name == 'retry' else 1), usage
@@ -31509,6 +31525,13 @@ ARTIFACT
     verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/timeout.md'")"
     [ "$verdict" = truncated ] || fail "zero-exit print timeout must not be an answer: $verdict"
   done
+
+  printf '## Output\nAnswer:\nTradeoffs:\nRisks:\nRecommendation:\n' > "$dir/headings.md"
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/headings.md'")"
+  [ "$verdict" = empty ] || fail "empty section headings must be empty: $verdict"
+  printf '## Output\nAnswer:\nA finding.\nRisks:\n' > "$dir/headings.md"
+  verdict="$(bash -c ". '$ROOT/scripts/lib/peer-common.sh'; ma_answer_quality '$dir/headings.md'")"
+  [ "$verdict" = ok ] || fail "section body must remain usable: $verdict"
 
   # A correct answer can be one sentence. Calling that a non-answer would spend
   # another provider call for nothing, so length alone must not decide.

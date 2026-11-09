@@ -85,7 +85,8 @@ def main(path: str) -> None:
         and not STOP_REASON.match(line.strip())
     ]
 
-    if not lines:
+    headings = re.compile(r"^(?:#{1,6}\s*)?(?:Answer|Alternatives|Tradeoffs|Evidence|Counterargument|Risks|Recommendation|Verification|Changed from previous round|Remaining disagreements):\s*$", re.IGNORECASE)
+    if not lines or all(headings.fullmatch(line) for line in lines):
         print("empty")
         return
     if all(REFUSAL.match(line) for line in lines):

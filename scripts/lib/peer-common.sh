@@ -2870,7 +2870,13 @@ try:
         detail = json.loads(footer[-1].split(": ", 1)[1])
         detail.update({"cache_write_tokens": sum(row["cache_creation_input_tokens"] for row in rows)})
         footer[-1] = "usage detail: " + json.dumps(detail, sort_keys=True)
-    output = answer + ("\n" if answer and not answer.endswith("\n") else "")
+    stop = last.get("stopReason")
+    marker = ""
+    if isinstance(stop, str) and stop and all(c.isalnum() or c in "_-" for c in stop):
+        reason = "max_tokens" if stop in ("length", "max_tokens", "max_output") else stop
+        marker = "stop-reason: provider=pi reason=%s subtype=%s is_error=%d\n" % (
+            reason, stop, int(stop in ("error", "aborted")))
+    output = marker + answer + ("\n" if answer and not answer.endswith("\n") else "")
     if footer:
         output += "\n".join(footer) + "\n"
     fd, tmp = tempfile.mkstemp(prefix=".pi-output-", dir=os.path.dirname(os.path.abspath(path)))
@@ -4186,7 +4192,7 @@ with open(source, encoding="utf-8", errors="replace") as handle:
     lines = [line.rstrip("\r\n") for line in handle]
 prefix = "stop-reason: provider=%s " % provider
 stop = ""
-if provider in ("claude", "codex") and lines and lines[0].startswith(prefix):
+if provider in ("claude", "codex", "pi") and lines and lines[0].startswith(prefix):
     stop = lines[0]
 elif provider == "antigravity":
     tail = [line for line in lines if line.strip()]
