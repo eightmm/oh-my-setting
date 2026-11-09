@@ -38,6 +38,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - A swapped-in main inherits its predecessor's workers, reviews and plan
   completions only through the room's ordered swap chain; an attempt from a
   different provider or another repository is not adopted.
+- `oms agent-memory supersede --id ID --text NEW` and `retire --id ID --reason TEXT`
+  append a note linked to an earlier one (by its JSON `event_id`); search, recall,
+  provider context and pins omit superseded and retired notes, and
+  `--include-superseded` shows them marked.
 - One panel key table drives the root bindings, the F12 summary, the `?`
   overlay and the footer hints, so they cannot drift apart.
 - Plan rows and task Detail say what a ready or blocked task waits on (PR #19).
@@ -663,6 +667,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Plan completion accepts a main that swapped provider after its room rolled
+  over: each room is checked against the swap chain at that point instead of
+  the final provider.
 - A refresh that removes the selected inbox row moves the cursor to a nearby
   row, and the next Enter asks again instead of opening a different row.
 - The launch context's unsettled lineage list drops tasks its owner already
