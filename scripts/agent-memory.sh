@@ -25,6 +25,9 @@ JSON_ARGS=()
 SOURCE_FILE=""
 SOURCE_LINE=""
 INCLUDE_STALE=0
+INCLUDE_SUPERSEDED=0
+TARGET_ID=""
+REASON=""
 
 usage() {
   cat <<'EOF'
@@ -64,6 +67,9 @@ Options:
                     Cited notes stay out of compact provider context and are
                     revalidated whenever they are searched or recalled.
   --source-line N   append: 1-based line paired with --source-file.
+  --id ID           supersede/retire: target event_id from search/recall JSON.
+  --reason TEXT     retire: reason for retirement.
+  --include-superseded search/recall: include superseded and retired notes, marked.
   --include-stale   search/recall: include cited notes whose source can no
                     longer be verified. Default recall omits them.
   -h, --help        Show help.
@@ -76,6 +82,8 @@ Commands:
   init              Create the source memory file if missing.
   append            Append a source note and refresh summary.md.
   pin               Append a short note to pins.md.
+  supersede         Append a replacement note linked to --id.
+  retire            Append a retirement record linked to --id.
   compact           Regenerate summary.md from source memory.
   search PATTERN    Print memory + pins entries matching PATTERN (case-
                     insensitive substring over header and body) from SQLite;
@@ -151,11 +159,19 @@ while [ "$#" -gt 0 ]; do
       SOURCE_LINE="$2"
       shift 2
       ;;
+    --id)
+      [ "$#" -ge 2 ] || { echo "error: --id requires a value" >&2; exit 2; }
+      TARGET_ID="$2"; shift 2 ;;
+    --reason)
+      [ "$#" -ge 2 ] || { echo "error: --reason requires text" >&2; exit 2; }
+      REASON="$2"; shift 2 ;;
+    --include-superseded)
+      INCLUDE_SUPERSEDED=1; shift ;;
     --include-stale)
       INCLUDE_STALE=1
       shift
       ;;
-    path|db-path|show|context|init|append|pin|compact|search|recall|health|rebuild)
+    path|db-path|show|context|init|append|pin|supersede|retire|compact|search|recall|health|rebuild)
       ACTION="$1"
       shift
       ;;
@@ -176,7 +192,7 @@ done
 
 ACTION="${ACTION:-show}"
 case "$ACTION" in
-  append|pin|search|recall) ;;
+  append|pin|supersede|search|recall) ;;
   *)
     [ -z "$TEXT" ] || { echo "error: unknown argument: $TEXT" >&2; usage >&2; exit 2; }
     ;;
@@ -200,6 +216,14 @@ if [ -n "$SOURCE_FILE" ] || [ -n "$SOURCE_LINE" ]; then
     echo "error: source citations require project memory" >&2
     exit 2
   }
+fi
+case "$ACTION" in
+  supersede|retire) [ -n "$TARGET_ID" ] || { echo "error: $ACTION requires --id" >&2; exit 2; } ;;
+  *) [ -z "$TARGET_ID" ] && [ -z "$REASON" ] || { echo "error: --id/--reason apply only to supersede or retire" >&2; exit 2; } ;;
+esac
+if [ "$ACTION" = supersede ] && [ -n "$REASON" ]; then echo "error: --reason applies only to retire" >&2; exit 2; fi
+if [ "$INCLUDE_SUPERSEDED" -eq 1 ]; then
+  case "$ACTION" in search|recall) JSON_ARGS+=(--include-superseded) ;; *) echo "error: --include-superseded applies only to search or recall" >&2; exit 2 ;; esac
 fi
 if [ "$INCLUDE_STALE" -eq 1 ]; then
   case "$ACTION" in
@@ -307,6 +331,25 @@ case "$ACTION" in
       note "$SOURCE_FILE" "$SOURCE_LINE"
     echo "memory: appended $MEMORY_FILE"
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
+    ;;
+  supersede|retire)
+    if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] &&
+       { [ "$SCOPE" = global ] || [ "$MEMORY_FILE_EXPLICIT" -eq 1 ]; }; then
+      echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
+      exit 2
+    fi
+    ensure_tmpdir
+    note_file="$(mktemp "$OMS_MEMORY_TMPDIR/note.XXXXXX")"
+    if [ "$ACTION" = retire ]; then
+      [ -n "$REASON" ] || { echo "error: retire requires --reason" >&2; exit 2; }
+      printf '%s\n' "$REASON" > "$note_file"
+      agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file" retirement "" "" "$TARGET_ID" retires
+    else
+      write_note_file "$note_file"
+      [ -s "$note_file" ] || { echo "error: supersede requires nonempty text" >&2; exit 2; }
+      agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file" note "" "" "$TARGET_ID" supersedes
+    fi
+    echo "memory: $ACTION recorded in $MEMORY_FILE"
     ;;
   pin)
     ensure_tmpdir

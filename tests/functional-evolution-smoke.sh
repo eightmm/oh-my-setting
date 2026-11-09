@@ -371,6 +371,82 @@ PY
     fail "rebuild lost citation provenance"
 }
 
+test_memory_supersession_and_retirement() {
+  local repo="$TMP/memory-links" old mid pin before out newest unsafe
+  make_repo "$repo"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" append --text "orchid old fact" >/dev/null
+  old="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search --json "orchid old fact" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$old" --text "orchid middle fact" >/dev/null
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search "orchid old fact" >/dev/null 2>&1; then fail "superseded search result visible"; fi
+  out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" recall "orchid old fact" || true)"
+  [[ "$out" != *"orchid old fact"* ]] || fail "superseded recall result visible"
+  out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search --include-superseded --json "orchid old fact")"
+  OMS_TEST_REPORT="$out" python3 -c 'import json,os; assert json.loads(os.environ["OMS_TEST_REPORT"])["supersession"]["status"] == "superseded"' || fail "missing supersession marker"
+  mid="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search --json "orchid middle fact" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  printf 'orchid newest fact\n' | bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$mid" --stdin >/dev/null
+  newest="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search --json "orchid newest fact" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" context)"
+  [[ "$out" == *"orchid newest fact"* && "$out" != *"orchid old fact"* && "$out" != *"orchid middle fact"* ]] || fail "context contains superseded facts"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" pin --text "violet pinned fact" >/dev/null
+  pin="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search --json "violet pinned fact" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" retire --id "$pin" --reason "no longer true" >/dev/null
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search --include-superseded "no longer true" >/dev/null 2>&1; then fail "retirement record returned as note"; fi
+  out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" context)"
+  [[ "$out" != *"violet pinned fact"* ]] || fail "retired pin injected"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" recall --include-superseded --json "violet pinned fact" | grep -F '"status": "retired"' >/dev/null || fail "retirement marker missing"
+  before="$(wc -c < "$repo/.oms/memory/shared.md")"
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" retire --id "$pin" --reason again >/dev/null 2>&1; then fail "duplicate retirement accepted"; fi
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" retire --id unknown --reason absent >/dev/null 2>&1; then fail "unknown ID accepted"; fi
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$mid" --text bad >/dev/null 2>&1; then fail "inactive target accepted"; fi
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" retire --id 'bad id' --reason absent >/dev/null 2>&1; then fail "malformed ID accepted"; fi
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$newest" --text '' >/dev/null 2>&1; then fail "empty replacement accepted"; fi
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$newest" --text '  ' >/dev/null 2>&1; then fail "blank replacement accepted"; fi
+  if printf '\n' | bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$newest" --stdin >/dev/null 2>&1; then fail "blank stdin accepted"; fi
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" retire --id "$newest" --reason '  ' >/dev/null 2>&1; then fail "blank reason accepted"; fi
+  unsafe="$(printf '%s%s%s' 'pass' 'word' '=not-a-real-value')"
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" supersede --id "$newest" --text "$unsafe" >/dev/null 2>&1; then fail "sensitive replacement accepted"; fi
+  [ "$before" = "$(wc -c < "$repo/.oms/memory/shared.md")" ] || fail "failed update appended"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" rebuild >/dev/null
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search "orchid old fact" >/dev/null 2>&1; then fail "rebuild lost supersession"; fi
+
+  # A clean old summary cannot make freshly generated sensitive text safe.
+  printf '\n## 2026-06-10T00:00:00Z agent\n\n%s%s%s\n' 'pass' 'word' '=sensitive-value' >> "$repo/.oms/memory/shared.md"
+  out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" context)"
+  [[ "$out" != *"sensitive-value"* ]] || fail "sensitive source leaked into context"
+
+  local empty_repo="$TMP/memory-unknown"
+  mkdir -p "$empty_repo/.oms/memory"
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$empty_repo" retire --id unknown --reason absent >/dev/null 2>&1; then fail "unknown target accepted in empty memory"; fi
+  [ ! -e "$empty_repo/.oms/.gitignore" ] || fail "unknown target created ignore file"
+
+  local full_repo="$TMP/memory-full"
+  make_repo "$full_repo"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$full_repo" append --text "sole full entry" >/dev/null
+  old="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$full_repo" search --json "sole full entry" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$full_repo" retire --id "$old" --reason "obsolete item" >/dev/null
+  out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$full_repo" context --full)"
+  [ -z "$out" ] || fail "empty full context emitted a header"
+  out="$(bash -c '. "$1"; AGENT_MEMORY_DB_HELPER="$2/missing"; agent_memory_emit_full_section project "$3" || true' _ "$ROOT/scripts/lib/agent-memory-common.sh" "$TMP" "$full_repo/.oms/memory/shared.md" 2>/dev/null)"
+  [ -z "$out" ] || fail "failed full context emitted a header"
+
+  local partial_repo="$TMP/memory-partial"
+  make_repo "$partial_repo"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$partial_repo" append --text "intact original" >/dev/null
+  old="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$partial_repo" search --json "intact original" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$partial_repo" supersede --id "$old" --text "unfinished replacement" >/dev/null
+  python3 - "$partial_repo/.oms/memory/shared.md" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+data = path.read_bytes()
+marker = b'<!-- oms-memory-link-complete -->\n'
+assert data.endswith(marker)
+path.write_bytes(data[:-len(marker)])
+PY
+  bash "$ROOT/scripts/agent-memory.sh" --repo "$partial_repo" search "intact original" >/dev/null || fail "partial link hid the original"
+  if bash "$ROOT/scripts/agent-memory.sh" --repo "$partial_repo" search "unfinished replacement" >/dev/null 2>&1; then fail "partial record indexed"; fi
+}
+
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
   local repo="$TMP/checkpoint"
   local created checkpoint_id before_dry
@@ -2872,6 +2948,7 @@ test_inbox_ranks_state_and_applies_only_safe_repairs
 test_inbox_fix_safe_reports_ci_refresh_only_when_ledger_changed
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
+test_memory_supersession_and_retirement
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
 test_checkpoint_restores_from_unstaged_only_with_stale_stat
 

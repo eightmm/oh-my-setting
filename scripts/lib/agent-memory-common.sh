@@ -221,7 +221,10 @@ agent_memory_db_command() {
   if [ -n "$repo" ]; then
     repo_args=(--repo "$repo")
   fi
-  agent_memory_ensure_oms_ignore_for_path "$db_file"
+  case "$command_name" in
+    validate|context) ;;
+    *) agent_memory_ensure_oms_ignore_for_path "$db_file" ;;
+  esac
   python3 "$AGENT_MEMORY_DB_HELPER" "$command_name" \
     --db "$db_file" \
     --shared "$memory_file" \
@@ -1060,8 +1063,27 @@ agent_memory_append_file_unlocked() {
   local note_file="$4"
   local occurred_at="$5"
   local metadata_file="$6"
+  local target="${7:-}"
+  local operation="${8:-}"
+  local record_file="${9:-}"
 
+  if [ -n "$target" ]; then
+    agent_memory_db_command "$memory_file" validate --target "$target" --operation "$operation" || return $?
+  fi
   agent_memory_init_file_unlocked "$memory_file" "$scope"
+  if [ -n "$target" ]; then
+    python3 - "$memory_file" "$record_file" <<'PY'
+import os, sys
+data = open(sys.argv[2], "rb").read()
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_APPEND)
+try:
+    if os.write(fd, data) != len(data):
+        raise OSError("incomplete memory record append")
+finally:
+    os.close(fd)
+PY
+    return $?
+  fi
   {
     cat "$metadata_file"
     printf '## %s %s\n\n' "$occurred_at" "$agent"
@@ -1078,11 +1100,22 @@ agent_memory_append_file() {
   local kind="${5:-note}"
   local source_file="${6:-}"
   local source_line="${7:-}"
+  local target="${8:-}"
+  local operation="${9:-}"
   local occurred_at
   local metadata_file
   local citation_file=""
   local repo=""
   local scan_rc
+  local record_file=""
+
+  if [ -n "$target" ]; then
+    case "$target" in *[!A-Za-z0-9._:-]*) echo "error: invalid memory ID" >&2; return 2 ;; esac
+    if ! LC_ALL=C grep -q '[^[:space:]]' "$note_file"; then
+      echo "error: memory text must not be empty" >&2
+      return 2
+    fi
+  fi
 
   scan_rc=0
   agent_memory_file_sensitive_status "$note_file" || scan_rc=$?
@@ -1129,12 +1162,19 @@ agent_memory_append_file() {
     return 1
   fi
   [ -z "$citation_file" ] || rm -f "$citation_file"
+  if [ -n "$target" ]; then
+    sed '$d' "$metadata_file" > "$metadata_file.link"
+    printf '%s: %s\nlink_complete: required\n-->\n' "$operation" "$target" >> "$metadata_file.link"
+    mv "$metadata_file.link" "$metadata_file"
+    record_file="$(agent_memory_mktemp)" || { rm -f "$metadata_file"; return 1; }
+    { printf '\n'; cat "$metadata_file"; printf '## %s %s\n\n' "$occurred_at" "$agent"; cat "$note_file"; printf '\n<!-- oms-memory-link-complete -->\n'; } > "$record_file"
+  fi
   if ! oms_with_file_lock "$memory_file" agent_memory_append_file_unlocked \
-    "$memory_file" "$scope" "$agent" "$note_file" "$occurred_at" "$metadata_file"; then
-    rm -f "$metadata_file"
+    "$memory_file" "$scope" "$agent" "$note_file" "$occurred_at" "$metadata_file" "$target" "$operation" "$record_file"; then
+    rm -f "$metadata_file" ${record_file:+"$record_file"}
     return 1
   fi
-  rm -f "$metadata_file"
+  rm -f "$metadata_file" ${record_file:+"$record_file"}
   # The note is already written; a stale summary must not turn the append
   # into a failure (refresh prints its own warning).
   agent_memory_refresh_summary "$memory_file" "$scope" || true
@@ -1221,13 +1261,16 @@ agent_memory_emit_full_section() {
     return 1
   fi
 
-  printf '### %s\n' "$label"
   # Line-bounded is not size-bounded: one pasted wall of text is one line.
   # Capture, then byte-cap from the file so the consumer's early exit has no
   # writer to kill.
   local buf_file total
   buf_file="$(agent_memory_mktemp)" || return 1
-  tail -n "$lines" "$file" > "$buf_file"
+  agent_memory_db_command "$file" context --view full > "$buf_file" || { rm -f "$buf_file"; return 1; }
+  [ -s "$buf_file" ] || { rm -f "$buf_file"; return 1; }
+  printf '### %s\n' "$label"
+  tail -n "$lines" "$buf_file" > "$buf_file.tail"
+  mv "$buf_file.tail" "$buf_file"
   total="$(LC_ALL=C wc -c < "$buf_file" | tr -d ' ')"
   if [ "$total" -gt 16384 ]; then
     agent_memory_truncate_bytes 16384 < "$buf_file"
@@ -1267,7 +1310,7 @@ agent_memory_emit_compact_section() {
     if agent_memory_file_has_sensitive_content "$pins_file"; then
       echo "warning: pinned memory omitted because it contains sensitive-looking content: $label" >&2
     else
-      entries="$(grep -E '^- [0-9]{4}-' "$pins_file" | tail -n "$pin_lines" || true)"
+      entries="$(agent_memory_db_command "$memory_file" context --view pins | tail -n "$pin_lines" || true)"
       if [ -n "$entries" ]; then
         {
           printf 'Pinned:\n'
@@ -1281,7 +1324,15 @@ agent_memory_emit_compact_section() {
     if agent_memory_file_has_sensitive_content "$summary_file"; then
       echo "warning: compact memory omitted because it contains sensitive-looking content: $label" >&2
     else
-      entries="$(grep -E '^- [0-9]{4}-' "$summary_file" | tail -n "$summary_lines" || true)"
+      local summary_body
+      summary_body="$(agent_memory_mktemp)" || { rm -f "$body"; return 1; }
+      if agent_memory_db_command "$memory_file" context --view summary > "$summary_body" &&
+         ! agent_memory_file_has_sensitive_content "$summary_body"; then
+        entries="$(tail -n "$summary_lines" "$summary_body")"
+      else
+        entries=""
+      fi
+      rm -f "$summary_body"
       if [ -n "$entries" ]; then
         {
           printf 'Compact recent:\n'

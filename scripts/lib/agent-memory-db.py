@@ -62,6 +62,8 @@ class Entry:
     source_line: Optional[int] = None
     source_line_sha256: str = ""
     source_blob_oid: str = ""
+    supersedes: str = ""
+    retires: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,8 @@ def make_entry(
         source_line=source_line,
         source_line_sha256=metadata.get("source_line_sha256", ""),
         source_blob_oid=metadata.get("source_blob_oid", ""),
+        supersedes=metadata.get("supersedes", ""),
+        retires=metadata.get("retires", ""),
     )
 
 
@@ -163,6 +167,16 @@ def parse_shared(text: str) -> list[Entry]:
         nonlocal occurred_at, agent, body_lines, entry_metadata
         if not occurred_at:
             return
+        if entry_metadata.get("link_complete") == "required":
+            while body_lines and not body_lines[-1].strip():
+                body_lines.pop()
+            if not body_lines or body_lines[-1] != "<!-- oms-memory-link-complete -->":
+                occurred_at = ""
+                agent = ""
+                body_lines = []
+                entry_metadata = {}
+                return
+            body_lines.pop()
         body = "\n".join(body_lines).strip()
         rendered = "## %s %s" % (occurred_at, agent)
         if body:
@@ -987,6 +1001,22 @@ def select_fields(alias: str = "") -> str:
     return ", ".join(prefix + field for field in ENTRY_FIELDS)
 
 
+def memory_state(shared: str, pins: str):
+    notes = parse_shared(stable_snapshot(shared).text)
+    pinned = parse_pins(stable_snapshot(pins).text)
+    status = {}
+    for entry in notes:
+        if EVENT_ID_RE.fullmatch(entry.supersedes):
+            status[entry.supersedes] = {"status": "superseded", "by": entry.event_id}
+        if EVENT_ID_RE.fullmatch(entry.retires):
+            status[entry.retires] = {"status": "retired", "by": entry.event_id}
+    return notes, pinned, status
+
+
+def filter_memory_state(entries, status, include):
+    return [row for row in entries if row[5] != "retirement" and (include or str(row[0]) not in status)]
+
+
 def source_citation_map(shared: str) -> dict[str, dict[str, object]]:
     """Read citation provenance from the canonical Markdown source.
 
@@ -1112,8 +1142,10 @@ def emit(
     as_json: bool = False,
     citations: Optional[dict[str, dict[str, object]]] = None,
     selection_reason: str = "",
+    status: Optional[dict] = None,
 ) -> int:
     citations = citations or {}
+    status = status or {}
     shown = 0
     for row in entries:
         values = dict(zip(ENTRY_FIELDS, row))
@@ -1127,9 +1159,13 @@ def emit(
                 payload["selection_reason"] = selection_reason
             if citation is not None:
                 payload["citation"] = citation
+            if str(values["event_id"]) in status:
+                payload["supersession"] = status[str(values["event_id"])]
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
         else:
             sys.stdout.write(rendered.rstrip() + "\n\n")
+            if str(values["event_id"]) in status:
+                sys.stdout.write("[memory: %s]\n\n" % status[str(values["event_id"])]["status"])
             if selection_reason:
                 sys.stdout.write("[selection: %s; source=%s; event=%s; recorded=%s]\n\n" %
                                  (selection_reason, values["source"], values["event_id"], values["occurred_at"]))
@@ -1340,7 +1376,7 @@ def rebuild_database(path: str, shared: str, pins: str, failures: str = "") -> N
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=("sync", "search", "recall", "health", "rebuild")
+        "command", choices=("sync", "search", "recall", "health", "rebuild", "validate", "context")
     )
     parser.add_argument("--db", required=True)
     parser.add_argument("--shared", required=True)
@@ -1353,6 +1389,10 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--include-stale", action="store_true")
+    parser.add_argument("--include-superseded", action="store_true")
+    parser.add_argument("--target", default="")
+    parser.add_argument("--operation", default="")
+    parser.add_argument("--view", default="")
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("--limit must not be negative")
@@ -1360,6 +1400,33 @@ def main() -> int:
         parser.error("recall --limit must be positive")
     if args.command in ("search", "recall") and not args.query:
         parser.error("--query is required")
+
+    if args.command in ("validate", "context"):
+        notes, pinned, status = memory_state(args.shared, args.pins)
+        if args.command == "validate":
+            targets = [entry for entry in notes + pinned if entry.event_id == args.target and entry.kind != "retirement"]
+            if not EVENT_ID_RE.fullmatch(args.target) or len(targets) != 1:
+                raise RuntimeError("unknown or ambiguous memory ID")
+            if args.target in status:
+                raise RuntimeError("memory note is already superseded or retired")
+            return 0
+        active = lambda entry: entry.event_id not in status and entry.kind != "retirement"
+        if args.view == "full":
+            for entry in notes:
+                if active(entry):
+                    print(entry.rendered + "\n")
+        elif args.view == "pins":
+            for entry in pinned:
+                if active(entry):
+                    print(entry.rendered)
+        elif args.view == "summary":
+            for entry in notes:
+                if active(entry) and not entry.source_path and entry.body.strip():
+                    line = " ".join(entry.body.splitlines()[0].split())
+                    if len(line) > 240:
+                        line = line[:240] + "..."
+                    print("- %s %s: %s" % (entry.occurred_at, entry.agent, line))
+        return 0
 
     if args.command == "rebuild":
         rebuild_database(args.db, args.shared, args.pins, args.failures)
@@ -1377,26 +1444,30 @@ def main() -> int:
         sync_sources(db, args.shared, args.pins, args.failures)
         if args.command == "search":
             citations = source_citation_map(args.shared)
+            _, _, status = memory_state(args.shared, args.pins)
             entries = exact_search(db, args.query, args.agent, 0)
+            entries = filter_memory_state(entries, status, args.include_superseded)
             entries, validation = filter_cited_entries(
                 entries, citations, args.repo, args.include_stale
             )
             if args.limit:
                 entries = entries[: args.limit]
-            shown = emit(entries, args.json, validation)
+            shown = emit(entries, args.json, validation, status=status)
             sys.stderr.write(
                 'memory: %d match(es) for "%s"\n' % (shown, args.query)
             )
             result = 0 if shown else 1
         elif args.command == "recall":
             citations = source_citation_map(args.shared)
+            _, _, status = memory_state(args.shared, args.pins)
             entries = ranked_recall(db, args.query, args.agent, 0)
+            entries = filter_memory_state(entries, status, args.include_superseded)
             entries, validation = filter_cited_entries(
                 entries, citations, args.repo, args.include_stale
             )
             entries = entries[: args.limit]
             touch_access(db, entries)
-            shown = emit(entries, args.json, validation, "query relevance with access decay; citation status reported when available")
+            shown = emit(entries, args.json, validation, "query relevance with access decay; citation status reported when available", status)
             sys.stderr.write(
                 'memory: %d recalled entr%s for "%s"\n'
                 % (shown, "y" if shown == 1 else "ies", args.query)
