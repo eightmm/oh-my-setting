@@ -600,7 +600,9 @@ their title, calls or mains waiting for approval or input, unanswered room messa
 a main sent to `all`, and finished write workers whose patch has no admission or landing
 record. Arrow keys or a click select a row; the wheel moves by lines and page keys by
 the visible item count, stopping at either end. Enter (or a click) opens that main's
-chat or shows the call's result, and Esc returns.
+chat or shows the call's result, and Esc returns. If a refresh removes the selected
+row, the cursor stays near its place and the next Enter only says the selection
+changed; Enter again, or any navigation key first, acts on the row now selected.
 
 An empty list says `Nothing needs you right now`; a room with no main shows `Press 1
 (Claude) or 2 (Pi) to start the sole main`. The menu keeps start (`1` Claude, `2` Pi,
