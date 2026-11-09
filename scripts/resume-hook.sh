@@ -12,6 +12,9 @@ set -uo pipefail
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
 # disables; harness children stay silent (their parent already has context).
+# OMS_RESUME_MEMORY=1 adds one bounded shared-memory section; that opt-in read
+# goes through the memory index, which may refresh its derived database and
+# recall receipts.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -402,6 +405,112 @@ esac
 
 relay_line="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/hook_state.py" relay-hint 2>/dev/null)" || relay_line=""
 [ -z "$relay_line" ] || append "${relay_line//$'\r'/}"
+
+# Shared memory, opt-in (OMS_RESUME_MEMORY=1). The project writes pins and
+# notes all day, but only peer calls and delegations ever read them back; the
+# main session had to remember to ask. This puts the newest pins and, when an
+# active task names a goal, the notes ranked for that goal at the end of the
+# block, where the block's own byte cap cuts them first. Everything comes
+# through the memory library: its sensitive-content scan withholds a pins file
+# or a recall result as it does for provider context, and recall drops notes
+# whose cited source no longer verifies. No memory, a withheld read, or a
+# lookup slower than its bound leaves the block as it was.
+if [ "${OMS_RESUME_MEMORY:-0}" = "1" ]; then
+  memory_lines="$(python3 -X utf8 -I -B - "$BASH" "$ROOT/scripts/lib/agent-memory-common.sh" \
+    "$cwd" "${goal:-}" "$ROOT/scripts/lib/agent-memory-db.py" <<'PYMEM' 2>/dev/null
+import importlib.util, json, os, signal, subprocess, sys, tempfile
+shell, library, repo, goal, helper = sys.argv[1:6]
+PINS, HITS = 3, 3          # newest pins, ranked notes
+LINE, CAP = 160, 1200      # bytes of one note's text, bytes of the whole section
+WAIT, READ = 2, 131072     # seconds for the lookup, bytes read back from it
+LOOKUP = r"""
+. "$1" 2>/dev/null || exit 0
+file="$(agent_memory_project_file "$2" 2>/dev/null)" || exit 0
+pins="$(agent_memory_pins_file "$file")"
+if [ -s "$pins" ] && ! agent_memory_file_has_sensitive_content "$pins" 2>/dev/null; then
+  printf '\036pins\n'
+  cat "$pins"
+  printf '\n'
+fi
+hits="$OMS_LIB_TMPDIR/hits"
+if [ -n "$3" ] && [ -s "$file" ] &&
+  python3 "$5" recall --db "$OMS_LIB_TMPDIR/memory.sqlite3" --shared "$file" \
+    --pins "" --repo "$2" --query "$3" --limit "$4" --json > "$hits" 2>/dev/null &&
+  [ -s "$hits" ] && ! agent_memory_file_has_sensitive_content "$hits" 2>/dev/null; then
+  printf '\036recall\n'
+  cat "$hits"
+fi
+"""
+
+def one_line(text):
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    raw = text.encode("utf-8")
+    if len(raw) > LINE:
+        text = raw[:LINE - 3].decode("utf-8", errors="ignore") + "..."
+    return text
+
+try:
+    query = " ".join(goal.split())[:300]
+    with tempfile.TemporaryDirectory(prefix="oms-resume-memory.") as scratch:
+        env = dict(os.environ, OMS_LIB_TMPDIR=scratch)
+        with open(os.path.join(scratch, "out"), "w+b") as output:
+            lookup = subprocess.Popen(
+                [shell, "-c", LOOKUP, "oms-resume-memory", library, repo, query, str(HITS), helper],
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                env=env, start_new_session=True)
+            try:
+                lookup.wait(timeout=WAIT)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(lookup.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                lookup.wait()
+                raise SystemExit(0)
+            output.seek(0)
+            text = output.read(READ + 1)
+    if len(text) > READ:
+        raise SystemExit(0)
+    parts = {}
+    for chunk in text.decode("utf-8", errors="replace").split("\x1e")[1:]:
+        name, _, body = chunk.partition("\n")
+        parts[name] = body
+
+    spec = importlib.util.spec_from_file_location("oms_resume_memory_db", helper)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    pins = [(entry.event_id, one_line(entry.body))
+            for entry in module.parse_pins(parts.get("pins", ""))
+            if one_line(entry.body)][-PINS:]
+    shown = {event for event, _ in pins}
+    hits = []
+    for line in parts.get("recall", "").splitlines():
+        entry = json.loads(line)
+        event, note = entry["event_id"], one_line(entry["body"])
+        if entry["source"] == "shared" and note and event not in shown:
+            shown.add(event)
+            hits.append((event, note))
+
+    rows = (["  pin %s: %s" % (event[:48], note) if event else "  pin: %s" % note for event, note in pins]
+            + ["  recall %s: %s" % (event[:48], note) for event, note in hits[:HITS]])
+    head = "- memory (reference only; not approval or verification evidence):"
+    more = "  more: oms agent-memory recall QUERY; oms agent-memory show"
+    while rows and len("\n".join([head, *rows, more]).encode("utf-8")) + 1 > CAP:
+        rows.pop()
+    if rows:
+        print("\n".join([head, *rows, more]))
+except Exception:
+    pass
+PYMEM
+)" || memory_lines=""
+  memory_lines="${memory_lines//$'\r'/}"
+  if [ -n "$memory_lines" ]; then
+    while IFS= read -r line; do append "$line"; done <<EOF_MEMORY
+$memory_lines
+EOF_MEMORY
+  fi
+fi
 
 [ -n "$out" ] || exit 0
 printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |

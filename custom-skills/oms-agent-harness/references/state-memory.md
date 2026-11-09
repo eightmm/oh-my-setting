@@ -46,6 +46,13 @@ last 15 minutes; a clean `SessionEnd` retires that neighbor immediately. Heed
 that warning before any dirty-tree `git add`. Treat the resume block as the
 entry point; follow its pointers
 (`oms session-handoff show`, `oms fail-ledger list`) before re-deriving state.
+Shared memory is not in that block by default. `OMS_RESUME_MEMORY=1` appends one
+section of at most 1200 bytes: the three newest pins, then up to three notes
+from shared memory ranked for the active task's goal, one line each with its
+event id. It is reference material, not approval or verification evidence. The section is
+omitted when memory is empty, when the memory scan withholds it, or when the
+lookup takes over two seconds. The lookup uses a temporary index, leaving the
+persistent index and recall receipts unchanged.
 
 Work Journal automatically projects durable lifecycle receipts and explicit
 Agent State outcomes into local daily/weekly summaries. Capture needs no manual
