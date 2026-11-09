@@ -587,7 +587,8 @@ layout in the checkout's panel when tmux is available, while `--host inline
 The room's default tree uses closed usage, activity and action cards. Wide
 usage cards list the retained model-call totals (the quota/context readings are
 the pinned usage line); call totals appear once and are not account quotas. A narrow
-usage line uses `W` for weekly quota left and `C` for main context used. Activity keeps
+usage line uses `W` for weekly quota left and `C` for main context used, and keeps a
+reported 5-hour window as `5h N%` without its reset countdown. Activity keeps
 main/role branches, wraps task titles, separates repository tasks, and closes
 the viewport border even while scrolling. Empty declared scopes are omitted.
 
@@ -786,9 +787,20 @@ selected window's exact main attempt wins; otherwise the live, then newest, matc
 main is used. Claude reads its session HUD cache first, then the proven pane footer when
 the cache is absent/stale and to fill missing fields; Codex uses its native reading or
 proven pane footer. Missing readings show `--`. Claude's existing session HUD cache
-supplies reported context and optional `seven_day` usage, with a ten-minute TTL and
-expired reset values suppressed. The consumer hash selects that session's cache; no
-newest-session guess is made.
+supplies reported context and optional `seven_day` and `five_hour` usage, with a
+ten-minute TTL and expired reset values suppressed. The consumer hash selects that
+session's cache; no newest-session guess is made.
+
+When Claude reported a 5-hour window, the reading leads with it:
+`Claude 5h 77% left (2h10m) · week 58% left · ctx 62% used`. The percentage is the
+provider's own, never one derived from token counts, and the countdown is the time to
+the reported reset. Without a reported window nothing is added to the line; a window
+whose reset has passed is dropped rather than shown as current, including on a held
+frame; a reset further out than the window is long shows the percentage without a
+countdown. Only the session HUD cache supplies it: the pane footer is not parsed for the
+5-hour field because a footer cannot show whether its window already rolled over, and
+Codex has no 5-hour reading here. The window is information only; it starts no main
+swap and raises no board alert.
 
 A proven existing tmux pane can supply numeric fields from its last eight visible native
 footer lines. `TUI` or `HUD/TUI` labels those mirrored readings; native output may lag
@@ -3001,7 +3013,11 @@ menu also offers `k Capacity`; `Ctrl+L` there follows the existing Refresh actio
 bounded projection or `--room ID` to inspect a specific room. It reports selected
 main context, reported weekly usage, room mains/calls/messages, and private
 active/history slots separately. Missing, ambiguous or stale context/quota stays
-unknown. Context bands reuse the existing `OMS_CTX_WARN_PCT` (15% left) and
+unknown. A current reported 5-hour window adds a `Claude · 5h N% left · resets in …`
+row and, in `--json`, a `Claude 5-hour left` item carrying `resets_at` and
+`advisory: true`; an advisory item changes neither `level` nor the board's capacity
+alert, and no item is listed when the window was not reported, has rolled over, or the
+readings are stale. Context bands reuse the existing `OMS_CTX_WARN_PCT` (15% left) and
 `OMS_CTX_URGENT_PCT` (8% left) settings and existing hook handoff/compaction flow.
 The health screen makes no model calls and changes no native permissions.
 
