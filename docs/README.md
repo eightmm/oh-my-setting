@@ -32,6 +32,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
 | [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
+| [Implementation review](CONTROL-PLANE-IMPLEMENTATION-REVIEW.md) | Recent implementation findings, reproductions and UX tradeoffs |
 
 ## Migration notes
 
