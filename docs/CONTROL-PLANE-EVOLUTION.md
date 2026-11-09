@@ -132,7 +132,7 @@ session binding과 가능한 process generation을 재확인하고, 모호하면
 
 - [ ] 같은 cwd, session label 또는 PID를 재사용한 다른 세션이 합쳐지지 않는다.
 - [ ] mtime 기반 최근 활동과 실제 liveness, disconnected와 ended를 구분한다.
-- [ ] native/observed 행 추가가 room participant, task owner, lease 또는 acceptance를 만들지 않는다.
+- [x] native/observed 행 추가가 room participant, task owner, lease 또는 acceptance를 만들지 않는다.
 - [ ] 탐색 후 실행 사이 target 교체, room rollover, session-ID 충돌 시 잘못된 pane에 입력하지 않는다.
 
 ### CP-03 — provider 관측 확장
@@ -143,7 +143,7 @@ Pi/Agy는 실제 native 계약으로 확인되는 신호만 추가한다. 전체
 
 - [ ] Opt-in이 꺼져 있으면 기존 repo/room 범위와 provider-home 접근 범위가 넓어지지 않는다.
 - [ ] read-only 관측이 native 설정·기록·인증 파일·provider 실행 상태를 변경하지 않는다.
-- [ ] 다른 UID, symlink/hardlink, 특수 파일, path traversal, 읽는 동안 교체된 파일을 안전하게 거부한다.
+- [x] 다른 UID, symlink/hardlink, 특수 파일, path traversal, 읽는 동안 교체된 파일을 안전하게 거부한다.
 - [ ] 중단·손상·미지원 포맷은 source별 degraded/unsupported로 표시하며 다른 provider 관측은 계속된다.
 
 ### CP-04 — 증분 파서·공유 수집·부하 상한
@@ -152,9 +152,9 @@ Pi/Agy는 실제 native 계약으로 확인되는 신호만 추가한다. 전체
 다시 스캔하지 않는다. 메모리 내 파서 상태를 기본으로 하며, 영속 캐시는
 별도 근거·privacy/retention 계약 없이는 추가하지 않는다.
 
-- [ ] Append, partial line, truncate, rotate, inode 교체, 매우 긴 JSONL 줄, 알 수 없는 event를 검사한다.
+- [x] Append, partial line, truncate, rotate, inode 교체, 매우 긴 JSONL 줄, 알 수 없는 event를 검사한다.
 - [ ] 파일·줄·전체 refresh byte 수, entry 수와 wall-time 예산이 명시되고 starvation 없이 동작한다.
-- [ ] 동일 event 재수집·재시작으로 token/child 수가 중복 증가하지 않는다.
+- [x] 동일 event 재수집·재시작으로 token/child 수가 중복 증가하지 않는다.
 - [ ] 변화 없는 warm refresh의 파일 읽기·subprocess 수와 RSS를 측정하고 baseline 대비 회귀를 공개한다.
 
 ### CP-05 — projection 통합과 호환성

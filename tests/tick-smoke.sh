@@ -581,6 +581,12 @@ with main() as typed:
         assert wake() == "skipped: panel typing lock held"
     typed.assert_not_called()
     assert wakes() == []
+    # A main whose pane changed between discovery and verification is never typed into, even when idle.
+    with patch.object(panel_native, "_swap_main_window", return_value=("@1", attempt, "%8", member, "room-wake")):
+        assert wake() == "skipped: main pane changed during verification", wake()
+        assert wake(dry_run=True) == "skipped: main pane changed during verification"
+    typed.assert_not_called()
+    assert keys() == [] and wakes() == []
     # Dry run: the prompt it would type, and nothing typed or recorded.
     shown = wake(dry_run=True)
     assert shown.startswith("would wake call-wake: OMS tick wake: ready plan tasks t1. "), shown

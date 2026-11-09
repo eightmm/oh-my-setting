@@ -154,9 +154,20 @@ def _claude_mains(members):
 def _main_transcript(home, consumer):
     """The main's own transcript, resolved once per consumer."""
     path = _transcripts.get(consumer)
+    if path is not None:
+        try:
+            info = os.lstat(path)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.parent.is_symlink()
+                    or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                raise OSError("unsafe native file")
+        except FileNotFoundError:
+            pass  # the reader below drops a vanished path and the next call resolves it again
+        except OSError:
+            _transcripts.pop(consumer, None)
+            path = None
     if path is None:
         sids = native_index({consumer})["claude"].get(consumer) or ()
-        for sid in sorted(sids)[:1]:
+        for sid in sids if len(sids) == 1 else ():
             matches = []
             with os.scandir(home / "projects") as slugs:
                 for slug in list(slugs)[:MAX_FILES]:
@@ -290,7 +301,7 @@ def _active(folder, prefix, suffix, now, inner=None):
                         continue
                 except OSError:
                     continue
-                if (stat.S_ISREG(info.st_mode) and 0 <= now - info.st_mtime <= NATIVE_ACTIVE
+                if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 <= now - info.st_mtime <= NATIVE_ACTIVE
                         and not (hasattr(os, "getuid") and info.st_uid != os.getuid())):
                     recent.append((info.st_mtime, name[len(prefix):len(name) - len(suffix)]))
     except OSError:
@@ -335,6 +346,9 @@ def _transcript_usage(path, budget):
     path = str(path)
     try:
         info = os.lstat(path)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+            raise OSError("unsafe native file")
     except OSError:
         _usage.pop(path, None)
         return None
@@ -475,6 +489,8 @@ def _codex_usage(path, budget):
             return entry["tokens"]
         budget[0] -= len(data)
         end = data.rfind(b"\n") + 1
+        if not end and len(data) >= USAGE_FILE_BYTES:
+            end = len(data)  # one line longer than the read cap: skipped, so the offset still advances
         for line in data[:end].split(b"\n"):
             try:
                 record = json.loads(line)
@@ -550,7 +566,8 @@ def _run_agents(run, now, budget):
                     info = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                if stat.S_ISREG(info.st_mode) and not (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+                if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                        and not (hasattr(os, "getuid") and info.st_uid != os.getuid())):
                     files.append((info.st_mtime, entry.path))
     except OSError:
         return {}
@@ -572,6 +589,8 @@ def _run_agents(run, now, budget):
 def _native_workflows(folder, now, budget):
     """Workflow runs whose journal was written lately, with approximate phase and counts when its tail parses."""
     found = []
+    if (folder / "subagents" / "workflows").is_symlink():
+        return found
     for mtime, name in _active(folder / "subagents" / "workflows", "wf_", "", now, "journal.jsonl"):
         run = "wf_" + name
         started = answered = 0
@@ -624,7 +643,8 @@ def native_subagents(members):
                 continue
             path = _main_transcript(home, consumer)
             folder = path.with_suffix("") if path else None
-            if folder is None or not UUID.fullmatch(path.stem) or folder.is_symlink() or not folder.is_dir():
+            if (folder is None or not UUID.fullmatch(path.stem) or folder.is_symlink() or not folder.is_dir()
+                    or (folder / "subagents").is_symlink()):  # a linked folder would read files outside the session
                 continue
             row = {"agents": [], "workflows": []}
             for key, read in (("agents", _native_agents), ("workflows", _native_workflows)):

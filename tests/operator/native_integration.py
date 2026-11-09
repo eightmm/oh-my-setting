@@ -1110,6 +1110,22 @@ with patch.dict(os.environ, chat_env, clear=True):
     assert not panel_chats.current_models(project, [dict(model_member, role="worker")])
     assert not panel_chats.current_models(project, [dict(model_member, state="done")])
     assert not panel_chats.current_models(project, [dict(model_member, consumer="f" * 32)])
+    # Two sessions claiming one consumer are ambiguous: no model is attributed to either.
+    twin_sid = "5" * 8 + chat_codex[8:]
+    twins = {"codex": {model_member["consumer"]: {chat_codex, twin_sid}}, "claude": {}}
+    with patch.object(panel_chats, "native_index", return_value=twins):
+        assert panel_chats.current_models(project, [model_member]) == {}, "an ambiguous identity supplied a model"
+    one = {"codex": {model_member["consumer"]: {chat_codex}}, "claude": {}}
+    with patch.object(panel_chats, "native_index", return_value=one):
+        assert panel_chats.current_models(project, [model_member])["chat-sol"]["model"] == "gpt-6.1-sol"
+        with patch.object(panel_chats.os, "getuid", return_value=os.getuid() + 1):
+            assert panel_chats.current_models(project, [model_member]) == {}, "a foreign-owned database was read"
+        database_link = codex_home / "state_9.sqlite"
+        database_link.symlink_to(model_database)
+        try:
+            assert panel_chats.current_models(project, [model_member]) == {}, "a symlinked database was read"
+        finally:
+            database_link.unlink()
     status = collect(model_report, chat_attempt, repo=project)
     assert status["codex"]["model"] == "gpt-6.1-sol", status
     from room_view import nodes
@@ -1255,6 +1271,34 @@ assert room.selected(project, explicit_hash) == (legacy_room, "explicit-worker")
 reason_report = deepcopy(chats)
 reason_report["rows"][0].update(joined=False, reason="ambiguous native identity")
 assert " / left" in panel_chats.text(reason_report) and "ambiguous native identity" in panel_chats.text(reason_report)
+# An ambiguous identity attributes no session and no deep link to the row, and the terminal stays the only route.
+with patch.dict(os.environ, chat_env, clear=True), patch.object(panel_chats.shutil, "which", return_value="/fixture/tmux"), \
+        patch.object(panel_chats.subprocess, "run", side_effect=tmux_navigation), \
+        patch.object(panel_chats, "native_index", return_value={"codex": {model_member["consumer"]: {chat_codex, "6" * 8 + chat_codex[8:]}}, "claude": {}}):
+    ambiguous_row = next(r for r in panel_chats.catalog(project, shared)["rows"] if r["participant"] == "chat-sol")
+    assert ambiguous_row["reason"] == "ambiguous native identity", ambiguous_row
+    assert ambiguous_row["session_id"] is None and ambiguous_row["uri"] is None, ambiguous_row
+    assert room.records(project, shared) == room_before_chats
+# The identity index trusts only an own-uid, singly linked rollout.
+with patch.dict(os.environ, chat_env, clear=True):
+    wanted_hash = {model_member["consumer"]}
+    assert panel_chats.native_index(wanted_hash)["codex"] == {model_member["consumer"]: {chat_codex}}
+    with patch.object(panel_chats.os, "getuid", return_value=os.getuid() + 1):
+        assert panel_chats.native_index(wanted_hash)["codex"] == {}, "a foreign-owned rollout was indexed"
+    rollout_twin = codex_day / ("rollout-twin-" + chat_codex + ".jsonl")
+    os.link(chat_file, rollout_twin)
+    try:
+        assert panel_chats.native_index(wanted_hash)["codex"] == {}, "a hard-linked rollout was indexed"
+    finally:
+        rollout_twin.unlink()
+    rollout_link = codex_day / ("rollout-link-" + chat_codex + ".jsonl")
+    chat_file.rename(chat_file.with_name("moved.keep"))
+    rollout_link.symlink_to(chat_file.with_name("moved.keep"))
+    try:
+        assert panel_chats.native_index(wanted_hash)["codex"] == {}, "a symlinked rollout was indexed"
+    finally:
+        rollout_link.unlink()
+        chat_file.with_name("moved.keep").rename(chat_file)
 
 # Desktop navigation uses the exact session and only an advertised native
 # flag. Inspecting a plan must not run a model or force-close a live session.
@@ -1825,6 +1869,10 @@ codex_bad.write_text("{malformed metadata\n")
 os.utime(codex_parent, (time.time(),) * 2)
 os.utime(codex_child, (time.time(),) * 2)
 os.utime(codex_bad, (time.time(),) * 2)
+def room_authority():
+    return room.records(project, shared), [(p["participant"], p.get("owns"), p.get("state"), p.get("role"))
+                                            for p in room.status(project, shared)["participants"]]
+authority_before = room_authority()
 panel_chats._codex_usage_cache["malformed-fixture-entry"] = None
 with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
     try:
@@ -1832,6 +1880,35 @@ with patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
         rows = {row["id"]: row for row in native["codex-main"]["agents"]}
         assert set(rows) == {codex_child.stem} and rows[codex_child.stem]["tokens"] == 1234, native
         assert rows[codex_child.stem]["title"] == "Inspect", rows
+        # An unknown event and a torn last line change nothing, and a lost cache does not count the rollout twice.
+        with codex_child.open("a") as handle:
+            handle.write(json.dumps({"type": "event_msg", "payload": {"type": "future-kind"}}) + '\n{"type": "event_msg", "pay')
+        for reset in (False, True):
+            if reset:
+                panel_chats._codex_usage_cache.clear()
+            again = {row["id"]: row for row in panel_chats.native_subagents([codex_main])["codex-main"]["agents"]}
+            assert again[codex_child.stem]["tokens"] == 1234, again
+        # A symlinked rollout is never followed; a hard-linked one is refused whole (the child and its twin name).
+        codex_link = codex_sessions / "rollout-symlink.jsonl"
+        codex_link.symlink_to(codex_child)
+        assert set(row["id"] for row in panel_chats.native_subagents([codex_main])["codex-main"]["agents"]) == {codex_child.stem}
+        codex_link.unlink()
+        codex_hard = codex_sessions / "rollout-hardlink.jsonl"
+        os.link(codex_child, codex_hard)
+        try:
+            assert panel_chats.native_subagents([codex_main]) == {}, "a hard-linked rollout was read"
+        finally:
+            codex_hard.unlink()
+        assert panel_chats.native_subagents([codex_main])["codex-main"]["agents"]
+        # A line longer than the per-file read cap is skipped, not retried forever.
+        long_rollout = codex_sessions / "rollout-long.jsonl"
+        long_rollout.write_text("x" * 1000 + "\n" + json.dumps({"type": "event_msg", "payload": {"type": "token_count",
+            "info": {"total_token_usage": {"total_tokens": 77}}}}) + "\n")
+        with patch.object(panel_chats, "USAGE_FILE_BYTES", 400):
+            for _ in range(6):
+                tokens = panel_chats._codex_usage(long_rollout, [10 ** 6])
+        long_rollout.unlink()
+        assert tokens == 77, tokens
     finally:
         panel_chats._codex_usage_cache.pop("malformed-fixture-entry", None)
 with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
@@ -1862,6 +1939,15 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     assert panel_chats.native_advisors([claude_main]) == {}
     assert panel_chats.native_subagents([claude_main]) == {}
     assert advisor_consumer not in panel_chats._transcripts
+    twin_log.unlink()
+    # A symlinked copy (file or project folder) is neither read nor counted as a twin.
+    twin_log.symlink_to(advisor_log)
+    linked_slug = advisor_home / "projects" / "linked-slug"
+    linked_slug.symlink_to(advisor_log.parent, target_is_directory=True)
+    panel_chats._transcripts.pop(advisor_consumer, None)
+    assert panel_chats.native_advisors([claude_main])["adv-main"]["running"] is True
+    assert panel_chats._transcripts[advisor_consumer] == advisor_log
+    linked_slug.unlink()
     twin_log.unlink()
     twin_dir.rmdir()
     panel_chats._transcripts.pop(advisor_consumer, None)
@@ -2018,8 +2104,98 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     agents = shown(found)["agents"]
     assert set(agents) == {"a1", "a3", "a4"} and found["adv-main"]["workflows"] == [], found
     assert agents["a1"]["title"] == "Audit the parser" and agents["a3"]["title"] == "Claude Code agent", agents
+    assert room_authority() == authority_before, "native rows created room participants, owners or records"
     with patch.object(panel_chats.os, "getuid", return_value=os.getuid() + 1):
         assert panel_chats.native_subagents([claude_main]) == {}, "a foreign-owned file must not be read"
+    # A FIFO, a hard-linked agent, journal or workflow transcript is never listed or read, even if read before the link.
+    os.mkfifo(agents_dir / "agent-fifo.jsonl")
+    hl_log = write_agent("hl", description="Linked", lines=[usage_line("h1", 1, 0, 0, 1)])
+    write_agent("mf", description="FIFO meta", lines=[usage_line("f1", 1, 0, 0, 1)])
+    (agents_dir / "agent-mf.meta.json").unlink()
+    os.mkfifo(agents_dir / "agent-mf.meta.json")
+    write_journal("wf_hj", started)
+    write_journal("wf_ha", started)
+    for name in ("x", "y"):
+        (runs_dir / "wf_ha" / ("agent-%s.jsonl" % name)).write_text(usage_line(name, 1, 0, 0, 1) + "\n")
+    probe = panel_chats.native_subagents([claude_main])
+    assert shown(probe)["agents"]["hl"]["tokens"] == 2 and str(hl_log) in panel_chats._usage, probe
+    assert shown(probe)["workflows"]["wf_hj"] and shown(probe)["workflows"]["wf_ha"]["agents"] == 2, probe
+    keep = agents_dir / "linked.keep"
+    for path in (hl_log, runs_dir / "wf_hj" / "journal.jsonl", runs_dir / "wf_ha" / "agent-x.jsonl"):
+        os.link(path, keep.with_name(path.parent.name + path.name + ".keep"))
+    probe = shown(panel_chats.native_subagents([claude_main]))
+    assert "fifo" not in probe["agents"] and "hl" not in probe["agents"], probe
+    assert "wf_hj" not in probe["workflows"] and probe["workflows"]["wf_ha"]["agents"] == 1, probe
+    assert str(hl_log) not in panel_chats._usage and probe["agents"]["mf"]["title"] == "Claude Code agent", probe
+    assert probe["agents"]["mf"]["tokens"] == 2, probe
+    for leftover in list(agents_dir.glob("*.keep")) + list(agents_dir.glob("agent-fifo*")) + list(agents_dir.glob("agent-hl*")) \
+            + list(agents_dir.glob("agent-mf*")):
+        leftover.unlink()
+    shutil.rmtree(runs_dir / "wf_hj")
+    shutil.rmtree(runs_dir / "wf_ha")
+    # The main's transcript is resolved from exactly one session ID and rechecked each use.
+    with patch.object(panel_chats, "native_index", return_value={"claude": {advisor_consumer: {advisor_sid, "7" * 8 + advisor_sid[8:]}}}):
+        panel_chats._transcripts.pop(advisor_consumer, None)
+        assert panel_chats.native_subagents([claude_main]) == {} and panel_chats.native_advisors([claude_main]) == {}
+    assert panel_chats.native_subagents([claude_main]) and advisor_consumer in panel_chats._transcripts
+    advisor_link = advisor_log.with_name("advisor.keep")
+    os.link(advisor_log, advisor_link)
+    assert panel_chats.native_subagents([claude_main]) == {} and advisor_consumer not in panel_chats._transcripts
+    advisor_link.unlink()
+    # A file replaced between the check and the read is refused, not read.
+    victim = write_agent("race", description="Race", lines=[usage_line("r1", 2, 0, 0, 1)])
+    fresh = agents_dir / "race.tmp"
+    fresh.write_text(usage_line("r1", 2, 0, 0, 1) + "\n")
+    seen_id = (victim.stat().st_dev, victim.stat().st_ino)
+    os.replace(fresh, victim)
+    try:
+        panel_chats._read_owned(victim, 100, expect=seen_id)
+    except OSError as error:
+        assert "changed" in str(error), error
+    else:
+        raise AssertionError("a replaced file was read")
+    # A read that fails mid-way keeps the counted total, says it is partial, and later counts each message once.
+    assert shown(panel_chats.native_subagents([claude_main]))["agents"]["race"]["tokens"] == 3
+    children = len(shown(panel_chats.native_subagents([claude_main]))["agents"])
+    with victim.open("a") as handle:
+        handle.write(usage_line("r2", 1, 0, 0, 4) + "\n" + json.dumps({"type": "future-kind", "message": {"usage": dict.fromkeys(panel_chats.USAGE_KEYS, 9)}}) + "\n")
+    with patch.object(panel_chats, "_read_owned", side_effect=OSError("native file changed")):
+        agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["race"]
+    assert (agent["tokens"], agent["partial"]) == (3, True), agent
+    for reset in (False, True):
+        if reset:
+            panel_chats._usage.clear()  # a restart: the file is re-read from the start, not added to the old total
+        agent = shown(panel_chats.native_subagents([claude_main]))["agents"]["race"]
+        assert (agent["tokens"], agent["output"], agent["partial"]) == (3 + 5, 1 + 4, False), (reset, agent)
+        assert len(shown(panel_chats.native_subagents([claude_main]))["agents"]) == children, "children counted twice"
+    # A symlinked subagents folder is not a root the session owns.
+    outside = session_dir.parent / "outside-agents"
+    outside.mkdir()
+    (outside / "agent-ghost.jsonl").write_text(usage_line("g", 1, 0, 0, 1) + "\n")
+    hold = agents_dir.with_name("subagents.real")
+    agents_dir.rename(hold)
+    agents_dir.symlink_to(outside, target_is_directory=True)
+    try:
+        assert panel_chats.native_subagents([claude_main]) == {}, "escaped the session folder"
+    finally:
+        agents_dir.unlink()
+        hold.rename(agents_dir)
+        shutil.rmtree(outside)
+    (outside_runs := session_dir.parent / "outside-runs").mkdir()
+    (outside_runs / "wf_ghost").mkdir()
+    (outside_runs / "wf_ghost" / "journal.jsonl").write_text(json.dumps({"type": "started", "phase": "X"}) + "\n")
+    runs_hold = runs_dir.with_name("workflows.real")
+    runs_dir.rename(runs_hold)
+    runs_dir.symlink_to(outside_runs, target_is_directory=True)
+    try:
+        assert "wf_ghost" not in shown(panel_chats.native_subagents([claude_main]))["workflows"], "workflows escaped the session"
+    finally:
+        runs_dir.unlink()
+        runs_hold.rename(runs_dir)
+        shutil.rmtree(outside_runs)
+    for leftover in agents_dir.glob("agent-race*"):
+        leftover.unlink()
+    (agents_dir / "race.tmp").unlink(missing_ok=True)
     assert panel_chats.native_subagents([dict(claude_main, provider="codex")]) == {}
     text, nav = sub_board(found, "detail", ("chat", "adv-main"))
     assert "SUBAGENTS (3)" in text and "Audit the parser - active " in text and "[? status unknown]" in text, text
