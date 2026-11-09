@@ -20732,6 +20732,57 @@ PY
   assert_file_contains "$cfg_err" "capsule: config creds.json contains sensitive-looking values; kept its digest only"
   ! grep -Fq "hunter2" "$runs/$id/capsule.json" || fail "a withheld config value reached the capsule"
   [ "$(grep -c '"sha256"' "$runs/$id/capsule.json")" = 4 ] || fail "every config keeps its digest"
+
+  # --data links the run to a recorded data manifest: its fingerprint and split row counts, never data.
+  local manifests="$proj/.oms/manifests" data_id data_out before
+  printf 'a\nb\nc\n' > "$proj/train.txt"
+  printf 'd\n' > "$proj/val.txt"
+  ( cd "$proj" && OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/data-manifest.sh" create --name ds \
+    --split train=train.txt --split val=val.txt >/dev/null 2>&1 ) || fail "manifest create failed"
+  # An unknown or unsafe name stops before the command runs and leaves no bundle.
+  before="$(find "$runs" -name capsule.json | wc -l | tr -d ' ')"
+  if ( cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --data nope --no-ledger -- touch "$proj/ran-anyway" >/dev/null 2>"$proj/data.err" ); then
+    fail "an unknown --data manifest must fail the capture"
+  fi
+  assert_file_contains "$proj/data.err" "--data nope: no such data manifest"
+  [ ! -e "$proj/ran-anyway" ] || fail "the command ran despite an unknown --data manifest"
+  if ( cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --data ../ds --no-ledger -- true >/dev/null 2>&1 ); then
+    fail "a --data name with a path separator must be refused"
+  fi
+  [ "$(find "$runs" -name capsule.json | wc -l | tr -d ' ')" = "$before" ] || fail "a refused --data left a capsule"
+  data_id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --data ds --data ds --no-ledger -- true 2>/dev/null)"
+  [ -n "$data_id" ] || fail "capsule run with --data printed no id"
+  data_out="$(python3 - "$runs/$data_id/capsule.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))["data"]
+print(len(data), data[0]["name"], len(data[0]["manifest_sha256"]), json.dumps(data[0]["splits"], sort_keys=True))
+PY
+)"
+  [ "$data_out" = '1 ds 64 {"train": 3, "val": 1}' ] || fail "--data should record one fingerprinted manifest: $data_out"
+  ! grep -Fq '"data"' "$runs/$id/capsule.json" || fail "a capsule without --data must not grow a data block"
+  # Recreating the manifest over unchanged splits (new timestamp and note) keeps the fingerprint.
+  ( cd "$proj" && OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/data-manifest.sh" create --name ds --note again \
+    --split train=train.txt --split val=val.txt >/dev/null 2>&1 ) || fail "manifest recreate failed"
+  data_out="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" \
+    "$ROOT/scripts/run-capsule.sh" verify "$data_id" 2>/dev/null || true)"
+  contains "$data_out" "ok    data-ds:" || fail "an unchanged manifest should verify ok: $data_out"
+  # A manifest recorded over changed splits is a warning, and does not add drift of its own.
+  printf 'e\n' >> "$proj/train.txt"
+  ( cd "$proj" && OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/data-manifest.sh" create --name ds \
+    --split train=train.txt --split val=val.txt >/dev/null 2>&1 ) || fail "manifest update failed"
+  data_out="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" \
+    "$ROOT/scripts/run-capsule.sh" verify "$data_id" 2>/dev/null || true)"
+  contains "$data_out" "WARN  data-ds:" || fail "a changed manifest should warn: $data_out"
+  ! printf '%s\n' "$data_out" | grep -q '^DRIFT data' || fail "a data warning must not be drift: $data_out"
+  rm -f "$manifests/ds.json"
+  data_out="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" \
+    "$ROOT/scripts/run-capsule.sh" verify "$data_id" 2>/dev/null || true)"
+  contains "$data_out" "current=(missing)" || fail "a removed manifest should read as missing: $data_out"
+  data_out="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" reproduce "$data_id")"
+  contains "$data_out" "# data at capture: ds manifest " || fail "reproduce should name the data manifest: $data_out"
 }
 
 test_run_capsule_propagates_exit_and_runs_once() {
@@ -21807,19 +21858,28 @@ test_oms_run_diff_compares_capsules() {
   make_committed_repo "$d"
   printf '{"auc": 0.74, "ok": false, "label": "old", "empty": null}\n' > "$d/mA.json"
   printf '{"auc": 0.82, "ok": true, "label": "new", "empty": null}\n' > "$d/mB.json"
+  # Run A reads the manifest before a row is added to train; run B after. A second manifest only B names.
+  printf 'a\nb\n' > "$d/train.txt"
+  ( cd "$d" && "$ROOT/scripts/data-manifest.sh" create --name ds --split train=train.txt >/dev/null 2>&1 ) ||
+    fail "manifest create failed"
+  ( cd "$d" && "$ROOT/scripts/data-manifest.sh" create --name extra --split train=train.txt >/dev/null 2>&1 ) ||
+    fail "second manifest create failed"
   # The same config path changes between the runs; a second one is unparsed text.
   printf '{"lr": 0.001, "model": {"depth": 4, "act": "relu"}, "tags": ["a", "b"], "drop": 0.1}\n' > "$d/hp.json"
   printf 'lr=0.001\n' > "$d/hp.ini"
   a="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
   ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$a" env -u LOADEDMODULES \
-    "$cap" run --seed 1 --metrics mA.json --config hp.json --config hp.ini --no-ledger -- true >/dev/null 2>&1 ) ||
+    "$cap" run --seed 1 --metrics mA.json --config hp.json --config hp.ini --data ds --no-ledger -- true >/dev/null 2>&1 ) ||
     fail "run A failed"
+  printf 'c\n' >> "$d/train.txt"
+  ( cd "$d" && "$ROOT/scripts/data-manifest.sh" create --name ds --split train=train.txt >/dev/null 2>&1 ) ||
+    fail "manifest update failed"
   printf '{"lr": 0.0003, "model": {"depth": 6, "act": "relu"}, "tags": ["a"], "warmup": 100}\n' > "$d/hp.json"
   printf 'lr=0.0003\n' > "$d/hp.ini"
   b="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
   ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$b" LOADEDMODULES='cuda/12.1' \
-    "$cap" run --seed 2 --metrics mB.json --config hp.json --config hp.ini --no-ledger -- true >/dev/null 2>&1 ) ||
-    fail "run B failed"
+    "$cap" run --seed 2 --metrics mB.json --config hp.json --config hp.ini --data ds --data extra --no-ledger \
+    -- true >/dev/null 2>&1 ) || fail "run B failed"
 
   out="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" "$b" 2>/dev/null)"
   contains "$out" "metric:auc" || fail "diff missing metric line"
@@ -21827,6 +21887,10 @@ test_oms_run_diff_compares_capsules() {
   contains "$out" "seeds" || fail "diff missing seeds line"
   printf '%s\n' "$out" | grep -E '^modules +!=  \(none\)  \|  cuda/12\.1$' > /dev/null || fail "diff missing the modules line"
   printf '%s\n' "$out" | grep -E '^host +== ' > /dev/null || fail "diff missing the host line"
+  printf '%s\n' "$out" | grep -E '^data:ds +!=  [0-9a-f]{12} \(train=2\)  \|  [0-9a-f]{12} \(train=3\)$' > /dev/null ||
+    fail "diff missing the changed data manifest: $out"
+  printf '%s\n' "$out" | grep -E '^data:extra +!=  -  \|  [0-9a-f]{12} \(train=2\)$' > /dev/null ||
+    fail "diff missing the manifest only one run named: $out"
   # Config differences are named key by key; an unchanged key is not listed.
   printf '%s\n' "$out" | grep -Fx '  lr: 0.001 → 0.0003' > /dev/null || fail "diff missing the changed key: $out"
   printf '%s\n' "$out" | grep -Fx '  model.depth: 4 → 6' > /dev/null || fail "diff missing the nested key: $out"

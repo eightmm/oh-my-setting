@@ -1670,6 +1670,14 @@ ML/Slurm workflows use local-first experiment controls:
   Over 200 keys, 200 characters per key or value, or 16384 bytes, and whenever
   the flattened view looks sensitive, the capsule keeps the digest alone and
   records why in `params_status`.
+  `--data NAME` (repeatable) links the run to a manifest made by
+  `oms data-manifest create --name NAME`: the capsule records the manifest's
+  fingerprint (its content without timestamp and note) and each split's row
+  count, never data, and an unknown name stops before the command runs.
+  `verify` warns when the manifest's recorded splits have since changed and
+  `oms run diff` shows a `data:NAME` line; neither re-reads the split files, so
+  `oms data-manifest check --name NAME` remains the drift check. Manifests
+  store no check or leakage verdict, so the capsule records none.
 - `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
   studies; `oms runtime experiment launch` pre-registers a single command
   through the same run ledger (replacing `research-runner`).

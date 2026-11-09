@@ -368,6 +368,19 @@ for path in sorted(set(ca) | set(cb)):
     if len(rows) > PARAM_LINES:
         print("  ... %d more differing keys" % (len(rows) - PARAM_LINES))
 
+# Data manifests each run named with --data; nothing is printed when neither capsule recorded one.
+def data_rows(capsule):
+    return {str(item.get("name")): item for item in capsule.get("data") or [] if isinstance(item, dict)}
+def data_label(item):
+    if not item:
+        return "-"
+    splits = item.get("splits") if isinstance(item.get("splits"), dict) else {}
+    counts = ",".join("%s=%s" % (shown(label), splits[label]) for label in sorted(splits))
+    return str(item.get("manifest_sha256") or "")[:12] + (" (%s)" % counts if counts else "")
+da, db = data_rows(a), data_rows(b)
+for name in sorted(set(da) | set(db)):
+    line("data:" + shown(name), data_label(da.get(name)), data_label(db.get(name)))
+
 # numeric metric deltas
 ma = (a.get("result") or {}).get("metrics") or {}
 mb = (b.get("result") or {}).get("metrics") or {}
