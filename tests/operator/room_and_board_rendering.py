@@ -5111,7 +5111,7 @@ with patch.dict(os.environ, {"CODEX_HOME": str(quota_home)}):
     with patch("panel_chats.windows", return_value={}), patch("panel_chats.current_models", return_value={}):
         quota_status = collect(quota_report, now=quota_now)
     assert quota_status["codex"]["weekly_used"] == 9
-    assert "Codex week 91% left" in usage_line({"provider_status": quota_status}, width=200)
+    assert "Codex week ▮▮▮▮▯ 91% left" in usage_line({"provider_status": quota_status}, width=200)
     quota_status["claude"]["weekly_used"] = 60
     assert allocate("claude", installed=both, provider_status=quota_status)["provider"] == "codex"
     quota_main = {"room": {"id": "quota-room", "participants": [{"participant": "quota-codex",
@@ -5296,18 +5296,27 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
         assert "five_hour_used" not in five_rolled["claude"] and "five_hour_used" not in five_rolled["codex"], five_rolled
     five_status = {"provider_status": {"claude": five_row}}
     assert usage_line(five_status, 200, True, now=1000) == \
-        "Claude 5h 77% left (5m) · week 59% left · ctx 38% used │ Codex --", usage_line(five_status, 200, True, now=1000)
+        "Claude 5h ▮▮▮▮▯ 77% left (5m) · week ▮▮▮▯▯ 59% left · ctx 38% used │ Codex --", usage_line(five_status, 200, True, now=1000)
     assert usage_line(five_status, 200, False, now=1000) == \
-        "Claude 5h 77% left (5m) / week 59% left / ctx 38% used | Codex --"
+        "Claude 5h [####-] 77% left (5m) / week [###--] 59% left / ctx 38% used | Codex --"
+    # The bars are the first thing a tight row drops: the worded row, then the narrow one, read as they did without them.
+    assert usage_line(five_status, 70, True, now=1000) == "Claude 5h 77% left (5m) · week 59% left · ctx 38% used │ Codex --"
+    assert usage_line(five_status, 70, False, now=1000) == "Claude 5h 77% left (5m) / week 59% left / ctx 38% used | Codex --"
+    # Fixed width whatever the value; any quota left keeps a cell, only an untouched one fills the bar, unknown draws none.
+    from panel_metrics import quota_bar
+    assert [quota_bar(value) for value in (0, 1, 9, 10, 50, 77, 99, 100)] == [
+        "▯▯▯▯▯", "▮▯▯▯▯", "▮▯▯▯▯", "▮▯▯▯▯", "▮▮▯▯▯", "▮▮▮▮▯", "▮▮▮▮▯", "▮▮▮▮▮"]
+    assert quota_bar(0, False) == "[-----]" and quota_bar(100, False) == "[#####]"
+    assert [quota_bar(value) for value in (None, True, 101, -1, "50")] == [""] * 5
     assert usage_line(five_status, 44, True, now=1000) == "Claude 5h 77% · W 59% left · C 38% used │ Codex --"
     # A frame held past the reset shows the row as it read before the window was cached, not a stale percentage.
-    assert usage_line(five_status, 200, True, now=1300) == "Claude week 59% left · ctx 38% used │ Codex --"
+    assert usage_line(five_status, 200, True, now=1300) == "Claude week ▮▮▮▯▯ 59% left · ctx 38% used │ Codex --"
     for five_fields, shown in (
-            ({"five_hour_used": 100, "five_hour_resets_at": 1000 + 2 * 3600 + 600}, "Claude 5h 0% left (2h10m) · week -- · ctx --"),
-            ({"five_hour_used": 50, "five_hour_resets_at": 1030}, "Claude 5h 50% left (<1m) · week -- · ctx --"),
-            ({"five_hour_used": 50}, "Claude 5h 50% left · week -- · ctx --"),
+            ({"five_hour_used": 100, "five_hour_resets_at": 1000 + 2 * 3600 + 600}, "Claude 5h ▯▯▯▯▯ 0% left (2h10m) · week -- · ctx --"),
+            ({"five_hour_used": 50, "five_hour_resets_at": 1030}, "Claude 5h ▮▮▯▯▯ 50% left (<1m) · week -- · ctx --"),
+            ({"five_hour_used": 50}, "Claude 5h ▮▮▯▯▯ 50% left · week -- · ctx --"),
             # A reset further out than the window is long is bad data, not a countdown.
-            ({"five_hour_used": 50, "five_hour_resets_at": 1000 + 6 * 3600}, "Claude 5h 50% left · week -- · ctx --"),
+            ({"five_hour_used": 50, "five_hour_resets_at": 1000 + 6 * 3600}, "Claude 5h ▮▮▯▯▯ 50% left · week -- · ctx --"),
             ({"five_hour_used": True, "five_hour_resets_at": 2000}, "Claude --"),
             ({"five_hour_used": 101, "five_hour_resets_at": 2000}, "Claude --"),
             ({"five_hour_resets_at": 2000}, "Claude --")):
@@ -5315,7 +5324,12 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
     # Health lists the window only when it was reported and is current; it moves neither the level nor the alert.
     five_health = {"collection": {"ok": True}, "provider_status": {"claude": five_row}, "room": {"participants": [
         {"participant": "five-main", "provider": "claude", "role": "main", "state": "working", "joined": True}]}}
-    assert "Claude · 5h 77% left · resets in 5m [ok]" in panel_health.render(five_health, 100, 40, now=1000)
+    assert "Claude · 5h ▮▮▮▮▯ 77% left · resets in 5m [ok]" in panel_health.render(five_health, 100, 40, now=1000)
+    assert "Claude · week ▮▮▮▯▯ 59% left [ok]" in panel_health.render(five_health, 100, 40, now=1000)
+    # A narrow health screen keeps its rows whole and gives up the bars.
+    assert "Claude · 5h 77% left · resets in 5m [ok]" in panel_health.render(five_health, 44, 40, now=1000)
+    assert "▮" not in panel_health.render(five_health, 44, 40, now=1000)
+    assert "▮" not in json.dumps(panel_health.project(five_health, now=1000), ensure_ascii=False)
     five_item = [item for item in panel_health.project(five_health, now=1000)["items"] if "5-hour" in item["label"]]
     assert len(five_item) == 1 and five_item[0]["label"] == "Claude 5-hour left", five_item
     assert {key: five_item[0][key] for key in ("kind", "used", "limit", "status", "resets_at", "advisory")} == {
@@ -5328,7 +5342,7 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
         assert "5h" not in panel_health.render(quiet[0], 100, 40, now=quiet[1]), label
         assert not any("5-hour" in item["label"] for item in panel_health.project(quiet[0], now=quiet[1])["items"]), label
     spent = dict(five_health, provider_status={"claude": dict(five_row, five_hour_used=100, five_hour_resets_at=4_000_000_000)})
-    assert "Claude · 5h 0% left [full]" in panel_health.render(spent, 100, 40)
+    assert "Claude · 5h ▯▯▯▯▯ 0% left [full]" in panel_health.render(spent, 100, 40)
     spent_view = panel_health.project(spent)
     assert next(item for item in spent_view["items"] if "5-hour" in item["label"])["status"] == "full", spent_view
     assert spent_view["level"] == panel_health.project(without_five)["level"], spent_view

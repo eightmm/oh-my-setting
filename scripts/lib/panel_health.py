@@ -1,7 +1,7 @@
 """Read-only pressure projection; reported limits never authorize native session changes."""
 
 from dashboard_projection import clean, mapping
-from panel_metrics import five_hour, percent
+from panel_metrics import five_hour, percent, quota_bar
 from hook_state import env_int
 import room
 
@@ -116,12 +116,15 @@ def render(report, width, height, footer=None, now=None):
         status = "unknown" if context is None else "full" if context >= 100 else "urgent" if context >= 100 - urgent else "warning" if context >= 100 - warn else "ok"
         rows.append(("%s main: context [%s]" % (provider.capitalize(), status) if context is None else
                      "%s main · ctx %s%% used [%s]" % (provider.capitalize(), context, status)))
-        rows.append("%s · week %s left [%s]" % (provider.capitalize(), "--" if weekly is None else "%s%%" % weekly,
+        bars = width >= 48  # the rows stay whole on a narrow screen; the bar is what goes
+        rows.append("%s · week %s left [%s]" % (
+            provider.capitalize(), "--" if weekly is None else
+            "%s%s%%" % (quota_bar(weekly) + " " if bars else "", weekly),
                     "unknown" if weekly is None else "full" if weekly <= 0 else "warning" if weekly <= 10 else "ok"))
         window = five_hour(row, now) if known else None
         if window is not None:
-            rows.append("%s · 5h %s%% left%s [%s]" % (
-                provider.capitalize(), window[0], " · resets in " + window[1] if window[1] else "",
+            rows.append("%s · 5h %s%s%% left%s [%s]" % (
+                provider.capitalize(), quota_bar(window[0]) + " " if bars else "", window[0], " · resets in " + window[1] if window[1] else "",
                 "full" if window[0] <= 0 else "warning" if window[0] <= 10 else "ok"))
     mains = sum(m.get("role") == "main" and m.get("state") in
                 LIVE_STATES | {"blocked", "waiting_input", "waiting_approval", "review"} for m in members)

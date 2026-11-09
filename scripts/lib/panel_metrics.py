@@ -100,6 +100,22 @@ def five_hour(row, now=None):
     return 100 - used, "<1m" if minutes < 1 else "%dm" % minutes if minutes < 60 else "%dh%02dm" % divmod(minutes, 60)
 
 
+BAR_CELLS = 5
+
+
+def quota_bar(left, unicode=True):
+    """A reported percentage left as a fixed-width bar, "" when nothing was reported.
+
+    The width never changes with the value, so the line does not shift as quota
+    drains. Any quota left keeps one filled cell and only a full reading fills
+    them all: an empty bar means spent, a full one untouched."""
+    left = percent(left)
+    if left is None:
+        return ""
+    cells = BAR_CELLS if left >= 100 else 0 if left <= 0 else min(BAR_CELLS - 1, max(1, round(left * BAR_CELLS / 100)))
+    return ("▮" * cells + "▯" * (BAR_CELLS - cells)) if unicode else "[%s%s]" % ("#" * cells, "-" * (BAR_CELLS - cells))
+
+
 def pane_reading(target, provider):
     """Mirror only numeric fields in the proven pane's visible native footer."""
     pane = mapping(target).get("pane")
@@ -1395,6 +1411,7 @@ def metrics_text(report):
 def usage_line(report, width=100, unicode=True, now=None):
     """One row for both providers; a provider without a reading stays on the row as "Codex --"."""
     parts = []
+    barred = []
     narrow = []
     for provider, title in (("claude", "Claude"), ("codex", "Codex")):
         row = mapping(mapping(report.get("provider_status")).get(provider))
@@ -1406,6 +1423,7 @@ def usage_line(report, width=100, unicode=True, now=None):
         window = five_hour(row, now)
         if week is None and context is None and window is None:
             parts.append(title + " --")
+            barred.append(parts[-1])
             narrow.append(parts[-1])
             continue
         mark = lambda value: "--" if value is None else "%s%%" % value
@@ -1416,6 +1434,10 @@ def usage_line(report, width=100, unicode=True, now=None):
         # The shorter window leads, as on the native status line; its reset countdown is the first thing to go.
         lead = "" if window is None else "5h %s%% left%s%s" % (window[0], " (%s)" % window[1] if window[1] else "", gap)
         parts.append("%s %s%s" % (title, lead, rest))
+        # Quota left gets a bar; context is "used", and a bar filling the other way beside these would misread.
+        barred.append("%s %s%s" % (
+            title, lead.replace("5h ", "5h %s " % quota_bar(window[0], unicode), 1) if window is not None else "",
+            rest.replace("week ", "week %s " % quota_bar(week, unicode), 1) if week is not None else rest))
         narrow.append("%s %s%s" % (title, "" if window is None else "5h %s%%%s" % (window[0], gap), rest))
     agy = mapping(mapping(report.get("provider_status")).get("antigravity"))
     if agy.get("source") == "OMS artifacts":
@@ -1423,8 +1445,12 @@ def usage_line(report, width=100, unicode=True, now=None):
             return ("%.1fM" % (total / 1000000)) if total >= 1000000 else ("%.1fk" % (total / 1000) if total >= 1000 else str(total))
         parts.append("agy 7d in %s · cached %s · out %s / %d calls" % (
             amount(agy["input_tokens"]), amount(agy["cache_read_tokens"]), amount(agy["output_tokens"]), agy["calls"]))
+        barred.append(parts[-1])
         narrow.append(parts[-1])
-    line = (" │ " if unicode else " | ").join(parts)
+    # The bars are the first thing a tight row gives up, then the long words and the reset countdown.
+    line = (" │ " if unicode else " | ").join(barred)
+    if len(line) > width:
+        line = (" │ " if unicode else " | ").join(parts)
     if len(line) > width:
         line = (" │ " if unicode else " | ").join(
             p.replace(" week ", " W ").replace("ctx ", "C ") for p in narrow)
