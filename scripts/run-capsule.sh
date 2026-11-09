@@ -29,6 +29,7 @@ METRICS_FILE=""
 declare -a CONFIGS=()
 declare -a OUTPUTS=()
 declare -a SEEDS=()
+declare -a DATA=()
 SCAN_FILE=""
 CONDA_SCRATCH=""
 cleanup_done=0
@@ -55,6 +56,10 @@ run options:
   --output PATH    Output/checkpoint path to record (path+size+mtime, not
                    content). Repeatable.
   --seed N         Seed to record. Repeatable.
+  --data NAME      Data manifest (`oms data-manifest create --name NAME`) the
+                   run reads. Records the manifest's fingerprint and split
+                   row counts, not data; an unknown NAME stops before the command
+                   runs. Repeatable.
   --metrics PATH   JSON metrics file folded into the capsule result.
   --no-ledger      Do not also append a run-ledger row.
   --ledger PATH    Ledger path for the companion row (default run-ledger default).
@@ -64,6 +69,9 @@ show <id>          Print the capsule JSON.
 whence <file>      Print which run produced a checkpoint/output file (by sha).
 reproduce <id>     Print the exact checkout + env + command to recreate the run.
 verify <id>        Compare the current tree/env to the capsule; nonzero on drift.
+                   A --data manifest whose recorded splits changed since
+                   capture is a WARN, not drift; `oms data-manifest check` tells whether the split
+                   files still match their manifest.
 
 Capture is mechanical (no model). The command line is recorded verbatim —
 do not put secrets in arguments.
@@ -433,6 +441,66 @@ configs_json() {
   printf '%s]\n' "$out"
 }
 
+# The manifest directory data-manifest.sh writes to, so --data NAME names the same file.
+manifest_dir() {
+  printf '%s\n' "${OMS_MANIFEST_DIR:-$STATE_ROOT/.oms/manifests}"
+}
+
+# Which recorded data fingerprints the run read: per --data NAME the manifest
+# fingerprint (its content without timestamp and note), its creation time and
+# each split's row count. The manifest is read, never recomputed, and no data
+# file is opened. Unknown names fail here,
+# before the command runs.
+data_json() {
+  local name dir
+  dir="$(manifest_dir)"
+  for name in "${DATA[@]:-}"; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      .|..|*/*|*\\*|*..*|*[!A-Za-z0-9._-]*)
+        fail "--data name must match [A-Za-z0-9._-]+ with no path separators or .." ;;
+    esac
+    [ -f "$dir/$name.json" ] ||
+      fail "--data $name: no such data manifest ($dir/$name.json); create it with: oms data-manifest create --name $name --split LABEL=FILE"
+  done
+  OMS_DATA="$(printf '%s\n' "${DATA[@]:-}")" OMS_MANIFESTS="$dir" python3 <<'PY'
+import hashlib, json, os
+def fingerprint(raw):
+    # What the manifest says about the data, without when or why it was written: recreating a manifest over
+    # unchanged splits keeps the fingerprint. An unreadable manifest falls back to its bytes.
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+        body = {key: value for key, value in manifest.items() if key not in ("ts", "note")}
+        raw = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (ValueError, AttributeError):
+        pass
+    return hashlib.sha256(raw).hexdigest()
+rows, seen = [], set()
+for name in os.environ.get("OMS_DATA", "").splitlines():
+    if not name or name in seen:
+        continue
+    seen.add(name)
+    with open(os.path.join(os.environ["OMS_MANIFESTS"], name + ".json"), "rb") as handle:
+        raw = handle.read()
+    row = {"name": name, "manifest_sha256": fingerprint(raw), "manifest_ts": None, "splits": None}
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        manifest = None
+    if isinstance(manifest, dict):
+        if isinstance(manifest.get("ts"), str):
+            row["manifest_ts"] = manifest["ts"][:40]
+        splits = {}
+        for split in manifest.get("splits") or []:
+            if isinstance(split, dict) and isinstance(split.get("label"), str) and len(splits) < 64:
+                count = split.get("rows")
+                splits[split["label"][:64]] = count if isinstance(count, int) and not isinstance(count, bool) else None
+        row["splits"] = splits or None
+    rows.append(row)
+print(json.dumps(rows, ensure_ascii=False))
+PY
+}
+
 outputs_json() {
   # Hash outputs up to a size cap so a checkpoint can be traced back to its
   # producing run (see `whence`). Multi-GB files are recorded path+size+mtime
@@ -473,6 +541,7 @@ cmd_run() {
       --config) [ "$#" -ge 2 ] || fail "--config requires path"; CONFIGS+=("$2"); shift 2 ;;
       --output) [ "$#" -ge 2 ] || fail "--output requires path"; OUTPUTS+=("$2"); shift 2 ;;
       --seed) [ "$#" -ge 2 ] || fail "--seed requires value"; SEEDS+=("$2"); shift 2 ;;
+      --data) [ "$#" -ge 2 ] || fail "--data requires a manifest name"; DATA+=("$2"); shift 2 ;;
       --metrics) [ "$#" -ge 2 ] || fail "--metrics requires path"; METRICS_FILE="$2"; shift 2 ;;
       --no-ledger) LEDGER_OPT=0; shift ;;
       --ledger) [ "$#" -ge 2 ] || fail "--ledger requires path"; LEDGER_FILE="$2"; shift 2 ;;
@@ -482,6 +551,9 @@ cmd_run() {
   done
   [ "$#" -gt 0 ] || fail "run requires a command after --"
 
+  # Resolved before anything is written: an unknown manifest must not leave a half-made bundle.
+  local data_rows
+  data_rows="$(data_json)" || exit 2
   local ts id bundle
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -542,7 +614,7 @@ cmd_run() {
   fi
 
   OMS_GIT="$git_json" OMS_ENV="$env_json" OMS_CFG="$cfg_json" OMS_OUT="$out_json" \
-  OMS_METRICS="$metrics_json" OMS_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" \
+  OMS_METRICS="$metrics_json" OMS_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" OMS_DATA_ROWS="$data_rows" \
   python3 - "$SCHEMA" "$id" "$ts" "$(oms_detect_agent)" "$PWD" "$NOTE" \
     "$status" "$duration_s" "${SLURM_JOB_ID:-}" "$@" <<'PY' > "$bundle/capsule.json"
 import json, os, sys
@@ -576,6 +648,10 @@ row = {
     "log_file": "output.log",
     "result": {"exit": int(a[6]), "duration_s": int(a[7]), "metrics": metrics},
 }
+# Present only when the run named a manifest, so a capsule without --data reads as before.
+data = load("OMS_DATA_ROWS", [])
+if isinstance(data, list) and data:
+    row["data"] = data
 print(json.dumps(row, ensure_ascii=False, allow_nan=False, indent=2))
 PY
 
@@ -739,6 +815,10 @@ if isinstance(e.get("modules"), list) and e["modules"]:
     print("# modules at capture: %s" % " ".join(str(m) for m in e["modules"]))
 if cap.get("seeds"):
     print("# seeds: %s" % ", ".join(cap["seeds"]))
+for item in cap.get("data") or []:
+    if isinstance(item, dict):
+        print("# data at capture: %s manifest %s; confirm with: oms data-manifest check --name %s"
+              % (item.get("name"), str(item.get("manifest_sha256"))[:12], item.get("name")))
 print("# command:")
 print(" ".join(cap.get("command", [])))
 PY
@@ -764,6 +844,7 @@ cmd_verify() {
   py="$(project_python)"
   cur_extra="$(capture_env_extra_json 2>/dev/null)" || cur_extra=""
   OMS_CUR_COMMIT="$cur_commit" OMS_CUR_DIFF="$cur_diff" OMS_PROJECT_PY="$py" OMS_CUR_EXTRA="$cur_extra" \
+  OMS_MANIFESTS="$(manifest_dir)" \
     "$py" - "$p" <<'PY'
 import json, os, sys
 cap = json.load(open(sys.argv[1]))
@@ -822,6 +903,31 @@ for k, label in (("conda", conda_label), ("modules", modules_label)):
         print("%s env-%s: capsule=%s current=%s" % (tag, k, want, got))
 if "host" in e:
     print("info env-host: capsule=%s current=%s" % (e.get("host"), extra.get("host")))
+# A manifest whose recorded splits changed, or that was removed, since capture means the run's data fingerprint is no longer the recorded one.
+# Informational like the environment: whether the split files still match is `oms data-manifest check`.
+import hashlib, re
+def fingerprint(raw):
+    # What the manifest says about the data, without when or why it was written: recreating a manifest over
+    # unchanged splits keeps the fingerprint. An unreadable manifest falls back to its bytes.
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+        body = {key: value for key, value in manifest.items() if key not in ("ts", "note")}
+        raw = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (ValueError, AttributeError):
+        pass
+    return hashlib.sha256(raw).hexdigest()
+for item in cap.get("data") or []:
+    if not isinstance(item, dict) or not re.fullmatch(r"[A-Za-z0-9._-]+", str(item.get("name") or "")) \
+            or ".." in str(item.get("name")):
+        continue
+    want = str(item.get("manifest_sha256") or "")
+    try:
+        with open(os.path.join(os.environ["OMS_MANIFESTS"], item["name"] + ".json"), "rb") as handle:
+            got = fingerprint(handle.read())
+    except OSError:
+        got = ""
+    tag = "ok   " if want and want == got else "WARN "
+    print("%s data-%s: capsule=%s current=%s" % (tag, item["name"], want[:12] or "(none)", got[:12] or "(missing)"))
 sys.exit(1 if drift else 0)
 PY
 }
