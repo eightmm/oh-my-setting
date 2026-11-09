@@ -1449,18 +1449,19 @@ admit_cmd=("$ROOT/scripts/patch-admit.sh" --patch "$PATCH" --repo "$REPO")
 # and bytes available; uncertain receipt writes are not permission to unlink.
 CAPTURE_PERSIST=1
 admission_passed=0
+admission_rc=0
 if [ "$reuse_admission" = 1 ]; then
   echo "patch-land: reusing unchanged native admission" >&2
   admission_passed=1
 else
   ADMISSION_STDERR="$(mktemp "${TMPDIR:-/tmp}/oms-land-admit.XXXXXX")" || ADMISSION_STDERR=""
   if [ -n "$ADMISSION_STDERR" ]; then
-    if "${admit_cmd[@]}" >/dev/null 2>"$ADMISSION_STDERR"; then
-      admission_passed=1
-    fi
+    "${admit_cmd[@]}" >/dev/null 2>"$ADMISSION_STDERR" || admission_rc=$?
+    [ "$admission_rc" = 0 ] && admission_passed=1
     cat "$ADMISSION_STDERR" >&2 || true
-  elif "${admit_cmd[@]}" >/dev/null; then
-    admission_passed=1
+  else
+    "${admit_cmd[@]}" >/dev/null || admission_rc=$?
+    [ "$admission_rc" = 0 ] && admission_passed=1
   fi
 fi
 if [ "$admission_passed" = 0 ]; then
@@ -1511,6 +1512,25 @@ PYDETAILS
     admission_gates="${admission_details#*$'\n'}"
     echo "patch-land: failed gate(s): $admission_gates; report: $admission_report" >&2
     ledger_next=(--next "read $admission_report (failed: $admission_gates)")
+  fi
+  if [ -z "$admission_details" ]; then
+    # No single parsable report: still name the exit status and admit's own
+    # first message so the ledger row says what to look at next.
+    admission_note="$(python3 - "${ADMISSION_STDERR:-}" <<'PYNOTE' 2>/dev/null || true
+import pathlib, re, sys
+text = ""
+try:
+    text = pathlib.Path(sys.argv[1]).read_text(errors="replace") if sys.argv[1] else ""
+except OSError:
+    pass
+lines = [l.strip() for l in text.splitlines() if l.strip()]
+own = [l for l in lines if l.startswith("patch-admit:") and "REJECT (" not in l]
+line = (own or lines or [""])[0]
+line = re.sub(r"(?<![\w.-])(?:~|/)[^\s,;:)]*", "<path>", line)
+print(re.sub(r"\s+", " ", line)[:160])
+PYNOTE
+)"
+    ledger_next=(--next "re-run patch-admit on this patch (exit $admission_rc, no single report): ${admission_note:-no admission message captured}")
   fi
   # The outer landings lock is still held here. Acquire only the remaining
   # existing reader fences; no public skip-lock or force-cleanup capability.

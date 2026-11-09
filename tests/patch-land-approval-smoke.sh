@@ -75,6 +75,37 @@ command = "patch-land " + hashlib.sha256(pathlib.Path(sys.argv[4]).read_bytes())
 assert any(row.get("cmd") == command and report.name in row.get("next", "") and row["next"].endswith(" (failed: %s)" % match.group(1)) for row in rows)
 PYTEST
 
+# Rejections whose stderr carries no single parsable report still file a
+# bounded next step naming the admission exit and its own first message.
+alt="$TMP/alt-root"
+mkdir -p "$alt/scripts"
+for entry in "$ROOT"/* "$ROOT"/.[!.]*; do
+  [ -e "$entry" ] || continue
+  [ "$(basename "$entry")" = scripts ] || ln -s "$entry" "$alt/$(basename "$entry")"
+done
+for entry in "$ROOT"/scripts/*; do ln -s "$entry" "$alt/scripts/$(basename "$entry")"; done
+rm "$alt/scripts/patch-admit.sh"
+cat > "$alt/scripts/patch-admit.sh" <<WRAP
+#!/usr/bin/env bash
+"$ROOT/scripts/patch-admit.sh" "\$@" || rc=\$?
+echo "patch-admit: REJECT (\$HOME/second.md)" >&2
+exit "\${rc:-0}"
+WRAP
+chmod +x "$alt/scripts/patch-admit.sh"
+"$alt/scripts/patch-land.sh" --repo "$usage_repo" --patch "$TMP/usage.patch" --verify false \
+  >"$TMP/noreport.out" 2>&1 && fail "wrapped failed verifier unexpectedly passed"
+grep -Fq 'patch-land: REJECTED by admission gate; not applied' "$TMP/noreport.out" ||
+  { cat "$TMP/noreport.out" >&2; fail "no-report rejection was not reported"; }
+if grep -Fq 'patch-land: failed gate(s)' "$TMP/noreport.out"; then fail "ambiguous reports were parsed"; fi
+python3 - "$usage_repo" "$ROOT/scripts/fail-ledger.sh" "$TMP/usage.patch" "$HOME" <<'PYTEST' || fail "report-less rejection did not file a bounded next step"
+import hashlib, json, pathlib, subprocess, sys
+rows = json.loads(subprocess.check_output([sys.argv[2], "--repo", sys.argv[1], "list", "--json"]))["failures"]
+command = "patch-land " + hashlib.sha256(pathlib.Path(sys.argv[3]).read_bytes()).hexdigest()
+nexts = [row.get("next", "") for row in rows if row.get("cmd") == command and "no single report" in row.get("next", "")]
+assert nexts, rows
+assert "exit 1" in nexts[0] and 0 < len(nexts[0]) <= 300 and sys.argv[4] not in nexts[0], nexts
+PYTEST
+
 LAND="$ROOT/scripts/patch-land.sh"
 APPROVAL="$ROOT/scripts/approval-inbox.sh"
 
