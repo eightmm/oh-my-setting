@@ -18061,6 +18061,7 @@ test_update_refreshes_providers_by_default_and_tools_on_request() {
   cp "$ROOT/scripts/lib/canonical-sync.sh" "$project/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/harness-residue.sh" "$project/scripts/lib/harness-residue.sh"
+  cp "$ROOT/scripts/lib/oms-common.sh" "$project/scripts/lib/oms-common.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor install-autoupdate uninstall-autoupdate install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
@@ -18168,6 +18169,7 @@ test_update_auto_refreshes_only_installed_codex_plugin() {
   cp "$ROOT/scripts/lib/canonical-sync.sh" "$project/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/harness-residue.sh" "$project/scripts/lib/harness-residue.sh"
+  cp "$ROOT/scripts/lib/oms-common.sh" "$project/scripts/lib/oms-common.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor install-autoupdate uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"
@@ -19036,6 +19038,7 @@ test_update_preserves_auto_update_mode() {
   cp "$ROOT/scripts/lib/canonical-sync.sh" "$project/scripts/lib/canonical-sync.sh"
   cp "$ROOT/scripts/lib/file-lock.sh" "$project/scripts/lib/file-lock.sh"
   cp "$ROOT/scripts/lib/harness-residue.sh" "$project/scripts/lib/harness-residue.sh"
+  cp "$ROOT/scripts/lib/oms-common.sh" "$project/scripts/lib/oms-common.sh"
   cp "$ROOT/scripts/lib/poll.sh" "$project/scripts/lib/poll.sh"
   for script in link doctor uninstall-autoupdate install-tools install-claude-hooks install-mcp install-agy-plugin; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/$script.sh"

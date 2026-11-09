@@ -2,7 +2,7 @@ execution_repo = temporary / "verification-execution-root"
 execution_repo.mkdir()
 import panel_dispatch as dispatch
 import panel_routing, runpy, tempfile, types
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 
 # Routing reads provider account homes (registered Codex accounts, provider-accounts.json);
@@ -1054,22 +1054,26 @@ with patch.object(panel, "_dispatch_call_record", side_effect=AssertionError("un
              "purpose": "implement", "workload": "routine"}
     main_record = {"attempt_id": "main", "tool": "panel-main", "provider": "codex",
                    "terminal": False, "refs": {"panel_room_participant": "main", "panel_room_id": "room"}}
-    with patch.dict(os.environ, {"OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}), \
-            patch.object(panel, "_validate_dispatch_verifier"), patch.object(panel, "_validate_dry_run_inputs"), \
-            patch.object(panel, "routed_command", return_value=["delegate", "--repo", str(root),
-                                                                "--verify", "true", "--task-id", "plan-task"]), \
-            patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "room",
-                         "OMS_ROOM_PARTICIPANT": "main", "OMS_PANEL_MAIN_ATTEMPT": "main"}), \
-            patch.object(panel, "events", return_value=json.dumps(main_record)), \
-            patch.object(panel, "active_mains", return_value={"main": main_record}), \
-            patch.object(dispatch.room, "resolve", return_value="room"), \
-            patch.object(dispatch.room, "records", return_value=[]), \
-            patch.object(dispatch.room, "project", return_value=finished_room), \
-            patch.object(dispatch.room, "participant", return_value={"role": "main", "provider": "codex"}), \
-            patch.object(dispatch.room, "same_room", return_value=True), \
-            patch.object(dispatch, "_plan_task_paths", return_value=(["./src/shared.py"], [])), \
-            patch.object(panel, "scope_overlaps", return_value=overlap) as overlap_check, \
-            redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+    # ExitStack keeps this under Python 3.11's limit of 20 statically nested blocks.
+    with ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, {"OMS_ROOM_REPO": "", "OMS_ROOM_ID": "", "OMS_ROOM_PARTICIPANT": ""}))
+        stack.enter_context(patch.object(panel, "_validate_dispatch_verifier"))
+        stack.enter_context(patch.object(panel, "_validate_dry_run_inputs"))
+        stack.enter_context(patch.object(panel, "routed_command", return_value=["delegate", "--repo", str(root),
+                                                                    "--verify", "true", "--task-id", "plan-task"]))
+        stack.enter_context(patch.object(panel, "child_environment", return_value={"OMS_ROOM_ID": "room",
+                             "OMS_ROOM_PARTICIPANT": "main", "OMS_PANEL_MAIN_ATTEMPT": "main"}))
+        stack.enter_context(patch.object(panel, "events", return_value=json.dumps(main_record)))
+        stack.enter_context(patch.object(panel, "active_mains", return_value={"main": main_record}))
+        stack.enter_context(patch.object(dispatch.room, "resolve", return_value="room"))
+        stack.enter_context(patch.object(dispatch.room, "records", return_value=[]))
+        stack.enter_context(patch.object(dispatch.room, "project", return_value=finished_room))
+        stack.enter_context(patch.object(dispatch.room, "participant", return_value={"role": "main", "provider": "codex"}))
+        stack.enter_context(patch.object(dispatch.room, "same_room", return_value=True))
+        stack.enter_context(patch.object(dispatch, "_plan_task_paths", return_value=(["./src/shared.py"], [])))
+        overlap_check = stack.enter_context(patch.object(panel, "scope_overlaps", return_value=overlap))
+        stack.enter_context(redirect_stderr(io.StringIO()))
+        stack.enter_context(redirect_stdout(io.StringIO()))
         def preview(role, access, scopes, main="main"):
             return dispatch.run_dispatch(root, "codex", role, access, None, None, "true", "plan-task",
                                          True, None, dict(route, role=role), main, None, scopes, work_repo=root)
