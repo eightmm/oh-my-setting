@@ -303,7 +303,8 @@ def resolve(extractions: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, An
         node = by_id.get(candidate, {})
         if ref.get("shell_bare"):
             return node.get("language") == "shell" and node.get("kind") == "function"
-        if language == "python":
+        if language in ("python", "notebook"):
+            # A notebook cell calls Python; nothing imports a notebook, so its symbols are never candidates.
             if node.get("language") != "python":
                 return False
             return node.get("kind") != "method" or bool(ref.get("method_call"))

@@ -217,6 +217,7 @@ scripts/lib/oms_graph/
             shell.py       regex-based
             markdown.py    documents + path references
             config.py      json/yaml/toml nodes
+            notebook.py    .ipynb code cells through the Python extractor
 scripts/lib/oms_graph_core.py   thin entrypoint (mirrors oms_core.py)
 scripts/graph.sh                front door: exec python3 .../oms_graph_core.py
 config/graphs/*.json            bundled GraphSpecs
@@ -765,7 +766,21 @@ definitions; a `self.x()`/`cls.x()` call to a sibling method is an `EXTRACTED`
 definitions, `source`/`.` includes, invocations of repo scripts by literal
 path, bare-name calls to functions defined in sourced files); Markdown
 (document nodes, `references` to literal repo paths); JSON/YAML/TOML config
-nodes. Python docstrings, the contiguous comment immediately above a shell
+nodes; Jupyter notebooks (`.ipynb`, `language: notebook`) by reading the
+`source` of code cells with stdlib `json` and handing it to the Python
+extractor, so a cell's classes, functions, methods, imports and calls are the
+same nodes and edges a `.py` file yields. Nothing is executed and cell outputs
+are never inspected, so text that only appears in an output is not a symbol.
+Each symbol carries the 1-based `cell` it came from, and `line`/`end_line` are
+lines of the `.ipynb` file itself (a cell stored as one JSON string sits on one
+line). IPython line magics and shell escapes (`%matplotlib inline`, `!pip ...`)
+are blanked when they are what keeps a cell from parsing; a cell magic
+(`%%bash`, `%%time`) or any other cell that is still not Python is skipped, as
+is every code cell of a notebook whose kernel language is not Python, and the
+notebook's `module` node reports `code_cells` and `skipped_cells`. A notebook's
+bare-name call resolves like a Python one, to Python symbols only; nothing
+imports a notebook, so its symbols are never a candidate for another file's
+call. Python docstrings, the contiguous comment immediately above a shell
 function, and a Markdown document's first prose paragraph become optional,
 bounded deterministic summaries after the shared sensitive-text guard. Python
 and shell symbols also carry a bodies-free signature and source span for
@@ -831,7 +846,8 @@ CamelCase before scoring name, path, qualname, and summary matches;
 `search(repo, query)` exhaustively scans indexed files for a case-insensitive
 literal, groups hits by enclosing symbol, and ranks them by incoming coupling.
 Search previews are bounded, secret-shaped lines are withheld, and source
-previews are labelled untrusted data. The overview verbs (`map`, `find`)
+previews are labelled untrusted data. Notebooks are not searched (they count
+in `skipped_files`): their raw lines are JSON that includes cell outputs. The overview verbs (`map`, `find`)
 drop test files and their edges by default because tests name many paths and
 otherwise dominate hubs — `--include-tests` (or `--kind test`)
 brings them back, while `blast` and `context` always keep them; `neighbors(id, relation, direction)`;
@@ -1094,7 +1110,10 @@ a value may never start with `-`. Output stays under the server's
   in-file only, a bare name never resolves to a method while an inherited
   `self.` call still does, `from pkg import submodule` binds the module file,
   a binding without the member stays unresolved, `Class.method()` resolves to
-  the method, a local shadowing a same-file function yields no edge.
+  the method, a local shadowing a same-file function yields no edge; notebook
+  code cells become symbols anchored to their cell and `.ipynb` line, outputs
+  and Markdown cells never do, magic/non-Python cells are counted as skipped,
+  and notebooks leave parser coverage's unparsed list and stay out of search.
 - `tests/test_oms_graph_integration.py`: fake `codex` provider on PATH (the
   `autonomy-plan-run-smoke.sh` pattern) driving `exec run` through
   `plan-run`; regression guards: no lease/scope/admission/review/acceptance

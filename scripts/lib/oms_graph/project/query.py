@@ -202,6 +202,10 @@ class Graph:
         folded = needle.casefold()
         for path in sorted(file_nodes):
             target = root / path
+            if file_nodes[path].get("language") == "notebook":
+                # Its lines are JSON with cell outputs in them; a preview would show what the parser never reads.
+                skipped_files += 1
+                continue
             try:
                 if target.is_symlink() or not target.is_file() or target.stat().st_size > 2 * 1024 * 1024:
                     skipped_files += 1
