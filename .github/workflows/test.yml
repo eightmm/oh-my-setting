@@ -109,6 +109,7 @@ jobs:
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
+      python: ${{ steps.plan.outputs.python }}
       operator: ${{ steps.plan.outputs.operator }}
     steps:
       - uses: actions/checkout@v7
@@ -127,7 +128,7 @@ jobs:
               --changed-from "$DIFF_BASE" --changed-to HEAD \
               --ci-output "$GITHUB_OUTPUT"
           else
-            printf 'mode=full\nnative=true\n' >> "$GITHUB_OUTPUT"
+            printf 'mode=full\nnative=true\npython=true\n' >> "$GITHUB_OUTPUT"
             if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
               printf '\n### OMS verification selection\n\nFull check: scheduled/manual run or unavailable base revision.\n' >> "$GITHUB_STEP_SUMMARY"
             fi
@@ -181,12 +182,13 @@ jobs:
           DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           PLAN_MODE: ${{ needs.affected_plan.outputs.mode }}
           PLAN_NATIVE: ${{ needs.affected_plan.outputs.native }}
+          PLAN_PYTHON: ${{ needs.affected_plan.outputs.python }}
           PLAN_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
           OMS_TEST_CALL_TIMEOUT: "240"
         run: |
           bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
             --ci-output "$RUNNER_TEMP/verify-output"
-          expected="$(printf 'mode=%s\nnative=%s\noperator=%s\n' "$PLAN_MODE" "$PLAN_NATIVE" "$PLAN_OPERATOR")"
+          expected="$(printf 'mode=%s\nnative=%s\npython=%s\noperator=%s\n' "$PLAN_MODE" "$PLAN_NATIVE" "$PLAN_PYTHON" "$PLAN_OPERATOR")"
           if [ "$(cat "$RUNNER_TEMP/verify-output")" != "$expected" ]; then
             echo "affected selection changed between plan and verification" >&2
             echo "planned:" >&2; printf '%s\n' "$expected" >&2
@@ -243,7 +245,7 @@ jobs:
   # Exercise the minimum supported Python, including the stdlib TOML parser.
   python311:
     needs: affected_plan
-    if: needs.affected_plan.outputs.native == 'true'
+    if: needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.python == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
@@ -300,6 +302,7 @@ jobs:
           AFFECTED_VERIFY_RESULT: ${{ needs.affected_verify.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
           AFFECTED_NATIVE: ${{ needs.affected_plan.outputs.native }}
+          AFFECTED_PYTHON: ${{ needs.affected_plan.outputs.python }}
           AFFECTED_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
           AFFECTED_OPERATOR_RESULT: ${{ needs.affected_operator.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
@@ -342,7 +345,12 @@ jobs:
             *) native_expected=invalid; install_expected=invalid; status=1 ;;
           esac
           [ "$INSTALL_E2E_RESULT" = "$install_expected" ] || status=1
-          [ "$PYTHON311_RESULT" = "$native_expected" ] || status=1
+          case "$AFFECTED_PYTHON" in
+            true) python_expected=success ;;
+            false) python_expected="$expected" ;;
+            *) python_expected=invalid; status=1 ;;
+          esac
+          [ "$PYTHON311_RESULT" = "$python_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
             echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
           fi

@@ -457,27 +457,30 @@ assert 'bash tests/operator-tools-smoke.sh --section "$OPERATOR"' in operator_jo
 assert "outputs.operator }}\"" not in operator_job.split("run: |", 1)[1]
 for mode in ("full", "affected"):
   for operator in ("", "section-shell", "all"):
-    for native in ("true", "false"):
-        env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PLAN_RESULT="success",
+   for native in ("true", "false"):
+    for python in ("true", "false"):
+        env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PYTHON=python,
+                   AFFECTED_PLAN_RESULT="success",
                    AFFECTED_OPERATOR=operator)
         env["AFFECTED_OPERATOR_RESULT"] = "success" if mode == "affected" and operator else "skipped"
         env["AFFECTED_VERIFY_RESULT"] = "success" if mode == "affected" else "skipped"
         env.update({name.upper() + "_RESULT": "success" if mode == "full" else "skipped"
                     for name in full_jobs})
-        env["PYTHON311_RESULT"] = "success" if native == "true" else "skipped"
+        env["PYTHON311_RESULT"] = "success" if python == "true" or mode == "full" else "skipped"
         env["INSTALL_E2E_RESULT"] = "success" if native == "true" or mode == "full" else "skipped"
         def passes(values):
             return subprocess.run(["bash", "-eu", "-c", script], env=values,
                                   capture_output=True).returncode == 0
-        assert passes(env), (mode, native, "valid planned skips rejected")
+        assert passes(env), (mode, native, python, "valid planned skips rejected")
         for name in required:
             key = name.upper() + "_RESULT"
             for result in ("success", "skipped", "failure", "cancelled", ""):
                 if result != env[key]:
-                    assert not passes(dict(env, **{key: result})), (mode, native, name, result)
+                    assert not passes(dict(env, **{key: result})), (mode, native, python, name, result)
         assert not passes(dict(env, AFFECTED_MODE="unknown"))
         for invalid in ("", "unknown"):
             assert not passes(dict(env, AFFECTED_NATIVE=invalid))
+            assert not passes(dict(env, AFFECTED_PYTHON=invalid))
 
 # Execute the native matrix alternatives as data and pin the plan expression.
 import json
@@ -499,7 +502,7 @@ for name in full_jobs:
     job = re.split(r"\n  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
     assert "    needs: affected_plan\n" in job, name
     condition = {"install_e2e": "needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.native == 'true'",
-                 "python311": "needs.affected_plan.outputs.native == 'true'"}.get(name, "needs.affected_plan.outputs.mode == 'full'")
+                 "python311": "needs.affected_plan.outputs.mode == 'full' || needs.affected_plan.outputs.python == 'true'"}.get(name, "needs.affected_plan.outputs.mode == 'full'")
     assert "    if: %s\n" % condition in job, name
 plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install_e2e:\n", 1)[0]
 plan_body, verify_body = plan_body.split("\n  affected_verify:\n", 1)
@@ -548,7 +551,7 @@ with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
     (root / "scripts").mkdir()
     (root / "scripts/check.sh").write_text(
         'echo invoked >> "$PROBE_LOG"\n[ "$PROBE_MODE" != invalid ] || exit 2\n'
-        'printf "mode=%s\\nnative=false\\n" "$PROBE_MODE" >> "$GITHUB_OUTPUT"\n', encoding="utf-8")
+        'printf "mode=%s\\nnative=false\\npython=false\\n" "$PROBE_MODE" >> "$GITHUB_OUTPUT"\n', encoding="utf-8")
     for event, base, selected, expected, invoked in (
         ("pull_request", "valid", "affected", "affected", True),
         ("push", "valid", "affected", "affected", True),
@@ -579,20 +582,21 @@ with tempfile.TemporaryDirectory(prefix="oms-ci-verify-") as tmp:
     (root / "scripts").mkdir()
     (root / "scripts/check.sh").write_text(
         'printf "%s" "$PROBE_OUT" >> "${@: -1}"\n', encoding="utf-8")
-    planned = "mode=affected\nnative=false\noperator=section-shell\n"
+    planned = "mode=affected\nnative=false\npython=false\noperator=section-shell\n"
     for written, ok in ((planned, True),
-                        ("mode=full\nnative=true\n", False),
-                        ("mode=affected\nnative=false\noperator=all\n", False),
-                        ("mode=affected\nnative=false\noperator=\n", False),
+                        ("mode=full\nnative=true\npython=true\noperator=\n", False),
+                        ("mode=affected\nnative=false\npython=false\noperator=all\n", False),
+                        ("mode=affected\nnative=false\npython=true\noperator=section-shell\n", False),
+                        ("mode=affected\nnative=false\npython=false\noperator=\n", False),
                         ("", False)):
         (root / "verify-output").unlink(missing_ok=True)
         env = dict(os.environ, RUNNER_TEMP=tmp, DIFF_BASE="base", PLAN_MODE="affected",
-                   PLAN_NATIVE="false", PLAN_OPERATOR="section-shell", PROBE_OUT=written)
+                   PLAN_NATIVE="false", PLAN_PYTHON="false", PLAN_OPERATOR="section-shell", PROBE_OUT=written)
         result = subprocess.run(["bash", "-eu", "-c", verify_script], cwd=tmp, env=env, capture_output=True)
         assert (result.returncode == 0) == ok, (written, result.stderr)
     # An empty operator plan must still match the empty operator line.
     (root / "verify-output").unlink(missing_ok=True)
-    env.update(PLAN_OPERATOR="", PROBE_OUT="mode=affected\nnative=false\noperator=\n")
+    env.update(PLAN_OPERATOR="", PROBE_OUT="mode=affected\nnative=false\npython=false\noperator=\n")
     assert subprocess.run(["bash", "-eu", "-c", verify_script], cwd=tmp, env=env, capture_output=True).returncode == 0
 checker = (pathlib.Path(sys.argv[1]).parents[2] / "scripts/check.sh").read_text()
 selector = checker.split("prepare_affected_gate() {", 1)[1].split("\nif [ \"$RUN_QUICK\"", 1)[0]
@@ -600,11 +604,13 @@ selector = "prepare_affected_gate() {" + selector
 with tempfile.TemporaryDirectory(prefix="oms-native-plan-") as tmp:
     root = pathlib.Path(tmp)
     changed = root / "paths"
-    for paths, expected in ((["README.md"], "false"), (["AGENTS.md"], "false"),
-                            (["AGENTS.md", "scripts/install-tools.sh"], "true"),
-                            (["scripts/lib/room.py"], "true"), (["tests/bsd-portability-smoke.sh"], "true"),
-                            ([".github/workflows/test.yml"], "true"), (["scripts/lib/oms-common.sh"], "true"),
-                            (['"scripts/lib/quoted path.py"'], "true")):
+    for paths, expected in ((["README.md"], "false false"), (["AGENTS.md"], "false false"),
+                            (["AGENTS.md", "scripts/install-tools.sh"], "true true"),
+                            (["scripts/lib/room.py"], "false true"), (["scripts/panel.sh"], "false false"),
+                            (["tests/scripts-smoke.sh"], "false false"),
+                            (["tests/bsd-portability-smoke.sh"], "true true"),
+                            ([".github/workflows/test.yml"], "true true"), (["scripts/lib/oms-common.sh"], "true true"),
+                            (['"scripts/lib/quoted path.py"'], "true true")):
         changed.write_text("\n".join(paths) + "\n")
         probe = r'''git() {
           case "$1 $2" in
@@ -617,7 +623,7 @@ with tempfile.TemporaryDirectory(prefix="oms-native-plan-") as tmp:
         AFFECTED_MODE=; AFFECTED_REASONS=; AFFECTED_TESTS=(); AFFECTED_CASE_LANGS=()
         AFFECTED_CASE_PATHS=(); AFFECTED_CASE_SELECTORS=(); QUICK_FROM=base; QUICK_TO=HEAD
         CHECK_RUNTIME="$PROBE_ROOT"; SKIP_LINT=0; CI_PARITY=0
-        ''' + selector + '\nprepare_affected_gate\nprintf "%s\\n" "$AFFECTED_NATIVE"\n'
+        ''' + selector + '\nprepare_affected_gate\nprintf "%s %s\\n" "$AFFECTED_NATIVE" "$AFFECTED_PYTHON"\n'
         result = subprocess.run(["bash", "-eu", "-c", probe], cwd=tmp,
                                 env=dict(os.environ, PROBE_PATHS=str(changed), PROBE_ROOT=tmp),
                                 capture_output=True, text=True)

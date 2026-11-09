@@ -190,8 +190,9 @@ manifest) then the test suites. With no arguments it runs both.
   --print-affected-mode With --affected, print affected or full after planning
                         and exit without running test stages (with --ci-output
                         FILE, the plan keys are appended to FILE first).
-  --ci-output FILE      With --affected, append mode=affected|full and
-                        native=true|false to FILE; an affected plan also
+  --ci-output FILE      With --affected, append mode=affected|full,
+                        native=true|false and python=true|false to FILE;
+                        an affected plan also
                         appends operator=SECTIONS|all|(empty) and leaves
                         operator-tools to CI's own job.
                         Run affected checks here; defer full checks to CI lanes.
@@ -827,17 +828,20 @@ prepare_affected_gate() {
   local kind first second third path docs_only=1 scoped_only=1
 
   AFFECTED_NATIVE=false
+  AFFECTED_PYTHON=false
   # Read the complete path set separately: the mode selector can stop at its
   # first full boundary, but a later path can still require native coverage.
   git diff --name-only --no-renames "$QUICK_FROM" "$QUICK_TO" -- > "$selector_changes"
   while IFS= read -r path; do
     case "$path" in
-      .github/workflows/*|install.sh|scripts/*.sh|scripts/*.py|scripts/oms|\
-      plugins/*|rules/*|config/*|templates/*.sh|tests/*.py|tests/scripts-smoke.sh|\
-      tests/*install*|tests/*update*|tests/*portability*|\
-      tests/*windows*|tests/*python*|tests/*runtime*|tests/*hook*|\
+      .github/workflows/*|install.sh|scripts/oms|scripts/install*|scripts/uninstall*|\
+      scripts/update*|scripts/link.sh|scripts/doctor.sh|scripts/python-runtime.sh|\
+      scripts/lib/platform.sh|scripts/lib/install*|scripts/lib/python-runtime.sh|\
+      scripts/lib/python-entry.sh|scripts/lib/oms-common.sh|scripts/lib/file-lock.sh|\
+      tests/*install*|tests/*update*|tests/*portability*|tests/*doctor*|\
       \"*|*\\*)
         AFFECTED_NATIVE=true ;;
+      *.py) AFFECTED_PYTHON=true ;;
     esac
   done < "$selector_changes"
 
@@ -885,6 +889,7 @@ prepare_affected_gate() {
     AFFECTED_REASONS=workspace-differs-from-head
     AFFECTED_NATIVE=true
   fi
+  [ "$AFFECTED_NATIVE" != true ] || AFFECTED_PYTHON=true
   if [ "$AFFECTED_MODE" = full ]; then
     : # The selector cannot be the sole judge of changes to its own boundary.
   elif [ "$docs_only" = 1 ] && [ -s "$selector_changes" ]; then
@@ -1009,7 +1014,7 @@ PY
 if [ "$RUN_AFFECTED" = 1 ]; then
   prepare_affected_gate
   if [ -n "$CI_OUTPUT" ]; then
-    printf 'mode=%s\nnative=%s\n' "$AFFECTED_MODE" "$AFFECTED_NATIVE" >> "$CI_OUTPUT"
+    printf 'mode=%s\nnative=%s\npython=%s\n' "$AFFECTED_MODE" "$AFFECTED_NATIVE" "$AFFECTED_PYTHON" >> "$CI_OUTPUT"
     if [ "$AFFECTED_MODE" = full ] && [ "$PRINT_AFFECTED_MODE" != 1 ]; then
       verify_oms_state
       exit 0
