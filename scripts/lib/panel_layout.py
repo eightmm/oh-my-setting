@@ -671,7 +671,7 @@ def keys_help(installed=None):
     starts = [label for name, label in (("claude", "1 Claude"), ("pi", "2 Pi"), ("codex", "0 Codex"))
               if name in installed]
     return (" ".join(starts + ["s Swap main", "? More F5 Back"]),
-            "F9 Chat/Board F8 Modes F5 Control s Swap main ? Keys k Capacity i Headers")
+            "F9 Chat/Board F8 Modes F5 Control ? Keys m Modes i Headers")
 
 
 def bind_main_keys():

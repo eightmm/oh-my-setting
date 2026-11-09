@@ -1000,7 +1000,8 @@ assert cycled == ["overview", "focus", "work"] and mode[0] == "work", cycled
 assert [call.args[0][1:] for call in mode_run.call_args_list if call.args[0][1] == "set-option"] == [
     ["set-option", "-w", "-t", "%1", "@oms_panel_mode", name] for name in cycled]
 assert "F8" in dict((key, command) for key, command in panel.MAIN_KEYS)
-assert all(hint in panel.keys_help(())[1] for hint in ("F8 Modes", "i Headers"))
+assert all(hint in panel.keys_help(())[1] for hint in ("F9 Chat/Board", "F8 Modes", "F5 Control", "? Keys", "m Modes", "i Headers")) and all(
+    key not in panel.keys_help(("claude", "pi", "codex"))[1] for key in ("1 Claude", "2 Pi", "0 Codex"))
 root_calls = []
 def root_key_run(argv, **kwargs):
     if argv[1] == "list-keys" and argv[-1] == "F8":
@@ -2852,14 +2853,28 @@ for view_name in ("graph", "tree"):
             assert "Keys" in drawn[-1] and len(drawn) == 24, (view_name, columns, drawn[-3:])
             assert display_width(footer_line) <= columns, (view_name, columns, footer_line)
             if columns >= 80:
-                assert footer_line.endswith("F12 Keys" if managed_board else "? Keys"), (view_name, columns, footer_line)
+                assert footer_line.endswith("? Keys"), (view_name, columns, footer_line)
             assert ("F9" in footer_line) == managed_board and ("q Quit" in footer_line) == (not managed_board), footer_line
             assert len(re.split(r"  +", footer_line)) <= 7 and "Esc Back" not in footer_line and "q Chat" not in footer_line, footer_line
+    for columns in (40, 50, 80, 120):
+        footer = render(flow, "codex", columns, 24, view=view_name, main_attempt="flow-attempt",
+                        navigation={}, managed=True).splitlines()[-1]
+        assert footer.endswith("? Keys") and (columns > 50 or "F12 Keys" not in footer), footer
+    if view_name == "graph":
+        with patch.dict(os.environ, {"TERM": "xterm-256color", "OMS_PANEL_THEME": "dark", "OMS_PANEL_COLOR": "always"}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            colored_footer = render(flow, "codex", 80, 24, view=view_name, main_attempt="flow-attempt",
+                                    navigation={}, managed=True, color=True).splitlines()[-1]
+            assert "\033[1;38;5;250m?\033[0m\033[38;5;250m Keys" in colored_footer, colored_footer
+            with patch.dict(os.environ, {"NO_COLOR": "1"}):
+                plain_footer = render(flow, "codex", 80, 24, view=view_name, main_attempt="flow-attempt",
+                                      navigation={}, managed=True, color=True).splitlines()[-1]
+                assert plain_footer.endswith("? Keys") and plain_footer == re.sub(r"\033\[[0-9;]*m", "", colored_footer), plain_footer
     # Board footers reserve space for context; F5 stays in full help.
     for control, offered in ((True, True), (False, False)):
         launched = render(flow, "codex", 120, 24, view="graph", main_attempt="flow-attempt",
                           navigation={"control_window": control}, managed=True).splitlines()[-1]
-        assert "F5 Control" not in launched and launched.endswith("F12 Keys"), launched
+        assert "F5 Control" not in launched and launched.endswith("F12 Keys  ? Keys"), launched
     open_nav = {"tab": "detail", "preview": {"target": ("chat", "flow-main")}}
     assert "Esc Close" in render(flow, "codex", 157, 24, view=view_name, main_attempt="flow-attempt",
                                  navigation=open_nav, managed=True).splitlines()[-1]

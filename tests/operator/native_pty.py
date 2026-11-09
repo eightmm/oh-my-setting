@@ -762,7 +762,7 @@ if os.name == "posix":
                 time.sleep(.2)
             # Occupied boards omit start actions while B's retired-main controls still work.
             assert "[+ Claude main]" not in board_text and "[+ Codex main]" not in board_text, board_text
-            assert "One main active or unverified" not in board_text and board_text.splitlines()[-1].endswith("F12 Keys"), board_text
+            assert "One main active or unverified" not in board_text and board_text.splitlines()[-1].endswith("F12 Keys  ? Keys"), board_text
             subprocess.run(tmux + ["send-keys", "-t", chat_pane, "-l", "r"], env=env, check=True)
             tmux_wait(["capture-pane", "-p", "-J", "-t", chat_pane], "another main is live or unverified")
             # Enter closes the retired main's entire window and its board watcher.

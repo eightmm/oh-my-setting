@@ -1482,7 +1482,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     if navigation.get("tab") == "debate" and not mapping(navigation.get("debate_view")).get("shown") and not menu:
         final_hints = footer_hints(dict(navigation, debate_empty=True), width, managed, unicode, selected_member, True)
     for text in final_hints[:help_rows]:
-        add(text, "metadata")
+        parts = re.split(r"(  +)", clipped(text, width))
+        lines.append("".join(styled(part, "hint") if part.isspace() else
+                             styled(part.split(" ", 1)[0], "hint", bold=True) +
+                             styled(part[len(part.split(" ", 1)[0]):], "hint") for part in parts if part))
     if menu:
         for text in footer_extra:
             add(text, "metadata")
@@ -2338,10 +2341,13 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
         return packed
 
     if managed:
-        base_reserved = [toggle, "F12 Keys"] if width >= 64 else ["F9", "F12 Keys"]
-        swap_reserved = ["F9 Swap", "F12 Keys"]
-        mode_reserved = ([toggle, "m Modes", "F12 Keys"] if width >= 64 else
-                         ["F9 Swap", "m Modes", "F12 Keys"])
+        keys = ["F12 Keys", "? Keys"] if width >= 64 else ["? Keys"]
+        if width >= 64 and (pack([toggle] + keys) != pack([toggle, "? Keys"]) or
+                            pack([toggle, "m Modes"] + keys) != pack([toggle, "m Modes", "? Keys"])):
+            keys = ["? Keys"]
+        base_reserved = ([toggle] if width >= 64 else ["F9"]) + keys
+        swap_reserved = ["F9 Swap"] + keys
+        mode_reserved = ([toggle, "m Modes"] if width >= 64 else ["F9 Swap", "m Modes"]) + keys
         reserved = base_reserved
         if width < 64 and pack(swap_reserved) == pack(base_reserved):
             reserved = swap_reserved

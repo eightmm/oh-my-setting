@@ -473,7 +473,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `Enter` | Preview a graph call; open a tree call; expand a message/group | Finish search input |
 | `Space` | Expand/collapse a selected group or fold a main in the tree | Page down |
 | `f` | Open the selected full result; open the recorded Debate result | — |
-| `r` / `e` / `d` | — | Raw / Events / Diff view |
+| `r` / `e` / `d` / `x` | — | Raw / Events / Diff / Transcript view |
 | `i` | Toggle pane context headers in a managed panel | Run info view |
 | `g` / `t` | Graph / tree view | — |
 | `b` / `v` | Toggle attention-only / expand or collapse the board | — |
@@ -2325,7 +2325,7 @@ The wheel scrolls only the band or detail under the pointer.
 The footer shows at most three hints chosen by the selection (a main: `Enter Chat`,
 `a Ask advisor`; a call: `Enter Show`, `w Worktree` when it applies;
 `Esc Close` while a preview or detail is open; on the Messages and Debate tabs the arrows, `Enter` and the filter or target keys) and always ends with the fixed panel keys
-`F9 Chat⇄Board  F5 Control  F12 Keys` (`q Quit` and `? Keys` on a standalone watcher). `?` swaps in the full list of keys
+`F9 Chat⇄Board  m Modes  F12 Keys  ? Keys` when space allows (`q Quit` and `? Keys` on a standalone watcher); narrow managed footers drop `F12 Keys` before `? Keys`. `?` swaps in the full list of keys
 that work in that view, with `v Expand` or `v Collapse` following the board's state.
 Notices disappear on the next input or after ten seconds.
 
