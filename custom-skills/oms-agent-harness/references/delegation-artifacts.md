@@ -52,8 +52,8 @@ Repair calls remain fresh: retain the original brief and required evidence.
 - Cite observed evidence with file and line, and say how it was checked.
 - Define the smallest change and explicit non-goals, including no new flags.
 - List every call site of the changed identifier, found with `rg`.
-- State applicable portability constraints: Bash 3.2, BSD userland, and
-  Windows Git Bash; strip CR from Python output and resolve paths with `pwd -P`.
+- State applicable portability constraints: Bash 5.0+ and GNU/BSD userland
+  for the core lifecycle; resolve paths with `pwd -P`.
 - Name the existing test to extend and its cases, including one that fails
   without the fix.
 - Give exact writable paths and an existing `--verify` command checked to exist;

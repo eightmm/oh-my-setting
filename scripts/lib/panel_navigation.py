@@ -347,7 +347,7 @@ def navigate(repo, action, state, navigation, width):
             if pending:
                 lines.append("Waiting on: " + ", ".join(pending))
         if task.get("state") == "blocked":
-            reason = clean(task.get("reason"), 240)
+            reason = clean(task.get("reason"), 500)  # the panel bounds a reason at 500 characters
             if reason:
                 lines.append("Blocked: " + reason)
             # An unverified completion only reads as blocked; its stored state is not one reopen accepts.
@@ -367,7 +367,9 @@ def navigate(repo, action, state, navigation, width):
                       "Plan acceptance: " + clean(task.get("state"))]
         lines += ["Scope: " + clean(path) for path in task.get("allowed_paths") or []]
         from panel_view import wrapped
-        text = "\n".join(part for line in lines for part in wrapped(line, width, 8))
+        # A block reason is shown up to that bound, past the usual row cap: its tail often says how to unblock.
+        text = "\n".join(part for line in lines for part in (
+            wrapped(line, width, len(line), len(line)) if line.startswith("Blocked: ") else wrapped(line, width, 8)))
         navigation["detail"] = {"title": "REPO TASK / snapshot", "text": text}
         navigation["offset"] = 0
 

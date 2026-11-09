@@ -6418,7 +6418,7 @@ wait_tasks = [{"id": "base", "title": "Base", "state": "done"}, {"id": "lib", "t
     {"id": "wait", "title": "Waits", "state": "ready", "depends": ["base", "lib", "absent"]},
     {"id": "odd", "title": "Odd", "state": "ready", "depends": ["base", ["nested"], 7]},
     {"id": "met", "title": "Met", "state": "ready", "depends": ["base"]},
-    {"id": "stop", "title": "Stopped", "state": "blocked", "depends": ["base"], "reason": "license\x1b[31m pending"},
+    {"id": "stop", "title": "Stopped", "state": "blocked", "depends": ["base"], "reason": "license\x1b[31m pending " + "x " * 230 + " until legal replies"},
     {"id": "unproven", "title": "Unproven", "state": "blocked", "stored_state": "done", "reason": "not verified"}]
 wait_text = {}
 for wait_id in ("wait", "met", "stop", "unproven", "odd"):
@@ -6431,6 +6431,7 @@ assert "Depends: base (done), lib (cancelled), absent (not in this plan)" in wai
 assert "Waiting on: lib, absent" in wait_text["wait"] and "Blocked:" not in wait_text["wait"], wait_text["wait"]
 assert "Depends: base (done)" in wait_text["met"] and "Waiting on:" not in wait_text["met"], wait_text["met"]
 assert "Blocked: license?[31m pending" in wait_text["stop"] and "\x1b" not in wait_text["stop"], wait_text["stop"]
+assert "until legal replies" in " ".join(wait_text["stop"].split()), wait_text["stop"]
 assert "Next: oms agent-plan reopen --id stop returns it to ready" in wait_text["stop"], wait_text["stop"]
 assert "Waiting on:" not in wait_text["stop"], wait_text["stop"]
 assert "Blocked: not verified" in wait_text["unproven"] and "reopen" not in wait_text["unproven"], wait_text["unproven"]
