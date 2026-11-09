@@ -793,6 +793,14 @@ supplies reported context and optional `seven_day` and `five_hour` usage, with a
 ten-minute TTL and expired reset values suppressed. The consumer hash selects that
 session's cache; no newest-session guess is made.
 
+Where the row has room, each reported quota percentage carries a five-cell bar of what
+is left: `5h ▮▮▮▮▯ 77% left (2h10m) · week ▮▮▮▯▯ 58% left` (`[####-]` without Unicode).
+The bar's width never changes with the value; any quota left keeps one filled cell and
+only an untouched quota fills all five. An unreported percentage draws no bar, and
+context, which counts up, has none. The bars are the first thing a tight row drops,
+before the long words and the countdown; `oms panel --health` draws the same bars on
+its weekly and 5-hour rows from 48 columns up, and `--health --json` carries none.
+
 When Claude reported a 5-hour window, the reading leads with it:
 `Claude 5h 77% left (2h10m) · week 58% left · ctx 62% used`. The percentage is the
 provider's own, never one derived from token counts, and the countdown is the time to
