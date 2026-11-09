@@ -77,7 +77,7 @@ from panel_navigation import (
 from panel_render import (
     show_providers, clear_control_view, room_listing, terminal_style, managed_session, stale_notice,
     provider_availability, frame_view, _show_state, show, draw_frame)
-from panel_watch import BackgroundRead, mark_window, start_spawn, reap_spawns, watch
+from panel_watch import BackgroundRead, mark_window, start_spawn, reap_spawns, stop_attention_command, watch
 from panel_interaction import (
     read_field, browse_results, browse_chats, raw_keys, menu_input, read_choice, interactive)
 
@@ -690,6 +690,7 @@ def main(argv=None):
         if host_control:
             # Retain Herdr's controller lifetime after the original startup argv is re-executed.
             command += ["--layout", "inline", "--view", args.view or "auto"]
+        stop_attention_command()
         os.execv(sys.executable, command)
     except NativeShutdown as error:
         return error.exit_code

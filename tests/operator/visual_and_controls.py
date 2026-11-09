@@ -351,10 +351,10 @@ assert panel_watch.ring_bell(piped_bell) is False and piped_bell.text == ""
 assert panel_watch.ring_bell(broken_bell) is False and panel_watch.ring_bell(object()) is False
 # The watcher rings only with OMS_PANEL_ATTENTION_BELL=1 and, in a managed panel, only from the main window's
 # board; the clock is artificial, so two reads cost no real refresh wait.
-def bell_watch(bell, managed=False, main_watch=""):
+def bell_watch(bell, managed=False, main_watch="", command=None, notified=None):
     bell_clock = itertools.count(0, 10)
     reads = [(report, 0, "codex", None, "graph", False, "endings") for report in (guard_read, ending_fixture, ending_fixture)]
-    environment = {"OMS_PANEL_ATTENTION_BELL": bell, "TMUX": "", "TMUX_PANE": "%1"}
+    environment = {"OMS_PANEL_ATTENTION_BELL": bell, "OMS_PANEL_ATTENTION_CMD": command, "TMUX": "", "TMUX_PANE": "%1"}
     with patch.dict(os.environ, {key: value for key, value in environment.items() if value is not None}), \
             patch.object(panel, "BackgroundRead", ImmediateRead), patch.object(panel, "read_panel", side_effect=reads), \
             patch.object(panel, "managed_session", return_value=managed), \
@@ -365,13 +365,85 @@ def bell_watch(bell, managed=False, main_watch=""):
             patch.object(panel, "draw_frame", return_value=None), patch.object(panel.sys, "stdout", io.StringIO()), \
             patch("panel_navigation.pane_local_option", return_value=main_watch), \
             patch.object(panel.time, "monotonic", side_effect=lambda: next(bell_clock)), \
+            patch.object(panel_watch, "run_attention_command") as ran, \
             patch.object(panel_watch, "ring_bell") as rung:
-        if bell is None:
-            os.environ.pop("OMS_PANEL_ATTENTION_BELL", None)
-        assert panel.watch(Path("."), "codex", count=3) == 0
+        for name, value in (("OMS_PANEL_ATTENTION_BELL", bell), ("OMS_PANEL_ATTENTION_CMD", command)):
+            if value is None:
+                os.environ.pop(name, None)
+        assert panel.watch(Path("endings-repo"), "codex", count=3) == 0
+    if notified is not None:
+        notified.extend(call.args for call in ran.call_args_list)
     return rung.call_count
 assert bell_watch("1") == 1 and bell_watch(None) == 0 and bell_watch("0") == 0 and bell_watch("yes") == 0
 assert bell_watch("1", managed=True, main_watch="1") == 1 and bell_watch("1", managed=True) == 0
+# OMS_PANEL_ATTENTION_CMD runs the person's notifier on the same event, with or without the bell, and only then.
+notifications = []
+assert bell_watch(None, command="notify --json", notified=notifications) == 0 and len(notifications) == 1, notifications
+sent_command, sent = notifications[0]
+assert sent_command == "notify --json" and sent["new"] == {"guard_stop": 1} and sent["repo"] == "endings-repo", sent
+assert set(sent) == {"schema", "kind", "repo", "new", "waiting", "ids", "ts"} and sent["schema"] == 1, sent
+assert sent["waiting"] == {cls: sum(item["cls"] == cls for item in ending_queue) for cls in {item["cls"] for item in ending_queue}}, sent
+assert len(sent["ids"]) == 1 and re.fullmatch(r"[0-9a-f]{16}", sent["ids"][0]) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", sent["ts"]), sent
+# Nothing an item says reaches the payload: no label, task, participant or message text.
+sent_text = json.dumps(sent)
+for item in ending_queue:
+    assert not any(str(value) in sent_text for value in (item.get("who"), item.get("what"), item.get("task")) if value), (item, sent_text)
+    assert not any(str(part) in sent_text for part in item["row_id"][1:] if isinstance(part, str)), (item["row_id"], sent_text)
+notifications.clear()
+assert bell_watch("1", command="notify", notified=notifications) == 1 and len(notifications) == 1
+notifications.clear()
+assert bell_watch(None, notified=notifications) == 0 and bell_watch("1", notified=notifications) == 1 and notifications == []
+assert bell_watch(None, managed=True, command="notify", notified=notifications) == 0 and notifications == []
+assert bell_watch(None, managed=True, main_watch="1", command="notify", notified=notifications) == 0 and len(notifications) == 1
+# The notifier gets one JSON line on stdin, without a shell; a bad command or a busy notifier is skipped quietly.
+notifier_out = temporary / "attention-notifier.json"
+notifier_argv = [sys.executable, "-c", "import sys; open(sys.argv[1], 'w').write(sys.stdin.read() + '|' + sys.argv[2])",
+                 str(notifier_out), "$HOME;`id`"]
+assert panel_watch.run_attention_command(" ".join(shlex.quote(part) for part in notifier_argv), sent) is True
+panel_watch._attention_notifier[0].join(20)
+received, literal = notifier_out.read_text().rsplit("|", 1)
+assert json.loads(received) == sent and received.endswith("\n") and received.count("\n") == 1 and literal == "$HOME;`id`", (received, literal)
+for unusable in ("", "   ", "notify 'unterminated"):
+    assert panel_watch.run_attention_command(unusable, sent) is False, unusable
+assert panel_watch.run_attention_command("/nonexistent/oms-attention-notifier", sent) is False
+# Past the timeout the notifier's whole process group dies, and the board's exit stops a hung one.
+import time
+def notifier_group(timeout, command=None):
+    pid_file = temporary / "attention-child.pid"
+    pid_file.unlink(missing_ok=True)
+    script = "sleep 60 & echo $! > " + shlex.quote(str(pid_file)) + "; wait"
+    command = command.format(shlex.quote(str(pid_file))) if command else "sh -c " + shlex.quote(script)
+    with patch.object(panel_watch, "ATTENTION_COMMAND_TIMEOUT", timeout):
+        assert panel_watch.run_attention_command(command, sent) is True
+        for _ in range(200):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            time.sleep(0.05)
+        return int(pid_file.read_text())
+def gone(pid):
+    for _ in range(200):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+child = notifier_group(0.5)
+panel_watch._attention_notifier[0].join(20)
+assert not panel_watch._attention_notifier[0].is_alive() and gone(child)
+child = notifier_group(0.5, "sh -c 'sleep 60 & echo $! > {}'")
+panel_watch._attention_notifier[0].join(20)
+assert not panel_watch._attention_notifier[0].is_alive() and gone(child)
+child = notifier_group(60)
+panel_watch.stop_attention_command()
+panel_watch._attention_notifier[0].join(20)
+assert not panel_watch._attention_notifier[0].is_alive() and gone(child)
+class BusyNotifier:
+    def is_alive(self):
+        return True
+panel_watch._attention_notifier[:] = [BusyNotifier()]
+assert panel_watch.run_attention_command("true", sent) is False
+panel_watch._attention_notifier.clear()
 projection_extra = deepcopy(ending_fixture)
 projection_extra["attempts"]["active_recent"] = [a for a in projection_extra["attempts"]["active_recent"] if a["attempt_id"] != "guard-record"]
 projection_extra["room_attempts"] = {"guard-record": {"attempt_id": "guard-record", "state": "failed",
@@ -1900,8 +1972,9 @@ with patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "0", "OMS_CLAUDE_NOTIFY": "0"},
     assert "OMS_CLAUDE_NOTIFY=0" in panel.panel_environment()
     # The bell opt-in reaches automatically opened boards only when the launching environment sets it.
     assert not any(entry.startswith("OMS_PANEL_ATTENTION_BELL=") for entry in panel.panel_environment())
-with patch.dict(os.environ, {"OMS_PANEL_ATTENTION_BELL": "1"}, clear=True):
+with patch.dict(os.environ, {"OMS_PANEL_ATTENTION_BELL": "1", "OMS_PANEL_ATTENTION_CMD": "notify --json"}, clear=True):
     assert "OMS_PANEL_ATTENTION_BELL=1" in panel.panel_environment()
+    assert "OMS_PANEL_ATTENTION_CMD=notify --json" in panel.panel_environment()
 for mode in ("animated", "static", "environment", "interrupt"):
     clock = [0.0]
     output = io.StringIO()

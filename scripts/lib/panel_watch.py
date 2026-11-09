@@ -1,5 +1,7 @@
 """Background reads, window indicators and the terminal watcher."""
 
+import atexit
+import hashlib
 import json
 import math
 import os
@@ -10,6 +12,7 @@ import panel_messages
 import panel_reader
 import queue
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -335,6 +338,96 @@ def ring_bell(stream=None):
     return False
 
 
+ATTENTION_COMMAND_TIMEOUT = 10
+_attention_notifier = []  # [thread, process] of the one notifier that may be running
+
+
+def attention_event(report, fresh, repo_name, now=None):
+    """The content-free payload for OMS_PANEL_ATTENTION_CMD: counts by attention class for the new items and for
+    the whole queue, hashed ids of the new items, the repository directory name and a UTC timestamp.
+
+    It never carries a label, prompt, command, path or message text."""
+    from dashboard_projection import clean
+    from panel_view import attention_items
+
+    def counts(items):
+        found = {}
+        for item in items:
+            found[item["cls"]] = found.get(item["cls"], 0) + 1
+        return found
+
+    ranked = attention_items(report, False)
+    new = [item for item in ranked if item["row_id"] in fresh]
+    return {"schema": 1, "kind": "oms-panel-attention", "repo": clean(repo_name, 80) or "",
+            "new": counts(new), "waiting": counts(ranked),
+            "ids": sorted(hashlib.sha256(repr(item["row_id"]).encode("utf-8")).hexdigest()[:16] for item in new)[:32],
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
+
+
+def _signal_attention_group(pid, number):
+    try:
+        os.killpg(pid, number)
+        return True
+    except OSError:
+        return False
+
+
+def stop_attention_command():
+    """Kill a notifier's process group while it is supervised; the board calls it before it exits or re-executes.
+
+    The group is signalled by its leader's pid, which the kernel does not reuse while the group has a member;
+    only a group that empties between the liveness check and the signal leaves a sub-poll-interval reuse window."""
+    if len(_attention_notifier) == 2 and _attention_notifier[0].is_alive():
+        _signal_attention_group(_attention_notifier[1].pid, signal.SIGKILL)
+
+
+def run_attention_command(command, payload):
+    """Start the person's notifier with the payload as one JSON line on stdin; True when it was started.
+
+    The command is split into argv and run without a shell in its own session, one at a time; past
+    ATTENTION_COMMAND_TIMEOUT its whole process group is killed, even after the first process exits. A malformed
+    command, a missing program, a failure or a notifier still running from the previous event never blocks or
+    fails the board."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv or (_attention_notifier and _attention_notifier[0].is_alive()):
+        return False
+    data = (json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+    def deliver():
+        deadline = time.monotonic() + ATTENTION_COMMAND_TIMEOUT
+        try:
+            process.communicate(data, timeout=ATTENTION_COMMAND_TIMEOUT)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        # The bound covers the whole group: a wrapper that backgrounds its sender and exits stays supervised.
+        while _signal_attention_group(process.pid, 0):
+            if time.monotonic() >= deadline:
+                _signal_attention_group(process.pid, signal.SIGKILL)
+                break
+            time.sleep(0.1)
+        process.wait()
+
+    try:
+        thread = threading.Thread(target=deliver, daemon=True)
+        if not _attention_notifier:
+            atexit.register(stop_attention_command)
+        _attention_notifier[:] = [thread, process]
+        thread.start()
+    except BaseException:
+        # Interrupted before supervision began: nothing else would ever stop this group.
+        _signal_attention_group(process.pid, signal.SIGKILL)
+        raise
+    return True
+
+
 def watch(repo, provider, count=0, no_animation=False, view=None, attention_only=False):
     from terminal_panel import (BOTTOM_OPTION, BackgroundRead, MAIN_HARNESSES, PanelModeSync, REJECTED_RELOAD,
         ReloadWatcher, SplitSync, _clear_cancel_option, _poll_cancel_confirmation, _request_cancel_confirmation,
@@ -484,11 +577,17 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     state, status, notice = hold_state(held, state, status, selected_room)
                     # Nothing edits this snapshot until the next one, so its frames share one set of projections.
                     board = freeze_report(state)
-                    if os.environ.get("OMS_PANEL_ATTENTION_BELL") == "1":
+                    bell = os.environ.get("OMS_PANEL_ATTENTION_BELL") == "1"
+                    notifier = os.environ.get("OMS_PANEL_ATTENTION_CMD", "")
+                    if bell or notifier:
+                        waited = belled
                         ring, belled = attention_bell(belled, board, selected_room, bool(notice))
-                        # One event rings once: in a managed panel only the main window's board rings.
+                        # One event signals once: in a managed panel only the main window's board does.
                         if ring and (not managed_session() or pane_local_option("@oms_panel_main_watch") == "1"):
-                            ring_bell()
+                            if bell:
+                                ring_bell()
+                            if notifier:
+                                run_attention_command(notifier, attention_event(board, belled[1] - waited[1], repo.name))
                     if view is not None or not managed_session():
                         read_density = navigation.get("view") or read_density
                     if "attention" in navigation:
