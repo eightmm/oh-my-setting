@@ -965,6 +965,14 @@ Project state lives under ignored `.oms/` paths:
 attention. `oms fail-ledger list`, `oms artifact-index unresolved`, and
 `oms thread list` expose the underlying records. Writers are append-oriented;
 use migration and GC commands instead of editing JSONL by hand.
+`oms agent-memory recall` and `search` also cover the failure ledger. An open
+failure carries its recorded next step (`record --next`), and the newest failure
+of a resolved fingerprint carries how it was fixed (`resolve --how`), each as one
+line of up to 240 characters. The ledger stores those two notes as given, so each
+passes the secret scanner before it is indexed; a flagged note, or any note when
+the scan cannot run, is left out while the failure itself still recalls. An index
+built earlier gains them when the ledger next changes or on `oms agent-memory
+rebuild`.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
