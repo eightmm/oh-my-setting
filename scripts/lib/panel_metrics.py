@@ -62,10 +62,42 @@ def cached(consumer, now):
         reset = week.get("resets_at")
         if number(reset) is not None and reset <= now:
             weekly = None
+        # The 5-hour window is the provider's own percentage, never one derived
+        # from tokens; a record written before it was cached simply has none.
+        five = mapping(data.get("five_hour"))
+        five_used, five_reset = percent(five.get("used_percentage")), number(five.get("resets_at"))
+        if five_reset is not None and five_reset <= now:
+            five_used = None
         return {"context_left": None if used is None else 100 - used,
-                "weekly_used": weekly, "source": "HUD"}
+                "weekly_used": weekly, "five_hour_used": five_used,
+                "five_hour_resets_at": None if five_used is None else five_reset, "source": "HUD"}
     except (OSError, ValueError, RecursionError):
         return {}
+
+
+FIVE_HOURS = 5 * 3600
+
+
+def five_hour(row, now=None):
+    """The reported 5-hour window of a provider row as (percent left, reset text).
+
+    None when no percentage was reported or its reset has passed since the row
+    was collected: a window that already rolled over is not a current reading.
+    The reset text is "" when no reset time was reported or it lies further out
+    than the window is long, which is bad data rather than a countdown."""
+    row = mapping(row)
+    used, reset = percent(row.get("five_hour_used")), number(row.get("five_hour_resets_at"))
+    if used is None:
+        return None
+    if reset is None:
+        return 100 - used, ""
+    remaining = reset - (time.time() if now is None else now)
+    if remaining <= 0:
+        return None
+    if remaining > FIVE_HOURS + 600:
+        return 100 - used, ""
+    minutes = int(remaining // 60)
+    return 100 - used, "<1m" if minutes < 1 else "%dm" % minutes if minutes < 60 else "%dh%02dm" % divmod(minutes, 60)
 
 
 def pane_reading(target, provider):
@@ -1360,9 +1392,10 @@ def metrics_text(report):
         else "incomplete: no") if line is not None)
 
 
-def usage_line(report, width=100, unicode=True):
+def usage_line(report, width=100, unicode=True, now=None):
     """One row for both providers; a provider without a reading stays on the row as "Codex --"."""
     parts = []
+    narrow = []
     for provider, title in (("claude", "Claude"), ("codex", "Codex")):
         row = mapping(mapping(report.get("provider_status")).get(provider))
         if row.get("accounts_error"):
@@ -1370,21 +1403,29 @@ def usage_line(report, width=100, unicode=True):
         week_used, context_left = percent(row.get("weekly_used")), percent(row.get("context_left"))
         week = None if week_used is None else 100 - week_used
         context = None if context_left is None else 100 - context_left
-        if week is None and context is None:
+        window = five_hour(row, now)
+        if week is None and context is None and window is None:
             parts.append(title + " --")
+            narrow.append(parts[-1])
             continue
         mark = lambda value: "--" if value is None else "%s%%" % value
-        parts.append("%s week %s%s%sctx %s%s" % (
-            title, mark(week), " left" if week is not None else "", " · " if unicode else " / ",
-            mark(context), " used" if context is not None else ""))
+        gap = " · " if unicode else " / "
+        rest = "week %s%s%sctx %s%s" % (
+            mark(week), " left" if week is not None else "", gap,
+            mark(context), " used" if context is not None else "")
+        # The shorter window leads, as on the native status line; its reset countdown is the first thing to go.
+        lead = "" if window is None else "5h %s%% left%s%s" % (window[0], " (%s)" % window[1] if window[1] else "", gap)
+        parts.append("%s %s%s" % (title, lead, rest))
+        narrow.append("%s %s%s" % (title, "" if window is None else "5h %s%%%s" % (window[0], gap), rest))
     agy = mapping(mapping(report.get("provider_status")).get("antigravity"))
     if agy.get("source") == "OMS artifacts":
         def amount(total):
             return ("%.1fM" % (total / 1000000)) if total >= 1000000 else ("%.1fk" % (total / 1000) if total >= 1000 else str(total))
         parts.append("agy 7d in %s · cached %s · out %s / %d calls" % (
             amount(agy["input_tokens"]), amount(agy["cache_read_tokens"]), amount(agy["output_tokens"]), agy["calls"]))
+        narrow.append(parts[-1])
     line = (" │ " if unicode else " | ").join(parts)
     if len(line) > width:
         line = (" │ " if unicode else " | ").join(
-            p.replace(" week ", " W ").replace("ctx ", "C ") for p in parts)
+            p.replace(" week ", " W ").replace("ctx ", "C ") for p in narrow)
     return line

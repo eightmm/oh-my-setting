@@ -355,11 +355,15 @@ def write_context_cache(payload: Dict[str, Any]) -> None:
         "total_input_tokens": finite_number(context.get("total_input_tokens")),
         "ts": time.time(),
     }
-    week = mapping(mapping(payload.get("rate_limits")).get("seven_day"))
-    weekly = rounded_percent(week.get("used_percentage"))
-    if weekly is not None:
-        record["seven_day"] = {"used_percentage": weekly,
-                               "resets_at": finite_number(week.get("resets_at"), 0.0, 4_000_000_000.0)}
+    # Both reported windows ride the same record: the panel shows the 5-hour
+    # one beside the weekly one and derives neither from token counts.
+    limits = mapping(payload.get("rate_limits"))
+    for key in ("five_hour", "seven_day"):
+        window = mapping(limits.get(key))
+        reported = rounded_percent(window.get("used_percentage"))
+        if reported is not None:
+            record[key] = {"used_percentage": reported,
+                           "resets_at": finite_number(window.get("resets_at"), 0.0, 4_000_000_000.0)}
     try:
         os.makedirs(cache_dir, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".ctx-", dir=cache_dir)

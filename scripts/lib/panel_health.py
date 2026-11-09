@@ -1,12 +1,12 @@
 """Read-only pressure projection; reported limits never authorize native session changes."""
 
 from dashboard_projection import clean, mapping
-from panel_metrics import percent
+from panel_metrics import five_hour, percent
 from hook_state import env_int
 import room
 
 
-def project(report):
+def project(report, now=None):
     items = []
 
     def add(kind, label, used, limit, action, unknown=False, warning_at=None, urgent_at=None,
@@ -39,6 +39,14 @@ def project(report):
         add("quota", provider.capitalize() + " weekly left", weekly_left, 100,
             "Check the native quota/reset; OMS keeps the selected model and provider.", weekly is None or not readable,
             warning_at_most=10, full_at_most=0)
+        # Listed only when the provider reported it and it has not rolled over: an absent 5-hour reading is not
+        # an unknown to chase. It is a reading beside the limits, so it moves neither the level nor the board alert.
+        window = five_hour(row, now) if readable and report.get("capacity_stale") is not True else None
+        if window is not None:
+            add("quota", provider.capitalize() + " 5-hour left", window[0], 100,
+                "Wait for the reset or check the native quota; OMS keeps the selected model and provider.",
+                warning_at_most=10, full_at_most=0)
+            items[-1].update(resets_at=row.get("five_hour_resets_at"), advisory=True)
     shared = mapping(report.get("room"))
     members = shared.get("participants")
     if isinstance(members, list) and not shared.get("error"):
@@ -67,17 +75,19 @@ def project(report):
     if mapping(report.get("collection")).get("ok") is not True:
         items.append({"kind": "collection", "label": "Status collection", "used": None, "limit": None,
                       "status": "unknown", "action": "Refresh status; the retained frame is not current execution proof."})
-    level = next((state for state in ("full", "urgent", "warning", "unknown") if any(i["status"] == state for i in items)), "ok")
+    level = next((state for state in ("full", "urgent", "warning", "unknown")
+                  if any(i["status"] == state and not i.get("advisory") for i in items)), "ok")
     return {"schema": 1, "level": level, "items": items}
 
 
 def alerts(report):
-    pressured = [item for item in project(report)["items"] if item["status"] in {"full", "urgent", "warning"}]
+    pressured = [item for item in project(report)["items"]
+                 if item["status"] in {"full", "urgent", "warning"} and not item.get("advisory")]
     return ["! Capacity: " + "; ".join("%s %s/%s" % (item["label"], item["used"], item["limit"])
             for item in pressured)] if pressured else []
 
 
-def render(report, width, height, footer=None):
+def render(report, width, height, footer=None, now=None):
     from panel_view import box_edge, box_row, clipped, LIVE_STATES
     from room_view import nodes
     members = nodes(report)
@@ -108,6 +118,11 @@ def render(report, width, height, footer=None):
                      "%s main · ctx %s%% used [%s]" % (provider.capitalize(), context, status)))
         rows.append("%s · week %s left [%s]" % (provider.capitalize(), "--" if weekly is None else "%s%%" % weekly,
                     "unknown" if weekly is None else "full" if weekly <= 0 else "warning" if weekly <= 10 else "ok"))
+        window = five_hour(row, now) if known else None
+        if window is not None:
+            rows.append("%s · 5h %s%% left%s [%s]" % (
+                provider.capitalize(), window[0], " · resets in " + window[1] if window[1] else "",
+                "full" if window[0] <= 0 else "warning" if window[0] <= 10 else "ok"))
     mains = sum(m.get("role") == "main" and m.get("state") in
                 LIVE_STATES | {"blocked", "waiting_input", "waiting_approval", "review"} for m in members)
     rows.append("Main: %s live" % mains)
