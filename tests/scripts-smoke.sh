@@ -6341,6 +6341,10 @@ case "$AGY_MODE" in
   err_idle) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"API error (attempt 1): request failed: stream idle timeout (5m0s): context deadline exceeded","usage":{}}' ;;
   err_tokens) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"cut","error":"Your previous response was cut off because it exceeded the output token limit","usage":{}}' ;;
   err_unknown) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"something else broke","usage":{}}' ;;
+  err_auth) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"authentication failed","usage":{}}' ;;
+  err_denied) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"permission denied: tool run_command requires approval","usage":{}}' ;;
+  err_long) printf '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"cut","error":"%s output token limit","usage":{}}\n' "$(python3 -c 'print("x" * 241)')" ;;
+  quote) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"The stream was interrupted and output token limit are phrases I quote.","usage":{}}' ;;
   zero) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"zero usage","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0}}' ;;
   *) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"Answer: hello\n","usage":{"input_tokens":7,"output_tokens":3,"thinking_tokens":2,"cache_read_tokens":4,"total_tokens":12}}' ;;
 esac
@@ -6410,7 +6414,7 @@ SH
           ! grep -Fq 'earlier answer' "$project/output" || exit 22 ;;
       esac
     done
-    for mode in err_interrupted err_idle err_tokens err_unknown; do
+    for mode in err_interrupted err_idle err_tokens err_unknown err_auth err_denied err_long; do
       export AGY_MODE="$mode"
       if ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
           provider-default '' test '' ''; then exit 50; fi
@@ -6422,12 +6426,18 @@ SH
         err_interrupted|err_idle)
           grep -Fxq 'stop-reason: provider=antigravity reason=stream_truncated subtype=error is_error=1' "$project/output" || exit 55
           [ "$OMS_PROVIDER_ERROR_CLASSIFICATION" = provider_down ] || exit 56 ;;
-        err_tokens)
+        err_tokens|err_long)
           grep -Fxq 'stop-reason: provider=antigravity reason=max_tokens subtype=error is_error=1' "$project/output" || exit 57
           [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 58 ;;
-        err_unknown) [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 59 ;;
+        err_unknown|err_auth|err_denied)
+          grep -Fxq 'stop-reason: provider=antigravity reason=turn_failed subtype=error is_error=1' "$project/output" || exit 59
+          [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 62 ;;
       esac
     done
+    export AGY_MODE=quote
+    ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+      provider-default '' test '' '' || exit 60
+    ! grep -q '^stop-reason: ' "$project/output" || exit 61
     for mode in plain empty malformed failed invalid_utf8 oversized banner_error; do
       export AGY_MODE="$mode"
       if ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \

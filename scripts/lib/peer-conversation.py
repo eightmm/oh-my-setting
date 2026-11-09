@@ -68,11 +68,19 @@ def _bounded(value, limit):
 
 
 def agy_turn_error(doc):
-    error = _bounded(doc.get("error"), 240)
+    scanned = _bounded(doc.get("error"), 4096)
+    error = scanned[:240]
     if doc.get("status") != "ERROR" and not error:
         return None
     finished = re.sub(r"[^A-Za-z0-9_.-]", "", _bounded(doc.get("finished_reason"), 40)) or "error"
-    reason = "max_tokens" if re.search(r"output token limit|max_tokens", error, re.I) else "stream_truncated"
+    typed = finished.lower()
+    if re.search(r"max_tokens|token_limit", typed) or re.search(r"output token limit|max_tokens", scanned, re.I):
+        reason = "max_tokens"
+    elif re.search(r"stream_interrupted|idle_timeout", typed) or re.search(
+            r"stream was interrupted|stream idle timeout", scanned, re.I):
+        reason = "stream_truncated"
+    else:
+        reason = "turn_failed"
     message = "antigravity turn ended with status=%s finished_reason=%s error=%s" % (
         _bounded(doc.get("status"), 20) or "unknown", finished, error or "none")
     stop = "stop-reason: provider=antigravity reason=%s subtype=%s is_error=1" % (reason, finished)
