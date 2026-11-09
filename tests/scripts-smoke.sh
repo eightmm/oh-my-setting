@@ -20707,6 +20707,31 @@ PY
   if ( cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" verify "$id" >/dev/null ); then
     fail "verify should report drift after a change"
   fi
+
+  # A JSON config is stored flattened; a sensitive-looking or oversized one keeps its digest only.
+  local cfg_err="$proj/cfg.err" cfg_view
+  printf '{"lr": 0.001, "model": {"depth": 4}, "nan_ok": [1, 2]}\n' > "$proj/hp.json"
+  printf '{"lr": 0.001, "pass''word": "hunter2-hunter2-hunter2"}\n' > "$proj/creds.json"
+  python3 -c 'import json; print(json.dumps({"k%d" % i: i for i in range(201)}))' > "$proj/wide.json"
+  printf '[1, 2]\n' > "$proj/list.json"
+  id="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" run --config hp.json \
+    --config creds.json --config wide.json --config list.json --no-ledger -- true 2>"$cfg_err")"
+  [ -n "$id" ] || fail "capsule run with configs printed no id: $(cat "$cfg_err")"
+  cfg_view="$(python3 - "$runs/$id/capsule.json" <<'PY'
+import json, sys
+for row in json.load(open(sys.argv[1]))["configs"]:
+    print("%s|%s|%s" % (row["path"], row.get("params_status"), json.dumps(row.get("params"), sort_keys=True)))
+PY
+)"
+  contains "$cfg_view" 'hp.json|parsed|{"lr": 0.001, "model.depth": 4, "nan_ok": "[1,2]"}' ||
+    fail "a JSON config should be stored flattened: $cfg_view"
+  contains "$cfg_view" 'creds.json|withheld: sensitive-looking content|null' ||
+    fail "a sensitive-looking config must keep its digest only: $cfg_view"
+  contains "$cfg_view" 'wide.json|not recorded: over the cap' || fail "an oversized config must keep its digest only: $cfg_view"
+  contains "$cfg_view" 'list.json|not parsed: top level is not a mapping|null' || fail "a non-mapping config is not flattened: $cfg_view"
+  assert_file_contains "$cfg_err" "capsule: config creds.json contains sensitive-looking values; kept its digest only"
+  ! grep -Fq "hunter2" "$runs/$id/capsule.json" || fail "a withheld config value reached the capsule"
+  [ "$(grep -c '"sha256"' "$runs/$id/capsule.json")" = 4 ] || fail "every config keeps its digest"
 }
 
 test_run_capsule_propagates_exit_and_runs_once() {
@@ -21782,12 +21807,19 @@ test_oms_run_diff_compares_capsules() {
   make_committed_repo "$d"
   printf '{"auc": 0.74, "ok": false, "label": "old", "empty": null}\n' > "$d/mA.json"
   printf '{"auc": 0.82, "ok": true, "label": "new", "empty": null}\n' > "$d/mB.json"
+  # The same config path changes between the runs; a second one is unparsed text.
+  printf '{"lr": 0.001, "model": {"depth": 4, "act": "relu"}, "tags": ["a", "b"], "drop": 0.1}\n' > "$d/hp.json"
+  printf 'lr=0.001\n' > "$d/hp.ini"
   a="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
   ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$a" env -u LOADEDMODULES \
-    "$cap" run --seed 1 --metrics mA.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run A failed"
+    "$cap" run --seed 1 --metrics mA.json --config hp.json --config hp.ini --no-ledger -- true >/dev/null 2>&1 ) ||
+    fail "run A failed"
+  printf '{"lr": 0.0003, "model": {"depth": 6, "act": "relu"}, "tags": ["a"], "warmup": 100}\n' > "$d/hp.json"
+  printf 'lr=0.0003\n' > "$d/hp.ini"
   b="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" new 2>/dev/null)"
   ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" OMS_RUN_ID="$b" LOADEDMODULES='cuda/12.1' \
-    "$cap" run --seed 2 --metrics mB.json --no-ledger -- true >/dev/null 2>&1 ) || fail "run B failed"
+    "$cap" run --seed 2 --metrics mB.json --config hp.json --config hp.ini --no-ledger -- true >/dev/null 2>&1 ) ||
+    fail "run B failed"
 
   out="$(cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" "$b" 2>/dev/null)"
   contains "$out" "metric:auc" || fail "diff missing metric line"
@@ -21795,6 +21827,15 @@ test_oms_run_diff_compares_capsules() {
   contains "$out" "seeds" || fail "diff missing seeds line"
   printf '%s\n' "$out" | grep -E '^modules +!=  \(none\)  \|  cuda/12\.1$' > /dev/null || fail "diff missing the modules line"
   printf '%s\n' "$out" | grep -E '^host +== ' > /dev/null || fail "diff missing the host line"
+  # Config differences are named key by key; an unchanged key is not listed.
+  printf '%s\n' "$out" | grep -Fx '  lr: 0.001 → 0.0003' > /dev/null || fail "diff missing the changed key: $out"
+  printf '%s\n' "$out" | grep -Fx '  model.depth: 4 → 6' > /dev/null || fail "diff missing the nested key: $out"
+  printf '%s\n' "$out" | grep -Fx '  tags: ["a","b"] → ["a"]' > /dev/null || fail "diff missing the list value: $out"
+  printf '%s\n' "$out" | grep -Fx '  - drop: 0.1' > /dev/null || fail "diff missing the removed key: $out"
+  printf '%s\n' "$out" | grep -Fx '  + warmup: 100' > /dev/null || fail "diff missing the added key: $out"
+  ! contains "$out" "model.act" || fail "an unchanged key must not be listed: $out"
+  contains "$out" "(keys of $a: not parsed: only JSON and YAML configs are flattened)" ||
+    fail "diff should say why an unparsed config has no key view: $out"
   printf '%s\n' "$out" | grep -F "metric:ok" > "$d/okline" || fail "diff missing bool metric"
   if grep -Fq "(Δ" "$d/okline"; then
     fail "bool metrics must not be treated as numeric deltas"

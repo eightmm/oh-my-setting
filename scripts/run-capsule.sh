@@ -47,7 +47,11 @@ Capture a reproducibility capsule around a command and record it under
 
 run options:
   --note TEXT      Free-text note stored in the capsule.
-  --config PATH    Config file to fingerprint (sha256). Repeatable.
+  --config PATH    Config file to fingerprint (sha256). Repeatable. A JSON
+                   config (YAML when PyYAML is importable) is also stored as
+                   flattened key -> value pairs so `oms run diff` names the
+                   keys that differ; over 200 keys, 200 characters per key or
+                   value or 16384 bytes, or sensitive-looking, keeps the digest.
   --output PATH    Output/checkpoint path to record (path+size+mtime, not
                    content). Repeatable.
   --seed N         Seed to record. Repeatable.
@@ -325,16 +329,105 @@ print(json.dumps({
 PY
 }
 
+# One config row: path and digest always; for a JSON config (YAML when PyYAML is
+# importable) also a flattened key -> value view, so `oms run diff` can name the
+# hyperparameters that differ. MODE=digest (the caller's verdict after the
+# sensitive scan) keeps the digest alone and records why.
+config_row_json() {
+  OMS_P="$1" OMS_S="$2" OMS_MODE="${3:-full}" python3 <<'PY'
+import json, math, os
+
+MAX_KEYS, MAX_VALUE, MAX_BYTES, MAX_READ = 200, 200, 16384, 1048576
+path = os.environ["OMS_P"]
+row = {"path": path, "sha256": os.environ["OMS_S"]}
+
+def flatten(value, prefix, out):
+    if isinstance(value, dict) and value:
+        for key in value:
+            flatten(value[key], "%s.%s" % (prefix, key) if prefix else str(key), out)
+    elif value is None or isinstance(value, (bool, int, str)):
+        out[prefix] = value
+    elif isinstance(value, float):
+        out[prefix] = value if math.isfinite(value) else str(value)
+    elif isinstance(value, (list, dict)):
+        out[prefix] = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    else:
+        out[prefix] = str(value)
+
+def parse():
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".json", ".yaml", ".yml"):
+        return None, "not parsed: only JSON and YAML configs are flattened"
+    try:
+        if os.path.getsize(path) > MAX_READ:
+            return None, "not recorded: config larger than %d bytes" % MAX_READ
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeError):
+        return None, "not parsed: unreadable as UTF-8"
+    if ext == ".json":
+        try:
+            return json.loads(text), None
+        except (ValueError, RecursionError):
+            return None, "not parsed: invalid JSON"
+    try:
+        import yaml
+    except Exception:
+        return None, "not parsed: PyYAML unavailable"
+    try:
+        return yaml.safe_load(text), None
+    except Exception:
+        return None, "not parsed: invalid YAML"
+
+if os.environ["OMS_MODE"] == "digest":
+    row["params_status"] = "withheld: sensitive-looking content"
+else:
+    data, why = parse()
+    if why is None and not isinstance(data, dict):
+        why = "not parsed: top level is not a mapping"
+    if why is None:
+        flat = {}
+        try:
+            flatten(data, "", flat)
+            body = json.dumps(flat, ensure_ascii=False, allow_nan=False)
+        except (RecursionError, ValueError, TypeError):
+            why = "not parsed: unsupported structure"
+        else:
+            if (len(flat) > MAX_KEYS or len(body.encode("utf-8")) > MAX_BYTES
+                    or any(len(k) > MAX_VALUE or len(str(v)) > MAX_VALUE for k, v in flat.items())):
+                why = ("not recorded: over the cap (%d keys, %d characters per key or value, %d bytes)"
+                       % (MAX_KEYS, MAX_VALUE, MAX_BYTES))
+            else:
+                row["params"] = flat
+                why = "parsed"
+    row["params_status"] = why
+print(json.dumps(row, ensure_ascii=False))
+PY
+}
+
 configs_json() {
-  local c sha
+  local c sha row scan
   local out="["
   local first=1
   for c in "${CONFIGS[@]:-}"; do
     [ -n "$c" ] || continue
     [ -f "$c" ] || { echo "capsule: config not found, skipped: $c" >&2; continue; }
     sha="$(oms_sha256_file "$c" | cut -c1-32)"
+    row="$(config_row_json "$c" "$sha" full)"
+    # Config values can be credentials; a flattened view that looks sensitive is not kept.
+    case "$row" in
+      *'"params": {'*)
+        scan="$(mktemp)" || fail "mktemp failed"
+        printf '%s\n' "$row" > "$scan"
+        if agent_memory_file_has_sensitive_content "$scan"; then
+          echo "capsule: config $c contains sensitive-looking values; kept its digest only" >&2
+          row="$(config_row_json "$c" "$sha" digest)"
+        fi
+        rm -f "$scan"
+        ;;
+    esac
     [ "$first" = 1 ] || out="$out,"
-    out="$out$(OMS_P="$c" OMS_S="$sha" python3 -c 'import json,os;print(json.dumps({"path":os.environ["OMS_P"],"sha256":os.environ["OMS_S"]}))')"
+    out="$out$row"
     first=0
   done
   printf '%s]\n' "$out"
