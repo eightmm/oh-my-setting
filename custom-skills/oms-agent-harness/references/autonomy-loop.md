@@ -128,6 +128,11 @@ This is an agent-driven loop while a parent is running, not an always-on daemon
 or an app notification service. Session wakeups need a separately configured
 scheduler. Publication and expensive compute retain their own authorization.
 
+An idle main with no ready task does not just wait: its plan hint names a waiting
+`proposal-review` proposal (review the exact bytes, apply by digest), else, while
+acceptance is unmet, suggests `oms plan-from-spec --discover` at most once per plan
+generation per UTC day. Review and gates still apply; nothing applies automatically.
+
 The one built-in wakeup is opt-in: with `OMS_TICK_WAKE=1`, the hourly `oms tick`
 types a single prompt into an idle panel main (30 minutes idle, no live child
 call, panel lock free) when plan tasks are ready or an autopilot proposal waits

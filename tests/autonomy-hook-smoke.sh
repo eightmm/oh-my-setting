@@ -1170,8 +1170,8 @@ assert "No active goal" in hook_state.panel_plan_hint(payload("tower"))
 assert "replaces the current plan and archives it" in empty, empty
 plan_path.unlink()
 stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-def plan_file(tasks):
-    (plan_dir / "tasks.json").write_text(json.dumps({"goal": "Ship the shared plan board " * 5, "tasks": {
+def plan_file(tasks, **extra):
+    (plan_dir / "tasks.json").write_text(json.dumps({"goal": "Ship the shared plan board " * 5, **extra, "tasks": {
         t["id"]: dict(t, title=t.get("title", t["id"]), created=stamp, updated=stamp) for t in tasks}}))
 plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "ready", "depends": ["t1"], "title": "Wire banner"},
            {"id": "t3", "state": "ready", "depends": ["t9"]}, {"id": "t4", "state": "cancelled"}])
@@ -1192,6 +1192,88 @@ plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "clai
            {"id": "t3", "state": "ready"}])
 held = hook_state.panel_main_hint(dict(payload("tower"), hook_event_name="UserPromptSubmit", prompt="Continue work"))
 assert "yours: t2 (running) → oms agent-plan brief --id t2" in held and "next ready: t3" in held and "before starting new work" not in held, held
+# Idle main: ready task > waiting proposal > one discovery suggestion per plan generation per UTC day > unchanged.
+cap = repo / ".oms/hooks/discover-hint.json"
+receipt = plan_dir / "autopilot-run.json"
+progress = plan_dir / "progress.jsonl"
+def idle_hint():
+    return hook_state.panel_plan_hint(payload("tower"))
+def reset_idle():
+    for leftover in (cap, receipt, progress):
+        if leftover.is_dir():
+            leftover.rmdir()
+        elif leftover.exists() or leftover.is_symlink():
+            leftover.unlink()
+reset_idle()
+plan_file([{"id": "t1", "state": "done"}])
+assert "plan-from-spec --discover" in idle_hint(), "unmet acceptance, nothing ready"
+assert "plan-from-spec --discover" not in idle_hint(), "second call the same day"
+stored = json.loads(cap.read_text())
+cap.write_text(json.dumps(dict(stored, day="2000-01-01")))
+assert "plan-from-spec --discover" in idle_hint(), "next UTC day"
+cap.write_text(json.dumps(dict(stored, generation="other")))
+assert "plan-from-spec --discover" in idle_hint(), "new plan generation"
+for broken in ("dir", "malformed", "list"):
+    reset_idle()
+    if broken == "dir":
+        cap.mkdir()
+    else:
+        cap.parent.mkdir(parents=True, exist_ok=True)
+        cap.write_text("{" if broken == "malformed" else "[]")
+    assert "plan-from-spec --discover" not in idle_hint(), broken
+reset_idle()
+accept_digest = hashlib.sha256(b"check-a").hexdigest()
+other_digest = hashlib.sha256(b"check-b").hexdigest()
+def acceptance(status, digest):
+    return json.dumps({"kind": "acceptance", "status": status, "accept_sha256_full": digest}) + "\n"
+plan_file([{"id": "t1", "state": "done"}], accept="check-a")
+reset_idle()
+progress.write_text(acceptance("fail", accept_digest) + "not json\n")
+assert "plan-from-spec --discover" in idle_hint(), "latest acceptance failed"
+reset_idle()
+progress.write_text(acceptance("fail", accept_digest) + acceptance("pass", accept_digest))
+assert "plan-from-spec --discover" not in idle_hint() and not cap.exists(), "acceptance met never reopens a goal"
+reset_idle()
+progress.write_text(acceptance("pass", other_digest))
+assert "plan-from-spec --discover" in idle_hint(), "another goal's pass is skipped"
+reset_idle()
+progress.write_text(acceptance("fail", accept_digest) + acceptance("pass", other_digest))
+assert "plan-from-spec --discover" in idle_hint(), "another command's later pass is not the latest row"
+reset_idle()
+progress.write_text(acceptance("pass", accept_digest))
+plan_file([{"id": "t1", "state": "done"}])
+assert "plan-from-spec --discover" in idle_hint(), "a plan without accept has no passing row"
+plan_file([{"id": "t1", "state": "done"}], accept="check-a")
+reset_idle()
+with patch.dict(os.environ, {"OMS_ROOM_REPO": str(repo)}):
+    assert "plan-from-spec --discover" in hook_state.panel_plan_hint({"cwd": "/nonexistent-cwd"}) and cap.exists(), "cap follows the plan repo"
+reset_idle()
+reset_idle()
+progress.mkdir()
+assert "plan-from-spec --discover" not in idle_hint(), "unreadable acceptance record fails closed"
+reset_idle()
+digest = "a" * 64
+receipt.write_text(json.dumps({"stage": "proposal-review", "proposal": {"path": "/x/proposal-1.json", "sha256": digest}}))
+pending = idle_hint()
+assert "proposal awaiting review (sha256 %s)" % digest in pending and "oms autopilot status" in pending, pending
+assert "--apply FILE --expected-proposal-sha256 " + digest in pending and "--discover" not in pending, pending
+receipt.write_text(json.dumps({"stage": "proposal-review", "proposal": {"path": "/x/p.json", "sha256": "bad"}}))
+assert "proposal awaiting" not in idle_hint(), "malformed digest"
+receipt.write_text(json.dumps({"stage": "running", "proposal": {"path": "", "sha256": ""}}))
+assert "proposal awaiting" not in idle_hint()
+reset_idle()
+plan_file([{"id": "t2", "state": "ready", "title": "Wire banner"}])
+ready_idle = idle_hint()
+assert "next ready: t2" in ready_idle and "--discover" not in ready_idle and not cap.exists(), ready_idle
+plan_file([{"id": "t3", "state": "running", "claimed_by_participant": "different-main"}])
+assert "--discover" not in idle_hint(), "work in flight"
+plan_path.write_text(json.dumps({"goal": "", "tasks": []}))
+assert "No active goal" in idle_hint() and "--discover" not in idle_hint()
+receipt.write_text(json.dumps({"stage": "proposal-review", "proposal": {"path": "/x/p.json", "sha256": digest}}))
+assert "No active goal" in idle_hint() and "proposal awaiting review" in idle_hint()
+reset_idle()
+plan_file([{"id": "t1", "state": "done"}, {"id": "t2", "state": "running", "claimed_by_participant": os.environ["OMS_ROOM_PARTICIPANT"]},
+           {"id": "t3", "state": "ready"}])
 owner = os.environ["OMS_ROOM_PARTICIPANT"]
 def worker_row(task_id, state="claimed", **overrides):
     row = {"id": task_id, "state": state, "claimed_by_participant": owner}

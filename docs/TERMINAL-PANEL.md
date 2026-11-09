@@ -2159,6 +2159,13 @@ and replaces the current canonical plan) or ask one question using prior-work
 candidates, then manually re-add relevant unfinished tasks; bounded previous-plan
 details are reference data.
 
+With no ready task, the hint instead names a waiting `proposal-review` proposal
+(`oms autopilot status` shows it; the hint carries its digest for the reviewed
+`--expected-proposal-sha256` apply). With no proposal, no work in flight and no passing
+acceptance record, it suggests `oms plan-from-spec --discover` at most once per plan
+generation per UTC day (cap in `.oms/hooks/discover-hint.json`; unreadable state means no
+suggestion). A met acceptance or no goal never reopens the goal. Nothing applies itself.
+
 A registered goal with zero tasks awaits them: use `oms agent-plan add`, never `init`.
 
 ### State vocabulary

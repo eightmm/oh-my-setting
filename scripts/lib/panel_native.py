@@ -213,7 +213,7 @@ def bootstrap(provider, repo):
         "OMS_CODEX_NOTIFY is 0; delivery failure preserves outcome; retry explicitly, never blindly resend. A "
         "worker exit or review handoff is intermediate: continue the authorized goal until done or a concrete "
         "scope, authority or runtime blocker remains; state the blocker and next action. Register supplied "
-        "objectives if no shared-plan goal; without a task, report readiness and wait. Syntax: load references "
+        "objectives if no shared-plan goal; no ready task: review a waiting proposal by digest, else oms plan-from-spec --discover while acceptance is unmet, else wait. Syntax: load references "
         "at %s: delegation-artifacts.md (panel/continue/salvage/finalize/delivery), roles.md and "
         "model-routing.md (triggers/routes), autonomy-loop.md (campaigns), command-routing.md "
         "(orientation/resume), graphs.md (context), state-memory.md (room), efficient-waiting.md (jobs)."

@@ -691,7 +691,7 @@ for owner in panel.PROVIDERS:
             "sole shared-checkout commit exception", "the main never commits there itself",
             "Publication still needs authority", "Without a campaign, ordinary panel plan execution applies",
             "concurrent land exits 75", "retry after the active land finishes",
-            "worker exit or review handoff is intermediate", "OMS_ROOM_REPO", "oms room scope", "--scope PATH"):
+            "worker exit or review handoff is intermediate", "review a waiting proposal by digest", "plan-from-spec --discover", "OMS_ROOM_REPO", "oms room scope", "--scope PATH"):
         assert phrase in guidance, phrase
     assert all(phrase not in guidance for phrase in ("--seat", "Astra", "preferred installed provider", "For tasks not covered by a PROJECT.md plan"))
     reference_contracts = {

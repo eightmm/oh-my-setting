@@ -1747,6 +1747,55 @@ def panel_no_goal_hint(repo: Path, data: dict[str, Any], tasks: list[dict[str, A
     return text
 
 
+def panel_idle_hint(repo: Path, payload: dict[str, Any], data: dict[str, Any], tasks: list[dict[str, Any]],
+                    discover: bool = True) -> str:
+    """No ready task: a waiting proposal first, else one discovery suggestion per plan generation per UTC day."""
+    raw = read_regular_file(repo / ".oms" / "plan" / "autopilot-run.json", STATE_FILE_LIMIT)
+    with contextlib.suppress(Exception):
+        receipt = json.loads(raw.decode("utf-8")) if raw else {}
+        proposal = receipt.get("proposal") if receipt.get("stage") == "proposal-review" else None
+        digest = proposal.get("sha256") if isinstance(proposal, dict) else None
+        if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            return ("proposal awaiting review (sha256 %s): oms autopilot status shows it; review those exact bytes, then "
+                    "apply the printed continuation (oms plan-from-spec --apply FILE --expected-proposal-sha256 %s)"
+                    % (digest, digest))
+    if not discover or not data.get("goal") or any(
+            t.get("state") in ("claimed", "running", "review", "landing") for t in tasks):
+        return ""
+    plan = repo / ".oms" / "plan"
+    progress = plan / "progress.jsonl"
+    try:
+        if os.path.lexists(progress):
+            rows = read_regular_file(progress, STATE_FILE_LIMIT)
+            if rows is None:
+                return ""  # unreadable acceptance record: fail closed
+            accept = data.get("accept")
+            bound = hashlib.sha256(accept.encode("utf-8")).hexdigest() if isinstance(accept, str) and accept else None
+            for line in reversed(rows.decode("utf-8", "replace").splitlines()):
+                with contextlib.suppress(ValueError):
+                    row = json.loads(line)
+                    # Only rows from this plan's acceptance command count; older goals' rows are skipped.
+                    if isinstance(row, dict) and row.get("kind") == "acceptance" and row.get("accept_sha256_full") == bound:
+                        if row.get("status") == "pass":
+                            return ""  # acceptance met: never reopen a finished goal
+                        break
+        path = repo / ".oms" / "hooks" / "discover-hint.json"
+        generation = str(data.get("plan_id") or data.get("goal"))
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if os.path.lexists(path):
+            stored = read_regular_file(path, STATE_FILE_LIMIT)
+            if stored is None:
+                return ""  # unreadable cap state: fail closed
+            old = json.loads(stored.decode("utf-8"))
+            if not isinstance(old, dict) or (old.get("generation") == generation and old.get("day") == today):
+                return ""
+        write_json_atomic(path, {"schema": 1, "generation": generation, "day": today})
+    except Exception:
+        return ""
+    return ("no ready task and acceptance unmet: oms plan-from-spec --discover proposes work; "
+            "review the proposal before applying it (once per day per plan)")
+
+
 def panel_plan_hint(payload: dict[str, Any]) -> str:
     """The shared plan as one bounded sentence: progress, the task this main holds, the next ready one."""
     repo = Path(os.environ["OMS_ROOM_REPO"]) if os.environ.get("OMS_ROOM_REPO") else hook_repo(payload)
@@ -1767,13 +1816,16 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
             stamps.append(datetime.strptime(str(t.get("updated")), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
     # Registered goal awaiting tasks (non-empty goal, zero tasks) is not "no active goal".
     if goal and not tasks:
-        return " [oms plan] Goal: %s · registered goal awaiting tasks — add tasks with oms agent-plan add; never use init (init replaces plan_id and clears the acceptance command)." % goal
+        idle = panel_idle_hint(repo, payload, data, tasks)
+        return " [oms plan] Goal: %s · registered goal awaiting tasks — add tasks with oms agent-plan add; never use init (init replaces plan_id and clears the acceptance command)." % goal + (" · " + idle if idle else "")
     all_closed = bool(tasks) and all(t.get("state") in ("done", "cancelled") for t in tasks)
     if (not goal or (stamps and clock - max(stamps) >= 7 * 86400 and not worker_holds)):
-        return panel_no_goal_hint(repo, data, tasks)
+        return panel_no_goal_hint(repo, data, tasks) + (
+            " Pending: " + idle if (idle := panel_idle_hint(repo, payload, data, tasks, False)) else "")
     # A recent goal whose tasks are all closed may continue: add the next task, do not re-init.
     if all_closed:
-        return " [oms plan] Goal: %s · all %d tasks closed — if this goal continues, add the next task with oms agent-plan add; if it is complete, register the next goal with oms agent-plan init --goal TEXT (init archives this plan)." % (goal, len(tasks))
+        return " [oms plan] Goal: %s · all %d tasks closed — if this goal continues, add the next task with oms agent-plan add; if it is complete, register the next goal with oms agent-plan init --goal TEXT (init archives this plan)." % (goal, len(tasks)) + (
+            " · " + idle if (idle := panel_idle_hint(repo, payload, data, tasks)) else "")
     done = {t["id"] for t in tasks if t.get("state") == "done"}
     ready_hint = panel_next_ready_hint(tasks, payload_agent(payload))
     cancelled = sum(1 for task in tasks if task.get("state") == "cancelled")
@@ -1792,6 +1844,8 @@ def panel_plan_hint(payload: dict[str, Any]) -> str:
         parts.append(ready_hint)
         if not mine:
             parts.append("claim the next ready task before starting new work")
+    elif not mine and (idle := panel_idle_hint(repo, payload, data, tasks)):
+        parts.append(idle)
     return " [oms plan] " + " · ".join(parts)
 
 
