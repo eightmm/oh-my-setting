@@ -26,6 +26,12 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 | macOS | Bash 5.0+, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub). The installer can re-exec under an installed Homebrew Bash 5; otherwise install Bash with `brew install bash` and rerun it. | symlinks |
 | Windows via WSL2 | Linux requirements above, inside WSL2 | symlinks |
 
+Claude Code's [memory documentation](https://code.claude.com/docs/en/memory.md) says a
+Cowork session on the desktop skips a `~/.claude/CLAUDE.md` that is itself a symlink or
+hard link. Under the default link mode the global rules are such a symlink, so they may not
+load on that surface; the terminal CLI is unaffected. `OH_MY_SETTING_LINK_MODE=copy` installs
+regular files that `oms doctor` checks for parity instead. OMS has not tested the Cowork surface.
+
 OMS requires Python 3.11+ with no upper version bound and provisions the 3.12
 runtime pinned in `tools.lock.json`. System Python stays unchanged, including
 older versions on Ubuntu 20.04/22.04 and macOS Command Line Tools.

@@ -26,6 +26,12 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 | macOS | Bash 5.0+, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다). 설치기는 이미 있는 Homebrew Bash 5로 재실행할 수 있다. 없으면 `brew install bash` 후 다시 실행한다. | symlink |
 | Windows via WSL2 | WSL2 안에서 위 Linux 요구 사항 적용 | symlink |
 
+Claude Code [memory 문서](https://code.claude.com/docs/en/memory.md)는 데스크톱 Cowork 세션이
+symlink나 hard link인 `~/.claude/CLAUDE.md`를 건너뛴다고 적는다. 기본 link 모드에서는 전역 규칙이
+바로 그 symlink라서 그 표면에서는 로드되지 않을 수 있다. 터미널 CLI는 해당하지 않는다.
+`OH_MY_SETTING_LINK_MODE=copy`는 일반 파일로 설치하고 `oms doctor`가 원본과의 일치를 검사한다.
+OMS는 Cowork 표면을 시험하지 않았다.
+
 Python 요구 사항은 상한 없는 3.11 이상이며 `tools.lock.json`에 고정된 3.12
 런타임을 설치한다. Ubuntu 20.04/22.04나 macOS Command Line Tools의 오래된
 시스템 Python은 바꾸지 않는다.
