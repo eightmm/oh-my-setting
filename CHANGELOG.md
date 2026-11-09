@@ -643,6 +643,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   `max_tokens` or `stream_truncated`; any other cause is `turn_failed`.
 - Native panel readers refuse hard-linked transcript files and linked subagent
   folders, and revalidate a cached main transcript.
+  Every lookup of a cached Claude main transcript checks the passed home's project
+  folders again, both for uniqueness and for file safety. A session that appears
+  in two folders, or a scan that hit its cap, reads nothing.
+- `oms runtime context-inspect` (PR #22) rejects two kinds of impossible manifest:
+  a truncated source whose retained bytes and marker cannot fit its payload, and
+  a truncated required source that is missing from `truncated_required`.
 - Task Detail shows a blocked reason up to 500 characters instead of cutting
   it at 240.
 - CONTRIBUTING.md states the Bash 5 floor. Only `install.sh`'s prelude stays
