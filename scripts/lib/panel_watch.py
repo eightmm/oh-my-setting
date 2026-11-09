@@ -272,6 +272,40 @@ def auto_check_due(now, deadline):
     return (True, now + 60) if now >= deadline else (False, deadline)
 
 
+# The attention classes that wait on the person: an answer or approval, and every kind of failed call.
+BELL_CLASSES = frozenset({"needs", "failed", "guard_stop", "timed_out", "verify_failed", "verify_timed_out",
+                          "provider_error"})
+
+
+def attention_bell(known, report, key, stale=False):
+    """(ring, known) for one snapshot: whether an item entered the person-facing attention classes.
+
+    `known` is None or (key, row ids) from the previous completed read of the same room `key`. The first read
+    of a room only seeds it, so a board start, restart or room switch never rings for what already waited. A
+    failed or held read, or one whose room was unreadable, keeps `known` unchanged: an item hidden only by that
+    read is not new when it returns. An item that left the queue and comes back rings again. Display-only."""
+    from dashboard_projection import mapping
+    from panel_view import attention_items
+    if stale or mapping(report.get("collection")).get("ok") is not True or mapping(report.get("room")).get("error"):
+        return False, known
+    current = frozenset(item["row_id"] for item in attention_items(report, False) if item["cls"] in BELL_CLASSES)
+    seeded = known is not None and known[0] == key
+    return seeded and bool(current - known[1]), (key, current)
+
+
+def ring_bell(stream=None):
+    """One BEL on the board's own terminal; tmux flags the window and applies the person's bell-action."""
+    stream = sys.stdout if stream is None else stream
+    try:
+        if stream.isatty():
+            stream.write("\a")
+            stream.flush()
+            return True
+    except (AttributeError, OSError, ValueError):
+        pass
+    return False
+
+
 def watch(repo, provider, count=0, no_animation=False, view=None, attention_only=False):
     from terminal_panel import (BOTTOM_OPTION, BackgroundRead, MAIN_HARNESSES, PanelModeSync, REJECTED_RELOAD,
         ReloadWatcher, SplitSync, _clear_cancel_option, _poll_cancel_confirmation, _request_cancel_confirmation,
@@ -394,6 +428,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             snapshots, animated = 0, (None, False)
             size = None
             held = {}
+            belled = None
             next_focus, splits, modes = 0, SplitSync(), PanelModeSync()
             while True:
                 collected = False
@@ -419,6 +454,11 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     state, status, notice = hold_state(held, state, status, selected_room)
                     # Nothing edits this snapshot until the next one, so its frames share one set of projections.
                     board = freeze_report(state)
+                    if os.environ.get("OMS_PANEL_ATTENTION_BELL") == "1":
+                        ring, belled = attention_bell(belled, board, selected_room, bool(notice))
+                        # One event rings once: in a managed panel only the main window's board rings.
+                        if ring and (not managed_session() or pane_local_option("@oms_panel_main_watch") == "1"):
+                            ring_bell()
                     if view is not None or not managed_session():
                         read_density = navigation.get("view") or read_density
                     if "attention" in navigation:

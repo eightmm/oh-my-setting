@@ -61,7 +61,8 @@ def watch_shell(repo, provider=None, session=None, model=None):
 def panel_environment():
     from terminal_panel import EXECUTION_ENV
     return ["env"] + [name + "=" + os.environ[name] for name in
-                      ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_AUTO_SWAP", "OMS_PANEL_COLOR", "NO_COLOR", "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
+                      ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_AUTO_SWAP", "OMS_PANEL_ATTENTION_BELL", "OMS_PANEL_COLOR", "NO_COLOR",
+                       "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
                        "CLAUDE_CONFIG_DIR",
                        "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW",
                        "OMS_PANEL_THEME", "COLORFGBG", EXECUTION_ENV) if name in os.environ]
