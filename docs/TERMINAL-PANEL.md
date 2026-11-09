@@ -1789,6 +1789,12 @@ was retained, the tab shows a truncation notice and the recorded source artifact
 path. Esc returns, and `f` opens the full recorded result reader. Evidence is
 read in the background.
 
+A seat's newest observed round is its state. When that round exited 0 without a
+usable answer, the seat line reads `no usable answer (KIND) in round N · round M
+said: …` and the seat's detail shows the non-answer first, then `Earlier usable
+answer, round M:`. Such a seat is not counted in `seats answered`, and the round
+count includes rounds that produced only non-answers.
+
 
 
 ### Finalize an outcome

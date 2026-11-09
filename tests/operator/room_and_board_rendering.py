@@ -748,7 +748,8 @@ quality_text = "\n".join(row[0] for row in quality_board)
 assert quality_text.count("no usable answer (empty)") == 1 and "usable seat answer" in quality_text, quality_text
 assert "no usable answer (blocked)" in quality_text and "allow-rule" not in quality_text, quality_text
 assert "no usable answer (empty)" in "\n".join(row[0] for row in quality_detail), quality_detail
-# Later repairs keep their round, and an unanswered later round retains the last answer.
+# Later repairs keep their round. A later round without a usable answer is the seat's newest state: the row and
+# the detail say so first and name the earlier answer by its own round, and the seat no longer counts as answered.
 round_calls = [
     {"kind": "ask", "exit": 0, "selected_model": "repair-seat", "artifact": "seat.md", "answer": "Initial position."},
     {"kind": "ask", "exit": 0, "selected_model": "repair-seat", "artifact": "seat-r2-repair.md", "answer": "Repaired position."},
@@ -764,9 +765,46 @@ with patch.object(panel.panel_debate, "debates", return_value=[quality_entry]):
     round_nav["debate_view"].update(seat=1, scroll=0)
     retained_detail = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
 round_text = "\n".join(row[0] for row in round_board)
-assert "Repaired position." in round_text and "Retained position." in round_text and "no usable answer" not in round_text, round_text
+assert "Repaired position." in round_text and "1 of 2 seats answered" in round_text and "round 2 of 2" in round_text, round_text
+assert "no usable answer (empty) in round 2 · round 1 said: Retained position." in round_text, round_text
 assert "round 2 answer" in "\n".join(row[0] for row in repaired_detail), repaired_detail
-assert "round 1 answer" in "\n".join(row[0] for row in retained_detail) and "Retained position." in "\n".join(row[0] for row in retained_detail), retained_detail
+assert "no usable answer" not in "\n".join(row[0] for row in repaired_detail), repaired_detail
+retained_rows = [row[0] for row in retained_detail]
+assert "round 2 answer" in retained_rows[0] and retained_rows[1] == "no usable answer (empty)", retained_rows
+assert retained_rows[2] == "Earlier usable answer, round 1:" and "Retained position." in retained_rows[3], retained_rows
+assert not any(row.startswith("Decision: not finalized") for row in round_text.splitlines()), round_text
+# Each non-answer kind after a valid round, a valid round after a non-answer, a failed same-round repair, and a
+# seat that has not reached the new round.
+def debate_rows(calls, seat=None):
+    nav = {"debate_view": {"shown": ("quality-view", "main-1"), "report": {"rows": [{"calls": calls}]}}}
+    if seat is not None:
+        nav["debate_view"]["seat"] = seat
+    with patch.object(panel.panel_debate, "debates", return_value=[quality_entry]):
+        return [row[0] for row in panel.panel_debate.tab_body({}, "main-1", 120, 30, nav, {}, unicode=False)]
+def ask(model, artifact, answer=None, quality=None):
+    call = {"kind": "ask", "exit": 0, "selected_model": model, "artifact": artifact}
+    call.update({"answer": answer} if answer else {"answer_quality": quality})
+    return call
+for later in ("blocked", "truncated", "empty", "invalid-deliberation"):
+    later_calls = [ask("seat-a", "a.md", "First position."), ask("seat-a", "a-r2.md", quality=later),
+                   ask("seat-b", "b.md", "Steady position.")]
+    later_board = "\n".join(debate_rows(later_calls))
+    assert "no usable answer (%s) in round 2 · round 1 said: First position." % later in later_board, later_board
+    # seat-b has no round 2 yet: its round 1 answer is still its newest state.
+    assert "1 of 2 seats answered" in later_board and "Steady position." in later_board, later_board
+    later_detail = debate_rows(later_calls, seat=0)
+    assert later_detail[1:3] == ["no usable answer (%s)" % later, "Earlier usable answer, round 1:"], later_detail
+recovered_calls = [ask("seat-a", "a.md", quality="blocked"), ask("seat-a", "a-r2.md", "Recovered position.")]
+recovered = "\n".join(debate_rows(recovered_calls))
+assert "Recovered position." in recovered and "no usable answer" not in recovered and "1 of 1 seats answered" in recovered, recovered
+assert "round 2 answer" in debate_rows(recovered_calls, seat=0)[0] and "Recovered position." in debate_rows(recovered_calls, seat=0)[1]
+failed_repair = [ask("seat-a", "a.md", "First position."), ask("seat-a", "a-r2.md", "Second position."),
+                 ask("seat-a", "a-r2-repair.md", quality="truncated")]
+failed_repair_board = "\n".join(debate_rows(failed_repair))
+assert "no usable answer (truncated) in round 2 · round 1 said: First position." in failed_repair_board, failed_repair_board
+assert "Second position." not in failed_repair_board and "0 of 1 seats answered" in failed_repair_board, failed_repair_board
+only_failed = debate_rows([ask("seat-a", "a.md", quality="empty")], seat=0)
+assert only_failed[1] == "no usable answer (empty)" and len(only_failed) == 2, only_failed
 # Delegate failures and legacy rows retain their diagnostic or worker summary.
 for failure in ({"kind": "delegate", "exit": 1, "verify_exit": 1},
                 {"kind": "delegate", "exit": 1}, {"kind": "ask"}):
