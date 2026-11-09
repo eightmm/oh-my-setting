@@ -64,6 +64,9 @@ for review — nothing touches the task board until --apply.
   --validate-spec FILE  Preflight a spec candidate's acceptance contract
                    (same parser as propose; state is not checked — a
                    candidate is draft by design). Used by intent adopt.
+                   Also prints advisory `warning: spec:` lines on stderr
+                   (open decisions left, no or unobservable success
+                   criteria, criterion ids); they never change the exit code.
   --model MODEL    Exact planner model forwarded to agent-call.
   --fallback-model MODEL
                   One-shot planner capacity fallback model.
@@ -751,6 +754,118 @@ print(",".join(files))
 PY
 }
 
+# Advisory requirement-quality lint for a spec candidate. It only prints
+# `warning: spec: ...` lines: the acceptance contract above stays the sole
+# pass/fail judge, so a noisy heuristic can never block an adopt. Criteria are
+# read with the runtime's own Markdown helpers, so a warning names exactly the
+# criteria (and ids) the runtime envelope would project from this file.
+spec_quality_warnings() {
+  python3 - "$SPEC" "$ROOT/scripts/lib" <<'PY'
+import re, sys, unicodedata
+
+sys.dont_write_bytecode = True
+spec, lib = sys.argv[1:]
+sys.path.insert(0, lib)
+try:
+    from oms_runtime.markdown import (bullet_items, normalized_line, section_text, sections,
+                                      stable_criterion_id, strip_criterion_marker)
+    text = open(spec, encoding="utf-8").read()
+except (ImportError, OSError, UnicodeError):
+    sys.exit(0)
+
+# Headings the runtime projects project criteria from (projection._project_file).
+CRITERIA_HEADINGS = ["acceptance", "done", "success", "completion", "완료", "성공", "수용"]
+EXPLICIT_ID = re.compile(r"\[(?:id|criterion):\s*[A-Za-z0-9._:-]{1,80}\]", re.I)
+SETTLED = {"", "none", "n/a", "na", "-", "없음"}
+# Words that state a wish rather than an observable outcome. Kept short on
+# purpose: a criterion that also carries a number is taken as measured.
+VAGUE = ("fast", "quickly", "robust", "user-friendly", "intuitive", "seamless",
+         "properly", "appropriately", "as needed", "적절히", "적절한", "원활히", "원활하게")
+VAGUE_RE = re.compile(r"(?<![\w-])(%s)(?![\w-])" % "|".join(re.escape(word) for word in VAGUE), re.I)
+MAX_WARNINGS = 12
+
+lines = text.splitlines()
+warnings = []
+
+def shown(value, limit=60):
+    value = "".join(ch if unicodedata.category(ch)[0] != "C" else " " for ch in value)
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[:limit - 3] + "..."
+
+def field(section_name, label):
+    """First `- label:` value in `## section_name`, or None when absent."""
+    inside = False
+    pattern = re.compile(r"^- " + re.escape(label) + r":[ \t]*(.*)$")
+    for line in lines:
+        if line.startswith("## "):
+            inside = line.rstrip() == "## " + section_name
+            continue
+        match = pattern.match(line) if inside else None
+        if match:
+            return match.group(1).strip()
+    return None
+
+def settled(value):
+    if value is None:
+        return True
+    value = value.strip(" \t'\"`.").lower()
+    # "none (confirmed with the owner)" is settled; "none of the databases fit" is not.
+    return value in SETTLED or re.match(r"none\s*[^\w\s]", value) is not None
+
+for section_name, label in (("Status", "Open decisions"), ("Decisions", "Open")):
+    value = field(section_name, label)
+    if not settled(value):
+        warnings.append("'- %s:' still lists unsettled choices (%s); settle them before planning, "
+                        "or the plan automates a guess" % (label, shown(value)))
+
+body, _ = sections(text)
+bullets = bullet_items(section_text(body, CRITERIA_HEADINGS))
+one_line = field("Verification", "Success criteria") or ""
+
+if not bullets and not one_line:
+    warnings.append("no success criteria: '- Success criteria:' is empty and no acceptance-criteria "
+                    "list is present, so nothing states what done looks like")
+
+# The runtime refuses a spec whose id names two different criteria
+# (projection._claim_criterion_id); say so before the first projection does.
+claimed = {}
+collisions = []
+for raw in bullets:
+    statement = strip_criterion_marker(normalized_line(raw))
+    if not statement:
+        continue
+    criterion_id = stable_criterion_id("project", raw)
+    previous = claimed.setdefault(criterion_id, statement.lower())
+    if previous != statement.lower() and criterion_id not in collisions:
+        collisions.append(criterion_id)
+for criterion_id in collisions:
+    warnings.append("criterion id %s names two different criteria; the runtime refuses that — "
+                    "give each criterion its own [id:...]" % shown(criterion_id))
+
+unnamed = [raw for raw in bullets if not EXPLICIT_ID.search(raw)]
+if bullets and len(unnamed) == len(bullets):
+    warnings.append("%d acceptance criteria carry no [id:...]; their ids are derived from the wording, "
+                    "so rewording one orphans its evidence (optional: '- [id:REQ-1] ...')" % len(bullets))
+elif unnamed:
+    for raw in unnamed[:3]:
+        warnings.append("criterion has no [id:...] while others do: \"%s\"" % shown(raw))
+    if len(unnamed) > 3:
+        warnings.append("%d more criteria have no [id:...]" % (len(unnamed) - 3))
+
+for raw in ([one_line] if one_line else []) + bullets:
+    statement = strip_criterion_marker(raw)
+    match = VAGUE_RE.search(statement)
+    if match and not re.search(r"\d", statement):
+        warnings.append("criterion is not observable as written (\"%s\" in \"%s\"); "
+                        "say what is measured or seen" % (match.group(1), shown(statement)))
+
+for message in warnings[:MAX_WARNINGS]:
+    sys.stderr.write("warning: spec: %s\n" % message)
+if len(warnings) > MAX_WARNINGS:
+    sys.stderr.write("warning: spec: %d more warning(s) not shown\n" % (len(warnings) - MAX_WARNINGS))
+PY
+}
+
 if [ "$SCOPE_ONLY" -eq 1 ]; then
   [ -f "$SPEC" ] || fail "no PROJECT.md in $REPO"
   spec_field Scope
@@ -844,6 +959,8 @@ if [ -n "$VALIDATE_SPEC" ]; then
   acceptance_meta="$(acceptance_contract)" || exit 2
   acceptance_meta="${acceptance_meta//$'\r'/}"
   echo "validate-spec: acceptance ok ($(printf '%s\n' "$acceptance_meta" | sed -n 1p))"
+  # Advisory only: requirement-quality warnings never change this exit code.
+  spec_quality_warnings || true
   exit 0
 fi
 

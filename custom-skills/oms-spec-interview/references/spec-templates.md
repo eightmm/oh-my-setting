@@ -39,6 +39,21 @@ resources, security constraints, and do-not-touch boundaries only when they
 apply; `n/a` may describe an inapplicable narrative fact, with a reason, but
 must not replace executable verification.
 
+`Success criteria` is one line. When separate criteria need their own evidence,
+an optional `## Acceptance criteria` list makes each bullet a runtime criterion.
+An explicit ID keeps evidence bound when the wording changes; the condition and
+response form is recommended, not required:
+
+```md
+## Acceptance criteria
+- [id:REQ-1] WHEN <condition> THE SYSTEM SHALL <observable response>
+```
+
+`oms plan-from-spec --validate-spec FILE` (also run by `oms intent adopt`) prints
+advisory `warning: spec:` lines for unsettled open decisions, missing or
+unobservable criteria, and missing or reused IDs. Warnings never block adoption;
+only the reviewer or owner may mark a criterion satisfied.
+
 `Affected checks` names the repository's narrow changed-file or test-selector
 entrypoint. `Always-run checks` lists the small portability, schema, security,
 or lifecycle floor that selection may not remove. Leave either `n/a` when the

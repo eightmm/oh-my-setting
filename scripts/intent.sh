@@ -840,6 +840,8 @@ if [ "$ACTION" = adopt ]; then
     printf '%s\n' "$preflight_out" >&2
     fail "the candidate's acceptance contract would refuse at plan-from-spec; fix it before adopting (usually '- Required check files:' naming what the checks read)"
   fi
+  # The same preflight lints requirement quality. Advisory: relay it, never gate on it.
+  printf '%s\n' "$preflight_out" | grep '^warning: spec: ' >&2 || true
 
   # The vacuity gate (a field defect class: hollow acceptance): an acceptance
   # that passes before any work exists cannot prove the work. Required checks
