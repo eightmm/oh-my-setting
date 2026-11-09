@@ -2531,7 +2531,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     from terminal_panel import _reconcile_dispatch, _rollback_dispatch_enrollment, _rollover_if_needed
     from terminal_panel import _safe_patch_path, _save_dispatch_output, _stop_dispatch
     from terminal_panel import _validate_dispatch_verifier, _validate_dry_run_inputs, active_mains
-    from terminal_panel import child_environment, deliver_result, events, moved_main, native_repository
+    from terminal_panel import child_environment, clean, deliver_result, events, moved_main, native_repository
     from terminal_panel import plan_link, repository, routed_command, scope_overlaps, snapshot
     from terminal_panel import work_repository
     from provider_accounts import implicit_default_account, next_account_route
@@ -3000,6 +3000,13 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                 signal.signal(number, previous)
     if shutdown is not None:
         raise shutdown
+    if room_id and member and status not in {129, 130, 143}:
+        from panel_review import _launch_review_rework
+        try:
+            _launch_review_rework(repo, room_id, member, caller)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            print("OMS automatic rework unavailable for task %s: %s; use the fix-brief notice."
+                  % (task_id, clean(str(error), 180)), file=sys.stderr)
     if status and status != 130 and exit_verified and deferred_fallback:
         retry_route, retry_fallback = None, None
         try:

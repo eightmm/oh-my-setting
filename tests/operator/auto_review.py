@@ -1171,7 +1171,7 @@ for dispatched_role in ("verifier", "security-auditor", "critic", "architect"):
     assert "findings are ready for owner judgment" in judge_mail["text"]
     assert "review failed or is inconclusive" not in judge_mail["text"]
     assert "awaiting admission" not in judge_mail["text"] and room_owner in judge_mail["targets"]
-# Completed negative automatic gates draft fixes for the main without dispatching another worker.
+# Completed negative automatic gates retain a fix brief for owner recovery.
 draft_main = {"attempt_id": "attempt-fix-draft-main", "tool": "panel-main", "provider": "claude",
               "state": "working", "terminal": False, "created_at": "2026-10-14T00:00:00Z",
               "refs": {"panel_role": "main", "panel_owner": "claude", "panel_room_id": shared,
@@ -1720,3 +1720,331 @@ for size in (0, 1, 4000, 4001, "malformed"):
     if size == 4001:
         assert len(message.encode("utf-8")) == 4000, len(message.encode("utf-8"))
 # END pinned judge handoff boundary
+
+# BEGIN automatic-review-rework
+import signal
+import panel_review as rework_controller
+import panel_dispatch as rework_dispatch
+rework_room = room.create(project, "automatic-rework", "Controller-owned rework")
+rework_main = panel.events(project, "start", "--provider", "claude", "--tool", "panel-main",
+    "--ref", "panel_role=main", "--ref", "panel_owner=claude", "--ref", "panel_room_id=" + rework_room,
+    "--then", "starting", "--then", "working", output=True)
+room.join(project, rework_room, rework_main, "claude", "main")
+rework_env = dict(environment, OMS_AGENT="claude", OMS_ROOM_ID=rework_room,
+    OMS_ROOM_REPO=str(project), OMS_ROOM_PARTICIPANT=rework_main, OMS_PANEL_MAIN_ATTEMPT=rework_main,
+    OMS_GRAPH_AUTOBUILD="0")
+rework_execution = Path(call(["bash", str(panel.ENTRY), "scratch-worktree", "add", "--repo", str(project),
+    "--owner-pid", str(os.getpid())], dict(rework_env,
+        OMS_DELEGATE_WORKTREE_ROOT=str(temporary / "rework-worktrees"))).strip())
+rework_rows, rework_order, rework_launched, rework_children = [], [], [], []
+rework_real_run, rework_real_popen = subprocess.run, subprocess.Popen
+rework_replay = False
+rework_real_release = panel._settlement_release
+rework_original_send = room.send
+rework_original_events = panel.events
+rework_original_execution = panel._dispatch_execution_repository
+rework_handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+rework_catalog = [dict(provider=provider, installed=True, binary=provider, access=["read", "write"],
+                      catalog_models=[], models=[], exact_model_override=True) for provider in ("codex", "claude")]
+rework_route = allocate("claude", "builder", "routine", "write", None, installed={"codex", "claude"})
+
+def rework_records(repo, **kwargs):
+    rows = json.loads(panel.events(repo, "list", "--json", output=True))
+    for row in rows:
+        if row["attempt_id"] in rework_order:
+            row["created_at"] = "2026-11-09T00:%04dZ" % rework_order.index(row["attempt_id"])
+    return rows, rework_rows
+
+def rework_fixture(label, task=None, gate_exit=0, findings=True, provider_exit=0, status=0, review_status=1):
+    task = task or "automatic-rework-" + label
+    writer = fixture_call_id("rework-writer-" + label)
+    patch_data = ("diff --git a/value.txt b/value.txt\n--- a/value.txt\n+++ b/value.txt\n"
+                  "@@ -1 +1 @@\n-old\n+" + label + "\n").encode()
+    digest = hashlib.sha256(patch_data).hexdigest()
+    _, _, reviewer = room.review_ids(writer, digest, 1)
+    ids = []
+    for member, role, tool, access in ((writer, "worker", "peer-delegate", "write"),
+                                       (reviewer, "reviewer", "peer-review", "read")):
+        ids.append(panel.events(project, "start", "--provider", "codex", "--tool", tool,
+            "--task-id", task, "--parent-attempt-id", rework_main,
+            "--ref", "panel_owner=claude", "--ref", "panel_role=" + role, "--ref", "panel_access=" + access,
+            "--ref", "panel_room_id=" + rework_room, "--ref", "panel_room_participant=" + member, output=True))
+    rework_order.extend(ids)
+    relative = ".oms/artifacts/rework-%s.md" % label
+    artifact = project / relative
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    answer = ("P1: Repair value.txt:1.\n" if findings else "No actionable findings.\n") + "GATE: fail"
+    artifact.write_text("## Output\n" + answer + "\n## Exit\n%d\n" % provider_exit, encoding="utf-8")
+    review_row = {"kind": "review", "attempt_id": ids[1], "task_id": task, "artifact": relative,
+                  "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(), "exit": 0}
+    outcome = dict(review_row, kind="review-outcome", exit=1,
+                   review={"gate_verify_exit": gate_exit, "seats": [{"verdict": "fail", "artifact": artifact.name}]})
+    patch_path = relative + ".patch"
+    (project / patch_path).write_bytes(patch_data)
+    writer_artifact = relative + ".writer.md"
+    (project / writer_artifact).write_text("## Output\nWorker finished.\n## Exit\n0\n", encoding="utf-8")
+    rework_rows.extend([dict(kind="delegate", attempt_id=ids[0], task_id=task, artifact=writer_artifact,
+        patch=patch_path, patch_sha256=digest, verify_exit=0,
+        base_sha=subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()),
+        review_row, outcome])
+    brief = temporary / (label + ".brief.md")
+    brief.write_text("Repair value.txt only.", encoding="utf-8")
+    return {"task": task, "writer": writer, "attempt": ids[0], "reviewer": reviewer,
+            "artifact": relative, "digest": digest, "brief": brief, "label": label, "status": status,
+            "review_status": review_status}
+
+def rework_subprocess(argv, **kwargs):
+    if "peer-delegate" in argv and "--dry-run" in argv:
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    if len(argv) >= 3 and argv[2] == "panel" and "--continue" in argv:
+        assert not rework_replay, "replayed reservation launched twice"
+        assert argv[argv.index("--continue") + 1] == rework_active["task"], argv
+        item = rework_active
+        assert any(message["id"] == "result-" + item["writer"]
+                   for message in room.project(room.records(project, rework_room))["messages"]), "launched before writer delivery"
+        assert {number: signal.getsignal(number) for number in rework_handlers} == rework_handlers, "handlers not restored"
+        claim = panel.dispatch_store.read(project, panel._settlement_claim_path(item["reviewer"]))
+        assert claim["complete"] and not claim["active"] and claim["auto_rework_launched"] is True, claim
+        assert item["reviewer"] not in rework_controller.SETTLEMENTS_HELD
+        assert kwargs["cwd"] == rework_execution and kwargs["stdin"] == subprocess.DEVNULL
+        assert argv[argv.index("--repo") + 1] == str(rework_execution), argv
+        assert kwargs["env"]["OMS_ROOM_REPO"] == str(project)
+        assert kwargs["env"]["OMS_ROOM_PARTICIPANT"] == rework_main
+        assert kwargs["env"]["OMS_PANEL_MAIN_ATTEMPT"] == rework_main
+        assert Path(argv[argv.index("--brief-file") + 1]) == (project / item["artifact"]).with_suffix(".fix-brief.md")
+        rework_launched.append(list(argv))
+        if item["label"] == "lost-launch":
+            raise OSError("fixture controller exit after launch record")
+        return subprocess.CompletedProcess(argv, 1 if item["label"] == "refused" else 0)
+    return rework_real_run(argv, **kwargs)
+
+def rework_popen(argv, **kwargs):
+    member = kwargs.get("env", {}).get("OMS_PANEL_CALL_ID")
+    if not member or member not in {rework_active["writer"], rework_active["reviewer"]}:
+        return rework_real_popen(argv, **kwargs)
+    rework_children.append(member)
+    if member == rework_active["reviewer"]:
+        assert not any(message["id"] == "result-" + rework_active["writer"]
+                       for message in room.status(project, rework_room)["messages"])
+    status = rework_active["status"] if member == rework_active["writer"] else rework_active["review_status"]
+    child = [sys.executable, "-c", "import sys; sys.exit(%d)" % status]
+    # Preserve the real supervisor and its whole-tree exit evidence; replace only the provider.
+    if len(argv) > 1 and Path(argv[1]).name == "dispatch_supervisor.py":
+        child = list(argv[:5]) + child
+    if member == rework_active["writer"] and status in {129, 130, 143}:
+        item = rework_active
+        event_id, _, _ = room.review_ids(item["writer"], item["digest"], 1)
+        room.claim_review(project, rework_room, dict(kind="review-dispatch", event_id=event_id,
+            task_id=item["task"], call_id=item["writer"], review_call_id=item["reviewer"],
+            patch_sha256=item["digest"], attempt=1))
+        review_route = allocate("claude", "reviewer", "routine", "read", None, installed={"codex", "claude"})
+        assert panel.run_dispatch(project, "claude", "reviewer", "read", "Review value.txt.", None, "true",
+            item["task"], False, None, review_route, rework_main, None, None,
+            work_repo=rework_execution, member_id=item["reviewer"]) == 1
+    return rework_real_popen(child, **kwargs)
+
+def rework_send(*args, **kwargs):
+    if rework_active["label"] == "reviewer-retry":
+        if kwargs.get("message_id") == "result-" + rework_active["reviewer"]:
+            notices = rework_active.setdefault("review_notices", [])
+            notices.append(args[4])
+            if len(notices) == 1:
+                raise OSError("fixture first reviewer result send refused")
+        elif kwargs.get("message_id") == "result-" + rework_active["writer"]:
+            assert panel.deliver_result(project, rework_room, rework_active["reviewer"], rework_main,
+                                        rework_active["task"], 1)
+    if rework_active["label"] == "send-failed" and kwargs.get("message_id") == "result-" + rework_active["writer"]:
+        raise OSError("fixture writer result send refused")
+    if rework_active["label"] == "notice-failed" and kwargs.get("message_id") == "auto-rework-" + rework_active["reviewer"]:
+        raise OSError("fixture reservation notice refused")
+    return rework_original_send(*args, **kwargs)
+
+def rework_release(repo, member, claim):
+    if rework_active["label"] == "release-failed" and member == rework_active["writer"]:
+        raise OSError("fixture writer settlement release refused")
+    released = rework_real_release(repo, member, claim)
+    if member == rework_active["writer"]:
+        if rework_active["label"] == "busy-room":
+            for number in range(13):
+                room.send(project, rework_room, rework_main, member, "Room traffic %d." % number,
+                          message_id="busy-rework-%d" % number)
+                rework_active["busy_traffic"] = number + 1
+            visible = {message["id"] for message in room.status(project, rework_room)["messages"]}
+            assert "result-" + member not in visible
+            assert "auto-rework-" + rework_active["reviewer"] not in visible
+        elif rework_active["label"] == "newer-manual":
+            newer = panel.events(project, "start", "--provider", "codex", "--tool", "peer-delegate",
+                "--task-id", rework_active["task"], "--parent-attempt-id", rework_main,
+                "--ref", "panel_owner=claude", "--ref", "panel_role=worker", "--ref", "panel_access=write",
+                "--ref", "panel_room_id=" + rework_room,
+                "--ref", "panel_room_participant=" + fixture_call_id("newer-manual"),
+                "--ref", "panel_continues=" + rework_active["attempt"], "--then", "starting", "--then", "working", output=True)
+            rework_order.append(newer)
+    return released
+
+def rework_events(repo, *args, **kwargs):
+    if args[0] == "usage" and rework_active["label"] == "reservation-failed" and "panel_auto_rework=" + rework_active["reviewer"] in args:
+        raise OSError("fixture reservation refused")
+    return rework_original_events(repo, *args, **kwargs)
+
+def rework_execution_repository(*args):
+    if rework_active["label"] == "execution-missing" and any(
+            m["id"] == "result-" + rework_active["writer"] for m in room.status(project, rework_room)["messages"]):
+        return None
+    return rework_original_execution(*args)
+
+def rework_run(item):
+    return panel.run_dispatch(project, "claude", "builder", "write", None, str(item["brief"]), "true",
+        item["task"], False, None, rework_route, rework_main, None, ["value.txt"],
+        work_repo=rework_execution, member_id=item["writer"])
+
+with patch.dict(os.environ, rework_env, clear=True), \
+        patch.object(panel_result_store, "_records", side_effect=rework_records), \
+        patch.object(panel, "provider_catalog", side_effect=lambda selection: [
+            row for row in rework_catalog if row["provider"] in selection.split(",")]), \
+        patch.object(subprocess, "run", side_effect=rework_subprocess), \
+        patch.object(subprocess, "Popen", side_effect=rework_popen), \
+        patch.object(room, "send", side_effect=rework_send), \
+        patch.object(panel, "events", side_effect=rework_events), \
+        patch.object(panel, "_dispatch_execution_repository", side_effect=rework_execution_repository), \
+        patch.object(panel, "_settlement_release", side_effect=rework_release), \
+        patch.object(panel, "_settle_dispatch", side_effect=rework_dispatch._settle_dispatch), \
+        patch.object(panel, "results", return_value={"rows": []}):
+    rework_active = first = rework_fixture("first")
+    assert rework_run(first) == 0
+    assert rework_children == [first["writer"], first["reviewer"]], rework_children
+    assert len(rework_launched) == 1, "run_dispatch never launched the reserved rework"
+    launched = rework_launched[0]
+    for option, expected in (("--continue", first["task"]), ("--dispatch", "builder"),
+                             ("--verify", "true"), ("--scope", "value.txt"), ("--access", "write")):
+        assert launched[launched.index(option) + 1] == expected, launched
+    saved_claim = panel.dispatch_store.read(project, panel._settlement_claim_path(first["reviewer"]))
+    assert saved_claim["auto_rework_launched"] is True
+    # A replay crosses the same launcher; fail directly if it reaches the process boundary again.
+    rework_replay = True
+    try:
+        rework_controller._launch_review_rework(project, rework_room, first["writer"], rework_main)
+    finally:
+        rework_replay = False
+    assert panel.dispatch_store.read(project, panel._settlement_claim_path(first["reviewer"])) == saved_claim
+    rework_replay = True
+    try:
+        for value in ("", "0", "not-a-review"):
+            panel.events(project, "usage", "--attempt", first["attempt"], "--ref", "panel_auto_rework=" + value)
+            rework_controller._launch_review_rework(project, rework_room, first["writer"], rework_main)
+        panel.events(project, "usage", "--attempt", first["attempt"], "--ref", "panel_auto_rework=" + first["reviewer"])
+        for value in (None, 0, {}, dict(saved_claim["auto_rework"], task_id="wrong-task")):
+            invalid = dict(saved_claim, auto_rework=value)
+            invalid.pop("auto_rework_launched")
+            panel.dispatch_store.write(project, panel._settlement_claim_path(first["reviewer"]), invalid)
+            rework_controller._launch_review_rework(project, rework_room, first["writer"], rework_main)
+    finally:
+        panel.dispatch_store.write(project, panel._settlement_claim_path(first["reviewer"]), saved_claim)
+        rework_replay = False
+    notes = [m for m in room.status(project, rework_room)["messages"] if m["id"] == "auto-rework-" + first["reviewer"]]
+    assert len(notes) == 1 and first["artifact"] in notes[0]["text"]
+
+    round_two_failures = []
+    for label in ("reviewer-retry", "busy-room", "newer-manual"):
+        rework_active = item = rework_fixture(label)
+        before_launch = len(rework_launched)
+        assert rework_run(item) == 0
+        claim = panel.dispatch_store.read(project, panel._settlement_claim_path(item["reviewer"]))
+        if label == "reviewer-retry":
+            notices = item["review_notices"]
+            if len(notices) != 2 or notices[0] != notices[1] or "manual command: oms panel" not in notices[1]:
+                round_two_failures.append("reviewer retry changed its fix-brief notice or manual command")
+            if len(rework_launched) != before_launch + 1:
+                round_two_failures.append("reviewer retry did not launch exactly once")
+        elif label == "busy-room":
+            assert item.get("busy_traffic") == 13, "room traffic fixture did not finish"
+            if len(rework_launched) != before_launch + 1:
+                round_two_failures.append("busy room lost the reserved launch")
+        elif len(rework_launched) != before_launch or claim.get("auto_rework_refused") != "writer-attempt-not-latest":
+            round_two_failures.append("newer manual continuation did not durably refuse automatic launch")
+    assert not round_two_failures, round_two_failures
+    assert not claim.get("auto_rework_launched")
+    assert panel.deliver_result(project, rework_room, item["reviewer"], rework_main, item["task"], 1)
+    rework_controller._launch_review_rework(project, rework_room, item["writer"], rework_main)
+    assert panel.dispatch_store.read(project, panel._settlement_claim_path(item["reviewer"])) == claim
+    current = {"attempt_id": first["attempt"], "refs": {}}
+    assert not rework_controller._other_rework_reservation([current], first["attempt"], first["reviewer"])
+    for value in ("", 0, None, "other-reviewer", first["reviewer"]):
+        reserved = dict(current, refs={"panel_auto_rework": value})
+        assert rework_controller._other_rework_reservation([reserved], first["attempt"], first["reviewer"]) == (value != first["reviewer"])
+        assert rework_controller._other_rework_reservation([dict(reserved, attempt_id="earlier")], first["attempt"], first["reviewer"])
+    for value in ("", 0, None, "unknown-refusal"):
+        invalid = dict(saved_claim, auto_rework_refused=value)
+        panel.dispatch_store.write(project, panel._settlement_claim_path(first["reviewer"]), invalid)
+        try:
+            rework_controller._settlement_claim(project, first["reviewer"], 1)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("malformed refusal record was accepted")
+        finally:
+            panel.dispatch_store.write(project, panel._settlement_claim_path(first["reviewer"]), saved_claim)
+    after_round_two = len(rework_launched)
+
+    rework_active = second = rework_fixture("second", task=first["task"])
+    assert rework_run(second) == 0
+    judgment = next(m for m in room.status(project, rework_room)["messages"] if m["id"] == "result-" + second["reviewer"])
+    assert "automatic rework was already used" in judgment["text"] and "The owner decides" in judgment["text"]
+    assert len(rework_launched) == after_round_two
+
+    for label, gate_exit, findings, provider_exit, review_status in (("no-findings", 0, False, 0, 1),
+            ("verify-failed", 1, True, 0, 1), ("malformed-verify", False, True, 0, 1),
+            ("provider-crash", 0, True, 1, 1), ("gate-crash", 0, True, 1, 2), ("zero-exit", 0, True, 0, 0)):
+        rework_active = item = rework_fixture(label, gate_exit=gate_exit, findings=findings,
+            provider_exit=provider_exit, review_status=review_status)
+        assert rework_run(item) == 0
+        rows, _ = rework_records(project)
+        assert "panel_auto_rework" not in next(row for row in rows if row["attempt_id"] == item["attempt"])["refs"], label
+    assert len(rework_launched) == after_round_two
+
+    for label in ("send-failed", "release-failed", "refused", "lost-launch", "reservation-failed", "notice-failed", "execution-missing"):
+        rework_active = item = rework_fixture(label)
+        before_launch = len(rework_launched)
+        with redirect_stderr(io.StringIO()) as errors:
+            assert rework_run(item) == 0
+        rows, _ = rework_records(project)
+        refs = next(row for row in rows if row["attempt_id"] == item["attempt"])["refs"]
+        assert ("panel_auto_rework" in refs) == (label != "reservation-failed"), label
+        claim = panel.dispatch_store.read(project, panel._settlement_claim_path(item["reviewer"]))
+        assert ("auto_rework" in claim) == (label not in {"reservation-failed", "notice-failed"}), label
+        assert len(rework_launched) - before_launch == (1 if label in {"refused", "lost-launch"} else 0), (label, errors.getvalue())
+        assert claim.get("auto_rework_launched", False) == (label in {"refused", "lost-launch"}), label
+        if label == "send-failed":
+            assert not any(m["id"] == "result-" + item["writer"] for m in room.status(project, rework_room)["messages"])
+        fallback = next(m for m in room.status(project, rework_room)["messages"] if m["id"] == "result-" + item["reviewer"])
+        assert "manual command: oms panel" in fallback["text"]
+        if label == "send-failed":
+            rework_active = dict(item, label="parallel")
+            assert panel.deliver_result(project, rework_room, item["writer"], rework_main, item["task"], 0)
+            barrier, errors = threading.Barrier(2), []
+            timeout = float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "120"))
+            def contender():
+                try:
+                    barrier.wait(timeout=timeout)
+                    rework_controller._launch_review_rework(project, rework_room, item["writer"], rework_main)
+                except BaseException as error:
+                    errors.append(error)
+            contenders = [threading.Thread(target=contender) for _ in range(2)]
+            for thread in contenders:
+                thread.start()
+            for thread in contenders:
+                thread.join(timeout=timeout)
+            assert not any(thread.is_alive() for thread in contenders), "concurrent rework did not settle"
+            assert not errors and len(rework_launched) == before_launch + 1, errors
+            assert panel.dispatch_store.read(project, panel._settlement_claim_path(item["reviewer"]))["auto_rework_launched"] is True
+
+    for interruption in (129, 130, 143):
+        rework_active = item = rework_fixture("interrupted-%s" % interruption, status=interruption)
+        # The provider boundary settles a review before the controller observes interruption.
+        before_launch = len(rework_launched)
+        assert rework_run(item) == interruption
+        rows, _ = rework_records(project)
+        assert next(row for row in rows if row["attempt_id"] == item["attempt"])["refs"]["panel_auto_rework"] == item["reviewer"]
+        assert len(rework_launched) == before_launch
+        assert not panel.dispatch_store.read(project, panel._settlement_claim_path(item["reviewer"])).get("auto_rework_launched")
+# END automatic-review-rework

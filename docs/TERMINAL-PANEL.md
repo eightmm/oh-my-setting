@@ -266,8 +266,19 @@ completion hint requires owner judgment. The candidate patch must also apply for
 review gate to run (`auto_review` in config/panel-routing.json, default true).
 
 It reuses the call's `--verify`, else the plan task's, and mails the main for manual
-review when neither exists. A FAIL verdict drafts a `--continue` fix brief and prints
-its command without launching it. Gate reviewers make a full pass over the scoped diff
+review when neither exists. A completed FAIL verdict with findings drafts a `--continue`
+fix brief and retains its manual command. After releasing reviewer settlement, the
+controller reserves and launches one automatic continuation through `oms panel`, and
+posts the task, review artifact and fix brief to the owner. The reservation is durable
+on the writer attempt (`panel_auto_rework` names the reviewer run) across the task's
+main lineage; replay cannot launch it again. A controller exit after reservation may
+lose the launch; the fix-brief notice remains for owner recovery. A second blocking
+review needs owner judgment and states that automatic rework was already used.
+Continuation retains the task's WIP slot. A refused or failed continuation is reported
+and leaves the manual notice available. It runs in the writer's recorded execution
+repository; room state stays in the state repository, and the fix brief is passed by
+absolute path from that state repository. Gate crashes, failed verification and reviews
+without findings never launch rework. Gate reviewers make a full pass over the scoped diff
 and report every evidenced blocking finding. A follow-up gate receives screened findings
 from the last completed failed gate's final provider attempt and checks whether each
 remains blocking. The carried findings are bounded to 3000 bytes; an omission notice

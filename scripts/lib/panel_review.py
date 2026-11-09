@@ -185,6 +185,12 @@ def _rework_history(rows, task_id, parents):
                   key=lambda row: (row.get("created_at", ""), row.get("attempt_id", "")))
 
 
+def _other_rework_reservation(rows, attempt_id, member):
+    return any("panel_auto_rework" in row.get("refs", {})
+               and (row.get("attempt_id") != attempt_id or row["refs"]["panel_auto_rework"] != member)
+               for row in rows)
+
+
 def _write_brief_artifact(repo, relative, content):
     from terminal_panel import DURABLE, MAX_PROMPT
     body = content.encode("utf-8")
@@ -406,8 +412,8 @@ def _prior_gate_findings(repo, room_id, task_id):
     return ""
 
 
-def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
-    """Draft from verified review bytes and controller-owned dispatch inputs; never launch rework."""
+def _review_fix_notice(repo, room_id, member, caller, task_id, record, context, rework=None):
+    """Draft verified findings and reserve controller rework without launching it."""
     from terminal_panel import MAX_PROMPT, WRITERS, _dispatch_call_record, _read, _rework_history
     from terminal_panel import _validate_dry_run_inputs, _write_brief_artifact, lineage_ids_from_rows
     import panel_results
@@ -462,10 +468,13 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
     if not earlier or earlier[-1].get("attempt_id") != worker.get("attempt_id"):
         raise ValueError("review no longer names the latest owned worker")
     review_round = len(earlier)
-    if review_round >= 2:
-        return ("Review gate failed (GATE: fail) for task %s (review round %d): the second consecutive blocking "
-                "review; automatic fix drafts stop here. The owner decides: narrow the brief and dispatch fresh, "
-                "fix directly, or finalize rejected." % (task_id, review_round))
+    rework_used = _other_rework_reservation(earlier, worker["attempt_id"], member)
+    if rework_used or review_round >= 2:
+        reason = ("automatic rework was already used" if rework_used else
+                  "the second consecutive blocking review; automatic fix drafts stop here")
+        return ("Review gate failed (GATE: fail) for task %s (review round %d): %s. "
+                "The owner decides: narrow the brief and dispatch fresh, fix directly, or finalize rejected."
+                % (task_id, review_round, reason))
     finding_text = "\n\n".join(findings)
     roots = {str(repo), str(anchor.get("execution_repo") or repo)}
     candidate = outcome.get("candidate") if isinstance(outcome, dict) else None
@@ -516,7 +525,106 @@ def _review_fix_notice(repo, room_id, member, caller, task_id, record, context):
     if len(notice.encode("utf-8")) > 3800:
         raise ValueError("draft notification exceeds the room message limit")
     _write_brief_artifact(repo, draft, content)
+    if rework is not None:
+        request = {"task_id": task_id, "attempt_id": worker["attempt_id"],
+                   "parent_attempt_id": worker["parent_attempt_id"], "owner": refs["panel_owner"],
+                   "review_artifact": review["artifact"], "brief": draft, "arguments": arguments[1:]}
+        try:
+            _reserve_review_rework(repo, room_id, member, caller, request)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            from terminal_panel import clean
+            print("OMS automatic rework reservation unavailable: " + clean(str(error), 180) +
+                  "; use the fix-brief notice.", file=sys.stderr)
     return notice
+
+
+def _reserve_review_rework(repo, room_id, member, caller, request):
+    """A reservation survives failed delivery; the fix-brief notice is its recovery."""
+    from terminal_panel import _lock, events, lineage_ids_from_rows
+    import panel_results
+    with _lock(repo, "panel-auto-rework"):
+        attempts, _ = panel_results._records(repo, full=True)
+        parents = lineage_ids_from_rows(attempts, request["owner"], caller, request["parent_attempt_id"])
+        history = _rework_history(attempts, request["task_id"], parents)
+        if (not history or history[-1].get("attempt_id") != request["attempt_id"]
+                or _other_rework_reservation(history, request["attempt_id"], member)):
+            return
+        events(repo, "usage", "--attempt", request["attempt_id"], "--ref", "panel_auto_rework=" + member,
+               "--idempotency-key", "panel-auto-rework-" + member)
+        room.send(repo, room_id, member, caller,
+                  "Automatic rework reserved for task %s; review artifact %s; fix brief %s." %
+                  (request["task_id"], request["review_artifact"], request["brief"]),
+                  message_id="auto-rework-" + member)
+        # This private request is the receipt for a successful reservation notice send.
+        with _lock(repo, "panel-call-settle"):
+            path = _settlement_claim_path(member)
+            claim = dispatch_store.read(repo, path)
+            claim["auto_rework"] = request
+            dispatch_store.write(repo, path, claim)
+
+
+def _launch_review_rework(repo, room_id, writer, caller):
+    """Consume durable reservation and delivery facts before crossing the spawn boundary."""
+    from terminal_panel import ENTRY, _dispatch_execution_repository, _lock, child_environment, lineage_ids_from_rows
+    import panel_results
+    with _lock(repo, "panel-auto-rework"):
+        attempts, _ = panel_results._records(repo, full=True)
+        worker = next((row for row in reversed(attempts)
+                       if row.get("refs", {}).get("panel_room_participant") == writer
+                       and room.same_room(repo, row.get("refs", {}).get("panel_room_id"), room_id)), {})
+        refs = worker.get("refs", {})
+        member = refs.get("panel_auto_rework")
+        if (refs.get("panel_access") != "write" or not isinstance(member, str)
+                or not re.fullmatch(r"call-[A-Za-z0-9][A-Za-z0-9._-]{0,159}", member)):
+            return
+        context = _review_dispatch_context(repo, room_id, member)
+        if context.get("call_id") != writer or context.get("kind") != "review-dispatch":
+            return
+        path = _settlement_claim_path(member)
+        claim = dispatch_store.read(repo, path)
+        request = claim.get("auto_rework")
+        if (claim.get("exit") != 1 or claim.get("complete") is not True or claim.get("active") is not False
+                or "auto_rework_launched" in claim or "auto_rework_refused" in claim
+                or not isinstance(request, dict) or request.get("attempt_id") != worker.get("attempt_id")
+                or request.get("task_id") != worker.get("task_id")
+                or request.get("task_id") != context.get("task_id")
+                or request.get("owner") != refs.get("panel_owner")
+                or request.get("parent_attempt_id") != worker.get("parent_attempt_id")):
+            return
+        parents = lineage_ids_from_rows(attempts, request["owner"], caller, request["parent_attempt_id"])
+        history = _rework_history(attempts, request["task_id"], parents)
+        if not history or history[-1].get("attempt_id") != request["attempt_id"]:
+            with _lock(repo, "panel-call-settle"):
+                claim = dispatch_store.read(repo, path)
+                claim["auto_rework_refused"] = "writer-attempt-not-latest"
+                dispatch_store.write(repo, path, claim)
+            print("OMS automatic rework refused for task %s: writer attempt is no longer latest; use the fix-brief notice."
+                  % request["task_id"], file=sys.stderr)
+            return
+        # Delivery writes its message before releasing its claim. Both must be durable.
+        delivery = dispatch_store.read(repo, _settlement_claim_path(writer))
+        if (delivery.get("complete") is not True or delivery.get("active") is not False
+                or delivery.get("steps", {}).get("room_result") is not True
+                or delivery.get("exit") in {129, 130, 143}):
+            return
+        execution = _dispatch_execution_repository(repo, room_id, writer, caller)
+        if execution is None:
+            raise ValueError("original execution repository unavailable")
+        with _lock(repo, "panel-call-settle"):
+            claim = dispatch_store.read(repo, path)
+            claim["auto_rework_launched"] = True
+            dispatch_store.write(repo, path, claim)
+    env = child_environment(request["owner"], repo)
+    env.update(OMS_ROOM_ID=room_id, OMS_ROOM_REPO=str(repo), OMS_ROOM_PARTICIPANT=caller,
+               OMS_PANEL_MAIN_ATTEMPT=request["parent_attempt_id"])
+    arguments = list(request["arguments"])
+    arguments[arguments.index("--brief-file") + 1] = str(Path(repo).resolve() / request["brief"])
+    result = subprocess.run(["bash", str(ENTRY)] + arguments +
+                            ["--repo", str(execution), "--room", room_id, "--owner", request["owner"], "--main", caller],
+                            cwd=execution, env=env, stdin=subprocess.DEVNULL, check=False)
+    if result.returncode:
+        print("OMS automatic rework failed or was refused for task %s (exit %s); use the fix-brief notice."
+              % (request["task_id"], result.returncode), file=sys.stderr)
 
 
 def _dispatch_execution_repository(repo, room_id, member, caller):
@@ -632,7 +740,12 @@ def _settlement_claim(repo, member, status):
         if old is not None:
             required = {"schema", "member", "exit", "claim_id", "owner_pid", "owner_identity",
                         "active", "complete", "steps"}
-            if (not isinstance(old, dict) or set(old) != required or old.get("schema") != 1
+            if (not isinstance(old, dict) or not required <= set(old)
+                    or set(old) - required - {"auto_rework", "auto_rework_launched", "auto_rework_refused"}
+                    or "auto_rework" in old and not isinstance(old["auto_rework"], dict)
+                    or "auto_rework_launched" in old and old["auto_rework_launched"] is not True
+                    or "auto_rework_refused" in old and old["auto_rework_refused"] != "writer-attempt-not-latest"
+                    or old.get("schema") != 1
                     or old.get("member") != member or type(old.get("exit")) is not int
                     or not isinstance(old.get("claim_id"), str)
                     or not old["claim_id"] or type(old.get("owner_pid")) is not int
@@ -754,6 +867,7 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
             return bool(old.get("complete") and old.get("exit") == status)
         except (OSError, ValueError, KeyError, TypeError):
             return False
+    delivered = False
     try:
         try:
             call = _dispatch_call_record(repo, room_id, {"participant": member, "parent": caller})
@@ -764,7 +878,8 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             print("OMS call attempt settlement unavailable.", file=sys.stderr)
             return False
-        return _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
+        delivered = _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
+        return delivered
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
         print("OMS call result delivery incomplete: " + clean(str(error), 180), file=sys.stderr)
         return False
@@ -778,7 +893,7 @@ def deliver_result(repo, room_id, member, caller, task_id, status):
                 SETTLEMENTS_HELD.discard(member)
 
 
-def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim):
+def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim, rework=None):
     """Keep the numeric outcome deliverable when a worker summary cannot be shared."""
     from terminal_panel import ROOT, _call_result_event, _dispatch_execution_repository, _review_fix_notice
     from terminal_panel import _review_launch_state, _review_verifier, _settlement_step, _validate_dry_run_inputs
@@ -842,6 +957,7 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
         completed_gate_fail = (gate_required and status == 1
                                and result_record.get("kind") == "review-outcome"
                                and result_record.get("exit") == 1 and isinstance(outcome, dict)
+                               and type(outcome.get("gate_verify_exit")) is int
                                and outcome.get("gate_verify_exit") == 0
                                and isinstance(seats, list) and len(seats) == 1
                                and isinstance(seats[0], dict) and seats[0].get("verdict") == "fail")
@@ -876,7 +992,8 @@ def _deliver_result_steps(repo, room_id, member, caller, task_id, status, claim)
                 if review_context:
                     try:
                         notice = (_review_fix_notice(repo, room_id, member, caller, task_id,
-                                                     result_record, review_context) or notice)
+                                                     result_record, review_context,
+                                                     rework=True if completed_gate_fail else None) or notice)
                     except (OSError, ValueError, KeyError, TypeError, UnicodeError, subprocess.SubprocessError):
                         notice += " Fix draft unavailable; the main must re-brief manually."
             review_notice = notice

@@ -286,6 +286,18 @@ shared OMS records.
   Continue reviewed work with `--continue TASK_ID --brief-file F`: role, scopes,
   verifier and workload default to the original write dispatch. First salvage
   stopped write work with `--salvage TASK_ID`.
+  A completed automatic FAIL review with findings retains a fix brief and manual
+  command. After reviewer settlement is released, the controller reserves one
+  automatic `--continue` in the writer attempt's `panel_auto_rework` ref and posts
+  the task, review artifact and brief to the owner. The reservation names the
+  reviewer run and is consumed across the task's main lineage, even if the
+  controller exits before launch. Replay cannot launch again; a second blocking
+  review needs owner judgment. A refused or failed launch leaves the manual
+  notice available. Gate crashes, failed verification and reviews without
+  findings never launch rework. Continuation retains the task's existing WIP slot.
+  It uses the writer's recorded execution repository for `--repo` and its working
+  directory, retaining the room's state repository and passing the fix brief by
+  absolute path from that state repository.
   Dispatch blocks until its worker ends; start each independent ready task in a
   separate concurrent/background call before waiting, then review and refill
   as each completes without a wave barrier. A new write dispatch is refused
