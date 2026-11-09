@@ -149,6 +149,12 @@ def _seats(calls):
     return list(seats.values())
 
 
+def _newest(seat):
+    """Newest observed round (answer or non-answer) and the last valid answer round at or before it, or 0."""
+    newest = max([*seat["rounds"], *seat["quality"]], default=0)
+    return newest, max((r for r in seat["rounds"] if r < newest), default=0)
+
+
 def _sections(text):
     """Agreement/Disagreement bodies from the synthesis' own headings; the prompt echo never counts."""
     found, current, skip = {}, None, False
@@ -244,21 +250,25 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     dash, arrow = ("—", "→") if unicode else ("-", "->")
     if state.get("seat") is not None and state["seat"] < len(seats):
         seat = seats[state["seat"]]
-        latest = max(seat["rounds"]) if seat["rounds"] else max(seat["quality"], default=0)
-        title = "%s %s round %s answer · Esc back" % (
-            call_identity("council", seat["model"]), dash, latest)
-        text = ("no usable answer (%s)" % seat["quality"][latest] if latest in seat["quality"] else
-                readable(seat["rounds"].get(latest, "No answer recorded"), "\n", True))
+        latest, earlier = _newest(seat)
+        failed = latest in seat["quality"]
+        title = "%s %s round %s %s · Esc back" % (
+            call_identity("council", seat["model"]), dash, latest,
+            "no usable answer (%s)" % seat["quality"][latest] if failed else "answer")
+        shown = earlier if failed else latest
+        text = readable(seat["rounds"].get(shown, "No answer recorded"), "\n", True)
         body = [(title, None, False)]
-        notice = seat["truncated"].get(latest)
+        if failed:
+            body.append(("Earlier valid answer, round %d:" % earlier if earlier else "No earlier valid answer", None, False))
+        notice = seat["truncated"].get(shown)
         if notice:
             message = "Answer was truncated; source artifact: %s" % notice["path"]
             body.extend((line, None, False) for line in wrapped(message, width, len(message), len(message)))
         body.extend((line, None, False) for line in _answer_rows(text, width))
         state["scroll"] = min(max(0, state.get("scroll", 0)), max(0, len(body) - cap))
         return body[state["scroll"]:state["scroll"] + cap]
-    answered = sum(1 for seat in seats if seat["rounds"])
-    rounds = max([r for seat in seats for r in seat["rounds"]] or [1])
+    answered = sum(1 for seat in seats if _newest(seat)[0] in seat["rounds"])
+    rounds = max([_newest(seat)[0] for seat in seats] or [1]) or 1
     done = entry["state"] in TERMINAL_STATES
     stamp = clock_stamp(entry["time"])
     head = "%s · opened by %s%s · %d of %d seats answered · %s" % (
@@ -276,9 +286,11 @@ def tab_body(report, main, width, cap, navigation, labels, unicode=True):
     mark = "▸ " if unicode else "> "
     for i, seat in enumerate(seats):
         model = call_identity("council", seat["model"])
-        if not seat["rounds"] and seat["quality"]:
-            latest = max(seat["quality"])
-            text = "%s %s no usable answer (%s)" % (model, dash, seat["quality"][latest])
+        latest, earlier = _newest(seat)
+        if latest in seat["quality"]:
+            text = "%s %s round %d: no usable answer (%s)" % (model, dash, latest, seat["quality"][latest])
+            if earlier:
+                text += "; earlier valid answer, round %d" % earlier
         elif seat["rounds"]:
             first, last = seat["rounds"][min(seat["rounds"])], seat["rounds"][max(seat["rounds"])]
             stance = fit(clean(_stance(last)[1], 400) or "No answer recorded", 140)

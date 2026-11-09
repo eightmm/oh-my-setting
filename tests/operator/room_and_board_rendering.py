@@ -748,25 +748,40 @@ quality_text = "\n".join(row[0] for row in quality_board)
 assert quality_text.count("no usable answer (empty)") == 1 and "usable seat answer" in quality_text, quality_text
 assert "no usable answer (blocked)" in quality_text and "allow-rule" not in quality_text, quality_text
 assert "no usable answer (empty)" in "\n".join(row[0] for row in quality_detail), quality_detail
-# Later repairs keep their round, and an unanswered later round retains the last answer.
-round_calls = [
-    {"kind": "ask", "exit": 0, "selected_model": "repair-seat", "artifact": "seat.md", "answer": "Initial position."},
-    {"kind": "ask", "exit": 0, "selected_model": "repair-seat", "artifact": "seat-r2-repair.md", "answer": "Repaired position."},
-    {"kind": "ask", "exit": 0, "selected_model": "retained-seat", "artifact": "other.md", "answer": "Retained position."},
-    {"kind": "ask", "exit": 0, "selected_model": "retained-seat", "artifact": "other-r2.md", "answer_quality": "empty"},
-]
-round_report = {"rows": [{"calls": round_calls}]}
-round_nav = {"debate_view": {"shown": ("quality-view", "main-1"), "report": round_report}}
-with patch.object(panel.panel_debate, "debates", return_value=[quality_entry]):
-    round_board = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
-    round_nav["debate_view"]["seat"] = 0
-    repaired_detail = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
-    round_nav["debate_view"].update(seat=1, scroll=0)
-    retained_detail = panel.panel_debate.tab_body({}, "main-1", 120, 30, round_nav, {}, unicode=False)
-round_text = "\n".join(row[0] for row in round_board)
-assert "Repaired position." in round_text and "Retained position." in round_text and "no usable answer" not in round_text, round_text
-assert "round 2 answer" in "\n".join(row[0] for row in repaired_detail), repaired_detail
-assert "round 1 answer" in "\n".join(row[0] for row in retained_detail) and "Retained position." in "\n".join(row[0] for row in retained_detail), retained_detail
+# Later repairs keep their round; a newer non-answer round is the seat's newest, with the older answer labelled.
+def ask(model, artifact, answer=None, quality=None):
+    call = {"kind": "ask", "exit": 0, "selected_model": model, "artifact": artifact}
+    call.update({"answer": answer} if answer else {})
+    call.update({"answer_quality": quality} if quality else {})
+    return call
+
+def council(calls, seat=None, done=True):
+    debate_nav = {"debate_view": {"shown": ("quality-view", "main-1"), "report": {"rows": [{"calls": calls}]}}}
+    if seat is not None:
+        debate_nav["debate_view"].update(seat=seat, scroll=0)
+    with patch.object(panel.panel_debate, "debates", return_value=[dict(quality_entry, state="done" if done else "running")]):
+        return "\n".join(row[0] for row in panel.panel_debate.tab_body({}, "main-1", 120, 30, debate_nav, {}, unicode=False))
+
+round_calls = [ask("repair-seat", "seat.md", "Initial position."), ask("repair-seat", "seat-r2-repair.md", "Repaired position."),
+               ask("retained-seat", "other.md", "Retained position."), ask("retained-seat", "other-r2.md", quality="empty")]
+round_text = council(round_calls)
+assert "Repaired position." in round_text and "Retained position." not in round_text, round_text
+assert "round 2: no usable answer (empty); earlier valid answer, round 1" in round_text and "1 of 2 seats answered" in round_text and "round 2 of 2" in round_text, round_text
+assert "round 2 answer" in council(round_calls, 0)
+retained_detail = council(round_calls, 1)
+assert "round 2 no usable answer (empty)" in retained_detail.splitlines()[0] and "Earlier valid answer, round 1:" in retained_detail and "Retained position." in retained_detail, retained_detail
+for quality in ("blocked", "truncated", "empty"):
+    text = council([ask("m", "m.md", "Old."), ask("m", "m-r2.md", quality=quality)])
+    assert "round 2: no usable answer (%s); earlier valid answer, round 1" % quality in text and "0 of 1 seats answered" in text and "round 2 of 2" in text, text
+text = council([ask("m", "m.md", quality="blocked"), ask("m", "m-r2.md", "New.")])
+assert "New." in text and "no usable answer" not in text and "1 of 1 seats answered" in text, text
+assert "round 2 answer" in council([ask("m", "m.md", quality="blocked"), ask("m", "m-r2.md", "New.")], 0)
+text = council([ask("m", "m.md", "Old."), ask("m", "m-r2.md", quality="blocked"), ask("m", "m-r2-repair.md", "Fixed.")])
+assert "Fixed." in text and "no usable answer" not in text and "1 of 1 seats answered" in text, text
+text = council([ask("m", "m.md", "Old."), ask("m", "m-r2.md", "Mid."), ask("m", "m-r2-repair.md", quality="blocked")], 0)
+assert "round 2 no usable answer (blocked)" in text and "Earlier valid answer, round 1:" in text and "Mid." not in text, text
+text = council([ask("a", "a.md", "A one."), ask("a", "a-r2.md", "A two."), ask("b", "b.md", "B one.")])
+assert "2 of 2 seats answered" in text and "round 2 of 2" in text and "B one." in text, text
 # Delegate failures and legacy rows retain their diagnostic or worker summary.
 for failure in ({"kind": "delegate", "exit": 1, "verify_exit": 1},
                 {"kind": "delegate", "exit": 1}, {"kind": "ask"}):
