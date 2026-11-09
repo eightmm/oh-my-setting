@@ -29,6 +29,8 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
 | [Stabilization plan](STABILIZATION-PLAN.md) | Prioritized reliability work and bounded offline verification |
+| [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |
+| [Control-plane references](CONTROL-PLANE-REFERENCES.md) | Reference projects, adoption boundaries and evidence requirements |
 
 ## Migration notes
 
