@@ -312,6 +312,66 @@ next(m for m in guard_read["room"]["messages"] if m["sender"] == "guard-record")
 assert any(item["cls"] == "guard_stop" for item in attention_items(guard_read))
 guard_read["finalized"] = {"guard-record": "accepted"}
 assert not any(item["cls"] == "guard_stop" for item in attention_items(guard_read))
+# The opt-in bell rings when an item enters the classes that wait on the person. The first read of a room only
+# seeds, a re-read rings nothing, and an item that left the queue and came back rings again.
+import itertools
+import panel_watch
+ring, known = panel_watch.attention_bell(None, guard_read, "endings")
+assert ring is False and known[0] == "endings" and len(known[1]) == 5, known
+assert panel_watch.attention_bell(known, guard_read, "endings") == (False, known)
+ring, entered = panel_watch.attention_bell(known, ending_fixture, "endings")
+# The decision row stays out: it waits on the main, and the classes are the person-facing ones only.
+assert ring is True and len(entered[1]) == 6 and len(entered[1] - known[1]) == 1, entered
+assert {item["row_id"] for item in ending_queue if item["cls"] == "decide"}.isdisjoint(entered[1])
+assert panel_watch.attention_bell(entered, ending_fixture, "endings") == (False, entered)
+# A failed or held read keeps what was known, so an item hidden only by that read is not new when it returns.
+for unread, held_frame in (({"collection": {"ok": False}}, False), (dict(ending_fixture, collection={}), False),
+                           (dict(guard_read, room={"id": "endings", "error": "room unreadable"}), False),
+                           (guard_read, True)):
+    assert panel_watch.attention_bell(entered, unread, "endings", held_frame) == (False, entered), unread.get("collection")
+assert panel_watch.attention_bell(entered, ending_fixture, "endings") == (False, entered)
+ring, left = panel_watch.attention_bell(entered, guard_read, "endings")
+assert ring is False and left == known and panel_watch.attention_bell(left, ending_fixture, "endings")[0] is True
+# Another room is seeded afresh instead of ringing for everything it already holds.
+assert panel_watch.attention_bell(known, ending_fixture, "other-room") == (False, ("other-room", entered[1]))
+class BellStream:
+    def __init__(self, tty, broken=False):
+        self.tty, self.broken, self.text = tty, broken, ""
+    def isatty(self):
+        return self.tty
+    def write(self, text):
+        if self.broken:
+            raise OSError("closed")
+        self.text += text
+    def flush(self):
+        pass
+terminal_bell, piped_bell, broken_bell = BellStream(True), BellStream(False), BellStream(True, True)
+assert panel_watch.ring_bell(terminal_bell) is True and terminal_bell.text == "\a"
+assert panel_watch.ring_bell(piped_bell) is False and piped_bell.text == ""
+assert panel_watch.ring_bell(broken_bell) is False and panel_watch.ring_bell(object()) is False
+# The watcher rings only with OMS_PANEL_ATTENTION_BELL=1 and, in a managed panel, only from the main window's
+# board; the clock is artificial, so two reads cost no real refresh wait.
+def bell_watch(bell, managed=False, main_watch=""):
+    bell_clock = itertools.count(0, 10)
+    reads = [(report, 0, "codex", None, "graph", False, "endings") for report in (guard_read, ending_fixture, ending_fixture)]
+    environment = {"OMS_PANEL_ATTENTION_BELL": bell, "TMUX": "", "TMUX_PANE": "%1"}
+    with patch.dict(os.environ, {key: value for key, value in environment.items() if value is not None}), \
+            patch.object(panel, "BackgroundRead", ImmediateRead), patch.object(panel, "read_panel", side_effect=reads), \
+            patch.object(panel, "managed_session", return_value=managed), \
+            patch.object(panel, "session_option", return_value=""), patch.object(panel, "mark_window"), \
+            patch.object(panel, "update_context_header"), patch.object(panel, "reload_ready", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+            patch.object(panel, "frame_view", return_value=("", os.terminal_size((80, 24)), (False, False, True))), \
+            patch.object(panel, "draw_frame", return_value=None), patch.object(panel.sys, "stdout", io.StringIO()), \
+            patch("panel_navigation.pane_local_option", return_value=main_watch), \
+            patch.object(panel.time, "monotonic", side_effect=lambda: next(bell_clock)), \
+            patch.object(panel_watch, "ring_bell") as rung:
+        if bell is None:
+            os.environ.pop("OMS_PANEL_ATTENTION_BELL", None)
+        assert panel.watch(Path("."), "codex", count=3) == 0
+    return rung.call_count
+assert bell_watch("1") == 1 and bell_watch(None) == 0 and bell_watch("0") == 0 and bell_watch("yes") == 0
+assert bell_watch("1", managed=True, main_watch="1") == 1 and bell_watch("1", managed=True) == 0
 projection_extra = deepcopy(ending_fixture)
 projection_extra["attempts"]["active_recent"] = [a for a in projection_extra["attempts"]["active_recent"] if a["attempt_id"] != "guard-record"]
 projection_extra["room_attempts"] = {"guard-record": {"attempt_id": "guard-record", "state": "failed",
@@ -1816,6 +1876,10 @@ for width, height in ((100, 32), (42, 34), (24, 18), (12, 10), (2, 8)):
 import io
 with patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "0", "OMS_CLAUDE_NOTIFY": "0"}, clear=True):
     assert "OMS_CLAUDE_NOTIFY=0" in panel.panel_environment()
+    # The bell opt-in reaches automatically opened boards only when the launching environment sets it.
+    assert not any(entry.startswith("OMS_PANEL_ATTENTION_BELL=") for entry in panel.panel_environment())
+with patch.dict(os.environ, {"OMS_PANEL_ATTENTION_BELL": "1"}, clear=True):
+    assert "OMS_PANEL_ATTENTION_BELL=1" in panel.panel_environment()
 for mode in ("animated", "static", "environment", "interrupt"):
     clock = [0.0]
     output = io.StringIO()

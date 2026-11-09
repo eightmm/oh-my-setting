@@ -2264,6 +2264,16 @@ that window. Numeric usage readings from a native pane count only when they are
 whole fields of its last two status lines. A notice shows on a short board in place
 of the key hints.
 
+Set `OMS_PANEL_ATTENTION_BELL=1` in the launching environment to also ring the
+terminal bell once when a call or message newly waits on the person: `answer needed`
+or any failed class. The first read of a room only seeds what already waits, so
+opening, restarting or switching a board never rings for it; a failed or held read
+rings nothing, and an item that left the queue and returns rings again. In a managed
+panel only the main window's board rings, so a panel without a main stays silent; a
+standalone `--watch` rings itself on a terminal. The bell carries no text: tmux marks
+the window and applies your own `bell-action`, `monitor-bell` and `visual-bell`
+settings. It is off by default.
+
 ### Reader-facing status labels
 
 Board text is written for
