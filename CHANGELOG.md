@@ -8,6 +8,15 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- Council seats that exit 0 without a usable answer (empty, blocked,
+  truncated or a broken deliberation) record `answer_quality`, review-council
+  seats included, and `oms panel --results` and the Debate tab label them as
+  non-answers instead of showing their text. A rejected deliberation repair
+  leaves no stale index row.
+- The terminal panel guide has a provider coverage matrix (launch, observe,
+  subagents, usage, attach, resume, stop) with code anchors and fixture tests,
+  and states the dashboard's managed-only scope against the panel's native
+  reads.
 - Write dispatches refuse a scope that overlaps a joined main's declaration or
   a call's joined write declaration until the controller records that call's
   structured result or its parent reads the call's result handoff; there is no
@@ -619,6 +628,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Panel footers show `? Keys` beside `F12 Keys` and draw key names in a
+  brighter hint colour; the F12 key summary lists the chat-window keys.
+- A Claude session ID found under two project folders is ambiguous, so the
+  panel reads neither transcript.
+- The Python syntax gate rejects code nested deeper than the Python 3.11
+  limit of 20 blocks on newer interpreters too; one operator test that broke
+  the 3.11 CI jobs now uses `ExitStack`.
 - Pi seats record their final stop reason, so a seat cut off at its output
   limit reads as truncated rather than answered, and a heading-only answer
   reads as empty.
