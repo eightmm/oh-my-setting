@@ -41,6 +41,45 @@ LICENSE/NOTICE, 해당 기능의 소스·테스트를 다시 고정한다.
 | [agentmux](https://github.com/adelost/agentmux) | Durable delivery, recipient fanout 제한, session isolation | CP-07/13; Discord 연동은 기본 범위 아님 |
 | [ccswarm](https://github.com/nwiizo/ccswarm) | 평가별 의견과 pipeline 단계 구분 | CP-10; approval 수를 OMS evidence/admission의 대체물로 쓰지 않음 |
 
+## 메커니즘 단위 보강 (2026-11-09)
+
+위 표는 프로젝트 단위의 방향만 적는다. 아래는 후속 구현이 실제로 참고할 수 있는
+개별 메커니즘과 그 확인 수준이다. 외부 프로젝트를 설치하거나 실행하지 않았고
+exact commit도 고정하지 않았다. 구현 근거로 쓰기 전에 채택 기록 양식으로 다시 확인한다.
+
+확인 수준: **문서** = 해당 프로젝트의 공식 문서 페이지를 직접 열어 확인,
+**조사** = 조사 도구가 README·문서·release note·issue를 읽고 요약한 내용(직접 재확인하지 않음),
+**보조** = 제3자의 글·gist·fork에서 온 내용. 소스 코드와 테스트는 어느 항목도 확인하지 않았다.
+
+| 프로젝트 / 출처 | 메커니즘 | 확인 | 연결 작업 | OMS 판단 |
+|---|---|---|---|---|
+| [tmux-agent-sidebar scripting](https://hiroppy.github.io/tmux-agent-sidebar/reference/scripting/) | Agent hook이 상태를 tmux pane 사용자 옵션(`@pane_status`, `@pane_attention`, `@pane_wait_reason` 등)에 쓰고, sidebar·status line·스크립트가 `tmux show -pv`로 읽는다 | 문서 | CP-06/07 | 데이터 계약만 독립 구현 후보로 둔다: board가 Attention 개수만 자기 window option으로 게시하는 형태. 같은 표의 `@pane_prompt`, `@pane_cwd`, `@pane_session_id`에 해당하는 값은 CP-07의 표시 제한 때문에 게시하지 않는다 |
+| [oh-my-symphony v0.29.0](https://github.com/cskwork/oh-my-symphony/releases/tag/v0.29.0) | `.symphony/needs.json`이 막힌 ticket을 state/since/reason/action으로 나열한다. Verify gate는 lane을 떠나거나 건너뛸 때 실행되고, 실패하면 카드를 이전 lane으로 되감고 실패 note를 붙인다 | 조사 | CP-06/10 | “왜 멈췄는가 / 다음 조치”를 기존 Plan·Attention 표시에 더하는 것이 후보다. 별도 needs 파일, lane 엔진, agent가 직접 쓰는 상태 전이는 도입하지 않는다 |
+| [Beads](https://github.com/gastownhall/beads) | `bd ready --explain`이 열린 blocker와 그 작업이 풀어 줄 작업 수를 보여 준다 | 조사 | CP-06 | Plan 행에 미완료 dependency를 표시하는 것이 후보다. 두 번째 task store는 만들지 않는다 |
+| [Gas Town](https://github.com/gastownhall/gastown) | Problems 뷰가 agent를 진행 없음/정체/세션 사망/작업 중/유휴로 분류하고 nudge·handoff 키를 제공한다. Witness는 세션 종료 전에 git 상태를 확인한다. 감시 사슬의 바닥은 주기적 heartbeat를 내는 daemon이다 | 조사 | CP-02/07/09 | 분류 어휘와 “종료 전 dirty 확인”만 참고한다. Daemon, AI 감독 계층, 자동 nudge·kill은 [원칙](CONTROL-PLANE-EVOLUTION.md#2-보존할-설계-원칙) 1·5와 충돌하므로 도입하지 않는다 |
+| Gas Town 정체 임계값 | 30분 무진척, nudge 3회 뒤 escalation 같은 숫자 | 보조 | — | 출처가 README가 아니므로 OMS threshold의 근거로 쓰지 않는다. CP-07의 threshold는 자체 fixture와 baseline으로 정한다 |
+| [OpenAI Symphony SPEC](https://github.com/openai/symphony/blob/main/SPEC.md) | 실패 재시도 간격이 지수적으로 늘고 상한을 가진다. Stall timeout을 넘기면 실행을 종료하고 재시도한다 | 조사 | CP-07/09 | 반복 알림에 상한 있는 backoff를 쓰는 개념만 참고한다. 정체 시 종료·재시도는 원칙 5와 충돌하므로 도입하지 않는다 |
+| [Agent Deck CLI reference](https://github.com/asheshgoplani/agent-deck/blob/main/skills/agent-deck/references/cli-reference.md) | Down 판정에 연속 probe의 일치를 요구한다(`--confirm-probes`). `events follow --jsonl --since CURSOR`로 이벤트를 이어 읽는다. 의도적 stop이 이후 sweep에서 error로 덮이는 문제를 조건부 쓰기로 고쳤다 | 조사 | CP-02/07 | “한 번의 실패한 probe로 종료를 확정하지 않는다”는 규칙은 CP-02 liveness 검토에, cursor 기반 tail은 CP-07의 bounded 대기 후보로 남긴다 |
+| [CAO issue #896](https://github.com/awslabs/cli-agent-orchestrator/issues/896) | Inbox 메시지는 수신 terminal이 유휴일 때 전달된다. 선택형 eager delivery는 처리 중·사용자 응답 대기 중에도 전달하며, 열린 질문 대화상자에 메시지가 입력된 사례가 보고됐다 | 조사 + 보조 | CP-02 | OMS의 tick wake는 입력줄이 비었음을 증명하지 못하면 입력하지 않는다(`panel_native.input_line_empty`, 이 저장소 코드에서 확인). 승인·질문 대화상자 화면을 그 회귀 fixture에 추가해 같은 부류를 고정하는 것이 후보다 |
+| [workmux](https://github.com/raine/workmux), [sidebar guide](https://workmux.dev/guide/sidebar/) | Agent hook이 window 상태를 설정하고, sidebar는 백그라운드 프로세스가 tmux 상태를 주기적으로 읽어 각 sidebar pane에 전달한다. `--all`로 현재 multiplexer의 모든 저장소를 조회한다 | 조사 | CP-06/15 | 상주 프로세스 없이 가능한 부분만 참고한다. 전역 조회는 새 project manager 대신 tmux의 `list-windows -a`와 게시된 window option으로 충분한지 먼저 본다 |
+
+### 앞선 비교의 정정
+
+대화에서 쓰인 요약 가운데 아래 내용은 조사 결과와 달랐다. 모두 **조사** 수준이다.
+
+- CAO는 SQLite와 상주 API 서버를 전제로 한다. OMS와 가까운 것은 여러 CLI와 MCP라는 표면이며 상태 구조는 아니다.
+  CAO의 provider 목록에 있는 것은 Pi가 아니라 Oh My Pi다.
+- oh-my-symphony의 “실패 시 되돌림”은 코드 rollback이 아니라 카드를 이전 lane으로 되감는 동작이다.
+- Gas Town 저장소는 `gastownhall` 조직으로 옮겨졌고 자체 웹 대시보드가 있다.
+- workmux의 지속 표시 sidebar는 백그라운드 프로세스를 쓴다. 그대로 옮기면 원칙 1과 충돌한다.
+- tmux-agent-sidebar에서 OMS가 가져올 것은 sidebar UI가 아니라 pane option이라는 데이터 계약이다.
+
+### 이 조사로도 채택하지 않는 것
+
+AI 감독 계층(Gas Town의 Mayor/Deacon/Witness), SQLite·Dolt 상태 원장, 상주 HTTP·PTY 서버,
+정체 시 자동 kill·cold restart, agent가 자기 task 상태를 직접 바꾸는 모델은 위 조사 뒤에도
+[작업계획 7절](CONTROL-PLANE-EVOLUTION.md#7-착수하지-않을-작업)의 비범위로 남긴다.
+
 ## 신규 의존성으로 채택하지 않을 후보
 
 아래 상태는 검토 시 README에 명시된 내용이다. 미래의 fork/재개 여부는 별도로 확인한다.
@@ -59,6 +98,11 @@ LICENSE/NOTICE, 해당 기능의 소스·테스트를 다시 고정한다.
 [Conductor](https://github.com/ShacklesLay/conductor)는 이 PR의 구현 근거로 채택하지 않는다.
 해당 기능·현재 상태·코드/테스트를 확인한 뒤 필요한 항목만 CP-18에 추가한다.
 이름이 비슷한 fork나 제품을 원본과 혼동하지 않는다.
+
+2026-11-09 보강에서 OpenAI Symphony, Gas Town, Beads의 README·문서 수준 내용을
+[메커니즘 단위 보강](#메커니즘-단위-보강-2026-11-09)에 기록했다. 소스·테스트·exact commit은
+여전히 확인하지 않았으므로 위 판단은 바뀌지 않는다. Conductor는 같은 이름의 다른 제품이
+있어 대상을 특정하지 못했고 이번에도 확인하지 않았다.
 
 ## 채택 기록 양식
 
