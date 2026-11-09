@@ -336,8 +336,37 @@ line("seeds", ",".join(a.get("seeds", [])) or "-", ",".join(b.get("seeds", [])) 
 # config files by path -> sha
 ca = {c["path"]: c.get("sha256") for c in a.get("configs", [])}
 cb = {c["path"]: c.get("sha256") for c in b.get("configs", [])}
+# Key-level differences when both capsules recorded the flattened config; capsules without it diff as before.
+rows_a = {c["path"]: c for c in a.get("configs", []) if isinstance(c, dict) and "path" in c}
+rows_b = {c["path"]: c for c in b.get("configs", []) if isinstance(c, dict) and "path" in c}
+PARAM_LINES = 40
+def shown(value):
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return "".join(ch if ch.isprintable() else " " for ch in text)[:200]
+def param_lines(path):
+    left, right = rows_a.get(path, {}), rows_b.get(path, {})
+    fa, fb = left.get("params"), right.get("params")
+    if not isinstance(fa, dict) or not isinstance(fb, dict):
+        # Say why only when the files differ and a capsule recorded a reason.
+        if ca.get(path) != cb.get(path):
+            for side, row in ((a_id, left), (b_id, right)):
+                if row and not isinstance(row.get("params"), dict) and row.get("params_status"):
+                    yield "  (keys of %s: %s)" % (side, shown(row["params_status"]))
+        return
+    for key in sorted(set(fa) | set(fb)):
+        if key not in fb:
+            yield "  - %s: %s" % (shown(key), shown(fa[key]))
+        elif key not in fa:
+            yield "  + %s: %s" % (shown(key), shown(fb[key]))
+        elif fa[key] != fb[key] or type(fa[key]) is not type(fb[key]):
+            yield "  %s: %s \u2192 %s" % (shown(key), shown(fa[key]), shown(fb[key]))
 for path in sorted(set(ca) | set(cb)):
     line("cfg:" + os.path.basename(path), ca.get(path, "-"), cb.get(path, "-"))
+    rows = list(param_lines(path))
+    for row in rows[:PARAM_LINES]:
+        print(row)
+    if len(rows) > PARAM_LINES:
+        print("  ... %d more differing keys" % (len(rows) - PARAM_LINES))
 
 # numeric metric deltas
 ma = (a.get("result") or {}).get("metrics") or {}

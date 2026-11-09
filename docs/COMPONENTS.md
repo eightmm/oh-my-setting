@@ -1654,6 +1654,12 @@ ML/Slurm workflows use local-first experiment controls:
   `verify` and `oms run diff` report conda and module differences as
   information; only commit and uncommitted-diff drift fail `verify`.
   `OMS_RUN_CAPSULE_CONDA_TIMEOUT` (1–600 seconds, default 30) bounds the export.
+  A `--config` that is JSON (YAML when PyYAML is importable) is stored as
+  flattened `key.path` → value pairs beside its digest, and `oms run diff`
+  lists the keys that changed, appeared or disappeared (40 lines at most).
+  Over 200 keys, 200 characters per key or value, or 16384 bytes, and whenever
+  the flattened view looks sensitive, the capsule keeps the digest alone and
+  records why in `params_status`.
 - `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
   studies; `oms runtime experiment launch` pre-registers a single command
   through the same run ledger (replacing `research-runner`).
