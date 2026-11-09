@@ -135,6 +135,19 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- A needs-judgment notice names its type: a second blocking review is a design
+  question to settle with `oms panel --council` before implementing; anything
+  else is an authority question, acted on within delegated authority and asked
+  of the user only beyond it.
+- `oms panel --continue` without `--repo` continues in the attempt's recorded
+  execution worktree after checking it is an existing worktree root of the same
+  repository, and says which; a missing or invalid record refuses with the
+  explicit `--repo` retry.
+- The spec interview treats a requirement that a reader without the
+  conversation cannot restate with its acceptance check as an open decision.
+- Scripts outside the core lifecycle drop Bash 3.2 empty-array guards and `tr`
+  lowercasing for their Bash 5 forms.
+
 - One WIP limit of six per main (live write workers plus results awaiting
   decision) refuses new write dispatches and drives the panel warning, replacing
   the review backlog threshold of eight; it is an advisory snapshot check.
@@ -606,6 +619,18 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Pi seats record their final stop reason, so a seat cut off at its output
+  limit reads as truncated rather than answered, and a heading-only answer
+  reads as empty.
+- Antigravity turns that end in an error keep their status, finished reason and
+  error text with one stop-reason line; an interrupted stream or idle timeout
+  classifies as `provider_down`, while the output-limit cut-off stays a
+  truncation.
+- The doctor model-capability test waits for its detached catalog refresh
+  before cleanup, the dispatch results test stays under Python 3.11's nesting
+  limit, update fixtures ship `oms-common.sh`, the tick resume fixture detaches
+  at a branch another worktree holds, and the lifecycle guard-scan fault
+  targets the fourth registry lock.
 - Codex and Antigravity hook launchers, the `oms` entry and `uninstall.sh`
   run their children under the recorded Bash 5 when the first `bash` on PATH
   is 3.2 (macOS), instead of exiting silently at the Bash 5 floor guard; a
