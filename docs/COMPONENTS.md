@@ -1280,6 +1280,12 @@ non-symlink proposal snapshot of at most 1 MiB. `oms intent adopt` likewise vali
 one frozen candidate, then publishes only that snapshot after a locked SHA-256 and
 byte-for-byte comparison with the live candidate; an editor save during acceptance
 leaves the draft intact and creates no `PROJECT.md`.
+The acceptance preflight (`oms plan-from-spec --validate-spec FILE`) also prints
+advisory `warning: spec:` lines on stderr, which adopt relays: an `Open decisions`
+(or `Decisions` → `Open`) field that still lists a choice, no success criteria at
+all, a criterion without `[id:...]` in a list where others have one, and one ID
+on two different criteria (which the runtime envelope refuses). They never change
+an exit code.
 
 #### Draft PR publication
 

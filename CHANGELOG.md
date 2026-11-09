@@ -23,6 +23,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   notebooks stay out of search, context ranking and test-path edges (PR #32).
 - `oms ci-status` protection reports whether the gate job is a required check
   on the branch (PR #33).
+- `oms plan-from-spec --validate-spec` (and `oms intent adopt`, which relays
+  it) prints advisory `warning: spec:` lines on stderr for an open decision
+  still listed, no success criteria, and missing or reused criterion ids; the
+  exit code and acceptance verdict do not change (PR #36).
 - The resume block can carry the newest pins and the notes ranked for the
   active task's goal (PR #35).
 

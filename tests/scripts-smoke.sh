@@ -12941,6 +12941,66 @@ EOF
 
   sed 's|- Required checks: true|- Required checks: bash tests/greet.sh|' \
     "$intent_dir/intent-vacuous.md" > "$intent_dir/intent-good.md"
+
+  # The same preflight lints requirement quality. The warnings are advisory:
+  # stderr only, the exit code and the acceptance verdict stay what they were,
+  # and a spec with nothing to say about produces none.
+  local lint="$project/lint"
+  mkdir -p "$lint"
+  spec_lint() {  # NAME -> $lint/NAME.out (stdout) and $lint/NAME.err (stderr)
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$project" --validate-spec "$lint/$1.md" \
+      > "$lint/$1.out" 2> "$lint/$1.err" || fail "spec lint must not change the preflight exit code ($1)"
+    assert_file_contains "$lint/$1.out" "validate-spec: acceptance ok"
+    ! grep -q '^warning: spec: ' "$lint/$1.out" || fail "spec warnings belong on stderr ($1)"
+  }
+  cp "$intent_dir/intent-good.md" "$lint/clean.md"
+  spec_lint clean
+  [ ! -s "$lint/clean.err" ] || fail "a settled spec must lint silently: $(cat "$lint/clean.err")"
+  sed 's/- Open decisions: none/- Open decisions: sqlite or postgres?/' "$lint/clean.md" > "$lint/open.md"
+  spec_lint open
+  assert_file_contains "$lint/open.err" "warning: spec: '- Open decisions:' still lists unsettled choices (sqlite or postgres?)"
+  sed 's/- Open decisions: none/- Open decisions: none (confirmed with the owner)/' "$lint/clean.md" > "$lint/settled.md"
+  spec_lint settled
+  [ ! -s "$lint/settled.err" ] || fail "an annotated 'none' is settled: $(cat "$lint/settled.err")"
+  for decided in 'n/a (no interface changes)' 'None remaining' 'No open decisions' '**None**' '(none)' 'None officially remain'; do
+    sed "s|- Open decisions: none|- Open decisions: $decided|" "$lint/clean.md" > "$lint/na.md"
+    spec_lint na
+    [ ! -s "$lint/na.err" ] || fail "'$decided' is settled: $(cat "$lint/na.err")"
+  done
+  sed 's/- Open decisions: none/- Open decisions: none of the databases fit/' "$lint/clean.md" > "$lint/noneof.md"
+  spec_lint noneof
+  assert_file_contains "$lint/noneof.err" "still lists unsettled choices (none of the databases fit)"
+  # An empty value with an indented list under it is the list.
+  sed 's/- Open decisions: none/- Open decisions:\
+  - sqlite or postgres?/' "$lint/clean.md" > "$lint/nested.md"
+  spec_lint nested
+  assert_file_contains "$lint/nested.err" "still lists unsettled choices (sqlite or postgres?)"
+  sed 's/- Success criteria: greeting prints/- Success criteria:/' "$lint/clean.md" > "$lint/empty.md"
+  spec_lint empty
+  assert_file_contains "$lint/empty.err" "warning: spec: no success criteria"
+  # Criterion ids: a list that uses none gets one hint, not one line per bullet;
+  # a list that uses some names the bullets without one; one id on two
+  # different criteria is what the runtime envelope refuses.
+  { cat "$lint/clean.md"; printf '\n## Acceptance criteria\n- prints hello\n- prints the name given\n'; } > "$lint/noids.md"
+  spec_lint noids
+  assert_file_contains "$lint/noids.err" "warning: spec: 2 acceptance criteria carry no [id:...]"
+  [ "$(grep -c '^warning: spec: ' "$lint/noids.err")" = 1 ] || fail "a list without ids gets one hint: $(cat "$lint/noids.err")"
+  { cat "$lint/clean.md"; printf '\n## Acceptance criteria\n- [id:REQ-1] WHEN run THE SYSTEM SHALL print hello\n'
+    printf '%s\n' '- prints the name given' '- [id:REQ-1] WHEN run twice THE SYSTEM SHALL print once'; } > "$lint/ids.md"
+  spec_lint ids
+  assert_file_contains "$lint/ids.err" "warning: spec: criterion id REQ-1 names two different criteria"
+  assert_file_contains "$lint/ids.err" 'warning: spec: criterion has no [id:...] while others do: "prints the name given"'
+  { cat "$lint/clean.md"; printf '\n## Acceptance criteria\n- [id:REQ-1] WHEN run THE SYSTEM SHALL print hello\n'
+    printf '%s\n' '- [id:REQ-2] WHEN given a name THE SYSTEM SHALL print it'; } > "$lint/named.md"
+  spec_lint named
+  [ ! -s "$lint/named.err" ] || fail "distinct ids on every criterion lint silently: $(cat "$lint/named.err")"
+  # Adopt relays the warning and still adopts: the lint never gates.
+  cp "$lint/open.md" "$intent_dir/intent-open.md"
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id intent-open > "$project/open-out" 2>&1 ||
+    fail "an advisory spec warning must not refuse adopt: $(cat "$project/open-out")"
+  assert_file_contains "$project/open-out" "warning: spec: '- Open decisions:' still lists unsettled choices"
+  [ -f "$project/PROJECT.md" ] || fail "adopt with a spec warning should still publish PROJECT.md"
+  rm -f "$project/PROJECT.md"
   for scope in 'src/, *' '`src/`,' '`src/` `tests/`' '``' '` . `' '`src/'; do
     sed "s@- Scope: src/@- Scope: $scope@" "$intent_dir/intent-good.md" > "$intent_dir/intent-unsafe.md"
     rc=0
