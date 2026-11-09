@@ -1119,6 +1119,19 @@ def attention_header(ranked, width, unicode):
     return clipped("Attn %s" % len(ranked), width)
 
 
+def attention_summary(report, ranked=None):
+    """The queue as a status-line value: `1 you / 2 fail / 1 dec`, empty when nothing waits.
+
+    `?` stands for a snapshot that is not a completed collection or whose room was unreadable, so a failed read
+    never reads as an empty queue. The value holds counts and class words only: no label, prompt, command or
+    path. Display-only."""
+    if mapping(report.get("collection")).get("ok") is not True or mapping(report.get("room")).get("error"):
+        return "?"
+    ranked = attention_items(report, False) if ranked is None else ranked
+    counts = ((sum(item["cls"] == kind for item in ranked), short) for kind, unused, short, unused_heading in ATTENTION_CLASSES)
+    return " / ".join("%s %s" % (n, short) for n, short in counts if n)
+
+
 def render_inbox(report, width, height, color, unicode, managed, previous, navigation):
     """The control window's menu pane: only what needs the person, then the few actions that start work."""
     navigation = navigation if navigation is not None else {}

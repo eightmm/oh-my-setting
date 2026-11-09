@@ -2255,6 +2255,21 @@ right.
 
 The queue is display-only: it changes no lifecycle state or authority.
 
+In a managed tmux panel each board also publishes the queue's counts as its window's
+`@oms_panel_attention_counts` option, in rank order with the short class words (`1 you
+/ 2 fail / 1 dec`). The option is unset while nothing waits and reads `?` while the board
+shows a failed or held read or an unreadable room, so an unread queue never looks empty. tmux formats read
+it without starting a command:
+
+```text
+set -g status-right '#{?#{@oms_panel_attention_counts},OMS #{@oms_panel_attention_counts} | ,}%H:%M'
+```
+
+`tmux list-windows -a -F '#{session_name}:#{window_name} #{@oms_panel_attention_counts}'`
+lists every open board on the tmux server. The value holds counts and class words
+only, never a label, prompt, command or path. It is written when the summary changes
+and removed when the board stops; it is a display cache, not lifecycle evidence.
+
 Results classify call endings as `cancelled`, `guard stop`, `timed out`,
 `verify failed`, `provider error` or `failed` from the recorded lifecycle,
 verification and provider evidence.

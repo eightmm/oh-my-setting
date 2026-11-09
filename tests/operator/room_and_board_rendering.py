@@ -3418,6 +3418,27 @@ with patch.object(panel.subprocess, "run", TmuxStub("codex")):
         panel.mark_window(*flags)
 assert renames == ["? codex", "! codex", "codex"], renames
 renames.clear()
+# The same watcher publishes the queue summary as its window's option; an empty summary removes the option.
+import panel_watch
+option_calls = []
+def option_tmux(command, **kwargs):
+    option_calls.append(command[1:])
+    return subprocess.CompletedProcess(command, 0, "")
+with patch.object(panel.subprocess, "run", option_tmux):
+    assert panel_watch.publish_attention("1 you / 2 fail") is True and panel_watch.publish_attention("") is True
+# The counts have their own option; @oms_panel_attention stays the window's attention-only filter.
+assert option_calls == [["set-option", "-w", "-t", "%7", "@oms_panel_attention_counts", "1 you / 2 fail"],
+                        ["set-option", "-wu", "-t", "%7", "@oms_panel_attention_counts"]], option_calls
+option_calls.clear()
+# Outside a managed tmux pane nothing is written, and a refused or failing tmux reports False for a later retry.
+for unsafe in ({"TMUX": ""}, {"TMUX_PANE": "%7;kill-server"}, {"TMUX_PANE": ""}, {"OMS_PANEL_SESSION": "work"}):
+    with patch.dict(os.environ, unsafe), patch.object(panel.subprocess, "run", option_tmux):
+        assert panel_watch.publish_attention("1 you") is False, unsafe
+assert option_calls == [], option_calls
+with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+    assert panel_watch.publish_attention("1 you") is False
+with patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 2)):
+    assert panel_watch.publish_attention("1 you") is False
 for name in ("TMUX", "TMUX_PANE", "OMS_PANEL_SESSION"):
     del os.environ[name]
 # A short board shows a notice instead of dropping it.
@@ -4842,6 +4863,44 @@ assert attention_header(ranked, len(short_header) - 1, True) == "Attention 11"
 assert attention_header(ranked, 11, True) == "Attn 11" and attention_header(ranked, 3, True) == "At…"
 assert attention_header(ranked, 127, False) == full_header.replace(" · ", " / ")
 assert attention_header(attention_items(held_flow), 80, True) == "Attention 2 · 1 decide · 1 stale"
+# The status-line summary: the same counts in rank order with the short class words, and nothing else of an item.
+summary = panel_view.attention_summary(queue)
+assert summary == "3 you / 2 fail / 1 timeout / 2 dec / 1 stale / 1 mail / 1 info", summary
+assert panel_view.attention_summary(queue, ranked) == summary and panel_view.attention_summary(held_flow) == "1 dec / 1 stale"
+assert not any(str(item[key]) in summary for item in ranked for key in ("who", "what") if item.get(key)), summary
+calm = deepcopy(held_flow)
+calm["attempts"]["active_recent"], calm["plan"]["tasks"], calm["room"]["messages"] = [], [], []
+assert attention_items(calm) == [] and panel_view.attention_summary(calm) == "", attention_items(calm)
+# A read that did not complete is `?`, never an empty queue.
+for unread in ({"ok": False}, {"ok": False, "pending": True}, {}, None):
+    assert panel_view.attention_summary(dict(queue, collection=unread)) == "?", unread
+assert panel_view.attention_summary(dict(calm, room={"id": "flow-room", "error": "room unreadable"})) == "?"
+# Only a changed, accepted value is written; a held frame publishes `?`; a refused write is retried.
+writes = []
+with patch.object(panel_watch, "publish_attention", side_effect=lambda value: writes.append(value) or True):
+    shown = panel_watch.sync_attention(None, calm)
+    assert shown == "" and writes == [""], (shown, writes)
+    shown = panel_watch.sync_attention(shown, queue)
+    assert panel_watch.sync_attention(shown, queue) == summary and writes == ["", summary], writes
+    shown = panel_watch.sync_attention(shown, queue, stale=True)
+    assert shown == "?" and panel_watch.sync_attention(shown, queue, stale=True) == "?" and writes == ["", summary, "?"], writes
+    assert panel_watch.sync_attention(shown, held_flow) == "1 dec / 1 stale" and len(writes) == 4, writes
+with patch.object(panel_watch, "publish_attention", return_value=False) as refused:
+    assert panel_watch.sync_attention("", queue) == "" and panel_watch.sync_attention("", queue) == ""
+    assert refused.call_count == 2
+# The watch loop publishes for its managed window on a snapshot and removes the option when it stops.
+with patch.dict(os.environ, {"TMUX": "x", "TMUX_PANE": "%1"}), \
+        patch.object(panel, "managed_session", return_value=True), \
+        patch.object(panel, "session_option", return_value=""), patch.object(panel, "mark_window"), \
+        patch.object(panel, "update_context_header"), patch.object(panel, "reload_ready", return_value=False), \
+        patch.object(panel, "terminal_style", return_value=(False, False, True)), \
+        patch.object(panel, "read_panel", return_value=(queue, 0, "codex", None, "graph", False, "flow-room")), \
+        patch.object(panel, "frame_view", return_value=("", os.terminal_size((80, 24)), (False, False, True))), \
+        patch.object(panel, "draw_frame", return_value=None), \
+        patch.object(panel_watch, "publish_attention", side_effect=lambda value: writes.append(value) or True):
+    writes.clear()
+    assert panel.watch(Path("."), "codex", count=1) == 0
+assert writes == [summary, ""], writes
 strip = needs_strip(queue, 127, True)
 assert [row["action"] for row in strip] == [("tab", "needs")], strip
 assert strip[0]["text"] == full_header, strip

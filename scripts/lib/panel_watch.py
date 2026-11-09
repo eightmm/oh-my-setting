@@ -71,6 +71,36 @@ def mark_window(attention, asked=False):
         pass
 
 
+# Not @oms_panel_attention: that window option is the attention-only filter the `b` key toggles.
+ATTENTION_OPTION = "@oms_panel_attention_counts"
+
+
+def publish_attention(summary):
+    """Set this watcher's own OMS window option to the room's attention summary; an empty summary unsets it.
+
+    tmux formats read the option without starting a process. No-op outside a managed tmux pane; returns
+    whether tmux accepted the change, so a refused write is retried on the next snapshot."""
+    from terminal_panel import managed_session, tmux_command
+    pane = os.environ.get("TMUX_PANE", "")
+    if not os.environ.get("TMUX") or not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
+        return False
+    command = (("set-option", "-w", "-t", pane, ATTENTION_OPTION, summary) if summary else
+               ("set-option", "-wu", "-t", pane, ATTENTION_OPTION))
+    try:
+        return subprocess.run(tmux_command(*command), capture_output=True, check=False, timeout=2,
+                              stdin=subprocess.DEVNULL).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def sync_attention(published, report, stale=False):
+    """Publish the queue summary of `report` once it differs from the accepted `published` value; returns the
+    value now on the window. A held frame is not a current read, so it publishes `?` instead of its counts."""
+    from panel_view import attention_summary
+    summary = "?" if stale else attention_summary(report)
+    return summary if summary != published and publish_attention(summary) else published
+
+
 def start_spawn(repo, provider, spawns, navigation, swap=False, auto=None):
     """Start a main off the input loop; a second request waits for the first."""
     from terminal_panel import ENTRY, clean
@@ -345,6 +375,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     expanded = False
     stamps = source_stamps()
     flagged = None
+    published = None
     spawns = []
     installed = [name for name in MAIN_HARNESSES if main_installed(name)]
 
@@ -479,6 +510,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         if alert != flagged:
                             mark_window(*alert)
                             flagged = alert
+                    if managed_session():
+                        published = sync_attention(published, board, bool(notice))
                     if managed_session():
                         update_context_header(state, main_attempt, repo, navigation)
                         if (status == 0 and state.get("collection", {}).get("ok") is True
@@ -923,6 +956,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     finally:
         if flagged and any(flagged):
             mark_window(False)
+        if published and sys.exc_info()[0] is not ReloadWatcher:
+            publish_attention("")  # a board that stopped reading must not leave counts behind
         if expanded:
             try:
                 expand(False)
