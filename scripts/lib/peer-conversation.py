@@ -54,6 +54,31 @@ def native_lines(path):
     return raw.decode("utf-8").splitlines()
 
 
+class ProviderTurnError(ValueError):
+    """An antigravity turn that ended in its own error; carries the normalized stop line."""
+
+    def __init__(self, message, stop):
+        super().__init__(message)
+        self.stop = stop
+
+
+def _bounded(value, limit):
+    value = value if isinstance(value, str) else ""
+    return re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", value)).strip()[:limit]
+
+
+def agy_turn_error(doc):
+    error = _bounded(doc.get("error"), 240)
+    if doc.get("status") != "ERROR" and not error:
+        return None
+    finished = re.sub(r"[^A-Za-z0-9_.-]", "", _bounded(doc.get("finished_reason"), 40)) or "error"
+    reason = "max_tokens" if re.search(r"output token limit|max_tokens", error, re.I) else "stream_truncated"
+    message = "antigravity turn ended with status=%s finished_reason=%s error=%s" % (
+        _bounded(doc.get("status"), 20) or "unknown", finished, error or "none")
+    stop = "stop-reason: provider=antigravity reason=%s subtype=%s is_error=1" % (reason, finished)
+    return ProviderTurnError(message, stop)
+
+
 def result(provider, lines, expected, include_usage=False):
     envelopes = []
     for line in lines:
@@ -80,6 +105,10 @@ def result(provider, lines, expected, include_usage=False):
         ok = doc.get("status") == "SUCCESS" and not doc.get("error")
         session_id, answer = doc.get("conversation_id"), doc.get("response")
     if not ok:
+        if provider != "claude" and include_usage:
+            failure = agy_turn_error(doc)
+            if failure:
+                raise failure
         raise ValueError("provider turn did not finish successfully or requires permission")
     if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", session_id):
         raise ValueError("missing or invalid native session ID")
@@ -107,7 +136,12 @@ def result(provider, lines, expected, include_usage=False):
 def agy_text(path):
     from peer_artifacts import usage_footer
     lines = native_lines(path)
-    parsed = result("antigravity", lines, "", include_usage=True)
+    try:
+        parsed = result("antigravity", lines, "", include_usage=True)
+    except ProviderTurnError as failure:
+        # The raw envelope, partial response included, stays in the artifact for diagnosis.
+        print("Error: " + str(failure) + "\n" + failure.stop, file=sys.stderr)
+        raise SystemExit(2)
     usage = dict(parsed["usage"])
     usage.update({"cache_read_input_tokens": usage.get("cache_read_tokens")})
     footer = usage_footer("antigravity", [usage])

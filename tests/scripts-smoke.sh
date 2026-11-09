@@ -6337,6 +6337,10 @@ case "$AGY_MODE" in
   last) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"earlier answer","usage":{}}' '{"conversation_id":"id1","status":"SUCCESS","response":"last answer","usage":{}}' ;;
   noisy) printf '%s\n' '{bad diagnostic' >&2; printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"noisy answer","usage":{}}' ;;
   failed) printf '%s\n' '{"conversation_id":"id1","status":"FAILED","response":"bad answer","usage":{}}' ;;
+  err_interrupted) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"partial text","error":"The stream was interrupted. Please continue the task you were working on.","usage":{}}' ;;
+  err_idle) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"API error (attempt 1): request failed: stream idle timeout (5m0s): context deadline exceeded","usage":{}}' ;;
+  err_tokens) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"cut","error":"Your previous response was cut off because it exceeded the output token limit","usage":{}}' ;;
+  err_unknown) printf '%s\n' '{"conversation_id":"id1","status":"ERROR","finished_reason":"error","response":"","error":"something else broke","usage":{}}' ;;
   zero) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"zero usage","usage":{"input_tokens":0,"output_tokens":0,"cache_read_tokens":0}}' ;;
   *) printf '%s\n' '{"conversation_id":"id1","status":"SUCCESS","response":"Answer: hello\n","usage":{"input_tokens":7,"output_tokens":3,"thinking_tokens":2,"cache_read_tokens":4,"total_tokens":12}}' ;;
 esac
@@ -6404,6 +6408,24 @@ SH
         last)
           grep -Fxq 'last answer' "$project/output" || exit 21
           ! grep -Fq 'earlier answer' "$project/output" || exit 22 ;;
+      esac
+    done
+    for mode in err_interrupted err_idle err_tokens err_unknown; do
+      export AGY_MODE="$mode"
+      if ma_provider_attempt antigravity read "$project/prompt" "$project/output" "$project" \
+          provider-default '' test '' ''; then exit 50; fi
+      grep -Fq 'finished_reason=error error=' "$project/output" || exit 51
+      grep -Fq '"conversation_id":"id1"' "$project/output" || exit 52
+      ! grep -Fq 'provider turn did not finish' "$project/output" || exit 53
+      [ "$(grep -c '^stop-reason: ' "$project/output")" = 1 ] || exit 54
+      case "$mode" in
+        err_interrupted|err_idle)
+          grep -Fxq 'stop-reason: provider=antigravity reason=stream_truncated subtype=error is_error=1' "$project/output" || exit 55
+          [ "$OMS_PROVIDER_ERROR_CLASSIFICATION" = provider_down ] || exit 56 ;;
+        err_tokens)
+          grep -Fxq 'stop-reason: provider=antigravity reason=max_tokens subtype=error is_error=1' "$project/output" || exit 57
+          [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 58 ;;
+        err_unknown) [ -z "$OMS_PROVIDER_ERROR_CLASSIFICATION" ] || exit 59 ;;
       esac
     done
     for mode in plain empty malformed failed invalid_utf8 oversized banner_error; do

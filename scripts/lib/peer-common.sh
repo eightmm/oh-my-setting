@@ -3176,6 +3176,9 @@ DOWN = re.compile(r"service unavailable|bad gateway|gateway timeout|internal ser
                   r"error sending request|could not connect|econnreset|etimedout", re.I)
 
 
+AGY_DOWN = re.compile(r"stream was interrupted|stream idle timeout", re.I)
+
+
 def text(value):
     if isinstance(value, dict):
         value = value.get("message")
@@ -3236,6 +3239,13 @@ if claude_result is not None:
 if not completed:
     messages.extend(pending)
 for message in messages:
+    if sys.argv[2] == "antigravity":
+        # Only agy's own transient stream failures; the output-token-limit stop
+        # is a truncation the answer-quality gate owns, and a retry would fail alike.
+        if AGY_DOWN.search(message):
+            print("provider_down")
+            break
+        continue
     code = CODE.search(message)
     code = code.group(1) if code else ""
     if MODEL.search(message):
@@ -3256,7 +3266,7 @@ PY
 oms_panel_provider_error_classify() { # PROVIDER EXIT OUTPUT_FILE
   local provider="$1" status="$2" file="$3"
   [ "$status" -ne 0 ] || return 0
-  case "$provider" in codex|claude|pi) ;; *) return 0 ;; esac
+  case "$provider" in codex|claude|pi|antigravity) ;; *) return 0 ;; esac
   [ -f "$file" ] && [ -s "$file" ] || return 0
   oms_panel_provider_error_scan "$file" "$provider" | tr -d '\r'
 }
