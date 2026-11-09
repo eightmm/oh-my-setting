@@ -600,7 +600,8 @@ def main(argv=None):
             status = dispatch(repo, owner, args.dispatch, args.workload, args.access, args.purpose,
                               args.prompt, brief, args.verify, args.task_id, args.dry_run, args.label,
                               args.to, args.model, args.reasoning_effort, main=args.main,
-                              continue_task=args.continue_task, scopes=args.scope, work_repo=execution, alias=args.alias,
+                              continue_task=args.continue_task, scopes=args.scope, alias=args.alias,
+                              work_repo=None if args.continue_task and args.repo is None else execution,
                               allow_stale_base=args.allow_stale_base, from_task=args.from_task,
                               workload_explicit=workload_explicit)
             if asked:

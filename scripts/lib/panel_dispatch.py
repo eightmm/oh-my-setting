@@ -537,8 +537,35 @@ def _stopped_write_continuation(last, eligible_result):
             and refs.get("panel_location", "").startswith("worktree:"))
 
 
+def _git_path(path, option):
+    out = subprocess.run(["git", "-C", str(path), "rev-parse", option], capture_output=True,
+                         text=True, check=False, stdin=subprocess.DEVNULL)
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    return (Path(path) / out.stdout.strip()).resolve()
+
+
+def _recorded_execution_repository(repo, recorded):
+    """The continued attempt's base worktree, or a refusal naming --repo."""
+    path = Path(recorded)
+    retry = "oms panel --continue TASK --repo PATH"
+    if not path.is_absolute():
+        raise ValueError("the recorded execution repository %r is not an absolute path; retry with an explicit "
+                         "--repo (%s)" % (recorded, retry))
+    if not path.is_dir():
+        raise ValueError("the original execution repository %s no longer exists; --continue needs a base to apply "
+                         "the previous patch, so retry with an explicit --repo (%s)" % (recorded, retry))
+    physical = path.resolve()
+    common = _git_path(physical, "--git-common-dir")
+    if (common is None or common != _git_path(repo, "--git-common-dir")
+            or _git_path(physical, "--show-toplevel") != physical):
+        raise ValueError("the original execution repository %s is not a worktree root of this repository; retry "
+                         "with an explicit --repo (%s)" % (recorded, retry))
+    return physical
+
+
 def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, patch_reference=None,
-                 allow_stale_base=False):
+                 allow_stale_base=False, execution=None):
     """(brief file, native session or None, note) for this main's next worker round.
 
     Fresh sessions receive the bounded tail of the verified answer so the final
@@ -547,7 +574,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     from terminal_panel import MAX_PROMPT, _rework_history, clean, events, owning_attempt, repository, results, session_stored, verified_patch, work_repository
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id or ""):
         raise ValueError("invalid task ID to continue")
-    head_repo = work_repository(work_repo or repo)
+    local_repo = repo
     if env.get("OMS_ROOM_REPO"):
         repo = repository(env["OMS_ROOM_REPO"])
     parents = owning_attempt(repo, owner, main, env)
@@ -582,6 +609,7 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
     last = earlier[-1]
     refs = last.get("refs", {})
     member = refs.get("panel_room_participant")
+    anchor = None
     try:
         anchor = dispatch_store.read(repo, member + "-launch.json") if member else None
         recorded_route = anchor.get("route", {}) if isinstance(anchor, dict) else {}
@@ -589,6 +617,16 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             recorded_route = {}
     except (OSError, ValueError, KeyError, TypeError):
         recorded_route = {}
+    if work_repo is None and isinstance(execution, dict):
+        recorded = anchor.get("execution_repo") if isinstance(anchor, dict) else None
+        if isinstance(recorded, str) and recorded:
+            work_repo = _recorded_execution_repository(repo, recorded)
+            print("continue: using the original execution repository %s" % work_repo, file=sys.stderr)
+        else:
+            raise ValueError("task %s has no recorded execution repository to continue in; retry with an "
+                             "explicit --repo (oms panel --continue TASK --repo PATH)" % task_id)
+        execution["work_repo"] = work_repo
+    head_repo = work_repository(work_repo or local_repo)
     recorded_account = recorded_route.get("account") if recorded_route.get("account_applied") is True else None
     if not isinstance(recorded_account, str):
         recorded_account = None
@@ -1079,10 +1117,12 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
             _require_assigned_route(repo, continue_task, route)
         continuation_env = child_environment(owner, repo)
         continuation_env.pop("OMS_RESUME_USAGE_BASELINE", None)
+        chosen = {}
         brief, resume, note = continuation(repo, owner, main, continue_task, route, brief,
                                            continuation_env, work_repo,
                                            patch_reference=continuation_patch,
-                                           allow_stale_base=allow_stale_base)
+                                           allow_stale_base=allow_stale_base, execution=chosen)
+        work_repo = chosen.get("work_repo", work_repo)
         resume_usage_baseline = continuation_env.get("OMS_RESUME_USAGE_BASELINE")
         temporary, task_id = brief, continue_task
         if preferred and route["provider"] == preferred:
