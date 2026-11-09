@@ -152,31 +152,54 @@ def _claude_mains(members):
 
 
 def _main_transcript(home, consumer):
-    """The main's own transcript, resolved once per consumer."""
+    """Resolve a cached session ID against the supplied home's bounded project list."""
     path = _transcripts.get(consumer)
+    sid = path.name[:-6] if path is not None and path.name.endswith(".jsonl") else None
     if path is not None:
         try:
-            info = os.lstat(path)
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or path.parent.is_symlink()
-                    or hasattr(os, "getuid") and info.st_uid != os.getuid()):
-                raise OSError("unsafe native file")
+            os.lstat(path)
         except FileNotFoundError:
-            pass  # the reader below drops a vanished path and the next call resolves it again
+            _transcripts.pop(consumer, None)
+            if path.parent.parent == home / "projects" and not path.parent.is_symlink():
+                return None
         except OSError:
             _transcripts.pop(consumer, None)
-            path = None
-    if path is None:
+    if sid is None:
         sids = native_index({consumer})["claude"].get(consumer) or ()
-        for sid in sids if len(sids) == 1 else ():
-            matches = []
-            with os.scandir(home / "projects") as slugs:
-                for slug in list(slugs)[:MAX_FILES]:
-                    candidate = Path(slug.path) / (sid + ".jsonl")
-                    if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
-                        matches.append(candidate)
-            if len(matches) == 1:  # one session ID in two project folders is ambiguous: read neither
-                path = _transcripts[consumer] = matches[0]
-    return path
+        if len(sids) != 1:
+            _transcripts.pop(consumer, None)
+            return None
+        sid = next(iter(sids))
+    matches = []
+    try:
+        with os.scandir(home / "projects") as slugs:
+            scanned = folders = 0
+            for slug in slugs:
+                scanned += 1
+                if scanned > MAX_ENTRIES:
+                    raise OSError("partial project scan")
+                if not slug.is_dir(follow_symlinks=False):
+                    continue
+                folders += 1
+                if folders > MAX_FILES:
+                    raise OSError("partial project scan")
+                candidate = Path(slug.path) / (sid + ".jsonl")
+                try:
+                    info = candidate.lstat()
+                except FileNotFoundError:
+                    continue
+                if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                        and (not hasattr(os, "getuid") or info.st_uid == os.getuid())):
+                    matches.append(candidate)
+                    if len(matches) > 1:
+                        break
+    except OSError:
+        matches = []
+    _transcripts.pop(consumer, None)
+    if len(matches) == 1:
+        _transcripts[consumer] = matches[0]
+        return matches[0]
+    return None
 
 
 def native_advisors(members):

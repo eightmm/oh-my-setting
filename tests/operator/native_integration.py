@@ -1831,6 +1831,72 @@ council_detail = render(council_only, "claude", 91, 40, view="tree",
                         main_attempt="fresh-attempt", navigation=council_detail_nav)
 assert "MAIN fixture-model" in council_detail and "1 seat(s) answering" in council_detail, council_detail
 assert ("debate", ("decide", member)) in council_detail_nav["items"], council_detail_nav
+# BEGIN transcript-warm-safety
+import tempfile
+import panel_chats
+from pathlib import Path
+from unittest.mock import patch
+with tempfile.TemporaryDirectory() as transcript_tmp:
+    transcript_root = Path(transcript_tmp)
+    first_home = transcript_root / "first"
+    second_home = transcript_root / "second"
+    first_dir = first_home / "projects" / "a"
+    other_dir = first_home / "projects" / "b"
+    second_dir = second_home / "projects" / "a"
+    for folder in (first_dir, other_dir, second_dir):
+        folder.mkdir(parents=True)
+    sid = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    consumer = "fixture-consumer"
+    first_log = first_dir / (sid + ".jsonl")
+    second_log = second_dir / first_log.name
+    first_log.write_text("first")
+    second_log.write_text("second")
+    index = {"claude": {consumer: {sid}}}
+    with patch.object(panel_chats, "native_index", return_value=index):
+        panel_chats._transcripts.pop(consumer, None)
+        assert panel_chats._main_transcript(first_home, consumer) == first_log
+        with patch.object(panel_chats, "native_index", side_effect=AssertionError("warm scan")):
+            assert panel_chats._main_transcript(second_home, consumer) == second_log
+            assert panel_chats._main_transcript(first_home, consumer) == first_log
+        twin = other_dir / first_log.name
+        twin.write_text("duplicate")
+        assert panel_chats._main_transcript(first_home, consumer) is None
+        twin.unlink()
+        assert panel_chats._main_transcript(first_home, consumer) == first_log
+        link = first_dir / "hardlink"
+        os.link(first_log, link)
+        assert panel_chats._main_transcript(first_home, consumer) is None
+        assert panel_chats._main_transcript(first_home, consumer) is None
+        link.unlink()
+        assert panel_chats._main_transcript(first_home, consumer) == first_log
+        if hasattr(os, "getuid"):
+            with patch.object(panel_chats.os, "getuid", return_value=os.getuid() + 1):
+                assert panel_chats._main_transcript(first_home, consumer) is None
+                assert panel_chats._main_transcript(first_home, consumer) is None
+        assert panel_chats._main_transcript(first_home, consumer) == first_log
+        replacement = first_dir / "replacement"
+        replacement.write_text("replacement")
+        replacement.replace(first_log)
+        with patch.object(panel_chats, "native_index", side_effect=AssertionError("warm scan")):
+            assert panel_chats._main_transcript(first_home, consumer) == first_log
+        first_log.rename(twin)
+        first_dir.rmdir()
+        first_dir.symlink_to(second_dir, target_is_directory=True)
+        assert panel_chats._main_transcript(first_home, consumer) == twin
+        first_dir.unlink()
+        first_dir.mkdir()
+        twin.rename(first_log)
+        assert panel_chats._main_transcript(first_home, consumer) is None
+        assert panel_chats._main_transcript(first_home, consumer) == first_log
+        (first_home / "projects" / "notes").write_text("ignored")
+        with patch.object(panel_chats, "MAX_FILES", 2):
+            assert panel_chats._main_transcript(first_home, consumer) == first_log
+        with patch.object(panel_chats, "MAX_FILES", 1):
+            assert panel_chats._main_transcript(first_home, consumer) is None
+        assert panel_chats._main_transcript(first_home, consumer) == first_log
+    panel_chats._transcripts.pop(consumer, None)
+# END transcript-warm-safety
+
 # Claude Code's built-in advisor shows above its main only while unanswered, read from the
 # main's own transcript tail; finalized failed calls leave the board.
 from datetime import datetime, timedelta, timezone
@@ -1930,6 +1996,34 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     panel_chats._transcripts.pop(advisor_consumer, None)
     open_call = panel_chats.native_advisors([claude_main])
     assert open_call["adv-main"]["running"] is True, open_call
+    # Recheck the cached selection when the project tree or native identity changes.
+    assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
+    warm_twin = moved_dir / advisor_log.name
+    warm_twin.write_bytes(advisor_log.read_bytes())
+    assert panel_chats._main_transcript(advisor_home, advisor_consumer) is None
+    warm_twin.unlink()
+    assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
+    replacement = advisor_log.with_suffix(".replacement")
+    replacement.write_bytes(advisor_log.read_bytes())
+    replacement.replace(advisor_log)
+    with patch.object(panel_chats, "native_index", side_effect=AssertionError("warm index scan")):
+        assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
+    assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
+    other_home = temporary / "other-advisor-home"
+    (other_home / "projects" / "slug").mkdir(parents=True)
+    other_log = other_home / "projects" / "slug" / advisor_log.name
+    other_log.write_bytes(advisor_log.read_bytes())
+    assert panel_chats._main_transcript(other_home, advisor_consumer) == other_log
+    assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
+    with patch.object(panel_chats, "MAX_FILES", 0):
+        assert panel_chats._main_transcript(advisor_home, advisor_consumer) is None
+    with patch.object(panel_chats, "MAX_FILES", 2):
+        assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
+    with patch.object(panel_chats, "MAX_FILES", 1):
+        assert panel_chats._main_transcript(advisor_home, advisor_consumer) is None
+    with patch.object(panel_chats.os, "scandir", side_effect=OSError("partial discovery")):
+        assert panel_chats._main_transcript(advisor_home, advisor_consumer) is None
+    assert panel_chats._main_transcript(advisor_home, advisor_consumer) == advisor_log
     # The same session ID under a second project folder is ambiguous: neither copy is read, nothing is cached.
     twin_dir = advisor_home / "projects" / "twin-slug"
     twin_dir.mkdir()
