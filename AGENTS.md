@@ -7,8 +7,8 @@
 - This repository maintains a Bash harness shared by Codex, Claude Code, and
   Antigravity. Preserve behavior across all three providers.
 - Supported hosts are Linux (Ubuntu 20.04 floor), WSL2 and macOS; native
-  Windows is retired and refused. Keep scripts compatible with Bash 3.2 and
-  GNU/BSD userlands for the documented core lifecycle, and resolve paths with
+  Windows is retired and refused. Require Bash 5.0+ and keep scripts compatible
+  with GNU/BSD userlands for the documented core lifecycle; resolve paths with
   `pwd -P` before comparing them: one directory has more than one spelling.
 - Artifacts this repo publishes into shared namespaces carry the oms
   marker: skills and output styles are `oms-*`, MCP tools `oms_*`, work
@@ -36,7 +36,7 @@
   duplicate hook gate. Its default gate is `check.sh --affected --ci-parity`:
   a full selection runs lint and the quick lane, never CI's full lanes, plus
   operator-tools when tier-routing inputs change, with every registry provider
-  CLI hidden from PATH and a Bash 3.2 parse of changed shell files.
+  CLI hidden from PATH.
   Installation needs successful CI for that same SHA plus full proof: a full
   local gate (`--gate 'bash scripts/check.sh --parallel'`) or a CI run whose
   jobs executed the full selection. Affected-only gates and runs push but
@@ -45,9 +45,10 @@
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
 - CI scopes PRs and main pushes alike. Full selections keep Linux lint, focused,
-  smoke and copy lifecycle coverage. Native macOS lifecycle, stock Bash
-  3.2/BSD and Python 3.9 run for install/lifecycle/portability/Python compatibility
-  changes and weekly/manual runs. Only plan-authorized skips pass the stable
+  smoke and copy lifecycle coverage. Install/lifecycle/portability/Python
+  compatibility changes and weekly/manual runs cover native macOS lifecycle
+  with Homebrew Bash 5 and BSD userland fixtures, plus Python 3.11 compatibility.
+  Only plan-authorized skips pass the stable
   gate. CI remains authoritative. Smoke shards and focused lanes balance by
   measured cost (`# smoke-weight:` lines, focused registration order); refresh
   from CI timings.

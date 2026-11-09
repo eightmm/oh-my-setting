@@ -1839,9 +1839,10 @@ service or proof of measured CI savings.
 
 ### Local development checks
 
-`bash scripts/check.sh` is the repository gate: shell lint, Bash 3.2 parsing, Python
-3.11 grammar, skill validation, focused suites, and sharded smoke tests. Development
-uses affected tests and static checks, not this full gate per edit. Before landing a
+`bash scripts/check.sh` is the repository gate: shell lint, Python 3.11 grammar, skill
+validation, focused suites, and sharded smoke tests. The entry point requires Bash 5.0 or
+newer; the Bash 3.2 parse check has been retired. Development uses affected tests and
+static checks, not this full gate per edit. Before landing a
 bundle, run `bash scripts/check.sh invariants` for the fast repository-wide
 allowlist/review-state, skill and provider registry, documentation reference and
 changed-source syntax checks; this lane is intentionally limited to these invariants and
@@ -1875,9 +1876,9 @@ CI selects once and runs affected tests plus changed-file lint in that same job 
 and main pushes. Full selections fan out to the existing Linux lint, four focused lanes,
 four smoke shards and copy lifecycle runner. The selector also emits
 `native=true|false`: install/lifecycle, shell portability, Python compatibility, shared
-runtime/configuration and workflow changes require macOS lifecycle, macOS Bash 3.2/BSD
-fixtures and real Python 3.11. Weekly/manual runs and unavailable-base fallbacks require
-all native jobs. The install matrix omits native hosts only on an explicit
+runtime/configuration and workflow changes require macOS lifecycle with Homebrew Bash 5
+and BSD userland fixtures, plus real Python 3.11 compatibility. Weekly/manual runs and
+unavailable-base fallbacks require all native jobs. The install matrix omits native hosts only on an explicit
 `native=false` plan; the stable `gate` rejects missing, failed or cancelled required
 results and accepts only planned skips.
 
@@ -1891,9 +1892,9 @@ refresh the installation. An affected-only run or one whose scope cannot be read
 does not supply full proof; an existing full local gate can supply that proof.
 
 A moving update target is rejected by the updater. Local CI-parity hides registry
-provider CLIs, parses changed shell files with Bash 3.2, and adds operator-tools when
-tier-routing inputs change. The receipt's `update.authority` records the full proof used
-for installation.
+provider CLIs and adds operator-tools when tier-routing inputs change; it does not parse
+changed shell files with Bash 3.2. The receipt's `update.authority` records the full proof
+used for installation.
 
 The [installation verification policy](INSTALL.md#verification-policy) records the
 explicit differences between land, scheduled updates, and fresh/manual edge installs.

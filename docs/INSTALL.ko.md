@@ -22,8 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | 호스트 | 필요한 것 | 관리 파일 |
 |---|---|---|
-| Linux (glibc) | Bash 3.2+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다) | symlink |
-| macOS | 기본 Bash 3.2, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다) | symlink |
+| Linux (glibc) | Bash 5.0+, curl. Git·tar·gzip·find는 없으면 설치한다(이때 root나 sudo가 필요하다) | symlink |
+| macOS | Bash 5.0+, curl, Command Line Tools(`xcode-select --install`, 없으면 `git`은 설치 안내 스텁뿐이다). 설치기는 이미 있는 Homebrew Bash 5로 재실행할 수 있다. 없으면 `brew install bash` 후 다시 실행한다. | symlink |
 | Windows via WSL2 | WSL2 안에서 위 Linux 요구 사항 적용 | symlink |
 
 Python 요구 사항은 상한 없는 3.11 이상이며 `tools.lock.json`에 고정된 3.12

@@ -22,8 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 
 | Host | Needs | Managed files |
 |---|---|---|
-| Linux (glibc) | Bash 3.2+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then) | symlinks |
-| macOS | stock Bash 3.2, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub) | symlinks |
+| Linux (glibc) | Bash 5.0+, curl; Git, tar, gzip and find are installed if missing (root or sudo needed then) | symlinks |
+| macOS | Bash 5.0+, curl, Command Line Tools (`xcode-select --install`; without them `git` is only an installer stub). The installer can re-exec under an installed Homebrew Bash 5; otherwise install Bash with `brew install bash` and rerun it. | symlinks |
 | Windows via WSL2 | Linux requirements above, inside WSL2 | symlinks |
 
 OMS requires Python 3.11+ with no upper version bound and provisions the 3.12
