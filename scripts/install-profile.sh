@@ -230,7 +230,7 @@ fi
 
 # The tools this apply just installed live under ~/.local/bin, which future
 # shells get from the persisted rc line but the CURRENT process does not have
-# yet on hosts whose default PATH omits it (Windows Git Bash). Verifying with
+# yet on hosts whose default PATH omits it. Verifying with
 # the old PATH judged a successful install unavailable.
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

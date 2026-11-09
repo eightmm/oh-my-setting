@@ -131,7 +131,6 @@ EOF_VENDOR
         esac
       }
       locked_platform() { printf 'linux-amd64\n'; }
-      oms_platform_is_windows() { return 1; }
       if [ "$scenario" = claude-checksum ]; then
         if install_npm_global claude > "$HOME/error" 2>&1; then fail "Claude checksum mismatch accepted"; fi
         grep -Fq 'checksum mismatch' "$HOME/error" || fail "Claude checksum failure missing"
@@ -677,7 +676,6 @@ EOF_FOREIGN
       [ ! -e "$HOME/foreign-invocations" ] || fail "inventory executed an unselected unmarked foreign copy"
       grep -Fq "channel=unknown version=unknown path=$HOME/repo/bin/codex (not executed)" "$HOME/foreign-report" || fail "inventory omitted the unexecuted foreign copy"
       export PATH="$inventory_path"
-      if ! oms_platform_is_windows; then
         python3 - <<'PY_PATH_FORGERY'
 from pathlib import Path
 base = Path.home() / "path-copies"
@@ -708,9 +706,6 @@ PY_PATH_FORGERY
         [ ! -e "$HOME/path-invocations" ] || fail "selected copy with unsafe fields executed"
         grep -Fq 'codex selected channel=unknown version=unknown' "$HOME/selected-path-report" || fail "unsafe selected copy was not reported"
         export PATH="$inventory_path"
-      else
-        echo "note: filesystem separator fixture requires POSIX filenames"
-      fi
       make_vendor_binary "$HOME/.local/share/claude/versions/claude" claude 1.0.0
       make_vendor_binary "$HOME/.pi/agent/install/releases/0.9.0/bin/pi" pi 1.0.0
       export PATH="$PATH:$CODEX_HOME/packages/standalone/releases/0.9.0/bin:$HOME/.local/share/claude/versions:$HOME/.pi/agent/install/releases/0.9.0/bin"

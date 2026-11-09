@@ -2469,7 +2469,7 @@ def available(cli):
                            stderr=subprocess.DEVNULL, timeout=15) == 0
 
 def probe(argv):
-    # Bash resolves the same native shims as the lifecycle scripts on Git Bash.
+    # Bash resolves the same shims as the lifecycle scripts.
     return subprocess.check_output(["bash", "-c", 'exec "$@"', "oms-integration-probe"] + argv,
                                    stdin=subprocess.DEVNULL, stderr=subprocess.STDOUT,
                                    timeout=15, text=True)

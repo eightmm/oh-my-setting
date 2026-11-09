@@ -178,9 +178,8 @@ oms_provider_binary() {
 }
 
 # Run a no-input provider probe behind a real wall clock. GNU timeout is the
-# native Git Bash/Linux path, gtimeout covers Homebrew coreutils, and the
-# process-group helper is the stock macOS/POSIX fallback. Native Windows
-# without Git Bash timeout fails closed rather than running an unbounded CLI.
+# GNU/Linux path, gtimeout covers Homebrew coreutils, and the
+# process-group helper is the stock macOS/POSIX fallback.
 oms_provider_run_bounded() { # SECONDS OUTPUT COMMAND...
   local seconds="$1" output="$2" helper
   shift 2

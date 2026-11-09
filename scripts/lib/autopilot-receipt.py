@@ -37,7 +37,6 @@ UPDATED = re.compile(
 )
 OWNER_ID = re.compile(r"owner_[0-9a-f]{32}\Z")
 NATIVE_PID_SOURCE = "msys-proc-v1"
-NATIVE_PID_SOURCES = {NATIVE_PID_SOURCE, "logical-pid-v1"}
 STAGES = {
     "proposing",
     "proposal-review",
@@ -379,12 +378,8 @@ def resolve_base(repo: str, remote: str, base: str) -> str:
     raise ReceiptError("bound base cannot be resolved")
 
 
-# Git Bash paths are not native Windows Python paths; mirror agent-plan.sh
-# python_path_for_host and emit the mixed drive spelling (cygpath -m).
 SHELL_STATE_ROOT = (
     '. "$1" && root="$(oms_state_root "$2")" || exit $?; '
-    'case "$(uname -s 2>/dev/null)" in '
-    'MINGW*|MSYS*|CYGWIN*) root="$(cygpath -m "$root" | tr -d "\\r")" || exit $? ;; esac; '
     'printf "%s\\n" "$root"'
 )
 
@@ -2210,7 +2205,7 @@ def main() -> int:
                 raise ReceiptError("reenter native pid is invalid")
             if (not isinstance(self_native_pid_source, str)
                     or (self_native_pid_source
-                        and self_native_pid_source not in NATIVE_PID_SOURCES)):
+                        and self_native_pid_source != "logical-pid-v1")):
                 raise ReceiptError("reenter native pid source is invalid")
             if self_native_pid_source and not self_native_pid:
                 raise ReceiptError("reenter native pid source requires a native pid")
@@ -2283,7 +2278,7 @@ def main() -> int:
                 raise ReceiptError("drive-claim native pid is invalid")
             if (not isinstance(args.native_pid_source, str)
                     or (args.native_pid_source
-                        and args.native_pid_source not in NATIVE_PID_SOURCES)):
+                        and args.native_pid_source != "logical-pid-v1")):
                 raise ReceiptError("drive-claim native pid source is invalid")
             if args.native_pid_source and not args.native_pid:
                 raise ReceiptError(

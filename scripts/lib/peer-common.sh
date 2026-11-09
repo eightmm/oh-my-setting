@@ -1669,37 +1669,6 @@ ma_artifact_index_shell_path() {
   printf '%s\n' "${value//$'\r'/}"
 }
 
-# Panel salvage still depends on native path conversion.
-ma_kernel_name() {
-  [ -n "${MA_KERNEL_NAME:-}" ] ||
-    MA_KERNEL_NAME="$(uname -s 2>/dev/null || printf unknown)"
-}
-
-ma_artifact_index_python_path() {
-  local value="$1"
-  local platform
-
-  [ -n "$value" ] || { printf '\n'; return 0; }
-  value="${value//$'\r'/}"
-  ma_kernel_name
-  platform="${MSYSTEM:-}:${OSTYPE:-}:$MA_KERNEL_NAME"
-  case "$platform" in
-    *MINGW*|*MSYS*|*CYGWIN*|*:msys:*|*:cygwin:*)
-      command -v cygpath >/dev/null 2>&1 || {
-        echo "error: artifact index: cygpath is required for a Windows Python path" >&2
-        return 1
-      }
-      case "$value" in
-        /*|[A-Za-z]:[\\/]*|\\\\*)
-          value="$(cygpath -m "$value")" || return 1
-          value="${value//$'\r'/}"
-          ;;
-      esac
-      ;;
-  esac
-  printf '%s\n' "$value"
-}
-
 # Capture usage while a delegate artifact still contains only provider output.
 # Some failure receipts append a later Output section before indexing, so their
 # final artifact cannot be used to recover the earlier provider section.

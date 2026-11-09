@@ -26,10 +26,6 @@ oms_platform_name() {
   esac
 }
 
-oms_platform_is_windows() {
-  [ "$(oms_platform_name)" = windows ]
-}
-
 # The managed `python3` shim, recognized by its exact shape. Lives on the
 # platform boundary because both the installer that writes it and the
 # uninstaller that removes it must agree on what "ours" means — anything else

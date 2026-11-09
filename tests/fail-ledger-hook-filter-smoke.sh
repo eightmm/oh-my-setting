@@ -89,9 +89,6 @@ mkdir -p "$target/.oms" "$nested" "$other/.oms"
 git -C "$target" init -q
 git -C "$other" init -q
 payload_cwd="$nested"
-if command -v cygpath >/dev/null 2>&1; then
-  payload_cwd="$(cygpath -u "$nested")"
-fi
 payload "python3 -m payload_repo_only" 1 "$payload_cwd" |
   ( cd "$other" && env -u OMS_STATE_REPO bash "$ROOT/scripts/fail-ledger-hook.sh" )
 grep -Fq payload_repo_only "$target/.oms/failures.jsonl" ||

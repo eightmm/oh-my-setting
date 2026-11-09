@@ -394,30 +394,6 @@ if bash -x "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
   > "$TMP/scratch-gone.out" 2>&1; then
   fail "an unresolvable campaign repo must count as live: $(cat "$TMP/scratch-gone.out")"
 fi
-# a failed or empty Windows path conversion must not read as this checkout
-# (cd "" succeeds in the cwd): the campaign stays a live sibling
-mkdir -p "$TMP/cygpath-fail" "$TMP/cygpath-empty"
-printf '#!/bin/sh\nexit 1\n' > "$TMP/cygpath-fail/cygpath"
-printf '#!/bin/sh\nexit 0\n' > "$TMP/cygpath-empty/cygpath"
-chmod +x "$TMP/cygpath-fail/cygpath" "$TMP/cygpath-empty/cygpath"
-python3 - "$canonical_receipt" "$repo" <<'PY' || fail "cannot rebind the canonical receipt"
-import json, sys
-row = json.load(open(sys.argv[1]))
-row["repo"] = sys.argv[2]
-json.dump(row, open(sys.argv[1], "w"))
-PY
-for stub in cygpath-fail cygpath-empty; do
-  before="$(remote_tip)"
-  if env PATH="$TMP/$stub:$PATH" OMS_PLATFORM_OVERRIDE=windows \
-    "$LAND" --repo "$repo" --wait --ci-wait 0 --sibling-wait 0 \
-    > "$TMP/scratch-$stub.out" 2>&1; then
-    fail "a $stub conversion must keep the campaign live: $(cat "$TMP/scratch-$stub.out")"
-  fi
-  [ "$(remote_tip)" = "$before" ] || fail "a $stub conversion must not push"
-  grep -Fq "still driving" "$TMP/scratch-$stub.out" ||
-    fail "a $stub conversion must wait on the campaign: $(cat "$TMP/scratch-$stub.out")"
-done
-
 # the landing checkout's own campaign is not a sibling
 # a non-normalized spelling of the same checkout (a symlink) is still this checkout
 ln -s "$repo" "$TMP/repo-link"

@@ -25,7 +25,6 @@ chmod +x "$fixture/scripts/doctor.sh"
 
 cat > "$fixture/scripts/lib/agent-memory-common.sh" <<'EOF_STUB'
 agent_memory_file_has_sensitive_content() { return 1; }
-oms_platform_is_windows() { return 1; }
 EOF_STUB
 cat > "$fixture/scripts/lib/harness-residue.sh" <<'EOF_STUB'
 oms_harness_count_stale_worktrees() { printf '0\n'; }

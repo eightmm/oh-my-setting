@@ -587,9 +587,7 @@ goal_phase_run() {  # COMMAND [ARGV...]; output -> GOAL_PHASE_OUT
   set +e
   # The provider already has its own shorter timeout. The outer wall is a
   # fail-closed ceiling and, critically, uses one cross-platform supervisor
-  # implementation with POSIX process groups and Windows taskkill /T /F.
-  # Keep an explicit `bash script` in argv: native Windows Python cannot
-  # CreateProcess a shebang-only .sh file, while Git Bash is documented core.
+  # implementation with POSIX process groups.
   # One routed delegation may consume primary + safeguard retry + explicit or
   # capacity fallback attempts. Preserve the inner per-attempt timeout rather
   # than cutting off a legitimate fallback sequence halfway through.
@@ -1274,8 +1272,7 @@ intent_prepare() {  # TASK PATCH BASE REF SUFFIX [REUSE_INTENT_ID]
     # Anchor creation to the already-open plan directory. If another same-UID
     # process swaps the absolute path before `cd`, the physical identity check
     # fails; if it swaps after `cd`, relative mkdir still targets the original
-    # directory handle. This is portable to the documented Git Bash path where
-    # Python dir_fd/openat support is not uniform.
+    # directory handle, without relying on Python dir_fd/openat support.
     (
       cd "$STATE_REPO/.oms/plan" 2>/dev/null || exit 1
       [ "$(pwd -P)" = "$plan_physical" ] || exit 1

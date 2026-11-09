@@ -598,13 +598,9 @@ test_python_floor
 
 # Both source orders must agree that a missing file fails silently.
 missing_sha_file="$TMP/does-not-exist"
-sha_special_supported=0
-if ! oms_platform_is_windows; then
-  # Windows filenames cannot contain a literal backslash.
-  sha_special_supported=1
-  sha_special_file="$TMP/back\\slash.txt"
-  printf 'backslash path contents\n' > "$sha_special_file"
-fi
+sha_special_supported=1
+sha_special_file="$TMP/back\\slash.txt"
+printf 'backslash path contents\n' > "$sha_special_file"
 for sha_source_order in common-platform platform-common; do
   sha_output="$TMP/sha-output"
   sha_error="$TMP/sha-error"

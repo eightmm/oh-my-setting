@@ -114,9 +114,6 @@ PY
 )"
   fi
   source_root="${source_root//$'\r'/}"
-  if [ -n "$source_root" ] && command -v cygpath >/dev/null 2>&1; then
-    source_root="$(cygpath -u "$source_root")"
-  fi
   if [ -n "$source_root" ] && [ -f "$source_root/scripts/agent-task.sh" ]; then
     SCRIPTS_DIR="$source_root/scripts"
     ROOT="$source_root"

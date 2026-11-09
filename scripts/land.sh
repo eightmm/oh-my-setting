@@ -278,14 +278,8 @@ collect_state_root_campaign() {  # REPORT
   esac
   bound="${metadata#*$'\t'*$'\t'*$'\t'}"
   [ -n "$bound" ] || return 0
-  # The receipt spells its repo natively (C:\work\project on Windows); an
-  # unresolvable one cannot be proven to be this checkout, so it counts as live.
+  # An unresolvable receipt repo cannot be proven to be this checkout.
   physical="$bound"
-  if command -v oms_platform_is_windows >/dev/null 2>&1 && oms_platform_is_windows &&
-    command -v cygpath >/dev/null 2>&1; then
-    physical="$(cygpath -u "$bound" 2>/dev/null)" && physical="$(oms_strip_cr "$physical")" ||
-      physical=""
-  fi
   # An empty path never reaches cd, which would succeed in the cwd (this checkout).
   if [ -n "$physical" ]; then
     physical="$(cd "$physical" 2>/dev/null && pwd -P)" || physical=""

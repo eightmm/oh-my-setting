@@ -48,11 +48,6 @@ if [ "${1:-}" = disconnect ] && ! command -v python3 >/dev/null 2>&1; then
   if [ -z "$config" ] && [ -n "${XDG_CONFIG_HOME:-}" ]; then
     config="$XDG_CONFIG_HOME/oh-my-setting/work-journal.json"
   fi
-  if [ -z "$config" ]; then
-    case "$(uname -s)" in
-      MINGW*|MSYS*|CYGWIN*) [ -z "${LOCALAPPDATA:-}" ] || config="$LOCALAPPDATA/oh-my-setting/work-journal.json" ;;
-    esac
-  fi
   config="${config:-$HOME/.config/oh-my-setting/work-journal.json}"
   if [ ! -e "$config" ] && [ ! -L "$config" ]; then
     echo "not configured"
