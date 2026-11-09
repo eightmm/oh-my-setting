@@ -157,12 +157,14 @@ def _main_transcript(home, consumer):
     if path is None:
         sids = native_index({consumer})["claude"].get(consumer) or ()
         for sid in sorted(sids)[:1]:
+            matches = []
             with os.scandir(home / "projects") as slugs:
                 for slug in list(slugs)[:MAX_FILES]:
                     candidate = Path(slug.path) / (sid + ".jsonl")
                     if slug.is_dir(follow_symlinks=False) and candidate.is_file() and not candidate.is_symlink():
-                        path = _transcripts[consumer] = candidate
-                        break
+                        matches.append(candidate)
+            if len(matches) == 1:  # one session ID in two project folders is ambiguous: read neither
+                path = _transcripts[consumer] = matches[0]
     return path
 
 

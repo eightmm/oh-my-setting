@@ -1842,6 +1842,18 @@ with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(advisor_home)}):
     panel_chats._transcripts.pop(advisor_consumer, None)
     open_call = panel_chats.native_advisors([claude_main])
     assert open_call["adv-main"]["running"] is True, open_call
+    # The same session ID under a second project folder is ambiguous: neither copy is read, nothing is cached.
+    twin_dir = advisor_home / "projects" / "twin-slug"
+    twin_dir.mkdir()
+    twin_log = twin_dir / advisor_log.name
+    twin_log.write_bytes(advisor_log.read_bytes())
+    panel_chats._transcripts.pop(advisor_consumer, None)
+    assert panel_chats.native_advisors([claude_main]) == {}
+    assert panel_chats.native_subagents([claude_main]) == {}
+    assert advisor_consumer not in panel_chats._transcripts
+    twin_log.unlink()
+    twin_dir.rmdir()
+    panel_chats._transcripts.pop(advisor_consumer, None)
     advisor_log.write_text(advisor_log.read_text() + json.dumps({"timestamp": (advisor_start + timedelta(seconds=72)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), "message": {"id": "msg-advisor-1", "content": [
         {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_1", "content": "ciphertext"}], "usage": {"iterations": [
             {"type": "message", "model": "main-model", "input_tokens": 999999},

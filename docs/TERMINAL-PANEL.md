@@ -813,6 +813,28 @@ quota; they do not supply the provider header. Provider token definitions can di
 particularly for cache input; no cross-model total is shown. The window can change or
 shrink as new artifact records arrive.
 
+#### Provider coverage
+
+Static reading of the code and fixture tests; no live-native verification. Every
+"fixture" test uses fake native files or a fake tmux, so each cell is fixture-only or untested.
+`impl` = implemented, `part` = partial, `unsup` = unsupported. Anchors are `panel_native.py`
+(PN), `panel_chats.py` (PC), `panel_state.py` (PS), `room_view.py` (RV). Fixtures are in
+`core/native-integration` (NI) or `core/room-and-board-rendering` (RB).
+
+| | launch | observe | subagents | usage | attach | resume | stop |
+|---|---|---|---|---|---|---|---|
+| Claude | impl: PN `native_command`; NI | part: PS `main_activity` (hook file, not liveness); NI | impl: PC `native_subagents`, `_native_agents`; NI, RB | part: PC `native_advisors`, `_transcript_usage`; NI | part: PC `plan` (existing tmux pane; `--desktop --resume` on macOS only); NI | impl: PN `_native_resume_binding`; NI `startup-crash-resume` | part: PN `_run_native` `stop_native` on panel exit, no stop control; not tested |
+| Codex | impl: PN `native_command`; NI | part: PS `main_activity`; NI | part: PC `_codex_native_agents` collects, RV `native_subagents` renders Claude mains only; NI | part: PC `_codex_usage`, `current_models`; NI | part: PC `plan` (pane or `codex://` link); NI | impl: PN `_native_resume_binding`; NI | part: as Claude; not tested |
+| Pi | part: PN `native_command` (gateway transport only; direct refused); NI | part: activity forwarded by the Pi extension to `hook_state.py`, no native reading; not tested | unsup: no reader in PC | unsup: no reader in PC | part: PC `plan` pane only if registered; not tested | unsup: PN `native_command` refuses until ownership is verifiable; not tested | part: as Claude; not tested |
+| Agy | part: PN `native_command` (fresh only); NI `agy-fresh-main` | unknown: no Agy hook reader found; not tested | unsup: no reader in PC | unsup: no reader in PC | part: PC `plan` pane only if registered; not tested | unsup: PN `run_single_native` refuses; NI `agy-fresh-main` | part: as Claude; not tested |
+
+`oms dashboard` is managed-only; the panel also reads native session files.
+By default the panel shows the registered main, its linked subagents and (for Claude and
+Codex mains) their native usage. External sessions, other repos and other hosts are not
+read: `native_index` matches only enrolled consumer hashes inside one repo's room.
+Native rows (subagents, advisor) are read-only and are never participants, task owners,
+leases or acceptance evidence; a recent file write is shown as `active`, never as liveness.
+
 `oms panel --metrics` reports retained owner decisions for write tasks by provider and
 model, counting a task once per model it touched and grouping attempts without a
 recorded model as `unknown`.

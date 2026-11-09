@@ -119,9 +119,9 @@ CP-16/17은 별도 거대 테스트·문서 PR이 아니라 각 구현 PR에 함
 대조한다. 기능을 `implemented`, `partial`, `unsupported`, `unknown`으로 나누고,
 문서 확인·fixture 검증·native 실행 검증을 별도 칸으로 둔다.
 
-- [ ] Claude/Codex/Pi/Agy별 launch, observe, subagent, usage, attach, resume, stop 지원 근거를 기록한다.
-- [ ] dashboard의 managed-only와 panel의 native 읽기 범위를 별도로 명시한다.
-- [ ] 등록 Main, 연결된 subagent, 외부 세션, 다른 repo/host의 기본 visibility를 확정한다.
+- [x] Claude/Codex/Pi/Agy별 launch, observe, subagent, usage, attach, resume, stop 지원 근거를 기록한다.
+- [x] dashboard의 managed-only와 panel의 native 읽기 범위를 별도로 명시한다.
+- [x] 등록 Main, 연결된 subagent, 외부 세션, 다른 repo/host의 기본 visibility를 확정한다.
 - [ ] 기존 S1–S6와 이미 있는 UI/collector를 신규 구현 항목으로 중복 등록하지 않는다.
 
 ### CP-02 — identity·liveness·권한 경계
