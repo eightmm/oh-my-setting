@@ -12,7 +12,11 @@ set -euo pipefail
 # .oms/ci.jsonl so a later session / oms state sees "CI failed on <sha>"
 # instead of the result vanishing after the print. `tick` is the bounded,
 # fail-open session-boundary observer: it skips a completed current SHA and
-# throttles pending lookups instead of polling in the foreground.
+# throttles pending lookups instead of polling in the foreground. `protection`
+# answers the question a quick push hook rests on: is CI's `gate` job a required
+# check on the destination branch? It only reads GitHub, runs only when asked,
+# and has three answers — a lookup that could not read a source is unknown,
+# never absent and never a pass.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
@@ -32,6 +36,7 @@ while [ "$#" -gt 0 ]; do
     record|--record) ACTION="record"; shift ;;
     tick) ACTION="tick"; shift ;;
     history) ACTION="history"; shift ;;
+    protection) ACTION="protection"; shift ;;
     --limit)
       [ "$#" -ge 2 ] || { echo "error: --limit needs a positive integer" >&2; exit 2; }
       limit="$2"
@@ -43,16 +48,26 @@ while [ "$#" -gt 0 ]; do
       cat <<'EOF'
 Usage: ci-status.sh [status|record|tick] [branch]
        ci-status.sh history [--limit N] [branch]
+       ci-status.sh protection [branch]
 
 status  Print the latest CI run and fail on a completed red result (default).
 record  Also append the result to .oms/ci.jsonl and Work Journal.
 tick    Fail-open bounded refresh for prompt/session boundaries. A completed
         current SHA and a recent pending lookup are local no-ops.
 history Show recent completed runs and ranked failing jobs/tests (read-only).
+protection
+        Report whether CI job 'gate' is a required check on the branch
+        (default: the repository's default branch), from branch protection
+        and active rulesets (read-only GET requests; nothing is changed).
+        Exit 0 proven, 1 absent, 2 unknown: a source that could not be read
+        (no gh, no permission, timeout) is unknown, never absent or a pass.
 
 Environment:
   OMS_CI_TICK_INTERVAL  Minimum seconds between unresolved lookups (default 120).
   OMS_CI_TICK_TIMEOUT   Network subprocess budget in seconds (default 2).
+  OMS_CI_PROTECTION_TIMEOUT
+                        Seconds each protection lookup may take, 1..120
+                        (default 10).
 EOF
       exit 0
       ;;
@@ -63,7 +78,9 @@ EOF
       ;;
   esac
 done
-if [ -z "$branch" ]; then
+# `protection` asks about the destination, so its default is the repository's
+# default branch (looked up below), not the checkout's.
+if [ -z "$branch" ] && [ "$ACTION" != protection ]; then
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
 fi
 
@@ -141,6 +158,174 @@ PY
   # network I/O. The next scheduled pass can retry.
   oms_try_file_lock "$marker" ci_tick_locked || true
   exit 0
+fi
+
+if [ "$ACTION" = protection ]; then
+  # Like history, this action has no ledger/journal path: it only reads GitHub.
+  if ! command -v "$GH" >/dev/null 2>&1; then
+    echo "ci-status protection: required check 'gate' unknown (gh CLI not installed)"
+    exit 2
+  fi
+  protection_timeout="${OMS_CI_PROTECTION_TIMEOUT:-10}"
+  case "$protection_timeout" in ""|*[!0-9]*) protection_timeout=10 ;; esac
+  [ "$protection_timeout" -ge 1 ] && [ "$protection_timeout" -le 120 ] || protection_timeout=10
+  OMS_PROTECTION_GH="$GH" OMS_PROTECTION_TIMEOUT="$protection_timeout" python3 - "$branch" <<'PY'
+import json, os, subprocess, sys
+from urllib.parse import quote
+
+CHECK = "gate"
+gh = os.environ["OMS_PROTECTION_GH"]
+timeout = int(os.environ["OMS_PROTECTION_TIMEOUT"])
+
+
+def clean(value, limit=120):
+    text = "".join(ch if ch.isprintable() else "?" for ch in str(value))
+    return text[:limit]
+
+
+def get(path):
+    """One GET. ("ok", body) for a readable answer, ("refused", message, status)
+    for an API error body, ("unread", reason) for everything else. Only fixed
+    reasons leave this function: no header, token or response body is printed."""
+    try:
+        done = subprocess.run(
+            [gh, "api", "--method", "GET", "-H", "Accept: application/vnd.github+json", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            universal_newlines=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return ("unread", "timed out")
+    except OSError:
+        return ("unread", "gh could not run")
+    try:
+        body = json.loads(done.stdout)
+    except ValueError:
+        body = None
+    if done.returncode == 0:
+        return ("ok", body) if body is not None else ("unread", "unreadable answer")
+    if isinstance(body, dict) and isinstance(body.get("message"), str):
+        status = str(body.get("status") or "")
+        return ("refused", body["message"], status if status.isdigit() and len(status) == 3 else "?")
+    return ("unread", "gh not authenticated or unreachable")
+
+
+def unread(answer):
+    if answer[0] == "refused":
+        return "HTTP %s" % answer[2]
+    return answer[1]
+
+
+branch = sys.argv[1]
+if not branch:
+    repo = get("repos/{owner}/{repo}")
+    name = repo[1].get("default_branch") if repo[0] == "ok" and isinstance(repo[1], dict) else None
+    if not isinstance(name, str) or not name:
+        reason = "unreadable answer" if repo[0] == "ok" else unread(repo)
+        print("ci-status protection: required check '%s' unknown (default branch: %s)" % (CHECK, reason))
+        raise SystemExit(2)
+    branch = name
+target = quote(branch, safe="/")
+
+# Each source ends as "read" (it answered, and what it requires is known),
+# "none" (it answered that nothing protects the branch) or a reason it could
+# not be read. Only the first two can support "absent".
+contexts = {"protection": set(), "rulesets": set()}
+state = {}
+reviews, dismiss, force_blocked, force_open = [], [], False, None
+
+classic = get("repos/{owner}/{repo}/branches/%s/protection" % target)
+if classic[0] == "ok" and isinstance(classic[1], dict):
+    state["protection"] = "read"
+    body = classic[1]
+    checks = body.get("required_status_checks")
+    if isinstance(checks, dict):
+        for item in checks.get("contexts") or []:
+            if isinstance(item, str):
+                contexts["protection"].add(item)
+        for item in checks.get("checks") or []:
+            if isinstance(item, dict) and isinstance(item.get("context"), str):
+                contexts["protection"].add(item["context"])
+    review = body.get("required_pull_request_reviews")
+    if isinstance(review, dict):
+        count = review.get("required_approving_review_count")
+        reviews.append(count if type(count) is int and count >= 0 else 0)
+        dismiss.append(review.get("dismiss_stale_reviews") is True)
+    force = body.get("allow_force_pushes")
+    if isinstance(force, dict) and isinstance(force.get("enabled"), bool):
+        force_blocked = force_blocked or not force["enabled"]
+        force_open = force["enabled"]
+elif classic[0] == "ok":
+    state["protection"] = "unreadable answer"
+elif classic[0] == "refused" and classic[1] == "Branch not protected":
+    # Only a caller allowed to read protection gets this exact answer; a plain
+    # 404 or a 403 cannot tell "not protected" from "not allowed to look".
+    state["protection"] = "none"
+    force_open = True
+else:
+    state["protection"] = unread(classic)
+
+rules = get("repos/{owner}/{repo}/rules/branches/%s" % target)
+if rules[0] == "ok" and isinstance(rules[1], list):
+    state["rulesets"] = "read"
+    for rule in rules[1]:
+        if not isinstance(rule, dict):
+            continue
+        kind, parameters = rule.get("type"), rule.get("parameters")
+        parameters = parameters if isinstance(parameters, dict) else {}
+        if kind == "required_status_checks":
+            for item in parameters.get("required_status_checks") or []:
+                if isinstance(item, dict) and isinstance(item.get("context"), str):
+                    contexts["rulesets"].add(item["context"])
+        elif kind == "pull_request":
+            count = parameters.get("required_approving_review_count")
+            reviews.append(count if type(count) is int and count >= 0 else 0)
+            dismiss.append(parameters.get("dismiss_stale_reviews_on_push") is True)
+        elif kind == "non_fast_forward":
+            force_blocked = True
+elif rules[0] == "ok":
+    state["rulesets"] = "unreadable answer"
+else:
+    state["rulesets"] = unread(rules)
+
+labels = (("protection", "branch protection"), ("rulesets", "rulesets"))
+conclusive = all(state[key] in ("read", "none") for key, _ in labels)
+proof = [label for key, label in labels if CHECK in contexts[key]]
+if proof:
+    verdict, code = "proven", 0
+    detail = ", ".join(proof)
+else:
+    verdict, code = ("absent", 1) if conclusive else ("unknown", 2)
+    parts = []
+    for key, label in labels:
+        if state[key] == "read":
+            parts.append("%s: does not require it" % label)
+        elif state[key] == "none":
+            parts.append("%s: not protected" % label)
+        else:
+            parts.append("%s: %s" % (label, state[key]))
+    detail = "; ".join(parts)
+print("ci-status protection [%s]: required check '%s' %s (%s)" % (clean(branch), CHECK, verdict, detail))
+
+# The same answers carry three more facts. A value found in a source that was
+# read stands; "none"/"no"/"allowed" needs every source read.
+if reviews:
+    print("  approving reviews required: %d" % max(reviews))
+else:
+    print("  approving reviews required: %s" % ("none" if conclusive else "unknown"))
+if any(dismiss):
+    print("  stale approvals dismissed: yes")
+else:
+    print("  stale approvals dismissed: %s" % ("no" if conclusive else "unknown"))
+if force_blocked:
+    print("  force pushes: blocked")
+else:
+    print("  force pushes: %s" % ("allowed" if conclusive and force_open is not None else "unknown"))
+if verdict == "absent":
+    print("  a workflow alone does not protect the branch: keep the full pre-push hook until '%s' is required" % CHECK)
+elif verdict == "unknown":
+    print("  unknown is not a pass: nothing here shows the branch is protected")
+raise SystemExit(code)
+PY
+  exit $?
 fi
 
 if [ "$ACTION" = history ]; then

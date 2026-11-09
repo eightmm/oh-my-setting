@@ -1883,7 +1883,15 @@ unavailable-base fallbacks require all native jobs. The install matrix omits nat
 results and accepts only planned skips.
 
 Require it in branch protection before enabling a local quick push hook; having a
-workflow alone does not protect the branch. Deployment via `oms land` verifies the exact
+workflow alone does not protect the branch. `oms ci-status protection [branch]` checks
+that on request: it reads the branch's protection and active rulesets (GET only; the
+default is the repository's default branch) and reports whether `gate` is a required
+check as `proven` (exit 0), `absent` (1) or `unknown` (2), with the required approving
+reviews, stale-approval dismissal and force-push setting from the same answers. A
+source it cannot read — no `gh`, no permission, a timeout — makes the answer `unknown`,
+never `absent` and never a pass. Nothing else runs it, and it changes nothing.
+
+Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
 pushes its SHA, waits for CI success, then updates only to that SHA when a full local

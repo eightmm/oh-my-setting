@@ -19697,6 +19697,92 @@ EOF
   else
     [ "$?" -eq 2 ] || fail "ci-status history missing-gh exit must be 2"
   fi
+
+  # Protection reads whether CI's gate job is a required check on the
+  # destination. It has three answers and one unreadable source makes it
+  # unknown, never absent: proven exits 0, absent 1, unknown 2.
+  local calls="$d/protection-calls" rc
+  cat > "$d/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PROTECTION_CALLS"
+path=""; for path in "$@"; do :; done
+unprotected() { echo '{"message":"Branch not protected","documentation_url":"https://docs.example/x","status":"404"}'; exit 1; }
+case "${PROTECTION_CASE}:$path" in
+  hang:*) exec sleep 30 ;;
+  garbage:*) echo '<html>proxy error</html>'; exit 0 ;;
+  *:'repos/{owner}/{repo}') echo '{"default_branch":"trunk","private":false}' ;;
+  classic-gate:*/protection)
+    echo '{"required_status_checks":{"strict":true,"contexts":["lint"],"checks":[{"context":"gate","app_id":15368}]},"required_pull_request_reviews":{"dismiss_stale_reviews":true,"required_approving_review_count":1},"allow_force_pushes":{"enabled":false}}' ;;
+  classic-other:*/protection)
+    echo '{"required_status_checks":{"strict":false,"contexts":["lint","gateway"],"checks":[{"context":"lint","app_id":15368}]},"allow_force_pushes":{"enabled":true}}' ;;
+  ruleset-gate:*/protection|unprotected:*/protection) unprotected ;;
+  forbidden:*/protection)
+    echo '{"message":"Resource not accessible by fixture-credential-marker","status":"403"}'; exit 1 ;;
+  ruleset-gate:*/rules/branches/*)
+    echo '[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"pull_request","parameters":{"required_approving_review_count":2,"dismiss_stale_reviews_on_push":false}},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"gate","integration_id":15368}]}}]' ;;
+  *:*/rules/branches/*) echo '[]' ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$d/bin/gh"
+  protection() {
+    local mode="$1"; shift
+    rc=0
+    out="$(PROTECTION_CASE="$mode" PROTECTION_CALLS="$calls" OMS_GH_BIN="$d/bin/gh" \
+      OMS_CI_PROTECTION_TIMEOUT=1 "$ROOT/scripts/ci-status.sh" protection "$@" 2>&1)" || rc=$?
+  }
+  : > "$calls"
+  protection classic-gate
+  [ "$rc" -eq 0 ] || fail "a required gate check should exit 0 (rc=$rc): $out"
+  contains "$out" "ci-status protection [trunk]: required check 'gate' proven (branch protection)" ||
+    fail "protection should prove the gate on the default branch: $out"
+  contains "$out" "approving reviews required: 1" && contains "$out" "stale approvals dismissed: yes" &&
+    contains "$out" "force pushes: blocked" || fail "protection missing the review and force-push facts: $out"
+  protection classic-other
+  [ "$rc" -eq 1 ] || fail "protection without the gate should exit 1 (rc=$rc): $out"
+  contains "$out" "required check 'gate' absent (branch protection: does not require it; rulesets: does not require it)" ||
+    fail "a check that merely resembles gate must not count: $out"
+  contains "$out" "approving reviews required: none" && contains "$out" "force pushes: allowed" ||
+    fail "protection without reviews should say so: $out"
+  protection ruleset-gate release/1.x
+  [ "$rc" -eq 0 ] || fail "a ruleset requiring the gate should exit 0 (rc=$rc): $out"
+  contains "$out" "ci-status protection [release/1.x]: required check 'gate' proven (rulesets)" ||
+    fail "an active ruleset should prove the gate: $out"
+  contains "$out" "approving reviews required: 2" && contains "$out" "stale approvals dismissed: no" &&
+    contains "$out" "force pushes: blocked" || fail "ruleset facts missing: $out"
+  protection unprotected main
+  [ "$rc" -eq 1 ] || fail "an unprotected branch should exit 1 (rc=$rc): $out"
+  contains "$out" "required check 'gate' absent (branch protection: not protected; rulesets: does not require it)" ||
+    fail "an unprotected branch with no ruleset is absent: $out"
+  contains "$out" "a workflow alone does not protect the branch" || fail "absent should say what to keep: $out"
+  # No permission to read protection cannot tell "unprotected" from "hidden".
+  protection forbidden main
+  [ "$rc" -eq 2 ] || fail "an unreadable protection answer should exit 2 (rc=$rc): $out"
+  contains "$out" "required check 'gate' unknown (branch protection: HTTP 403; rulesets: does not require it)" ||
+    fail "a refused read is unknown, not absent: $out"
+  contains "$out" "force pushes: unknown" && contains "$out" "unknown is not a pass" ||
+    fail "unknown facts should stay unknown: $out"
+  ! contains "$out" "fixture-credential-marker" && ! contains "$out" "absent" ||
+    fail "protection must not print the API body or read a refusal as absent: $out"
+  protection garbage main
+  [ "$rc" -eq 2 ] || fail "an unreadable answer should exit 2 (rc=$rc): $out"
+  contains "$out" "unknown (branch protection: unreadable answer; rulesets: unreadable answer)" && ! contains "$out" "proxy error" ||
+    fail "a non-JSON answer is unknown and stays unprinted: $out"
+  protection garbage
+  [ "$rc" -eq 2 ] && contains "$out" "required check 'gate' unknown (default branch: unreadable answer)" ||
+    fail "an unreadable default branch is unknown (rc=$rc): $out"
+  protection hang
+  [ "$rc" -eq 2 ] && contains "$out" "required check 'gate' unknown (default branch: timed out)" ||
+    fail "a lookup past its budget is unknown (rc=$rc): $out"
+  # Every request is an explicit GET; nothing else is asked of gh, and no ledger appears.
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 16 ] || fail "unexpected number of protection lookups: $(cat "$calls")"
+  ! grep -Fv -e 'api --method GET -H Accept: application/vnd.github+json repos/{owner}/{repo}' "$calls" ||
+    fail "protection must only issue GET requests for this repository"
+  ! grep -Eq -e '-X|--input|-f |-F |--field' "$calls" || fail "protection must not send request fields"
+  rc=0
+  out="$(OMS_GH_BIN=__oms_absent_gh__ "$ROOT/scripts/ci-status.sh" protection main 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ] && contains "$out" "required check 'gate' unknown (gh CLI not installed)" ||
+    fail "protection without gh is unknown (rc=$rc): $out"
 }
 
 test_install_hooks_writes_pre_push() {
