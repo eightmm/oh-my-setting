@@ -4416,6 +4416,27 @@ test_peer_review_gate_all_pass() {
   assert_file_contains "$project/out" 'claude: pass'
   assert_one_artifact_contains "$artifact_dir" 'antigravity-gate-all-pass-*-r2.md' 'Gate verdict:'
   assert_one_artifact_contains "$artifact_dir" 'claude-gate-all-pass-*-r2.md' 'GATE: pass or GATE: fail.'
+  # The typed outcome row records the debate round each seat was judged in,
+  # and no task id is invented when the caller supplied none.
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "gate debate outcome row lacks real rounds: $(tail -c 1500 "$project/.oms/artifacts/index.jsonl")"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+row = [r for r in rows if r.get("kind") == "review-outcome"][-1]
+assert "task_id" not in row, row
+rounds = {s["provider"]: s["round"] for s in row["review"]["seats"]}
+assert rounds == {"claude": 2, "antigravity": 2}, rounds
+PY
+  rm -rf "$project/.oms/artifacts/index.jsonl"
+  OMS_TASK_ID=known-task HOME="$project/home" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" --artifact-dir "$project/artifacts-task" --providers claude \
+    --no-diff --gate --prompt "Gate with task" >/dev/null ||
+    fail "gate with a task id should pass"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "gate outcome row lacks the caller task id"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+row = [r for r in rows if r.get("kind") == "review-outcome"][-1]
+assert row.get("task_id") == "known-task" and row["review"]["seats"][0]["round"] == 0, row
+PY
 }
 
 test_peer_review_gate_records_typed_outcome() {
@@ -9799,6 +9820,7 @@ intent = [r for r in landings if r['event'] == 'intent'][-1]
 admission = [r for r in index() if r['kind'] == 'patch-admit'][-1]
 landed = [r for r in index() if r['kind'] == 'patch-land'][-1]
 assert 'patch' not in admission and admission['patch_external']['owned'] is False
+assert admission.get('task_id') == 'successor' and landed.get('task_id') == 'successor', (admission, landed)
 assert admission['patch_external']['sha256'] == admission['patch_sha256'] == intent['patch_sha']
 assert 'patch_external' not in landed and (repo / landed['patch']).read_bytes() == (repo / intent['patch']).read_bytes()
 satisfied = {'schema': 1, 'kind': 'satisfied-by', 'plan_id': current['plan_id'], 'task_id': 'original',
@@ -23569,6 +23591,12 @@ test_patch_land_admits_then_applies() {
   grep -Fq landed "$project/file.txt" || fail "patch-land should apply the patch to the tree"
   grep -Fq '"kind": "patch-land"' "$project/.oms/artifacts/index.jsonl" ||
     fail "patch-land should record the land in the artifact index"
+  # A land with no plan task must not invent one.
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "task-less patch-land row must carry no task_id"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+assert all("task_id" not in r for r in rows if r.get("kind") in ("patch-land", "patch-admit")), rows
+PY
 
   # Dirty tree is refused.
   git -C "$project" checkout -q file.txt
