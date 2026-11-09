@@ -1853,6 +1853,8 @@ def panel_status_hint(payload: dict[str, Any], room_id: str) -> str:
 
 
 def panel_main_base(payload: dict[str, Any], room: str) -> str:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from review_backlog import THRESHOLD as wip_limit
     return ("[oms panel] You are a control-tower main. Delegate implementation, investigation and test repair: "
             "oms panel --dispatch ROLE --owner %s%s (worker --purpose implement|investigate|explain, builder, refactorer, "
             "researcher, scholar, reviewer, verifier, security-auditor and the other roles; each picks its capability tier, "
@@ -1880,7 +1882,7 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "For experiments you authorize launches, since paid compute needs the user's authority; "
             "builders write run scripts and configs, a worker with --purpose investigate reports finished outputs "
             "(oms job-digest condenses a training or Slurm log), and you wait on jobs with one background wait or notification, not repeated polls. Dispatch blocks until its worker ends: start every independent ready task (non-overlapping scope) "
-            "in its own concurrent or background call before waiting; review, admit or re-dispatch each completion as it arrives, refill with the next ready task without a wave barrier; a new write dispatch is refused at WIP limit 4 (running+awaiting). "
+            "in its own concurrent or background call before waiting; review, admit or re-dispatch each completion as it arrives, refill with the next ready task without a wave barrier; a new write dispatch is refused at WIP limit %d (running+awaiting). "
             "Send remaining review findings to a worker via --continue. "
             "Land your own work only when publication is authorized: oms scratch-worktree add starts detached; create a "
             "local nontracking branch with git checkout --no-track -b oms/<task>, then commit, rebase on the remote target, "
@@ -1891,7 +1893,7 @@ def panel_main_base(payload: dict[str, Any], room: str) -> str:
             "the concrete blocker and next action. Record plan progress and --finalize results in OMS_ROOM_REPO "
             "even when the implementation ran elsewhere; local completion does not grant publication authority. "
             "To know whether a land is running, use oms land status --repo PATH (active: true) - never pgrep."
-            % (payload_agent(payload), " --room " + room if room else ""))
+            % (payload_agent(payload), " --room " + room if room else "", wip_limit))
 
 
 def cmd_panel_hook(_: argparse.Namespace) -> int:

@@ -3,6 +3,7 @@
 import contextlib
 from collections import Counter
 import hashlib
+import shutil
 import io
 import json
 import os
@@ -835,7 +836,9 @@ def _run_verifier(repo, verify, timeout, evidence_repo=None):
 
 
 def _run_verifier_slotted(repo, verify, timeout, evidence_repo, slot):
-    process = subprocess.Popen(['bash', '-c', verify], cwd=str(repo),
+    # Only a verify holding a fresh pool slot is niced (nice execs bash; signals and exit codes pass through).
+    lower = ['nice', '-n', '10'] if slot and shutil.which('nice') else []
+    process = subprocess.Popen(lower + ['bash', '-c', verify], cwd=str(repo),
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True,
                                env=dict(os.environ, OMS_VERIFY_SLOT_HELD=slot) if slot else None)

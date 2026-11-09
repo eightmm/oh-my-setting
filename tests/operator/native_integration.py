@@ -31,7 +31,7 @@ with patch.object(panel_native, "_claude_supports_name", return_value=False), \
             "investigation patches fail", "a verifier and return contract",
             "finalize findings completed, never accepted",
             "a context apart from the implementer", "without a wave barrier",
-            "WIP limit 4 (running+awaiting)", "--continue", "--salvage",
+            "WIP limit 6 (running+awaiting)", "--continue", "--salvage",
             "Edit directly for admitted-patch integration or conflict resolution",
             "same review gate (oms peer-review --gate --verify)",
             "Serialize shared release bookkeeping", "one background wait or notification, not repeated polls",

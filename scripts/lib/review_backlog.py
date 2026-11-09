@@ -3,7 +3,7 @@
 from dashboard_projection import listing, mapping
 
 # One work-in-progress limit per main: live write workers plus results awaiting decision.
-THRESHOLD = 4
+THRESHOLD = 6
 
 
 def counts(report):

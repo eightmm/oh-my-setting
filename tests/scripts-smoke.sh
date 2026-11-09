@@ -22472,6 +22472,19 @@ test_verify_slots_bound_concurrent_verifies() {
   [ "$out" = 143 ] || fail "interrupted verify should keep its signal exit 143, got $out"
   [ -z "$(ls -A "$slots")" ] || fail "interrupted verify should free its slot"
 
+  # An admitted verify runs 10 nice levels above its caller; exit status and TERM still reach it.
+  if command -v nice >/dev/null 2>&1; then
+    local base="" got=""
+    base="$(nice)"
+    got="$(XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout nice' _ "$lib" 2>/dev/null)"
+    [ "$got" = "$((base + 10 > 19 ? 19 : base + 10))" ] || fail "a slot-admitted verify should run at nice $base+10, got '$got'"
+    out=0
+    XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout bash -c "exit 7"' _ "$lib" >/dev/null 2>&1 || out=$?
+    [ "$out" = 7 ] || fail "niced verify should keep its exit status 7, got $out"
+    XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 bash -c '. "$1"; run_verify_with_timeout bash -c "kill -TERM \$\$; sleep 5"' _ "$lib" >/dev/null 2>&1 || out=$?
+    [ "$out" = 143 ] || fail "niced verify killed by TERM should exit 143, got $out"
+  fi
+
   # A verify that runs a nested verify must not wait on its own slot.
   out="$(XDG_RUNTIME_DIR="$rt" OMS_VERIFY_SLOTS=1 OMS_PEER_VERIFY_TIMEOUT=4s bash -c '. "$1"
     run_verify_with_timeout bash -c ". \"\$1\"; run_verify_with_timeout true; echo inner=\$?" _ "$1"

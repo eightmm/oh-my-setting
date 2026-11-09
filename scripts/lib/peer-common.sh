@@ -1012,7 +1012,12 @@ run_verify_with_timeout() {
   [ -z "$OMS_VERIFY_TRAPS" ] || trap -p INT TERM > "$OMS_VERIFY_TRAPS"
   trap 'oms_verify_slot_signal INT' INT
   trap 'oms_verify_slot_signal TERM' TERM
+  # Only a verify this call admits is niced; a nested one under a held slot already runs niced.
+  local lower=""
+  { [ -n "${OMS_VERIFY_SLOT_HELD:-}" ] && [ -d "$OMS_VERIFY_SLOT_HELD" ]; } || lower=1
   if oms_verify_slot_acquire; then
+    # nice execs its argument: pid, signals and exit status pass through; without nice the command runs unchanged.
+    if [ -n "$lower" ] && command -v nice >/dev/null 2>&1; then set -- nice -n 10 "$@"; fi
     OMS_VERIFY_SLOT_HELD="${OMS_VERIFY_SLOT:-${OMS_VERIFY_SLOT_HELD:-}}" \
       ma_run_bounded "${OMS_PEER_VERIFY_TIMEOUT:-10m}" verify "$@" || rc=$?
   else

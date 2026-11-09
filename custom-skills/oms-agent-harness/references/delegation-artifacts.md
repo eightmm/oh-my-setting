@@ -289,7 +289,7 @@ shared OMS records.
   Dispatch blocks until its worker ends; start each independent ready task in a
   separate concurrent/background call before waiting, then review and refill
   as each completes without a wave barrier. A new write dispatch is refused
-  at the WIP limit 4 (running+awaiting) per main; finalize or `--continue` to drain.
+  at the WIP limit 6 (running+awaiting) per main; finalize or `--continue` to drain.
 - Graph lookup syntax is in [graphs.md](graphs.md); use `oms inbox`,
   `oms panel --results` and `oms room updates` for current state. Resume with
   `oms session-handoff` and `oms agent-memory recall`.

@@ -150,6 +150,7 @@ def main_missing(provider, model=None):
 
 
 def bootstrap(provider, repo):
+    from review_backlog import THRESHOLD
     from terminal_panel import ENTRY
     references = Path(ENTRY).resolve().parents[1] / "custom-skills/oms-agent-harness/references"
     return (
@@ -167,7 +168,7 @@ def bootstrap(provider, repo):
         "Choose roles from source evidence and applicable triggers, not all advisors by default. Scratch stays "
         "outside the repository; investigation patches fail; finalize findings completed, never accepted. Start "
         "every independent non-overlapping ready task concurrently before waiting. Review, admit or re-dispatch "
-        "each completion as it arrives; refill without a wave barrier and obey WIP limit 4 (running+awaiting). "
+        "each completion as it arrives; refill without a wave barrier and obey WIP limit %d (running+awaiting). "
         "Send remaining findings via --continue; salvage stopped write work first with --salvage. Delegate with "
         "oms panel --dispatch ROLE --owner OWNER (ordinary roles use tier routing; see references for "
         "overrides); oms consult, oms peer-delegate and oms peer-review are the explicit cross-provider "
@@ -216,7 +217,7 @@ def bootstrap(provider, repo):
         "at %s: delegation-artifacts.md (panel/continue/salvage/finalize/delivery), roles.md and "
         "model-routing.md (triggers/routes), autonomy-loop.md (campaigns), command-routing.md "
         "(orientation/resume), graphs.md (context), state-memory.md (room), efficient-waiting.md (jobs)."
-    ) % (json.dumps(str(repo)), json.dumps(str(ENTRY)), provider, json.dumps(str(references)))
+    ) % (json.dumps(str(repo)), json.dumps(str(ENTRY)), provider, THRESHOLD, json.dumps(str(references)))
 
 
 def native_command(provider, repo, resume=None, model=None, task=None, room_id=None, member=None, context_file=None,
