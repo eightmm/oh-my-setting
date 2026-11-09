@@ -897,19 +897,29 @@ def membership_epoch(repo, room, who, provider, read_window=None, swapped_to=fro
         if any(r['ts'] <= ended for r in rejoins):
             fail('historical READ crosses recycled room membership')
         return
+    project_chain = swap_chain_projection()
+    chain = project_chain([records], who)
     member = next((m for m in state['participants'] if m['participant'] == who), {})
     if (state['id'] != room or state['closed'] or len(joins) != 1 or leaves or
-            not member.get('joined') or member.get('role') != 'main' or member.get('provider') != provider):
+            not chain or not member.get('joined') or member.get('role') != 'main'
+            or member.get('provider') != chain[1]):
         fail('actual parent room context is unproven or recycled')
     # A main keeps the id of the room it joined after that room rolls over; a close or leave lands in the room
     # it continues as, so the membership must still hold there.
     for later_records, later in successor_rooms(repo, state):
+        carried_joins = [r['room_event'] for r in later_records if r.get('room_event', {}).get('participant') == who
+                         and r['room_event'].get('kind') == 'join']
+        previous = chain[1]
+        chain = project_chain([later_records], who)
         member = next((m for m in later['participants'] if m['participant'] == who), {})
-        if (later['closed'] or not member.get('joined') or member.get('role') != 'main'
-                or member.get('provider') != provider
+        if (later['closed'] or len(carried_joins) != 1 or carried_joins[0].get('role') != 'main'
+                or carried_joins[0].get('provider') != previous or not chain
+                or not member.get('joined') or member.get('role') != 'main' or member.get('provider') != chain[1]
                 or any(r.get('room_event', {}).get('participant') == who and r['room_event'].get('kind') == 'leave'
                        for r in later_records)):
             fail('actual parent room context is unproven or recycled')
+    if chain[1] != provider:
+        fail('actual parent room context is unproven or recycled')
 
 
 def successor_rooms(repo, state):

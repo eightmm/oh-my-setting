@@ -70,6 +70,51 @@ assert saved._patch_line_balance(carriage)["a"][b"after\rpart\n"] == 1
 middle = dict(delta_attempts[0], attempt_id="delta-missing")
 with patch.object(saved, "verified_patch", side_effect=delta_patches):
     assert saved._round_delta(project, [delta_attempts[0], middle, delta_attempts[1]], delta_rows)["since_round"] == 1
+membership_core = runpy.run_path(str(root / "scripts/lib/plan-completion.py"))
+membership_globals = membership_core["membership_epoch"].__globals__
+who = "rollover-main"
+def membership_event(kind, participant=who, **fields):
+    return {"room_event": dict(kind=kind, participant=participant, **fields)}
+def member_state(provider, closed=False, joined=True):
+    return {"id": "room-old", "closed": closed, "participants": [
+        {"participant": who, "joined": joined, "role": "main", "provider": provider}]}
+join_old = membership_event("join", role="main", provider="claude")
+join_new = membership_event("join", role="main", provider="claude")
+swap = membership_event("main-swap", attempt="old-attempt", provider="codex")
+with patch.dict(membership_globals, {"rows": lambda *_: ([join_old], "sha"),
+        "read": lambda *_args, **_kwargs: b"room", "room_records": lambda *_: member_state("claude"),
+        "successor_rooms": lambda *_: [([join_new, swap], member_state("codex"))]}):
+    released = membership_core["swap_released"]("repo", "room-old", who)
+    binding = {"attempt_id": "old-attempt", "provider": "claude", "state": "abandoned",
+               "reason_code": "main_swapped", "refs": {"panel_owner": "claude"}}
+    assert released == {"old-attempt": ("claude", "codex")}
+    assert membership_core["swapped_providers"](released, {"old-attempt": binding}) == {"codex"}
+def check_membership(old, old_provider, later, later_provider, requested, via, accepted, closed=False):
+    successors = [(later, member_state(later_provider, closed=closed))]
+    with patch.dict(membership_globals, {"rows": lambda *_: (old, "sha"),
+            "room_records": lambda *_: member_state(old_provider),
+            "successor_rooms": lambda *_: successors}):
+        try:
+            membership_core["membership_epoch"]("repo", "room-old", who, requested, swapped_to=via)
+        except ValueError:
+            assert not accepted
+        else:
+            assert accepted
+check_membership([join_old], "claude", [join_new, swap], "codex", "codex", {"codex"}, True)
+check_membership([join_old, swap], "codex", [membership_event("join", role="main", provider="codex")],
+                 "codex", "codex", {"codex"}, True)
+check_membership([join_old], "claude", [join_new, swap], "codex", "codex", set(), False)
+check_membership([join_old], "claude", [join_new, swap], "codex", "agy", {"agy"}, False)
+check_membership([join_old], "claude", [membership_event("join", role="main", provider="agy"), swap],
+                 "codex", "codex", {"codex"}, False)
+check_membership([join_old], "claude", [join_new, membership_event("main-swap", participant="other",
+                 attempt="old-attempt", provider="codex")], "claude", "codex", {"codex"}, False)
+check_membership([join_old], "claude", [join_new, swap, membership_event("leave")],
+                 "codex", "codex", {"codex"}, False)
+check_membership([join_old], "claude", [join_new, swap], "codex", "codex", {"codex"}, False, closed=True)
+check_membership([join_old], "claude", [], "claude", "claude", set(), False)
+check_membership([join_old], "claude", [join_new, membership_event("main-swap", attempt=None, provider="codex")],
+                 "codex", "codex", {"codex"}, False)
 # END continuation round delta
 
 # BEGIN continued acceptance regression
