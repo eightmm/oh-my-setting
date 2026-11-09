@@ -92,7 +92,7 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
         if args.command == 'context-inspect':
             from .context_inspect import InspectionError, inspect_files
             try:
-                value = inspect_files(repo, args.manifest, compare=args.compare, limit=args.limit)
+                value = inspect_files(repo, args.manifest, compare=args.compare, limit=args.limit, verify_current=args.verify_current)
             except InspectionError as exc:
                 raise CoreError(str(exc)) from None
             emit(value, args.pretty)

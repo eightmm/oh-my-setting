@@ -1,14 +1,16 @@
 # Saved context inspection
 
 `oms runtime context-inspect` reads an existing OMS context manifest. It does
-not compile a new pack, open the listed source/bundle files, contact a provider,
-write state, or verify current evidence. It is an agent-facing read surface for
+not compile a new pack, open the bundle, contact a provider, or write state.
+By default it does not open listed source files; `--verify-current` reads them
+to compare their full-source digests. It is an agent-facing read surface for
 [NF-03](CONTROL-PLANE-UX-AND-FEATURES.md#nf-03--context-budget-inspector), not a new
 panel or a replacement context compiler.
 
 ```bash
 oms runtime context-inspect .oms/runtime/context/MANIFEST.json --pretty
 oms runtime context-inspect before.json --compare after.json --limit 10 --pretty
+oms runtime context-inspect before.json --verify-current --pretty
 ```
 
 Use the exact `manifest_path` returned by `oms runtime context`, or explicitly
@@ -30,9 +32,11 @@ two truncated selections of the same source need not repeat the same bytes.
 Nothing is removed from a pack automatically.
 
 `validation: recorded-metadata-only`, `sources_current: null` and
-`bundle_verified: false` are intentional. A pack can report `sufficient: true`
-for its original selection while the source tree has subsequently changed.
-This command does not establish freshness, authenticity, approval or acceptance.
+`bundle_verified: false` describe the default. With `--verify-current`,
+`sources_current` counts unchanged, changed, missing and unreadable sources,
+and bounds the changed and missing path lists using `--limit`. This is a
+read-time comparison, not authenticity, approval or acceptance. The flag
+cannot be combined with `--compare`; comparisons do not verify source files.
 The manifest's `reported_sufficient` is preserved under `debt`, not promoted.
 
 The `oms-context-comparison` object reports added/removed selected paths,
@@ -45,16 +49,18 @@ token saving or billing saving is inferred. Existing `experiment compare` and
 
 ## Bounds, authority and compatibility
 
-Only explicitly selected, own-UID, single-link regular files inside the selected
-repository are read. Descriptor-relative opens refuse symlinks in path
+Manifest reads require an own-UID, single-link regular file inside the selected
+repository. Descriptor-relative opens refuse symlinks in path
 components, parent traversal, special files, files over 4 MiB and detected
 in-place changes while reading. A manifest list has at most 4,096 rows and path
 traversal at most 64 components. JSON duplicate keys, non-finite numbers,
-unsupported schema and inconsistent byte/debt data fail closed.
+unsupported schema and inconsistent byte/debt data fail closed. Verified source
+reads also refuse symlinks and special files, cap each file at 2 MiB, and count
+unsafe, oversized or changing files as unreadable.
 
 This first version supports repo-relative source labels. Manifests with external
 or invalid required-path labels are refused rather than normalized into a
-misleading local source. Source paths are identifiers only and are never opened.
+misleading local source. Source paths are opened only with `--verify-current`.
 Unknown additional manifest fields are ignored, not echoed. Display reasons are
 bounded and terminal controls are neutralized; this is not a secret-redaction
 service. Treat metadata names/reasons as private and do not publish them blindly.

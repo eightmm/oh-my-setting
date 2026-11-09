@@ -1,14 +1,17 @@
-"""Bounded, read-only inspection of recorded context manifests, never source files."""
+"""Bounded, read-only inspection of recorded context manifests."""
 from __future__ import annotations
 
 from collections import defaultdict
 import json
+import hashlib
+import errno
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
 import unicodedata
 
+MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_ROWS = 4096
 MAX_NUMBER = (1 << 53) - 1
@@ -38,7 +41,6 @@ def _text(value, name, limit=4096):
 
 def _path(value):
     text = _text(value, "source path")
-    # Paths identify rows only: neither inspection nor comparison opens them.
     if (not text or text != value or "\\" in text or ":" in text or text.startswith("~")
             or PurePosixPath(text).is_absolute() or any(p in ("", ".", "..") for p in text.split("/"))):
         raise InspectionError("invalid context manifest: source path must be a relative label")
@@ -267,8 +269,61 @@ def read_manifest(repo, raw_path):
             os.close(fd)
 
 
-def inspect_files(repo, manifest, *, compare=None, limit=10):
+def _source_status(repo, path, expected):
+    """Hash a bounded regular file without following any path symlinks."""
+    descriptors = []
+    try:
+        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+            return "unreadable"
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        descriptors.append(os.open(Path(repo).resolve(strict=True), flags))
+        parts = path.split("/")
+        for part in parts[:-1]:
+            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=descriptors[-1])
+        descriptors.append(fd)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_SOURCE_BYTES:
+            return "unreadable"
+        digest = hashlib.sha256()
+        remaining = MAX_SOURCE_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if not remaining or any(getattr(before, k) != getattr(after, k) for k in fields):
+            return "unreadable"
+        return "unchanged" if digest.hexdigest() == expected else "changed"
+    except OSError as exc:
+        return "missing" if exc.errno == errno.ENOENT else "unreadable"
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
+
+
+def inspect_files(repo, manifest, *, compare=None, limit=10, verify_current=False):
+    if compare is not None and verify_current:
+        raise InspectionError("--verify-current cannot be combined with --compare")
     left = read_manifest(repo, manifest)
-    if compare is None:
-        return inspect_manifest(left, limit=limit)
-    return compare_manifests(left, read_manifest(repo, compare), limit=limit)
+    if compare is not None:
+        return compare_manifests(left, read_manifest(repo, compare), limit=limit)
+    result = inspect_manifest(left, limit=limit)
+    if verify_current:
+        counts = {key: 0 for key in ("unchanged", "changed", "missing", "unreadable")}
+        paths = {key: [] for key in ("changed", "missing")}
+        for row in sorted(_validated(left)["selected"], key=lambda row: row["path"]):
+            status = _source_status(repo, row["path"], row["sha256"])
+            counts[status] += 1
+            if status in paths:
+                paths[status].append(row["path"])
+        counts.update({key + "_paths": _bounded(value, limit) for key, value in paths.items()})
+        result["sources_current"] = counts
+        result["note"] = ("Not the provider's full context; the bundle was not read. "
+                          "Repeated source hashes do not prove duplicate selected bytes. "
+                          "No token or billing savings are inferred.")
+    return result

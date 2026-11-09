@@ -217,6 +217,31 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(before, tree_bytes(self.repo))
         self.assertEqual(inspector.inspect_files(self.repo, self.file, compare="pack.json")["delta"]["selected_bytes"], 0)
 
+    def test_verify_current_counts_and_bounds_safe_sources(self):
+        data = manifest()
+        data["targets"] = []
+        data["selected"] = [source(name, b"") for name in
+                            ("same", "at-limit", "changed", "missing", "escape/file", "fifo", "large")]
+        data.update(selected_bytes=0, remaining_bytes=1000)
+        self.file.write_text(json.dumps(data))
+        (self.repo / "same").write_bytes(b"")
+        (self.repo / "at-limit").write_bytes(b"xxxx")
+        (self.repo / "changed").write_bytes(b"x")
+        (self.root / "file").write_bytes(b"outside")
+        (self.repo / "escape").symlink_to(self.root, target_is_directory=True)
+        os.mkfifo(self.repo / "fifo")
+        (self.repo / "large").write_bytes(b"x" * 5)
+        with patch.object(inspector, "MAX_SOURCE_BYTES", 4):
+            value = inspector.inspect_files(self.repo, "pack.json", verify_current=True, limit=1)
+        current = value["sources_current"]
+        self.assertEqual([current[k] for k in ("unchanged", "changed", "missing", "unreadable")],
+                         [1, 2, 1, 3])
+        self.assertEqual(current["changed_paths"], {"total": 2, "items": ["at-limit"], "omitted": 1})
+        self.assertEqual(current["missing_paths"]["items"], ["missing"])
+        self.assertNotIn("no source or bundle files were read", value["note"])
+        with self.assertRaises(ERROR):
+            inspector.inspect_files(self.repo, "pack.json", compare="pack.json", verify_current=True)
+
     def test_links_traversal_and_special_files_are_rejected(self):
         (self.repo / "symlink.json").symlink_to(self.file)
         os.link(self.file, self.repo / "hardlink.json")
@@ -284,6 +309,12 @@ if CLI:
                 value = json.loads(one.stdout)
                 self.assertIsNone(value["sources_current"])
                 self.assertFalse(value["bundle_verified"])
+                verified = call("context-inspect", "pack.json", "--verify-current", child=True)
+                self.assertEqual(verified.returncode, 0, verified.stderr)
+                self.assertEqual(json.loads(verified.stdout)["sources_current"]["missing"], 1)
+                conflict = call("context-inspect", "pack.json", "--compare", "pack.json", "--verify-current")
+                self.assertEqual(conflict.returncode, 2)
+                self.assertIn("cannot be combined", conflict.stderr)
                 pair = call("context-inspect", "pack.json", "--compare", "pack.json", "--limit", "1")
                 self.assertEqual(pair.returncode, 0, pair.stderr)
                 self.assertEqual(json.loads(pair.stdout)["delta"]["selected_bytes"], 0)
