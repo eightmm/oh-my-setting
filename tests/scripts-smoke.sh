@@ -14105,6 +14105,7 @@ encoded="$(pwd -P | sed 's/[^A-Za-z0-9]/-/g')"
 {
   printf 'argv: %s\n' "$*"
   printf 'resume-baseline: %s\n' "${OMS_RESUME_USAGE_BASELINE-unset}"
+  printf 'env-names: %s \n' "$(env | cut -d= -f1 | tr '\n' ' ')"
   [ -f "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" ] && printf 'session-in-new-cwd\n'
   printf 'session-body: %s\n' "$(cat "$HOME/.claude/projects/$encoded/$FIXTURE_SESSION.jsonl" 2>/dev/null)"
   cat
@@ -14146,6 +14147,45 @@ EOF
       --resume-session '../x' --prompt p >/dev/null 2>&1; then
     fail "an unsafe session id must be rejected"
   fi
+
+  # Secret guard (opt-in). Off: the worker gets no inline settings and the
+  # owner's environment as before. On: the Read tool is denied the secret
+  # paths the prompt bundle already excludes, and credential-shaped variables
+  # stay with the owner except the provider's login and the names allowed.
+  local forge="GH_TO""KEN" hub="HF_TO""KEN" cloud="AWS_PROFILE" login="ANTHROPIC_API_KEY" deny
+  guard_run() {  # extra environment assignments as arguments
+    env HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+      FIXTURE_LOG="$log" FIXTURE_SESSION="$session" OMS_PANEL_DISPATCH=1 OMS_PANEL_ROLE=worker \
+      "$forge=f" "$hub=h" "$cloud=c" "$login=l" PLAIN_SETTING=1 "$@" \
+      "$ROOT/scripts/peer-delegate.sh" --to claude --repo "$project" \
+      --artifact-dir "$project/artifacts" --no-verify --allow-no-change \
+      --prompt "Secret guard probe" >/dev/null || fail "delegate under the secret guard probe failed ($*)"
+  }
+  guard_run
+  ! grep -q 'permissions' "$log" || fail "an unguarded worker must not receive inline deny settings"
+  for deny in "$forge" "$hub" "$cloud" "$login" PLAIN_SETTING; do
+    grep -q "^env-names: .* $deny " "$log" || fail "an unguarded worker lost $deny"
+  done
+  guard_run OMS_WORKER_SECRET_GUARD=1 OMS_WORKER_ENV_ALLOW="$hub,UNSET_NAME"
+  assert_file_contains "$log" '--settings {"permissions":{"deny":["Read(**/.env*)",'
+  assert_file_contains "$log" '"Read(~/.ss''h/**)","Read(~/.aw''s/**)","Read(~/.config/gh/hosts.yml)"]}}'
+  for deny in "$forge" "$cloud"; do
+    ! grep -q "^env-names: .* $deny " "$log" || fail "a guarded worker still carries $deny"
+  done
+  for deny in "$hub" "$login" PLAIN_SETTING OMS_HARNESS_CHILD; do
+    grep -q "^env-names: .* $deny " "$log" || fail "a guarded worker lost $deny"
+  done
+  # Claude on Bedrock logs in with the cloud's variables; the guard keeps them.
+  guard_run OMS_WORKER_SECRET_GUARD=1 CLAUDE_CODE_USE_BEDROCK=1
+  grep -q "^env-names: .* $cloud " "$log" || fail "a Bedrock worker lost its cloud login variable"
+  ! grep -q "^env-names: .* $forge " "$log" || fail "a guarded Bedrock worker still carries $forge"
+  # Every denied repository pattern is one the prompt bundle already excludes.
+  while IFS= read -r deny; do
+    grep -Fq "':(top,exclude,glob)$deny'" "$ROOT/scripts/lib/peer-common.sh" ||
+      fail "Read deny $deny is not excluded from the prompt bundle"
+  done < <(sed -n "/^MA_SECRET_READ_DENY=(/,/^)/s/^  '\(\*\*\/.*\)'$/\1/p" "$ROOT/scripts/lib/peer-common.sh")
+  [ "$(sed -n "/^MA_SECRET_READ_DENY=(/,/^)/p" "$ROOT/scripts/lib/peer-common.sh" | grep -c "^  '\*\*/")" -ge 10 ] ||
+    fail "the Read deny list was not found"
 
   local projects="$home_dir/.claude/projects" outside="$TMP/delegate-resume-outside"
   mkdir -p "$projects/-newer-worktree"
@@ -16078,6 +16118,12 @@ PY
     fail "a read seat must keep plan files out of the owner's home: $(cat "$home_dir/claude-argv")"
   [ -s "$home_dir/claude-plans" ] || fail 'the stub never saw a plans directory'
   [ ! -e "$(cat "$home_dir/claude-plans")" ] || fail "the seat's plan directory outlived the call"
+  # Opted in, the same inline settings also deny the Read tool the secret paths.
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_WORKER_SECRET_GUARD=1 \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --prompt "Guarded read seat probe" >/dev/null
+  grep -Eq '^\{"plansDirectory":"\.oms/tmp/claude-plans-[0-9a-f]{8}","permissions":\{"deny":\["Read\(\*\*/\.env\*\)",.*\]\}\}$' \
+    "$home_dir/claude-argv" || fail "a guarded read seat must carry the Read deny rules: $(cat "$home_dir/claude-argv")"
 
   # A closing remark must not replace the substantive preceding answer.
   cat > "$project/stream" <<'EOF'

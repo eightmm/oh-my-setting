@@ -950,6 +950,24 @@ ordinary provider/verifier shell can leave a background process. On POSIX,
 `agent-supervisor` owns and closes one process group; a process that deliberately
 starts a new session can escape it. The boundary is not an OS sandbox.
 
+`OMS_WORKER_SECRET_GUARD=1` (off by default) narrows what a provider child is
+handed. A Claude read seat or write worker gets per-call inline settings that
+deny its Read tool the secret paths the prompt bundle already excludes
+(`**/.env*`, `**/.npmrc`, `**/*.pem`, `**/id_rsa*`, the SSH and AWS directories
+under home, and the rest of `MA_SECRET_READ_DENY` in `scripts/lib/peer-common.sh`); the
+person's settings files are not edited. A Claude, Codex or Antigravity child
+also starts without the owner's credential-shaped variables: `AWS_*` and names
+ending in `_TOKEN`, `_SECRET`, `_SECRET_KEY`, `_API_KEY`, `_APIKEY`,
+`_ACCESS_KEY`, `_ACCESS_KEY_ID`, `_PRIVATE_KEY`, `_PASSWORD`, `_PASSWD` or
+`_CREDENTIALS`. Kept are the provider's own login variables (`ANTHROPIC_*` and
+`CLAUDE_*`; `OPENAI_*`, `CODEX_*` and `AZURE_OPENAI_*`; `GEMINI_*`, `GOOGLE_*`
+and `ANTIGRAVITY_*`; `AWS_*` or `GOOGLE_*` for Claude on Bedrock or Vertex),
+every `OMS_*` variable, and the names listed in `OMS_WORKER_ENV_ALLOW` (spaces
+or commas) for a verifier that needs one. Other providers keep their
+environment, because their key can have any name. This is a seatbelt too: a
+deny rule stops the Read tool, not `cat`, `grep -r` or a script the worker runs,
+and Codex and Antigravity get no read rule from it.
+
 Treat a clean worker result as “no monitored repository surface moved,” not
 “the process was harmless.” Stronger guarantees require OS/container isolation.
 The default provider permission profile remains practical rather than strict;
