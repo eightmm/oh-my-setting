@@ -12,6 +12,7 @@ from itertools import chain
 from dashboard_projection import (ELLIPSIS, clean, count, display_width as _display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
 from panel_routing import policy, route_family
+from panel_attention_read import is_unread
 from call_ending import LIVE_STATES, call_ending
 
 
@@ -1103,7 +1104,8 @@ def attention_items(report, unicode=True):
         for item in group:
             if item["row_id"] not in seen:
                 seen.add(item["row_id"])
-                ranked.append(dict(item, age=age_label(item["stamp"]) if kind == "decide" and item["stamp"] else ""))
+                ranked.append(dict(item, age=age_label(item["stamp"]) if kind == "decide" and item["stamp"] else "",
+                                   unread=is_unread(report, item)))
     return ranked
 
 
@@ -1111,12 +1113,13 @@ def attention_header(ranked, width, unicode):
     """`Attention N · 1 needs you · 2 failed`, zero classes dropped; narrower widths shorten the class words."""
     sep = " · " if unicode else " / "
     counts = [(sum(item["cls"] == kind for item in ranked), tag, short) for kind, tag, short, unused in ATTENTION_CLASSES]
+    new = sum(item.get("unread", True) for item in ranked)
     for form in ("tag", "short", None):
-        text = "Attention %s" % len(ranked) + "".join(
+        text = "Attention %s" % (len(ranked) if new == len(ranked) else "%d new / %d waiting" % (new, len(ranked))) + "".join(
             sep + "%s %s" % (n, tag if form == "tag" else short) for n, tag, short in counts if n and form)
         if display_width(text) <= width:
             return text
-    return clipped("Attn %s" % len(ranked), width)
+    return clipped("Attn %s" % (len(ranked) if new == len(ranked) else "%d/%d" % (new, len(ranked))), width)
 
 
 def attention_summary(report, ranked=None):
@@ -1244,7 +1247,7 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     for row_id, item, values in zip(row_ids[start:start + capacity], window, inbox_plan["rows"]):
         text, _ = format_tail_row([], ("%s %s%s" % (item["glyph"], item["who"],
                                   sep + item["what"] if item["what"] else ""), item["style"]), values, inbox_plan)
-        body.append((text, item["style"], item["action"], row_id))
+        body.append((text, item["style"] if is_unread(report, item) else "dim", item["action"], row_id))
     more = len(shown) - len(window) + hidden
     if shown and more and available > len(window):
         body.append(("+%s more%s" % (more, sep + "arrows, wheel or page keys" if len(shown) > len(window) else ""), "dim", None))
@@ -1253,7 +1256,9 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         lines.append(clipped(text, width))
         lines[-1] = (PALETTE[style] + lines[-1] + "\033[0m") if color else lines[-1]
     if boxed:
-        title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens" if items and not navigation.get("line_input") else "")
+        new = sum(is_unread(report, item) for item in items)
+        title = "Needs you" + (sep + ("%s" % len(items) if new == len(items) else "%d new / %d waiting" % (new, len(items)))
+                               if items else "") + (sep + "Up/Down, Enter opens" if items and not navigation.get("line_input") else "")
         lines.append((PALETTE["alert" if items else "dim"] if color else "") + box_edge(title, width, unicode) + ("\033[0m" if color else ""))
     for entry in body:
         text, style, action = entry[:3]

@@ -320,7 +320,9 @@ def attention_bell(known, report, key, stale=False):
     from panel_view import attention_items
     if stale or mapping(report.get("collection")).get("ok") is not True or mapping(report.get("room")).get("error"):
         return False, known
-    current = frozenset(item["row_id"] for item in attention_items(report, False) if item["cls"] in BELL_CLASSES)
+    # A row the person already read stays quiet; a row that moved to another class is unread again and rings.
+    current = frozenset(item["row_id"] for item in attention_items(report, False)
+                        if item["cls"] in BELL_CLASSES and item["unread"])
     import panel_health
     # An opt-in quota line the reported window just crossed rings like a new item, once per window.
     current |= frozenset(ident for ident, unused in panel_health.quota_warnings(report))
@@ -616,6 +618,19 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     def close_detail():
         navigation.pop("detail", None)
         navigation.pop("transcript_back", None)
+
+    def apply_read():
+        """Record the Attention rows just opened or marked read and show them read at once."""
+        nonlocal board
+        wanted = navigation.pop("read_request", None)
+        if wanted:
+            import panel_attention_read
+            read = panel_attention_read.mark(repo, os.environ.get("OMS_ROOM_ID", ""), board, list(wanted.items()))
+            if read is None:
+                navigation["notice"] = "Read state not saved"
+            else:
+                state["attention_read"] = read
+                board = freeze_report(state)
 
     def interrupted(number, unused):
         from terminal_panel import NativeShutdown
@@ -923,6 +938,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         elif event[0] == "escape" and navigation.get("health_view"):
                             navigation["health_view"] = False
                         elif tab_event(event, navigation):
+                            apply_read()
                             if navigation.get("finalize_call"):
                                 inputs.__exit__(None, None, None)
                                 try:
@@ -1045,6 +1061,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                                         navigate(repo, action, state, navigation, size.columns)
                                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                                     navigation["notice"] = clean(str(error), 160)
+                        apply_read()
                         size = redraw()
                         if event[0] in {"g", "t", "v", "b", "k", "escape", "?", "u", "repaint"}:
                             # Even an empty/loading hit map becomes invalid after a mode change.

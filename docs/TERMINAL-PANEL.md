@@ -2431,6 +2431,20 @@ such as `oms my-project: 1 new (1 failed), 3 waiting`; it never carries a label,
 prompt, command, path or message text, and control characters are removed. It is off
 by default and any other value is ignored.
 
+Each Attention item is unread until you look at it. Opening a row of the Attention tab
+(Enter, a click or `f`) or a row of the control window's Needs-you list marks it read;
+in the Attention tab `r` marks every row read and `l` moves the selection to the
+newest unread row. A read row is dimmed, and the Attention header and the Needs-you
+title read `2 new / 5 waiting` once any row is read; the tmux counts option keeps the
+totals. The bell, notifier and OSC notice fire only for rows that are new to the board
+and unread, so a read row that leaves the queue and returns stays quiet, while a row
+that moves to another attention class is unread again. The read marks live per room in
+`.oms/artifacts/panel-attention-read.json` (under a lock; hashed row ids, the class
+word and a time, at most 100 ids per room and 8 rooms, rows no longer in the report
+dropped), so they survive a restart or room switch. Reading is presentation only: it
+never approves, answers, dismisses or changes a call, and the attention-only filter
+(`b`) still shows read rows. No color means no dimming; the counts line still shows.
+
 ### Reader-facing status labels
 
 Board text is written for

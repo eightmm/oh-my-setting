@@ -5699,6 +5699,16 @@ exercise_exited_main_mail()
 nav = {}
 inbox = render(inbox_room, "codex", 100, 28, menu=True, navigation=nav)
 assert "Needs you" in inbox and "Nothing needs you" not in inbox and "Press 1" not in inbox and "START" not in inbox, inbox
+# A read row is dimmed and counted in the title; nothing moves, and no state leaves every row unread.
+import panel_attention_read
+read_items = inbox_items(inbox_room, False)
+read_state = {panel_attention_read.row_key(read_items[0]["row_id"]): read_items[0]["cls"]}
+unread_screen = render(inbox_room, "codex", 100, 28, menu=True, color=True, navigation={})
+read_screen = render(dict(inbox_room, attention_read=read_state), "codex", 100, 28, menu=True, color=True, navigation={})
+read_plain = render(dict(inbox_room, attention_read=read_state), "codex", 100, 28, menu=True, navigation={})
+plain_screen = render(inbox_room, "codex", 100, 28, menu=True, navigation={})
+assert "new /" not in plain_screen and "%d new / %d waiting" % (len(read_items) - 1, len(read_items)) in read_plain, read_plain
+assert unread_screen != read_screen and len(read_plain.splitlines()) == len(plain_screen.splitlines())
 from review_backlog import counts as backlog_counts, project as backlog_project, warning as backlog_warning
 decision_fixture = deepcopy(inbox_room)
 decision_fixture["awaiting_admission"] = []

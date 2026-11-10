@@ -166,6 +166,8 @@ def _show_state(repo, main_attempt=None, navigation=None, cache=None):
         from panel_metrics import collect
         if state.get("room", {}).get("participants"):
             state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
+        import panel_attention_read
+        state = dict(state, attention_read=panel_attention_read.load(repo, os.environ.get("OMS_ROOM_ID", "")))
         if cache is not None:
             cache.update(state=state, status=status)
     return state, status

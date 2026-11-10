@@ -831,6 +831,9 @@ def tab_event(event, navigation):
         from room_view import plan_event
         if plan_event(event, navigation):
             return True
+    if tab == "needs" and kind in {"r", "l"}:
+        from room_view import attention_read_event
+        return attention_read_event(event, navigation)
     if tab in {"past", "needs"} and kind != "q" and inside:
         from room_view import past_event
         return past_event(event, navigation, tab)

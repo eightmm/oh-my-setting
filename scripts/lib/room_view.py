@@ -1831,7 +1831,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             elif active == "needs" and len(row) > 3:
                 item = next((item for item in attention if item["row_id"] == row[3]), None)
                 if item:
-                    line = line.replace(text, paint(text, item["style"], color=color, colors=colors, light=light), 1)
+                    line = line.replace(text, paint(text, item["style"] if item.get("unread", True) else "dim", color=color, colors=colors, light=light), 1)
             lines.append(line)
             if target:
                 # Body text without its own link is passive, so a click that selects text changes nothing.
@@ -2081,6 +2081,10 @@ def attention_body(ranked, width, capacity, navigation, unicode):
                   "needs": "answer request", "stale": "release or continue task", "mail": "read message", "info": "check delivery"}
     lines = []
     navigation["needs_finalize"] = {}
+    navigation["needs_classes"] = {item["row_id"]: item["cls"] for item in ranked}
+    # Newest unread row that can be selected (undated rows rank last); the `l` key moves to it.
+    navigation["needs_latest"] = max(((item["stamp"], -n, item["row_id"]) for n, item in enumerate(ranked)
+                                      if item.get("unread", True) and item.get("action")), default=(0, 0, None))[2]
     for item in ranked:
         kind = "pending admission" if item["cls"] == "decide" and item["what"].startswith("patch awaits admission") else names.get(item["cls"], item["cls"].replace("_", " "))
         task = item.get("task") or (item["row_id"][1] if item["row_id"][0] == "task" else None)
@@ -2109,6 +2113,22 @@ def attention_body(ranked, width, capacity, navigation, unicode):
     title = attention_header(ranked, width, unicode)
     rows = [(clipped(title + sep + "Enter finalize", width), None, False)] if header else []
     return rows + [(text, target, key is not None and key == pick, key) for text, target, key in lines[first:first + page]]
+
+
+def attention_read_event(event, navigation):
+    """`r` marks every row of the Attention list read; `l` moves the selection to the newest unread row.
+
+    Presentation only: neither key answers, approves, dismisses or changes a call."""
+    if event[0] == "r":
+        navigation["read_request"] = dict(navigation.get("needs_classes", {}))
+        return True
+    latest, keys = navigation.get("needs_latest"), navigation.get("needs_keys", [])
+    if latest in keys:
+        navigation["selected"], navigation["needs_pick"] = navigation["needs_ids"][keys.index(latest)], latest
+        navigation.setdefault("needs_view", {})["reveal"] = True
+    else:
+        navigation["notice"] = "No unread items"
+    return True
 
 
 def past_pick(navigation, tab):
@@ -2160,6 +2180,11 @@ def past_event(event, navigation, tab="past"):
         navigation["selected"] = target
         view["reveal"] = True
         return True
+    if tab == "needs":
+        # Opening a row reads it; the watcher records that after the event.
+        row = navigation.get("needs_pick") if kind == "click" else pick
+        if row in navigation.get("needs_classes", {}):
+            navigation.setdefault("read_request", {})[row] = navigation["needs_classes"][row]
     if tab == "needs" and kind in {"enter", "click"}:
         navigation.pop("finalize_call", None)
         key = navigation.get("needs_pick") if kind == "click" else pick
@@ -2309,6 +2334,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 panel_hint('n_new_main') if managed and not navigation.get("main_occupied") else "",
                 panel_hint('s_swap_main') if managed and navigation.get("main_occupied") else "",
                 panel_hint('v_collapse' if navigation.get('expanded') else 'v_expand'), panel_hint('b_attention'),
+                panel_hint('r_read_all') if tabs and navigation.get("tab") == "needs" else "",
+                panel_hint('l_latest_unread') if tabs and navigation.get("tab") == "needs" else "",
                 panel_hint('shift_drag_copy') if managed else "", panel_hint('m_modes') if managed else "",
                 toggle if managed else panel_hint('q_quit'), panel_hint('f12_keys') if managed else ""]
         lines = [""]
@@ -2330,7 +2357,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   else [panel_hint('tab_next_tab')] if tab == "debate"
                   else [panel_hint('call', unicode), panel_hint('enter_finalize') if tab == "needs" and past_pick(navigation, "needs") in navigation.get("needs_finalize", {}) else
                         panel_hint('enter_expand') if kind == "past-group" else panel_hint('enter_plan') if kind == "tab" else panel_hint('enter_detail'),
-                        (panel_hint('f_open_right') if managed else panel_hint('f_full_result')) if (tab == "past" and kind != "past-group") or kind in {"result", "debate"} else ""]
+                        (panel_hint('f_open_right') if managed else panel_hint('f_full_result')) if (tab == "past" and kind != "past-group") or kind in {"result", "debate"} else "",
+                        panel_hint('r_read_all') if tab == "needs" else "", panel_hint('l_latest_unread') if tab == "needs" else ""]
                   if tab in {"past", "needs"}
                   else ([panel_hint('enter_collapse') if navigation.get("plan_closed") else panel_hint('enter_expand')] if navigation.get("plan_pick") == ("plan-closed", "toggle") else []) +
                        [panel_hint('task', unicode), panel_hint('wheel_scroll'), panel_hint('tab_next_tab')] if tab == "plan" else None)

@@ -620,6 +620,12 @@ def read_choice(repo, provider, previous, view, attention_only, navigation, cach
                     continue  # Ignored input; repainting would only flicker text the person is selecting.
                 action = choose(event, navigation)
                 if action:
+                    if navigation.get("surface") == "inbox" and navigation.get("selected_row") and "state" in cache:
+                        import panel_attention_read
+                        read = panel_attention_read.mark_open(repo, os.environ.get("OMS_ROOM_ID", ""), cache["state"],
+                                                              navigation["selected_row"][0])
+                        if read is not None:
+                            cache["state"] = dict(cache["state"], attention_read=read)
                     navigation.pop("transcript_back", None)
                     width = max(1, shutil.get_terminal_size().columns)
                     navigate(repo, action, cache.get("state", {}), navigation, width)

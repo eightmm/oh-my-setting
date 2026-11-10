@@ -50,6 +50,8 @@ PANEL_KEYS = (
     ('m', 'Modes', ('board',), 'm_modes'),
     ('n', 'New main', ('board',), 'n_new_main'),
     ('q', 'Quit', ('board',), 'q_quit'),
+    ('r', 'Read all', ('board',), 'r_read_all'),
+    ('l', 'Latest unread', ('board',), 'l_latest_unread'),
     ('s', 'Swap main', ('board',), 's_swap_main'),
     ('t', 'Tree', ('board',), 't_tree'),
     ('u', 'Refresh', ('board',), 'u_refresh'),
