@@ -24707,6 +24707,25 @@ assert trace["policy"] == "budget" and trace["samples"] == 0, trace
 assert len(trace["steps"]) == 2 and trace["steps"][-1]["verify"] == 0, trace
 PY
 
+  # A failed recorded check prints the same brief one effort step higher; it is
+  # a suggestion, so the provider is called exactly once.
+  # Only a call that carries a brief counts; capability probes also hit the stub.
+  printf '#!/usr/bin/env bash\np="$(cat)"\n[ -n "$p" ] || exit 0\nprintf "broken\\n" > delegated.txt\necho x >> "%s/escalate.calls"\n' "$project" > "$bin_dir/codex"
+  rc=0
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$artifact_dir" --model fixture-model --reasoning-effort low \
+    --verify "grep -q fixed delegated.txt" --prompt 'Escalate hint' \
+    >"$project/escalate.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "failed verify should exit 1, got $rc: $(cat "$project/escalate.out")"
+  assert_file_contains "$project/escalate.out" 'escalate: verify exit 1 at effort=low; suggested re-run (--reasoning-effort medium, not run): oms peer-delegate --to codex'
+  assert_file_contains "$project/escalate.out" "--prompt 'Escalate hint'"
+  [ "$(wc -l < "$project/escalate.calls" | tr -d ' ')" = 1 ] || fail "escalation hint must not re-run the worker: $(cat "$project/escalate.calls" 2>&1)"
+  python3 "$ROOT/scripts/lib/effort_ladder.py" --effort max --scale 'low max' --workload routine -- --to codex --workload routine |
+    grep -Fxq -- 'oms peer-delegate --to codex --workload standard' || fail "top of effort scale should step to the standard workload"
+  [ "$(python3 "$ROOT/scripts/lib/effort_ladder.py" --effort max --scale 'low max' -- --to codex)" = top ] ||
+    fail "top of the ladder must print no step"
+
   # A repair can finish successfully without producing a patch. Classify the
   # final capture, and require explicit opt-in for that result to exit zero.
   cat > "$bin_dir/codex" <<'EOF'

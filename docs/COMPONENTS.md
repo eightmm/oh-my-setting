@@ -992,6 +992,14 @@ full-suite fallback or no-verify override; choose an explicit command when
 Read-only reports do not auto-run tests. Missing or blocked providers skip
 verification with a non-success result, rather than test unchanged code.
 
+When the recorded `--verify` check fails (worker exit 0, verify non-zero other
+than the 125 boundary stop), the result prints an `escalate:` line with the exact
+command to run the same brief one `--reasoning-effort` step higher, limited to
+what the selected model accepts; at the top of that scale a `--workload routine`
+call steps to `standard`, and an exact `--model` stops there. It is a printed
+suggestion with its reason and is never run. The ladder lives in
+`scripts/lib/effort_ladder.py` so other verbs can share it.
+
 With `--repair 2|3`, compact candidate/diagnostic hashes and exit codes go into
 the existing artifact-index `repair_replay` field. Replay compares the requested
 budget with stopping consecutive identical failures; single-repair runs skip
