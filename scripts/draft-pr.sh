@@ -12,6 +12,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT/scripts/lib/file-lock.sh"
 
+# Read-only follow-up on a published intent (GET only): it needs neither the
+# publisher's supervisor nor its locks. The action is the last word, as for
+# prepare and publish, so a branch or path that happens to carry the same
+# name is never mistaken for it.
+if [ "$#" -gt 0 ]; then
+  case "${!#}" in
+    comments|merged) exec python3 "$ROOT/scripts/lib/draft_pr_followup.py" "$@" ;;
+  esac
+fi
+
 # Cancellation is an authority boundary too: a targeted TERM/HUP/INT to the
 # publisher must not return while a verifier, Git transport, push, or gh child
 # keeps running with the parent's credentials. The small outer shell waits on
@@ -87,11 +97,23 @@ usage() {
   cat <<'EOF'
 Usage: draft-pr.sh [options] prepare
        draft-pr.sh --repo PATH --intent FILE publish
+       draft-pr.sh --repo PATH --intent FILE [--json] comments
+       draft-pr.sh --repo PATH --intent FILE [--json] merged
 
 Prepare and publish exactly one clean commit as a new GitHub branch and Draft
 PR. `prepare` runs the verifier and writes an immutable local intent;
 `publish` rechecks it, creates the branch only if absent, and creates or
 recovers the exact Draft PR.
+
+`comments` and `merged` only read a published intent's PR (GET requests).
+`comments` stores the PR's review comments as an untrusted evidence packet
+under .oms/artifacts/pr-comments and prints a fix-brief draft; a comment made
+on a commit that is no longer the PR head is `outdated`. `merged` records
+whether a person merged the PR, whether the merged tree is the tree the
+intent froze (same-tree, changed-after-review or unknown) and what CI
+reported for the merge commit; it exits 0 only for same-tree with green CI,
+1 otherwise, and 3 when GitHub could not be read. Neither posts, resolves,
+reverts or dispatches anything.
 
   --repo PATH       Git repository (default: current directory).
   --remote NAME     GitHub remote (default: origin).
