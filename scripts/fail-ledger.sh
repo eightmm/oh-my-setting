@@ -185,8 +185,11 @@ advise_hint_if_repeated() {
 # cherry-pick or stash pop stopped on a conflict), and "contract:<reason>" for
 # the first changed path (vs the upstream merge-base, else HEAD; untracked
 # included) that the gate's own critical-path list names. No second list.
+# Repository config that these reads would run (fsmonitor, filter drivers,
+# includes) yields no signals: the hints are advisory and must never execute it.
 advise_signals() {
   local base path reason
+  oms_git_assert_safe_execution_config "$STATE_ROOT" diff-read >/dev/null 2>&1 || return 0
   if git -C "$STATE_ROOT" ls-files -u 2>/dev/null | grep -q .; then
     echo conflict
   fi
