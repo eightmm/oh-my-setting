@@ -1351,6 +1351,17 @@ finding that a later run reports again reads `open`. Every status is a record
 of what was said, never approval or verification evidence, and a refused
 action exits 2.
 
+`oms peer-review --gate --confirm PROVIDER` adds one read-only call after the
+seats: the blocking findings that exactly one seat reported (and that PROVIDER
+did not report itself; at most twenty) go to PROVIDER, which answers one label
+per ID: `confirmed`, `refuted` or `unverified`. Name a provider from a different
+model family than the reporting seat. The labels are appended to
+`_finding-events.jsonl` as `review-finding-confirmation` rows and shown by
+`findings list` and `findings show`; an unanswered or unverified finding is
+kept and reads `unconfirmed`. A label is one more reader's opinion on a
+citation: the GATE verdict, the exit code and the finding's status do not move,
+and a failed confirm call is a warning. It is off unless asked for.
+
 ### Acceptance freshness and reuse
 
 Acceptance stays fresh by default. An explicit `- Acceptance reuse: same-run`

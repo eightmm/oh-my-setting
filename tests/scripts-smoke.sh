@@ -4709,6 +4709,52 @@ EOF
   "$review" findings show "$fixed_id" "${where[@]}" > "$TMP/findings-show"
   assert_file_contains "$TMP/findings-show" "$fixed_id  open  [reported again in run"
   assert_file_contains "$TMP/findings-show" '-> verified verify=sha256:'
+
+  # --confirm puts what one seat alone called blocking to a second provider
+  # for a label per id. The labels are recorded and shown; the verdict, the
+  # status and the unanswered finding all stay as they were.
+  cat > "$found/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '```findings\n'
+printf '%s\n' '{"file": "file.txt", "line": 2, "summary": "Second opinion wanted", "quote": "reviewed change"}'
+printf '%s\n' '{"file": "file.txt", "line": 1, "summary": "Nobody answers this one"}'
+printf '%s\n' '{"file": "steady.txt", "line": 2, "severity": "advisory", "summary": "Advisory stays out"}'
+printf '```\nGATE: fail\n'
+EOF
+  cat > "$found/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+# Label the finding whose line says "Second opinion wanted"; say nothing usable about the other.
+prompt="$(cat; printf '%s\n' "$@")"
+id="$(printf '%s\n' "$prompt" | sed -n 's/^\[\(f-[0-9a-f]\{12\}\)\] .*Second opinion wanted.*/\1/p' | head -n 1)"
+other="$(printf '%s\n' "$prompt" | sed -n 's/^\[\(f-[0-9a-f]\{12\}\)\] .*Nobody answers.*/\1/p' | head -n 1)"
+printf '%s: confirmed - file.txt:2 really is wrong\n' "$id"
+printf '[%s] confirmed is not an answer line\n' "$other"
+printf 'f-000000000000: refuted - an id that was never sent\n'
+EOF
+  chmod +x "$found/bin/codex"
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --no-verify --confirm codex --prompt "Confirm pass" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "a confirm pass must leave the gate exit alone, got $rc: $(cat "$TMP/findings-out")"
+  assert_file_contains "$TMP/findings-out" 'confirm: 2 single-seat blocking finding(s) put to codex: 1 confirmed, 0 refuted, 1 unverified'
+  assert_file_contains "$TMP/findings-out" 'the GATE verdict and finding status are unchanged'
+  "$review" findings list "${where[@]}" > "$TMP/findings-list"
+  assert_file_contains "$TMP/findings-list" 'Second opinion wanted  [confirmed by codex]'
+  assert_file_contains "$TMP/findings-list" 'Nobody answers this one  [unconfirmed by codex]'
+  ! grep -q 'Advisory stays out.*codex' "$TMP/findings-list" || fail "an advisory finding is not put to the confirming seat"
+  grep -q 'open .*Second opinion wanted' "$TMP/findings-list" || fail "a label must not change a finding's status"
+  "$review" findings show "$(awk '/Second opinion wanted/{print $1}' "$TMP/findings-list")" "${where[@]}" > "$TMP/findings-show"
+  assert_file_contains "$TMP/findings-show" 'confirmed by codex: file.txt:2 really is wrong'
+  # The reporter is not its own second opinion, and the flag is gate-only.
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --no-verify --confirm claude --prompt "Self confirm" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "self-confirm run should keep the gate exit, got $rc"
+  assert_file_contains "$TMP/findings-out" 'confirm: no single-seat blocking finding to put to claude'
+  ! HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --confirm codex --prompt "No gate" > "$TMP/findings-out" 2>&1 || fail "--confirm without --gate must be refused"
+  assert_file_contains "$TMP/findings-out" '--confirm requires --gate'
 }
 
 test_prompt_takers_refuse_a_mistyped_option() {
