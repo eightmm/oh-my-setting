@@ -43,6 +43,7 @@ SECURITY_ONLY=0
 EXTENSIONS_ONLY=0
 MCP_PINS_ONLY=0
 MCP_PIN_RECORD=0
+PROVIDERS_ONLY=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
@@ -81,6 +82,7 @@ Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--no-model-doctor] [-h|--help]
        doctor.sh --extensions [--repo PATH] [--json]
        doctor.sh --mcp [--pin] [--repo PATH] [--json]
+       doctor.sh --providers [--json]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
 from this checkout for a legacy install without a receipt. The local model
@@ -147,6 +149,10 @@ with a hash recorded in a private pin file, reporting new, changed and removed
 servers, unpinned npx/bunx/uvx packages and plain http to a non-loopback host.
 Nothing is written unless you add --pin, which records the current servers as
 your approval. No server starts and tool descriptions are not fetched.
+--providers is a standalone read-only matrix of what OMS supports per provider
+and per function (launch, worker call, observe, resume, send, stop, approval,
+usage, handoff), read from config/provider-capabilities.json; fixture means not
+verified against a live CLI. Nothing runs and nothing is contacted.
 
 --repo selects the project whose .oms state is inspected without changing
 install ownership. --json returns the same verdict as a bounded structured
@@ -171,6 +177,7 @@ while [ "$#" -gt 0 ]; do
     --extensions) EXTENSIONS_ONLY=1; shift ;;
     --mcp) MCP_PINS_ONLY=1; shift ;;
     --pin) MCP_PIN_RECORD=1; shift ;;
+    --providers) PROVIDERS_ONLY=1; shift ;;
     --json) REPORT_JSON=1; shift ;;
     --remediation-plan) REPORT_PLAN=1; shift ;;
     --repair) REPAIR=1; FORWARD_ARGS+=(--repair); shift ;;
@@ -216,6 +223,20 @@ if ! REPORT_REPO="$(cd "$REPORT_REPO" 2>/dev/null && pwd -P)"; then
 fi
 OMS_DOCTOR_PROJECT_DIR="$REPORT_REPO"
 export OMS_DOCTOR_PROJECT_DIR
+
+# --providers reads one data table; it needs no repository, probe or lock.
+if [ "$PROVIDERS_ONLY" = 1 ]; then
+  if [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] ||
+     [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ] || [ "$SECURITY_ONLY" = 1 ] ||
+     [ "$EXTENSIONS_ONLY" = 1 ] || [ "$MCP_PINS_ONLY" = 1 ] || [ "$MCP_PIN_RECORD" = 1 ]; then
+    echo "error: --providers is a standalone read-only report; only --json goes with it" >&2
+    exit 2
+  fi
+  command -v python3 >/dev/null 2>&1 || { echo "error: --providers needs python3" >&2; exit 2; }
+  provider_args=()
+  [ "$REPORT_JSON" = 0 ] || provider_args+=(--json)
+  exec python3 -I "$ROOT/scripts/lib/doctor-providers.py" ${provider_args[@]+"${provider_args[@]}"}
+fi
 
 # --extensions is its own read-only report and shares no state with a health
 # pass: it leaves before any probe, lock or delegation.

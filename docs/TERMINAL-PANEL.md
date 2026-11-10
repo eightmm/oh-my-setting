@@ -859,6 +859,11 @@ shrink as new artifact records arrive.
 
 #### Provider coverage
 
+The machine-checked source for provider support is `config/provider-capabilities.json`,
+shown by `oms doctor --providers`; its evidence names are verified by
+`tests/provider-registry-smoke.sh`. Where this table and that file disagree, the file
+wins; this table keeps the panel-specific detail below.
+
 Static reading of the code and fixture tests; no live-native verification. Every
 "fixture" test uses fake native files or a fake tmux, so each cell is fixture-only or untested.
 `impl` = implemented, `part` = partial, `unsup` = unsupported. Anchors are `panel_native.py`
