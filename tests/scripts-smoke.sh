@@ -17820,6 +17820,13 @@ EOF
   HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/clean" 2>&1 ||
     fail "a clean install should pass the doctor: $(cat "$home_dir/clean")"
   assert_file_contains "$home_dir/clean" "no skills installed under a superseded name"
+  # The doctor totals what a session carries before any task: the global rules
+  # plus one listing description per catalog skill, never a skill body.
+  local rules_bytes described
+  rules_bytes="$(wc -c < "$ROOT/rules/global-AGENTS.md" | tr -d ' ')"
+  described="$(find "$ROOT/custom-skills" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l | tr -d ' ')"
+  grep -Eq "^note: always-loaded OMS text is [0-9]+ bytes: global rules $rules_bytes \+ $described skill description\(s\) [0-9]+ \(longest oms-[a-z-]+, [0-9]+\)\$" \
+    "$home_dir/clean" || fail "skill-doctor did not total the always-loaded text: $(cat "$home_dir/clean")"
 }
 
 test_skill_doctor_checks_agy_loaded_skills() {
