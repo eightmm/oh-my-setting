@@ -796,6 +796,12 @@ test_apply_ml_scaffolds_docs() {
   for doc in SETUP DATA MODEL TRAINING EVALUATION EXPERIMENTS CHECKPOINTS LOGGING BENCHMARKS REPRODUCIBILITY CONFIGS CHANGELOG DEBUGGING; do
     [ -f "$full/docs/$doc.md" ] || fail "full ml doc not scaffolded: $doc.md"
   done
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "Default checkpoint policy"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" '`latest`'
+  assert_file_contains "$full/docs/CHECKPOINTS.md" '`best`'
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "then rename"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "never the test split"
+  assert_file_contains "$ROOT/templates/project-skills/oms-ml-experiment/SKILL.md" '`latest` and `best`'
 
   local cwd_full="$TMP/ml-docs-full-cwd"
   mkdir -p "$cwd_full"
