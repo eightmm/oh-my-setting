@@ -622,10 +622,11 @@ with tempfile.TemporaryDirectory(prefix="oms-native-plan-") as tmp:
         }
         AFFECTED_MODE=; AFFECTED_REASONS=; AFFECTED_TESTS=(); AFFECTED_CASE_LANGS=()
         AFFECTED_CASE_PATHS=(); AFFECTED_CASE_SELECTORS=(); QUICK_FROM=base; QUICK_TO=HEAD
-        CHECK_RUNTIME="$PROBE_ROOT"; SKIP_LINT=0; CI_PARITY=0
+        CHECK_RUNTIME="$PROBE_ROOT"; ROOT="$PROBE_REPO"; SKIP_LINT=0; CI_PARITY=0
         ''' + selector + '\nprepare_affected_gate\nprintf "%s %s\\n" "$AFFECTED_NATIVE" "$AFFECTED_PYTHON"\n'
         result = subprocess.run(["bash", "-eu", "-c", probe], cwd=tmp,
-                                env=dict(os.environ, PROBE_PATHS=str(changed), PROBE_ROOT=tmp),
+                                env=dict(os.environ, PROBE_PATHS=str(changed), PROBE_ROOT=tmp,
+                                         PROBE_REPO=str(pathlib.Path(sys.argv[1]).parents[2])),
                                 capture_output=True, text=True)
         assert result.returncode == 0 and result.stdout.strip() == expected, (paths, result.stdout, result.stderr)
 
