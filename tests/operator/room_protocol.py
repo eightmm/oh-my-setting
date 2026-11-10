@@ -2067,6 +2067,73 @@ with patch.dict(os.environ, {}, clear=False), patch.object(panel.room, "status",
     assert panel.main(["--repo", str(project), "--health", "--room", "health-room", "--json"]) == 0
     assert selected.call_args.kwargs["room_id"] == "health-room"
 assert any(item["label"] == "Room closed" and item["status"] == "full" for item in json.loads(health_out.getvalue())["items"])
+# oms panel --sessions: a thin projection with one mapping table that covers every raw state.
+import runpy
+import session_status
+from call_ending import LIVE_STATES, OPEN_STATES
+from panel_view import ATTENTION_STATES, TERMINAL_STATES
+raw_states = (runpy.run_path(str(Path(panel.__file__).with_name("agent-events.py")))["ALL_STATES"]
+              | LIVE_STATES | OPEN_STATES | ATTENTION_STATES | TERMINAL_STATES | {"exited"})
+assert not raw_states - set(session_status.STATE_MAP), raw_states - set(session_status.STATE_MAP)
+assert not set(session_status.STATE_MAP) - raw_states, "mapping row for a state OMS never produces"
+assert all(state in session_status.STATES and waiting in session_status.WAITING_FOR
+           for state, waiting in session_status.STATE_MAP.values())
+assert session_status.normalize("never-seen") == ("unknown", "unknown") and session_status.normalize(None) == ("unknown", "unknown")
+worker_states = sorted(raw_states - {"exited"})
+sessions_report = {
+    "collection": {"ok": True, "sources": {"state": "ok", "artifacts": "ok", "attempts": "ok"}},
+    "attempts": {"active_recent": [], "recent": [
+        {"attempt_id": "att-" + raw.replace(" ", "-").replace("_", "-"), "state": raw, "provider": "codex",
+         "updated_at": "2026-11-10T01:02:03Z",
+         "panel": {"role": "worker", "room_id": "sess-room", "room_participant": "w-" + raw.replace(" ", "-").replace("_", "-")}}
+        for raw in worker_states] + [
+        {"attempt_id": "att-main-done", "state": "done", "provider": "claude", "updated_at": "2026-11-10T01:02:03Z",
+         "panel": {"role": "main", "room_id": "sess-room", "room_participant": "m-done"}},
+        {"attempt_id": "att-main-idle", "state": "working", "provider": "claude", "updated_at": "2026-11-10T01:02:03Z",
+         "panel": {"role": "main", "room_id": "sess-room", "room_participant": "m-idle"}}]},
+    "main_activity": {"m-idle": {"attempt": "att-main-idle", "state": "idle", "since": 1762736523}},
+    "room": {"id": "sess-room", "participants": [
+        {"participant": "w-" + raw.replace(" ", "-").replace("_", "-"), "role": "worker", "provider": "codex", "joined": True}
+        for raw in worker_states] + [
+        {"participant": "m-done", "role": "main", "provider": "claude", "joined": True},
+        {"participant": "m-idle", "role": "main", "provider": "claude", "joined": True}]}}
+projected = session_status.project(sessions_report)
+by_raw = {row["raw_state"]: row for row in projected["sessions"] if row["role"] != "main"}
+by_raw.update({"exited": next(r for r in projected["sessions"] if r["id"] == "att-main-done"),
+               "idle-main": next(r for r in projected["sessions"] if r["id"] == "att-main-idle")})
+assert set(by_raw) == raw_states | {"idle-main"}, set(by_raw) ^ (raw_states | {"idle-main"})
+for raw in raw_states:
+    assert by_raw[raw]["raw_state"] == raw and (by_raw[raw]["state"], by_raw[raw]["waiting_for"]) == session_status.STATE_MAP[raw], raw
+assert by_raw["exited"]["id"] == "att-main-done" and by_raw["exited"]["source"] == "attempt"
+assert by_raw["idle-main"]["source"] == "native activity" and by_raw["idle-main"]["raw_state"] == "idle"
+assert by_raw["idle-main"]["since"] == "2025-11-10T01:02:03Z" and by_raw["idle-main"]["since_basis"] == "native activity"
+assert by_raw["failed"]["since"] == "2026-11-10T01:02:03Z" and by_raw["working"]["since"] is None
+assert projected["stale"] is False and not any(row["stale"] for row in projected["sessions"])
+assert all(set(row) == {"id", "attempt", "participant", "provider", "role", "state", "waiting_for", "raw_state",
+                        "since", "since_basis", "source", "stale"} for row in projected["sessions"])
+assert set(projected) == {"schema", "kind", "stale", "stale_reason", "sessions"} and projected["schema"] == 1
+held = session_status.project(dict(sessions_report, capacity_stale=True))
+assert held["stale"] and all(row["stale"] for row in held["sessions"]) and "held" in held["stale_reason"]
+partial = session_status.project(dict(sessions_report, collection={"ok": False, "sources": {
+    "state": "ok", "artifacts": "x", "attempts": "unreadable"}}))
+assert partial["stale"] and all(row["stale"] for row in partial["sessions"] if row["attempt"])
+sessions_out = io.StringIO()
+with patch.object(panel, "snapshot", return_value=(sessions_report, 0)) as selected, \
+        patch.object(panel, "run_native", side_effect=AssertionError("sessions launched a native session")), \
+        patch.object(panel, "run_dispatch", side_effect=AssertionError("sessions dispatched a model")), \
+        patch.object(panel.sys, "stdout", sessions_out):
+    assert panel.main(["--repo", str(project), "--sessions"]) == 0
+assert len(sessions_out.getvalue().splitlines()) == len(projected["sessions"]), sessions_out.getvalue()
+assert "att-main-idle claude/main waiting waiting=none raw=idle since=2025-11-10T01:02:03Z source=native activity" in sessions_out.getvalue()
+sessions_out = io.StringIO()
+with patch.object(panel, "snapshot", return_value=({"collection": {"ok": False}, "room": {}}, 1)), \
+        patch.object(panel.sys, "stdout", sessions_out):
+    assert panel.main(["--repo", str(project), "--sessions", "--json"]) == 1
+assert json.loads(sessions_out.getvalue())["stale"] is True and json.loads(sessions_out.getvalue())["sessions"] == []
+for bad in (["--sessions", "--health"], ["--sessions", "--dry-run"], ["--sessions", "--view", "graph"]):
+    refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), *bad],
+                             capture_output=True, text=True)
+    assert refused.returncode == 2, (bad, refused)
 snapshot = call(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "1", "--owner", "claude"],
                 dict(environment, OMS_HARNESS_CHILD="1", NO_COLOR=""))
 assert "MAIN " in snapshot and "\033" not in snapshot, snapshot

@@ -123,6 +123,8 @@ def main(argv=None):
     parser.add_argument("--providers", action="store_true", help="read registered CLI capabilities without running providers")
     parser.add_argument("--release-main", metavar="ATTEMPT", help="release a crashed main after proving its terminal owner absent")
     parser.add_argument("--health", action="store_true", help="read context, reported quota, room bounds and private slot/history capacity")
+    parser.add_argument("--sessions", action="store_true",
+                        help="read-only normalized status of every recorded session (one line each; --json for schema 1)")
     parser.add_argument("--metrics", action="store_true",
                         help="read-only recorded metrics; follow-up task IDs have no producer linkage")
     parser.add_argument("--since", metavar="DURATION", help="limit --metrics to records within a duration (for example 7d)")
@@ -255,6 +257,8 @@ def main(argv=None):
         return panel_release.cli_main(arguments)
     if args.health and (args.dry_run or args.view or args.attention_only):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
+    if args.sessions and (args.dry_run or args.view or args.attention_only):
+        parser.error("--sessions is a read-only report; use --repo, --room and optional --json")
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
     if args.page is not None and not (args.results and not args.task_id):
@@ -265,7 +269,7 @@ def main(argv=None):
         parser.error("--alias requires --dispatch")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
-                                     args.chats, args.open_chat, args.health, args.mail, args.metrics)) > 1:
+                                     args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions)) > 1:
         parser.error("choose one panel operation")
     if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.accept or args.finalize):
         parser.error("--json is only available for panel state or results")
@@ -409,7 +413,7 @@ def main(argv=None):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
             or args.spawn_main or args.swap_main or not (
-            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics)) and (
+            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
@@ -455,9 +459,15 @@ def main(argv=None):
             raise ValueError("--host tmux conflicts with --layout inline")
         if args.room:
             room.identifier(args.room, "room")
-            if room.status(repo, args.room)["closed"] and not (args.chats or args.open_chat or args.health):
+            if room.status(repo, args.room)["closed"] and not (args.chats or args.open_chat or args.health or args.sessions):
                 raise ValueError("selected room is closed")
             os.environ["OMS_ROOM_ID"] = args.room
+        if args.sessions:
+            import session_status
+            state, status = snapshot(repo, room_id=args.room)
+            read = session_status.project(state)
+            print(json.dumps(read, ensure_ascii=False, indent=2) if args.json else session_status.text(read))
+            return status
         if args.health:
             import panel_health
             from panel_metrics import collect
