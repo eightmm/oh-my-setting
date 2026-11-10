@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Lint config/role-contracts.json against roles/*.md and the panel routing tables.
 
-The contract is descriptive input for later routing work; nothing enforces it at runtime.
+The contract is descriptive input for later routing work; the only runtime reader is
+peer-delegate.sh --role (via --role-access), which defaults a bundled read-only role to read access.
 """
 
 import json
@@ -48,8 +49,9 @@ def surface(contracts):
         label, tools, mcp = belt_for(name, entry)
         rows.append({"role": name, "read_only": entry.get("read_only"), "writes": entry.get("writes"),
                      "belt": label, "tools": None if tools is None else len(tools), "mcp": mcp,
-                     # peer-delegate.sh defaults to write access; only --read-only narrows it.
-                     "delegate_default": "default" if entry.get("read_only") else "same"})
+                     # peer-delegate.sh --role launches a bundled read-only role with read access
+                     # unless OMS_DELEGATE_ROLE_WRITE=1 (or --apply) asks for the old write default.
+                     "delegate_default": "read" if entry.get("read_only") is True else "write"})
     return rows
 
 
@@ -132,12 +134,27 @@ def report(contracts, as_json):
         tools = "default" if r["tools"] is None else str(r["tools"])
         lines.append(f"{r['role']:<22} {str(r['read_only']).lower():<9} {r['belt']:<9} {tools:<7} "
                      f"{'on' if r['mcp'] else 'off':<4} {r['delegate_default']}")
-    lines.append("belt/tools/mcp: claude launch at the contract's own access; delegate-default 'default' marks a "
-                 "read-only role that peer-delegate.sh launches with the full surface unless --read-only is passed")
+    lines.append("belt/tools/mcp: claude launch at the contract's own access; delegate-default is the access "
+                 "peer-delegate.sh --role gives a bundled role when no access flag is passed (read for read-only "
+                 "roles; OMS_DELEGATE_ROLE_WRITE=1 restores write)")
     return "\n".join(lines)
 
 
+def role_access(name, path=None):
+    """'read' when the contract marks the role read_only, else 'write'. Raises on an unreadable contract."""
+    data = json.loads((Path(path) if path else ROOT / "config/role-contracts.json").read_text(encoding="utf-8"))
+    entry = data["roles"].get(name)
+    return "read" if isinstance(entry, dict) and entry.get("read_only") is True else "write"
+
+
 def main(argv):
+    if len(argv) == 2 and argv[0] == "--role-access":
+        try:
+            print(role_access(argv[1]))
+        except (OSError, ValueError, KeyError, AttributeError) as exc:
+            print(f"role-contracts: unreadable: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if argv and argv[0] in ("--surface", "--surface-json"):
         try:
             data = json.loads((ROOT / "config/role-contracts.json").read_text(encoding="utf-8"))

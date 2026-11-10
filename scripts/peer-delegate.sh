@@ -119,7 +119,10 @@ Options:
   --prompt TEXT        Short task brief.
   --role NAME          Prepend a reusable strategy profile (agent-role.sh:
                        repo, global, then bundled fallback) to the worker brief.
-                       Overrides a plan task's role field.
+                       Overrides a plan task's role field. A bundled role the
+                       contract marks read_only launches with --read-only
+                       access unless --apply, --interactive or
+                       OMS_DELEGATE_ROLE_WRITE=1 is given.
   --brief-file PATH    File with a structured brief (Task/Context/Constraints/
                        Files/Success criteria). Preferred for non-trivial tasks.
   --review-artifact P  Prior peer-review artifact (e.g. its _synthesis file).
@@ -226,6 +229,8 @@ Options:
 
 Environment:
   OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
+  OMS_DELEGATE_ROLE_WRITE=1  Keep write access for a bundled read-only --role
+                             (default: such a role launches as --read-only).
   OMS_ADVISE_ON_REPEAT=1     Permit one extra advisor call after a failed repair.
                              Default: off; set only within user-authorized scope.
   OMS_REPAIR_REPLAY=0        Keep the explicit repair budget; still record outcomes.
@@ -537,6 +542,26 @@ plan_publish_review() {
 
 [ -n "$TO" ] || fail "--to is required"
 TO="$(oms_provider_normalize "$TO")" || exit $?
+# A bundled role whose contract says read_only gets read access exactly as
+# --read-only would, unless the caller states write intent (--apply,
+# --interactive, OMS_DELEGATE_ROLE_WRITE=1). Project/global overrides, roles
+# absent from the contract, panel dispatch and no --role keep the write default.
+delegate_role_read_default() {
+  local resolved bundled_dir access
+  [ -n "$ROLE" ] && [ "$WORKER_ACCESS" = write ] && [ "$APPLY" = 0 ] && [ "$INTERACTIVE" = 0 ] &&
+    [ "${OMS_DELEGATE_ROLE_WRITE:-0}" != 1 ] && [ "${OMS_PANEL_DISPATCH:-0}" != 1 ] || return 0
+  resolved="$("$(ma_scripts_dir)/agent-role.sh" --repo "$REPO" --name "$ROLE" resolve 2>/dev/null)" || return 0
+  bundled_dir="$(cd "$(ma_scripts_dir)/../roles" 2>/dev/null && pwd -P)" || return 0
+  [ "$(cd "${resolved%/*}" 2>/dev/null && pwd -P)" = "$bundled_dir" ] || return 0
+  if ! access="$(python3 -I "$(ma_scripts_dir)/lib/role_contracts.py" --role-access "$ROLE" 2>/dev/null)"; then
+    echo "warning: role contract unreadable; --role $ROLE keeps write access (pass --read-only to narrow it)" >&2
+    return 0
+  fi
+  [ "$access" = read ] || return 0
+  WORKER_ACCESS=read
+  echo "role $ROLE is read_only in config/role-contracts.json: launching with read access as --read-only would (override: OMS_DELEGATE_ROLE_WRITE=1)" >&2
+}
+delegate_role_read_default
 if [ "$TO" = codex ] && [ "$WORKER_ACCESS" = write ] && oms_provider_codex_sandbox_blocked; then
   echo "error: this host restricts unprivileged user namespaces, so Codex's workspace-write sandbox (bwrap) cannot start; route to another provider or run oms doctor for the remedy" >&2
   exit 2
