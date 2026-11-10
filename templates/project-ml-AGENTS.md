@@ -10,8 +10,15 @@
   transforms, baseline, primary metric direction, and applicability domain in
   `PROJECT.md` before training or evaluation work depends on them.
 - Fit preprocessing, feature selection, vocabularies, thresholds, retrieval
-  indexes, and hyperparameters on training data only. Validation/test data may
-  select checkpoints only when that policy is explicit.
+  indexes, and hyperparameters on training data only. Only validation data
+  selects checkpoints or models; the test split is for final evaluation only.
+- Use the split method declared in `PROJECT.md` (scaffold, time, cold-start,
+  group, random); do not default to random.
+- Checkpoints: `latest` and `best` only, fixed names, atomic write; test
+  evaluation loads `best` (`docs/CHECKPOINTS.md` when scaffolded). Size the
+  validation interval to its cost, not every epoch by default.
+- Claim-bearing numbers are mean ± std over at least 3 seeds; one seed is
+  preliminary.
 - Verify shapes, dtypes, masks, devices, NaN/Inf handling, empty/small batches,
   loss reduction, evaluation mode, metric aggregation, and checkpoint symmetry
   at the affected interfaces.
@@ -29,7 +36,10 @@
 - Keep commands, paths, data versions, seeds, configs, metrics, and required
   checks in `PROJECT.md`; keep data, outputs, checkpoints, and secrets out of git.
 
-Use `oms data-manifest` for registered split/leakage checks and
+Use `oms data-manifest create --policy …` for registered split/leakage checks,
+`oms run capsule --config FILE --data NAME` for run provenance, a
+`metric-contract.json` beside the run ledger, `oms run-ledger top --by-group`
+to compare seed groups, and
 `oms runtime experiment launch` for pre-registered claims; use the raw run ledger for
 mechanical runs. Queue workstation jobs with `oms tsp-queue` and digest long
 logs with `oms job-digest`. Cluster-specific guidance (snapshots, job

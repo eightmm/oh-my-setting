@@ -727,6 +727,7 @@ test_generated_project_contracts_stay_compact() {
   assert_file_contains "$ml/PROJECT.md" '- Prediction unit:'
   assert_file_contains "$ml/PROJECT.md" '- Inference-time information boundary:'
   assert_file_contains "$ml/PROJECT.md" '- Split/group keys:'
+  assert_file_contains "$ml/PROJECT.md" '- Validation interval'
   assert_file_contains "$ml/PROJECT.md" '- Success criteria:'
   assert_file_contains "$general/PROJECT.md" '- Affected checks:'
   assert_file_contains "$general/PROJECT.md" '- Always-run checks:'
@@ -801,7 +802,16 @@ test_apply_ml_scaffolds_docs() {
   assert_file_contains "$full/docs/CHECKPOINTS.md" '`best`'
   assert_file_contains "$full/docs/CHECKPOINTS.md" "then rename"
   assert_file_contains "$full/docs/CHECKPOINTS.md" "never the test split"
-  assert_file_contains "$ROOT/templates/project-skills/oms-ml-experiment/SKILL.md" '`latest` and `best`'
+  assert_file_contains "$full/docs/CHECKPOINTS.md" 'checkpoints/<run-id>/latest.pt'
+  assert_file_contains "$full/docs/CHECKPOINTS.md" 'checkpoints/<run-id>/best.pt'
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "Keep exactly these two files per run"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "Never put epoch, step or metric in a"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "at most about 10%"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "not every epoch"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "state it in validations"
+  assert_file_contains "$full/docs/CHECKPOINTS.md" "A tie keeps the earlier"
+  assert_file_contains "$ROOT/templates/project-skills/oms-ml-experiment/SKILL.md" 'checkpoints/<run-id>/latest.pt'
+  assert_file_contains "$ROOT/templates/project-skills/oms-ml-experiment/SKILL.md" "validation interval"
 
   local cwd_full="$TMP/ml-docs-full-cwd"
   mkdir -p "$cwd_full"
@@ -26415,12 +26425,27 @@ test_project_policy_templates_stay_compact() {
   for file in project-general-AGENTS.md project-ml-AGENTS.md project-slurm-AGENTS.md; do
     case "$file" in
       project-general-AGENTS.md) limit=120 ;;
-      project-ml-AGENTS.md) limit=350 ;;
-      project-slurm-AGENTS.md) limit=90 ;;
+      project-ml-AGENTS.md) limit=440 ;;
+      project-slurm-AGENTS.md) limit=115 ;;
     esac
     words="$(wc -w < "$ROOT/templates/$file" | tr -d ' ')"
     [ "$words" -le "$limit" ] || fail "$file exceeds $limit words (got $words)"
   done
+
+  # The ML block is what every ML project's agent reads: it must carry the
+  # training defaults, not only point at docs.
+  local ml="$ROOT/templates/project-ml-AGENTS.md"
+  assert_file_contains "$ml" '`latest` and `best` only'
+  assert_file_contains "$ml" "validation interval"
+  assert_file_contains "$ml" "at least 3 seeds"
+  assert_file_contains "$ml" "test split is for final evaluation only"
+  assert_file_contains "$ml" "do not default to random"
+  assert_file_contains "$ml" "oms run capsule --config FILE --data NAME"
+  assert_file_contains "$ml" "metric-contract.json"
+  assert_file_contains "$ml" "oms run-ledger top --by-group"
+  assert_file_contains "$ml" "oms data-manifest create --policy"
+  assert_file_contains "$ROOT/templates/project-slurm-AGENTS.md" "--requeue"
+  assert_file_contains "$ROOT/templates/project-slurm-AGENTS.md" "SIGTERM"
 }
 
 test_skill_catalog_is_one_general_purpose_set() {

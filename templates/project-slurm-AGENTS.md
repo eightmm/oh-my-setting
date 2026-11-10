@@ -5,6 +5,9 @@
   checkpoints from `PROJECT.md` or the private cluster snapshot.
 - Use `sbatch` for batch jobs and allocated `srun` interactively.
 - Job scripts enter `$SLURM_SUBMIT_DIR`, fail fast, and write job-specific logs.
+- Preemptible jobs save `latest` on SIGTERM and at the checkpoint interval,
+  request `--requeue` where the cluster preempts by requeue, and resume from
+  `latest`.
 - Record job ID, command, config, seed, commit, checkpoints, and logs.
 - Refresh private cluster data with `oms snapshot --cluster`; never commit or
   share it.

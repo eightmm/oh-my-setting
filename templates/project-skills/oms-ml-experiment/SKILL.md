@@ -24,10 +24,12 @@ Do not launch a run merely because this skill was loaded.
    the task packet (`oms agent-task update --decision/--result`) so the Work
    Journal daily carries it.
 
-Unless the project says otherwise, a run keeps only `latest` and `best`
-(validation-selected, atomic rename; test evaluation loads `best`); record
-`best`'s path, metric and step with the run. Full default: `docs/CHECKPOINTS.md`
-template.
+Unless the project says otherwise, a run keeps only `checkpoints/<run-id>/latest.pt`
+and `best.pt` (no epoch/step/metric in file names; validation-selected, atomic
+rename; test evaluation loads `best`); record `best`'s path, metric and step
+with the run. Size the validation interval so validation stays about 10% of
+training time or less, not every epoch by default. Full default:
+`docs/CHECKPOINTS.md` template.
 
 Rank past runs with `oms run-ledger top --metric KEY` before proposing a new
 configuration — the best known baseline is a lookup, not a memory.
