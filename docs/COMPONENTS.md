@@ -2019,6 +2019,11 @@ uncertain graphs retain full coverage. `source-distribution-smoke.sh --docs-only
 documentation references without its CI orchestration, installation or CLI-help probes.
 
 `--quick` is partial feedback, not a substitute for affected or release checks.
+`scripts/install-hooks.sh --quick` prints the read-only check for its precondition,
+`oms ci-status protection`, and contacts no network. Add `--check-protection` to run
+that probe once before installing: only a proven answer (exit 0) installs the quick
+hook; absent (1) and unknown (2) refuse with the probe's line and leave the existing
+hook untouched.
 
 
 ### CI selection and execution

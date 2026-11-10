@@ -20211,6 +20211,43 @@ test_install_hooks_writes_pre_push() {
   grep -Fq 'risk-based CI gate' "$repo/.git/hooks/pre-push" ||
     fail "quick hook must say that its local result is partial"
 
+  # --quick names the read-only probe and stays offline; --check-protection
+  # runs the probe once and installs only on proven (exit 0).
+  local probe="$TMP/install-hooks-probe.sh" calls="$TMP/install-hooks-probe.calls" out rc=0
+  cat > "$probe" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$PROBE_CALLS"
+case "$PROBE_CASE" in
+  proven) echo "ci-status protection [main]: required check 'gate' proven (branch protection)"; echo "  extra fact"; exit 0 ;;
+  absent) echo "ci-status protection [main]: required check 'gate' absent (branch protection: not protected)"; exit 1 ;;
+  *) echo "ci-status protection: required check 'gate' unknown (gh CLI not installed)"; exit 2 ;;
+esac
+EOF
+  chmod +x "$probe"
+  : > "$calls"
+  out="$(cd "$repo" && PROBE_CASE=proven PROBE_CALLS="$calls" OMS_CI_STATUS_BIN="$probe" bash scripts/install-hooks.sh --quick 2>&1)" ||
+    fail "--quick without the flag must still install: $out"
+  contains "$out" "oms ci-status protection" || fail "--quick must print the probe command: $out"
+  [ ! -s "$calls" ] || fail "--quick without --check-protection must not run the probe"
+  ( cd "$repo" && bash scripts/install-hooks.sh >/dev/null ) # back to the full hook
+  for mode in absent unknown; do
+    rc=0
+    out="$(cd "$repo" && PROBE_CASE="$mode" PROBE_CALLS="$calls" OMS_CI_STATUS_BIN="$probe" \
+      bash scripts/install-hooks.sh --quick --check-protection 2>&1)" || rc=$?
+    [ "$rc" -eq 1 ] || fail "$mode must refuse the quick hook (rc=$rc): $out"
+    contains "$out" "required check 'gate'" && contains "$out" "quick hook not installed" ||
+      fail "$mode refusal must show the probe line: $out"
+    grep -Fq 'scripts/pre-push-check.sh" --full' "$repo/.git/hooks/pre-push" ||
+      fail "$mode refusal must leave the full hook in place"
+  done
+  out="$(cd "$repo" && PROBE_CASE=proven PROBE_CALLS="$calls" OMS_CI_STATUS_BIN="$probe" \
+    bash scripts/install-hooks.sh --quick --check-protection 2>&1)" || fail "proven must install: $out"
+  contains "$out" "'gate' proven" || fail "proven line missing: $out"
+  grep -Fq 'risk-based CI gate' "$repo/.git/hooks/pre-push" || fail "proven must install the quick hook"
+  [ "$(wc -l < "$calls" | tr -d ' ')" -eq 3 ] || fail "probe must run once per request: $(cat "$calls")"
+  ( cd "$repo" && bash scripts/install-hooks.sh --check-protection >/dev/null 2>&1 ) &&
+    fail "--check-protection without --quick must be refused"
+
   git -C "$repo" add scripts
   git -C "$repo" -c user.email=test@example.com -c user.name=Test commit -qm fixture
   git -C "$repo" worktree add --detach "$TMP/install-hooks-linked" >/dev/null
