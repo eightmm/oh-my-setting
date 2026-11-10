@@ -1660,7 +1660,13 @@ ML/Slurm workflows use local-first experiment controls:
 - `oms data-manifest` for fingerprints, split checks, and leakage evidence.
 - `oms experiment-board` for claims and collision avoidance.
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local
-  GPU work. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
+  GPU work. `oms run-reconcile apply` records a finished job once per
+  submission (job id and submit time) and copies what `sacct` reports beside the
+  state: cluster, submit/start/end, AllocTRES, node list, the number of requeues
+  and, for an array, each task's ending plus a count per state. A job that ended
+  `PREEMPTED` or `NODE_FAIL` while `squeue` still lists its id was requeued: it
+  shows as `REQUEUED, attempt n` and is not recorded until that attempt ends.
+  Reconcile only queries the scheduler. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
   the scheduler polling inside one shell call instead of repeated model turns:
   a spent budget exits 124 with observation incomplete and the job untouched, the
   digest is capped to whole lines with the omission stated, and a repeating
