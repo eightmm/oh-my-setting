@@ -216,6 +216,7 @@ project_content() {
     printf -- '- Train-only fitted transforms:\n'
     printf -- '- Data manifest:\n'
     printf -- '- Baseline / primary metric:\n'
+    printf -- '- Validation interval (steps/epochs):\n'
     printf -- '- Calibration/applicability-domain plan:\n\n'
   fi
   printf '## Verification\n\n'
