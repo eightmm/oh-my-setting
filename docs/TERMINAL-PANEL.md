@@ -2231,7 +2231,7 @@ Expanded main details list calls as Needs attention, Active, No record and Finis
 then recent messages and the work location; every team row opens that call's
 recorded result, and status-unavailable calls keep separate identities and result
 links. Result details put the main's decision
-and verification before the worker's answer. Long excerpts remain scrollable and
+and verification before the worker's answer, with an attributed verdict when available. Long excerpts remain scrollable and
 point to the full retained result rather than filling the board with raw output.
 Press `f` in a call preview (or click or Enter on the call) to open that complete
 scrollable reader. The reader revalidates the exact recorded target.

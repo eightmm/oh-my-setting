@@ -1986,7 +1986,11 @@ def render_results(report, width=100, compact=False, heading=None):
         check = verification.get("status")
         verify_stage = mapping(mapping(row.get("stages")).get("verify"))
         if not check or check == "not_run":
-            check = verify_stage.get("state")
+            check = verify_stage.get("state") or check
+        calls = listing(row.get("calls"))
+        active_calls = [mapping(call) for call in calls if not mapping(call).get("superseded")]
+        if check is None and active_calls:
+            check = active_calls[-1].get("verify_status")
         outcome = {"accepted": "Accepted by its main", "completed": "Completed; the main recorded a summary",
                    "failed": "Marked failed by its main", "rejected": "Rejected by its main"}.get(
                        row.get("outcome"), "Admitted · awaiting land" if row.get("admitted") else "Not reviewed by its main yet")
@@ -2017,7 +2021,6 @@ def render_results(report, width=100, compact=False, heading=None):
             if delivery and delivery != "not_requested":
                 add("App: " + delivery, "   ", 2)
             continue
-        calls = listing(row.get("calls"))
         latest = mapping(calls[-1]) if calls else {}
         model = row.get("model") or latest.get("served_model") or latest.get("selected_model") or latest.get("requested_model")
         alias = latest.get("alias")
@@ -2038,12 +2041,36 @@ def render_results(report, width=100, compact=False, heading=None):
             add("App: %s%s" % (delivery, " / delivery uncertain; inspect before retry" if row.get("delivery_unknown") else ""))
         if row.get("issue"):
             add(row["issue"])
+        from panel_review import _review_verdict
+        from panel_results import _review_run_id, _review_run_order, nonanswer_quality
+        judgment = None
+        review_state = mapping(stages.get("review")).get("state")
+        if review_state in ("passed", "failed", "inconclusive"):
+            judgment = "review %s" % review_state
+        elif review_state is None:
+            reviews = [call for call in active_calls if call.get("kind") == "review"]
+            if reviews:
+                newest = max(enumerate(reviews), key=lambda item: (_review_run_order(_review_run_id(item[1])), item[0]))[1]
+                seats = [call for call in reviews if _review_run_id(call) == _review_run_id(newest)]
+                answer = newest.get("answer")
+                if (len(seats) == 1 and (len(reviews) == 1 or _review_run_order(_review_run_id(newest)) != ('', 0))
+                        and newest.get("exit") == 0 and not nonanswer_quality(newest)
+                        and isinstance(answer, str) and not newest.get("answer_truncated")):
+                    gate, conflict = _review_verdict(answer, with_conflict=True)
+                    candidates = sum(bool(re.fullmatch(r"\s*GATE\s*:\s*(?:pass|fail)\s*", line, re.I))
+                                     for line in answer.splitlines())
+                    if gate and not conflict and candidates == 1:
+                        source = newest.get("alias") or newest.get("served_model") or newest.get("selected_model") or newest.get("requested_model") or "review"
+                        judgment = "GATE %s (%s)" % (gate, source)
+        verified = check_state if check_state in ("passed", "failed") else None
+        if judgment or verified:
+            add(" · ".join((["verdict: " + judgment] if judgment else []) +
+                           (["verification: " + verified] if verified else [])))
         if row.get("summary"):
             prose(row["summary"], "  ")
         else:
             add("Owner summary pending. Model exit does not establish acceptance.", "  ")
         records = []
-        from panel_results import nonanswer_quality
         for call in calls:
             model = call.get("served_model") or call.get("selected_model") or call.get("requested_model")
             quality = nonanswer_quality(call)

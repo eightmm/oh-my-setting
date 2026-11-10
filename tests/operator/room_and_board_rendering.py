@@ -7108,8 +7108,49 @@ verdict_result = {"rows": [{"task_id": "verdict-view", "title": "Verdict view", 
     "summary": "Summary line", "artifact": ".oms/artifacts/panel-results/result-verdict-view-abc.json",
     "calls": [{"kind": "review", "exit": 0, "served_model": "claude-opus-5-5", "tokens": 1200,
                "artifact": ".oms/artifacts/review/answer-verdict.md",
+               "alias": "codex", "verify_status": "passed",
                "answer": "Findings:\nSee [the caller](scripts/lib/panel_view.py:1881) and [spec](https://example.test/a_(b)) and [full](<docs/full result.md>)\n" +
-                         "\n".join("Body %s" % n for n in range(30)) + "\nGATE: pass"}]}]}
+                         "\n".join("Body %s" % n for n in range(30)) + "\nGATE: fail"}]}]}
+first_screen = render_detail(tree_room, {"title": "RECORDED RESULTS", "report": verdict_result}, 80, 24, {})
+assert "verdict: review passed" in first_screen, first_screen
+assert "GATE: fail" not in first_screen, first_screen
+def verdict_screen(row):
+    return render_results({"rows": [row]}, 80)
+def review_call(answer, artifact="", **extra):
+    return dict({"kind": "review", "exit": 0, "answer": answer, "artifact": artifact}, **extra)
+seat = review_call("GATE: pass")
+assert "verdict: review failed" in verdict_screen({"stages": {"review": {"state": "failed"}}, "calls": [seat]})
+assert "verdict: GATE" not in verdict_screen({"calls": [seat, review_call("GATE: fail")]})
+old = review_call("GATE: pass", "review-20260101T000000Z-1.md")
+new = review_call("inconclusive", "review-20260101T000001Z-2.md")
+assert "verdict: GATE" not in verdict_screen({"calls": [old, new]})
+assert "verification: passed" not in verdict_screen({"calls": [{"verify_status": "passed"}, {"verify_status": "not_run"}]})
+screen = verdict_screen({"verification": {"status": "failed"}, "calls": [{"verify_status": "passed"}]})
+assert "checks failed" in screen and "verification: failed" in screen and "verification: passed" not in screen
+assert "verdict: GATE pass (review)" in verdict_screen({"calls": [seat]})
+for answer in ("GATE: pass\nGATE: pass", "GATE: pass\nGATE: fail", "", "> GATE: pass", "```\nGATE: pass\n```"):
+    assert "verdict: GATE" not in verdict_screen({"calls": [review_call(answer)]})
+for fields in ({"exit": 1}, {"answer_quality": "blocked"}, {"answer_truncated": True}, {"superseded": True}):
+    call = dict(seat, **fields)
+    assert "verdict: GATE" not in verdict_screen({"calls": [call]})
+plain_result = {"rows": [{"summary": "Plain summary", "calls": [{"answer": "Plain answer"}]}]}
+plain_screen = render_results(plain_result, 80)
+assert plain_screen == ("OMS / Results\n\nunrecorded model · Work · unknown · Task\n"
+                        "Task: unknown\nOutcome: Not reviewed by its main yet · no checks run\n"
+                        "  Plain summary\n  Answer:\n    Plain answer\n\nRetained OMS evidence"), plain_screen
+for state in ("passed", "failed", "inconclusive"):
+    typed = {"rows": [{"stages": {"review": {"state": state}}}]}
+    assert "verdict: review " + state in render_results(typed, 80)
+for status in ("passed", "failed"):
+    checked = {"rows": [{"calls": [{"verify_status": status}]}]}
+    assert "verification: " + status in render_results(checked, 80)
+for answer in ("", "> GATE: fail", "```\nGATE: fail\n```", "GATE: maybe"):
+    assert "verdict:" not in render_results({"rows": [{"calls": [{"answer": answer}]}]}, 80)
+for call in ({"answer": "GATE: fail", "answer_truncated": True},
+             {"answer": "GATE: fail", "superseded": True}, {"verify_status": "not_run"},
+             {"verify_status": "invalid"}):
+    result = render_results({"rows": [{"calls": [call]}]}, 80)
+    assert "verdict:" not in result and "verification:" not in result, result
 for width in (60, 100, 200):
     screen = render_detail(tree_room, {"title": "RECORDED RESULTS", "report": verdict_result}, width, 200, {})
     rows_ = screen.split("\n")
@@ -7120,7 +7161,7 @@ for width in (60, 100, 200):
         for link in ("[the caller](scripts/lib/panel_view.py:1881)", "[spec](https://example.test/a_(b))",
                      "[full](<docs/full result.md>)"):
             assert link in flat, (link, flat)
-    end_of_answer = max(n for n, line in enumerate(rows_) if "GATE: pass" in line)
+    end_of_answer = max(n for n, line in enumerate(rows_) if "GATE: fail" in line)
     cost = next(n for n, line in enumerate(rows_) if "Opus 5.5 / review / exit 0" in line)
     named = next(n for n, line in enumerate(rows_) if line.strip().startswith("Result:"))
     assert end_of_answer < cost < named, (width, screen)
