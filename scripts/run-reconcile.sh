@@ -31,6 +31,7 @@ usage() {
 Usage: run-reconcile.sh scan   [--ledger FILE] [--job ID]
        run-reconcile.sh apply  [--ledger FILE] [--job ID] [--memory] [--agent NAME]
        run-reconcile.sh list   [N]
+       run-reconcile.sh usage  [--experiment ID] [--job ID] [--ledger FILE] [--json]
 
 Reconcile launched Slurm jobs against their terminal state and record the
 outcome so async runs are not lost between agent sessions.
@@ -45,6 +46,11 @@ apply   For each FINISHED job not yet reconciled: record state + exit + a
         REQUEUED and not recorded until it really ends. This command only
         queries Slurm; it never submits, requeues or cancels.
 list    Show the last N reconcile records (default 10).
+usage   Sum what the recorded jobs consumed: allocated GPU-hours, queue wait,
+        elapsed time, and mean time and CPU efficiency where sacct gave the
+        fields. --experiment ID keeps the jobs whose ledger note carries
+        experiment=ID. Reads the recorded rows only; it queries nothing. GPU
+        utilisation and memory efficiency are reported as unknown.
 
 Job ids come from non-empty slurm_job_id fields in the ledger
 (default docs/EXPERIMENTS.jsonl), or a single --job ID.
@@ -106,7 +112,7 @@ MAX_TASK_ROWS=200
 # lists the id, it was requeued, so the state becomes REQUEUED and nothing is
 # recorded as finished yet.
 job_query() {
-  OMS_Q_TERMINAL="$TERMINAL_STATES" OMS_Q_REQUEUE="$REQUEUE_STATES" OMS_Q_MAX="$MAX_TASK_ROWS" \
+  OMS_Q_TERMINAL="$TERMINAL_STATES" OMS_Q_REQUEUE="$REQUEUE_STATES" OMS_Q_MAX="$MAX_TASK_ROWS" OMS_Q_LIB="$ROOT_LIB" \
     python3 - "$1" "$SACCT" "$SQUEUE" <<'PY'
 import json, os, shutil, subprocess, sys
 
@@ -114,7 +120,9 @@ jid, sacct, squeue = sys.argv[1:4]
 terminal = set(os.environ["OMS_Q_TERMINAL"].split())
 requeue = set(os.environ["OMS_Q_REQUEUE"].split())
 limit = int(os.environ["OMS_Q_MAX"])
-FIELDS = "JobID,State,ExitCode,Elapsed,Cluster,Submit,Start,End,AllocTRES,NodeList"
+FIELDS = "JobID,State,ExitCode,Elapsed,Cluster,Submit,Start,End,AllocTRES,NodeList,Timelimit,AllocCPUS,TotalCPU"
+sys.path.insert(0, os.environ["OMS_Q_LIB"])
+from run_usage import consumed
 
 
 def lines(argv):
@@ -147,7 +155,9 @@ for index, line in enumerate(lines([sacct, "-X", "-D", "-j", jid, "--format=" + 
     elements[ident].append({
         "id": ident, "state": state, "exit_code": cells[1], "elapsed": cells[2], "cluster": known(cells[3]),
         "submit": known(cells[4]), "start": known(cells[5]), "end": known(cells[6]),
-        "alloc_tres": known(cells[7]), "nodelist": known(cells[8])})
+        "alloc_tres": known(cells[7]), "nodelist": known(cells[8]),
+        "timelimit": cells[9] if len(cells) > 9 else "", "alloc_cpus": cells[10] if len(cells) > 10 else "",
+        "total_cpu": cells[11] if len(cells) > 11 else ""})
 
 out = {"job_id": jid, "state": "UNKNOWN", "exit_code": "", "elapsed": "", "source": "none"}
 if order:
@@ -176,6 +186,11 @@ if order:
         out["tasks"] = [{k: row[k] for k in ("id", "state", "exit_code", "elapsed")} for row in newest[:limit]]
         if len(newest) > limit:
             out["tasks_omitted"] = len(newest) - limit
+    if pending is None:
+        # Every record counts: a preempted attempt held its allocation too.
+        spent = consumed([row for ident in order for row in elements[ident]])
+        if spent:
+            out["usage"] = spent
     if pending is None and any(row["state"] in requeue for row in newest):
         queued = lines([squeue, "-j", jid, "-h", "-o", "%T"])
         if queued:
@@ -301,7 +316,7 @@ row = {"schema": 1, "job_id": job["job_id"], "state": job["state"], "exit_code":
 # Present only when sacct reported them: where and when the job ran, what it was
 # allocated, how often it was requeued, and each array task's own ending.
 for key in ("cluster", "submit", "start", "end", "alloc_tres", "nodelist", "attempts", "requeues",
-            "task_states", "tasks", "tasks_omitted"):
+            "task_states", "tasks", "tasks_omitted", "usage"):
     if key in job:
         row[key] = job[key]
 print(json.dumps(row, ensure_ascii=False))
@@ -345,6 +360,25 @@ for line in sys.stdin:
 '
 }
 
+# Totals over the recorded rows; reads files only.
+cmd_usage() {
+  local experiment="" job="" json=0
+  local -a extra=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --experiment) [ "$#" -ge 2 ] || fail "--experiment requires an id"; experiment="$2"; shift 2 ;;
+      --job) [ "$#" -ge 2 ] || fail "--job requires an id"; job="$2"; shift 2 ;;
+      --ledger) [ "$#" -ge 2 ] || fail "--ledger requires a path"; LEDGER="$2"; shift 2 ;;
+      --json) json=1; shift ;;
+      *) fail "unknown argument: $1" ;;
+    esac
+  done
+  [ -z "$experiment" ] || extra+=(--experiment "$experiment")
+  [ -z "$job" ] || extra+=(--job "$job")
+  [ "$json" = 0 ] || extra+=(--json)
+  python3 "$ROOT_LIB/run_usage.py" --reconcile "$RECONCILE_FILE" --ledger "$LEDGER" "${extra[@]}"
+}
+
 ONE_JOB=""
 
 parse_args() {
@@ -363,6 +397,7 @@ case "${1:-}" in
   scan) shift; parse_args "$@"; cmd_scan ;;
   apply) shift; parse_args "$@"; cmd_apply ;;
   list) shift; cmd_list "$@" ;;
+  usage) shift; cmd_usage "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;
   *) fail "unknown subcommand: $1" ;;

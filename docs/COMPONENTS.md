@@ -2160,7 +2160,16 @@ ML/Slurm workflows use local-first experiment controls:
   and, for an array, each task's ending plus a count per state. A job that ended
   `PREEMPTED` or `NODE_FAIL` while `squeue` still lists its id was requeued: it
   shows as `REQUEUED, attempt n` and is not recorded until that attempt ends.
-  Reconcile only queries the scheduler. `oms slurm-lint SCRIPT` reads a job
+  Reconcile only queries the scheduler. Each row also carries a `usage` object
+  computed from those fields alone: allocated GPU-hours (allocated GPUs times
+  elapsed, every array task and every preempted attempt counted), queue wait
+  (start minus submit), and time and CPU efficiency when `sacct` gave the limit
+  and `TotalCPU`. `oms run-reconcile usage [--experiment ID] [--job ID] [--json]`
+  sums the recorded rows without querying anything; `--experiment` keeps the
+  jobs whose ledger note carries `experiment=ID`. A figure `sacct` did not
+  support is left out and counted as unknown, and GPU utilisation and memory
+  efficiency always read `unknown`: accounting records the allocation, not how
+  busy it was. `oms slurm-lint SCRIPT` reads a job
   script's `#SBATCH` lines without running or submitting it and warns about a
   missing time limit, a log path shared between jobs or array tasks, an array
   with no concurrency limit, a time limit past the QOS `MaxWall`, and, when the
