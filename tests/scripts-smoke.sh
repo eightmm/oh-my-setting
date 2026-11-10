@@ -42539,6 +42539,54 @@ $name
   fi
 }
 
+# smoke-weight: 2
+test_deps_show_reads_pins_and_installed_metadata() {
+  local project="$TMP/deps-card" site rc=0
+  site="$project/.venv/lib/python3.12/site-packages"
+  mkdir -p "$site/torch-2.3.1.dist-info" "$site/torch"
+  # Importing or running anything from the environment would leave this marker.
+  printf 'open(%s, "w").write("ran")\n' "'$project/imported'" > "$site/torch/__init__.py"
+  printf '%s\n' 'Metadata-Version: 2.1' 'Name: torch' 'Version: 2.3.1' \
+    'Summary: Tensors and dynamic neural networks' 'Home-page: https://pytorch.example/' \
+    'Project-URL: Documentation, https:/''/reader:hunter2''@pytorch.example/docs?t=1#top' \
+    'Project-URL: Source, git+ssh://pytorch.example/src' > "$site/torch-2.3.1.dist-info/METADATA"
+  printf '%s\n' 'numpy==1.26.4' 'torch==2.2.0 \' '  --hash=sha256:abc' 'rdkit>=2023.9' > "$project/requirements.txt"
+  printf '%s\n' 'dependencies:' '  - conda-forge::rdkit=2023.09.5' '  - pip:' '    - torch==2.2.0' > "$project/environment.yml"
+  printf '%s\n' '[project]' 'name = "x"' 'dependencies = [' '  "torch>=2.2",' ']' > "$project/pyproject.toml"
+  printf '%s\n' '[[package]]' 'name = "Torch"' 'version = "2.2.0"' > "$project/uv.lock"
+
+  env -u VIRTUAL_ENV -u CONDA_PREFIX "$ROOT/scripts/oms" deps show torch --repo "$project" > "$project/card" ||
+    fail "deps show should find a pinned and installed package: $(cat "$project/card")"
+  assert_file_contains "$project/card" "pinned     2.2.0  (requirements.txt:2)"
+  assert_file_contains "$project/card" "pinned     2.2.0  (environment.yml:4)"
+  assert_file_contains "$project/card" "pinned     2.2.0  (uv.lock)"
+  assert_file_contains "$project/card" "declared   >=2.2  (pyproject.toml:4)"
+  assert_file_contains "$project/card" "installed  2.3.1  (project .venv, ./.venv/lib/python3.12/site-packages)"
+  assert_file_contains "$project/card" "note: installed 2.3.1 is not a pinned version (2.2.0)"
+  # A declared URL is shown without its credentials or query, and only http(s).
+  assert_file_contains "$project/card" "Documentation: https://pytorch.example/docs"
+  if grep -Eq 'hunter2|reader:|t=1|git\+ssh' "$project/card"; then
+    fail "deps show printed a credential, query or non-http URL: $(cat "$project/card")"
+  fi
+  [ ! -e "$project/imported" ] || fail "deps show must not import the package it describes"
+
+  env -u VIRTUAL_ENV -u CONDA_PREFIX "$ROOT/scripts/oms" deps show RDKit --repo "$project" --json > "$project/rdkit.json" ||
+    fail "deps show should match names case-insensitively"
+  python3 - "$project/rdkit.json" <<'PY' || fail "deps show --json shape is wrong: $(cat "$project/rdkit.json")"
+import json, sys
+card = json.load(open(sys.argv[1], encoding="utf-8"))
+assert (card["kind"], card["schema"], card["fetched"]) == ("oms-dependency-card", 1, False), card
+assert [(row["file"], row["version"]) for row in card["pinned"]] == [("environment.yml", "2023.09.5")], card
+assert [(row["file"], row["spec"]) for row in card["declared"]] == [("requirements.txt", ">=2023.9")], card
+assert card["installed"] == [], card
+PY
+  env -u VIRTUAL_ENV -u CONDA_PREFIX "$ROOT/scripts/oms" deps show absent-package --repo "$project" > "$project/none" || rc=$?
+  [ "$rc" -eq 1 ] || fail "an unknown package should exit 1, got $rc"
+  rc=0
+  "$ROOT/scripts/oms" deps show '../escape' --repo "$project" > "$project/bad" 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "a name that is not a package name should exit 2, got $rc"
+}
+
 test_state_consumes_canonical_active_task_status() {
   local project="$TMP/state-task-status"
   local task="$ROOT/scripts/agent-task.sh"
