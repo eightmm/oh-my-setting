@@ -1271,6 +1271,13 @@ recall receipt is written, and a clone with no index is counted, not built.
 `--limit` is per repository (default 5, at most 20); the first 30 registered
 repositories and 50 hits are read, and a harness child is refused.
 
+`oms agent-task update --decision TEXT [--decision-reason WHY] [--rejected ALT]`
+records one capped line (100/110/60 characters) in the packet's Decisions.
+`oms session-handoff capture` carries the newest 5 (`OMS_HANDOFF_DECISIONS`)
+within 1024 bytes (`OMS_HANDOFF_DECISION_BYTES`, minimum 256) as a
+`## Decisions (recorded ...)` block, oldest dropped first with a dropped count.
+No model call.
+
 Explicit project `recall` also points at session handoff digests. The head of
 each digest still under `.oms/handoffs/` (newest 200, first 8 KiB, machine
 header lines left out) is matched at recall time, and up to three matches are

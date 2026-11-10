@@ -21851,6 +21851,37 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   assert_file_contains "$out" "## Open dissents"
   assert_file_contains "$out" "codex: pass"
   assert_file_contains "$out" "claude: fail"
+
+  # Decision log: recorded decision + reason + rejected alternative ride the
+  # digest; the newest N stay, older ones are dropped with a count.
+  local n
+  for n in 1 2 3 4; do
+    "$ROOT/scripts/agent-task.sh" --repo "$cwd" update --decision "choice $n" \
+      --decision-reason "because $n" --rejected "alt $n" >/dev/null ||
+      fail "agent-task --decision with reason/rejected failed ($n)"
+  done
+  if "$ROOT/scripts/agent-task.sh" --repo "$cwd" update --rejected "orphan" \
+    >/dev/null 2>&1; then
+    fail "--rejected without --decision must be refused"
+  fi
+  out="$(OMS_CLAUDE_HOME="$home" OMS_HANDOFF_DECISIONS=3 "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/decisions.md" 2>/dev/null)"
+  assert_file_contains "$out" "## Decisions (recorded"
+  assert_file_contains "$out" "choice 4 | why: because 4 | rejected: alt 4"
+  assert_file_contains "$out" "choice 2 | why: because 2 | rejected: alt 2"
+  assert_file_contains "$out" "(1 older decision(s) dropped"
+  if grep -Fq "choice 1 " "$out"; then
+    fail "oldest decision must be dropped first"
+  fi
+  "$ROOT/scripts/agent-task.sh" --repo "$cwd" update \
+    --decision "$(printf 'long%.0s' $(seq 1 40))" \
+    --decision-reason "$(printf 'why%.0s' $(seq 1 60))" >/dev/null ||
+    fail "long decision must be capped, not refused"
+  out="$(OMS_CLAUDE_HOME="$home" OMS_HANDOFF_DECISION_BYTES=256 "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/decisions-cap.md" 2>/dev/null)"
+  assert_file_contains "$out" "longlonglong"
+  assert_file_contains "$out" "older decision(s) dropped"
+  if grep -Fq "choice 3 " "$out"; then fail "byte cap must drop older decisions"; fi
 }
 
 test_session_handoff_dissents_from_typed_outcome() {
