@@ -1225,6 +1225,20 @@ verdict per path. The public single-path scope operations remain compatible;
 the batch operation is an internal performance boundary for large diffs.
 
 
+### Look back before retiring
+
+`oms agent-plan retro [--json]` is a read-only summary of what the current plan cost:
+tasks by state, the tasks that took more than one try (drive cycles, repairs,
+amendments, reopened completions), blocked and cancelled tasks with their recorded
+reasons, how many drive runs and cycles the plan's tasks used, the reasons a drive
+parked, and how acceptance ran. It counts rows already in `.oms/plan/tasks.json` and
+`.oms/plan/progress.jsonl`, asks no model and writes nothing. Drive rows are matched to
+the plan by task id, and an acceptance row with no drive run is counted as this plan's.
+It does not count review finding verdicts or criteria whose evidence went stale. The
+output is not approval or verification evidence; copying a lesson into `PROJECT.md`
+Decisions or memory is the parent's own act. A retired plan has no retro, so run it
+before `retire`.
+
 ### Retire a stale plan
 
 An active plan that became stale after equivalent work landed elsewhere is removed
