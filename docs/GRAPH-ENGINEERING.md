@@ -915,6 +915,21 @@ cut no lower-ranked file takes the leftover bytes. `--entry-path` anchors it
 to exact files, `--max-files` bounds the ranking, and `--task`/`--entry-path`
 without `--signatures` are refused. It is deterministic and makes no model call.
 
+Impact brief (`impact.py`): `oms graph project impact --base REF [--head REF]`
+joins what a reviewer or worker brief needs for one range: the `affected`
+plan (mode, reasons, tests, cases, documentation paths), the files that depend
+on the changed ones through EXTRACTED edges (`--depth`, default 3; changed
+files and tests are not repeated there), the paths history says usually move
+with a changed path but this range left alone (`structural: false` is the
+partner no parser can see), and, only when the repository has a `CODEOWNERS`
+file (`CODEOWNERS`, `.github/CODEOWNERS`, `docs/CODEOWNERS`; a symlink or a
+file over 1 MiB is treated as absent), the owners of each changed path by the
+last matching rule. The CODEOWNERS reader is stdlib and read-only; negations,
+character classes, escapes and section headers are skipped, never guessed.
+Every list is cut to `--limit` (default 20, 1–500) with the cut counted in
+`omitted`. The brief is labelled orientation: it says where to look and is
+never evidence that a change is safe, tested or approved.
+
 Context pack (`context.py`): lexical query → path-deduplicated entry nodes →
 EXTRACTED/INFERRED neighborhood (depth 2; AMBIGUOUS omitted) → confidence-
 and-distance-ranked files, tests, selectable test cases, capped blast view,
@@ -993,6 +1008,7 @@ oms graph project trace  NODE [--direction in|out] [--depth N]
 oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
 oms graph project coupling [--path P]... [--commits N] [--max-changeset N] [--min-shared N] [--min-degree PCT] [--limit N]
 oms graph project affected --base REF [--head REF] [--depth N] [--guard GLOB]... [--runnable GLOB]...  # 0 = complete closure; runnable globs add test paths
+oms graph project impact --base REF [--head REF] [--depth N] [--commits N] [--limit 1..500] [--json]   # orientation brief; lists report `omitted`
 oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF] [--json] [--html-fragment ABS|--ui-model]
 oms graph exec validate  SPEC
 oms graph exec render    SPEC [--mermaid|--html-fragment ABS]
@@ -1021,7 +1037,7 @@ The graph exists wherever it is read. `project ensure` runs `check` and then
 builds when the graph is absent, refreshes it through the cache when the
 working tree moved, and writes nothing when it is current; it prints `graph:
 fresh revision=...` or the `build` summary line with `built`/`refreshed`.
-Every reader (`map find api search neighbors trace blast affected coupling context`) calls it
+Every reader (`map find api search neighbors trace blast affected coupling impact context`) calls it
 before loading the graph and sends that summary to **stderr**, so `--json`
 stdout stays parsable. `--no-refresh` on any reader, or `OMS_GRAPH_AUTOBUILD=0`
 globally, reads the graph as it stands — an absent one then fails with the
@@ -1032,7 +1048,7 @@ it with the verb to run; the explicit `build` (which bounds bytes, not files)
 has no such bound, and a refresh of an existing graph is never refused.
 
 Harness children (`OMS_HARNESS_CHILD=1`) may run `project
-build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling`
+build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling|impact`
 and `exec validate|render|route|status|events|test`. `build`/`ensure` are the exception
 to the runtime core's `context` precedent: the project graph is a regenerable
 cache that carries no authority, and a delegated worker in an isolated
@@ -1150,7 +1166,8 @@ context ranking and the test-path scan, whose raw lines include outputs.
 - `tests/test_oms_graph_history.py`: the coupling measure, thresholds and
   focus, structural annotation from path pairs, and a real repository where
   config-to-code coupling is `structural: false` while an import is `true`,
-  a bulk commit is skipped and counted, and a deleted path never appears.
+  a bulk commit is skipped and counted, and a deleted path never appears; the
+  impact brief's join, its per-list `omitted` counts and CODEOWNERS last-match rules.
 - `tests/graph-smoke.sh`: unittest discovery of `test_oms_graph_*.py`, CLI
   smoke through `scripts/oms`, dogfood build of this repository from a
   `git archive` copy (revision stable across two builds; `--include`/

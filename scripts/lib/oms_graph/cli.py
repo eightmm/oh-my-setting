@@ -17,6 +17,7 @@ from .project import analytics
 from .project import affected as project_affected
 from .project import blast as project_blast
 from .project import history as project_history
+from .project import impact as project_impact
 from .project import build as project_build
 from .project import context as project_context
 from .project import orientation as project_orientation
@@ -31,7 +32,7 @@ HTML_FRAGMENT_MAX_BYTES = 1024 * 1024
 # `build` is the explicit form: neither may refresh behind the caller's back.
 AUTO_REFRESH_ACTIONS = (
     "map", "find", "api", "search", "neighbors", "trace", "blast",
-    "affected", "coupling", "context",
+    "affected", "coupling", "impact", "context",
 )
 
 
@@ -144,6 +145,13 @@ def build_parser() -> argparse.ArgumentParser:
     affected.add_argument("--guard", action="append", default=[], help="additional always-full path glob")
     affected.add_argument("--runnable", action="append", default=[], help="additional runnable test path glob")
     affected.add_argument("--json", action="store_true")
+    impact = project_sub.add_parser("impact", help="one orientation brief for a Git range: affected tests, dependents, co-change partners left out, CODEOWNERS", parents=[shared_options])
+    impact.add_argument("--base", required=True)
+    impact.add_argument("--head", default="HEAD")
+    impact.add_argument("--depth", type=int, default=3, help="reverse dependency depth for the dependents list")
+    impact.add_argument("--commits", type=int, default=project_history.DEFAULT_COMMITS, help="history window for co-change, newest first")
+    impact.add_argument("--limit", type=int, default=20, metavar="N", help="keep at most N rows per list (1-500); the rest is counted in omitted")
+    impact.add_argument("--json", action="store_true")
     context = project_sub.add_parser("context", parents=[shared_options])
     context.add_argument("--task", required=True)
     context.add_argument("--entry-path", action="append", default=[], metavar="PATH",
@@ -626,11 +634,24 @@ def _project_coupling(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
+def _project_impact(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    if args.commits < 1:
+        raise GraphError("project impact --commits must be at least 1")
+    graph, _ = _index(repo, state)
+    brief = project_impact.impact_brief(repo, graph, base=args.base, head=args.head, limit=args.limit,
+                                        depth=args.depth, commits=args.commits)
+    if args.json:
+        emit(brief, args.pretty)
+    else:
+        sys.stdout.write(project_impact.brief_text(brief))
+    return 0
+
+
 PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
                    "find": _project_find, "api": _project_api, "search": _project_search,
                    "neighbors": _project_neighbors, "trace": _project_trace,
                    "blast": _project_blast, "affected": _project_affected,
-                   "coupling": _project_coupling, "context": _project_context}
+                   "coupling": _project_coupling, "impact": _project_impact, "context": _project_context}
 
 STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
 
