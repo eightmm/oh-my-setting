@@ -47,6 +47,24 @@ current tasks or valid experiment controls. No winning run, quality improvement,
 token saving or billing saving is inferred. Existing `experiment compare` and
 `benchmark compare` retain their separate contracts.
 
+## Selection-policy provenance
+
+A manifest may record `phase_rules_sha256`, the SHA-256 of the rules used to
+select its context. Inspection preserves that digest without opening the rules
+file. An explicitly recorded value must be a lower-case 64-hex digest; null,
+empty or malformed values are rejected instead of silently ignored.
+
+When either comparison operand records this field, `phase_rules` shows the
+left/right digests and `same-recorded-digest`, `different-recorded-digest`, or
+`unknown`. Different digests add `different-phase-rules` to the scope mismatch
+reasons. One missing digest adds `phase-rules-identity-unavailable`. Both make
+`recorded_scope_matches` false even when the selected files and bytes match.
+
+Two legacy operands with no policy field keep their existing output shape and
+scope comparison. This is compatibility, not proof that their policies were
+the same. No current rule file, source or provider is opened by this comparison;
+matching recorded digests are not current freshness or authority evidence.
+
 ## Bounds, authority and compatibility
 
 Manifest reads require an own-UID, single-link regular file inside the selected

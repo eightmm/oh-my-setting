@@ -138,7 +138,9 @@ def _validated(data):
             "missing_required": missing, "truncated_required": truncated,
             "context_debt": debt, "sufficient": data["sufficient"],
             "bundle_sha256": _digest(data.get("bundle_sha256"), "bundle digest"),
-            "contract_state_digest": _digest(data.get("contract_state_digest"), "contract digest", optional=True)}
+            "contract_state_digest": _digest(data.get("contract_state_digest"), "contract digest", optional=True),
+            "phase_rules_sha256": (_digest(data["phase_rules_sha256"], "phase rules digest")
+                                   if "phase_rules_sha256" in data else None)}
 
 
 def _bounded(items, limit):
@@ -157,7 +159,7 @@ def inspect_manifest(data, *, limit=10):
             groups[row["sha256"]].append(row["path"])
     repeated = [{"sha256": key, "paths": _bounded(sorted(paths), limit)}
                 for key, paths in sorted(groups.items()) if len(paths) > 1]
-    return {"schema": 1, "kind": "oms-context-inspection", "validation": "recorded-metadata-only",
+    result = {"schema": 1, "kind": "oms-context-inspection", "validation": "recorded-metadata-only",
             "sources_current": None, "bundle_verified": False,
             "note": "Not the provider's full context; no source or bundle files were read. Repeated source hashes do not prove duplicate selected bytes. No token or billing savings are inferred.",
             "phase": value["phase"], "generated_at": value["generated_at"],
@@ -171,6 +173,9 @@ def inspect_manifest(data, *, limit=10):
             "targets": _bounded(value["targets"], limit), "sources": _bounded(rows, limit),
             "omissions": _bounded(value["omitted"], limit), "repeated_source_digests": _bounded(repeated, limit),
             "bundle_sha256": value["bundle_sha256"], "contract_state_digest": value["contract_state_digest"]}
+    if value["phase_rules_sha256"] is not None:
+        result["phase_rules_sha256"] = value["phase_rules_sha256"]
+    return result
 
 
 def compare_manifests(left, right, *, limit=10):
@@ -187,6 +192,20 @@ def compare_manifests(left, right, *, limit=10):
         reasons.append("contract-identity-unavailable")
     elif before["contract_state_digest"] != after["contract_state_digest"]:
         reasons.append("different-contract-state")
+    # A legacy pack has no evidence of the selection policy used by a newer
+    # pack. Equal selected files do not repair that missing provenance.
+    rules = None
+    left_rules, right_rules = before["phase_rules_sha256"], after["phase_rules_sha256"]
+    if left_rules is not None or right_rules is not None:
+        if left_rules is None or right_rules is None:
+            status = "unknown"
+            reasons.append("phase-rules-identity-unavailable")
+        elif left_rules != right_rules:
+            status = "different-recorded-digest"
+            reasons.append("different-phase-rules")
+        else:
+            status = "same-recorded-digest"
+        rules = {"left": left_rules, "right": right_rules, "status": status}
     old = {row["path"]: row for row in before["selected"]}
     new = {row["path"]: row for row in after["selected"]}
     changed = []
@@ -195,7 +214,7 @@ def compare_manifests(left, right, *, limit=10):
                   if old[path][key] != new[path][key]]
         if fields:
             changed.append({"path": path, "changed_fields": fields})
-    return {"schema": 1, "kind": "oms-context-comparison", "validation": "recorded-metadata-only",
+    result = {"schema": 1, "kind": "oms-context-comparison", "validation": "recorded-metadata-only",
             "recorded_scope_matches": not reasons, "scope_mismatch_reasons": reasons,
             "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
             "delta": {key: after[key] - before[key] for key in
@@ -203,6 +222,9 @@ def compare_manifests(left, right, *, limit=10):
             "added": _bounded(sorted(new.keys() - old.keys()), limit),
             "removed": _bounded(sorted(old.keys() - new.keys()), limit),
             "changed": _bounded(changed, limit)}
+    if rules is not None:
+        result["phase_rules"] = rules
+    return result
 
 
 def _unique_pairs(pairs):
