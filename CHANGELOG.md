@@ -183,6 +183,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- The Claude Code installer no longer writes an empty `attribution` object, so
+  Claude Code's default commit/PR attribution (the Co-Authored-By trailer and
+  session link) applies. Install, update and repair drop the empty object older
+  installs wrote only while it is exactly `{"commit": "", "pr": "",
+  "sessionUrl": false}`; any other value, and an account receipt's
+  user-modified value, is kept. Uninstall is unchanged.
 - A needs-judgment notice names its type: a second blocking review is a design
   question to settle with `oms panel --council` before implementing; anything
   else is an authority question, acted on within delegated authority and asked

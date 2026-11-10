@@ -4461,6 +4461,52 @@ print("codex account connect: create, repair, preservation, ordering, validation
 PY
 }
 
+# No other runnable test reaches the account-receipt path for the retired empty
+# attribution (the account test above dies earlier in this container).
+test_claude_account_legacy_attribution_migrates() {
+  OMS_TEST_ROOT="$ROOT" python3 -I - <<'PY' || fail "legacy account attribution migration failed"
+import json, os, pathlib, subprocess, sys, tempfile
+root = os.environ["OMS_TEST_ROOT"]
+sys.path.insert(0, root + "/scripts/lib")
+sys.dont_write_bytecode = True
+import provider_accounts as pa
+exp = json.loads(subprocess.check_output(["bash", root + "/scripts/install-claude-hooks.sh", "--print-expected"]))
+manifest = {"surfaces": exp["surfaces"], "hooks_schema": exp["hooks_schema"]}
+legacy = {"commit": "", "pr": "", "sessionUrl": False}
+base = pathlib.Path(tempfile.mkdtemp()).resolve()
+def home(name):
+    h = base / name
+    h.mkdir(mode=0o700)
+    s = h / "settings.json"
+    s.write_text("{}")
+    s.chmod(0o600)
+    return s, h / ".oms-claude-hooks.json"
+def old_install(s, r):  # what a pre-change OMS did: it owned the leaf
+    pa._LEGACY_LEAVES.clear()
+    try:
+        pa.account_hook_settings(s, r, root, manifest)
+    finally:
+        pa._LEGACY_LEAVES.add(("attribution",))
+s, r = home("owned")
+old_install(s, r)
+assert json.loads(s.read_text())["attribution"] == legacy
+pa.account_hook_settings(s, r, root, manifest)  # update/repair
+assert "attribution" not in json.loads(s.read_text())
+assert all(row["path"] != ["attribution"] for row in json.loads(r.read_text())["leaves"])
+s, r = home("edited")
+old_install(s, r)
+data = json.loads(s.read_text())
+data["attribution"] = {"commit": "mine"}
+s.write_text(json.dumps(data))
+s.chmod(0o600)
+pa.account_hook_settings(s, r, root, manifest)
+assert json.loads(s.read_text())["attribution"] == {"commit": "mine"}
+s, r = home("fresh")
+pa.account_hook_settings(s, r, root, manifest)
+assert "attribution" not in json.loads(s.read_text())
+PY
+}
+
 test_installer_enables_auto_update_by_default() {
   # A harness that silently goes stale stops matching its own docs and
   # skills. Assert the default rather than the flag: apply-mode trigger on,
@@ -32512,7 +32558,40 @@ subagent = d["subagentStatusLine"]
 assert subagent["type"] == "command"
 assert "claude-subagent-statusline.py" in subagent["command"]
 assert d["modelSettings"] == {"claude-opus-5-5": {"effortLevel": "high", "autoCompactWindow": 300000}}, d["modelSettings"]
-assert d["attribution"] == {"commit": "", "pr": "", "sessionUrl": False}, d.get("attribution")
+assert "attribution" not in d, d.get("attribution")  # provider default applies
+PY
+  # Legacy empty attribution from an older OMS install: a repeated install drops
+  # it only when byte-identical; a user-set value is never touched.
+  python3 - "$s" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["attribution"] = {"commit": "", "pr": "", "sessionUrl": False}
+json.dump(d, open(sys.argv[1], "w"))
+PY
+  OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
+  python3 - "$s" <<'PY' || fail "install should drop the legacy empty attribution"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "attribution" not in d, d.get("attribution")
+PY
+  for near in '{"commit": "", "pr": ""}' '{"commit": "", "pr": "", "sessionUrl": true}'; do
+    python3 - "$s" "$near" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["attribution"] = json.loads(sys.argv[2])
+json.dump(d, open(sys.argv[1], "w"))
+PY
+    OMS_CLAUDE_SETTINGS="$s" "$ROOT/scripts/install-claude-hooks.sh" >/dev/null
+    python3 - "$s" "$near" <<'PY' || fail "install must keep a non-identical attribution: $near"
+import json, sys
+assert json.load(open(sys.argv[1]))["attribution"] == json.loads(sys.argv[2])
+PY
+  done
+  python3 - "$s" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("attribution")
+json.dump(d, open(sys.argv[1], "w"))
 PY
   [ -f "$s.oms-bak" ] || fail "installer should back up settings before the first change"
   cat > "$d/bin/claude" <<'EOF'

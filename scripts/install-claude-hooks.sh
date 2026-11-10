@@ -217,9 +217,11 @@ edit-time syntax-guard hook,
 PreCompact/SessionEnd handoff-snapshot hooks,
 SessionStart resume hook, SessionStart/SessionEnd telemetry hooks, main usage
 HUD, compact subagent HUD, and the per-model effort default for the Claude
-models OMS routes (Opus 5.5: high), and an empty-trailer `attribution`
-object (never `false`: Claude Code before 2.1.281 skips a settings file
-containing it) in Claude Code's settings.json. The merge
+models OMS routes (Opus 5.5: high) in Claude Code's settings.json. OMS no
+longer writes `attribution`, so Claude Code's default commit/PR attribution
+applies; an install or --remove drops the empty object older installs wrote
+(exactly {"commit": "", "pr": "", "sessionUrl": false}) and never touches any
+other attribution value. The merge
 is additive: user hooks, user-owned statusLine/subagentStatusLine entries,
 user-set modelSettings effort and a user-set attribution are preserved, and repeated installs
 converge OMS hook commands, timeouts and matchers and drop duplicates.
@@ -407,7 +409,11 @@ subagent_status_cmd = lib.entry_command(root, "python3", os.environ["OMS_CH_SUBA
 # indistinguishable and is treated as ours during removal.
 MODEL_EFFORT = {"claude-opus-5-5": "high"}
 MODEL_AUTO_COMPACT_WINDOW = {"claude-opus-5-5": 300000}
-ATTRIBUTION = {"commit": "", "pr": "", "sessionUrl": False}
+# Legacy: older OMS installs wrote this empty object, which suppresses Claude
+# Code's default commit/PR attribution. OMS no longer writes it; install and
+# --remove drop it only while it is exactly this value (a user value identical
+# to it is indistinguishable and is treated as ours, as with effort).
+LEGACY_ATTRIBUTION = {"commit": "", "pr": "", "sessionUrl": False}
 
 settings = {}
 if os.path.isfile(path):
@@ -474,7 +480,7 @@ if remove:
                     del model_settings[model]
         if not model_settings:
             del settings["modelSettings"]
-    if settings.get("attribution") == ATTRIBUTION:
+    if settings.get("attribution") == LEGACY_ATTRIBUTION:
         del settings["attribution"]
     action = "removed"
 else:
@@ -516,7 +522,8 @@ else:
                 row = model_settings.setdefault(model, {})
                 if isinstance(row, dict):
                     row.setdefault("autoCompactWindow", window)
-    settings.setdefault("attribution", dict(ATTRIBUTION))
+    if settings.get("attribution") == LEGACY_ATTRIBUTION:
+        del settings["attribution"]
     action = "installed"
 
 if json.dumps(settings, sort_keys=True) == before:

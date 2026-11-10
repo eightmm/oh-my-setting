@@ -1091,13 +1091,19 @@ def _hook_lib(root):
     return lib
 
 
+_LEGACY_ATTRIBUTION = {"commit": "", "pr": "", "sessionUrl": False}
+_LEGACY_LEAVES = {("attribution",)}
+
+
 def _managed_leaf_values(root):
     lib = _hook_lib(root)
     return {
         ("statusLine",): {"type": "command", "command": lib.entry_command(root, "python3", str(Path(root) / "scripts/claude-statusline.py"))},
         ("subagentStatusLine",): {"type": "command", "command": lib.entry_command(root, "python3", str(Path(root) / "scripts/claude-subagent-statusline.py"))},
         ("modelSettings", "claude-opus-5-5", "effortLevel"): "high",
-        ("attribution",): {"commit": "", "pr": "", "sessionUrl": False},
+        # Legacy: OMS no longer writes it, but receipts from older installs
+        # record it as an owned leaf and must still validate and be removable.
+        ("attribution",): dict(_LEGACY_ATTRIBUTION),
     }
 
 
@@ -1261,9 +1267,13 @@ def account_hook_settings(settings, receipt, root, manifest, remove=False):
             if actual != old_leaves[parts]:
                 print("recovery: kept user-modified Claude setting " + ".".join(parts))
                 continue
-            _leaf_set(updated, parts, value, remove=remove)
-            if not remove:
+            # A legacy leaf is dropped on update/repair too, never re-owned.
+            legacy = parts in _LEGACY_LEAVES
+            _leaf_set(updated, parts, value, remove=remove or legacy)
+            if not remove and not legacy:
                 owned_leaves.append({"path": list(parts), "value": value})
+        elif parts in _LEGACY_LEAVES:
+            continue
         elif not remove and not exists and _leaf_set(updated, parts, value):
             owned_leaves.append({"path": list(parts), "value": value})
             for length in range(1, len(parts)):
