@@ -21047,6 +21047,29 @@ EOF
   assert_file_contains "$lint/unknown.out" "note: preemption: unknown (no cluster snapshot; run: oms snapshot --cluster)"
   "$LINT" "$lint/plain.sh" --snapshot "$out" > "$lint/unlisted.out" 2>&1 || fail "lint with an unlisted QOS failed"
   assert_file_contains "$lint/unlisted.out" "note: preemption: unknown (QOS normal is not in the snapshot)"
+  # --preview: request totals from #SBATCH lines against the snapshot's GPU limits, with its age; nothing runs.
+  printf '%s\n' '# Local Slurm Cluster' '' 'Generated: 2026-01-01T00:00:00Z' '' '- QOS default: high' '' \
+    '## Associations (current user)' '' 'Cluster|Account|User|Partition|DefaultQOS|QOS|GrpTRES|MaxTRES|MaxTRESPJ|MaxJobs|MaxSubmit|MaxWall' \
+    'c|a|alice|gpu|high|high|gres/gpu=8||gres/gpu=4|||' '' '## QOS' '' \
+    'Name|Priority|Preempt|PreemptMode|Flags|UsageFactor|GrpTRES|MaxTRESPU|MaxTRESPJ|MaxWall|MaxJobsPU|MaxSubmitPU' \
+    'high|100|normal|REQUEUE||1||gres/gpu=6|gres/gpu=2|2-00:00:00||' > "$lint/pv-snap.md"
+  printf '%s\n' '#!/bin/bash' '#SBATCH --gres=gpu:a100:2' '#SBATCH -t 1-00:00:00' '#SBATCH --array=0-9%4' \
+    ': > "'"$lint"'/pv-executed"' > "$lint/pv.sh"
+  rc=0
+  "$LINT" --preview "$lint/pv.sh" --snapshot "$lint/pv-snap.md" > "$lint/pv.out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "slurm-lint --preview must exit 0 (got $rc): $(cat "$lint/pv.out")"
+  [ ! -e "$lint/pv-executed" ] || fail "slurm-lint --preview must not run the script"
+  assert_file_contains "$lint/pv.out" "GPU-hours, upper bound       480.0"
+  assert_file_contains "$lint/pv.out" "GPUs held at once, peak      8"
+  assert_file_contains "$lint/pv.out" "older than 7 days"
+  assert_file_contains "$lint/pv.out" "QOS high MaxTRESPJ                           gres/gpu=2    per job asks 2    within"
+  assert_file_contains "$lint/pv.out" "OVER by 2"
+  assert_file_contains "$lint/pv.out" "Slurm --test-only was not used"
+  # Without --time or a snapshot the totals are unknown, never a guess.
+  printf '%s\n' '#!/bin/bash' '#SBATCH --gpus=4' > "$lint/pv-bare.sh"
+  "$LINT" --preview "$lint/pv-bare.sh" --snapshot "$lint/missing.md" > "$lint/pv-bare.out" 2>&1 || fail "preview without a snapshot failed"
+  assert_file_contains "$lint/pv-bare.out" "GPU-hours, upper bound       unknown"
+  assert_file_contains "$lint/pv-bare.out" "snapshot: none readable"
   rc=0
   "$LINT" "$lint/absent.sh" > /dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "slurm-lint must exit 2 for an unreadable script (got $rc)"
