@@ -106,6 +106,7 @@ explains overlapping entrypoints.
 | `run-ledger` | Record a command and its execution metadata. | `oms run-ledger` | [ML and HPC](#ml-and-hpc) |
 | `run-reconcile` | Reconcile long-running Slurm jobs with saved run records. | `oms run-reconcile` | [ML and HPC](#ml-and-hpc) |
 | `slurm-lint` | Static check of a Slurm job script against the cluster snapshot's QOS; prints a preemption-aware template. | `oms slurm-lint` | [ML and HPC](#ml-and-hpc) |
+| `slurm-submit` | Submit a Slurm job once per request key; a repeat is reported, not resubmitted. | `oms slurm-submit` | [ML and HPC](#ml-and-hpc) |
 | `run` | Tie experiment and execution records together. | `oms run` | [ML and HPC](#ml-and-hpc) |
 | `tsp-queue` | Queue local jobs through task-spooler. | `oms tsp-queue` | [ML and HPC](#ml-and-hpc) |
 | `runtime` | Inspect typed projections and optional execution services. | `oms runtime` | [Runtime guide](OMS-RUNTIME.md) |
@@ -2417,6 +2418,25 @@ ML/Slurm workflows use local-first experiment controls:
   `LOGGING.md` template) or DVCLive `plots/metrics/*.tsv`: last step, latest and
   best value, recent slope, non-finite values and time since the last record.
   The age describes the file, not whether the run is alive.
+- `oms slurm-submit [--key KEY] [--dry-run] [--force-resubmit --reason TEXT] -- sbatch ARGS... SCRIPT`
+  runs the submission a person or agent asked for once per request key. The default
+  key is a sha256 over the script's content digest, the `sbatch` arguments in order,
+  the repo-relative working directory and the current commit; `--key` supplies your
+  own (a sweep cell id). Under the repo file lock it appends an `intent` row to
+  `.oms/slurm-submits.jsonl` (key, time, script path and digest, argument digest;
+  the raw arguments only when they pass the sensitive scan) before `sbatch` runs
+  exactly once, then a `submitted` row with the job id or a `failed` row with the
+  exit status. A repeat of a submitted key runs nothing, prints the earlier job id
+  and time and `oms run-reconcile list`, and exits 3. An intent with no result row
+  (OMS died, or a concurrent submit is still running) prints `unknown: an earlier
+  submission with this key may have gone through` and exits 3 too, pointing at
+  `squeue`/`sacct` and the `--comment oms-key=<12 chars>` tag added to `sbatch`
+  unless the caller already set a comment. A failed submission does not block a
+  retry. `--force-resubmit --reason TEXT` overrides either refusal and records the
+  reason. `--dry-run` prints the key and the command and writes nothing;
+  `oms slurm-lint` runs first as advice and never blocks. This is duplicate
+  detection inside one repository's `.oms`, not exactly-once across machines or
+  clones; it never submits on its own.
 - `oms cite add|list|verify|export --bibtex` keeps per-paper notes (id, title,
   year, claim, locator, status) in append-only `.oms/literature.jsonl`; the last
   row for an id wins. `verify` checks identifier syntax offline. Only

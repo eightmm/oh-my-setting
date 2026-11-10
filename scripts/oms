@@ -253,6 +253,7 @@ session-handoff
 skill-doctor
 skill-forge
 slurm-lint
+slurm-submit
 snapshot
 state
 state-verify
