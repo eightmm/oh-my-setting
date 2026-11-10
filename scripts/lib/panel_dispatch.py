@@ -915,10 +915,25 @@ def continuation(repo, owner, main, task_id, route, brief, env, work_repo=None, 
             "recorded summary" if has_summary else ("summary omitted by outbound scan"
                                                        if summary.startswith("earlier summary omitted:")
                                                        else "no verified summary"))
+    cache_line = None
+    if session:
+        # Advisory only: show the session's age so the parent can choose resume or fresh, and say when a
+        # model/effort change inside the warm window rebuilds the provider cache prefix.
+        import cache_warm
+        age = cache_warm.age_seconds(ran, session, last)
+        note += "; session %s" % cache_warm.age_phrase(age)
+        if resume:
+            changed = [name for name, before, after in (("model", last.get("refs", {}).get("panel_model"), route.get("model")),
+                                                       ("effort", last.get("refs", {}).get("panel_effort"), route.get("effort")))
+                       if isinstance(before, str) and isinstance(after, str) and before != after]
+            line = cache_warm.rebuild_note("the resumed session", age, " and ".join(changed)) if changed else None
+            cache_line = line
     if verification_section:
         note += "; verification failure attached"
     if drift_note:
         note += "; " + drift_note
+    if cache_line:
+        note += "\n" + cache_line
     text = preamble + Path(brief).read_text(encoding="utf-8")
     if len(text.encode("utf-8")) > MAX_PROMPT:
         raise ValueError("brief plus continuation preamble exceeds the panel input contract")
