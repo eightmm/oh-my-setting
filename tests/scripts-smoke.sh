@@ -14767,6 +14767,77 @@ assert rows[("codex", "gpt-fast")]["usage_detail"] == {"input_tokens": 20, "cach
   human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
   contains "$human" 'tokens: provider=antigravity model=agy-model input=130 cached=45 output=12 reports=1' ||
     fail "human telemetry omitted provider detail: $human"
+
+  # --by groups the same rows by a recorded field, and --since/--until bound
+  # them by their own time. Only reported values are shown: `-` when no call
+  # in the group reported one, `N+?` when only some did; a resumed session's
+  # running total is left out rather than added twice; cost is never priced.
+  local usage="$project/usage" by
+  mkdir -p "$usage/.oms/artifacts"
+  git -C "$usage" init -q
+  cat > "$usage/.oms/artifacts/index.jsonl" <<'EOF'
+{"schema":1,"event_id":"u1","operation_id":"o1","artifact_id":"a1","ts":"2026-07-01T23:59:59Z","kind":"call","provider":"codex","exit":0,"model_class":"fast","selected_model":"gpt-fast","tokens":1200,"task_id":"task-a","provider_usage":{"provider":"codex","input_tokens":1000,"cache_read_tokens":400,"output_tokens":200}}
+{"schema":1,"event_id":"u2","operation_id":"o2","artifact_id":"a2","ts":"2026-07-02T00:00:00Z","kind":"delegate","provider":"claude","exit":0,"model_class":"explicit","selected_model":"opus","served_model":"opus-served","tokens":3000,"cost_usd":0.25,"task_id":"task-a"}
+{"schema":1,"event_id":"u3","operation_id":"o3","artifact_id":"a3","ts":"2026-07-02T10:00:00Z","kind":"call","provider":"codex","exit":0,"model_class":"fast","selected_model":"gpt-fast","provider_usage":{"provider":"codex","input_tokens":9000,"cache_read_tokens":10,"output_tokens":3,"session_cumulative":true}}
+{"schema":1,"event_id":"u4","operation_id":"o4","artifact_id":"a4","ts":"2026-07-03T10:00:00Z","kind":"review","provider":"claude","exit":0,"model_class":"explicit","selected_model":"opus","served_model":"opus-served","tokens":500,"cost_usd":0.05}
+{"schema":1,"event_id":"u5","operation_id":"o5","artifact_id":"a5","kind":"call","provider":"codex","exit":0}
+{"schema":1,"event_id":"u6","operation_id":"o6","artifact_id":"a6","ts":"2026-07-03T11:00:00Z","kind":"patch-admit","provider":"local","exit":0}
+EOF
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by day)" ||
+    fail "telemetry --by day should run: $by"
+  contains "$by" 'usage by day (UTC): 5 routed operation(s) in 6/6 retained row(s) (limit 1000)' ||
+    fail "grouped telemetry must state its window and that days are UTC: $by"
+  contains "$by" 'window complete: every matching retained row is counted' ||
+    fail "grouped telemetry must say the window was not capped: $by"
+  printf '%s\n' "$by" | grep -Eq '^2026-07-01 +1 +1200 +1000 +400 +200 +-$' ||
+    fail "a fully reported day should show its totals and no cost: $by"
+  printf '%s\n' "$by" | grep -Eq '^2026-07-02 +2 +3000\+\? +- +- +- +0\.2500\+\?$' ||
+    fail "a partly reported day must be marked +? and must not add a cumulative report: $by"
+  printf '%s\n' "$by" | grep -Eq '^undated +1 +- +- +- +- +-$' ||
+    fail "a row without a time is its own group, and unreported is not zero: $by"
+  contains "$by" 'cumulative: 1 resumed-session report(s)' ||
+    fail "an excluded cumulative report must be disclosed: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by model)"
+  printf '%s\n' "$by" | grep -Eq '^opus-served +2 +3500 +- +- +- +0\.3000$' ||
+    fail "model grouping should use the served model and sum reported cost: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by task)"
+  printf '%s\n' "$by" | grep -Eq '^task-a +2 +4200 ' ||
+    fail "task grouping should use the recorded task id: $by"
+  printf '%s\n' "$by" | grep -Eq '^unrecorded +3 ' ||
+    fail "task grouping should keep rows without a task id unrecorded: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by provider --since 2026-07-02 --until 2026-07-02)"
+  contains "$by" 'in 2/6 retained row(s) (2 in range; limit 1000)' ||
+    fail "a date range should keep exactly that UTC day: $by"
+  contains "$by" 'undated: 1 row(s) carry no time and are outside any range' ||
+    fail "a range must say which rows it could not place: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry 2 --by provider --since 2026-07-01)"
+  contains "$by" 'window capped: the 3 oldest matching row(s) are not counted' ||
+    fail "a capped window must not read as complete: $by"
+  "$ROOT/scripts/artifact-index.sh" --repo "$usage" --json telemetry --by day --until 2026-07-02T00:00:00Z | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+block = r["usage_by"]
+assert r["window"]["matched_rows"] == 2 and r["window"]["timezone"] == "UTC", r["window"]
+assert block["by"] == "day" and block["capped"] is False, block
+days = {g["group"]: g for g in block["groups"]}
+assert sorted(days) == ["2026-07-01", "2026-07-02"], days
+assert days["2026-07-01"]["cost_usd"] is None and days["2026-07-01"]["input_tokens"] == 1000, days
+assert days["2026-07-02"]["cost_usd"] == 0.25 and days["2026-07-02"]["usage_reports"] == 0, days
+' || fail "grouped telemetry JSON should carry usage_by and the bounded window"
+  "$ROOT/scripts/artifact-index.sh" --repo "$usage" --json telemetry | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert "usage_by" not in r and "matched_rows" not in r["window"], r["window"]
+' || fail "ungrouped, unbounded telemetry JSON must keep its shape"
+  human="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --since 2026-07-03)"
+  contains "$human" 'retained window: 2/6 row(s)' ||
+    fail "the summary should honor --since too: $human"
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by role >/dev/null 2>&1 ||
+    fail "role is not recorded on index rows and must not be offered as a grouping"
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --since yesterday >/dev/null 2>&1 ||
+    fail "an unparseable --since must be refused"
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" list --by day >/dev/null 2>&1 ||
+    fail "--by is only valid with telemetry"
 }
 
 test_artifact_index_latest_run_groups_rows() {

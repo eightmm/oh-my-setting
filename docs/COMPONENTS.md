@@ -841,6 +841,16 @@ a failure. `OMS_REPAIR_REPLAY=0` retains the cap and records outcomes without
 reading history; `oms artifact-index telemetry` reports recorded/delegation
 counts, selections and stops, not a measured token or wall-clock saving.
 Telemetry also reports complete provider usage details by recorded route, with input, cached and output subtotals; incomplete reports are omitted.
+`oms artifact-index telemetry --by day|model|provider|task` groups the same routed
+operations and prints, per group, calls, provider-reported tokens, complete
+input/cached/output reports and provider-reported cost. `-` means no call in the
+group reported the value and `N+?` that only some did; a resumed session's
+running total is left out of input/cached/output rather than added twice; cost
+is never derived from tokens and groups are not summed. `--since`/`--until` take
+`YYYY-MM-DD` (the whole UTC day) or an ISO-8601 time and apply before `N`; the
+header says how many rows matched and whether `N` cut the oldest off. The index
+is pruned, so this covers retained rows only. Rows record no role, so there is
+no role grouping. `--json` carries the groups under `usage_by`.
 No extra run, timer, model, test omission or automatic delegation is introduced.
 Explicit repeated-failure advice bypasses replay: a different agent contributes
 to that trajectory and its cost, so single-worker evidence is not comparable.
