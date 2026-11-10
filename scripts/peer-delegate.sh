@@ -233,6 +233,9 @@ Environment:
                              $XDG_CACHE_HOME/oh-my-setting/worktrees, else
                              ~/.cache/oh-my-setting/worktrees.
   OMS_WORKER_GUARD_OFF=1     Skip the worker-authority check entirely.
+                             The guard also warns, by file name only, when a
+                             provider setting, shell start file or git config
+                             under HOME changed during the run.
   OMS_WORKER_GUARD_MAX_FILES=20000
                              Cap the untracked/ignored stat scan; a truncated
                              scan is reported, never silent.
@@ -2259,6 +2262,10 @@ EOF_GUARD_TARGETS
   worker_guard_dir="$worktree_parent/worker-guard"
   worker_guard_snapshot_error_file="$worktree_parent/worker-guard-snapshot.error"
   worker_guard_snapshot_time="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+  # User-level settings and start files, fingerprinted beside the repository
+  # snapshot. Best effort: without it the run only loses the warning below.
+  worker_user_config_before="$worktree_parent/worker-user-config.before"
+  oms_user_config_fingerprint "$worker_user_config_before" || rm -f "$worker_user_config_before"
   if oms_with_worktree_registry_lock "$REPO" \
     delegate_surface_snapshot "$REPO" "$worker_guard_dir" \
     "$worker_guard_worktree_physical" 2>"$worker_guard_snapshot_error_file"; then
@@ -2796,6 +2803,21 @@ if [ -n "$worker_guard_dir" ]; then
       esac
     done
     worker_guard_soft="$guard_read_soft"
+  fi
+  # A same-user worker can plant a hook, an MCP server or a permission for the
+  # next session in these files. Names only, never contents, and never a
+  # failure: a provider CLI may update its own settings, and a person may be
+  # editing them. Nothing is restored.
+  worker_user_config_changed=""
+  if [ -s "${worker_user_config_before:-}" ] &&
+    oms_user_config_fingerprint "$worktree_parent/worker-user-config.after"; then
+    worker_user_config_changed="$(oms_user_config_changed "$worker_user_config_before" \
+      "$worktree_parent/worker-user-config.after" 2>/dev/null || true)"
+  fi
+  if [ -n "$worker_user_config_changed" ]; then
+    echo "warning: user-level configuration changed during this run: $worker_user_config_changed; a provider CLI may update its own settings, so look before the next session (nothing was restored)" >&2
+    printf '\n\n## User-level configuration changed during the run\n\n- files: %s\n- not attributable to the worker and not restored; names only\n' \
+      "$worker_user_config_changed" >> "$artifact"
   fi
   if [ -n "$worker_guard_soft" ]; then
     if [ "$WORKER_ACCESS" = read ]; then

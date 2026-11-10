@@ -1529,6 +1529,16 @@ the stop. The worker guard treats `oms/*` branches and harness worktrees belongi
 mains in other sessions as soft, and `oms panel` refuses overlapping write dispatches against declared scopes before the work
 starts.
 
+A delegated run also fingerprints the user-level files that decide what the next
+session runs: the Claude `settings.json`, the Codex `config.toml` and `rules/`,
+the Antigravity `settings.json`, shell start files and the git config. When one
+differs after the run, `oms delegate` prints
+`warning: user-level configuration changed during this run: <names>` and adds a
+section to the artifact. It names files only, restores nothing and never fails
+the run, strict mode included: a provider CLI may update its own settings and a
+person may be editing them. `~/.claude.json` is left out because the CLI
+rewrites it on every run.
+
 
 #### Write authority
 
