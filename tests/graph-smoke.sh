@@ -312,6 +312,36 @@ run_graph "$work/neighbors.out" project neighbors 'symbol:alpha.py::alpha_entry'
 grep -Fqx 'in  calls  EXTRACTED  symbol:beta.py::BetaRunner.run' "$work/neighbors.out" \
   || fail "neighbors rows are not direction/relation/confidence/id: $(cat "$work/neighbors.out")"
 
+# One symbol, three zones: what a parser extracted, what a resolver inferred,
+# and name matches the graph has no edge for. The MCP tool is the same view.
+run_graph "$work/symbol.json" project symbol alpha_entry --json
+[ "$graph_rc" -eq 0 ] || fail "symbol --json exited $graph_rc: $(cat "$work/symbol.json")"
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oms_project_graph_symbol","arguments":{"repo":"%s","name":"alpha_entry"}}}\n' "$tmp"
+} | python3 "$ROOT/scripts/oms-mcp-server.py" > "$work/mcp-symbol.out" 2>&1
+python3 - "$work/symbol.json" "$work/mcp-symbol.out" <<'PY'
+import json
+import sys
+view = json.load(open(sys.argv[1], encoding="utf-8"))
+assert (view["kind"], view["match"], view["content_trust"]) == ("oms-project-symbol", "exact", "untrusted-source-data"), view
+assert [row["id"] for row in view["extracted"]["definitions"]] == ["symbol:alpha.py::alpha_entry"], view
+assert "symbol:beta.py::BetaRunner.run" in {row["source"] for row in view["extracted"]["callers"]}, view
+linked = {(row["path"], row["line"]) for row in view["extracted"]["callers"] + view["extracted"]["tests"] + view["inferred"]}
+definition = view["extracted"]["definitions"][0]
+for row in view["text_only"]:
+    assert (row["path"], row["line"]) not in linked, row
+    assert not (row["path"] == definition["path"] and definition["line"] <= row["line"] <= definition["end_line"]), row
+rows = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+result = next(row["result"] for row in rows if row.get("id") == 2)
+assert result["isError"] is False, result
+assert json.loads(result["content"][0]["text"])["extracted"]["definitions"][0]["id"] == "symbol:alpha.py::alpha_entry", result
+PY
+run_graph "$work/symbol.out" project symbol alpha_entry
+grep -Fq 'extracted (read from source by a parser):' "$work/symbol.out" && grep -Fq 'text-only (the name' "$work/symbol.out" \
+  || fail "symbol text view lost its zones: $(cat "$work/symbol.out")"
+
 run_graph "$work/trace.out" project trace 'file:beta.py' --depth 2
 [ "$graph_rc" -eq 0 ] || fail "trace exited $graph_rc: $(cat "$work/trace.out")"
 grep -Fqx 'file:beta.py' "$work/trace.out" || fail "trace omitted its root: $(cat "$work/trace.out")"

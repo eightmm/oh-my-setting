@@ -3375,7 +3375,8 @@ assert names == [
     "oms_runtime_failures", "oms_peer_start", "oms_peer_result",
     "oms_peer_operations", "oms_project_graph_map", "oms_project_graph_render",
     "oms_project_graph_query",
-    "oms_project_graph_api", "oms_project_graph_search", "oms_project_graph_trace",
+    "oms_project_graph_api", "oms_project_graph_search", "oms_project_graph_symbol",
+    "oms_project_graph_trace",
     "oms_project_graph_blast", "oms_project_graph_affected",
     "oms_execution_graph_status", "oms_execution_graph_route",
     "oms_execution_graph_events"], names

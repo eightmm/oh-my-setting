@@ -16,6 +16,7 @@ oms graph project map            # counts, hubs, module groups
 oms graph project find lease     # name/path/qualname search
 oms graph project api scripts/lib/oms_graph/cli.py  # signatures/summaries, no bodies
 oms graph project search candidate_count            # exhaustive literal hits by symbol
+oms graph project symbol select_context             # definition, extracted callers/tests, inferred edges, text-only matches
 oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 2
 oms graph project blast --base origin/main   # --limit N bounds the JSON lists
 oms graph project coupling --path scripts/plan-run.sh   # co-change pairs from Git history; structural=no = the parsers cannot see it

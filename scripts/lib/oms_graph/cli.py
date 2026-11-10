@@ -21,6 +21,7 @@ from .project import build as project_build
 from .project import context as project_context
 from .project import orientation as project_orientation
 from .project.query import Graph
+from .project import symbol as project_symbol
 from oms_runtime.common import CoreError, atomic_write_bytes, read_json, repo_root
 
 PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
@@ -30,7 +31,7 @@ HTML_FRAGMENT_MAX_BYTES = 1024 * 1024
 # works in a repository nobody has built yet. `check` reports freshness and
 # `build` is the explicit form: neither may refresh behind the caller's back.
 AUTO_REFRESH_ACTIONS = (
-    "map", "find", "api", "search", "neighbors", "trace", "blast",
+    "map", "find", "api", "search", "symbol", "neighbors", "trace", "blast",
     "affected", "coupling", "context",
 )
 
@@ -103,6 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=200)
     search.add_argument("--json", action="store_true")
+    symbol = project_sub.add_parser("symbol", help="one symbol's definitions, graph references and unlinked text matches, in separate zones", parents=[shared_options])
+    symbol.add_argument("name", help="symbol name, qualified name or node id")
+    symbol.add_argument("--limit", type=int, default=40, metavar="N", help="keep at most N rows per zone (1-500); the rest is counted in omitted")
+    symbol.add_argument("--json", action="store_true")
     neighbors = project_sub.add_parser("neighbors", parents=[shared_options])
     neighbors.add_argument("node")
     neighbors.add_argument("--relation", default="")
@@ -405,6 +410,20 @@ def _project_search(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
+def _project_symbol(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    if args.limit < 1 or args.limit > 500:
+        raise GraphError("project symbol --limit must be between 1 and 500")
+    view = project_symbol.symbol_view(repo, _index(repo, state)[1], args.name, limit=args.limit)
+    if not view["extracted"]["definitions"]:
+        print("graph symbol: no symbol has that name; try `oms graph project find`. "
+              "Text matches below are not definitions.", file=sys.stderr)
+    if args.json:
+        emit(view, args.pretty)
+    else:
+        sys.stdout.write(project_symbol.view_text(view))
+    return 0
+
+
 def _project_neighbors(args: argparse.Namespace, repo: Path, state: Path) -> int:
     rows = _index(repo, state)[1].neighbors(args.node, relation=args.relation, direction=args.direction)
     if args.json:
@@ -588,6 +607,7 @@ def _project_coupling(args: argparse.Namespace, repo: Path, state: Path) -> int:
 
 PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
                    "find": _project_find, "api": _project_api, "search": _project_search,
+                   "symbol": _project_symbol,
                    "neighbors": _project_neighbors, "trace": _project_trace,
                    "blast": _project_blast, "affected": _project_affected,
                    "coupling": _project_coupling, "context": _project_context}
