@@ -9,7 +9,7 @@ artifact. No model is called and the gate verdict is never touched: the
 classification says whether a citation can be found, not whether the finding
 is right.
 
-The lifecycle (`fix`, `verify`, `dismiss`, `reopen`) appends to
+The lifecycle (`fix`, `verify`, `dismiss`, `out-of-scope`, `reopen`) appends to
 `_finding-events.jsonl` in the same directory. Every status is a record of
 who said what, never approval or verification evidence by itself: `verify`
 only links a finding to a mechanical verify receipt the artifact index
@@ -33,7 +33,7 @@ MAX_TEXT = 500
 QUOTE_WINDOW = 3
 SEVERITIES = ("blocking", "advisory")
 ANCHORS = ("in-diff", "context", "outside-scope", "anchor-not-found", "unclassified")
-STATES = ("open", "fixed", "verified", "dismissed")
+STATES = ("open", "fixed", "verified", "dismissed", "out-of-scope")
 EVENTS_FILE = "_finding-events.jsonl"
 BLOCK_OPEN = re.compile(r"^\s*```+\s*findings\s*$")
 BLOCK_CLOSE = re.compile(r"^\s*```+\s*$")
@@ -435,6 +435,18 @@ def listing(args):
     return 0
 
 
+def undisposed(args):
+    """Findings still open that a run before RUN reported (a repeat counts): one line each, nothing when all have a disposition."""
+    findings, events = load(args.artifact_dir)
+    for ident in sorted(findings, key=lambda key: (findings[key]["ts"], key)):
+        entry = findings[ident]
+        if all(run == args.run for _, run in entry["runs"]) or status(entry, events.get(ident, []))[0] != "open":
+            continue
+        print("undisposed %s  %s  %s:%s  %s" % (ident, entry.get("severity"), clean(entry.get("file"), 200),
+                                              entry.get("line"), clean(entry.get("summary"), 160)))
+    return 0
+
+
 def show(args):
     ident, entry, history = resolve(args.artifact_dir, args.id)
     state, note = status(entry, history)
@@ -491,16 +503,17 @@ def transition(args):
         record(args.artifact_dir, ident, "verified", entry, verify_artifact_id=clean(receipt.get("artifact_id") or "", 120),
                verify_artifact=clean(receipt.get("artifact") or "", 400), commit=commit, note=clean(args.note or ""))
         print("%s: verified against %s" % (ident, clean(receipt.get("artifact_id") or args.run, 120)))
-    elif args.action == "dismiss":
+    elif args.action in ("dismiss", "out-of-scope"):
+        state_word = "dismissed" if args.action == "dismiss" else "out-of-scope"
         if os.environ.get("OMS_HARNESS_CHILD") == "1":
-            raise SystemExit("review findings: a harness worker or reviewer cannot dismiss a finding; the owner does")
+            raise SystemExit("review findings: a harness worker or reviewer cannot %s a finding; the owner does" % args.action)
         if state not in ("open", "fixed"):
-            raise SystemExit("review findings: %s is %s; nothing to dismiss" % (ident, state))
+            raise SystemExit("review findings: %s is %s; nothing to %s" % (ident, state, args.action))
         reason = clean(args.reason or "")
         if not reason:
-            raise SystemExit("review findings: dismiss needs --reason TEXT")
-        record(args.artifact_dir, ident, "dismissed", entry, reason=reason)
-        print("%s: dismissed (%s)" % (ident, reason))
+            raise SystemExit("review findings: %s needs --reason TEXT" % args.action)
+        record(args.artifact_dir, ident, state_word, entry, reason=reason)
+        print("%s: %s (%s)" % (ident, state_word, reason))
     else:
         if state == "open":
             raise SystemExit("review findings: %s is already open" % ident)
@@ -525,9 +538,11 @@ def main(argv):
     one = sub.add_parser("list")
     one.add_argument("--status", choices=STATES)
     one.add_argument("--json", action="store_true")
+    one = sub.add_parser("undisposed")
+    one.add_argument("--run", required=True)
     one = sub.add_parser("show")
     one.add_argument("id")
-    for name in ("fix", "verify", "dismiss", "reopen"):
+    for name in ("fix", "verify", "dismiss", "out-of-scope", "reopen"):
         one = sub.add_parser(name)
         one.add_argument("id")
         one.add_argument("--note")
@@ -546,6 +561,8 @@ def main(argv):
         return listing(args)
     if args.action == "show":
         return show(args)
+    if args.action == "undisposed":
+        return undisposed(args)
     return transition(args)
 
 

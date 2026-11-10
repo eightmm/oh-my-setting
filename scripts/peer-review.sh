@@ -34,6 +34,7 @@ INCLUDE_ML_CONTEXT=0
 DEBATE=0
 EXPORT_ONLY=0
 GATE=0
+REQUIRE_DISPOSITIONS="${OMS_REVIEW_REQUIRE_DISPOSITIONS:-0}"
 COVERS=""
 VERIFY_CMD=""
 NO_VERIFY=0
@@ -59,6 +60,7 @@ Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh findings fix ID [--commit SHA] [--note TEXT]
        peer-review.sh findings verify ID --run VERIFY_ARTIFACT
        peer-review.sh findings dismiss ID --reason TEXT
+       peer-review.sh findings out-of-scope ID --reason TEXT
        peer-review.sh findings reopen ID --reason TEXT
        peer-review.sh findings suggest-rules
        peer-review.sh advise [--json] [--repo PATH] [--base REF]
@@ -93,8 +95,10 @@ scope with a clean tracked tree at that commit, cover the cited file and use
 the original review base. Rerun the gate with --base ORIGINAL_BASE --verify CMD
 after recording the fix.
 Older receipts without that scope remain readable but cannot verify a finding.
-dismiss is the owner's and needs a reason (a harness worker or reviewer cannot),
-reopen needs a reason. A fixed or verified
+dismiss (the finding is wrong) and out-of-scope (right, but not this change) are
+the owner's and need a reason (a harness worker or reviewer cannot), reopen needs
+a reason; fix is the accept. `findings list --status open` lists the findings
+without a disposition. A fixed or verified
 finding that a later review reports again reads open. Every status is a
 record, never approval or verification evidence. Each action takes
 --artifact-dir PATH (default: ./.oms/artifacts/review) and --repo PATH.
@@ -181,6 +185,11 @@ Options:
                        contributes verified coverage, so --covers requires
                        a gate verify command.
   --no-verify          Gate mode: skip the default scripts/check.sh backstop.
+  --require-dispositions
+                       Gate mode: a reviewer pass becomes incomplete (exit 2) while
+                       an earlier run's finding is still open; record each with
+                       `findings fix|dismiss|out-of-scope`. Also
+                       OMS_REVIEW_REQUIRE_DISPOSITIONS=1. Off by default.
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
@@ -629,6 +638,10 @@ while [ "$#" -gt 0 ]; do
       GATE=1
       shift
       ;;
+    --require-dispositions)
+      REQUIRE_DISPOSITIONS=1
+      shift
+      ;;
     --covers)
       [ "$#" -ge 2 ] || fail "--covers requires a criterion id"
       COVERS="$COVERS $2"
@@ -814,6 +827,7 @@ fi
 # prose is advisory and never projects a criterion to verified. Both the
 # id set and the presence of a verify command are checked before any
 # reviewer is called or any artifact is written.
+[ "$REQUIRE_DISPOSITIONS" != 1 ] || [ "$GATE" -eq 1 ] || fail "--require-dispositions requires --gate"
 [ -z "$CONFIRM" ] || [ "$GATE" -eq 1 ] || fail "--confirm requires --gate"
 [ -z "$SECURITY_AUDIT" ] || [ "$GATE" -eq 1 ] || fail "--security-audit requires --gate"
 if [ -n "$COVERS" ]; then
@@ -1326,6 +1340,17 @@ print(json.dumps({
     echo "warning: review findings were not recorded" >&2
   rm -rf "$review_finding_windows"
   review_finding_windows=""
+  # Opt-in: a passing verdict is incomplete while an earlier run's finding has
+  # no disposition. It never turns a failure into a pass.
+  if [ "$REQUIRE_DISPOSITIONS" = 1 ] && [ "$verdict_rc" -eq 0 ] && [ "$DRY_RUN" != "1" ]; then
+    undisposed="$(python3 -I "$(ma_scripts_dir)/lib/review_findings.py" undisposed --run "$timestamp" \
+      --artifact-dir "$ARTIFACT_DIR" --repo "$REPO")" || undisposed="unreadable"
+    if [ -n "$undisposed" ]; then
+      printf '%s\n' "$undisposed" >&2
+      echo "gate: incomplete (findings without a disposition; record fix, dismiss or out-of-scope for each, then rerun)"
+      verdict_rc=2
+    fi
+  fi
   # A separate security reading of a change that touches risk paths. It is
   # recorded as its own verdict and stays advisory: incomplete is not a pass,
   # and neither answer moves the gate.
