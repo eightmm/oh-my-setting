@@ -844,7 +844,10 @@ Nothing is rewritten and no model is called: the raw file is the record, the
 digest a derived view for reading. A verifier's input and receipt stay the raw
 output, and the byte counts are measured bytes; the JSON's token figure is a
 labelled bytes/4 heuristic, not a tokenizer and not a quota or billing saving.
-The tool is opt-in: no hook rewrites a command to use it.
+The tool is opt-in: no hook rewrites a command to use it. The one built-in
+caller is `scripts/check.sh`: a failing stage whose output exceeds 4000 bytes
+prints this digest (`--file`, the stage's exit code) and names the retained
+full log instead of a 64 KiB tail; smaller output is still printed whole.
 
 Raw captures are mode 600 and the newest 50 are kept; the store retains itself,
 so `oms gc --delete-orphan-files` never treats it as unindexed orphans. If the lines to be

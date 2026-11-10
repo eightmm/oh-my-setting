@@ -758,6 +758,26 @@ for name in ('test_deadline', 'test_deadline_two'):
     assert 'check: deadline-smoke.' + name + ' FAILED' not in parallel.stdout
 PY_DEADLINE
 
+  # A failing stage's output reaches the session as an output-digest view, not a 64 KiB tail.
+  python3 - "$ROOT" "$TMP" <<'PY_STAGE_CAP' || fail "failing stage output was not capped through output-digest"
+import os, pathlib, subprocess, sys
+root, tmp = sys.argv[1:]
+check = pathlib.Path(root, 'scripts/check.sh').read_text()
+functions = check[check.index('run_stage_with_deadline() {'):check.index('# CI hosts have no provider CLI')]
+work = pathlib.Path(tmp, 'stage-cap')
+work.mkdir()
+env = dict(os.environ, ROOT=root, CHECK_RUNTIME=str(work), TMPDIR=str(work), FOCUSED_LANE='', LIST_STAGES='0')
+noisy = 'i=0; while [ $i -lt 3000 ]; do echo "noise line $i"; i=$((i+1)); done; echo "FAIL: the real reason"; exit 3'
+result = subprocess.run(['bash', '-c', functions + '\nstage noisy bash -c "$1"\n', 'probe', noisy],
+                        env=env, capture_output=True, text=True, timeout=60)
+assert result.returncode == 3, (result.stdout, result.stderr)
+assert len(result.stdout.encode()) < 8000, len(result.stdout)
+assert 'FAIL: the real reason' in result.stdout and 'output-digest: exit=3' in result.stdout, result.stdout
+assert 'full log: ' in result.stdout and 'check: noisy FAILED' in result.stderr, (result.stdout, result.stderr)
+log = pathlib.Path(result.stdout.split('full log: ', 1)[1].split(']', 1)[0])
+assert log.read_text().count('noise line') == 3000, log
+PY_STAGE_CAP
+
   local signal_suite="$TMP/signal-smoke.sh"
   local signal_tmp="$TMP/signal-tmp"
   local leader child fast linger linger_state="" status=0
