@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "kind": "recipe-trigger",
+  "id": "oms-scheduled-check",
+  "recipe": "templates/recipes/check.json",
+  "inputs": {"path": "."},
+  "schedule": {"at": "2026-11-10T00:00:00Z", "every_seconds": 86400}
+}

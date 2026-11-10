@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "kind": "recipe-trigger",
+  "id": "oms-event-check",
+  "recipe": "templates/recipes/check.json",
+  "inputs": {"path": "."},
+  "event": {"name": "source-changed", "match": {"branch": "main"}}
+}

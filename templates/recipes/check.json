@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "recipe",
+  "id": "oms-diff-check",
+  "description": "Check whitespace errors in the explicitly selected project path.",
+  "inputs": {
+    "path": {"type": "path", "default": "."}
+  },
+  "commands": {
+    "diff-check": {
+      "argv": ["git", "diff", "--check", "--", "${input.path}"],
+      "timeout_seconds": 60
+    }
+  },
+  "steps": [{"id": "check", "command": "diff-check"}]
+}

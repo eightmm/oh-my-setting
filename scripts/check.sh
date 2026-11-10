@@ -1439,6 +1439,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage platform-portability bash tests/platform-portability-smoke.sh
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
   stage supervisor bash tests/supervisor-smoke.sh
+  stage recipes python3 tests/test_recipes.py
   stage bsd-portability bash tests/bsd-portability-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
   stage lifecycle-events bash tests/lifecycle-events-smoke.sh

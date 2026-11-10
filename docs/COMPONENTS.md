@@ -67,6 +67,7 @@ explains overlapping entrypoints.
 | `goal-drive` | Drive an existing approved plan to its acceptance command. | `oms goal-drive` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `plan-from-spec` | Propose plan tasks from `PROJECT.md` or discovered work evidence. | `oms plan-from-spec` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `plan-run` | Execute one pre-authorized plan task. | `oms plan-run` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `recipe` | Run typed reusable recipes and workspace actions; import versioned local packs, link worksets and create due/event requests. | `oms recipe` | [Recipes and workspaces](RECIPES.md) |
 | `patch-admit` | Check delegated patch scope and evidence. | `oms patch-admit` | [Delegating writes](#delegating-writes) |
 | `patch-land` | Apply an admitted delegated patch. | `oms patch-land` | [Delegating writes](#delegating-writes) |
 | `land` | Gate, push and update a committed worktree. | `oms land` | [Verification and release](#verification-and-release) |
