@@ -61,6 +61,8 @@ run options:
                    row counts, not data; an unknown NAME stops before the command
                    runs. Repeatable.
   --metrics PATH   JSON metrics file folded into the capsule result.
+                   Input identity and metric contract are captured before the
+                   command and shared with its companion ledger row.
   --no-ledger      Do not also append a run-ledger row.
   --ledger PATH    Ledger path for the companion row (default run-ledger default).
 
@@ -580,6 +582,30 @@ cmd_run() {
   rm -f "$CONDA_SCRATCH"; CONDA_SCRATCH=""
   cfg_json="$(configs_json)"
 
+  # Capture comparison inputs before executing anything. A companion row must
+  # not relabel this run with a later checkout or metric contract.
+  local captured_run
+  captured_run="$(OMS_CAPTURE_GIT="$git_json" OMS_CAPTURE_CONFIGS="$cfg_json" \
+    OMS_CAPTURE_DATA="$data_rows" OMS_CAPTURE_CONFIG_PATHS="$(printf '%s\n' "${CONFIGS[@]:-}")" \
+    OMS_CAPTURE_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" \
+    python3 - "$ROOT_LIB" "$STATE_ROOT" "${LEDGER_FILE:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}" "$id" <<'PY_CAPTURE'
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import run_ledger_metrics as metrics
+try:
+    contract = metrics.row_contract(sys.argv[3], sys.argv[2], lambda text: sys.stderr.write(text + "\n"))
+    value = metrics.capture_for_ledger(
+        json.loads(os.environ["OMS_CAPTURE_GIT"]), json.loads(os.environ["OMS_CAPTURE_CONFIGS"]),
+        json.loads(os.environ["OMS_CAPTURE_DATA"]),
+        [path for path in os.environ["OMS_CAPTURE_CONFIG_PATHS"].splitlines() if path], contract,
+        [seed for seed in os.environ["OMS_CAPTURE_SEEDS"].splitlines() if seed], sys.argv[4])
+    print(json.dumps(value, ensure_ascii=False, allow_nan=False))
+except (ValueError, TypeError, RecursionError):
+    sys.stderr.write("capsule: cannot capture consistent bounded run metadata; command not started\n")
+    sys.exit(2)
+PY_CAPTURE
+)" || exit 2
+
   # The command's combined output is teed to the bundle log (part of the
   # capsule) and to stderr (live), leaving stdout free for the capsule id so
   # `id=$(run-capsule run ...)` is reliable.
@@ -614,7 +640,7 @@ cmd_run() {
   fi
 
   OMS_GIT="$git_json" OMS_ENV="$env_json" OMS_CFG="$cfg_json" OMS_OUT="$out_json" \
-  OMS_METRICS="$metrics_json" OMS_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" OMS_DATA_ROWS="$data_rows" \
+  OMS_CAPTURED_RUN="$captured_run" OMS_METRICS="$metrics_json" OMS_SEEDS="$(printf '%s\n' "${SEEDS[@]:-}")" OMS_DATA_ROWS="$data_rows" \
   python3 - "$SCHEMA" "$id" "$ts" "$(oms_detect_agent)" "$PWD" "$NOTE" \
     "$status" "$duration_s" "${SLURM_JOB_ID:-}" "$@" <<'PY' > "$bundle/capsule.json"
 import json, os, sys
@@ -652,6 +678,9 @@ row = {
 data = load("OMS_DATA_ROWS", [])
 if isinstance(data, list) and data:
     row["data"] = data
+captured = json.loads(os.environ["OMS_CAPTURED_RUN"])
+row["input_identity"] = captured["inputs"]
+row["metric_contract"] = captured["metric_contract"]
 print(json.dumps(row, ensure_ascii=False, allow_nan=False, indent=2))
 PY
 
@@ -685,6 +714,7 @@ PY
     local -a led=(--note "$NOTE" --no-gate)
     [ -n "$LEDGER_FILE" ] && led+=(--file "$LEDGER_FILE")
     [ -n "$METRICS_FILE" ] && [ -f "$METRICS_FILE" ] && led+=(--metrics "$METRICS_FILE")
+    OMS_RUN_LEDGER_CAPTURED="$captured_run" \
     OMS_WORK_JOURNAL_SUPPRESS=1 OMS_RUN_LEDGER_STATUS_OVERRIDE="$status" \
       "$ROOT/scripts/run-ledger.sh" \
       "${led[@]}" -- "$@" >/dev/null 2>&1 || \
