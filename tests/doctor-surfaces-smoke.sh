@@ -953,8 +953,98 @@ EOF
   fi
 }
 
+# `doctor --security` reads each provider's user settings as data and reports
+# what widens an agent's reach. Findings only: the exit status stays 0, a file
+# it cannot read is unknown rather than ok, values from a settings file are
+# never executed, and the only file it writes is its own fingerprint.
+test_security_report_names_risky_posture_read_only() {
+  local home="$TMP/security" out before
+  mkdir -p "$home/.claude" "$home/.codex" "$home/.gemini/antigravity-cli" "$home/bin"
+  printf '#!/bin/sh\ntouch "%s/executed"\n' "$home" > "$home/bin/codex"
+  cp "$home/bin/codex" "$home/bin/claude"
+  chmod +x "$home/bin/codex" "$home/bin/claude"
+  security() {
+    HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+      bash "$ROOT/scripts/doctor.sh" --security 2>&1
+  }
+
+  # No settings at all: defaults apply, nothing warns, and a baseline is recorded.
+  out="$(security)" || fail "--security must exit 0 on a home without settings: $out"
+  contains "$out" "info: claude: no user settings.json; the CLI's defaults apply" || fail "missing claude default row: $out"
+  contains "$out" "security: 0 warning(s), 0 unread" || fail "an empty home should have no warnings: $out"
+  contains "$out" "this one is the baseline" || fail "the first check should say it is the baseline: $out"
+  [ "$(stat -c %a "$home/state/oh-my-setting/doctor-security.json" 2>/dev/null ||
+       stat -f %Lp "$home/state/oh-my-setting/doctor-security.json")" = 600 ] ||
+    fail "the recorded fingerprint must be private to the user"
+
+  printf '%s\n' '{"permissions":{"defaultMode":"bypassPermissions","allow":["Bash(*)","Read","$(touch '"$home"'/executed)"]},"skipDangerousModePermissionPrompt":true}' \
+    > "$home/.claude/settings.json"
+  printf 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n[profiles.safe]\nsandbox_mode = "read-only"\n[sandbox_workspace_write]\nnetwork_access = true\n' \
+    > "$home/.codex/config.toml"
+  printf '%s\n' '{"permissions":{"allow":["mcp(*)","unsandboxed(npm)"]},"enableTerminalSandbox":false}' \
+    > "$home/.gemini/antigravity-cli/settings.json"
+  before="$(cat "$home/.claude/settings.json" "$home/.codex/config.toml" "$home/.gemini/antigravity-cli/settings.json")"
+  out="$(security)" || fail "warnings are findings and must not change the exit status: $out"
+  local row
+  for row in \
+    "warn: claude: permissions.defaultMode is bypassPermissions" \
+    "warn: claude: skipDangerousModePermissionPrompt is on" \
+    "warn: claude: permissions.allow grants every shell command (Bash(*))" \
+    "info: claude: sandbox.enabled is not on" \
+    "warn: codex: sandbox_mode is danger-full-access" \
+    "warn: codex: approval_policy is never" \
+    "warn: codex: sandbox_workspace_write.network_access is on" \
+    "ok: codex profile safe: sandbox_mode is read-only" \
+    "warn: antigravity: permissions.allow has a blanket rule (mcp(*))" \
+    "warn: antigravity: enableTerminalSandbox is off" \
+    "warn: changed since " \
+    "security: 9 warning(s), 0 unread; findings only, nothing was changed"; do
+    contains "$out" "$row" || fail "--security should report: $row
+$out"
+  done
+  contains "$out" "claude, codex, antigravity" || contains "$out" "antigravity, claude, codex" ||
+    fail "the drift row should name the sections that moved: $out"
+  [ "$before" = "$(cat "$home/.claude/settings.json" "$home/.codex/config.toml" "$home/.gemini/antigravity-cli/settings.json")" ] ||
+    fail "--security must not change a provider file"
+  [ ! -e "$home/executed" ] || fail "--security must not run a provider CLI or anything a settings file names"
+
+  # The same posture again is unchanged; a safer one clears its rows.
+  out="$(security)"
+  contains "$out" "ok: unchanged since " || fail "an unchanged posture should say so: $out"
+  printf '%s\n' '{"permissions":{"defaultMode":"default","allow":["Read"]},"sandbox":{"enabled":true,"excludedCommands":["docker"]}}' \
+    > "$home/.claude/settings.json"
+  out="$(security)"
+  contains "$out" "ok: claude: permissions.allow has no blanket shell rule (1 rule(s))" || fail "a narrow allow list is ok: $out"
+  contains "$out" "ok: claude: sandbox.enabled is on; 1 command(s) excluded from it" || fail "an enabled sandbox is ok: $out"
+  contains "$out" "warn: changed since " || fail "a changed posture should be flagged once: $out"
+  contains "$out" ": claude" || fail "only the claude section moved: $out"
+
+  # Unreadable is unknown, never ok; control characters in a value cannot reach the terminal.
+  printf '{not json' > "$home/.claude/settings.json"
+  printf 'sandbox_mode = "x\\u001b[31mred"\n' > "$home/.codex/config.toml"
+  out="$(security)" || fail "an unreadable settings file must not fail the report: $out"
+  contains "$out" "unknown: claude: settings.json not valid JSON; posture not read" || fail "invalid JSON is unknown: $out"
+  contains "$out" "1 unread" || fail "the summary should count the unread file: $out"
+  case "$out" in *$'\033'*) fail "a settings value must not carry an escape to the terminal" ;; esac
+
+  # A harness child may read the report but records nothing.
+  rm -f "$home/state/oh-my-setting/doctor-security.json"
+  out="$(OMS_HARNESS_CHILD=1 security)" || fail "a harness child may read the report: $out"
+  [ ! -e "$home/state/oh-my-setting/doctor-security.json" ] || fail "a harness child must not record a fingerprint"
+
+  # It is a standalone mode.
+  if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --repair 2>&1)"; then
+    fail "--security --repair must be refused"
+  fi
+  contains "$out" "standalone read-only report" || fail "the refusal should say why: $out"
+  if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --json 2>&1)"; then
+    fail "--security --json must be refused"
+  fi
+}
+
 test_print_expected_emits_the_registration_list
 test_install_converges_owned_rows_only
+test_security_report_names_risky_posture_read_only
 test_install_quotes_a_root_with_spaces
 test_registration_drift_fails_both_doctor_modes
 test_surfaces_expect_commands_at_the_install_owner

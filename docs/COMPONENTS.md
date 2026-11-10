@@ -1769,6 +1769,24 @@ execution or usage frequency. Prompt hints and session-budget checks emit
 events conditionally; silence alone is not evidence that their hooks are
 unused. Lifecycle telemetry retains the recent-evidence window.
 
+`oms doctor --security` is a separate read-only report of how far the provider
+CLIs are opened up. It parses each user-level settings file as data and prints
+one row per finding: Claude Code `permissions.defaultMode: bypassPermissions`,
+`skipDangerousModePermissionPrompt`, a blanket `Bash(*)` allow rule and whether
+`sandbox.enabled` is on; Codex `sandbox_mode = "danger-full-access"`,
+`approval_policy = "never"` and sandbox `network_access`, for the top level and
+each profile; Antigravity `mcp(*)` / `unsandboxed(*)` rules and
+`enableTerminalSandbox`; and which sandbox tools (`bwrap`, `socat`,
+`sandbox-exec`, `srt`, `docker`, `podman`) are on `PATH`. It runs no provider
+command and executes nothing a file names. Rows are `ok`, `warn`, `info` or
+`unknown`; a file that cannot be read is `unknown`, never `ok`, and no row
+changes the exit status. A fingerprint of the findings is kept under
+`$XDG_STATE_HOME/oh-my-setting/doctor-security.json` (mode 600) so the next run
+can say which section changed; no provider file is touched. Project-level
+settings, managed policy and command-line flags are not read, so the report
+describes the user-level starting point, not the effective posture of a given
+session.
+
 
 #### Optional hints and budgets
 
