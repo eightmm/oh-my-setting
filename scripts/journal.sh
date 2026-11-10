@@ -26,6 +26,9 @@ esac
 # Read (show), inspect, rebuild, configure, or explicitly sync the local-first
 # Work Journal. `show --today|--week|--blockers|--recent N [--json]` is the
 # agent read path over the derived summaries and event index.
+# `show --grep TEXT [--kind K]... [--limit N] [--json]` is a bounded read-only
+# search over what OMS recorded under .oms (journal, handoffs, threads,
+# dispatch transcripts, panel results); see scripts/lib/recorded_search.py.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PYTHON_ENTRY="$ROOT/scripts/lib/work_journal.py"
@@ -76,6 +79,18 @@ case "${1:-}" in
     repo="$(oms_repo_root "$repo" 2>/dev/null || printf '%s' "$repo")"
     repo="${repo//$'\r'/}"
     repo="$(cd "$repo" 2>/dev/null && pwd -P || printf '%s' "$repo")"
+    if [ "$command_name" = "show" ]; then
+      # `show --grep` only reads: it takes no journal lock and creates nothing,
+      # so it never goes through the admission path below.
+      for argument in "$@"; do
+        case "$argument" in
+          --grep|--grep=*)
+            shift
+            exec python3 "$ROOT/scripts/lib/recorded_search.py" "$@"
+            ;;
+        esac
+      done
+    fi
     if [ "$command_name" = "sync" ]; then
       shift
       force_args=""

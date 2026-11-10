@@ -200,6 +200,25 @@ Reading is always local; the Notion mirror is never in the agent read path.
   with its event ID. Annotations have no resolution record, so "open" means
   recently observed and not superseded.
 - `oms journal show --recent 20` prints the most recent events one line each.
+- `oms journal show --grep TEXT` searches what OMS recorded under `.oms` for
+  plain text, case-insensitively: Work Journal events and summaries
+  (`journal`), handoff digests (`handoff`), thread and room turns (`thread`),
+  dispatch transcripts (`dispatch`) and panel results (`result`). Each hit
+  names its kind, time and ID, one excerpt, and how to open it (a file and
+  line, or `oms thread show --id ID`). `--kind K` (repeatable) narrows the
+  kinds and `--limit N` sets how many of the newest hits print (20 by
+  default, 200 at most). It exits 0 with a match and 1 without.
+
+  The search is a scan, not an index: it takes no lock, writes nothing and
+  follows no symlink. It reads the newest 300 files of each kind, the last
+  2 MiB of a longer file, and stops after five seconds or 2,000 matches; every
+  bound that was reached prints as an `incomplete:` line, so a miss in a cut
+  scan is not a clean miss. Each excerpt passes the shared secret scanner
+  before it prints; a flagged excerpt, or every excerpt when the scanner
+  cannot run, is replaced by `[withheld: …]` while its location stays. Sealed
+  cold journal segments and provider-native transcripts outside `.oms` are
+  not read. A hit says where to look; it is not approval or verification
+  evidence.
 - `--json` returns the same data structurally in any mode.
 
 When resuming work in a repository, read `--blockers` and `--today` before
