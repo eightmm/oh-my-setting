@@ -367,8 +367,8 @@ def wake_main(repo, dry_run=False, now=None, once=None):
     The wake is recorded before it is typed, so a retried or killed tick never submits it twice. A pane whose
     input line is not provably empty is skipped and the skip recorded; nothing is cleared, typed or entered."""
     import hashlib
-    from panel_native import input_line_empty, live_main_pane
-    from terminal_panel import _lock, _swap_submit
+    from panel_native import PaneChanged, input_line_empty, live_main_pane, pane_stamp, submit_owned
+    from terminal_panel import _lock
     repo = Path(repo)
     now = time.time() if now is None else now
     day = time.strftime("%Y-%m-%d", time.gmtime(now))
@@ -383,6 +383,7 @@ def wake_main(repo, dry_run=False, now=None, once=None):
         if len(spent) >= WAKE_DAILY_LIMIT:
             return "skipped: %s reached %d wakes today" % (member, WAKE_DAILY_LIMIT)
         prompt = wake_prompt(reason)
+        stamp = pane_stamp(pane)
         empty, why = input_line_empty(pane)
         if dry_run:
             return ("would wake %s: %s" % (member, prompt)) if empty else "would skip %s: %s" % (member, why)
@@ -391,7 +392,13 @@ def wake_main(repo, dry_run=False, now=None, once=None):
             _record_wake(repo, receipt, wakes + [dict(row, outcome="skipped", reason=why)])
             return "skipped: %s; %s" % (member, why)
         _record_wake(repo, receipt, wakes + [dict(row, outcome="woke")])
-        _swap_submit(pane, prompt)
+        try:
+            submit_owned(pane, stamp, prompt)
+        except (PaneChanged, subprocess.CalledProcessError) as error:
+            # tmux refused, or the pane changed hands: nothing was delivered, so "woke" must not stand.
+            why = str(error) if isinstance(error, PaneChanged) else "send-keys failed (exit %s)" % error.returncode
+            _record_wake(repo, receipt, wakes + [dict(row, outcome="skipped", reason=why)])
+            return "skipped: %s; %s" % (member, why)
         return "woke %s: %s" % (member, prompt)
 
     try:

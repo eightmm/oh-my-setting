@@ -1273,6 +1273,34 @@ def _swap_submit(pane, text):
     subprocess.run(tmux_command("send-keys", "-t", pane, "Enter"), check=True, timeout=3, stdin=subprocess.DEVNULL)
 
 
+class PaneChanged(ValueError):
+    """The pane id no longer names the process generation that was verified; nothing was typed."""
+
+
+def pane_stamp(pane):
+    """Who owns a native pane id right now: (pane id, pane pid, dead flag, main attempt, native pane option).
+
+    A pane id can outlive its process (respawn) or window options can name a newer main, so the id alone is not
+    an owner. Any unreadable or unowned answer raises PaneChanged (fail closed)."""
+    from terminal_panel import tmux_command
+    found = subprocess.run(tmux_command("display-message", "-p", "-t", pane,
+                                        "#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{@oms_panel_main_attempt}\t#{@oms_panel_native_pane}"),
+                           capture_output=True, text=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+    fields = found.stdout.replace("\r", "").rstrip("\n").split("\t")
+    if (found.returncode or len(fields) != 5 or fields[0] != pane or fields[4] != pane or fields[2] != "0"
+            or not fields[1].isdigit() or not re.fullmatch(r"att_[0-9a-f]{32}", fields[3])):
+        raise PaneChanged("pane owner unverified; input refused")
+    return tuple(fields)
+
+
+def submit_owned(pane, stamp, text):
+    """_swap_submit, but only while the pane still carries the stamp taken when it was judged typeable."""
+    from terminal_panel import _swap_submit
+    if pane_stamp(pane) != stamp:
+        raise PaneChanged("pane changed hands before input; nothing typed")
+    _swap_submit(pane, text)
+
+
 _INPUT_MARK = re.compile(r"^(?:\s*[│┃|])?\s*[>❯›](?: |$)")
 _INPUT_SIDES = "│┃|"
 _INPUT_RULES = set("─━═╌┄╭╮╰╯┌┐└┘├┤┬┴┼")

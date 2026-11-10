@@ -473,9 +473,13 @@ cat > "$TMP/wake-bin/tmux" <<EOF_TMUX
 #!/usr/bin/env bash
 printf '%s\\n' "\$*" >> "$TMP/tmux.log"
 case "\$1" in
-  display-message) [ -n "\${WAKE_MODE:-}" ] && printf '%s\\n' "\$WAKE_MODE" ;;
+  display-message)
+    case "\$*" in
+      *pane_pid*) [ -n "\${WAKE_STAMP:-}" ] && printf '%s\\n' "\$WAKE_STAMP" ;;
+      *) [ -n "\${WAKE_MODE:-}" ] && printf '%s\\n' "\$WAKE_MODE" ;;
+    esac ;;
   capture-pane) [ -f "\${WAKE_SCREEN:-}" ] && cat "\$WAKE_SCREEN" ;;
-  send-keys) exit 0 ;;
+  send-keys) [ -z "\${WAKE_SENDFAIL:-}" ] || exit 1 ;;
   list-windows) [ -n "\${WAKE_WINDOWS+x}" ] && printf '%b' "\$WAKE_WINDOWS" || exit 1 ;;
   *) exit 1 ;;
 esac
@@ -563,6 +567,8 @@ def main(submit=None):
             patch.object(terminal_panel, "main_history", side_effect=lambda *a: history), \
             (patch.object(terminal_panel, "_swap_submit") if submit is None else contextlib.nullcontext()) as typed:
         yield typed
+stamp = lambda pid, owner=attempt: "\t".join(("%7", str(pid), "0", owner, "%7"))
+os.environ["WAKE_STAMP"] = stamp(4242)
 show(CODEX_EMPTY)
 wake = lambda **k: panel_interaction.wake_main(repo, now=now, **k)
 with main() as typed:
@@ -685,6 +691,28 @@ with main(submit=True):
     show(CODEX_EMPTY)
     typed_text = wake().split(": ", 1)[1]
     assert keys() == ["send-keys -t %7 -l " + typed_text, "send-keys -t %7 Enter"], keys()
+    # The pane id is reused for another owner after the decision and before the keys: refused, recorded unsent.
+    real_empty = panel_native.input_line_empty
+    def reused_after_check(pane, **other):
+        verdict = real_empty(pane, **other)
+        os.environ["WAKE_STAMP"] = reuse
+        return verdict
+    for name, reuse in (("another attempt", stamp(4242, "att_" + "c" * 32)), ("respawned pane", stamp(9999)),
+                        ("unreadable", "")):
+        seed(0)
+        tmux_log.unlink()
+        os.environ["WAKE_STAMP"] = stamp(4242)
+        with patch.object(panel_native, "input_line_empty", side_effect=reused_after_check):
+            status = wake()
+        assert status.startswith("skipped: call-wake; ") and keys() == [], (name, status, keys())
+        assert [w["outcome"] for w in wakes()] == ["skipped"], (name, wakes())
+    # A send tmux rejects is not a delivery: the ledger says skipped, so the dedupe key and the cap stay free.
+    seed(0)
+    os.environ.update(WAKE_STAMP=stamp(4242), WAKE_SENDFAIL="1")
+    assert wake().startswith("skipped: call-wake; "), wakes()
+    assert [w["outcome"] for w in wakes()] == ["skipped"], wakes()
+    del os.environ["WAKE_SENDFAIL"]
+    assert wake().startswith("woke ") and [w["outcome"] for w in wakes()] == ["skipped", "woke"], wakes()
 for argv in ([], [str(repo), "--apply"], [str(repo), "--dry-run", "x"]):
     with contextlib.redirect_stderr(open(os.devnull, "w")):
         assert panel_interaction.wake_cli(argv) == 2, argv
