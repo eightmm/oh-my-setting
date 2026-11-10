@@ -22,6 +22,13 @@ PATTERNS='Traceback|ERROR|Error:|error:|OOM|[Oo]ut of memory|CUDA|NCCL|NaN|nan l
 WAIT=0
 WAIT_TIMEOUT=""
 MAX_BYTES=""
+METRICS_FILE=""
+METRICS_FORMAT=jsonl
+METRIC=""
+METRIC_DIRECTION=observe
+METRICS_JSON=0
+METRICS_OPTIONS=0
+STALE_AFTER=600
 PENDING=0
 POLL_SECONDS="$(oms_poll_int_or_default "${OMS_JOB_DIGEST_POLL:-30}" 30)"
 [ "$POLL_SECONDS" -ge 1 ] || POLL_SECONDS=1
@@ -30,6 +37,7 @@ usage() {
   cat <<'EOF'
 Usage: job-digest.sh <logfile>
        job-digest.sh <slurm-job-id> [logfile]
+       job-digest.sh --metrics FILE [--metric NAME --metric-direction minimize]
 
 Emit a compact markdown digest of a training/Slurm run: sacct summary (job id
 mode), error-pattern hits, the last Python traceback, and the log tail.
@@ -45,6 +53,18 @@ Options:
                 never cancelled or resubmitted. Default: wait without limit.
   --max-bytes N Cap the digest at N bytes (>= 512) of whole lines and say what
                 was omitted. Default: no cap.
+  --metrics FILE
+                Read one repo-local JSONL metric history; may be used alone.
+  --metrics-format jsonl|dvclive
+                JSONL (default) or one DVCLive TSV history, not metrics.json.
+  --metric NAME Select an exact metric. Other metrics are not summarized.
+  --metric-direction observe|minimize|maximize
+                Default: observe. A best-value direction requires --metric.
+  --stale-after S
+                Label old timestamps late-record (1..604800, default 600).
+                This never proves a stalled or failed job.
+  --metrics-json
+                JSON report; requires --metrics alone, without --max-bytes.
   -h, --help    Show this help.
 
 Leaving the queue is not success: confirm State/ExitCode and required outputs.
@@ -90,6 +110,29 @@ while [ "$#" -gt 0 ]; do
       [ "$MAX_BYTES" -ge 512 ] || fail "--max-bytes must be at least 512"
       shift 2
       ;;
+    --metrics)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "--metrics requires a file"
+      METRICS_FILE="$2"; shift 2 ;;
+    --metrics-format)
+      [ "$#" -ge 2 ] || fail "--metrics-format requires jsonl or dvclive"
+      case "$2" in jsonl|dvclive) ;; *) fail "unsupported metrics format" ;; esac
+      METRICS_FORMAT="$2"; METRICS_OPTIONS=1; shift 2 ;;
+    --metric)
+      [ "$#" -ge 2 ] || fail "--metric requires a name"
+      [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,159}$ ]] || fail "invalid metric name"
+      METRIC="$2"; METRICS_OPTIONS=1; shift 2 ;;
+    --metric-direction)
+      [ "$#" -ge 2 ] || fail "--metric-direction requires a value"
+      case "$2" in observe|minimize|maximize) ;; *) fail "unsupported metric direction" ;; esac
+      METRIC_DIRECTION="$2"; METRICS_OPTIONS=1; shift 2 ;;
+    --stale-after)
+      [ "$#" -ge 2 ] || fail "--stale-after requires seconds"
+      [[ "$2" =~ ^[0-9]{1,6}$ ]] || fail "invalid staleness threshold"
+      STALE_AFTER="$((10#$2))"
+      [ "$STALE_AFTER" -ge 1 ] && [ "$STALE_AFTER" -le 604800 ] || fail "invalid staleness threshold"
+      METRICS_OPTIONS=1; shift 2 ;;
+    --metrics-json)
+      METRICS_JSON=1; METRICS_OPTIONS=1; shift ;;
     -h|--help)
       usage
       exit 0
@@ -101,7 +144,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "${#ARGS[@]}" -ge 1 ] || {
+[ "${#ARGS[@]}" -ge 1 ] || [ -n "$METRICS_FILE" ] || {
   usage >&2
   exit 2
 }
@@ -109,7 +152,14 @@ done
 
 JOB_ID=""
 LOG_FILE=""
-if [ -f "${ARGS[0]}" ]; then
+[ "$METRICS_OPTIONS" = 0 ] || [ -n "$METRICS_FILE" ] || fail "metric options require --metrics"
+[ "$METRIC_DIRECTION" = observe ] || [ -n "$METRIC" ] || fail "metric direction requires --metric"
+if [ "$METRICS_JSON" = 1 ]; then
+  [ "${#ARGS[@]}" -eq 0 ] && [ -z "$MAX_BYTES" ] || fail "--metrics-json cannot mix with log/job mode or --max-bytes"
+fi
+if [ "${#ARGS[@]}" -eq 0 ]; then
+  : # Explicit metrics-only mode has no Slurm or text-log operand.
+elif [ -f "${ARGS[0]}" ]; then
   [ "${#ARGS[@]}" -eq 1 ] || fail "too many arguments"
   LOG_FILE="${ARGS[0]}"
 elif printf '%s' "${ARGS[0]}" | grep -E '^[0-9]+(_[0-9]+)?$' > /dev/null; then
@@ -210,7 +260,23 @@ if [ "$WAIT" = "1" ]; then
   fi
 fi
 
+emit_metrics() {
+  local repo metric_path
+  local -a options
+  repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+  case "$METRICS_FILE" in /*) metric_path="$METRICS_FILE" ;; *) metric_path="$PWD/$METRICS_FILE" ;; esac
+  options=(--repo "$repo" --input-format "$METRICS_FORMAT" --direction "$METRIC_DIRECTION" --stale-after "$STALE_AFTER")
+  [ -z "$METRIC" ] || options+=(--metric "$METRIC")
+  [ "$METRICS_JSON" = 0 ] || options+=(--json)
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/scripts/lib${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m oms_runtime.training_metrics "${options[@]}" -- "$metric_path"
+}
+
 emit_digest() {
+  if [ -z "$JOB_ID" ] && [ -z "$LOG_FILE" ]; then
+    emit_metrics
+    return
+  fi
   printf '# Job digest\n\n'
   printf -- '- generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [ -n "$JOB_ID" ] && printf -- '- slurm job: %s\n' "$JOB_ID"
@@ -283,6 +349,10 @@ emit_digest() {
     printf '\n## Tail\n\n```\n'
     tail -n "$TAIL_LINES" "$LOG_FILE"
     printf '```\n'
+  fi
+  if [ -n "$METRICS_FILE" ]; then
+    printf '\n'
+    emit_metrics
   fi
 }
 
