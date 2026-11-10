@@ -28,6 +28,8 @@ Advisory: per CLI, the summed length of installed skill descriptions against
 OMS_SKILL_LISTING_CHARS (default 8000), a Claude listing entry over 1,536
 characters, a user-level skill a Claude plugin also ships, and two skills
 whose descriptions nearly coincide.
+Total the OMS text a session carries before any task: the global rules
+and every catalog skill's listing description.
 Read-only; takes no arguments.
 EOF
       exit 0
@@ -115,6 +117,38 @@ fi
 printf '\n## Skill listing budget\n\n'
 python3 "$ROOT/scripts/lib/skill_listing_budget.py" 2>/dev/null ||
   printf 'skip: the listing budget could not be read\n'
+
+# What every session pays before a task names anything: the global rules, and
+# one listing description per catalog skill (the body loads only when the
+# skill is used). A total, not a verdict: there is no budget to fail here, and
+# what a provider adds of its own is not OMS text and is not counted.
+printf '\n## Always-loaded text\n\n'
+always_loaded="$(python3 -I - "$ROOT" <<'PY' 2>/dev/null || true
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("validate_skills", root / "scripts" / "validate-skills.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+rules = root / "rules" / "global-AGENTS.md"
+rules_bytes = rules.stat().st_size if rules.is_file() else 0
+rows = []
+for skill in sorted((root / "custom-skills").glob("*/SKILL.md")):
+    text = module.frontmatter(skill.read_text(encoding="utf-8")).get("description", "").strip()
+    rows.append((len(text.encode("utf-8")), skill.parent.name))
+total = sum(size for size, _ in rows)
+longest = max(rows) if rows else (0, "none")
+print("note: always-loaded OMS text is %d bytes: global rules %d + %d skill description(s) %d (longest %s, %d)"
+      % (rules_bytes + total, rules_bytes, len(rows), total, longest[1], longest[0]))
+PY
+)"
+if [ -n "$always_loaded" ]; then
+  printf '%s\n' "$always_loaded"
+else
+  printf 'note: always-loaded OMS text could not be totalled (python3 or the catalog was unreadable)\n'
+fi
 
 if [ "$OMS_OPS_FAILED" -ne 0 ]; then
   printf 'skill-doctor: failed\n'

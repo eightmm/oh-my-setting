@@ -561,6 +561,12 @@ where linking installs them only when the tool is present.
 `scripts/validate-skills.py` fails when the manifest and
 `skills.manifest.json` disagree. There is no Gemini extension manifest.
 
+`oms skill-doctor` ends with one `note: always-loaded OMS text is N bytes`
+line: the global rules plus one listing description per catalog skill, which
+is what a session carries before any task (a skill body loads only when the
+skill is used). It is a total with no budget to fail; provider-added text and
+third-party skills are not counted.
+
 Use `oms skill-forge add|validate|link` for ordinary local guidance. Neither
 external bundle management nor evaluation is required for a local edit.
 `oms skill-forge status` gives kind-specific recovery guidance for skills that
