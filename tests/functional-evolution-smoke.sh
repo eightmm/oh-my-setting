@@ -2813,7 +2813,7 @@ with tempfile.TemporaryDirectory() as metrics_repo:
                                                     "verdict": verdict}]}})
     artifact_rows.extend({"kind": "panel-result", "task_id": "alpha", "ts": stamp}
                          for stamp in ("2026-10-26T00:00:00Z", "2026-10-26T00:00:41Z"))
-    def collect_coordination(rows=attempt_rows, artifacts=artifact_rows, since=None, owner_result=None):
+    def collect_coordination(rows=attempt_rows, artifacts=artifact_rows, since=None, owner_result=None, min_samples=3):
         (root / ".oms/artifacts/index.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in artifacts))
         with patch.object(panel_metrics, "_attempt_history", return_value=(rows, False)), \
@@ -2823,7 +2823,7 @@ with tempfile.TemporaryDirectory() as metrics_repo:
                     "kind": "oms-panel-result", "task_id": "alpha", "outcome": "accepted",
                     "attempt_ids": ["w1", "w5", "w6"],
                     "superseded_attempts": [{"attempt_id": "w1"}]}).encode()):
-            return panel_metrics.aggregate(root, since=since, now=1792972850)
+            return panel_metrics.aggregate(root, since=since, now=1792972850, min_samples=min_samples)
     measured = collect_coordination()
     coordination = measured["coordination"]
     duplicate = coordination["duplicate_work"]
@@ -2839,6 +2839,22 @@ with tempfile.TemporaryDirectory() as metrics_repo:
     assert (cell["accepted"], cell["rejected"], cell["total"], cell["unknown"]) == (2, 1, 3, 1), cell
     text = panel_metrics.metrics_text(measured)
     assert "codex/builder accepted=2 rejected=1 total=3 unknown=1" in text, text
+    # Route history: same retained rows grouped by role/provider/model/effort, derived not stored.
+    route = measured["route_history"]
+    (group,) = route["groups"]
+    assert (group["role"], group["effort"], group["attempts"], group["tasks"], group["decided"]) == (
+        "builder", "unrecorded", 6, 4, 3), group
+    assert (group["admitted"], group["rejected"], group["reworked"], group["admit_rate"]) == (2, 1, 1, 0.6667), group
+    assert group["median_tokens"] is None, group
+    assert route["suggest"]["builder"]["model"] == "fixture" and route["hidden_groups"] == 0, route
+    assert "suggest builder: codex/fixture" in text and "not a decision" in text, text
+    sparse = collect_coordination(min_samples=4)["route_history"]
+    assert sparse["groups"] == [] and sparse["hidden_groups"] == 1 and sparse["suggest"] == {}, sparse
+    assert "hidden under --min-samples 4: 1" in panel_metrics.metrics_text(collect_coordination(min_samples=4))
+    effort_rows = [dict(row, refs=dict(row["refs"], panel_effort="high"), usage_tokens=100 * (n + 1), usage_reports=1)
+                   if row["refs"]["panel_access"] == "write" else row for n, row in enumerate(attempt_rows)]
+    tuned = collect_coordination(effort_rows)["route_history"]["groups"][0]
+    assert tuned["effort"] == "high" and tuned["median_tokens"] == 350 and tuned["token_reports"] == 6, tuned
     # No write pair, no second round and no review is a missing denominator,
     # rather than a 0% rate. Small provider/role cells stay in JSON only.
     empty = collect_coordination([], [])

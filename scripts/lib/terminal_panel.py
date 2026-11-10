@@ -128,6 +128,7 @@ def main(argv=None):
     parser.add_argument("--metrics", action="store_true",
                         help="read-only recorded metrics; follow-up task IDs have no producer linkage")
     parser.add_argument("--since", metavar="DURATION", help="limit --metrics to records within a duration (for example 7d)")
+    parser.add_argument("--min-samples", type=int, metavar="N", help="with --metrics, hide role/provider/model/effort route groups with fewer than N decided tasks (default 3)")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
     parser.add_argument("--owner", help="main identity: claude, codex, pi or antigravity; registered adapters also support watch/dispatch/council")
@@ -268,6 +269,8 @@ def main(argv=None):
         parser.error("--sessions is a read-only report; use --repo, --room and optional --json")
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
+    if args.min_samples is not None and (not args.metrics or args.min_samples < 1):
+        parser.error("--min-samples requires --metrics and a positive number")
     if args.page is not None and not (args.results and not args.task_id):
         parser.error("--page requires --results without --task-id")
     if args.page is not None and not 1 <= args.page <= 1000:
@@ -496,7 +499,7 @@ def main(argv=None):
             return status
         if args.metrics:
             from panel_metrics import aggregate, metrics_text
-            report = aggregate(repo, args.since)
+            report = aggregate(repo, args.since, min_samples=args.min_samples or 3)
             print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else metrics_text(report))
             return 0
         if args.reopen:

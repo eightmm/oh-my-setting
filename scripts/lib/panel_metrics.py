@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from dashboard_projection import clean, mapping, number
 from call_ending import call_ending
+from route_stats import route_history, route_text
 from panel_view import TERMINAL_STATES
 
 
@@ -645,7 +646,7 @@ def _attempt_history(repo):
     return list(attempts.values()), incomplete
 
 
-def aggregate(repo, since=None, now=None):
+def aggregate(repo, since=None, now=None, min_samples=3):
     """Aggregate bounded recorded evidence read only.
 
     Follow-up task IDs are not linked by any producer record; rework therefore
@@ -1012,6 +1013,7 @@ def aggregate(repo, since=None, now=None):
     unreported_tokens = 0
     model_tasks = {}
     role_tasks = {}
+    route_rows = []
     # outcomes() reads only retained panel-result rows, so a task last active before the earliest one
     # may have been decided without a retained record; it is not undecided.
     result_stamps = [_stamp(row.get("ts")) for row in retained_artifacts
@@ -1047,6 +1049,9 @@ def aggregate(repo, since=None, now=None):
             role = refs.get("panel_purpose") or refs.get("panel_role")
             role = role if isinstance(role, str) and role else "unknown"
             role_tasks.setdefault(provider, {}).setdefault(role, {}).setdefault(bucket, set()).add(task_key)
+            route_rows.append({"role": role, "provider": provider, "model": model, "effort": refs.get("panel_effort"),
+                               "task": task_key, "bucket": bucket,
+                               "tokens": attempt.get("usage_tokens") if attempt.get("usage_reports", 0) else None})
         entry = token_decisions[bucket]
         entry["attempts"] += 1
         if task_key is not None:
@@ -1287,6 +1292,7 @@ def aggregate(repo, since=None, now=None):
             "endings": ending_counts,
             "tokens_by_decision": token_decisions,
             "decisions_by_model": decisions_by_model,
+            "route_history": route_history(route_rows, reworked, min_samples),
             "coordination": coordination,
             "write_attempts": {"total": len(delegate_writes), "states": state_totals,
                                "state_counts": delegate_states,
@@ -1392,6 +1398,7 @@ def metrics_text(report):
                 if name != "unreported_attempts"),
             report.get("tokens_by_decision", {}).get("unreported_attempts", 0)),
         "decisions by model: " + ("; ".join(model_parts) or "none"),
+        route_text(report) if report.get("route_history") else None,
         "coordination: duplicate_work=%d/%d (%s) unknown=%d; handoff_rework median=%s n=%d unknown=%d" % (
             duplicate.get("numerator", 0), duplicate.get("denominator", 0), rate(duplicate.get("rate")),
             duplicate.get("unknown", 0), "none" if handoff.get("median") is None else handoff["median"],
