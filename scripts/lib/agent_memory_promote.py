@@ -284,6 +284,9 @@ def main():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--json", action="store_true")
     args, extra = parser.parse_known_args()
+    # Python 3.11's argparse leaves query words that follow an option in `extra`; they are still the query.
+    args.query = list(args.query) + [word for word in extra if not word.startswith("-")]
+    extra = [word for word in extra if word.startswith("-")]
     if extra:
         die("%s does not take %s" % (args.command, extra[0]))
     args.text = args.text or " ".join(args.query)
