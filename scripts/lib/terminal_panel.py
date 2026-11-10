@@ -144,6 +144,7 @@ def main(argv=None):
     parser.add_argument("--lenses", help="--council only: 2..12 unique comma-separated names [a-z0-9-]+, 1..32 characters each; one blind seat each")
     parser.add_argument("--thread", help="council thread ID; a fresh thread prefix with --lenses")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
+    parser.add_argument("--page", type=int, metavar="N", help="--results only: page N (1-based, 20 tasks each) of the retained list")
     parser.add_argument("--salvage", metavar="TASK_ID", help="capture a stopped worker's kept worktree for owner review")
     parser.add_argument("--mail", metavar="PARTICIPANT", help="read messages addressed to one main in --room")
     parser.add_argument("--participant", help="--results of one room call (with --task-id, one council seat)")
@@ -254,6 +255,10 @@ def main(argv=None):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
+    if args.page is not None and not (args.results and not args.task_id):
+        parser.error("--page requires --results without --task-id")
+    if args.page is not None and not 1 <= args.page <= 1000:
+        parser.error("--page must be between 1 and 1000")
     if args.alias is not None and not args.dispatch:
         parser.error("--alias requires --dispatch")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
@@ -545,7 +550,8 @@ def main(argv=None):
             reader_cache = {}
 
             def report():
-                read = results(repo, args.task_id, participant)
+                read = (results(repo, args.task_id, participant) if args.page is None else
+                        results(repo, args.task_id, participant, offset=(args.page - 1) * 20))
                 if participant:
                     read["rows"] = [row for row in read["rows"] if row.get("calls")]
                 return read

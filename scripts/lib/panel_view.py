@@ -2014,6 +2014,14 @@ def render_results(report, width=100, compact=False, heading=None):
                 add(record, "  ", limit)
     lines.append("")
     add(report.get("coverage") or "Retained OMS evidence")
-    if report.get("truncated"):
+    offset = report.get("offset")
+    offset = offset if isinstance(offset, int) and offset > 0 else 0
+    page = offset // 20 + 1 if offset % 20 == 0 else 0
+    if page and not rows:
+        add("No results on page %d. Older work that was pruned from the retained index is in the Work Journal "
+            "(oms journal)." % page)
+    elif page and report.get("truncated"):
+        add("Page %d; older tasks: oms panel --results --page %d" % (page, page + 1))
+    elif report.get("truncated"):
         add("Recent tasks only; select a task ID for its retained answers.")
     return "\n".join(lines)
