@@ -1709,6 +1709,7 @@ for pair_harness, pair_owner, matches in (
         ("pi", None, False), ("pi", "claude", False), ("agy", "agy", False),
         ("antigravity", "antigravity", True), ("bad name", "bad name", False)):
     assert main_owner_matches(pair_harness, pair_owner) is matches, (pair_harness, pair_owner)
+# BEGIN main-swap-preflight
 for preflight_failure in (None, "target", "command", "interrupt", "room", "window", "liveness", "status", "tmux", "exit", "existing"):
     swap_attempt = "att_" + "c" * 32
     swap_next = "att_" + "d" * 32
@@ -1737,6 +1738,7 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
             patch.object(panel_native, "resolve_main", return_value=swap_resolution),
             patch.object(panel, "native_repository", return_value=project),
             patch.object(panel, "resolve_session", return_value=("fixture", str(project))),
+            patch.object(panel_native, "pane_stamp", return_value=("%1", "4242", "0", swap_attempt, "%1")),
             patch.object(panel, "main_history", side_effect=lambda *a: [swap_ended, swap_new] if swap_exited else [swap_old]),
             patch.object(room, "same_room", return_value=True),
             patch.object(panel, "_swap_submit", side_effect=lambda pane, text: swap_exited.append(text) if text == "/exit" else None),
@@ -1805,6 +1807,11 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
             assert swap_exited == ["/exit"]
             assert len(swap_handoffs()) == 1
             swapped.assert_called_once_with(project, "preflight-room", "preflight-main", "codex", "gpt-6.1-sol", swap_attempt, "pi")
+        if swapped.called:
+            cleanup = swap_process.call_args.args[0]
+            assert cleanup[1:5] == ["if-shell", "-F", "-t", "%1"], cleanup
+            assert "#{==:#{@oms_panel_main_attempt}," + swap_next + "}" in cleanup[-2], cleanup
+# END main-swap-preflight
 for swap_model in ("x" * 160, "", 0, "x" * 161, "-option", "bad model"):
     candidate_event = dict(kind="main-swap", participant="preflight-main", provider="codex", harness="pi",
                            model=swap_model, attempt=swap_attempt)

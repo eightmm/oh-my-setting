@@ -123,6 +123,12 @@ A land in flight does not block it; the handoff names the land and its
 if none arrives, OMS uses a recorded-state digest. Before asking the main to exit, OMS
 validates the target's durable owner/harness pair, prepares the replacement command and
 rechecks the current room, attempt and window ownership.
+Both the handoff request and the exit request recheck the original pane's process id,
+live state, main attempt and native-pane binding immediately before typing. A changed
+or unreadable binding refuses that input without transferring the room or respawning;
+cleanup only removes options still owned by the verified attempt. The tmux comparison
+and send remain separate operations, including the delay before Enter, so this is not
+an atomic input guarantee.
 
 OMS then exits the old main and relaunches the replacement in the same pane and room
 without stopping workers. If preparation or a recheck fails before the exit request, OMS
@@ -148,6 +154,8 @@ the automatic swap checks the target's weekly quota again. Below 100% usage it
 postpones the swap if the main does not provide a handoff; at 100% it may use
 the recorded-state digest. An active land does not hold the swap back; the
 handoff names it. A postponed handoff does not start the cooldown.
+Other refused automatic attempts, including a changed pane, retain the attempt
+cooldown; that receipt does not claim an exit was delivered or a replacement started.
 
 ### Installation deferral while workers are live
 
