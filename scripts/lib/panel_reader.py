@@ -106,7 +106,7 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                 patch_error=False, heading=None, color=None, transcript=()):
     """Render one bounded, read-only view for a recorded call."""
     from dashboard_projection import display_width
-    from panel_view import (call_identity, clipped, light_theme, paint, role_style, status_tag,
+    from panel_view import (call_identity, clipped, hanging_wrap, light_theme, paint, role_style, status_tag,
                             wrapped, _result_blocks, _result_structured)
     from room_view import readable
     color = sys.stdout.isatty() if color is None else color
@@ -215,7 +215,7 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                 elif re.match(r"^\s{0,3}#{1,6}\s", source):
                     lines.append(ink(clipped(clean(source, 2000), width), "metadata", bold=True))
                 elif re.match(r"^\s*(?:[-*+]\s|\d+[.)]\s)", source):
-                    lines.extend("  " + part for part in wrapped(clean(source, 2000), max(8, width - 2), 100))
+                    lines.extend(hanging_wrap("  " + source, max(8, width), 100))
                 else:
                     lines.extend(wrapped(clean(source, 2000), max(8, width), 100) if source.strip() else [""])
     elif view == "Run info":
@@ -422,6 +422,13 @@ def close_reader(board):
     return bool(pane)
 
 
+def position_label(offset, body_height, total):
+    """`rows a-b/N` plus how much is left: `all`, a percentage read so far, or `end`."""
+    last = min(total, offset + body_height)
+    tail = "all" if offset == 0 and last >= total else "end" if last >= total else "%d%%" % (100 * last // max(1, total))
+    return "rows %d-%d/%d %s" % (offset + 1, last, total, tail)
+
+
 def page(render, board, on_refresh=None):
     """Scroll `render(width)` until q, Esc or the end of input, or until the board pane is gone (a reader never
     outlives its board); focus then returns to the board."""
@@ -516,7 +523,7 @@ def page(render, board, on_refresh=None):
                     age = ("unknown" if seconds is None else "<1m" if seconds < 60 else
                            "%dm" % (int(seconds // 60)) if seconds < 3600 else
                            "%dh" % (int(seconds // 3600)) if seconds < 86400 else "%dd" % (int(seconds // 86400)))
-                    count = "rows %d-%d/%d" % (offset + 1, min(len(lines), offset + body_height), len(lines))
+                    count = position_label(offset, body_height, len(lines))
                     age_text = "updated " + age
                     footer = count + " " * max(2, size[0] - len(count) - len(age_text)) + age_text
                     if compact:

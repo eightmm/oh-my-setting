@@ -1059,6 +1059,29 @@ aligned_message_lines = [line for line in aligned_message_text.splitlines() if "
 assert len(aligned_message_lines) == 2, aligned_message_text
 aligned_message_columns = [display_width(line[:line.index("ALIGN-")]) for line in aligned_message_lines]
 assert aligned_message_columns == [40, 40], (aligned_message_columns, aligned_message_lines)
+def thread(count, text=None):
+    return [{"id": "t%d" % i, "sender": "peer", "recipient": "main", "message_kind": "note", "pending_for": [],
+             "ts": "2026-10-12T19:00:00Z", "text": text if text and i == 2 else "body %d" % i} for i in range(count)]
+# Scrolled up while the thread grows: the header keeps its position and says how many arrived below.
+long_thread = {"room": {"messages": thread(60), "message_count": 60}}
+long_nav = {"messages_view": {"filter": 1, "selected": None, "open": None, "scroll": 0}}
+panel_messages.tab_body(long_thread, 60, 8, long_nav, True)
+for unused in range(20):
+    panel_messages.handle(("up",), long_nav)
+assert "new" not in panel_messages.tab_body(long_thread, 60, 8, long_nav, True)[0][0]
+long_thread["room"].update(messages=thread(64), message_count=64)
+grown = panel_messages.tab_body(long_thread, 60, 8, long_nav, False)[0][0]
+assert grown.endswith("· v 4 new") and " of 64 " in grown + " ", grown
+panel_messages.handle(("end",), long_nav)
+assert "new" not in panel_messages.tab_body(long_thread, 60, 8, long_nav, True)[0][0]
+# An expanded message keeps code indentation and hangs list continuations; cut text says so.
+rich = "- " + "word " * 12 + "\n```\ndef f():\n    return 1\n```"
+rich_nav = {"messages_view": {"filter": 1, "selected": "t2", "open": "t2", "scroll": 0, "tail": False}}
+rich_body = [row[0] for row in panel_messages.tab_body(
+    {"room": {"messages": thread(3, rich), "message_count": 3}}, 40, 40, rich_nav, False)]
+assert any(row.startswith("        return 1") for row in rich_body), rich_body
+assert any(row.startswith("      word") for row in rich_body), rich_body
+assert panel_messages.readable_text("z" * (panel_messages.MAX_TEXT + 5)).endswith("[... 5 more characters not shown]")
 unread_message = [{"id": "tail-check", "sender": "peer", "recipient": "main",
                    "pending_for": ["main"], "text": "Unread body", "ts": "2026-10-12T00:00:00Z"}]
 # The row mark carries the read state (filled/hollow, ASCII */-) instead of a trailing word.
@@ -1138,7 +1161,8 @@ for message_text in ("x\n" * 999 + "TAIL", "word " * 790 + "TAIL", "한글 " * 5
         assert "TAIL" in board("messages", 80, 40, nav=nav, unicode=glyphs)[1]
         assert nav["messages_view"]["scroll"] == last_scroll
         assert tab_event(("escape",), nav) and nav["messages_view"]["open"] is None
-assert len(panel_messages.readable_text("x" * (panel_messages.MAX_TEXT + 1))) == panel_messages.MAX_TEXT
+capped_text = panel_messages.readable_text("x" * (panel_messages.MAX_TEXT + 1)).split("\n")
+assert len(capped_text[0]) == panel_messages.MAX_TEXT and capped_text[1] == "[... 1 more characters not shown]"
 assert msg_report == before and msg_log[-1]["text"].startswith("line 29"), "reading changed the report or log"
 # Unread totals use the full pending projection, independent of the loaded message window.
 import room

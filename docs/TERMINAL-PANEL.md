@@ -1814,7 +1814,7 @@ name, unread state, and question/answer/handoff/status kind.
 |---|---|
 | Left / Right | Cycle `needs you` → `all` → `this call` → `to/from me`. |
 | Up / Down | Select a message. |
-| Enter or click | Expand or collapse its full wrapped text. |
+| Enter or click | Expand or collapse its full wrapped text; code and tables keep their indentation, list items hang under their text, and text cut at 8000 characters ends with a `[... N more characters not shown]` line. |
 | `f` | Open the associated call in the right reader; show a notice when none exists. |
 
 - `this call` appears only when a non-main participant is selected.
@@ -1825,7 +1825,8 @@ name, unread state, and question/answer/handoff/status kind.
   are lower bounds marked with `+`.
 
 The full log is read in the background and reread only when the room's message
-counts change.
+counts change. When the selection has moved off the newest message and more
+arrive, the header adds `↓ N new` (`v N new` in ASCII) next to the `a-b of N` position.
 
 
 
@@ -2052,7 +2053,9 @@ artifact reference.
 
 The reader retains answer lines and reflows them when resized; Up/Down moves one line
 and Home/End goes to the first/last page. Page keys and the wheel expose the complete
-retained preview. The registered result and source artifacts retain their full bounded
+retained preview. The footer reads `rows a-b/N` followed by `all`, the percentage
+read so far, or `end`; paging stops at the last full page. Wrapped list items hang
+under their text and keep their nesting. The registered result and source artifacts retain their full bounded
 content. The menu's numbered list shows titles, outcome, verifier and app status before
 loading any normalized answers. Select a number to open that task's detail and return to
 the list afterward. Browsing performs read-only queries; it does not dispatch, accept a

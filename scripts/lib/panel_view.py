@@ -1862,6 +1862,21 @@ def _result_blocks(text):
         yield original, kind
 
 
+def hanging_wrap(line, width, limit=100, max_chars=2000):
+    """Wrap one prose line, keeping its leading indent; list continuations align under the item text."""
+    text = str(line).expandtabs(4)
+    lead = min(len(text) - len(text.lstrip(" ")), max(0, width // 3))
+    body = text.lstrip(" ")
+    marker = re.match(r"(?:[-+*]|[0-9]{1,9}[.)])(?= )", body)
+    mark = marker[0] + " " if marker else ""
+    hang = lead + len(mark)
+    if hang > width // 2:
+        lead, mark, hang = 0, "", 0
+    parts = wrapped(body[len(mark):] if mark else body, max(1, width - hang), limit, max_chars=max_chars)
+    first = " " * lead + mark
+    return [(first if i == 0 else " " * hang) + part for i, part in enumerate(parts)]
+
+
 def _result_structured(line, width, indent=""):
     from dashboard_projection import ELLIPSIS
     # Keep terminal controls inert without clipping retained printable content.
@@ -1903,7 +1918,8 @@ def render_results(report, width=100, compact=False, heading=None):
                     if display_width(indent + safe) <= width:
                         lines.append(indent + safe)
                     else:
-                        add(text, indent + clipped(spaces, max(0, width - len(indent) - 1)))
+                        lines.extend(indent + part for part in hanging_wrap(
+                            spaces + text, width - len(indent), max(1, len(text)), max(400, len(text))))
                 elif not line.strip():
                     lines.append("")
             ordinary[:] = []

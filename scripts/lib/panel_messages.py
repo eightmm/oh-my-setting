@@ -9,7 +9,7 @@ import time
 import unicodedata
 
 from dashboard_projection import clean, display_width, listing, mapping
-from panel_view import clipped, wrapped
+from panel_view import _result_blocks, _result_structured, clipped, hanging_wrap
 
 MAX_MESSAGES, RETAIN, MAX_TEXT = 200, 2000, 8000
 KINDS = ("question", "answer", "handoff", "status", "note", "decision")
@@ -161,11 +161,17 @@ def readable_text(text):
     output, prose = [], []
 
     def flush():
-        if prose:
-            output.append(readable("\n".join(prose), "\n", True))
-            prose[:] = []
+        # Per line, so list nesting survives readable()'s stripping of leading spaces.
+        for line in prose:
+            plain = readable(line)
+            if plain:
+                output.append(line[:len(line) - len(line.lstrip(" "))] + plain)
+            elif not line.strip() and output and output[-1]:
+                output.append("")
+        prose[:] = []
 
-    for line, kind in _result_blocks(str(text or "")[:MAX_TEXT]):
+    source = str(text or "")
+    for line, kind in _result_blocks(source[:MAX_TEXT]):
         if kind == "prose":
             prose.append(line)
         else:
@@ -174,6 +180,8 @@ def readable_text(text):
             output.append("".join("?" if char != "\t" and unicodedata.category(char)[0] == "C" else char
                                   for char in line))
     flush()
+    if len(source) > MAX_TEXT:
+        output.append("[... %d more characters not shown]" % (len(source) - MAX_TEXT))
     return "\n".join(output).strip("\n")
 
 
@@ -275,8 +283,14 @@ def tab_body(report, width, cap, navigation, unicode=True):
         body.append((r["id"], mark + r["line"], True))
         if r["id"] is not None and r["id"] == state["open"]:
             # Each wrapped line consumes at least one of the bounded message characters.
-            full = [part for paragraph in r["text"].splitlines()
-                    for part in (wrapped(paragraph, width - 4, MAX_TEXT, MAX_TEXT) if paragraph.strip() else [""])]
+            full = []
+            for line, kind in _result_blocks(r["text"]):
+                if kind != "prose":
+                    full.extend(_result_structured(line, width - 4))  # code and tables keep their layout
+                elif line.strip():
+                    full.extend(hanging_wrap(line, width - 4, MAX_TEXT, MAX_TEXT))
+                else:
+                    full.append("")
             body += [(r["id"], "    " + part, False) for part in full]
     if state.pop("reveal", False) and state["selected"] in starts:
         first = starts[state["selected"]]
@@ -306,10 +320,20 @@ def tab_body(report, width, cap, navigation, unicode=True):
         count_text = str(match_count)
     search_note = ("  · searching the newest %s of %s room messages" %
                    (format(RETAIN, ","), format(total_count, ","))) if searching and not loading else ""
-    head = "Filter: %s (%s)%s%s%s" % (label, count_text,
-                                    "  · loading earlier messages..." if loading else "", search_note,
-                                    "  · %d-%d of %d" % (scroll + 1, min(len(body), scroll + budget), len(body))
-                                    if len(body) > budget else "")
+    # Reading position and the new-below cue come first so a narrow header clips the notes, not the position.
+    if state.get("tail", True) or not ids:
+        state["tail_id"] = ids[-1] if ids else None
+        newer = 0
+    else:
+        seen = state.get("tail_id")
+        newer = len(ids) - ids.index(seen) - 1 if seen in ids else 0
+    position = ("  · %d-%d of %d" % (scroll + 1, min(len(body), scroll + budget), len(body))
+                if len(body) > budget else "")
+    position += ("  · ↓ %d new" if unicode else "  · v %d new") % newer if newer else ""
+    notes = "  · loading earlier messages..." if loading else ""
+    head = "Filter: %s (%s)%s%s%s" % (label, count_text, notes, search_note, position)
+    if display_width(head) > width and not search_note:  # the search window note stays first where it already did
+        head = "Filter: %s (%s)%s%s%s" % (label, count_text, position, notes, search_note)
     out = [(head, None, False)]
     if error:
         out.append(("! " + error, None, False))
