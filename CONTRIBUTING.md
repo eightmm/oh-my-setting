@@ -19,6 +19,22 @@ update. Do not run a duplicate full gate first. See
 [verification and release](docs/COMPONENTS.md#verification-and-release) for CI
 scope, installation proof and direct-push requirements.
 
+### Harness evaluation scenarios
+
+`bash tests/harness-eval-smoke.sh [--json] [--only NAME]` asks whether the
+harness as a whole keeps five promises across a realistic sequence: a resumed
+drive repeats no work, verification or landing; a reworded criterion makes its
+evidence stale; an unrelated verification receipt does not verify a review
+finding; the panel shows what the lifecycle records say (and does not show an
+unreadable source as live); and the note a task needs fits a bounded
+session-start block with its source id. Each scenario runs real `oms` commands
+in a temp repository with fake provider CLIs, no model call and no network, then
+asserts on recorded state. It is a regression instrument for harness behavior,
+not a benchmark of model quality. A scenario for a known defect is listed in
+`xfail_branch` with the branch that fixes it and prints `xfail(BRANCH)`; once
+that fix lands it reports `unexpected-pass` and the suite fails until the entry
+is removed.
+
 ## Style
 
 - Bash 5.0+, `set -euo pipefail`, GNU/BSD-compatible on Linux, WSL2 and macOS.

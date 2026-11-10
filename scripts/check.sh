@@ -1441,6 +1441,8 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage supervisor bash tests/supervisor-smoke.sh
   stage bsd-portability bash tests/bsd-portability-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
+  # Five end-to-end scenarios (~1-2 min); sits in CI lane 3 (position 63), whose predicted sum is lowest after lane 1.
+  stage harness-eval bash tests/harness-eval-smoke.sh
   stage lifecycle-events bash tests/lifecycle-events-smoke.sh
   # panel jobs need Linux subreaper+pidfd and a POSIX pty; other hosts keep the
   # core lifecycle without them rather than counting a missing native proof.
