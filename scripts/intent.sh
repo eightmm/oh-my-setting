@@ -33,6 +33,8 @@ REASONING_EFFORT="auto"
 PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 GOAL_TEXT=""
 INTENT_ID=""
+AMEND_REASON=""
+EXPECTED_PROJECT_SHA=""
 
 usage() {
   cat <<'EOF'
@@ -42,6 +44,8 @@ usage:
                   [--reasoning-effort E] [--provider-timeout DUR]
   intent.sh show [--id ID] [--repo PATH]
   intent.sh adopt --id ID [--repo PATH]
+  intent.sh amend --reason "TEXT" [--repo PATH]
+  intent.sh adopt --id AMEND-ID --expected-project-sha256 SHA256 [--repo PATH]
 
 Turn one goal sentence into a durable, reviewed PROJECT.md contract.
 
@@ -63,6 +67,18 @@ adopt   The explicit approval act and the only PROJECT.md writer. Refuses
         (planners must not copy that shape into task verifies — the
         admission floor rejects it). Writes PROJECT.md with
         `- State: confirmed`: adopting IS the confirmation.
+amend   The way to change an adopted contract. Copies PROJECT.md to a draft
+        candidate under .oms/intents/ bound to the contract's current
+        SHA-256, with the reason recorded beside it. Edit the candidate,
+        then adopt it with --expected-project-sha256: adopt prints the
+        criteria ADDED, MODIFIED and REMOVED and the sections that changed,
+        runs the same gates (a check that already passes is a warning here,
+        since an amendment can follow finished work), keeps the previous
+        bytes at .oms/intents/archive/<sha256>.md, replaces PROJECT.md only
+        if it still hashes to the bound digest, and appends a receipt to
+        .oms/intents/amendments.jsonl. Refused under a live autopilot
+        receipt. A plan made from the old contract is not touched: retire
+        or re-propose it with the commands adopt prints.
 EOF
 }
 
@@ -74,6 +90,10 @@ while [ "$#" -gt 0 ]; do
     --to) [ "$#" -ge 2 ] || fail "--to requires a provider"; PROVIDER="$2"; shift 2 ;;
     --goal) [ "$#" -ge 2 ] || fail "--goal requires text"; GOAL_TEXT="$2"; shift 2 ;;
     --id) [ "$#" -ge 2 ] || fail "--id requires an intent id"; INTENT_ID="$2"; shift 2 ;;
+    --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; AMEND_REASON="$2"; shift 2 ;;
+    --expected-project-sha256)
+      [ "$#" -ge 2 ] || fail "--expected-project-sha256 requires a digest"
+      EXPECTED_PROJECT_SHA="$2"; shift 2 ;;
     --model) [ "$#" -ge 2 ] || fail "--model requires a name"; MODEL="$2"; shift 2 ;;
     --fallback-model)
       [ "$#" -ge 2 ] || fail "--fallback-model requires a name"
@@ -88,7 +108,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--provider-timeout requires a duration"
       PROVIDER_TIMEOUT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    draft|show|adopt)
+    draft|show|adopt|amend)
       [ -z "$ACTION" ] || fail "multiple actions: $ACTION, $1"
       ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
@@ -524,6 +544,29 @@ if [ "$ACTION" = show ]; then
   exit 0
 fi
 
+[ -z "$AMEND_REASON" ] || [ "$ACTION" = amend ] || fail "--reason is valid only with amend"
+[ -z "$EXPECTED_PROJECT_SHA" ] || [ "$ACTION" = adopt ] ||
+  fail "--expected-project-sha256 is valid only with adopt of an amendment"
+
+project_sha256() {  # digest of PROJECT.md as it is now
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$SPEC"
+}
+
+if [ "$ACTION" = amend ]; then
+  [ -f "$SPEC" ] && [ ! -L "$SPEC" ] ||
+    fail "there is no adopted PROJECT.md to amend; a first contract goes through: intent.sh draft"
+  if outer_receipt_blocks; then
+    fail "a live autopilot receipt exists; amending the contract under it would only brick the run — finish it or run: oms autopilot abandon --reason ..."
+  fi
+  amend_id="amend-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  amend_base="$(python3 "$SCRIPT_DIR/lib/intent-amend.py" draft "$SPEC" "$INTENT_DIR" "$amend_id" "$AMEND_REASON")" ||
+    exit $?
+  echo "intent: amendment candidate -> $INTENT_DIR/$amend_id.md (State: draft; PROJECT.md is unchanged)"
+  echo "intent: bound to PROJECT.md sha256: $amend_base"
+  echo "intent: edit the candidate, then: intent.sh adopt --id $amend_id --expected-project-sha256 $amend_base --repo $REPO"
+  exit 0
+fi
+
 if [ "$ACTION" = draft ]; then
   [ -n "$GOAL_TEXT" ] || fail "draft requires --goal \"TEXT\""
   [ "${#GOAL_TEXT}" -le 2000 ] || fail "--goal is longer than 2000 characters; compact it"
@@ -797,8 +840,19 @@ if [ "$ACTION" = adopt ]; then
   if outer_receipt_blocks; then
     fail "a live autopilot receipt exists; adopting a new contract under it would only brick the run — finish it or run: oms autopilot abandon --reason ..."
   fi
-  if [ -e "$SPEC" ] || [ -L "$SPEC" ]; then
-    fail "PROJECT.md already exists; back it up or remove it deliberately before adopting a new contract"
+  AMEND=0
+  [ ! -f "$INTENT_DIR/$INTENT_ID.amend.json" ] || AMEND=1
+  if [ "$AMEND" = 1 ]; then
+    [ -n "$EXPECTED_PROJECT_SHA" ] ||
+      fail "an amendment replaces an adopted contract; pass --expected-project-sha256 with the digest amend printed"
+    [ -f "$SPEC" ] && [ ! -L "$SPEC" ] || fail "PROJECT.md is gone; there is nothing for this amendment to replace"
+    [ "$(project_sha256)" = "$EXPECTED_PROJECT_SHA" ] ||
+      fail "PROJECT.md changed since this amendment was drafted; draft a new one: intent.sh amend --reason ..."
+  else
+    [ -z "$EXPECTED_PROJECT_SHA" ] || fail "--expected-project-sha256 applies only to an amendment candidate (intent.sh amend)"
+    if [ -e "$SPEC" ] || [ -L "$SPEC" ]; then
+      fail "PROJECT.md already exists; change it with: intent.sh amend --reason \"...\" (or remove it deliberately before adopting a new contract)"
+    fi
   fi
 
   intent_snapshot="$(agent_memory_mktemp)" || fail "could not allocate intent snapshot"
@@ -810,8 +864,9 @@ if [ "$ACTION" = adopt ]; then
     rm -f "$intent_snapshot" "$live_snapshot"
     fail "could not stage PROJECT.md beside its publication path"
   }
+  amend_delta=""
   intent_adopt_cleanup() {
-    rm -f "$intent_snapshot" "$live_snapshot" "$staged_spec"
+    rm -f "$intent_snapshot" "$live_snapshot" "$staged_spec" ${amend_delta:+"$amend_delta"}
   }
   trap intent_adopt_cleanup EXIT
 
@@ -866,7 +921,9 @@ except subprocess.TimeoutExpired:
     sys.exit(124)
 sys.exit(result.returncode)
 PY
-  if [ "$accept_rc" -eq 0 ]; then
+  if [ "$accept_rc" -eq 0 ] && [ "$AMEND" = 1 ]; then
+    echo "warning: Required checks already passes before the amended work is done; it cannot prove what this amendment adds" >&2
+  elif [ "$accept_rc" -eq 0 ]; then
     fail "Required checks already passes with no work done — it cannot prove the work; sharpen it until it fails while the goal is unfinished"
   fi
   if [ "$accept_rc" -eq 124 ]; then
@@ -895,6 +952,59 @@ PY
   # at. Everything else in the candidate is preserved byte-for-byte,
   # provenance included.
   confirmed_intent_snapshot "$intent_snapshot" "$staged_spec" || exit $?
+
+  if [ "$AMEND" = 1 ]; then
+    # What the amendment changes, said before anything is replaced. The
+    # comparison ignores the State line, so an untouched candidate is refused
+    # rather than recorded as an amendment that changed nothing.
+    amend_delta="$(agent_memory_mktemp)" || fail "could not allocate the amendment delta"
+    delta_rc=0
+    python3 "$SCRIPT_DIR/lib/intent-amend.py" delta "$SPEC" "$staged_spec" "$SCRIPT_DIR/lib" "$amend_delta" || delta_rc=$?
+    case "$delta_rc" in
+      0) ;;
+      4) fail "the candidate does not change the contract; edit it first, or drop the amendment" ;;
+      *) fail "could not compare the amendment with PROJECT.md" ;;
+    esac
+    intent_amend_locked() {
+      local expected_sha="$1" frozen="$2" live="$3" staged="$4" live_sha="" publish_rc=0
+      if outer_receipt_blocks; then
+        fail "a live autopilot receipt appeared during adopt; PROJECT.md was not replaced"
+      fi
+      live_sha="$(snapshot_intent_file "$INTENT_FILE" "$live")" ||
+        fail "candidate changed during adopt; the edited draft was preserved and PROJECT.md was not replaced"
+      if [ "$live_sha" != "$expected_sha" ] || ! cmp -s "$frozen" "$live"; then
+        fail "candidate changed during adopt; the edited draft was preserved and PROJECT.md was not replaced"
+      fi
+      python3 "$SCRIPT_DIR/lib/intent-amend.py" publish "$SPEC" "$staged" "$INTENT_DIR" "$INTENT_ID" \
+        "$EXPECTED_PROJECT_SHA" "$amend_delta" >/dev/null || publish_rc=$?
+      case "$publish_rc" in
+        0) ;;
+        17) fail "PROJECT.md changed during adopt; it was not replaced — draft a new amendment" ;;
+        *) fail "could not replace PROJECT.md; the previous contract is unchanged or archived under .oms/intents/archive" ;;
+      esac
+    }
+    publish_rc=0
+    oms_with_file_lock "$SPEC" intent_amend_locked \
+      "$candidate_sha" "$intent_snapshot" "$live_snapshot" "$staged_spec" || publish_rc=$?
+    case "$publish_rc" in
+      0) ;;
+      75) fail "could not acquire the PROJECT.md publication lock" ;;
+      *) exit "$publish_rc" ;;
+    esac
+    work_journal_observe "$REPO" intent "$SPEC" \
+      --source-id "$INTENT_ID" --outcome "Contract amended: $INTENT_ID" \
+      --outcome-status "confirmed" --verification-status not_applicable || true
+    echo "intent: amended PROJECT.md from $INTENT_ID (State: confirmed)"
+    echo "intent: previous contract kept at .oms/intents/archive/$EXPECTED_PROJECT_SHA.md; receipt in .oms/intents/amendments.jsonl"
+    if [ -f "$REPO/.oms/plan/tasks.json" ]; then
+      echo "intent: the existing plan was made from the previous contract and is untouched; inspect it with: oms agent-plan --repo $REPO retire --check"
+      echo "intent: then retire it (--apply --expected-plan-sha256 SHA --disposition superseded --reason ...) or keep it and propose the remainder: oms plan-from-spec --repo $REPO"
+    else
+      echo "intent: next: oms plan-from-spec --repo $REPO"
+    fi
+    echo "intent: evidence recorded for a REMOVED criterion no longer counts; a MODIFIED criterion that kept its [id:...] keeps its evidence — re-verify it"
+    exit 0
+  fi
 
   # Serialize the only PROJECT.md publication point. A cooperative concurrent
   # adopter sees the same lock and exactly one can create the contract. The
