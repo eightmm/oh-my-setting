@@ -189,12 +189,17 @@ def show(repo, provider, previous=None, menu=True, clear=True, main_attempt=None
 def draw_frame(view, size, capable, last=None):
     if not capable:
         print(view, flush=True)
-    elif last is None or last[1] != size or len(last[0].splitlines()) != len(view.splitlines()):
+    elif last is None or last[1] != size or len(view.splitlines()) > size[1]:
         sys.stdout.write("\033[H\033[2J" + view + "\033[J")
         sys.stdout.flush()
-    else:
-        for index, (before, after) in enumerate(zip(last[0].splitlines(), view.splitlines())):
-            if before != after:
-                sys.stdout.write("\033[%s;1H\033[2K%s" % (index + 1, after))
-        sys.stdout.flush()
+    elif last[0] != view:
+        # A changed row, or a frame that grew or shrank, repaints only the differing rows in one write.
+        before, after = last[0].splitlines(), view.splitlines()
+        paint = ["\033[%s;1H\033[2K%s" % (index + 1, line)
+                 for index, line in enumerate(after) if index >= len(before) or before[index] != line]
+        if len(before) > len(after):
+            paint.append("\033[%s;1H\033[J" % (len(after) + 1))
+        if paint:
+            sys.stdout.write("".join(paint))
+            sys.stdout.flush()
     return view, size
