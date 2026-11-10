@@ -104,6 +104,7 @@ unset OMS_PEER_INTERACTIVE OMS_CONVERSATION_MAX_TURNS OMS_CONVERSATION_IDLE_SECO
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
 DRY_RUN="${OH_MY_SETTING_DELEGATE_DRY_RUN:-0}"
+ADVICE_JSON=0
 
 usage() {
   cat <<'EOF'
@@ -223,6 +224,11 @@ Options:
                        No source bodies; default: off (direct source discovery).
   --no-graph-context   Disable preparation requested by an earlier --graph-context.
   --dry-run            Write prompt and empty patch without calling the CLI.
+                       Also prints an advisory inline/researcher/worker verdict
+                       from facts only (never refuses a delegate); thresholds
+                       OMS_DELEGATE_ADVICE_SMALL_BYTES (600) and
+                       OMS_DELEGATE_ADVICE_SMALL_PATHS (3).
+  --json               With --dry-run, print the verdict as one `advice-json:` line.
   --strict-brief       Refuse (exit 2) a caller brief that lacks a goal, scope,
                        output form, stop condition or file pointers. Without it
                        the same findings are only `warning: brief:` lines.
@@ -447,6 +453,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-graph-context)
       AUTO_GRAPH_CONTEXT=0
+      shift
+      ;;
+    --json)
+      ADVICE_JSON=1
       shift
       ;;
     -h|--help)
@@ -2472,6 +2482,19 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
   printf 'DRY RUN: worker command skipped.\n' >> "$artifact"
   echo "dry-run: $TO -> $artifact"
+  # Advisory only: facts about the brief, never a gate on the delegate.
+  advice_args=(--access "$WORKER_ACCESS" --verify "$([ -n "$VERIFY_CMD" ] && echo yes || echo no)"
+    --allowed "$plan_allowed" --plan "$REPO/.oms/plan/tasks.json" --self-id "$PLAN_TASK_ID")
+  [ "$ADVICE_JSON" = 0 ] || advice_args+=(--json)
+  if [ -n "$BRIEF_FILE" ]; then
+    advice_out="$(python3 "$(ma_scripts_dir)/lib/delegate_advice.py" --brief "$BRIEF_FILE" "${advice_args[@]}" 2>/dev/null)" || advice_out=""
+  else
+    advice_out="$(printf '%s' "$PROMPT" | python3 "$(ma_scripts_dir)/lib/delegate_advice.py" --brief - "${advice_args[@]}" 2>/dev/null)" || advice_out=""
+  fi
+  if [ -n "$advice_out" ]; then
+    [ "$ADVICE_JSON" = 0 ] || printf 'advice-json: '
+    printf '%s\n' "$advice_out"
+  fi
 else
   binary="$(oms_provider_binary "$TO" 2>/dev/null || printf '%s' "$TO")"
   if ! command -v "$binary" >/dev/null 2>&1; then

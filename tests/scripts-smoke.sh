@@ -7660,6 +7660,28 @@ test_delegate_dry_run() {
   [ "$lint_codes" = "finding-without-pointer,no-unresolved-line,no-changed-files" ] || fail "result lint codes: $lint_codes"
   lint_codes="$(printf 'Fixed the parser.\n\nChanged files: scripts/a.sh\n\n## Findings\n- scripts/a.sh:3 off by one\n\nUnresolved: none\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --writer 2>/dev/null)"
   [ -z "$lint_codes" ] || fail "a complete result must lint clean: $lint_codes"
+  # The dry run also prints an advisory inline/researcher/worker verdict from facts.
+  local advice_brief="$TMP/advice-brief.md" advice_out="$TMP/advice.out"
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$TMP/delegate-advice" --prompt "Rename one flag" >"$advice_out" 2>&1
+  assert_file_contains "$advice_out" 'advice: inline'
+  assert_file_contains "$advice_out" 'small sequential edit'
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" --read-only \
+    --artifact-dir "$TMP/delegate-advice" --prompt "Map the callers" >"$advice_out" 2>&1
+  assert_file_contains "$advice_out" 'advice: researcher'
+  printf 'Update scripts/a.sh, scripts/b.sh and tests/c.sh together.\n' > "$advice_brief"
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_DELEGATE_ADVICE_SMALL_PATHS=2 "$ROOT/scripts/peer-delegate.sh" --to codex \
+    --repo "$project" --artifact-dir "$TMP/delegate-advice" --brief-file "$advice_brief" --json >"$advice_out" 2>&1
+  assert_file_contains "$advice_out" 'advice-json: {'
+  assert_file_contains "$advice_out" '"verdict": "worker"'
+  # Another claimed plan task that declares an overlapping path makes the delegate not parallel-safe.
+  mkdir -p "$project/.oms/plan"
+  printf '{"tasks":{"t1":{"state":"running","allowed_paths":["scripts/"]}}}\n' > "$project/.oms/plan/tasks.json"
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_DELEGATE_ADVICE_SMALL_PATHS=2 "$ROOT/scripts/peer-delegate.sh" --to codex \
+    --repo "$project" --artifact-dir "$TMP/delegate-advice" --brief-file "$advice_brief" >"$advice_out" 2>&1
+  assert_file_contains "$advice_out" 'advice: inline'
+  assert_file_contains "$advice_out" 'overlaps active task t1'
+  rm -rf "$project/.oms/plan"
   # A continuation resolves its default verifier on its recorded base, which
   # here still has the check script that HEAD has since removed.
   local with_check

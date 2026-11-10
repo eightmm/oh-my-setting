@@ -31,6 +31,15 @@ explanation request into a write task. Inspect relevant source first:
 - Several dependent implementation steps: use the reviewed autopilot plan;
   follow [autonomy-loop.md](autonomy-loop.md), not a chain of interactive workers.
 
+Multi-agent runs cost several times the tokens of one loop, so delegation pays
+only for parallel-safe writes, read-only exploration that would bloat the main
+context, independent verification, and permission separation. `peer-delegate
+--dry-run` prints an advisory `inline` / `researcher` / `worker` verdict from
+facts (brief size, named paths, overlap with another claimed plan task, whether
+a mechanical check exists; `--json` for a record). It never refuses a delegate
+and is not verification evidence; thresholds are
+`OMS_DELEGATE_ADVICE_SMALL_BYTES` and `OMS_DELEGATE_ADVICE_SMALL_PATHS`.
+
 These roles are provider-neutral. A top-level Claude Code session may allocate
 a Codex worker using the same CLI and reviewed `assignment` as the reverse.
 An OMS worker remains a worker even if its native CLI can spawn agents: return
