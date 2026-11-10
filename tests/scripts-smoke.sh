@@ -27088,6 +27088,31 @@ assert row["next"] == "inspect the failing assertion", row
 assert row["how"] == "fixed the assertion", row
 ' || fail "list --json must retain --next and --how"
 
+  # Credential-looking notes are refused at write time, naming the flag, and
+  # leave the ledger untouched; a stored one is withheld by show.
+  local before after
+  before="$(grep -c '' "$project/.oms/failures.jsonl")"
+  rc=0
+  out="$(cd "$project" && "$SH" --repo "$project" record --cmd "bash leaky.sh" --exit 1 \
+    --next 'set api_k''ey = s''k-abcdefghij1234567890' 2>&1)" || rc=$?
+  [ "$rc" = 3 ] || fail "a credential-looking --next must exit 3, got $rc: $out"
+  contains "$out" '--next looks like a credential' || fail "refusal must name --next: $out"
+  rc=0
+  out="$(cd "$project" && "$SH" --repo "$project" resolve --fingerprint "$fp" \
+    --how 'used api_k''ey = s''k-abcdefghij1234567890' 2>&1)" || rc=$?
+  [ "$rc" = 3 ] || fail "a credential-looking --how must exit 3, got $rc: $out"
+  contains "$out" '--how looks like a credential' || fail "refusal must name --how: $out"
+  after="$(grep -c '' "$project/.oms/failures.jsonl")"
+  [ "$before" = "$after" ] || fail "refused notes must not append rows ($before -> $after)"
+  printf '%s\n' '{"schema":2,"event":"fail","ts":"2026-01-01T00:00:00Z","agent":"x","fingerprint":"storedleak0000001","kind":"cmd","cmd":"old leak","exit":1,"next":"export api_k''ey = s''k-abcdefghij1234567890"}' \
+    >> "$project/.oms/failures.jsonl"
+  out="$(cd "$project" && "$SH" --repo "$project" show --fingerprint storedleak0000001)" ||
+    fail "show of a stored leaky row should succeed"
+  contains "$out" 'next:       (withheld: looks like a credential)' || fail "show must withhold a stored credential note: $out"
+  case "$out" in *abcdefghij*) fail "show leaked a stored credential note: $out" ;; esac
+  out="$(cd "$project" && "$SH" --repo "$project" show --fingerprint "$fp")" || fail "show clean row"
+  contains "$out" 'fixed the assertion' || fail "show must keep a clean --how: $out"
+
   printf '{"schema":1,"event":"fail","fingerprint":"legacy-row","kind":"cmd","cmd":"old command","exit":1}\n' \
     >> "$project/.oms/failures.jsonl"
   printf '{"event":"fail","fingerprint":"implicit-schema-row","cmd":"older command","exit":1}\n' \
