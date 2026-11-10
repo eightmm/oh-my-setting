@@ -37,6 +37,10 @@ Commands:
 Optional bundle/experiment operations (not needed for local skills):
   preview|import|update|rollback|eval --help
                               Show the selected operation's arguments.
+  outdated [--json]           Ask each imported git bundle's remote where its
+                              recorded ref points now (git ls-remote only):
+                              current, moved or unknown. Exit 1 when one
+                              moved. Nothing is fetched or applied.
 
 Project skills live in <repo>/.oms/skills/<name>/SKILL.md. They load through
 each CLI's native project skill discovery — no router entry, no manifest.
@@ -609,6 +613,14 @@ case "${1:-}" in
   status) shift; cmd_status "$@" ;;
   eval|preview|import|update|rollback)
     command="$1"; shift; cmd_lifecycle "$command" "$@"
+    ;;
+  outdated)
+    shift
+    case "${1:-}" in
+      ""|--json) [ "$#" -le 1 ] || fail "outdated takes only --json" ;;
+      *) fail "outdated takes only --json" ;;
+    esac
+    exec python3 "$ROOT/scripts/lib/skill_outdated.py" --repo "$REPO" "$@"
     ;;
   ""|help) usage ;;
   *) fail "unknown command: $1" ;;

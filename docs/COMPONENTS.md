@@ -521,6 +521,17 @@ oms skill-forge update --source PATH_OR_GIT --expected-current-sha256 OLD --expe
 oms skill-forge rollback oms-NAME --to SHA --expected-current-sha256 CURRENT --apply
 ```
 
+`oms skill-forge outdated [--json]` asks whether an imported git bundle's
+upstream moved. For each lock receipt with a git source it runs `git ls-remote`
+on the recorded ref and compares the answer with the revision the import
+resolved: `current`, `moved` or `unknown` with a reason (unreachable remote,
+vanished ref, a local-directory import that records no upstream). A bundle
+pinned to a commit is current. It exits 1 when one moved and 0 otherwise, so
+unknown is printed, never counted as current. This is the only network use,
+it happens only when the command is run by hand (no tick or auto-update calls
+it), each lookup is bounded by `OMS_SKILL_OUTDATED_TIMEOUT` (1–120 seconds,
+default 20), and nothing is fetched, stored or applied.
+
 Skill evaluation is an explicit black-box experiment. A suite declares near-
 miss trigger cases and baseline/treatment task commands; host commands run only
 with `--allow-host-commands`. The result contains aggregate counts and command

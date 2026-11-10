@@ -335,6 +335,53 @@ test_skill_bundle_preview_import_update_and_rollback() {
     "$repo/.oms/skill-store/oms-vendor-fixture/lock.json")"
   [ "$current" = "$first" ] || fail "rollback provenance is wrong"
 
+  # outdated asks a git bundle's remote where its recorded ref points now and
+  # nothing else: three answers, exit 1 only when one moved, no state written.
+  local upstream="$TMP/bundle-upstream" up_sha rc=0 store_before store_after
+  make_repo "$upstream"
+  make_skill "$upstream/skill" oms-upstream-fixture
+  git -C "$upstream" add skill
+  git -C "$upstream" commit -qm skill
+  git -C "$upstream" branch -q stable
+  up_sha="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview --source "$upstream" \
+    --ref origin/stable --subdir skill --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["bundle_sha256"])')"
+  "$ROOT/scripts/skill-forge.sh" --repo "$repo" import --source "$upstream" --ref origin/stable --subdir skill \
+    --expected-bundle-sha256 "$up_sha" --apply >/dev/null || fail "git bundle import failed"
+  store_before="$(cd "$repo/.oms" && find . -type f -exec cksum {} + | sort)"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" outdated)" ||
+    fail "outdated must exit 0 while no upstream moved: $out"
+  printf '%s\n' "$out" | grep -Eq '^current +oms-upstream-fixture  origin/stable at ' ||
+    fail "outdated did not report the git bundle as current: $out"
+  printf '%s\n' "$out" | grep -Eq '^unknown +oms-vendor-fixture  imported from a local directory' ||
+    fail "a local import has no upstream to ask and must read unknown: $out"
+  printf '%s\n' "$out" | grep -Fq 'unknown is not current' || fail "outdated let unknown read as current: $out"
+  printf 'reference-v9\n' > "$upstream/skill/references/guide.md"
+  git -C "$upstream" checkout -q stable
+  git -C "$upstream" commit -qam move
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" outdated)" || rc=$?
+  [ "$rc" = 1 ] || fail "outdated must exit 1 when an upstream moved (rc=$rc): $out"
+  printf '%s\n' "$out" | grep -Eq '^moved +oms-upstream-fixture  origin/stable: [0-9a-f]{12} -> [0-9a-f]{12}$' ||
+    fail "outdated did not name the moved ref: $out"
+  "$ROOT/scripts/skill-forge.sh" --repo "$repo" outdated --json > "$TMP/outdated.json" || true
+  python3 - "$TMP/outdated.json" <<'PY' || fail "outdated --json shape is wrong"
+import json, sys
+report = json.load(open(sys.argv[1]))
+assert report["kind"] == "oms-skill-outdated" and report["counts"] == {"current": 0, "moved": 1, "unknown": 1}, report
+moved = [row for row in report["bundles"] if row["status"] == "moved"][0]
+assert moved["name"] == "oms-upstream-fixture" and moved["recorded"] != moved["remote"], moved
+PY
+  git -C "$upstream" branch -q -m stable renamed
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" outdated)" ||
+    fail "a ref that left the remote is unknown, not moved: $out"
+  printf '%s\n' "$out" | grep -Eq '^unknown +oms-upstream-fixture  the recorded ref is no longer on the remote' ||
+    fail "a vanished ref must be unknown with its reason: $out"
+  store_after="$(cd "$repo/.oms" && find . -type f -exec cksum {} + | sort)"
+  [ "$store_before" = "$store_after" ] || fail "outdated wrote project state"
+  grep -Fq 'reference-v1' "$repo/.agents/skills/oms-upstream-fixture/references/guide.md" ||
+    fail "outdated changed the active bundle"
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" outdated --apply 2>&1)" &&
+    fail "outdated accepted an argument other than --json: $out"
+
   ln -s "$TMP" "$source/references/escape"
   out="$("$ROOT/scripts/skill-forge.sh" --repo "$repo" preview \
     --source "$source" --json 2>&1)" && fail "preview accepted a symlink: $out"
