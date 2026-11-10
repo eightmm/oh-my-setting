@@ -10,7 +10,7 @@ from . import RUNTIME_SCHEMA
 from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, read_json, read_jsonl, sha256_bytes, sha256_file, utc_now
 from .common import install_root, run_output
 from .execution import run as run_execution
-from .experiment_contract import load_contract, run_index, validate
+from .experiment_contract import budget_status, load_contract, require_run_budget, run_index, validate
 import json as _json
 import subprocess as _subprocess
 
@@ -77,12 +77,13 @@ def _metrics_snapshot(path: Path) -> Optional[Dict[str, Any]]:
     info = path.stat()
     return {'sha256': sha256_file(path), 'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
 
-def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path: Path, command: Sequence[str], *, profile: str='trusted-local', timeout_seconds: int=86400, image: str='', adapter: str='', worktree: Optional[Path]=None, allow_existing_metrics: bool=False) -> Tuple[Dict[str, Any], int]:
+def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path: Path, command: Sequence[str], *, profile: str='trusted-local', timeout_seconds: int=86400, image: str='', adapter: str='', worktree: Optional[Path]=None, allow_existing_metrics: bool=False, budget_reason: str='') -> Tuple[Dict[str, Any], int]:
     contract = load_contract(repo, experiment_id)
     if arm not in ('baseline', 'treatment'):
         raise CoreError('experiment arm must be baseline or treatment')
     if seed not in contract['seeds']:
         raise CoreError('seed %s was not pre-registered' % seed)
+    budget_override = require_run_budget(repo, contract, budget_reason)
     before = _metrics_snapshot(metrics_path)
     if before is not None and (not allow_existing_metrics):
         raise CoreError('metrics file already exists; refuse stale reuse unless --allow-existing-metrics is explicit')
@@ -124,6 +125,8 @@ def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path
     metrics_valid = rc == 0 and (not stale_metrics) and (metric_value is not None) and (not missing_required_metrics)
     effective_exit = rc if rc != 0 else 0 if metrics_valid else 3
     row = {'schema': 1, 'run_id': run_id, 'created_at': utc_now(), 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'arm': arm, 'seed': seed, 'execution_receipt': receipt.get('receipt'), 'execution_operation_id': receipt.get('operation_id'), 'ledger_id': ledger_id or None, 'exit': effective_exit, 'command_exit': rc, 'metric': contract['primary_metric'], 'metric_value': metric_value, 'metrics': numeric, 'metrics_digest': after.get('sha256') if after and (not stale_metrics) else None, 'metric_error': metric_error, 'missing_required_metrics': missing_required_metrics, 'metrics_valid': metrics_valid, 'stale_metrics': stale_metrics}
+    if budget_override:
+        row['budget_override_reason'] = budget_override
     append_jsonl(run_index(repo), row)
     return (row, effective_exit)
 
@@ -236,6 +239,9 @@ def summarize(repo: Path, experiment_id: str) -> Dict[str, Any]:
     summary = {'schema': RUNTIME_SCHEMA, 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'metric': primary, 'direction': contract['metrics']['primary']['direction'], 'arms': arms, 'complete': complete, 'data_complete': data_complete, 'improvement': improvement, 'min_improvement': float(contract['success'].get('min_improvement', 0.0)), 'primary_pass': primary_pass, 'no_regression': no_regression, 'invariants': {'required': invariant_required, 'complete': invariant_complete, 'passed': invariant_pass, 'result': invariant_result}, 'verdict': verdict}
     if contract['success'].get('noise_band') is not None:
         summary['noise_band'] = noise
+    budget = budget_status(repo, contract)
+    if budget is not None:
+        summary['budget'] = budget
     return summary
 
 def _result_values(results: Mapping[str, Any], arm: str, metric: str, primary: str) -> List[float]:

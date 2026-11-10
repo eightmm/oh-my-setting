@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 from .common import CoreError, install_root, read_json
-from .experiment_contract import validate
+from .experiment_contract import require_run_budget, validate
 
 RESEARCH_NOTE_MAX_CHARS = 1600
 
@@ -36,6 +36,12 @@ def launch(repo: Path, args) -> int:
                 raise CoreError('--%s conflicts with --contract' % name)
             fields[name] = value
         fields['contract_digest'] = contract['contract_digest']
+        # A contract whose run budget is spent needs a stated reason, as --no-gate does.
+        # The ledger row keeps the reason only alongside --no-gate; here it is
+        # required and echoed, and `experiment run` is the path that records it.
+        override = require_run_budget(repo, contract, args.reason)
+        if override:
+            print('experiment launch: past the contract run budget (%s)' % override, file=sys.stderr, flush=True)
     for name in names:
         if not fields[name].strip():
             raise CoreError('--%s is required' % name)

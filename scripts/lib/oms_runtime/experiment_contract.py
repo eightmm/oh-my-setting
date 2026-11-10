@@ -56,6 +56,68 @@ def _noise_band(raw: Any) -> Optional[Dict[str, Any]]:
     return {'mode': mode, key: float(value)}
 
 
+BUDGET_KEYS = ('gpu_hours', 'runs', 'final_evals')
+
+def _budget(raw: Any) -> Optional[Dict[str, Any]]:
+    """Optional ceiling a person sets before the runs start: recorded runs,
+    allocated GPU-hours, and evaluations on the final split. Only `runs` is
+    counted here; the other two are stated limits that their own records
+    (run-reconcile usage, the test-split count) are compared against."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise CoreError('budget must be a nonempty object')
+    unknown = sorted(set(raw) - set(BUDGET_KEYS))
+    if unknown:
+        raise CoreError('budget has unknown key: %s' % unknown[0])
+    out: Dict[str, Any] = {}
+    for key in BUDGET_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if key == 'gpu_hours':
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) <= 0:
+                raise CoreError('budget.gpu_hours must be a positive number')
+            out[key] = float(value)
+        else:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise CoreError('budget.%s must be a positive integer' % key)
+            out[key] = value
+    return out
+
+def budget_status(repo: Path, contract: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the contract's budget allows and what the run index shows spent.
+    Returns None when the contract set no budget."""
+    budget = contract.get('budget')
+    if not isinstance(budget, dict):
+        return None
+    status: Dict[str, Any] = {}
+    if 'runs' in budget:
+        digest = contract.get('contract_digest')
+        used = sum(1 for row in read_jsonl(run_index(repo), limit_rows=MAX_JSONL_ROWS)
+                   if isinstance(row, dict) and row.get('contract_digest') == digest)
+        status['runs'] = {'limit': budget['runs'], 'used': used, 'remaining': max(0, budget['runs'] - used),
+                          'exceeded': used >= budget['runs']}
+    if 'gpu_hours' in budget:
+        status['gpu_hours'] = {'limit': budget['gpu_hours'], 'used': None,
+                               'note': 'not counted here; see oms run-reconcile usage --experiment ID'}
+    if 'final_evals' in budget:
+        status['final_evals'] = {'limit': budget['final_evals'], 'used': None,
+                                 'note': 'not counted: evaluations on the final split are not recorded yet'}
+    return status
+
+def require_run_budget(repo: Path, contract: Mapping[str, Any], reason: str='') -> str:
+    """Refuse one more run past budget.runs unless a reason is given; returns the
+    reason to record, or ''. A run already going is never cancelled."""
+    status = budget_status(repo, contract)
+    runs = (status or {}).get('runs')
+    if not runs or not runs['exceeded']:
+        return ''
+    if not reason.strip():
+        raise CoreError('run budget spent: %d of %d run(s) recorded for this contract; pass --reason to run past it'
+                        % (runs['used'], runs['limit']))
+    return ' '.join(reason.split())[:300]
+
 def validate(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise CoreError('experiment contract must be a JSON object')
@@ -165,6 +227,11 @@ def validate(raw: Any) -> Dict[str, Any]:
     if noise_band is not None:
         source['success']['noise_band'] = noise_band
     source['invariant_pack'] = normalized_invariants
+    budget = _budget(raw.get('budget'))
+    if budget is not None:
+        source['budget'] = budget
+    else:
+        source.pop('budget', None)
     normalized = dict(source)
     normalized['primary_metric'] = primary['name']
     normalized['metric_specs'] = metric_specs

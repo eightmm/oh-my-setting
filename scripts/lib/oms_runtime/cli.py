@@ -225,7 +225,7 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                 command = list(args.remainder)
                 if command and command[0] == '--':
                     command = command[1:]
-                value, rc = record_run(repo, args.id, args.arm, args.seed, _path(repo, args.metrics), command, profile=args.profile, timeout_seconds=args.timeout_seconds, image=args.image, adapter=args.adapter, worktree=_path(repo, args.worktree) if args.worktree else None, allow_existing_metrics=args.allow_existing_metrics)
+                value, rc = record_run(repo, args.id, args.arm, args.seed, _path(repo, args.metrics), command, profile=args.profile, timeout_seconds=args.timeout_seconds, image=args.image, adapter=args.adapter, worktree=_path(repo, args.worktree) if args.worktree else None, allow_existing_metrics=args.allow_existing_metrics, budget_reason=args.reason)
                 emit(value, args.pretty)
                 return rc
             elif args.experiment_action == 'summarize':
