@@ -330,7 +330,7 @@ if os.name == "posix":
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "attention")
                 sidebar = tmux_wait(["capture-pane", "-p", "-t", listing[1]], "MA")  # the identity row paints after the filter frame
                 # Two-column identities have no room for the clipping ellipsis.
-                assert any(label in sidebar for label in ("MAIN ", "MA…", "MA  [")) and "OMS · " in sidebar, sidebar
+                assert any(label in sidebar for label in ("MAIN ", "MAIN…", "MA…", "MA  [")) and "OMS · " in sidebar, sidebar
                 native_header = tmux_wait(["show-option", "-p", "-v", "-t", listing[0], "@oms_panel_header"], identity)
                 assert identity in native_header, native_header
                 assert "activity" in sidebar.lower(), sidebar
@@ -514,12 +514,13 @@ if os.name == "posix":
                       str(min(panel.work_split_cells(("left", wider, False), window), window - 1 - panel.NATIVE_MIN)), timeout=20)
             control_sidebar = next(row.split("\t")[0] for row in panes if "--watch" in row)
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "claude")
-            tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Claude --")
+            # The sidebar is narrow, so the provider strip draws one letter per provider.
+            tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "C — · X — · A —")
             subprocess.run(tmux + ["send-keys", "-t", control, "4"], env=env, check=True)
             tmux_wait(["capture-pane", "-p", "-t", control], "Main harness (claude/pi/codex/agy)")
             subprocess.run(tmux + ["send-keys", "-t", control, "codex", "Enter"], env=env, check=True)
             tmux_wait(["show-option", "-w", "-v", "-t", control, "@oms_panel_owner"], "codex")
-            tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "Codex --")
+            tmux_wait(["capture-pane", "-p", "-t", control_sidebar], "C — · X — · A —")
             records = [json.loads(line) for line in log.read_text().splitlines()]
             # Claude launched first, restarted fresh, then resumed its stored session.
             assert [r["agent"] for r in records[-4:]] == ["codex", "claude", "claude", "claude"]
