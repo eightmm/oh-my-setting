@@ -4544,6 +4544,7 @@ assert row.get("task_id") == "known-task" and row["review"]["seats"][0]["round"]
 PY
 }
 
+# smoke-weight: 12
 test_peer_review_gate_records_typed_outcome() {
   local project="$TMP/review-gate-typed"
   local artifact_dir="$project/artifacts"
@@ -4606,6 +4607,108 @@ PY
     --prompt "Explicit verify budget" >"$project/out-explicit" 2>&1 || rc=$?
   [ "$rc" = "0" ] || fail "explicit-budget gate should pass, got $rc: $(cat "$project/out-explicit")"
   assert_one_artifact_contains "$project/artifacts-explicit" '_verify-*.md' 'budget=5m'
+
+  # Findings a seat lists in its fenced block are checked against the diff the
+  # seats saw and the file each one names, with no model call and no effect
+  # on the verdict; what became of each is a queryable record.
+  local found="$TMP/review-gate-findings" review="$ROOT/scripts/peer-review.sh" verify_name
+  local fixed_id dismissed_id
+  local -a where
+  make_committed_repo "$found"
+  printf 'one\ntwo\nthree\n' > "$found/steady.txt"
+  printf '/artifacts/\n/artifacts-fixed/\n/bin/\n/home/\n' > "$found/.gitignore"
+  git -C "$found" add -A
+  git -C "$found" commit -qm 'test: steady file'
+  printf 'reviewed change\n' >> "$found/file.txt"
+  where=(--artifact-dir "$found/artifacts" --repo "$found")
+  mkdir -p "$found/bin" "$found/home"
+  cat > "$found/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'Findings:\nsee the block\n```findings\n'
+printf '%s\n' '{"file": "file.txt", "line": 2, "severity": "blocking", "summary": "The appended line is wrong", "quote": "reviewed change"}'
+printf '%s\n' '{"file": "file.txt", "line": 1, "summary": "Base line looks odd"}'
+printf '%s\n' '{"file": "steady.txt", "line": 2, "severity": "advisory", "summary": "Unrelated nit"}'
+printf '%s\n' '{"file": "file.txt", "line": 2, "summary": "Cites text that is not there", "quote": "no such text"}'
+printf '%s\n' '{"file": "missing.txt", "line": 1, "summary": "Cites a file that does not exist"}'
+printf '%s\n' '{"file": "../outside.txt", "line": 1, "summary": "escapes the repository"}'
+printf '%s\n' 'not json'
+printf '```\nCONFIDENCE: 0.8\nGATE: fail\n'
+EOF
+  chmod +x "$found/bin/claude"
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --verify true --prompt "Findings probe" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "a failing seat keeps the gate at 1 whatever its findings say, got $rc: $(cat "$TMP/findings-out")"
+  assert_file_contains "$TMP/findings-out" 'findings: 5 recorded (1 in-diff, 1 context, 1 outside-scope, 2 anchor-not-found); 2 rejected as malformed'
+  assert_file_contains "$TMP/findings-out" 'not usable as blocking evidence (the GATE verdict is unchanged)'
+  assert_one_artifact_contains "$found/artifacts" 'claude-findings-probe-*.md' 'opened by a line reading ```findings'
+  "$review" findings list "${where[@]}" > "$TMP/findings-list"
+  assert_file_contains "$TMP/findings-list" 'open      blocking in-diff          file.txt:2  The appended line is wrong'
+  assert_file_contains "$TMP/findings-list" 'open      advisory outside-scope    steady.txt:2  Unrelated nit'
+  assert_file_contains "$TMP/findings-list" 'anchor-not-found missing.txt:1'
+  assert_file_contains "$TMP/findings-list" 'not approval or verification evidence'
+  ! grep -q 'outside.txt' "$TMP/findings-list" || fail "a finding that leaves the repository must be rejected"
+  python3 - "$found/artifacts" <<'PYFIND' || fail "finding rows are not bound to the reviewed scope"
+import glob, json, sys
+rows = [json.loads(line) for path in glob.glob(sys.argv[1] + "/_findings-*.jsonl") for line in open(path, encoding="utf-8")]
+scope = json.load(open(glob.glob(sys.argv[1] + "/_scope-*.json")[0], encoding="utf-8"))
+assert len(rows) == 5 and all(row["diff_sha256"] == scope["diff_sha256"] and row["id"].startswith("f-") for row in rows), rows
+assert {row["anchor"]: row["quote_found"] for row in rows if row["quote"]} == {"in-diff": True, "anchor-not-found": False}, rows
+PYFIND
+  # fixed is a claim; verified needs a passing verify receipt recorded after it.
+  fixed_id="$(awk '/in-diff/{print $1}' "$TMP/findings-list")"
+  dismissed_id="$(awk '/outside-scope/{print $1}' "$TMP/findings-list")"
+  "$review" findings fix "$fixed_id" "${where[@]}" --note "rewrote the line" > /dev/null
+  rc=0
+  "$review" findings verify "$fixed_id" "${where[@]}" --run no-such-receipt > "$TMP/findings-verify" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "verified without a recorded verification run must be refused, got $rc"
+  assert_file_contains "$TMP/findings-verify" 'verified needs a recorded verification run, not a claim'
+  ! "$review" findings fix "$fixed_id" "${where[@]}" > /dev/null 2>&1 || fail "only an open finding can be marked fixed"
+  verify_name="$(basename "$found"/artifacts/_verify-*.md)"
+  sleep 1
+  "$review" findings reopen "$fixed_id" "${where[@]}" --reason "restart the clock" > /dev/null
+  "$review" findings fix "$fixed_id" "${where[@]}" > /dev/null
+  rc=0
+  "$review" findings verify "$fixed_id" "${where[@]}" --run "$verify_name" > "$TMP/findings-verify" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a verify receipt older than the fix must be refused, got $rc: $(cat "$TMP/findings-verify")"
+  assert_file_contains "$TMP/findings-verify" 'predates the fix record'
+  rc=0
+  OMS_HARNESS_CHILD=1 "$review" findings dismiss "$dismissed_id" "${where[@]}" --reason nit > /dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a harness child must not dismiss a finding, got $rc"
+  ! "$review" findings dismiss "$dismissed_id" "${where[@]}" > /dev/null 2>&1 || fail "dismiss needs a reason"
+  "$review" findings dismiss "$dismissed_id" "${where[@]}" --reason "style only" > /dev/null
+  # A passing run after the fix supplies the receipt; the same finding reported
+  # again by a later run reads open whatever was recorded before.
+  write_fake_review_gate_provider "$found/bin" claude pass
+  sleep 1
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts-fixed" \
+    --providers claude --gate --verify true --prompt "After the fix" > "$TMP/findings-out" 2>&1 ||
+    fail "the passing follow-up gate failed: $(cat "$TMP/findings-out")"
+  ! grep -q '^findings: ' "$TMP/findings-out" || fail "a run with no findings block prints no findings line"
+  verify_name="$(basename "$found"/artifacts-fixed/_verify-*.md)"
+  "$review" findings verify "$fixed_id" "${where[@]}" --run "$verify_name" > "$TMP/findings-verify" ||
+    fail "a passing receipt recorded after the fix must verify: $(cat "$TMP/findings-verify")"
+  "$review" findings list "${where[@]}" --json > "$TMP/findings-json"
+  python3 - "$TMP/findings-json" "$fixed_id" "$dismissed_id" <<'PYFIND' || fail "finding status is not queryable: $(cat "$TMP/findings-json")"
+import json, sys
+rows = {row["id"]: row for row in json.load(open(sys.argv[1], encoding="utf-8"))["findings"]}
+assert rows[sys.argv[2]]["status"] == "verified" and rows[sys.argv[3]]["status"] == "dismissed", rows
+assert rows[sys.argv[3]]["note"] == "style only", rows
+assert sorted(row["status"] for row in rows.values()) == ["dismissed", "open", "open", "open", "verified"], rows
+PYFIND
+  cat > "$found/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '```findings\n%s\n```\nGATE: fail\n' '{"file": "file.txt", "line": 2, "summary": "the appended  LINE is wrong", "quote": "reviewed change"}'
+EOF
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --no-verify --prompt "Reported again" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "the repeat gate should fail on its seat, got $rc: $(cat "$TMP/findings-out")"
+  "$review" findings show "$fixed_id" "${where[@]}" > "$TMP/findings-show"
+  assert_file_contains "$TMP/findings-show" "$fixed_id  open  [reported again in run"
+  assert_file_contains "$TMP/findings-show" '-> verified verify=sha256:'
 }
 
 test_prompt_takers_refuse_a_mistyped_option() {

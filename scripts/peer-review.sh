@@ -47,6 +47,12 @@ usage() {
   cat <<'EOF'
 Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh verdicts [--json] [artifact-dir]
+       peer-review.sh findings list [--status STATE] [--json]
+       peer-review.sh findings show ID
+       peer-review.sh findings fix ID [--commit SHA] [--note TEXT]
+       peer-review.sh findings verify ID --run VERIFY_ARTIFACT
+       peer-review.sh findings dismiss ID --reason TEXT
+       peer-review.sh findings reopen ID --reason TEXT
 
 Review an existing diff with an independent provider council. The default
 council is Codex, Claude Code, and Antigravity.
@@ -60,6 +66,19 @@ is used. Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable; 2 takes
 precedence over 1 (a died provider means the round must be re-run before any
 fail is meaningful). Dry-run artifacts have no exit section and therefore
 always read as incomplete.
+
+findings: what gate seats reported in their fenced findings block, and what
+became of each. A gate run checks every reported file:line against the diff
+the seats saw and the file itself (in-diff, context, outside-scope,
+anchor-not-found; unclassified when no diff was attached) and records them
+beside the review-scope artifact; no model is called and the GATE verdict is
+unchanged. A finding is open until someone records otherwise: fix is a claim,
+verify needs the artifact id or file name of a passing gate-verify receipt
+recorded after the fix, dismiss is the owner's and needs a reason (a harness
+worker or reviewer cannot), reopen needs a reason. A fixed or verified
+finding that a later review reports again reads open. Every status is a
+record, never approval or verification evidence. Each action takes
+--artifact-dir PATH (default: ./.oms/artifacts/review) and --repo PATH.
 
 Options:
   --prompt TEXT        Review question/task. Required unless --ml is set.
@@ -150,6 +169,7 @@ The final line must contain only that exact GATE text, with no punctuation or fo
 Use GATE: pass only if this change is ready to proceed with no blocking findings.
 Use GATE: fail if any blocking bug, regression, unclear contract, or unsafe operation remains.
 Do not put any text after the final GATE line.
+If you report findings, also list them before the CONFIDENCE line in one fenced block opened by a line reading ```findings, one JSON object per line: {"file": "repo-relative path", "line": 12, "severity": "blocking" or "advisory", "summary": "one sentence", "quote": "exact text of the cited line"}. Omit the block when there is nothing to report.
 EOF
 }
 
@@ -273,6 +293,11 @@ review_verdicts() {
     if [ -n "$verdict" ] && [ -n "$died_stop" ]; then
       verdict=""
     fi
+    # A seat that reached a verdict hands its answer to the findings
+    # collector; a partial transcript is not a review and hands over nothing.
+    if [ -n "$verdict" ] && [ -n "${review_finding_windows:-}" ]; then
+      review_final_attempt "$f" "$attempt_route" > "$review_finding_windows/$provider.txt" 2>/dev/null || true
+    fi
     # Stated confidence is advisory display for tiebreaks, never a gate
     # input: a confident wrong verdict must not outvote the mechanical check.
     confidence="$(review_final_attempt "$f" "$attempt_route" |
@@ -390,6 +415,12 @@ PY
 # run group, with died-mid-run detection (artifact without an exit section).
 # --json emits the same collector's output as one JSON object for machine
 # consumers; the exit contract (0/1/2) is identical in both modes.
+if [ "${1:-}" = "findings" ]; then
+  shift
+  [ "${1:-}" != "collect" ] || fail "findings collect runs inside a gate review, not by hand"
+  exec python3 -I "$(ma_scripts_dir)/lib/review_findings.py" "$@"
+fi
+
 if [ "${1:-}" = "verdicts" ]; then
   shift
   VERDICTS_JSON_STDOUT=0
@@ -1139,7 +1170,17 @@ print(json.dumps({
   fi
   verdict_rc=0
   verdict_json_file="$(mktemp)" || fail "mktemp failed"
+  review_finding_windows="$(mktemp -d)" || fail "mktemp failed"
   ( review_verdicts "$ARTIFACT_DIR" "$timestamp" "$verdict_json_file" ) || verdict_rc=$?
+  # Where each reported finding points is a mechanical reading of the diff the
+  # seats were shown. It informs the person; it never moves the verdict, so a
+  # collector failure is a warning.
+  python3 -I "$(ma_scripts_dir)/lib/review_findings.py" collect --run "$timestamp" \
+    --artifact-dir "$ARTIFACT_DIR" --repo "$MA_READ_SOURCE_REPO" --diff "$raw_diff_file" \
+    --scope "$review_scope_file" --windows "$review_finding_windows" ||
+    echo "warning: review findings were not recorded" >&2
+  rm -rf "$review_finding_windows"
+  review_finding_windows=""
   # A structural failure exits before the collector serializes; the row then
   # goes out without a payload, which is honest. A clean pass with no typed
   # outcome is the inconsistent state that must fail closed.
