@@ -2357,6 +2357,18 @@ and `repo` is the repository directory name. The payload never carries a label,
 prompt, command, path or message text; whatever the notifier sends onward, such as a
 desktop or phone notification, is its own choice. OMS itself opens no connection.
 
+Set `OMS_PANEL_ATTENTION_OSC` to `9`, `777` or `99` to have the board write a terminal
+notification escape on the same events, with the same seeding and the same one-board
+rule: OSC 9 (iTerm2, WezTerm, Ghostty, Windows Terminal), OSC 777 `notify`
+(urxvt-style, foot) or OSC 99 (kitty). Inside tmux it is written to the most recently
+active client attached to the board's session, the way a finished Codex turn is
+announced, so tmux passthrough is not needed and the escape crosses SSH to the
+terminal application, which decides whether to show it. The text is the repository
+directory name, the number of new and waiting items and their attention class words,
+such as `oms my-project: 1 new (1 failed), 3 waiting`; it never carries a label,
+prompt, command, path or message text, and control characters are removed. It is off
+by default and any other value is ignored.
+
 ### Reader-facing status labels
 
 Board text is written for

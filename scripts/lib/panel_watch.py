@@ -364,6 +364,52 @@ def attention_event(report, fresh, repo_name, now=None):
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
 
 
+def attention_notice(event):
+    """(title, text) of the OMS_PANEL_ATTENTION_OSC notification, built only from an attention_event payload:
+    the repository directory name, how many items are new and how many wait, by attention class."""
+    def words(counts):
+        return ", ".join("%d %s" % (counts[cls], cls.replace("_", " ")) for cls in sorted(counts))
+
+    new, waiting = event["new"], event["waiting"]
+    text = "%d new (%s), %d waiting" % (sum(new.values()), words(new), sum(waiting.values()))
+    return "oms " + event["repo"] if event["repo"] else "oms", text
+
+
+def attention_ttys():
+    """The terminal the notification is written to: inside tmux the most recently active client attached to
+    this pane's session (the client, not the pane, so no passthrough is needed), else the board's own terminal."""
+    from terminal_panel import tmux_command
+    pane = os.environ.get("TMUX_PANE", "")
+    if os.environ.get("TMUX"):
+        if not re.fullmatch(r"%[0-9]+", pane):
+            return []
+        try:
+            result = subprocess.run(tmux_command("list-clients", "-t", pane, "-F", "#{client_activity}\t#{client_tty}"),
+                                    capture_output=True, text=True, check=False, timeout=2, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        clients = [line.split("\t") for line in result.stdout.splitlines()] if result.returncode == 0 else []
+        clients = [(int(row[0]), row[1]) for row in clients
+                   if len(row) == 2 and row[0].isdigit() and re.fullmatch(r"/dev/[A-Za-z0-9/_.-]+", row[1])]
+        return [max(clients)[1]] if clients else []
+    try:
+        return [os.ttyname(sys.stdout.fileno())] if sys.stdout.isatty() else []
+    except (AttributeError, OSError, ValueError):
+        return []
+
+
+def send_attention_osc(mode, event):
+    """Write one OSC 9, 777 or 99 desktop notification for the event; True when a terminal accepted it.
+
+    An unknown mode sends nothing. The text is attention_notice's counts and class words, and the emitter
+    strips every control byte, so nothing in it can end the sequence early."""
+    import codex_turn_notify
+    if mode not in codex_turn_notify.OSC_MODES:
+        return False
+    title, text = attention_notice(event)
+    return codex_turn_notify.write_ttys(attention_ttys(), codex_turn_notify.sequence(mode, title, title + ": " + text)) > 0
+
+
 def _signal_attention_group(pid, number):
     try:
         os.killpg(pid, number)
@@ -579,15 +625,21 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     board = freeze_report(state)
                     bell = os.environ.get("OMS_PANEL_ATTENTION_BELL") == "1"
                     notifier = os.environ.get("OMS_PANEL_ATTENTION_CMD", "")
-                    if bell or notifier:
+                    osc = os.environ.get("OMS_PANEL_ATTENTION_OSC", "")
+                    osc = osc if osc in ("9", "777", "99") else ""
+                    if bell or notifier or osc:
                         waited = belled
                         ring, belled = attention_bell(belled, board, selected_room, bool(notice))
                         # One event signals once: in a managed panel only the main window's board does.
                         if ring and (not managed_session() or pane_local_option("@oms_panel_main_watch") == "1"):
                             if bell:
                                 ring_bell()
-                            if notifier:
-                                run_attention_command(notifier, attention_event(board, belled[1] - waited[1], repo.name))
+                            if notifier or osc:
+                                event = attention_event(board, belled[1] - waited[1], repo.name)
+                                if notifier:
+                                    run_attention_command(notifier, event)
+                                if osc:
+                                    send_attention_osc(osc, event)
                     if view is not None or not managed_session():
                         read_density = navigation.get("view") or read_density
                     if "attention" in navigation:
