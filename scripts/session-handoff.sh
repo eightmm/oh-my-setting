@@ -444,6 +444,16 @@ PY
   python3 -I "$ROOT/scripts/lib/handoff_state.py" "$repo" "$state" 2>/dev/null || true
 }
 
+# Newest recorded decisions (decision | why | rejected), capped by entry count
+# and bytes; fail-open so a bad packet never blocks a capture.
+decision_log_block() {
+  local repo
+  repo="$(oms_repo_root "$1" 2>/dev/null || printf '%s' "$1")"
+  python3 "$ROOT/scripts/lib/handoff_decisions.py" "$repo" \
+    "${OMS_HANDOFF_DECISIONS:-5}" "${OMS_HANDOFF_DECISION_BYTES:-1024}" 2>/dev/null |
+    sed '1s/^/\n/' || true
+}
+
 render_digest() {
   # Continuation records preserve newlines without letting prose become keys.
   local agent="$1"
@@ -767,6 +777,7 @@ cmd_capture() {
   local task_snapshot
   task_snapshot="$(current_snapshot "$CWD")"
   task_snapshot="${task_snapshot//$'\r'/}"
+  task_snapshot="$task_snapshot$(decision_log_block "$CWD")"
   SCAN_FILE="$(mktemp)" || fail "mktemp failed"
   { printf '%s\n' "$extract"; printf '%s\n' "$NOTE"; printf '%s\n' "$task_snapshot"; } > "$SCAN_FILE"
   if agent_memory_file_has_secret_content "$SCAN_FILE"; then

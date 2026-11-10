@@ -30,6 +30,8 @@ VERIFICATION_NOTE=""
 HYPOTHESIS=""
 RESULT_NOTE=""
 DECISION=""
+DECISION_WHY=""
+DECISION_REJECTED=""
 STATE=""
 NEXT_STEP=""
 TEXT=""
@@ -74,7 +76,11 @@ Options:
   --verification T  update: append a Verification bullet.
   --hypothesis T    update: append a Current State hypothesis bullet.
   --result T        update: append a Current State result bullet.
-  --decision TEXT   update: append a Decisions bullet.
+  --decision TEXT   update: append a Decisions bullet (capped at 100 chars).
+  --decision-reason TEXT  update: why, with --decision (one line, 110 chars).
+  --rejected TEXT   update: the alternative turned down, with --decision (one
+                    line, 60 chars). `session-handoff capture` carries the
+                    newest Decisions bullets into the digest.
   --state TEXT      init/update: replace Current State.
   --next TEXT       init/update: replace Next Step.
   --source-session HASH
@@ -204,6 +210,16 @@ while [ "$#" -gt 0 ]; do
       DECISION="$2"
       shift 2
       ;;
+    --decision-reason)
+      [ "$#" -ge 2 ] || { echo "error: --decision-reason requires text" >&2; exit 2; }
+      DECISION_WHY="$2"
+      shift 2
+      ;;
+    --rejected)
+      [ "$#" -ge 2 ] || { echo "error: --rejected requires text" >&2; exit 2; }
+      DECISION_REJECTED="$2"
+      shift 2
+      ;;
     --state)
       [ "$#" -ge 2 ] || { echo "error: --state requires text" >&2; exit 2; }
       STATE="$2"
@@ -283,6 +299,25 @@ require_uint() {
       ;;
   esac
 }
+
+# One Decisions bullet: "decision | why: reason | rejected: alternative". Each
+# part is flattened to one line and capped so the bullet stays inside the note
+# cap (300) and the handoff can carry the newest few whole.
+decision_part() {
+  printf '%s' "$1" | tr '\n\r\t' '   ' | tr -s ' ' | sed 's/^ //;s/ $//' |
+    cut -c1-"$2"
+}
+if [ -z "$DECISION" ] && [ -n "$DECISION_WHY$DECISION_REJECTED" ]; then
+  echo "error: --decision-reason and --rejected require --decision" >&2
+  exit 2
+fi
+if [ -n "$DECISION" ]; then
+  DECISION="$(decision_part "$DECISION" 100)"
+  [ -z "$DECISION_WHY" ] ||
+    DECISION="$DECISION | why: $(decision_part "$DECISION_WHY" 110)"
+  [ -z "$DECISION_REJECTED" ] ||
+    DECISION="$DECISION | rejected: $(decision_part "$DECISION_REJECTED" 60)"
+fi
 
 require_uint "--loop-attempts" "$LOOP_ATTEMPTS"
 require_uint "--loop-max" "$LOOP_MAX"
