@@ -104,6 +104,16 @@ assert_one_artifact_contains() {
   assert_file_contains "$file" "$text"
 }
 
+# Provider prompt caches match a byte-exact prefix, so text OMS injects ahead of
+# the task must not change with the clock, TZ, TMPDIR, cwd or directory order.
+# Names the first differing line of the part before "## Brief" (the task).
+assert_delegate_prefix_stable() {
+  local first="$1" second="$2" label="$3" diff_out
+  diff_out="$(diff <(awk '/^## Prompt$/{p=1;next} /^## Brief$/{exit} p' "$first") \
+    <(awk '/^## Prompt$/{p=1;next} /^## Brief$/{exit} p' "$second") | sed -n '1,4p')"
+  [ -z "$diff_out" ] || fail "$label: injected prefix differs between renders: $diff_out"
+}
+
 assert_symlink_to() {
   local path="$1"
   local target="$2"
@@ -27395,6 +27405,39 @@ expect(lambda r, w: r["critic"].update(writes="assigned-paths"), "contradicts")
 expect(lambda r, w: r["verifier"].update(returns=["no such line"]), "not present in the role file")
 expect(lambda r, w: r["builder"].update(read_only=True, writes="none"), "listed as a writer")
 PY
+
+  # Prompt-cache stability: render the same bundled-role prefix in two repos
+  # under a different clock second, TZ, TMPDIR, cwd and artifact dir.
+  local pfx_a pfx_b
+  mkdir -p "$TMP/pfx-tmp"
+  ( cd "$empty_project" && TZ=UTC OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --to codex --role builder --artifact-dir "$TMP/pfx-a" --prompt "first task" >/dev/null 2>&1 ) ||
+    fail "prefix render A should succeed"
+  sleep 1
+  ( cd "$project" && TZ=Asia/Seoul TMPDIR="$TMP/pfx-tmp" OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+    OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
+      --to codex --role builder --artifact-dir "$TMP/pfx-b" --prompt "second task" >/dev/null 2>&1 ) ||
+    fail "prefix render B should succeed"
+  pfx_a="$(find "$TMP/pfx-a" -type f -name 'codex-*.md' | sed -n '1p')"
+  pfx_b="$(find "$TMP/pfx-b" -type f -name 'codex-*.md' | sed -n '1p')"
+  [ -n "$pfx_a" ] && [ -n "$pfx_b" ] || fail "prefix renders should leave artifacts"
+  grep -Fq BUILDER-STRATEGY "$pfx_a" || fail "prefix render should carry the role"
+  assert_delegate_prefix_stable "$pfx_a" "$pfx_b" "delegate brief (bundled builder role)"
+
+  # The context-pack bundle is the other injected prefix: same files created in
+  # opposite order in two repos must compile to identical bytes.
+  local ctx_a="$TMP/ctx-a" ctx_b="$TMP/ctx-b" ctx_file
+  make_committed_repo "$ctx_a"
+  make_committed_repo "$ctx_b"
+  for ctx_file in a.py b.py c.py; do printf 'content of %s\n' "$ctx_file" > "$ctx_a/$ctx_file"; done
+  for ctx_file in c.py b.py a.py; do printf 'content of %s\n' "$ctx_file" > "$ctx_b/$ctx_file"; done
+  TZ=UTC "$ROOT/scripts/runtime.sh" --repo "$ctx_a" context --target a.py --file b.py:x --file c.py:y \
+    --bundle "$TMP/ctx-a.txt" --manifest "$TMP/ctx-a.json" >/dev/null 2>&1 || fail "context render A should succeed"
+  TZ=Asia/Seoul "$ROOT/scripts/runtime.sh" --repo "$ctx_b" context --target a.py --file b.py:x --file c.py:y \
+    --bundle "$TMP/ctx-b.txt" --manifest "$TMP/ctx-b.json" >/dev/null 2>&1 || fail "context render B should succeed"
+  cmp -s "$TMP/ctx-a.txt" "$TMP/ctx-b.txt" ||
+    fail "context bundle differs between renders: $(diff "$TMP/ctx-a.txt" "$TMP/ctx-b.txt" | sed -n '1,3p')"
 }
 
 test_global_rules_stay_compact_and_route_workflows() {
@@ -27428,6 +27471,13 @@ test_global_rules_stay_compact_and_route_workflows() {
   if cmp -s "$ROOT/AGENTS.md" "$global_rules"; then
     fail "repo and global rules must remain separate to avoid double injection"
   fi
+  # Prompt-cache stability: text every session or worker loads must not embed a
+  # value that changes per render (timestamp, $(date), $RANDOM, $$, mktemp,
+  # temp path, uuid, epoch). Names the first offending file:line.
+  local volatile
+  volatile="$(cd "$ROOT" && grep -nE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}|\$\(date|\$RANDOM|\$\$|mktemp|/tmp/|/var/folders/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-|[0-9]{13}' \
+    rules/global-AGENTS.md templates/project-*-AGENTS.md roles/*.md output-styles/*.md | sed -n '1p')" || true
+  [ -z "$volatile" ] || fail "always-loaded text holds a per-render value (breaks the prompt-cache prefix): $volatile"
 }
 
 test_project_policy_templates_stay_compact() {
