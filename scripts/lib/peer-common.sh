@@ -2619,6 +2619,20 @@ ma_mask_quoted_paths() {
     -e 's#(/home|/Users|/scratch|/lustre|/gpfs|/beegfs)/[^[:space:])"'\''`]*#<PATH>#g'
 }
 
+# Replace invisible Unicode (tag characters, bidi controls, zero-width) in
+# quoted provider output with visible <U+XXXX> markers. A marker, not a
+# defence: it does not claim to catch every hiding technique. Without a
+# python3 the text passes through unchanged rather than blocking the quote.
+ma_mark_hidden_text() {
+  local pybin
+  pybin="${OMS_PYTHON_BIN:-$(command -v python3 2>/dev/null || true)}"
+  if [ -z "$pybin" ]; then
+    cat
+    return 0
+  fi
+  "$pybin" -I "$MA_LIB_DIR/hidden_text.py" 2>/dev/null
+}
+
 # Sanitize quoted provider output before re-sending it in debate rounds.
 # Unlike the operator prompt, prior provider output is untrusted reference data:
 # it can contain local paths, auth challenge boilerplate, or pasted secrets. Keep
@@ -2638,7 +2652,7 @@ ma_sanitize_quoted_output() {
 
   tmp="$(agent_memory_mktemp)" || return 1
   sanitized="$(agent_memory_mktemp)" || { rm -f "$tmp"; return 1; }
-  ma_mask_quoted_paths > "$tmp"
+  ma_mask_quoted_paths | ma_mark_hidden_text > "$tmp"
   # The redaction loop below forks a grep per line; over an unbounded
   # artifact that is minutes of work for bytes the final quote budget
   # will drop anyway. Trim in the same direction as the final cut, with a
