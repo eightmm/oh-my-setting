@@ -338,3 +338,65 @@ def compile_bundle(repo: Path, pack: Mapping[str, Any], *, max_bytes: int = 64 *
     explicit = [(str(path), "project-graph: %s" % item.get("reason", "selected"))
                 for item in pack.get("evidence", []) for path in [item.get("path", "")] if path]
     return plan_context(Path(repo).resolve(), explicit=explicit, max_bytes=max_bytes)
+
+
+SIGNATURE_MAP_MIN_BYTES = 256
+SIGNATURE_MAP_MAX_BYTES = 256 * 1024
+SIGNATURE_MAP_DEFAULT_BYTES = 8 * 1024
+
+
+def signature_map(repo: Path, graph: Any, *, task: str, max_bytes: int = SIGNATURE_MAP_DEFAULT_BYTES,
+                  max_files: int = 12, state: Optional[Path] = None,
+                  entry_paths: Sequence[str] = ()) -> Dict[str, Any]:
+    """The files `select_context` ranks for a task, as signatures inside a byte budget.
+
+    Deterministic and read-only: no pack is written and no source file is opened.
+    Every line comes from `Graph.file_api`, so it is a declaration the parsers
+    extracted, never a body, a comment block or a notebook output. A file whose
+    signatures do not all fit is cut at a line boundary and named in `truncated`;
+    a ranked file that got no room at all is named in `omitted`."""
+    if not SIGNATURE_MAP_MIN_BYTES <= int(max_bytes) <= SIGNATURE_MAP_MAX_BYTES:
+        raise GraphError("signature map --max-bytes must be between %d and %d"
+                         % (SIGNATURE_MAP_MIN_BYTES, SIGNATURE_MAP_MAX_BYTES))
+    index = graph if isinstance(graph, Graph) else Graph(graph)
+    pack = select_context(repo, index, task=task, max_files=max_files, state=state, entry_paths=entry_paths)
+    reasons = {str(item.get("path", "")): item for item in pack["evidence"]}
+    lines: List[str] = []
+    used = 0
+    files: List[Dict[str, Any]] = []
+    truncated: List[str] = []
+    omitted: List[str] = []
+    for path in pack["files"]:
+        api = index.file_api(path, limit=2000)
+        header = path + ("  # %s" % " ".join(str(api["summary"]).split()) if api.get("summary") else "")
+        cost = len(header.encode("utf-8")) + 1
+        # Rank order is the contract: once one file is cut, a lower-ranked one never takes the leftover room.
+        if truncated or omitted or used + cost > max_bytes:
+            omitted.append(path)
+            continue
+        block = [header]
+        spent = cost
+        shown = 0
+        for row in api["symbols"]:
+            line = "  %d  %s" % (row["line"], " ".join(str(row["signature"]).split()))
+            size = len(line.encode("utf-8")) + 1
+            if used + spent + size > max_bytes:
+                break
+            block.append(line)
+            spent += size
+            shown += 1
+        if shown < api["total_symbols"]:
+            truncated.append(path)
+        lines.extend(block)
+        used += spent
+        evidence = reasons.get(path, {})
+        files.append({"path": path, "reason": str(evidence.get("reason", "")), "score": int(evidence.get("score", 0) or 0),
+                      "symbols": api["total_symbols"], "shown": shown})
+    return {
+        "schema": 1, "task": task, "project_graph_revision": pack["project_graph_revision"],
+        "content_trust": "untrusted-source-data",
+        "note": "orientation: extracted declarations only, not evidence that code behaves as named",
+        "max_bytes": int(max_bytes), "bytes": used, "files": files,
+        "truncated": truncated, "omitted": omitted,
+        "retrieval": pack["retrieval"], "text": "".join(line + "\n" for line in lines),
+    }
