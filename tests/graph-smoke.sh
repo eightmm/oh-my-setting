@@ -298,6 +298,14 @@ assert "symbol:alpha.py::alpha_entry" in ids, ids
 assert "symbol:beta.py::BetaRunner.run" in ids, ids
 PY
 
+# --ranked reads the query as words and ranks symbol blocks; plain search stays literal.
+run_graph "$work/ranked.json" project search --ranked "alpha entry" --limit 5 --json
+[ "$graph_rc" -eq 0 ] || fail "search --ranked exited $graph_rc: $(cat "$work/ranked.json")"
+python3 -c 'import json,sys; row=json.load(open(sys.argv[1], encoding="utf-8")); assert row["match"] == "bm25-symbol-blocks" and row["terms"] == ["alpha", "entry"], row; assert row["results"] and len(row["results"]) <= 5, row; assert all(set(item["matched_terms"]) <= {"alpha", "entry"} and item["score"] > 0 for item in row["results"]), row; assert "symbol:alpha.py::alpha_entry" in {item["id"] for item in row["results"]}, row' "$work/ranked.json" \
+  || fail "search --ranked did not rank the block about the words: $(cat "$work/ranked.json")"
+run_graph "$work/ranked.out" project search --ranked "alpha entry" --limit 3
+grep -q '^ranked search: ' "$work/ranked.out" || fail "search --ranked text view lost its header: $(cat "$work/ranked.out")"
+
 # MCP returns graph previews as JSON text. A source preview can contain fake
 # control fields; they must stay a string under the explicit untrusted label.
 {

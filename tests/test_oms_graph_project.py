@@ -22,6 +22,7 @@ from oms_graph.project.benchmark import (compare as benchmark_compare, history_c
                                          run as benchmark_run, snapshot as benchmark_snapshot)
 from oms_graph.project.query import Graph
 from oms_graph.project.symbol import symbol_view, view_text
+from oms_graph.project.ranked import ranked_search
 from oms_graph.project import analytics, history
 
 
@@ -294,6 +295,34 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(found["total_hits"], 1)
         self.assertEqual(found["groups"][0]["id"], "symbol:lease.py::Lease.recover")
         self.assertEqual(found["groups"][0]["hits"][0]["line"], 7)
+        # Words, not a literal: the phrase appears nowhere as written, and the block about it still ranks first.
+        self.assertEqual(index.search(self.repo, "recover expired lease")["total_hits"], 0)
+        ranked = ranked_search(self.repo, index, "recover expired lease", limit=2)
+        self.assertEqual((ranked["match"], ranked["content_trust"]), ("bm25-symbol-blocks", "untrusted-source-data"))
+        self.assertEqual(ranked["results"][0]["id"], "symbol:lease.py::Lease.recover")
+        self.assertEqual(ranked["results"][0]["matched_terms"], ["recover", "expired", "lease"])
+        self.assertEqual(ranked["results"][0]["preview"]["line"], 6)
+        self.assertGreater(ranked["results"][0]["score"], ranked["results"][1]["score"])
+        self.assertEqual(ranked_search(self.repo, index, "taskJournal update")["results"][0]["id"],
+                         "symbol:lease.py::task_journal_update")
+        self.assertEqual(ranked_search(self.repo, index, "zzz_absent_word")["results"], [])
+        with self.assertRaises(GraphError):
+            ranked_search(self.repo, index, "___")
+        (self.repo / "lease.py").write_text("def moved(): pass\n", encoding="utf-8")
+        drifted = ranked_search(self.repo, index, "recover expired lease")
+        self.assertEqual((drifted["stale_files"], drifted["results"]), (1, []))  # bytes the graph never read are not ranked
+        self.write(
+            "lease.py",
+            '"""Lease lifecycle utilities."""\n\n'
+            "class Lease:\n"
+            '    """Coordinates task leases."""\n'
+            "    def recover(self, task, *, force=False):\n"
+            '        """Recover an expired task lease."""\n'
+            '        marker = "RECOVER_MARKER"\n'
+            "        return task, force, marker\n\n"
+            "def task_journal_update(task):\n"
+            "    return task\n",
+        )
 
         normalized = Graph({"nodes": [{
             "id": "symbol:lib/context.py::context_pack", "kind": "function",

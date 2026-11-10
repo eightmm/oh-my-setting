@@ -23,6 +23,7 @@ from .project import context as project_context
 from .project import orientation as project_orientation
 from .project.query import Graph
 from .project import symbol as project_symbol
+from .project import ranked as project_ranked
 from oms_runtime.common import CoreError, atomic_write_bytes, read_json, repo_root
 
 PROJECT_STATE_ENV = "OMS_PROJECT_GRAPH_STATE"
@@ -112,6 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     search = project_sub.add_parser("search", help="exhaustive case-insensitive literal search grouped by graph symbol", parents=[shared_options])
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=200)
+    search.add_argument("--ranked", action="store_true",
+                        help="treat the query as words and rank the symbol blocks about them (BM25 over bodies, comments and identifiers)")
     search.add_argument("--json", action="store_true")
     symbol = project_sub.add_parser("symbol", help="one symbol's definitions, graph references and unlinked text matches, in separate zones", parents=[shared_options])
     symbol.add_argument("name", help="symbol name, qualified name or node id")
@@ -444,6 +447,18 @@ def _project_api(args: argparse.Namespace, repo: Path, state: Path) -> int:
 def _project_search(args: argparse.Namespace, repo: Path, state: Path) -> int:
     if args.limit < 1 or args.limit > 500:
         raise GraphError("project search --limit must be between 1 and 500")
+    if args.ranked:
+        result = project_ranked.ranked_search(repo, _index(repo, state)[1], args.query, limit=args.limit)
+        if args.json:
+            emit(result, args.pretty)
+            return 0
+        print("ranked search: %d of %d block(s) match %s%s" % (
+            result["returned"], result["total_matches"], " ".join(result["terms"]),
+            " (truncated)" if result["truncated"] else ""))
+        for row in result["results"]:
+            print("%7.3f  %s  [%s]" % (row["score"], row["id"], " ".join(row["matched_terms"])))
+            print("         %s:%d: %s" % (row["path"], row["preview"]["line"], row["preview"]["text"]))
+        return 0
     result = _index(repo, state)[1].search(repo, args.query, limit=args.limit)
     if args.json:
         emit(result, args.pretty)
