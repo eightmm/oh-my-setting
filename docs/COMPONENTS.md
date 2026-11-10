@@ -676,7 +676,8 @@ output, and the byte counts are measured bytes; the JSON's token figure is a
 labelled bytes/4 heuristic, not a tokenizer and not a quota or billing saving.
 The tool is opt-in: no hook rewrites a command to use it.
 
-Raw captures are mode 600 and the newest 50 are kept. If the lines to be
+Raw captures are mode 600 and the newest 50 are kept; the store retains itself,
+so `oms gc --delete-orphan-files` never treats it as unindexed orphans. If the lines to be
 shown look like they carry a secret, or the scan cannot run, they are withheld
 and only the counts, the exit code and the raw path are printed. `--no-store`
 keeps no file, and a harness child never keeps one. In run mode the tool's own
