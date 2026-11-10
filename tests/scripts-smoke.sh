@@ -29446,6 +29446,9 @@ test_gc_keeps_orphan_artifacts_unless_asked() {
   printf 'a council answer a later round still cites\n' > "$orphan"
   printf '{"ts":"2026-06-11T00:00:01Z","kind":"call","event_id":"evt_kept","artifact":".oms/artifacts/ask/kept.md"}\n' > "$index"
   printf 'kept\n' > "$project/.oms/artifacts/ask/kept.md"
+  # oms output-digest keeps its own newest 50; the orphan sweep must not age it out.
+  mkdir -p "$project/.oms/artifacts/output-digest"
+  printf 'raw capture\n' > "$project/.oms/artifacts/output-digest/20260101T000000Z-1.log"
 
   # Rows are retention; an orphaned file is the evidence itself, and its row was
   # retired by an earlier prune at a lower floor. Riding that deletion along
@@ -29462,6 +29465,8 @@ test_gc_keeps_orphan_artifacts_unless_asked() {
     fail "--delete-orphan-files must remove the unreferenced artifact: $out"
   [ -f "$project/.oms/artifacts/ask/kept.md" ] ||
     fail "a referenced artifact must survive either way: $out"
+  [ -f "$project/.oms/artifacts/output-digest/20260101T000000Z-1.log" ] ||
+    fail "the orphan sweep must leave the self-retained output-digest store alone: $out"
 }
 
 test_gc_maintains_the_lifecycle_stream() {

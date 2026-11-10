@@ -24,6 +24,9 @@ RETENTION = runpy.run_path(os.path.join(LIB_DIR, "artifact-index-retention.py"))
 MAX_INDEX_BYTES = DURABLE["MAX_FILE_BYTES"]
 MAX_INPUT_BYTES = DURABLE["MAX_RECOVERY_BYTES"]
 MAX_ROW_BYTES = DURABLE["MAX_ROW_BYTES"]
+# Unindexed stores that keep their own retention (oms output-digest holds the
+# newest 50 captures); the orphan sweep must not apply an age rule to them.
+SELF_RETAINED_DIRS = frozenset({"output-digest"})
 
 
 def fail(message: str) -> None:
@@ -708,6 +711,8 @@ def delete_orphans(
         safe_dirs = []
         for name in dirnames:
             if name.endswith(".lock"):
+                continue
+            if dirpath == artifacts_root and name in SELF_RETAINED_DIRS:
                 continue
             path = os.path.join(dirpath, name)
             try:
