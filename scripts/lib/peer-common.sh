@@ -63,6 +63,90 @@ MA_SAFE_PATHS=(
   ':(top,exclude)local/slurm.md'
 )
 
+# What an opted-in Claude worker may not Read (OMS_WORKER_SECRET_GUARD=1). Every
+# `**/` entry is also an exclusion in MA_SAFE_PATHS above, so a file kept out of
+# the prompt bundle is the same file kept out of the worker's Read tool; the `~/`
+# entries are the home directories those exclusions name. This is narrower than
+# the bundle list on purpose: `*credentials*` and `*.crt` there also match source
+# files and public certificates a worker has to read.
+MA_SECRET_READ_DENY=(
+  '**/.env*'
+  '**/.envrc'
+  '**/.git-credentials'
+  '**/.npmrc'
+  '**/.pypirc'
+  '**/.pgpass'
+  '**/.netrc'
+  '**/id_rsa*'
+  '**/*.pem'
+  '**/*.key'
+  '**/*.p12'
+  '**/*.pfx'
+  '~/.ss''h/**'
+  '~/.aw''s/**'
+  '~/.config/gh/hosts.yml'
+)
+
+ma_worker_secret_guard() {
+  [ "${OMS_WORKER_SECRET_GUARD:-0}" = 1 ]
+}
+
+# The `"permissions":{...}` member of a per-call Claude --settings object. The
+# person's settings files are never edited. A deny rule stops the Read tool
+# only: a command the worker runs (cat, grep -r, a script) still reads the file.
+ma_claude_secret_deny_member() {
+  local pattern out=""
+  for pattern in "${MA_SECRET_READ_DENY[@]}"; do
+    out="$out${out:+,}\"Read($pattern)\""
+  done
+  printf '"permissions":{"deny":[%s]}' "$out"
+}
+
+# Remove credential-shaped variables from a provider child's environment when
+# the person opted in. Kept: the provider's own login variables, every OMS_*
+# variable, and the names in OMS_WORKER_ENV_ALLOW (spaces or commas). Only the
+# three providers whose login variables are known are scrubbed; any other
+# provider keeps its environment, since its key can have any name.
+ma_scrub_credential_env() {
+  local provider="$1" name allow glob kept
+  local -a keep=()
+  ma_worker_secret_guard || return 0
+  case "$provider" in
+    claude) keep=('ANTHROPIC_*' 'CLAUDE_*') ;;
+    codex) keep=('OPENAI_*' 'CODEX_*' 'AZURE_OPENAI_*') ;;
+    antigravity) keep=('GEMINI_*' 'GOOGLE_*' 'ANTIGRAVITY_*') ;;
+    *) return 0 ;;
+  esac
+  allow="${OMS_WORKER_ENV_ALLOW:-}"
+  allow=" ${allow//,/ } "
+  # Claude Code on Bedrock or Vertex logs in with the cloud's own variables.
+  if [ "$provider" = claude ]; then
+    [ -z "${CLAUDE_CODE_USE_BEDROCK:-}" ] || keep+=('AWS_*')
+    [ -z "${CLAUDE_CODE_USE_VERTEX:-}" ] || keep+=('GOOGLE_*')
+  fi
+  while IFS= read -r name; do
+    case "$name" in
+      OMS_*|OH_MY_SETTING_*) continue ;;
+    esac
+    case "$allow" in
+      *" $name "*) continue ;;
+    esac
+    kept=0
+    for glob in "${keep[@]}"; do
+      # shellcheck disable=SC2053
+      if [[ "$name" == $glob ]]; then
+        kept=1
+        break
+      fi
+    done
+    [ "$kept" -eq 0 ] || continue
+    case "$name" in
+      AWS_*|*_TOKEN|*_SECRET|*_SECRET_KEY|*_API_KEY|*_APIKEY|*_ACCESS_KEY|*_ACCESS_KEY_ID|*_PRIVATE_KEY|*_PASSWORD|*_PASSWD|*_CREDENTIALS)
+        unset "$name" ;;
+    esac
+  done < <(compgen -e)
+}
+
 fail() {
   echo "error: $*" >&2
   exit 2
@@ -1233,6 +1317,8 @@ PY
       ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL \
       OMS_CODEX_HARNESS_URL OMS_CODEX_HARNESS_CAPABILITY OMS_CODEX_HARNESS_MODEL OMS_HARNESS_BRIDGE
   fi
+  # Opt-in: the worker does not need the owner's cloud, registry or forge keys.
+  ma_scrub_credential_env "$provider"
   export OMS_HARNESS_CHILD=1
   export OMS_HARNESS_ORIGIN="$origin"
   export OMS_HARNESS_PARENT_AGENT="$parent_agent"
@@ -3494,7 +3580,14 @@ ma_provider_attempt_run() {
       # use a per-call directory relative to the seat's project, removed after.
       if [ "$access" != write ]; then
         seat_plans=".oms/tmp/claude-plans-$(ma_fence_id)"
-        cmd+=(--settings "{\"plansDirectory\":\"$seat_plans\"}")
+        if ma_worker_secret_guard; then
+          cmd+=(--settings "{\"plansDirectory\":\"$seat_plans\",$(ma_claude_secret_deny_member)}")
+        else
+          cmd+=(--settings "{\"plansDirectory\":\"$seat_plans\"}")
+        fi
+      elif ma_worker_secret_guard; then
+        # Inline settings add to the operator's rules a write worker keeps; deny wins over allow.
+        cmd+=(--settings "{$(ma_claude_secret_deny_member)}")
       fi
       # The result envelope and the public stream messages are converted back
       # to the shared plain-text shape after the run. Non-interactive writers
