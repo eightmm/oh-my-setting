@@ -8799,6 +8799,66 @@ test_agent_plan_dag_and_ready() {
   out="$("$SH" --repo "$d" ready)"
   [ "$out" = "P2" ] || fail "P2 should be ready after P1 done, got: $out"
   "$SH" --repo "$d" status | grep -F 'done=1' > /dev/null || fail "status should report done=1"
+
+  # ready --json: schema 1, only startable tasks, same order as plain ready.
+  out="$("$SH" --repo "$d" ready --json)" || fail "ready --json failed"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == 1 and r["total"] == 1, r
+t = r["tasks"][0]
+assert t["id"] == "P2" and t["depends"] == ["P1"], t
+assert t["allowed"] == [] and t["verify"] == "" and "P1" in t["why_ready"], t
+assert "discovered_from" not in t, t
+' || fail "ready --json shape wrong: $out"
+  "$SH" --repo "$d" claim --id P2 --provider codex >/dev/null || fail "claim P2 failed"
+  out="$("$SH" --repo "$d" ready)"
+  [ -z "$out" ] || fail "a claimed task must not be ready, got: $out"
+  out="$("$SH" --repo "$d" ready --json)"
+  printf '%s' "$out" | grep -F '"tasks": []' >/dev/null || fail "claimed task leaked into ready --json: $out"
+  "$SH" --repo "$d" ready --limit 0 >/dev/null 2>&1 && fail "--limit 0 must be rejected"
+  "$SH" --repo "$d" status --limit 1 >/dev/null 2>&1 && fail "--limit outside ready must be rejected"
+
+  # add --discovered-from: a link only. Unknown parent refused, parent untouched.
+  "$SH" --repo "$d" add --id F1 --title found --discovered-from NOPE >/dev/null 2>&1 \
+    && fail "unknown --discovered-from must be rejected"
+  "$SH" --repo "$d" show --id F1 >/dev/null 2>&1 && fail "rejected discovered add left a task"
+  local before after
+  before="$("$SH" --repo "$d" show --id P2 | python3 -c 'import json,sys; d=json.load(sys.stdin); d.pop("task_sha256",None); d.pop("claim_age_s",None); print(json.dumps(d,sort_keys=True))')"
+  "$SH" --repo "$d" add --id F1 --title found --discovered-from P2 --verify true >/dev/null \
+    || fail "discovered add failed"
+  out="$("$SH" --repo "$d" add --title generated --discovered-from P2)" || fail "generated-id add failed"
+  case "$out" in "plan: added d-"*) ;; *) fail "generated id missing, got: $out" ;; esac
+  "$SH" --repo "$d" add --title nolink >/dev/null 2>&1 && fail "add without id and link must still need --id"
+  after="$("$SH" --repo "$d" show --id P2 | python3 -c 'import json,sys; d=json.load(sys.stdin); d.pop("task_sha256",None); d.pop("claim_age_s",None); print(json.dumps(d,sort_keys=True))')"
+  [ "$before" = "$after" ] || fail "discovered add changed the parent task"
+  "$SH" --repo "$d" show --id F1 | grep -F '"discovered_from": "P2"' >/dev/null || fail "show lacks discovered_from"
+  "$SH" --repo "$d" brief --id F1 | grep -F 'discovered_from: P2' >/dev/null || fail "brief lacks discovered_from"
+  out="$("$SH" --repo "$d" ready --json --limit 1)"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["total"] == 2 and len(r["tasks"]) == 1 and r["tasks"][0]["id"] == "F1", r
+assert r["tasks"][0]["discovered_from"] == "P2", r
+' || fail "ready --json --limit/discovered link wrong: $out"
+  "$SH" --repo "$d" discovered --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["schema"] == 1 and r["count"] == 2 and [p["id"] for p in r["parents"]] == ["P2"], r
+assert r["parents"][0]["state"] == "claimed", r
+' || fail "discovered --json wrong"
+  "$SH" --repo "$d" discovered | grep -F 'F1' >/dev/null || fail "discovered text lacks F1"
+  "$SH" --repo "$d" status --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert list(r["discovered"]) == ["P2"] and "F1" in r["discovered"]["P2"], r
+' || fail "status --json lacks discovered"
+  # Old plans (no link anywhere) keep status --json byte-shape: no discovered key.
+  local old="$TMP/agent-plan-old"
+  mkdir -p "$old"; git -C "$old" init -q .
+  "$SH" --repo "$old" init --goal demo >/dev/null && "$SH" --repo "$old" add --id A --title a >/dev/null
+  "$SH" --repo "$old" status --json | grep -F '"discovered"' >/dev/null && fail "plan without links must not grow a discovered key"
+  "$SH" --repo "$old" discovered | grep -F '(none)' >/dev/null || fail "empty discovered must say none"
 }
 
 test_agent_plan_lock_single_winner() {
