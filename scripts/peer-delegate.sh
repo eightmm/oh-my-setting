@@ -1139,6 +1139,14 @@ else
   plan_allowed="${OMS_PANEL_ALLOWED_PATHS:-}"
   plan_forbidden="${OMS_PANEL_FORBIDDEN_PATHS:-}"
 fi
+memory_scope_args=()
+if [ -n "$PLAN_JSON" ] || [ "${OMS_PANEL_DISPATCH:-0}" = 1 ]; then
+  memory_scope_args=("$plan_allowed" "$plan_forbidden" "$DELEGATE_SOURCE_REPO")
+fi
+memory_query="$PROMPT"
+if [ -z "$memory_query" ] && [ -n "$PLAN_JSON" ]; then
+  memory_query="$(delegate_json_field title "$PLAN_JSON" scalar)"
+fi
 
 {
   printf 'You are a delegated worker agent (%s) in an isolated repository worktree.\n' "$TO"
@@ -1159,7 +1167,8 @@ fi
     printf 'Admission consent: verifier-change=%s test-reduction=%s restructure=%s\n\n' \
       "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION" "$ALLOW_RESTRUCTURE"
   fi
-  ma_write_harness_context "$delegate_worktree_repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$PROMPT"
+  ma_write_harness_context "$delegate_worktree_repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" \
+    "$memory_query" "${memory_scope_args[@]}"
   ma_write_thread_context "$REPO" "$THREAD_ID"
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
