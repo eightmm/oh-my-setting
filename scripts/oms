@@ -223,6 +223,7 @@ graph
 harness
 inbox
 init
+input
 install-profile
 intent
 job-digest

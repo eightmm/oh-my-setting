@@ -1389,6 +1389,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage land bash tests/land-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
   stage context-core bash tests/context-core-smoke.sh
+  stage inputs python3 tests/test_inputs.py
   stage draft-pr bash tests/draft-pr-smoke.sh
   stage graph bash tests/graph-smoke.sh
   stage autonomy-hook bash tests/autonomy-hook-smoke.sh
