@@ -1666,6 +1666,17 @@ finding that a later run reports again reads `open`. Every status is a record
 of what was said, never approval or verification evidence, and a refused
 action exits 2.
 
+Dispositions end a review loop: `fix` is accept, `dismiss` is reject (the
+finding is wrong) and `findings out-of-scope ID --reason TEXT` records a
+finding that is right but not this change (owner only, like `dismiss`).
+`findings list --status open` lists the findings without a disposition. Only
+the fenced `findings` block is parsed (see the finding format above); prose
+findings in a seat's answer have no ID and are not tracked. Gate behaviour is
+unchanged by default. With `--gate --require-dispositions` (or
+`OMS_REVIEW_REQUIRE_DISPOSITIONS=1`) a reviewer pass becomes incomplete (exit
+2) and the open IDs from earlier runs are printed; it never turns a fail into
+a pass.
+
 `oms peer-review --gate --confirm PROVIDER` adds one read-only call after the
 seats: the blocking findings that exactly one seat reported (and that PROVIDER
 did not report itself; at most twenty) go to PROVIDER, which answers one label

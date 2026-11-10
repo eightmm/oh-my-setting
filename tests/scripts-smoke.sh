@@ -5121,6 +5121,38 @@ EOF
   assert_file_contains "$TMP/findings-show" "$fixed_id  open  [reported again in run"
   assert_file_contains "$TMP/findings-show" '-> verified verify=sha256:'
 
+  # Dispositions: out-of-scope is a recorded state; the gate is unchanged by
+  # default and, opted in, calls a pass incomplete while an earlier finding is open.
+  cat > "$found/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'No findings\nCONFIDENCE: 0.9\nGATE: pass\n'
+EOF
+  rc=0
+  OMS_HARNESS_CHILD=1 "$review" findings out-of-scope "$fixed_id" "${where[@]}" --reason later > /dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a harness worker cannot mark a finding out-of-scope, got $rc"
+  rc=0
+  "$review" findings out-of-scope "$fixed_id" "${where[@]}" > /dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "out-of-scope needs a reason, got $rc"
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --base "$review_base" --gate --no-verify --prompt "Default pass" > "$TMP/findings-out" 2>&1 ||
+    fail "the default gate must ignore dispositions: $(cat "$TMP/findings-out")"
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --base "$review_base" --gate --no-verify --require-dispositions --prompt "Strict pass" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "undisposed findings must make a strict pass incomplete, got $rc: $(cat "$TMP/findings-out")"
+  assert_file_contains "$TMP/findings-out" "undisposed $fixed_id"
+  assert_file_contains "$TMP/findings-out" 'gate: incomplete (findings without a disposition'
+  "$review" findings list "${where[@]}" --status open | awk '/^f-/{print $1}' > "$TMP/findings-open"
+  while read -r open_id; do
+    "$review" findings out-of-scope "$open_id" "${where[@]}" --reason "tracked elsewhere" > /dev/null
+  done < "$TMP/findings-open"
+  "$review" findings list "${where[@]}" --status out-of-scope > "$TMP/findings-list"
+  assert_file_contains "$TMP/findings-list" 'out-of-scope blocking'
+  OMS_REVIEW_REQUIRE_DISPOSITIONS=1 HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" \
+    --artifact-dir "$found/artifacts" --providers claude --base "$review_base" --gate --no-verify --prompt "Disposed pass" \
+    > "$TMP/findings-out" 2>&1 || fail "a disposed pass must stay a pass under the env opt-in: $(cat "$TMP/findings-out")"
+
   # --confirm puts what one seat alone called blocking to a second provider
   # for a label per id. The labels are recorded and shown; the verdict, the
   # status and the unanswered finding all stay as they were.
