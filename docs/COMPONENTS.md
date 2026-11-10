@@ -1324,6 +1324,15 @@ all, a criterion without `[id:...]` in a list where others have one, and one ID
 on two different criteria (which the runtime envelope refuses). They never change
 an exit code.
 
+`oms intent draft --kind bugfix|quick` changes only the skeleton the draft is
+asked for. `bugfix` adds a Behavior section, Current, Expected and Preserve, so
+the behavior that must not change is written down and `Required checks` is asked
+to fail on the current behavior and still run the check for what is preserved;
+`quick` asks for Status, Project and Verification alone. The default (`feature`)
+prompt is unchanged, a non-default kind is recorded as `- Kind:` in the
+candidate's provenance, and validation and the adopt gate are the same for all
+three.
+
 An adopted contract is changed with `oms intent amend --reason "TEXT"`: it copies
 `PROJECT.md` to a draft candidate under `.oms/intents/`, bound to the contract's current
 SHA-256, and leaves `PROJECT.md` alone. After editing the candidate, `oms intent adopt --id

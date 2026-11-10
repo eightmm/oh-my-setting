@@ -12881,6 +12881,42 @@ EOF
     fail "absolute machine path leaked into the durable spec: $candidate"
   fi
   assert_file_contains "$candidate" "- Artifact: .oms/artifacts/"
+  # The default draft asks for the full skeleton and records no kind.
+  assert_file_contains "$home_dir/intent-prompt" "## Edge cases"
+  ! grep -Fq -- "- Current:" "$home_dir/intent-prompt" || fail "a default draft must not ask for the bugfix section"
+  ! grep -Fq -- "- Kind:" "$candidate" || fail "a default draft must not record a kind"
+
+  # --kind swaps the skeleton only: bugfix asks what must be preserved, quick
+  # asks for three sections. Validation and the candidate path are the same.
+  sleep 1
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex --kind bugfix \
+    --goal "fix the empty-name crash" > "$project/bugfix-out" 2>&1 ||
+    fail "a bugfix draft should succeed: $(tail -5 "$project/bugfix-out")"
+  assert_file_contains "$home_dir/intent-prompt" "## Behavior"
+  assert_file_contains "$home_dir/intent-prompt" "- Preserve: <behavior next to the bug that must stay exactly as it is"
+  assert_file_contains "$home_dir/intent-prompt" "Required checks must fail on the Current behavior"
+  assert_file_contains "$home_dir/intent-prompt" "## Decisions"
+  grep -Flq -- "- Kind: bugfix" "$project"/.oms/intents/intent-*.md || fail "the bugfix candidate should record its kind"
+  sleep 1
+  HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \
+    "$ROOT/scripts/intent.sh" draft --repo "$project" --to codex --kind quick \
+    --goal "rename the greeting flag" > "$project/quick-out" 2>&1 ||
+    fail "a quick draft should succeed: $(tail -5 "$project/quick-out")"
+  assert_file_contains "$home_dir/intent-prompt" "the three sections above are the whole"
+  assert_file_contains "$home_dir/intent-prompt" "- Required checks: <ONE runnable shell command"
+  if grep -Eq '^## (Decisions|Commands|Edge cases|Notes|Behavior)$' "$home_dir/intent-prompt"; then
+    fail "a quick draft must ask for Status, Project and Verification only"
+  fi
+  grep -Flq -- "- Kind: quick" "$project"/.oms/intents/intent-*.md || fail "the quick candidate should record its kind"
+  [ ! -e "$project/PROJECT.md" ] || fail "a draft of any kind must never touch PROJECT.md"
+  rc=0
+  "$ROOT/scripts/intent.sh" draft --repo "$project" --kind epic --goal "x" > "$project/kind-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unknown --kind should exit 2, got $rc"
+  assert_file_contains "$project/kind-out" "--kind must be feature, bugfix or quick"
+  rc=0
+  "$ROOT/scripts/intent.sh" show --repo "$project" --kind quick > "$project/kind-show-out" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "--kind outside draft should exit 2, got $rc"
 
   # A structureless answer fails closed and keeps the artifact pointer.
   printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "no structure"\n' > "$bin_dir/codex"

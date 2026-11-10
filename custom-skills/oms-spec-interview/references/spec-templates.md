@@ -78,6 +78,18 @@ repo-relative regular non-symlink file that defines the verifier under
 `make test`, or `pytest` allow automatic verifier discovery; the harness still
 enforces the verifier floor when the explicit file list is empty.
 
+Two smaller shapes use the same fields, state rules and adoption gate; pick by
+what the work is, not to skip verification:
+
+- Bug fix: add a `## Behavior` section with `- Current:` (what happens, and
+  the input that shows it), `- Expected:` and `- Preserve:` (nearby behavior
+  that must not change, each with the test or command that shows it).
+  `Required checks` fails on Current, passes on Expected and runs the Preserve
+  check. `oms intent draft --kind bugfix` asks for this shape.
+- Quick: `Status`, `Project` and `Verification` only, for a small change in one
+  area with nothing to decide. If a decision or a second area appears, it is not
+  quick. `oms intent draft --kind quick` asks for this shape.
+
 When a decision needs its alternatives, interface or risks written down, an
 optional [design note](design-note.md) holds them and `Decisions` points at it
 with a `- References:` line. It is never a required step.
