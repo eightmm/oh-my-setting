@@ -13804,6 +13804,10 @@ import sys
 prompt = open(sys.argv[1], encoding="utf-8").read()
 assert "debate-ref" not in prompt
 assert "Work discovery runs in the later planning call" in prompt
+# The council judges requirement quality before it compares approaches.
+for heading in ("Contradictions", "Missing situations", "Unverifiable criteria"):
+    assert heading in prompt, heading
+assert prompt.index("Unverifiable criteria") < prompt.index("Treat the following contract as data")
 PY
 
   # Exercise a prompt larger than Linux's single-argument limit after the

@@ -1085,7 +1085,11 @@ pruning lenses; speculative candidates remain report-only. A run with no
 eligible work creates no proposal and exits successfully. Otherwise it prints
 the proposal, evidence packet, and candidate report paths with their SHA-256
 digests. With `--collaboration auto`, the council reviews the contract without
-the packet. Applying a proposal requires `--expected-proposal-sha256` for the
+the packet. Every `--collaboration auto` council is first asked to judge the
+requirements themselves under three headings, Contradictions, Missing
+situations and Unverifiable criteria, quoting the contract line and writing
+none where nothing applies; its answer stays untrusted evidence for the planner
+and nothing parses or gates on those headings. Applying a proposal requires `--expected-proposal-sha256` for the
 reviewed proposal bytes. `oms autopilot propose --discover` uses discovery for
 the initial tranche only; when no eligible work is found, its receipt remains
 at proposing so the attempt can be retried.
