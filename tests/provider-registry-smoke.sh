@@ -418,6 +418,23 @@ fi
 [ "$(oms_provider_model_family cursor GLM-5.1)" = zhipu ] || fail 'Cursor GLM family'
 [ "$(oms_provider_model_family opencode provider-default)" = unknown ] ||
   fail 'multi-model provider defaults must not invent independence'
+# A review is from another family only when every configured model on both
+# sides resolves to a named family and none is shared; otherwise the PR body
+# keeps not-verified with the reason.
+[ "$(oms_review_family_independence claude claude '' '' codex gpt-6-astra '')" = verified.anthropic-vs-openai ] ||
+  fail 'distinct known families must read verified'
+[ "$(oms_review_family_independence claude claude '' '' claude claude-opus-5-5 '')" = not-verified.same-family-anthropic ] ||
+  fail 'one family on both sides is not independent'
+[ "$(oms_review_family_independence claude claude '' '' opencode provider-default '')" = not-verified.unknown-family ] ||
+  fail 'an unknown reviewer family must not read verified'
+[ "$(oms_review_family_independence claude claude '' '' codex gpt-6-astra '')" = \
+  "$(oms_review_family_independence claude claude '' '' codex '' '')" ] || fail 'a provider default keeps its own family'
+[ "$(oms_review_family_independence claude claude '' '' cursor GLM-5.1 claude-opus-5-5)" = not-verified.same-family-anthropic ] ||
+  fail 'a reviewer fallback from the writer family is not independent'
+[ "$(oms_review_family_independence claude,codex claude '' '' antigravity gemini-3 '')" = not-verified.writer-model-unrecorded ] ||
+  fail 'several writer transports have no recorded models to compare'
+[ "$(oms_review_family_independence codex claude '' '' antigravity gemini-3 '')" = not-verified.writer-model-unrecorded ] ||
+  fail 'a writer that is not the configured worker has no recorded model'
 [ "$(oms_provider_model_family muse provider-default)" = meta ] || fail 'Muse family'
 [ "$(oms_provider_model_family kimi provider-default)" = moonshot ] || fail 'Kimi family'
 [ "$(oms_provider_model_family kiro openai/gpt-5.6-sol)" = openai ] || fail 'Kiro model family inference'

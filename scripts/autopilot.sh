@@ -1874,7 +1874,12 @@ PY
   if [ "$review_rc" -eq 0 ]; then
     rm -f "$review_out"
     echo "autopilot: semantic review: pass"
-    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER writers=$review_writers review-scope=campaign:$review_base_sha..$final_head family-independence=not-verified"
+    # Draft PR evidence allows only letters, digits and [._= -] in 200 characters,
+    # so writers join with dots and the scope carries 16-digit commit prefixes.
+    review_family="$(oms_review_family_independence "$review_writers" "$WORKER" "$WORKER_MODEL" \
+      "$WORKER_FALLBACK_MODEL" "$REVIEWER" "$REVIEWER_MODEL" "$REVIEWER_FALLBACK_MODEL")" ||
+      review_family=not-verified.unreadable-route
+    review_evidence="mode=$REVIEW_MODE outcome=pass reviewer=$REVIEWER writers=${review_writers//,/.} review-scope=campaign-${review_base_sha:0:16}..${final_head:0:16} family-independence=$review_family"
     echo "autopilot: review scope: campaign $review_base_sha..$final_head; external recovery patches require separate review"
   elif [ "$REVIEW_MODE" = shadow ]; then
     rm -f "$review_out"

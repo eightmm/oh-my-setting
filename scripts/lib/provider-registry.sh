@@ -585,6 +585,52 @@ oms_provider_model_family() {
   esac
 }
 
+# Whether a review came from another model family than the code it reviewed,
+# as one word a PR body can carry: `verified.WRITER-vs-REVIEWER` or
+# `not-verified.REASON`. It reads the configured routes only, so it is
+# verified only when every model either side could have been served by is
+# known: one writer transport that is the configured worker, and each
+# configured primary and fallback model resolving to a named family, with no
+# family on both sides. Anything else stays not-verified with the reason.
+# WRITERS is the comma-separated transports that implemented the change.
+oms_review_family_independence() {  # WRITERS WORKER WORKER_MODEL WORKER_FALLBACK REVIEWER REVIEWER_MODEL REVIEWER_FALLBACK
+  local writers="$1" worker="$2" worker_model="$3" worker_fallback="$4"
+  local reviewer="$5" reviewer_model="$6" reviewer_fallback="$7"
+  local family writer_families="" reviewer_families="" writer_primary reviewer_primary
+
+  if [ "$writers" != "$worker" ]; then
+    printf 'not-verified.writer-model-unrecorded\n'
+    return 0
+  fi
+  writer_primary="$(oms_provider_model_family "$worker" "$worker_model" 2>/dev/null)" || writer_primary=unknown
+  reviewer_primary="$(oms_provider_model_family "$reviewer" "$reviewer_model" 2>/dev/null)" || reviewer_primary=unknown
+  writer_families="$writer_primary"
+  reviewer_families="$reviewer_primary"
+  if [ -n "$worker_fallback" ]; then
+    family="$(oms_provider_model_family "$worker" "$worker_fallback" 2>/dev/null)" || family=unknown
+    writer_families="$writer_families $family"
+  fi
+  if [ -n "$reviewer_fallback" ]; then
+    family="$(oms_provider_model_family "$reviewer" "$reviewer_fallback" 2>/dev/null)" || family=unknown
+    reviewer_families="$reviewer_families $family"
+  fi
+  case " $writer_families $reviewer_families " in
+    *" unknown "*|*"  "*)
+      printf 'not-verified.unknown-family\n'
+      return 0
+      ;;
+  esac
+  for family in $writer_families; do
+    case " $reviewer_families " in
+      *" $family "*)
+        printf 'not-verified.same-family-%s\n' "$family"
+        return 0
+        ;;
+    esac
+  done
+  printf 'verified.%s-vs-%s\n' "$writer_primary" "$reviewer_primary"
+}
+
 # The family a provider serves as its own. A route picks on its own only from
 # that family: a model another vendor re-hosts through this CLI is redundant
 # with its native CLI and muddies family-diversity accounting. Empty means the

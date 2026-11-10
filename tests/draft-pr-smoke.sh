@@ -537,6 +537,22 @@ PY
   run_draft_pr "$evidence_repo" prepare --remote origin --base main --verify true \
     --review-evidence 'mode=shadow outcome=$(pwned)' >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "unsafe review evidence should be a contract error, got $rc"
+  # The line autopilot writes for a passing gate must be one this boundary
+  # accepts: its real writer, scope and family words, within the character
+  # rule and the length limit. (Read-only: the rule is checked before prepare runs.)
+  local pass_evidence
+  pass_evidence="$(grep -o 'review_evidence="mode=\$REVIEW_MODE outcome=pass[^"]*"' "$ROOT/scripts/autopilot.sh")"
+  pass_evidence="${pass_evidence#review_evidence=\"}"; pass_evidence="${pass_evidence%\"}"
+  [ -n "$pass_evidence" ] || fail "autopilot's passing review evidence line was not found"
+  pass_evidence="$(REVIEW_MODE=gate REVIEWER=antigravity review_writers=claude,codex \
+    review_base_sha=0123456789abcdef0123456789abcdef01234567 final_head=89abcdef0123456789abcdef0123456789abcdef \
+    review_family=not-verified.writer-model-unrecorded bash -c "printf '%s' \"$pass_evidence\"")"
+  [ "${#pass_evidence}" -le 200 ] && [ -z "${pass_evidence//[A-Za-z0-9._= -]/}" ] ||
+    fail "autopilot's passing review evidence breaks the draft PR evidence rule: $pass_evidence"
+  case "$pass_evidence" in
+    *'writers=claude.codex review-scope=campaign-0123456789abcdef..89abcdef01234567 family-independence=not-verified.writer-model-unrecorded') ;;
+    *) fail "passing review evidence lost its writers, scope or family words: $pass_evidence" ;;
+  esac
   run_draft_pr "$evidence_repo" prepare --remote origin --base main --verify true \
     --review-evidence 'mode=shadow outcome=advisory-fail reviewer=claude' \
     > "$evidence_repo/prepare.out" || fail "evidence prepare failed"

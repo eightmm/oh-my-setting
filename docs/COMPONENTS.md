@@ -2696,6 +2696,16 @@ declared mechanical gate.
   receipt attests which process created that local branch. Inspect any
   unexpected matching branch before checkout or resume; use
   `--review-mode gate` when provenance is uncertain.
+- A passing semantic review is disclosed in the Draft PR body as
+  `mode=gate outcome=pass reviewer=R writers=W review-scope=campaign-BASE16..HEAD16 family-independence=…`
+  (writers joined with dots, commit ids as 16-digit prefixes, so the line
+  fits `draft-pr`'s evidence rule). The last word is
+  `verified.WRITER-vs-REVIEWER` only when one writer transport, the configured
+  worker, wrote the change and every configured primary and fallback model on
+  both sides resolves to a named model family with none shared; otherwise it
+  is `not-verified.` plus the reason (`writer-model-unrecorded`,
+  `unknown-family`, `same-family-NAME`). It is read from the configured
+  routes, not from which model a provider actually served.
 - Frozen-patch path validation rejects static symlinks and detects the
   exercised directory-swap windows, but it is not a portable `dirfd`/`openat`
   transaction. A hostile same-UID process may still win a check-to-write race
