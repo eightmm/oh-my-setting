@@ -2728,7 +2728,12 @@ or a machine in one step, prints the reason and names the safer spelling:
 It is a seatbelt against accidents, not a sandbox. It reads the command text
 only and fails open: a payload it cannot parse, a command spelled through a
 variable, `eval`, a subshell or a script file all pass, and what a script does
-once it runs (`oms` included) is never judged. An OMS worker in its own
+once it runs (`oms` included) is never judged. When the guard cannot evaluate
+a command at all (no `python3`, a payload that is not JSON, a helper library
+missing) it still allows it, with the same exit code, but prints one stderr line,
+`command guard: cannot evaluate this command (REASON); allowing it unchecked.`;
+`git-move-guard-hook.sh` does the same as `git move guard`, and `oms doctor`
+warns when those helpers are missing. An OMS worker in its own
 worktree skips the git rules and keeps the others.
 
 Coverage is Claude Code only. The Codex plugin registers no pre-tool hook and

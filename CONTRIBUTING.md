@@ -47,8 +47,9 @@ over the source); and removing or altering a guard row in a fixture
 environment (no `python3` on PATH, Bash older than 5, a truncated payload, the
 helper library missing) the property is that a guard never passes a payload it
 would refuse without a diagnostic on stderr. Fail-open with a diagnostic holds;
-silent fail-open does not, and is listed in `xfail_branch` as
-`owner-decision:SLUG` until the hook's owner rules on it. The suite ends with a
+silent fail-open does not. Both guards keep the exit code and print exactly one
+`<guard>: cannot evaluate this command (<reason>); allowing it unchecked.` line
+from shell builtins (no `python3`), and the scenarios assert that line. The suite ends with a
 hook-by-condition matrix (`blocks`, `passes+diagnostic`, `passes silently`; also
 under `hook_matrix` with `--json`). A new `PreToolUse` row fails the matcher
 scenario until it has conformance scenarios of its own.

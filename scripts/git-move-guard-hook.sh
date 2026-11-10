@@ -111,9 +111,20 @@ def targets(text, cwd):
     return found
 
 
+# Exit 3: the payload is not JSON. Exit 4: resolving the command failed. The
+# shell caller turns either into one stderr line; the command is still allowed.
+# A payload without tool_input.command is none of the guard's business.
 try:
     doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+if not isinstance(doc, dict):
+    sys.exit(3)
+try:
     command = doc["tool_input"]["command"]
+except (KeyError, TypeError):
+    sys.exit(0)
+try:
     cwd = doc.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         cwd = os.getcwd()
@@ -123,20 +134,33 @@ try:
             seen.append(path)
             print(path)
 except Exception:
-    pass
+    sys.exit(4)
 PY
 
-targets="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" 2>/dev/null || true)"
+# Fail open, never silently: one stderr line says the call went unjudged.
+# Shell builtins only, so it works when python3 or a helper is gone.
+guard_unevaluated() {
+  printf 'git move guard: cannot evaluate this command (%s); allowing it unchecked.\n' "$1" >&2
+}
+command -v python3 >/dev/null 2>&1 || { guard_unevaluated "python3 not found"; exit 0; }
+rc=0
+targets="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" 2>/dev/null)" || rc=$?
+case "$rc" in
+  0) ;;
+  3) guard_unevaluated "hook payload is not valid JSON"; exit 0 ;;
+  4) guard_unevaluated "internal error while resolving it"; exit 0 ;;
+  *) guard_unevaluated "python helper failed to run or its library is missing"; exit 0 ;;
+esac
 [ -n "$targets" ] || exit 0
 
 # Past this point a moving git verb is present; resolve whether it lands in the
-# canonical checkout. Any helper that is missing ends the hook open.
-[ -f "$ROOT/scripts/lib/agent-memory-common.sh" ] || exit 0
-[ -f "$ROOT/scripts/lib/canonical-sync.sh" ] || exit 0
+# canonical checkout. A missing helper ends the hook open, with the diagnostic.
+[ -f "$ROOT/scripts/lib/agent-memory-common.sh" ] || { guard_unevaluated "helper library agent-memory-common.sh missing"; exit 0; }
+[ -f "$ROOT/scripts/lib/canonical-sync.sh" ] || { guard_unevaluated "helper library canonical-sync.sh missing"; exit 0; }
 # shellcheck source=lib/agent-memory-common.sh
-. "$ROOT/scripts/lib/agent-memory-common.sh" >/dev/null 2>&1 || exit 0
+. "$ROOT/scripts/lib/agent-memory-common.sh" >/dev/null 2>&1 || { guard_unevaluated "helper library agent-memory-common.sh failed to load"; exit 0; }
 # shellcheck source=lib/canonical-sync.sh
-. "$ROOT/scripts/lib/canonical-sync.sh" >/dev/null 2>&1 || exit 0
+. "$ROOT/scripts/lib/canonical-sync.sh" >/dev/null 2>&1 || { guard_unevaluated "helper library canonical-sync.sh failed to load"; exit 0; }
 
 while IFS= read -r target; do
   target="${target//$'\r'/}"

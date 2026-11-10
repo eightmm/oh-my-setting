@@ -1891,6 +1891,17 @@ PY
 $open_guards
 EOF
   fi
+  # Read-only: the two PreToolUse guards fail open with one stderr line when a
+  # helper they load is gone ("cannot evaluate"); say so before a session does.
+  local helper missing_helpers=""
+  for helper in hook_state.py agent-memory-common.sh canonical-sync.sh; do
+    [ -f "$INSTALL_ROOT/scripts/lib/$helper" ] || missing_helpers="${missing_helpers:+$missing_helpers, }$helper"
+  done
+  command -v python3 >/dev/null 2>&1 || missing_helpers="${missing_helpers:+$missing_helpers, }python3 on PATH"
+  if [ -n "$missing_helpers" ]; then
+    echo "warning: claude guards cannot evaluate commands (missing: $missing_helpers); they let calls through with a one-line stderr notice"
+    echo "hint: run $INSTALL_ROOT/scripts/install-claude-hooks.sh or doctor --repair"
+  fi
   if [ -n "$problems" ]; then
     while IFS= read -r line; do
       echo "fail: claude hook $line"
