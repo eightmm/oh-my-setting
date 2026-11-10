@@ -160,6 +160,10 @@ Options:
                        sandbox). An audit or review role produces a report,
                        never a patch; the role's prose mandate gains the
                        matching authority. Incompatible with --apply.
+                       When the check fails, an `escalate:` line prints the same
+                       command with --reasoning-effort one step higher (then
+                       --workload standard from routine at the top). It is
+                       printed with its reason, never run.
   --no-verify          Skip the default scripts/check.sh verification.
   --allow-no-change    Treat an empty write patch as an allowed no_change result.
                        Otherwise a panel dispatch or plan task whose write
@@ -287,6 +291,7 @@ write that is undone before the worker exits, anything the worker reads
 EOF
 }
 
+DELEGATE_ARGV=("$@")
 while [ "$#" -gt 0 ]; do
   if ma_parse_common_option "$@"; then
     shift "$MA_COMMON_OPTION_SHIFT"
@@ -3352,6 +3357,24 @@ else
 fi
 if [ "$KEEP_WORKTREE" = 1 ]; then
   echo "worktree kept: $worktree"
+fi
+
+# A failed mechanical check is the one signal that a stronger setting may help:
+# print the same brief one effort step higher. Never run it; 125 is a
+# protected-boundary stop, not a check result.
+if [ "$DRY_RUN" != 1 ] && [ "$INTERACTIVE" != 1 ] && [ "$worker_status" -eq 0 ] &&
+  [ -n "$VERIFY_CMD" ] && [ -n "${verify_status:-}" ] &&
+  [ "$verify_status" -ne 0 ] && [ "$verify_status" -ne 125 ]; then
+  escalate_scale="$(oms_capability_model_efforts "$TO" "${OMS_MODEL_SELECTED:-}" 2>/dev/null ||
+    { oms_capability_peek "$TO" >/dev/null 2>&1 && printf '%s' "$OMS_CAP_EFFORT_VALUES"; } || true)"
+  escalate_out="$(python3 "$(ma_scripts_dir)/lib/effort_ladder.py" --effort "${OMS_REASONING_SELECTED:-}" \
+    --scale "$escalate_scale" --workload "$WORKLOAD" -- "${DELEGATE_ARGV[@]}" 2>/dev/null || true)"
+  escalate_step="$(printf '%s\n' "$escalate_out" | sed -n '1p')"
+  if [ -n "$escalate_step" ] && [ "$escalate_step" != top ]; then
+    echo "escalate: verify exit $verify_status at effort=${OMS_REASONING_SELECTED:-native-settings}; suggested re-run (${escalate_step}, not run): $(printf '%s\n' "$escalate_out" | sed -n '2p')"
+  else
+    echo "escalate: verify exit $verify_status at effort=${OMS_REASONING_SELECTED:-native-settings}; no higher step on this route (change the brief or model by hand)"
+  fi
 fi
 
 if [ "$worker_status" -ne 0 ] || [ "${verify_status:-0}" -ne 0 ] ||
