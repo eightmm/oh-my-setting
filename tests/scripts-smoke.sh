@@ -18365,6 +18365,39 @@ test_release_version_file_and_status_agree() {
   printf '%s' "$out" | grep >/dev/null -E '^- version: [0-9]' || fail "status.sh missing version line"
 }
 
+test_status_fingerprint_is_content_free_and_comparable() {
+  local home_dir="$TMP/status-fp-home"
+  local receipt="$home_dir/install.json"
+  local a="$home_dir/a.json"
+  local b="$home_dir/b.json"
+  local out rc=0
+
+  mkdir -p "$home_dir"
+  (
+    . "$ROOT/scripts/lib/install-contract.sh"
+    HOME="$home_dir" OH_MY_SETTING_PROFILE=minimal oms_install_write_receipt "$ROOT" "$receipt"
+  ) || fail "fixture receipt should be written"
+  HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" --fingerprint > "$a" ||
+    fail "status --fingerprint should succeed"
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["receipt"]=="valid" and d["receipt_profile"]=="minimal" and len(d["digests"]["custom_skills"])==64' "$a" ||
+    fail "fingerprint should carry the receipt profile and skill digests"
+  if grep -F -e "$ROOT" -e "$home_dir" -e installed_at "$a" >/dev/null; then
+    fail "fingerprint must not contain paths or timestamps"
+  fi
+  out="$(HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" --compare "$a")" ||
+    fail "identical fingerprints should compare equal: $out"
+  printf '%s' "$out" | grep -F 'same:' >/dev/null || fail "compare should say same: $out"
+  sed 's/"receipt_profile": "minimal"/"receipt_profile": "full"/' "$a" > "$b"
+  out="$(HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" --compare "$b")" || rc=$?
+  [ "$rc" = 1 ] || fail "differing fingerprints should exit 1, got $rc"
+  printf '%s' "$out" | grep -F -e '- receipt_profile: local=minimal file=full' >/dev/null ||
+    fail "compare should name the differing field: $out"
+  printf 'not json' > "$b"
+  rc=0
+  HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" --compare "$b" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "unreadable fingerprint file should exit 2, got $rc"
+}
+
 test_status_probes_provider_versions_only_when_verbose() {
   local home_dir="$TMP/status-probe-home"
   local bin_dir="$TMP/status-probe-bin"

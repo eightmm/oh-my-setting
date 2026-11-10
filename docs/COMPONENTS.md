@@ -462,6 +462,17 @@ is `in-sync`, `pending-source-changes`, `different-revision`,
 checkout identity. This display neither updates an installation nor proves
 plugin-cache freshness or verification.
 
+`oms status --fingerprint` prints a content-free JSON fingerprint of the
+installation: OMS version, receipt scalars (commit, channel, ref, profile,
+link mode, dirty), component flags and modes, plugin hash, and sha256 digests of
+`rules/global-AGENTS.md`, `skills.manifest.json`, `tools.lock.json` and
+`custom-skills/`. It omits paths, user names, timestamps and file contents,
+never runs a provider CLI and never writes. Save it and move it yourself
+(git, scp); OMS runs no sync and moves no credentials. `oms status --compare
+FILE [--json]` diffs the local fingerprint against such a file: exit 0 when
+identical, 1 with one `- field: local=… file=…` line per difference, 2 when the
+file is not a schema-1 fingerprint. It reports; it does not repair.
+
 ## Project onboarding
 
 Say “Start this project.” or “이 프로젝트 시작해줘.” The
