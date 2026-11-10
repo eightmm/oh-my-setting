@@ -3,6 +3,7 @@
 
     delegation_lint.py brief FILE|- [--strict]
     delegation_lint.py result FILE|- [--writer]
+    delegation_lint.py review FILE|- --verdict=pass|fail
 
 Mechanical regex checks only: no model call, no network, nothing written. Human
 warnings go to stderr as `warning: brief: ...` / `warning: result: ...`; stdout
@@ -10,6 +11,10 @@ carries the comma-separated warning codes (empty when none) so a caller can
 record them. Exit 0 always, except `brief --strict` which exits 1 on any
 warning. A clean lint says the text has the expected shape, nothing more: it is
 never verification evidence.
+
+`review` lints one gate seat's final answer and adds only what the gate does
+not already check: the GATE line, SECURITY line, answer quality and the fenced
+`findings` block's own validation (review_findings.py) stay where they are.
 """
 
 import re
@@ -20,6 +25,7 @@ SHORT_BRIEF_BYTES = 240
 # More numbered/step lines than this, with no stated goal, is a script.
 STEP_LIMIT = 7
 SUMMARY_CAP_BYTES = 1200
+REVIEW_CAP_BYTES = 6000
 MAX_BYTES = 262144
 
 WARNING_TEXT = {
@@ -34,6 +40,9 @@ WARNING_TEXT = {
     "finding-without-pointer": "findings without a path:line pointer",
     "no-unresolved-line": 'no explicit unresolved line (write "Unresolved: none" when nothing is open)',
     "no-changed-files": "writer result lists no changed files",
+    "findings-not-trackable": "prose findings but no fenced findings block, so nothing is tracked",
+    "pass-with-blocking": "GATE: pass contradicts a blocking finding in the findings block",
+    "long-answer-no-summary": "answer over %d bytes with no summary line" % REVIEW_CAP_BYTES,
 }
 
 LABEL = r"^[\s>#*_`\-+\d.)(]*"
@@ -149,10 +158,55 @@ def lint_result(text, writer=False):
     return codes
 
 
+NONE_ITEM = re.compile(r"^\W*(none|no (blocking |actionable )?(findings?|issues?)|n/?a|nothing|없음)\b", re.I)
+LABEL_LINE = re.compile(r"^[\s#*_`]*[A-Z][\w ]{1,30}:\s*\**\s*$")
+ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(\S.*)$")
+RECOMMENDATION = re.compile(r"^[\s#*_`]*(recommendation|verdict|결론)\b", re.I)
+
+
+def prose_findings(lines):
+    """Bullet items under the findings heading up to the next label; none-items dropped."""
+    for number, line in enumerate(lines):
+        if not FINDINGS_HEADING.match(line):
+            continue
+        items = []
+        for item in lines[number + 1:]:
+            if HEADING.match(item) or LABEL_LINE.match(item) or item.lstrip().startswith("```"):
+                break
+            match = ITEM.match(item)
+            if match and not NONE_ITEM.match(match.group(1)):
+                items.append(match.group(1))
+        return items
+    return []
+
+
+def lint_review(text, verdict):
+    """Shape warnings for a gate seat's final answer that carries a GATE verdict."""
+    from review_findings import parse_blocks
+    lines = text.splitlines()
+    codes = []
+    found, _rejected = parse_blocks(text)
+    has_block = any(re.match(r"^\s*```+\s*findings\s*$", line) for line in lines)
+    items = prose_findings(lines)
+    if items and not has_block:
+        codes.append("findings-not-trackable")
+        if any(not POINTER.search(item) for item in items):
+            codes.append("finding-without-pointer")
+    if verdict == "pass" and any(item["severity"] == "blocking" for item in found):
+        codes.append("pass-with-blocking")
+    if len(text.encode("utf-8", "replace")) > REVIEW_CAP_BYTES and not any(
+            SUMMARY_HEADING.match(line) or RECOMMENDATION.match(line) for line in lines):
+        codes.append("long-answer-no-summary")
+    return codes
+
+
 def main(argv):
     args = [arg for arg in argv if not arg.startswith("--")]
     flags = {arg for arg in argv if arg.startswith("--")}
-    if len(args) != 2 or args[0] not in ("brief", "result") or flags - {"--strict", "--writer"}:
+    verdicts = [arg[10:] for arg in flags if arg.startswith("--verdict=")]
+    flags -= {"--verdict=" + value for value in verdicts}
+    if len(args) != 2 or args[0] not in ("brief", "result", "review") or flags - {"--strict", "--writer"} or \
+            (args[0] == "review") != (len(verdicts) == 1) or any(value not in ("pass", "fail") for value in verdicts):
         sys.stderr.write(__doc__)
         return 2
     kind, source = args
@@ -162,7 +216,10 @@ def main(argv):
         sys.stderr.write("error: %s\n" % exc)
         return 2
     text = raw.decode("utf-8", "replace")
-    codes = lint_brief(text) if kind == "brief" else lint_result(text, writer="--writer" in flags)
+    if kind == "review":
+        codes = lint_review(text, verdicts[0])
+    else:
+        codes = lint_brief(text) if kind == "brief" else lint_result(text, writer="--writer" in flags)
     for code in codes:
         sys.stderr.write("warning: %s: %s\n" % (kind, WARNING_TEXT[code]))
     sys.stdout.write(",".join(codes) + "\n")

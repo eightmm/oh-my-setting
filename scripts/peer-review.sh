@@ -225,7 +225,7 @@ review_verdicts() {
   local forced_run_id="${2:-}"
   local json_out="${3:-}"
   local json_stdout="${4:-0}"
-  local latest run_id base provider suf r f verdict overall found reason
+  local latest run_id base provider suf r f verdict overall found reason seat_lint
   local requested_model selected_model model_family seat_provider attempt_route
   # bash 3.2 has no associative arrays; track one "provider<TAB>round<TAB>file"
   # record per candidate and pick the highest round per provider at the end.
@@ -364,15 +364,27 @@ review_verdicts() {
     model_family="$(oms_provider_model_family "$seat_provider" "$selected_model" 2>/dev/null || printf unknown)"
     suffix=""
     [ -z "$confidence" ] || suffix=" (confidence $confidence)"
+    # Advisory shape lint of an answer that reached a verdict: what the gate
+    # does not already check (trackable findings, verdict vs block, summary).
+    # Recorded on the seat; it never moves the verdict and is not evidence.
+    seat_lint=""
+    case "$verdict" in
+      pass|fail)
+        seat_lint="$(review_final_attempt "$f" "$attempt_route" 2>/dev/null |
+          python3 "$(ma_scripts_dir)/lib/delegation_lint.py" review - "--verdict=$verdict" 2>/dev/null)" || seat_lint=""
+        ;;
+    esac
     case "$verdict" in
       pass)
         [ "$json_stdout" = 1 ] || echo "$seat_provider: pass$suffix"
-        seat_rows="$seat_rows$seat_provider	pass	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
+        [ "$json_stdout" = 1 ] || [ -z "$seat_lint" ] || echo "  lint (advisory, not evidence): $seat_lint"
+        seat_rows="$seat_rows$seat_provider	pass	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family	$seat_lint
 "
         ;;
       fail)
         [ "$json_stdout" = 1 ] || echo "$seat_provider: fail$suffix"
-        seat_rows="$seat_rows$seat_provider	fail	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family
+        [ "$json_stdout" = 1 ] || [ -z "$seat_lint" ] || echo "  lint (advisory, not evidence): $seat_lint"
+        seat_rows="$seat_rows$seat_provider	fail	$confidence	$seat_round	$(basename "$f")		$requested_model	$selected_model	$model_family	$seat_lint
 "
         if [ "$overall" -ne 2 ]; then overall=1; fi
         ;;
@@ -412,8 +424,8 @@ seats = []
 for line in rows.splitlines():
     if not line.strip():
         continue
-    parts = (line.split("\t") + [""] * 9)[:9]
-    provider, verdict, confidence, rnd, artifact, reason, requested, selected, family = parts
+    parts = (line.split("\t") + [""] * 10)[:10]
+    provider, verdict, confidence, rnd, artifact, reason, requested, selected, family, lint = parts
     seat = {
         "provider": provider,
         "verdict": verdict,
@@ -429,6 +441,9 @@ for line in rows.splitlines():
         seat["selected_model"] = selected
     if family:
         seat["model_family"] = family
+    if lint:
+        # Advisory warnings about the answer's shape; never a verdict input.
+        seat["result_lint"] = lint.split(",")[:8]
     seats.append(seat)
 data = {
     "run": os.environ["OMS_VERDICTS_RUN"],
