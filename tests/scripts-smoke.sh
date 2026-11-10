@@ -42655,6 +42655,38 @@ test_cite_notes_verify_and_bibtex() {
   contains "$out" 'unverified' && contains "$out" 'lookup failed' || fail "failed lookup must stay unverified: $out"
 }
 
+test_external_receipts_record_egress_and_hash_drift() {
+  local project="$TMP/external-receipts" ext="$ROOT/scripts/external.sh" out id
+  make_committed_repo "$project"
+  printf 'torch==2.3\n' > "$project/env.lock"
+  printf 'weights-v1' > "$project/model.bin"
+  out="$(cd "$project" && "$ext" add --kind model --name esm2-650m --version v1 --file model.bin \
+    --license "MIT (as declared)" --env env.lock)" || fail "local add failed: $out"
+  contains "$out" 'egress none' || fail "egress none not reported: $out"
+  contains "$out" 'does not judge licenses' || fail "license note missing: $out"
+  id="$(printf '%s\n' "$out" | sed -n 's/^\(ext-[0-9a-f]*\):.*/\1/p' | head -n 1)"
+  [ -n "$id" ] || fail "receipt id missing: $out"
+
+  # Egress needs a named approver and shows the exposure warning.
+  if (cd "$project" && "$ext" add --kind mcp --name tooluniverse --egress public-query) >/dev/null 2>"$project/err"; then
+    fail "egress without approver must fail"
+  fi
+  assert_file_contains "$project/err" 'needs --approver'
+  out="$(cd "$project" && "$ext" add --kind mcp --name tooluniverse --version 0.2 --egress public-query \
+    --approver alice)" || fail "egress add failed"
+  contains "$out" 'unpublished structures or sequences' || fail "egress preview missing: $out"
+  out="$(cd "$project" && "$ext" list)"
+  contains "$out" 'tooluniverse@0.2 | license unknown | egress public-query' || fail "list wrong: $out"
+
+  out="$(cd "$project" && "$ext" check "$id")" || fail "unchanged hashes should pass: $out"
+  printf 'weights-v2' > "$project/model.bin"
+  if out="$(cd "$project" && "$ext" check "$id")"; then fail "changed file must be drift: $out"; fi
+  contains "$out" 'file changed: model.bin' || fail "drift not named: $out"
+  if (cd "$project" && "$ext" add --kind tool --name x --sha256 deadbeef) >/dev/null 2>&1; then
+    fail "short sha256 must be rejected"
+  fi
+}
+
 test_portable_capsule_rejects_unknown_fields() {
   local project="$TMP/portable-capsule-fields"
   make_committed_repo "$project"

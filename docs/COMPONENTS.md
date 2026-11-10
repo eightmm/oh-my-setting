@@ -99,6 +99,7 @@ explains overlapping entrypoints.
 | `cite` | Keep per-paper notes, check DOI or arXiv ids, export BibTeX. | `oms cite` | [ML and HPC](#ml-and-hpc) |
 | `data-manifest` | Fingerprint dataset splits and detect drift or leakage. | `oms data-manifest` | [ML and HPC](#ml-and-hpc) |
 | `experiment-board` | Coordinate shared research studies. | `oms experiment-board` | [ML and HPC](#ml-and-hpc) |
+| `external` | Record version, hash, license, env lock and egress of external science tools. | `oms external` | [ML and HPC](#ml-and-hpc) |
 | `job-digest` | Summarize training or Slurm logs and jobs. | `oms job-digest` | [ML and HPC](#ml-and-hpc) |
 | `run-ledger` | Record a command and its execution metadata. | `oms run-ledger` | [ML and HPC](#ml-and-hpc) |
 | `run-reconcile` | Reconcile long-running Slurm jobs with saved run records. | `oms run-reconcile` | [ML and HPC](#ml-and-hpc) |
@@ -1683,6 +1684,16 @@ ML/Slurm workflows use local-first experiment controls:
   `OMS_CITE_ARXIV_URL`) and compares title and year. A failed lookup stays
   `unverified`. A verified id shows the reference exists and matches; it does not
   show the recorded claim is supported. No full-text retrieval.
+- `oms external add|list|show|check` writes receipts for external science skills,
+  MCP servers, models and datasets to append-only `.oms/external.jsonl`: kind,
+  name, version or commit, sha256 (`--file` hashes, `--sha256` states), license
+  as declared (recorded, never judged), environment lock path and hash (`--env`),
+  and `--egress none|public-query|uploads-input`. Any egress other than `none`
+  needs `--approver` and prints that unpublished structures or sequences may
+  leave the machine; `none` is the provider's description, not a network
+  observation. `check` recomputes the recorded hashes and exits 1 on drift. It
+  installs and fetches nothing. Linking receipts from run capsules and
+  `skill-forge import --license/--env` are not wired yet.
 
 Machine, cluster, dataset, and run details stay local unless the user explicitly
 chooses a connector or tracked summary.
