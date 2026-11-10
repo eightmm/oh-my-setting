@@ -2931,6 +2931,7 @@ test_project_doctor_checks_subdirectory_loaders() {
   case "$out" in *'notes/span.md'*|*'notes/fence.md'*|*'l  notes/h5.md'*) fail "code spans, fences and a fifth hop are not loaded: $out" ;; esac
   contains "$out" 'warn: CLAUDE.md has 9 lines, over the 4-line budget' || fail "budget must apply the line limit: $out"
   ! "$ROOT/scripts/project-doctor.sh" --budget --contract "$budget" >/dev/null 2>&1 || fail "--budget must refuse --contract"
+  ! "$ROOT/scripts/project-doctor.sh" --team --budget "$budget" >/dev/null 2>&1 || fail "--team must refuse --budget"
   printf '@AGENTS.md\n' > "$budget/CLAUDE.md"
   out="$(HOME="$budget_home" CODEX_HOME="$budget_home/.codex" "$ROOT/scripts/project-doctor.sh" --budget --json "$budget")" || fail "budget --json should exit 0"
   printf '%s' "$out" | python3 -c '
@@ -19569,6 +19570,35 @@ test_status_fingerprint_is_content_free_and_comparable() {
   rc=0
   HOME="$home_dir" OMS_INSTALL_RECEIPT="$receipt" "$ROOT/scripts/status.sh" --compare "$b" >/dev/null 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "unreadable fingerprint file should exit 2, got $rc"
+}
+
+test_project_doctor_team_reports_baseline_without_running_anything() {
+  local home_dir="$TMP/team-home"
+  local proj="$TMP/team-proj"
+  local caps="$home_dir/capabilities.json"
+  local digest out rc=0
+
+  mkdir -p "$home_dir" "$proj"
+  printf '{"schema":1,"plan":{"requested":["core","github"]}}\n' > "$caps"
+  digest="$(HOME="$home_dir" "$ROOT/scripts/status.sh" --fingerprint |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["digests"]["custom_skills"])')"
+  out="$(HOME="$home_dir" OMS_CAPABILITY_RECEIPT="$caps" "$ROOT/scripts/project-doctor.sh" --team "$proj")" ||
+    fail "an absent baseline should not fail: $out"
+  printf '%s' "$out" | grep -F 'nothing declared' >/dev/null || fail "absent baseline should be a note: $out"
+  printf '{"schema":1,"min_oms_version":"0.1","capabilities":["github"],"digests":{"custom_skills":"%s"}}\n' "$digest" > "$proj/.oms-team.json"
+  out="$(HOME="$home_dir" OMS_CAPABILITY_RECEIPT="$caps" "$ROOT/scripts/project-doctor.sh" --team "$proj")" ||
+    fail "a met baseline should pass: $out"
+  printf '%s' "$out" | grep -F 'team-baseline: ok' >/dev/null || fail "met baseline should say ok: $out"
+  printf '{"schema":1,"min_oms_version":"999.0","capabilities":["hpc"]}\n' > "$proj/.oms-team.json"
+  out="$(HOME="$home_dir" OMS_CAPABILITY_RECEIPT="$caps" "$ROOT/scripts/project-doctor.sh" --team "$proj")" || rc=$?
+  [ "$rc" = 1 ] || fail "an unmet baseline should exit 1, got $rc: $out"
+  printf '%s' "$out" | grep -F 'run: oms update' >/dev/null || fail "unmet version should print its command: $out"
+  printf '%s' "$out" | grep -F 'oms install-profile --apply --add --profile hpc' >/dev/null ||
+    fail "unmet capability should print its command: $out"
+  printf '{"schema":1,"surprise":true}\n' > "$proj/.oms-team.json"
+  rc=0
+  HOME="$home_dir" OMS_CAPABILITY_RECEIPT="$caps" "$ROOT/scripts/project-doctor.sh" --team "$proj" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unknown baseline key should exit 2, got $rc"
 }
 
 test_status_probes_provider_versions_only_when_verbose() {

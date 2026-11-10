@@ -11,12 +11,14 @@ STRICT=0
 CONTRACT=0
 BUDGET=0
 BUDGET_JSON=0
+TEAM=0
 PROJECT_DIR_SET=0
 
 usage() {
   cat <<'EOF'
 Usage: project-doctor.sh [--strict] [--contract] [project_dir]
        project-doctor.sh --budget [--json] [--strict] [project_dir]
+       project-doctor.sh --team [project_dir]
 
 Verify that all agent-facing files in a project give every agent the same
 view. Checks:
@@ -47,6 +49,11 @@ Claude does not read because a CLAUDE.md is present. Files are read as text;
 nothing runs and no model is called. Findings are warnings (--strict fails on
 them). OMS_RULES_MAX_LINES (default 200) and OMS_RULES_MAX_TOTAL_BYTES
 (default 32768) set the limits; --json prints the same report as data.
+
+--team is a standalone report-only check of the tracked baseline file
+.oms-team.json (min_oms_version, capabilities, digests) against this
+installation. It prints the exact command for each unmet item and runs none;
+exit 1 when any item is unmet.
 EOF
 }
 
@@ -56,6 +63,7 @@ while [ "$#" -gt 0 ]; do
     --contract) CONTRACT=1 ;;
     --budget) BUDGET=1 ;;
     --json) BUDGET_JSON=1 ;;
+    --team) TEAM=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -73,7 +81,8 @@ done
 }
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
-[ "$BUDGET$CONTRACT" != 11 ] || { echo "error: --budget and --contract are separate reports; run one at a time" >&2; exit 2; }
+[ $((BUDGET + CONTRACT + TEAM)) -le 1 ] || { echo "error: --budget, --contract and --team are separate reports; run one at a time" >&2; exit 2; }
+[ "$BUDGET_JSON" = 0 ] || [ "$BUDGET" = 1 ] || { echo "error: --json is only for --budget" >&2; exit 2; }
 if [ "$BUDGET" = 1 ]; then
   budget_args=("$PROJECT_DIR")
   [ "$BUDGET_JSON" = 0 ] || budget_args+=(--json)
@@ -81,7 +90,15 @@ if [ "$BUDGET" = 1 ]; then
   command -v python3 >/dev/null 2>&1 || { echo "error: --budget needs python3" >&2; exit 2; }
   exec python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/instruction-budget.py" "${budget_args[@]}"
 fi
-[ "$BUDGET_JSON" = 0 ] || { echo "error: --json is only for --budget" >&2; exit 2; }
+if [ "$TEAM" = 1 ]; then
+  command -v python3 >/dev/null 2>&1 || { echo "error: --team needs python3" >&2; exit 2; }
+  # shellcheck source=scripts/lib/install-contract.sh
+  . "$ROOT/scripts/lib/install-contract.sh"
+  team_receipt="$(oms_install_receipt_path)"
+  [ -f "$team_receipt" ] || team_receipt=""
+  exec python3 -I "$ROOT/scripts/lib/team-baseline.py" "$PROJECT_DIR" "$ROOT" "$team_receipt" \
+    "${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
+fi
 
 fail() {
   echo "drift: $*"

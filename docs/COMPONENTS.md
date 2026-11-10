@@ -536,6 +536,23 @@ more words that one provider loads from two files is named once. Limits are
 provider); these are OMS budgets, not provider limits. Findings are warnings and fail
 only under `--strict`. Files are read as text: nothing runs, no model is called, and
 on-demand skills, hooks and path-scoped rules are not counted.
+A team can pin the OMS baseline it expects in a tracked `.oms-team.json`
+at the project root (`.oms/` and `PROJECT.md` are untracked by default, so
+neither can carry it):
+
+```json
+{"schema": 1, "min_oms_version": "0.7.0", "capabilities": ["core", "github"],
+ "digests": {"custom_skills": "<sha256 from oms status --fingerprint>"}}
+```
+
+Every key but `schema` is optional and unknown keys are rejected.
+`oms project-doctor --team [DIR]` is a standalone, report-only check against
+this installation: version from `VERSION`, requested capabilities from the
+capability receipt (`full` satisfies any), and digests with the names that
+`oms status --fingerprint` prints. Each unmet item prints the command a person
+could run (`oms update`, `oms install-profile --apply --add --profile NAME`);
+nothing is executed. Exit 0 when met or when no file exists, 1 when any item is
+unmet, 2 when the file cannot be read.
 
 Council and panel workers need no `PROJECT.md`; autopilot needs a confirmed
 `PROJECT.md`; goal-drive needs an agent-plan with verify commands and a clean tree. `oms
