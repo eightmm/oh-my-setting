@@ -427,6 +427,12 @@ else:
         print('- %s: %s' % (label, (value[:700] + (' [truncated]' if len(value) > 700 else '')) or 'not recorded'))
     print('\nRecheck the current packet and source before acting; this is not fresh verification.\n')
 PY
+  # Plan status, decisions, changed files and the last failing check come from
+  # their recorded sources, ahead of any model-written summary.
+  local state="inactive"
+  [ -f "$task" ] && [ ! -L "$task" ] &&
+    [ "$(printf '%s\n' "$status" | sed -n 's/^status: //p')" != closed ] && state="active"
+  python3 -I "$ROOT/scripts/lib/handoff_state.py" "$repo" "$state" 2>/dev/null || true
 }
 
 render_digest() {

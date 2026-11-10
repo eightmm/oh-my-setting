@@ -21823,8 +21823,19 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   # A repo with an active packet carrying a Verify contract and a review
   # round that ended split: both must ride the digest.
   mkdir -p "$cwd/.oms/task" "$cwd/.oms/artifacts/review"
-  printf '# Task\n\n## Verify\n\nbash scripts/check.sh --focused-only\n\n## Goal\n\nship\n' \
+  printf '# Task\n\n## Verify\n\nbash scripts/check.sh --focused-only\n\n## Goal\n\nship\n\n## Decisions\n\n- keep the v1 wire format\n- drop the cache layer\n' \
     > "$cwd/.oms/task/current.md"
+  # Recorded state the digest derives instead of trusting the model's summary:
+  # plan status, changed files (git) and the newest unresolved failure.
+  mkdir -p "$cwd/.oms/plan"
+  printf '{"goal":"ship the widget","tasks":{"a":{"state":"done"},"b":{"state":"ready"},"c":{"state":"ready"}}}\n' \
+    > "$cwd/.oms/plan/tasks.json"
+  git -C "$cwd" init -q 2>/dev/null
+  printf 'x\n' > "$cwd/zeta.py"
+  printf 'x\n' > "$cwd/alpha.py"
+  "$ROOT/scripts/fail-ledger.sh" --repo "$cwd" record --cmd "bash scripts/check.sh --widget" \
+    --exit 1 --summary "widget check failed on alpha.py" >/dev/null 2>&1 ||
+    fail "fail-ledger record failed in handoff fixture"
   printf '# codex review\n\n## Output\n\nGATE: pass\n\n## Exit\n\n0\n' \
     > "$cwd/.oms/artifacts/review/codex-x-$run.md"
   printf '# claude review\n\n## Output\n\nGATE: fail\n\n## Exit\n\n0\n' \
@@ -21845,6 +21856,15 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   assert_file_contains "$out" "## Resume contract"
   assert_file_contains "$out" "## Current task snapshot (advisory)"
   assert_file_contains "$out" "- Goal: ship"
+  assert_file_contains "$out" "- plan: ship the widget [done=1 ready=2]"
+  assert_file_contains "$out" "  - drop the cache layer"
+  assert_file_contains "$out" "- changed files (2, git status): alpha.py, zeta.py"
+  assert_file_contains "$out" "- last failing check: widget check failed on alpha.py"
+  # Mechanical block precedes the model-written summary, within its own cap.
+  [ "$(grep -n '^## Recorded state' "$out" | cut -d: -f1)" -lt "$(grep -n '^## Last assistant summary' "$out" | cut -d: -f1)" ] ||
+    fail "recorded state must come before the assistant summary"
+  [ "$(sed -n '/^## Recorded state/,/^## Last assistant summary/p' "$out" | wc -c)" -le 1700 ] ||
+    fail "recorded state block exceeded its byte cap"
   assert_file_contains "$out" "- verification_observed_at:"
   assert_file_contains "$out" "## Original request (historical)"
   assert_file_contains "$out" "bash scripts/check.sh --focused-only"
