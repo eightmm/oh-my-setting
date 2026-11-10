@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import RUNTIME_SCHEMA
 from .common import CoreError, atomic_write_bytes, atomic_write_json, canonical_json, read_bytes, read_json, relative_path, sensitive_text, sha256_bytes, sha256_file, utc_now
+from . import context_phases
 from .evidence import build_envelope
 
 DEFAULT_CONTEXT_BYTES = 64 * 1024
@@ -252,11 +253,19 @@ def _slice(data: bytes, budget: int, policy: str) -> Tuple[bytes, int, str]:
 def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[Tuple[str, str]] = (), required: Sequence[str] = (), max_bytes: int = DEFAULT_CONTEXT_BYTES, bundle_path: Optional[Path] = None, manifest_path: Optional[Path] = None, allow_external: bool = False, phase: str = "implementation") -> Dict[str, Any]:
     """Compile required targets and bounded evidence; reuse a fresh graph or
     fall back to Python discovery without building or refreshing graph state."""
-    if phase not in ("orientation", "implementation", "verification", "review", "research"):
+    if phase not in context_phases.PHASES:
         raise CoreError("unsupported context phase: %s" % phase)
+    # The phase decides composition through a validated table, not through code paths of its own.
+    phase_rules = context_phases.load_rules()
+    rule = phase_rules["phases"][phase]
+
+    def moved(priority: int, kind: str) -> int:
+        return context_phases.adjusted(priority, kind, rule)
     if max_bytes < MIN_CONTEXT_BYTES or max_bytes > MAX_CONTEXT_BYTES:
         raise CoreError("context budget must be between %d and %d bytes" % (MIN_CONTEXT_BYTES, MAX_CONTEXT_BYTES))
-    candidates: List[Tuple[Path, str, int, str]] = _default_layers(repo)
+    candidates: List[Tuple[Path, str, int, str]] = [
+        (path, reason, moved(priority, context_phases.candidate_class(reason, "")), policy)
+        for path, reason, priority, policy in _default_layers(repo)]
     target_labels: List[str] = []
     target_paths: List[Path] = []
     for target in targets:
@@ -270,11 +279,12 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
             target_paths.append(target_path)
         candidates.append((target_path, "direct target", 120, "middle"))
     for path, reason, priority in _related_candidates(repo, target_paths):
-        candidates.append((path, reason, priority, "middle"))
+        kind = context_phases.candidate_class(reason, relative_path(path, repo) or path.name, related=True)
+        candidates.append((path, reason, moved(priority, kind), "middle"))
     for raw, reason in explicit:
         candidates.append((
             _safe_repo_file(repo, raw, allow_external=allow_external, expanduser=True),
-            reason or "explicit context", 110, "middle",
+            reason or "explicit context", moved(110, "explicit"), "middle",
         ))
     unresolved_required: List[str] = []
     required_resolved: Dict[str, str] = {}
@@ -309,7 +319,7 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
     omitted: List[Dict[str, Any]] = []
     bundle_parts: List[bytes] = []
     remaining = max_bytes
-    max_nonrequired_source = max(MIN_CONTEXT_BYTES, max_bytes // 3)
+    max_nonrequired_source = max(MIN_CONTEXT_BYTES, max_bytes // int(rule.get("nonrequired_divisor", 3)))
     included_paths: Set[str] = set()
     required_paths = set(required_resolved.values())
     required_paths.update(target_labels)
@@ -356,7 +366,7 @@ def plan_context(repo: Path, *, targets: Sequence[str] = (), explicit: Sequence[
     bundle = b"".join(bundle_parts)
     if sensitive_text(bundle.decode("utf-8", "replace")):
         raise CoreError("compiled context contains sensitive-looking content")
-    manifest: Dict[str, Any] = {"schema": RUNTIME_SCHEMA, "generated_at": utc_now(), "phase": phase, "budget_bytes": max_bytes, "targets": list(target_labels), "selected_bytes": len(bundle), "remaining_bytes": remaining, "max_nonrequired_source_bytes": max_nonrequired_source, "selected": selected, "omitted": omitted, "context_debt": len(missing_required), "missing_required": missing_required, "truncated_required": truncated_required, "sufficient": not missing_required, "bundle_sha256": sha256_bytes(bundle), "contract_state_digest": build_envelope(repo).get("state_digest")}
+    manifest: Dict[str, Any] = {"schema": RUNTIME_SCHEMA, "generated_at": utc_now(), "phase": phase, "phase_rules_sha256": phase_rules["sha256"], "budget_bytes": max_bytes, "targets": list(target_labels), "selected_bytes": len(bundle), "remaining_bytes": remaining, "max_nonrequired_source_bytes": max_nonrequired_source, "selected": selected, "omitted": omitted, "context_debt": len(missing_required), "missing_required": missing_required, "truncated_required": truncated_required, "sufficient": not missing_required, "bundle_sha256": sha256_bytes(bundle), "contract_state_digest": build_envelope(repo).get("state_digest")}
     digest = sha256_bytes(canonical_json(manifest))
     if bundle_path is None:
         bundle_path = repo / ".oms" / "runtime" / "context" / (digest + ".txt")
