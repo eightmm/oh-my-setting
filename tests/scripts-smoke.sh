@@ -19987,6 +19987,107 @@ EOF
   out="$(OMS_GH_BIN=__oms_absent_gh__ "$ROOT/scripts/ci-status.sh" protection main 2>&1)" || rc=$?
   [ "$rc" -eq 2 ] && contains "$out" "required check 'gate' unknown (gh CLI not installed)" ||
     fail "protection without gh is unknown (rc=$rc): $out"
+
+  # Triage explains a red run without touching it: failing jobs and steps, a
+  # bounded scanned log tail, and each job against the base branch. A read that
+  # fails is unknown (exit 2), never "nothing red".
+  local tcalls="$d/triage-calls"
+  cat > "$d/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TRIAGE_CALLS"
+run() { printf '{"databaseId":%s,"status":"%s","conclusion":"%s","workflowName":"CI","headSha":"%s","url":"http://ci/%s"}' "$1" "$2" "$3" "$4" "$1"; }
+case "$TRIAGE_CASE:$*" in
+  down:*) exit 1 ;;
+  *:"api --method GET repos/{owner}/{repo}")
+    [ "$TRIAGE_CASE" != nobase ] || exit 1
+    echo '{"default_branch":"trunk"}' ;;
+  green:"run list --branch feature"*) echo "[$(run 31 completed success aaaa111122223333)]" ;;
+  pending:"run list --branch feature"*) echo "[$(run 32 in_progress "" aaaa111122223333)]" ;;
+  *:"run list --branch feature"*)
+    echo "[$(run 21 completed failure aaaa111122223333),$(run 20 completed success 9999000011112222)]" ;;
+  *:"run list --branch trunk"*) echo "[$(run 10 completed failure bbbb111122223333)]" ;;
+  nojobs:"run view 21 --json jobs") echo 'proxy error' ;;
+  *:"run view 21 --json jobs")
+    printf '%s' '{"jobs":[{"name":"lint","conclusion":"failure","steps":[{"name":"Set up","conclusion":"success"},{"name":"shellcheck","conclusion":"failure"}]},'
+    printf '%s' '{"name":"smoke (1/4)","conclusion":"failure","steps":[{"name":"smoke shard","conclusion":"failure"}]},'
+    printf '%s' '{"name":"leaky\u001b[31m job","conclusion":"failure","steps":"oops"},'
+    printf '%s\n' '{"name":"docs","conclusion":"success"}]}' ;;
+  *:"run view 10 --json jobs")
+    echo '{"jobs":[{"name":"lint","conclusion":"success"},{"name":"smoke (1/4)","conclusion":"failure"}]}' ;;
+  slowlog:"run view 21 --log-failed") sleep 5 ;;
+  *:"run view 21 --log-failed")
+    i=0; while [ "$i" -lt 40 ]; do printf 'lint\tshellcheck\t2026-11-10T00:00:00.0000000Z early line %s\n' "$i"; i=$((i + 1)); done
+    printf 'lint\tshellcheck\t2026-11-10T00:00:01.0000000Z \033[31mSC2034 (warning): unused appears unused\033[0m\n'
+    printf 'smoke (1/4)\tsmoke shard\t2026-11-10T00:00:02.0000000Z check: scripts-smoke.test_alpha FAILED\n'
+    printf 'leaky\033[31m job\tstep\t2026-11-10T00:00:03.0000000Z pass''word=hunter2hunter2-fixture\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$d/bin/gh"
+  triage() {  # MODE [ARGS...] -> $out, $rc
+    local mode="$1"
+    shift
+    rc=0
+    out="$(TRIAGE_CASE="$mode" TRIAGE_CALLS="$tcalls" OMS_GH_BIN="$d/bin/gh" OMS_CI_TRIAGE_TIMEOUT=2 \
+      "$ROOT/scripts/ci-status.sh" triage "$@" 2>&1)" || rc=$?
+  }
+  : > "$tcalls"
+  triage red feature
+  [ "$rc" -eq 1 ] || fail "a triaged red run should exit 1 (rc=$rc): $out"
+  contains "$out" "ci-status triage [feature]: failure on aaaa11112222: 3 failing jobs  http://ci/21" ||
+    fail "triage should name the red run: $out"
+  contains "$out" "compared with: trunk bbbb11112222" || fail "triage should name the base run: $out"
+  contains "$out" "- job: lint"$'\n'"  base: green on base (regression candidate)"$'\n'"  failed step: shellcheck" ||
+    fail "a job green on base is a regression candidate with its failed step: $out"
+  contains "$out" "- job: smoke (1/4)"$'\n'"  base: also red on base (preexisting)" ||
+    fail "a job red on base is preexisting: $out"
+  contains "$out" "failed checks: scripts-smoke.test_alpha" || fail "triage should name the failed check: $out"
+  # The tail is the end of the log, without timestamps or colour codes, and bounded.
+  contains "$out" "    | SC2034 (warning): unused appears unused" && contains "$out" "log tail (last 25 lines):" &&
+    contains "$out" "    | early line 39" && ! contains "$out" "early line 15" ||
+    fail "the log excerpt should be the cleaned last 25 lines: $out"
+  # A job the base run does not have is unknown; a sensitive-looking tail and control bytes never print.
+  contains "$out" "- job: leaky?[31m job"$'\n'"  base: unknown (job not in the base run)" &&
+    contains "$out" "  log: withheld (sensitive-looking content)" || fail "an unsafe job should stay unprinted: $out"
+  ! contains "$out" "hunter2" && ! contains "$out" $'\033' && ! contains "$out" "Traceback" ||
+    fail "triage leaked log content or control bytes: $out"
+  contains "$out" "not verification evidence; nothing was re-run, retried, pushed or recorded" ||
+    fail "the brief should say what it is: $out"
+  triage green feature
+  [ "$rc" -eq 0 ] && contains "$out" "ci-status triage [feature]: nothing red on aaaa11112222 (1 completed run)" ||
+    fail "a green head has nothing to triage (rc=$rc): $out"
+  # --sha picks that commit's run on the branch; one the listing does not hold is unknown.
+  triage red --sha 9999000 feature
+  [ "$rc" -eq 0 ] && contains "$out" "nothing red on 999900001111" || fail "--sha should select that commit (rc=$rc): $out"
+  triage red --sha deadbeef feature
+  [ "$rc" -eq 2 ] && contains "$out" "unknown (deadbeef has no run among the branch's newest 2)" ||
+    fail "a commit without a listed run is unknown (rc=$rc): $out"
+  triage pending feature
+  [ "$rc" -eq 2 ] && contains "$out" "unknown (no completed run on this branch)" ||
+    fail "an unfinished run is unknown, not green (rc=$rc): $out"
+  triage down feature
+  [ "$rc" -eq 2 ] && contains "$out" "unknown (run list: gh not authenticated, unreachable or unreadable)" &&
+    contains "$out" "unknown is not a pass" || fail "an unreadable run list is unknown (rc=$rc): $out"
+  triage nojobs feature
+  [ "$rc" -eq 2 ] && contains "$out" "unknown (job list unreadable)" && ! contains "$out" "proxy error" ||
+    fail "an unreadable job list is unknown and stays unprinted (rc=$rc): $out"
+  # An unreadable base or a log past its budget costs that part only.
+  triage nobase feature
+  [ "$rc" -eq 1 ] && contains "$out" "compared with: unknown (base branch unreadable)" &&
+    contains "$out" "- job: lint"$'\n'"  base: unknown" || fail "an unread base leaves the comparison unknown (rc=$rc): $out"
+  triage slowlog feature
+  [ "$rc" -eq 1 ] && contains "$out" "log: not downloaded (gh could not read it in time)" ||
+    fail "a log past its budget is reported, not waited for (rc=$rc): $out"
+  # Only reads were asked of gh, and nothing was written beside the repository.
+  ! grep -Ev -e '^(run list --branch [a-z]+ --limit 20 --json |run view [0-9]+ (--json jobs|--log-failed)$|api --method GET repos/\{owner\}/\{repo\}$)' "$tcalls" ||
+    fail "triage must only list runs, view jobs and logs, and read the repository"
+  rc=0
+  out="$(OMS_GH_BIN=__oms_absent_gh__ "$ROOT/scripts/ci-status.sh" triage feature 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ] && contains "$out" "ci-status triage: unknown (gh CLI not installed)" ||
+    fail "triage without gh is unknown (rc=$rc): $out"
+  rc=0
+  out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" --sha abcdef01 main 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ] && contains "$out" "--sha is only read by triage" || fail "--sha outside triage must be refused (rc=$rc): $out"
 }
 
 test_install_hooks_writes_pre_push() {

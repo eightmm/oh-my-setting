@@ -2004,6 +2004,20 @@ source it cannot read — no `gh`, no permission, a timeout — makes the answer
 never `absent` and never a pass, even when the other source requires `gate`. A review
 count of zero is no requirement. Nothing else runs it, and it changes nothing.
 
+`oms ci-status triage [--sha COMMIT] [branch]` explains a red run without touching it.
+For the branch's HEAD (or the named commit) it lists the failing jobs and their failed
+steps, the checks the log names as `FAILED`, the last 25 lines of each failing job's
+failed-step log, and whether the same job is also red on the base: the default branch,
+or for the default branch its previous commit. A job that is green there is a regression
+candidate; one that is also red was not broken by this branch; a base that could not be
+read leaves the comparison `unknown`. Each excerpt passes the sensitive-content scan
+before it is printed and is withheld when it looks sensitive or the scan cannot run.
+The action issues only read requests through `gh`, records nothing and never re-runs,
+retries, pushes or dispatches. It exits 0 when nothing is red, 1 after a triage and 2
+when the run could not be read; `OMS_CI_TRIAGE_TIMEOUT` (1 to 300 seconds, default 60)
+bounds the log download. The closing brief is an observation of CI, not verification
+evidence.
+
 Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
