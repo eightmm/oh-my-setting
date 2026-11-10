@@ -104,6 +104,7 @@ explains overlapping entrypoints.
 | `cite` | Keep per-paper notes, check DOI or arXiv ids, export BibTeX. | `oms cite` | [ML and HPC](#ml-and-hpc) |
 | `data-manifest` | Fingerprint dataset splits and detect drift or leakage. | `oms data-manifest` | [ML and HPC](#ml-and-hpc) |
 | `experiment-board` | Coordinate shared research studies. | `oms experiment-board` | [ML and HPC](#ml-and-hpc) |
+| `artifact-view` | Build offline case comparisons, molecular previews and editable decision reports; import source-bound selections and annotations. | `oms artifact-view` | [Artifact views](ARTIFACT-VIEWS.md) |
 | `external` | Record version, hash, license, env lock and egress of external science tools. | `oms external` | [ML and HPC](#ml-and-hpc) |
 | `job-digest` | Summarize training or Slurm logs and jobs. | `oms job-digest` | [ML and HPC](#ml-and-hpc) |
 | `run-ledger` | Record a command and its execution metadata. | `oms run-ledger` | [ML and HPC](#ml-and-hpc) |

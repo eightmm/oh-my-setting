@@ -197,6 +197,7 @@ agent-task
 apply-project-template
 approval-inbox
 artifact-index
+artifact-view
 auto-update
 autopilot
 candidate
