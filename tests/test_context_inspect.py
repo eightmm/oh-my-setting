@@ -189,6 +189,61 @@ class ProjectionTests(unittest.TestCase):
         self.assertFalse(value["recorded_scope_matches"])
         self.assertIn("contract-identity-unavailable", value["scope_mismatch_reasons"])
 
+    def test_recorded_phase_rules_are_visible_without_reading_them(self):
+        data = manifest()
+        data["phase_rules_sha256"] = "c" * 64
+        before = deepcopy(data)
+        with patch.object(inspector.os, "open", side_effect=AssertionError("unexpected I/O")):
+            report = inspector.inspect_manifest(data)
+            compared = inspector.compare_manifests(data, data)
+        self.assertEqual(report["phase_rules_sha256"], "c" * 64)
+        self.assertTrue(compared["recorded_scope_matches"])
+        self.assertEqual(compared["phase_rules"], {"left": "c" * 64, "right": "c" * 64,
+                                                "status": "same-recorded-digest"})
+        self.assertIsNone(report["sources_current"])
+        self.assertEqual(data, before)
+
+    def test_changed_phase_rules_disagree_even_with_identical_sources(self):
+        left, right = manifest(), manifest()
+        left["phase_rules_sha256"], right["phase_rules_sha256"] = "c" * 64, "d" * 64
+        for a, b in ((left, right), (right, left)):
+            with self.subTest(left=a["phase_rules_sha256"]):
+                result = inspector.compare_manifests(a, b)
+                self.assertFalse(result["recorded_scope_matches"])
+                self.assertEqual(result["scope_mismatch_reasons"], ["different-phase-rules"])
+                self.assertEqual(result["changed"]["total"], 0)
+                self.assertEqual(result["phase_rules"]["status"], "different-recorded-digest")
+
+    def test_one_legacy_pack_cannot_prove_matching_phase_rules(self):
+        legacy, current = manifest(), manifest()
+        current["phase_rules_sha256"] = "d" * 64
+        for left, right in ((legacy, current), (current, legacy)):
+            with self.subTest(left_is_legacy=left is legacy):
+                result = inspector.compare_manifests(left, right)
+                self.assertFalse(result["recorded_scope_matches"])
+                self.assertEqual(result["scope_mismatch_reasons"], ["phase-rules-identity-unavailable"])
+                self.assertEqual(result["phase_rules"]["status"], "unknown")
+                self.assertIn(None, (result["phase_rules"]["left"], result["phase_rules"]["right"]))
+
+    def test_legacy_phase_rules_keep_the_existing_projection_shape(self):
+        data = manifest()
+        self.assertNotIn("phase_rules_sha256", inspector.inspect_manifest(data))
+        result = inspector.compare_manifests(data, data)
+        self.assertNotIn("phase_rules", result)
+        self.assertTrue(result["recorded_scope_matches"])
+        self.assertEqual(result["scope_mismatch_reasons"], [])
+
+    def test_explicit_invalid_phase_rule_digest_is_not_silently_ignored(self):
+        for digest in (None, "", True, [], {}, 4, "x" * 64, "A" * 64, "a" * 63, "a" * 65):
+            data = manifest()
+            data["phase_rules_sha256"] = digest
+            with self.subTest(digest=digest):
+                for action in (lambda: inspector.inspect_manifest(data),
+                               lambda: inspector.compare_manifests(data, manifest()),
+                               lambda: inspector.compare_manifests(manifest(), data)):
+                    with self.assertRaises(ERROR):
+                        action()
+
     def test_child_policy_keeps_compilation_write_only(self):
         self.assertTrue(policy.child_action_is_read_only(argparse.Namespace(command="context-inspect")))
         self.assertFalse(policy.child_action_is_read_only(argparse.Namespace(command="context")))
@@ -553,6 +608,17 @@ if CLI:
                 transcript.unlink()
                 self.assertEqual(call("context", "--target", "src.py", child=True).returncode, 2)
                 self.assertEqual(before, tree_bytes(repo))
+                recorded = json.loads((repo / "pack.json").read_text())
+                recorded["phase_rules_sha256"] = "c" * 64
+                (repo / "policy-left.json").write_text(json.dumps(recorded))
+                recorded["phase_rules_sha256"] = "d" * 64
+                (repo / "policy-right.json").write_text(json.dumps(recorded))
+                before_policy = tree_bytes(repo)
+                mismatch = call("context-inspect", "policy-left.json", "--compare", "policy-right.json", child=True)
+                self.assertEqual(mismatch.returncode, 0, mismatch.stderr)
+                self.assertIn("different-phase-rules", json.loads(mismatch.stdout)["scope_mismatch_reasons"])
+                self.assertFalse(json.loads(mismatch.stdout)["recorded_scope_matches"])
+                self.assertEqual(before_policy, tree_bytes(repo))
 
 
 if __name__ == "__main__":
