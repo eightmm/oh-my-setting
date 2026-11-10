@@ -859,9 +859,14 @@ failing log no recogniser matches is shown as a raw head and tail and labelled
 as such, not as a diagnosis. `--file PATH [--exit-code N]` digests an existing
 capture without running or storing anything; `--json` prints schema 1.
 
-Nothing is rewritten and no model is called: the raw file is the record, the
-digest a derived view for reading. A verifier's input and receipt stay the raw
-output, and the byte counts are measured bytes; the JSON's token figure is a
+No model is called. Before the capture is kept, every line the shared secret
+scan flags (the outbound scrubber's pattern and env-value check, no second
+list) is replaced by `[oms-redacted:CLASS]`, CLASS being the scrubber's pattern
+label and never the value; a private-key block becomes one marker, other line
+numbers are unchanged, and a failed scan leaves one `[oms-redacted:scan-failed]`
+line. The stored file is therefore the command's output minus those lines, and
+the digest a derived view of it. A verifier's input and receipt stay the
+command's own output, not this file, and the byte counts are measured bytes; the JSON's token figure is a
 labelled bytes/4 heuristic, not a tokenizer and not a quota or billing saving.
 The tool is opt-in: no hook rewrites a command to use it. The one built-in
 caller is `scripts/check.sh`: a failing stage whose output exceeds 4000 bytes
@@ -870,8 +875,8 @@ full log instead of a 64 KiB tail; smaller output is still printed whole.
 
 Raw captures are mode 600 and the newest 50 are kept; the store retains itself,
 so `oms gc --delete-orphan-files` never treats it as unindexed orphans. If the lines to be
-shown look like they carry a secret, or the scan cannot run, they are withheld
-and only the counts, the exit code and the raw path are printed. `--no-store`
+shown still look like they carry a secret, they are withheld and only the
+counts, the exit code and the path are printed. `--no-store`
 keeps no file, and a harness child never keeps one. In run mode the tool's own
 failure is exit 125 and a bad request exit 2, before anything runs.
 

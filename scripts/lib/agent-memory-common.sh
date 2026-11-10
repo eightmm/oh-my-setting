@@ -684,6 +684,76 @@ agent_memory_sensitive_report_line() {  # TIER WHERE LINES COUNT
   printf '%s-tier match in %s at line %s%s\n' "$tier" "$where" "$lines" "$more"
 }
 
+# Store-time redaction of command output that already exists and so cannot be
+# refused: rewrite FILE in place, replacing every line the secret tier flags
+# (the same pattern and env-value scan as the outbound check, no second list)
+# with "[oms-redacted:CLASS]", CLASS being the scrubber's own label. The unit is
+# the line: the pattern matches the key part of "name=value", not the value, so
+# a span replacement would leave the secret behind. A private-key block collapses
+# to one marker. Line numbers of other lines are unchanged. Prints the number of
+# lines replaced; returns 0 when some were, 1 when FILE was clean, 2 when the
+# scan failed (FILE untouched). Writers that can still refuse (fail-ledger,
+# handoff) keep refusing; this is for the ones that must keep the output.
+agent_memory_redact_secret_lines() {  # FILE
+  local file="$1" hits="" idx map tmp row n text pattern classified=0 rc=0
+  local scan_status=()
+  [ -s "$file" ] || return 1
+  idx="$(agent_memory_mktemp)" || return 2
+  map="$(agent_memory_mktemp)" || { rm -f "$idx"; return 2; }
+  tmp="$(agent_memory_mktemp)" || { rm -f "$idx" "$map"; return 2; }
+  # -a: binary output still yields line numbers rather than "Binary file matches".
+  if agent_memory_scan_input "$file" | LC_ALL=C grep -Eain "$(agent_memory_secret_re)" > "$idx"; then
+    scan_status=("${PIPESTATUS[@]}")
+  else
+    scan_status=("${PIPESTATUS[@]}")
+  fi
+  if [ "${scan_status[0]}" -ne 0 ] || [ "${scan_status[1]}" -gt 1 ]; then
+    rm -f "$idx" "$map" "$tmp"
+    return 2
+  fi
+  hits="$(agent_memory_env_secret_hits "$file")" || { rm -f "$idx" "$map" "$tmp"; return 2; }
+  while IFS= read -r row || [ -n "$row" ]; do
+    n="${row%%:*}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    text="${row#*:}"
+    # One classifier fork per flagged line, bounded: past the cap a line takes
+    # the generic label rather than costing a fork each.
+    if [ "$classified" -lt 100 ]; then
+      pattern="$(agent_memory_sensitive_line_pattern secret "$text")" || pattern=token-like
+      classified=$((classified + 1))
+    else
+      pattern=token-like
+    fi
+    printf '%s %s\n' "$n" "$pattern" >> "$map"
+  done < "$idx"
+  while IFS=: read -r n text pattern; do
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$text" = env ] && printf '%s %s\n' "$n" "${pattern:-env-secret}" >> "$map"
+  done <<EOF
+$hits
+EOF
+  if [ ! -s "$map" ]; then
+    rm -f "$idx" "$map" "$tmp"
+    return 1
+  fi
+  LC_ALL=C awk '
+    NR == FNR { if (!($1 in cls)) cls[$1] = $2; next }
+    skip { if (index($0, "-----END") > 0) skip = 0; next }
+    FNR in cls {
+      printf "[oms-redacted:%s]\n", cls[FNR]; count++
+      if (cls[FNR] == "private-key" && index($0, "-----END") == 0) skip = 1
+      next
+    }
+    { print }
+    END { print count > "/dev/stderr" }' "$map" "$file" > "$tmp" 2> "$idx" || rc=2
+  if [ "$rc" -eq 0 ]; then
+    cat "$tmp" > "$file" || rc=2
+  fi
+  [ "$rc" -ne 0 ] || cat "$idx"
+  rm -f "$idx" "$map" "$tmp"
+  return "$rc"
+}
+
 # Rewrite machine-identifying path prefixes to ~ so repo-local records can keep
 # their content without recording the account layout. Textual only, applied to
 # stored copies — never to a command that still has to execute. Secret-tier
