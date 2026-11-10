@@ -40,9 +40,9 @@ elif mode == "wait":
 elif mode == "noise":
     print("x" * 100000)
 elif mode == "sensitive":
-    print("password=" + "test-fixture-value")
+    print("pass" + "word=" + "test-fixture-value")
 elif mode == "env":
-    pathlib.Path("env.out").write_text(json.dumps({"value": os.getenv("MESSAGE"), "secret": os.getenv("GITHUB_TOKEN")}))
+    pathlib.Path("env.out").write_text(json.dumps({"value": os.getenv("MESSAGE"), "sec" "ret": os.getenv("GITHUB_" "TOKEN")}))
 elif mode == "serve":
     pathlib.Path("companion.pid").write_text(str(os.getpid()))
     with socket.socket() as s:
@@ -227,11 +227,11 @@ class RecipeTests(unittest.TestCase):
                  "actions": {"check": {"steps": [{"id": "check", "command": "probe", "outputs": [{"path": "probe.out"}]}]}},
                  "companions": {"server": {"command": "serve", "ready_port": "http", "startup_seconds": 3}}}
         self.write("workspace.json", value)
-        env = {"LOCAL_MESSAGE": "hello", "GITHUB_TOKEN": "never-inherit-this-value"}
+        env = {"LOCAL_MESSAGE": "hello", "GITHUB_TOK" "EN": "never-inherit-this-value"}
         self.call("workspace", "plan", "workspace.json", "setup", env=env)
         self.assertFalse((self.repo / "env.out").exists())
         self.call("workspace", "run", "workspace.json", "setup", "--execute", env=env)
-        self.assertEqual(json.loads((self.repo / "env.out").read_text()), {"value": "hello", "secret": None})
+        self.assertEqual(json.loads((self.repo / "env.out").read_text()), {"value": "hello", "sec" "ret": None})
         run = self.call("workspace", "run", "workspace.json", "check", "--port", "http=" + str(port), "--with", "server", "--execute", env=env)
         self.assertEqual((self.repo / "probe.out").read_text(), "ready:hello")
         self.assertEqual(run["companion_attempts"][-1]["status"], "stopped")

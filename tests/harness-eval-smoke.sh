@@ -667,7 +667,7 @@ PY
 
   # ---- registration drift -------------------------------------------------------
   scenario_hook_registration_drift_detected() {
-    local home="$TMP/drift" mode out rc
+    local home="$TMP/drift" out rc
     drift_fixture() {  # MODE: settings.json and receipt from the real expected rows
       rm -rf "$home"
       mkdir -p "$home/.claude" "$home/.config/oh-my-setting" "$home/repo/.oms/hooks"

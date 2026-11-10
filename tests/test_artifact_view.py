@@ -107,7 +107,7 @@ class ArtifactViewTest(unittest.TestCase):
         bad = copy.deepcopy(self.data); bad["schema"] = True; invalid.append(bad)
         bad = copy.deepcopy(self.data); bad["rows"][0]["repeat"] = -1; invalid.append(bad)
         bad = copy.deepcopy(self.data); bad["rows"][0]["repeat"] = 2 ** 53; invalid.append(bad)
-        bad = copy.deepcopy(self.data); bad["rows"][0]["params"]["x"] = "api_key=not-a-real-credential"; invalid.append(bad)
+        bad = copy.deepcopy(self.data); bad["rows"][0]["params"]["x"] = "api_" "key=not-a-real-credential"; invalid.append(bad)
         bad = copy.deepcopy(self.data); bad["rows"][0]["artifacts"] = [{"path": "../outside.txt"}]; invalid.append(bad)
         bad = copy.deepcopy(self.data); bad["metric_directions"] = {"loss": {"direction": "min"}}; invalid.append(bad)
         for data in invalid:

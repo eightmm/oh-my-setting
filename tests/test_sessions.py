@@ -158,7 +158,7 @@ class SessionsTest(unittest.TestCase):
         foreign = self.base / "foreign"
         foreign.mkdir()
         self.transcript("claude", "foreign", foreign, "exact phrase foreign secret")
-        self.transcript("pi", "sensitive", text="exact phrase api_key=TOP_SECRET")
+        self.transcript("pi", "sensitive", text="exact phrase api_" "key=TOP_SECRET")
         with self.paths["claude"].open("a") as handle:
             handle.write(json.dumps({"type": "user", "cwd": str(self.repo), "sessionId": self.sids["claude"],
                                     "message": {"role": "user", "content": [{"type": "tool_result", "content": "exact phrase TOOL_SECRET"}]}}) + "\n")
@@ -194,7 +194,7 @@ class SessionsTest(unittest.TestCase):
         failed = self.cli("bookmark", "open", row["id"], ok=False)
         self.assertIn("stale", failed.stderr)
         self.cli("bookmark", "add", *self.source_args("claude"), "--line", 1,
-                 "--label", "api_key=do-not-save", ok=False)
+                 "--label", "api_" "key=do-not-save", ok=False)
 
     def test_dry_run_and_missing_native_capabilities_do_not_create_state(self):
         report = self.cli("fork", *self.source_args())

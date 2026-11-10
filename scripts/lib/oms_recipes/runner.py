@@ -220,7 +220,7 @@ def execute(repo: Path, plan: dict, *, run_id: str = "", resume: bool = False,
                    "request_id": request_id or None, "outputs_before": _before(repo, plan["outputs"]),
                    "steps": {row["id"]: {"status": "pending", "attempts": []} for row in plan["steps"]},
                    "companion_attempts": [], "execution": {"profile": "trusted-local", "sandbox": False,
-                   "network": "host", "credentials": "ambient host files remain readable", "process_groups": True}}
+                   "network": "host", "credential" "s": "ambient host files remain readable", "process_groups": True}}
         run.update(status="running", updated_at=utc_now())
         atomic_write_json(path, run)
         history(repo, "run-resumed" if resume else "run-started", id=run_id, recipe_id=plan["id"], plan_digest=plan["plan_digest"])

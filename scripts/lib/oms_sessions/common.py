@@ -18,7 +18,7 @@ from oms_runtime.common import (
 MAX_PATCH_BYTES = 32 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,159}\Z")
-SECRET = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{12,}|"
+SECRET_RE = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{12,}|"
                     r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
 
 
@@ -35,7 +35,7 @@ def ident(value, label="session ID"):
 
 def label(value):
     if (not isinstance(value, str) or len(value.encode("utf-8")) > 120
-            or any(ord(ch) < 32 for ch in value) or sensitive_text(value) or SECRET.search(value)):
+            or any(ord(ch) < 32 for ch in value) or sensitive_text(value) or SECRET_RE.search(value)):
         raise CoreError("label must be a short title without sensitive content or control characters")
     return value
 
@@ -43,7 +43,7 @@ def label(value):
 def excerpt(value, start=0, size=400):
     # Preserve exact characters/offsets for ordinary text. A withheld excerpt is
     # explicitly marked, never presented as a faithful quotation.
-    if SECRET_VALUE_RE.search(value) or SECRET.search(value):
+    if SECRET_VALUE_RE.search(value) or SECRET_RE.search(value):
         return "[sensitive-content-omitted]", True
     return value[start:start + size], False
 

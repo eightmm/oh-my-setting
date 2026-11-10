@@ -86,7 +86,7 @@ def attach_selection(repo, source_kind, origin, content):
     if any(ch in origin for ch in "\r\n\t"):
         raise CoreError("selection origin must be one line")
     parsed = urlsplit(origin)
-    if parsed.username or parsed.password:
+    if (parsed.username or parsed.password):
         raise CoreError("selection origin must not contain URL credentials")
     if any(re.search(r"token|secret|password|credential|signature|api.?key", key, re.I)
            for key, _ in parse_qsl(parsed.query)):

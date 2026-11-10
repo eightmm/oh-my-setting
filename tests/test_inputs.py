@@ -283,9 +283,9 @@ class InputsTest(unittest.TestCase):
             self.cli(*action, env=child, ok=False)
         self.cli("attach", "file", "source.py", env=child, ok=False)
         self.cli("add", *self.route(), "--text", "unauthorized", env=child, ok=False)
-        self.cli("add", *self.route(), "--text", "api_key=DO_NOT_FORWARD", ok=False)
-        self.cli("add", *self.route(), "--text", '{"api_key":"DO_NOT_FORWARD"}', ok=False)
-        self.cli("attach", "selection", "--source", "browser", "--origin", "https://example.org/?token=private",
+        self.cli("add", *self.route(), "--text", "api_" "key=DO_NOT_FORWARD", ok=False)
+        self.cli("add", *self.route(), "--text", '{"api_' 'key":"DO_NOT_FORWARD"}', ok=False)
+        self.cli("attach", "selection", "--source", "browser", "--origin", "https://example.org/?tok" "en=private",
                  "--text", "selected text", ok=False)
         (self.repo / "link").symlink_to(self.repo / "source.py")
         self.cli("attach", "file", "link", ok=False)

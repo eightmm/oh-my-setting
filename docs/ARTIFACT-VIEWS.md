@@ -152,7 +152,7 @@ artifact bytes to 12 MiB, and the final HTML to 24 MiB.
 
 ```bash
 oms artifact-view --repo . remote --host cluster-login \
-  --remote-root /scratch/project --input results/comparison.json \
+  --remote-root /srv/project --input results/comparison.json \
   --output reports/cluster-snapshot.html
 ```
 

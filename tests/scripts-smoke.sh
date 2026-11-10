@@ -23307,7 +23307,7 @@ test_slurm_submit_detects_repeat_submissions() {
   local d="$TMP/slurm-submit"
   local bin="$d/bin"
   local SH="$ROOT/scripts/slurm-submit.sh"
-  local calls="$d/calls" led="$d/.oms/slurm-submits.jsonl" rc key unk
+  local calls="$d/calls" led="$d/.oms/slurm-submits.jsonl" rc key
 
   mkdir -p "$bin"
   git init -q "$d"
@@ -23320,10 +23320,10 @@ test_slurm_submit_detects_repeat_submissions() {
     'echo "Submitted batch job $((5000 + $(wc -l < "'"$calls"'")))"' > "$bin/sbatch"
   chmod +x "$bin/sbatch"
   printf '#!/bin/bash\n#SBATCH --time=01:00:00\necho one\n' > "$d/a.sh"
-  local run=(env "PATH=$bin:$PATH" "OMS_LOCK_DIR=$d/locks")
+  local submit=(env "PATH=$bin:$PATH" "OMS_LOCK_DIR=$d/locks")
 
   # First submit runs sbatch once, tags the comment and records the id.
-  ( cd "$d" && "${run[@]}" "$SH" -- sbatch --gres=gpu:1 a.sh >"$d/first.out" 2>&1 ) || fail "first slurm-submit failed: $(cat "$d/first.out")"
+  ( cd "$d" && "${submit[@]}" "$SH" -- sbatch --gres=gpu:1 a.sh >"$d/first.out" 2>&1 ) || fail "first slurm-submit failed: $(cat "$d/first.out")"
   [ "$(wc -l < "$calls")" = 1 ] || fail "first submit must call sbatch once"
   assert_file_contains "$calls" "--comment oms-key="
   assert_file_contains "$d/first.out" "Submitted batch job 5001"
@@ -23332,7 +23332,7 @@ test_slurm_submit_detects_repeat_submissions() {
 
   # An identical repeat does not run sbatch: exit 3, earlier id, how to check.
   rc=0
-  ( cd "$d" && "${run[@]}" "$SH" -- sbatch --gres=gpu:1 a.sh >"$d/repeat.out" 2>&1 ) || rc=$?
+  ( cd "$d" && "${submit[@]}" "$SH" -- sbatch --gres=gpu:1 a.sh >"$d/repeat.out" 2>&1 ) || rc=$?
   [ "$rc" = 3 ] || fail "identical repeat must exit 3 (got $rc): $(cat "$d/repeat.out")"
   [ "$(wc -l < "$calls")" = 1 ] || fail "a repeat must not call sbatch"
   assert_file_contains "$d/repeat.out" "already submitted as job 5001"
@@ -23341,26 +23341,26 @@ test_slurm_submit_detects_repeat_submissions() {
 
   # A changed script is a new key.
   printf 'echo two\n' >> "$d/a.sh"
-  ( cd "$d" && "${run[@]}" "$SH" -- sbatch --gres=gpu:1 a.sh >/dev/null 2>&1 ) || fail "changed script must submit"
+  ( cd "$d" && "${submit[@]}" "$SH" -- sbatch --gres=gpu:1 a.sh >/dev/null 2>&1 ) || fail "changed script must submit"
   [ "$(wc -l < "$calls")" = 2 ] || fail "changed script must call sbatch"
   [ "$(grep -o '"key": "[0-9a-f]*"' "$led" | sort -u | wc -l)" = 2 ] || fail "changed script must change the key"
 
   # A failed sbatch is recorded and does not block the retry.
   printf '#!/bin/bash\necho f\n' > "$d/f.sh"
   rc=0
-  ( cd "$d" && "${run[@]}" FAKE_SBATCH_FAIL=7 "$SH" -- sbatch f.sh >/dev/null 2>&1 ) || rc=$?
+  ( cd "$d" && "${submit[@]}" FAKE_SBATCH_FAIL=7 "$SH" -- sbatch f.sh >/dev/null 2>&1 ) || rc=$?
   [ "$rc" = 7 ] || fail "failed sbatch must exit with its status (got $rc)"
   assert_file_contains "$led" '"type": "failed"'
-  ( cd "$d" && "${run[@]}" "$SH" -- sbatch f.sh >/dev/null 2>&1 ) || fail "retry after a failed submission must run"
+  ( cd "$d" && "${submit[@]}" "$SH" -- sbatch f.sh >/dev/null 2>&1 ) || fail "retry after a failed submission must run"
   [ "$(wc -l < "$calls")" = 4 ] || fail "failed attempt and retry must each call sbatch"
 
   # A crash between intent and submitted: the key is unknown, not guessed.
   printf '#!/bin/bash\necho c\n' > "$d/c.sh"
-  key="$(cd "$d" && "${run[@]}" "$SH" --dry-run -- sbatch c.sh 2>/dev/null | sed -n 's/^key: //p')"
+  key="$(cd "$d" && "${submit[@]}" "$SH" --dry-run -- sbatch c.sh 2>/dev/null | sed -n 's/^key: //p')"
   [ -n "$key" ] || fail "dry-run must print the key"
   printf '{"schema": 1, "type": "intent", "key": "%s", "attempt": "dead00000000", "ts": "t", "tag": true}\n' "$key" >> "$led"
   rc=0
-  ( cd "$d" && "${run[@]}" "$SH" -- sbatch c.sh >"$d/unknown.out" 2>&1 ) || rc=$?
+  ( cd "$d" && "${submit[@]}" "$SH" -- sbatch c.sh >"$d/unknown.out" 2>&1 ) || rc=$?
   [ "$rc" = 3 ] || fail "an unresolved intent must exit 3 (got $rc)"
   assert_file_contains "$d/unknown.out" "unknown: an earlier submission with this key may have gone through"
   assert_file_contains "$d/unknown.out" "oms-key="
@@ -23368,38 +23368,38 @@ test_slurm_submit_detects_repeat_submissions() {
 
   # --force-resubmit needs a reason, records it, and then the new job is the duplicate.
   rc=0
-  ( cd "$d" && "${run[@]}" "$SH" --force-resubmit -- sbatch c.sh >/dev/null 2>&1 ) || rc=$?
+  ( cd "$d" && "${submit[@]}" "$SH" --force-resubmit -- sbatch c.sh >/dev/null 2>&1 ) || rc=$?
   [ "$rc" = 2 ] || fail "--force-resubmit without --reason must exit 2 (got $rc)"
-  ( cd "$d" && "${run[@]}" "$SH" --force-resubmit --reason "checked squeue, nothing queued" -- sbatch c.sh >/dev/null 2>&1 ) ||
+  ( cd "$d" && "${submit[@]}" "$SH" --force-resubmit --reason "checked squeue, nothing queued" -- sbatch c.sh >/dev/null 2>&1 ) ||
     fail "forced resubmit failed"
   assert_file_contains "$led" '"reason": "checked squeue, nothing queued"'
   [ "$(wc -l < "$calls")" = 5 ] || fail "forced resubmit must call sbatch"
   rc=0
-  ( cd "$d" && "${run[@]}" "$SH" -- sbatch c.sh >/dev/null 2>&1 ) || rc=$?
+  ( cd "$d" && "${submit[@]}" "$SH" -- sbatch c.sh >/dev/null 2>&1 ) || rc=$?
   [ "$rc" = 3 ] || fail "after a forced resubmit the new job is the duplicate (got $rc)"
 
   # --dry-run runs nothing and writes nothing.
   printf '#!/bin/bash\necho d\n' > "$d/d.sh"
   local rows_before
   rows_before="$(wc -l < "$led")"
-  ( cd "$d" && "${run[@]}" "$SH" --dry-run -- sbatch d.sh >"$d/dry.out" 2>&1 ) || fail "dry-run failed"
+  ( cd "$d" && "${submit[@]}" "$SH" --dry-run -- sbatch d.sh >"$d/dry.out" 2>&1 ) || fail "dry-run failed"
   assert_file_contains "$d/dry.out" "would run: sbatch --comment oms-key="
   [ "$(wc -l < "$led")" = "$rows_before" ] || fail "dry-run must not write"
   [ "$(wc -l < "$calls")" = 5 ] || fail "dry-run must not call sbatch"
 
   # Concurrent identical submits: exactly one sbatch call.
   printf '#!/bin/bash\necho e\n' > "$d/e.sh"
-  ( cd "$d" && prc=0; "${run[@]}" "$SH" -- sbatch e.sh >/dev/null 2>&1 || prc=$?; echo "$prc" > "$d/par1.rc" ) &
-  ( cd "$d" && prc=0; "${run[@]}" "$SH" -- sbatch e.sh >/dev/null 2>&1 || prc=$?; echo "$prc" > "$d/par2.rc" ) &
+  ( cd "$d" && prc=0; "${submit[@]}" "$SH" -- sbatch e.sh >/dev/null 2>&1 || prc=$?; echo "$prc" > "$d/par1.rc" ) &
+  ( cd "$d" && prc=0; "${submit[@]}" "$SH" -- sbatch e.sh >/dev/null 2>&1 || prc=$?; echo "$prc" > "$d/par2.rc" ) &
   wait
   [ "$(wc -l < "$calls")" = 6 ] || fail "concurrent identical submits must call sbatch once"
   [ "$(cat "$d/par1.rc" "$d/par2.rc" | sort | tr -d '\n')" = 03 ] || fail "one concurrent submit must win and one exit 3"
 
   # A caller-supplied key stands in for the content hash; arguments that trip
   # the sensitive scan are stored as a digest only.
-  ( cd "$d" && "${run[@]}" "$SH" --key cell-7 -- sbatch "--export=PASS""WORD=hunter2" d.sh >/dev/null 2>&1 ) || fail "custom key submit failed"
+  ( cd "$d" && "${submit[@]}" "$SH" --key cell-7 -- sbatch "--export=PASS""WORD=hunter2" d.sh >/dev/null 2>&1 ) || fail "custom key submit failed"
   rc=0
-  ( cd "$d" && "${run[@]}" "$SH" --key cell-7 -- sbatch e.sh >/dev/null 2>&1 ) || rc=$?
+  ( cd "$d" && "${submit[@]}" "$SH" --key cell-7 -- sbatch e.sh >/dev/null 2>&1 ) || rc=$?
   [ "$rc" = 3 ] || fail "a repeated --key must exit 3 whatever the script (got $rc)"
   if grep -Fq hunter2 "$led"; then fail "sensitive sbatch arguments must not be stored"; fi
   assert_file_contains "$led" '"args_sha256"'

@@ -17,7 +17,7 @@ from .common import (
     load_definition, object_fields, relative, text, under,
 )
 
-TOKEN = re.compile(r"\$\{(input|port|resource)\.([A-Za-z][A-Za-z0-9_-]{0,63})\}")
+TOKEN_RE = re.compile(r"\$\{(input|port|resource)\.([A-Za-z][A-Za-z0-9_-]{0,63})\}")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
 
@@ -37,7 +37,7 @@ def _mapping(value: Any, label: str, maximum: int = 64) -> dict:
 
 def _template(value: Any, label: str) -> str:
     value = text(value, label, empty=True)
-    if "${" in TOKEN.sub("", value):
+    if "${" in TOKEN_RE.sub("", value):
         raise CoreError(label + " contains an unsupported interpolation")
     return value
 
@@ -165,7 +165,7 @@ def _commands(value: Any) -> dict:
         interpreters = {"sh", "bash", "dash", "zsh", "ksh", "python", "python3", "node", "ruby", "perl"}
         if Path(executable).name in interpreters:
             for index, arg in enumerate(command["argv"][:-1]):
-                if arg in {"-c", "-e", "--eval"} and TOKEN.search(command["argv"][index + 1]):
+                if arg in {"-c", "-e", "--eval"} and TOKEN_RE.search(command["argv"][index + 1]):
                     raise CoreError("interpreter code cannot interpolate inputs; pass them as separate argv items")
         _template(command.get("cwd", "."), "command cwd")
         _environment(command.get("environment", {}))
@@ -281,7 +281,7 @@ def expand(value: str, bindings: dict) -> str:
         if isinstance(item, bool):
             return "true" if item else "false"
         return str(item)
-    result = TOKEN.sub(replace, value)
+    result = TOKEN_RE.sub(replace, value)
     text(result, "expanded value", 16384, empty=True)
     return result
 

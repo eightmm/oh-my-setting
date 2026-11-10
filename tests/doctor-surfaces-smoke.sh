@@ -1171,7 +1171,13 @@ $out"
   # Restriction off, Landlock listed, no bwrap: the warning is about the missing helper.
   printf '0\n' > "$root/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
   printf 'landlock,yama\n' > "$root/sys/kernel/security/lsm"
-  out="$(SB_PATH="/usr/bin:/bin" sandbox)" || fail "$out"
+  # The system directories may hold a real bwrap: shadow them without it.
+  mkdir -p "$home/nobwrap"
+  local tool
+  for tool in /usr/bin/* /bin/*; do
+    [ "${tool##*/}" = bwrap ] || [ -e "$home/nobwrap/${tool##*/}" ] || ln -s "$tool" "$home/nobwrap/${tool##*/}"
+  done
+  out="$(SB_PATH="$home/nobwrap" sandbox)" || fail "$out"
   contains "$out" "unavailable: bwrap: not on PATH" || fail "missing bwrap: $out"
   contains "$out" "available: landlock: listed in the LSM list" || fail "landlock listed: $out"
   contains "$out" "warn: claude: sandbox.enabled is on but the sandbox helper is unusable here (bwrap is not on PATH)" ||

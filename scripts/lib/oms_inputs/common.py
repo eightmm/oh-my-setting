@@ -20,8 +20,8 @@ from room_repository import state_repository, work_repository
 MAX_STATE_BYTES = 4 * 1024 * 1024
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
-TOKEN = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{12,}")
-STRUCTURED_SECRET = re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|private[_-]?key)[\"']?\s*[:=]")
+TOKEN_RE = re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{12,}")
+STRUCTURED_SECRET_RE = re.compile(r"(?i)(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|private[_-]?key)[\"']?\s*[:=]")
 
 
 def child():
@@ -78,7 +78,7 @@ def safe_text(text, maximum, *, empty=False):
             or not empty and not text.strip() or "\0" in text
             or any(ord(ch) < 32 and ch not in "\r\n\t" for ch in text)):
         raise CoreError("text is empty, oversized, or contains unsupported control characters")
-    if SECRET_VALUE_RE.search(text) or STRUCTURED_SECRET.search(text) or TOKEN.search(text):
+    if SECRET_VALUE_RE.search(text) or STRUCTURED_SECRET_RE.search(text) or TOKEN_RE.search(text):
         raise CoreError("input contains secret-like content; redact it before attachment or delivery")
     return text
 

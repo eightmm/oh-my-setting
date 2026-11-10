@@ -150,12 +150,12 @@ fi
 TAG=no
 if [ "${#SBATCH_ARGS[@]}" -gt 0 ]; then
   for a in "${SBATCH_ARGS[@]}"; do
-    case "$a" in --comment|--comment=*) TAG=set ;; esac
+    case "$a" in --comment|--comment=*) TAG='set' ;; esac
   done
 fi
 if [ "$TAG" = no ] && [ -n "$SCRIPT" ] &&
   grep -Eq '^#SBATCH[[:space:]]+([^#]*[[:space:]])?--comment' "$SCRIPT" 2>/dev/null; then
-  TAG=set
+  TAG='set'
 fi
 RUN=("${CMD[0]}")
 if [ "$TAG" = no ]; then
