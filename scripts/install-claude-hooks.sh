@@ -40,6 +40,28 @@ claude_auto_compact_supported() {
   return 1
 }
 
+# Whether the installed Claude Code validates a command hook's `onFailure`
+# field ("continue" | "block"). Claude accepts unknown hook fields silently, so
+# acceptance proves nothing: the probe hands `claude doctor` (offline, reads
+# the settings of the directory it runs in, no trust prompt) a deliberately
+# invalid value and looks for the field being named in the complaint. An older
+# CLI ignores the field and says nothing, and then nothing is written.
+claude_on_failure_supported() {
+  local binary dir out status=1
+
+  binary="$(type -P claude 2>/dev/null)" || return 1
+  [ -n "$binary" ] && [ -f "$binary" ] && [ -x "$binary" ] || return 1
+  dir="$(mktemp -d 2>/dev/null)" || return 1
+  if mkdir -p "$dir/.claude" && printf '%s\n' \
+    '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"true","onFailure":"oms-probe"}]}]}}' \
+    > "$dir/.claude/settings.json"; then
+    out="$(cd "$dir" && oms_provider_run_bounded 10 /dev/stdout "$binary" doctor </dev/null)" || true
+    case "$out" in *onFailure*'"block"'*) status=0 ;; esac
+  fi
+  rm -rf "$dir"
+  return "$status"
+}
+
 # --- expected hook surfaces --------------------------------------------------
 #
 # The one place that says which Claude Code events this harness registers a
@@ -61,6 +83,16 @@ claude_auto_compact_supported() {
 # against the wrong expectations. tests/doctor-surfaces-smoke.sh hashes the row
 # set and fails until the bump and the recorded hash move together.
 HOOKS_SCHEMA=11
+
+# Guard rows that may be registered fail-closed: with Claude Code's
+# `onFailure: "block"` a guard that cannot run (missing script or runtime, a
+# crash, its timeout) stops the tool call instead of letting it through.
+# Opt-in, because a checkout that moved away would then block every Bash call
+# until the row is removed: OMS_GUARD_FAIL_CLOSED=1 writes the field when the
+# installed Claude validates it, =0 removes it, and unset keeps what is there,
+# so an update does not undo the choice. The field is not part of the row
+# identity, so asking for it does not change HOOKS_SCHEMA.
+HOOK_FAIL_CLOSED='command-guard-hook.sh'
 HOOK_SURFACES='
 UserPromptSubmit|skill-router.sh||
 Stop|turn-guard.sh||12
@@ -193,6 +225,11 @@ user-set modelSettings effort and a user-set attribution are preserved, and repe
 converge OMS hook commands, timeouts and matchers and drop duplicates.
 --remove deletes only oh-my-setting hooks, keeping user siblings in place.
 
+OMS_GUARD_FAIL_CLOSED=1 also registers the command guard with Claude Code's
+onFailure "block", so a guard that cannot run stops the Bash call instead of
+letting it through; it is written only when the installed claude validates the
+field. =0 removes it; unset keeps the registration as found.
+
 Options:
   --remove          Remove the oh-my-setting hook entries instead.
   --settings PATH   Settings file (default: ~/.claude/settings.json,
@@ -213,7 +250,7 @@ fail() { echo "error: $*" >&2; exit 2; }
 # below and --print-expected consume this JSON, so the list a doctor compares
 # against is the list that would actually be installed.
 print_expected_json() {
-  OMS_CH_ROOT="$ROOT" OMS_CH_SURFACES="$HOOK_SURFACES" \
+  OMS_CH_ROOT="$ROOT" OMS_CH_SURFACES="$HOOK_SURFACES" OMS_CH_FAIL_CLOSED_SCRIPTS="$HOOK_FAIL_CLOSED" \
     OMS_CH_HOOKS_SCHEMA="$HOOKS_SCHEMA" python3 <<'PY'
 import importlib.util, json, os, sys
 
@@ -224,6 +261,7 @@ spec = importlib.util.spec_from_file_location(
 lib = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lib)
 surfaces = []
+guards = set(os.environ.get("OMS_CH_FAIL_CLOSED_SCRIPTS", "").split())
 for line in os.environ["OMS_CH_SURFACES"].splitlines():
     line = line.strip()
     if not line or line.startswith("#"):
@@ -246,6 +284,7 @@ for line in os.environ["OMS_CH_SURFACES"].splitlines():
         "matcher": matcher or None,
         "timeout": int(timeout) if timeout else None,
         "command": lib.hook_command(root, script),
+        "fail_closed": script in guards,
     })
 json.dump(
     {
@@ -311,10 +350,26 @@ if [ -z "$OWNERSHIP_RECEIPT" ]; then mkdir -p "$(dirname "$SETTINGS")"; fi
 
 EXPECTED_JSON="$(print_expected_json)"
 
+FAIL_CLOSED_MODE=keep
+case "${OMS_GUARD_FAIL_CLOSED:-}" in
+  "") ;;
+  0) FAIL_CLOSED_MODE=off ;;
+  1)
+    if [ "$REMOVE" = 1 ] || [ -n "$OWNERSHIP_RECEIPT" ]; then
+      :
+    elif claude_on_failure_supported; then
+      FAIL_CLOSED_MODE=on
+    else
+      echo "warning: OMS_GUARD_FAIL_CLOSED=1 was not applied: the installed claude does not validate a hook's onFailure field (or claude is not on PATH), so the command guard stays fail-open" >&2
+    fi
+    ;;
+  *) fail "OMS_GUARD_FAIL_CLOSED must be 0 or 1" ;;
+esac
+
 OMS_CH_OWNERSHIP="$OWNERSHIP_RECEIPT" \
   OMS_CH_SETTINGS="$SETTINGS" \
   OMS_CH_REMOVE="$REMOVE" OMS_CH_AUTO_COMPACT_SUPPORTED="$AUTO_COMPACT_SUPPORTED" \
-  OMS_CH_EXPECTED="$EXPECTED_JSON" OMS_CH_ROOT="$ROOT" \
+  OMS_CH_EXPECTED="$EXPECTED_JSON" OMS_CH_ROOT="$ROOT" OMS_CH_FAIL_CLOSED="$FAIL_CLOSED_MODE" \
   OMS_CH_STATUS_PATH="$ROOT/scripts/claude-statusline.py" \
   OMS_CH_SUBAGENT_STATUS_PATH="$ROOT/scripts/claude-subagent-statusline.py" python3 <<'PY'
 import importlib.util, json, os, shlex, sys, tempfile
@@ -428,6 +483,7 @@ else:
     except ValueError as e:
         sys.stderr.write("error: %s: %s; fix it first\n" % (path, e))
         sys.exit(2)
+    lib.apply_fail_closed(hooks, expected, [root], os.environ.get("OMS_CH_FAIL_CLOSED", "keep"))
     if "statusLine" not in settings:
         settings["statusLine"] = {"type": "command", "command": status_cmd}
     elif status_ours(

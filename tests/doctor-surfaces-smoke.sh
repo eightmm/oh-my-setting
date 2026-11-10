@@ -412,6 +412,60 @@ PY
     *"ok: claude hooks registered"*) ;;
     *) printf '%s\n' "$out"; fail "the default doctor should pass after the installer converges" ;;
   esac
+
+  # The command guard is registered fail-open unless a person opts in, and the
+  # doctor says so as a note beside a healthy registration, never as a failure.
+  case "$out" in
+    *"note: claude guard PreToolUse -> command-guard-hook.sh is registered fail-open"*) ;;
+    *) printf '%s\n' "$out"; fail "the default doctor should note the fail-open command guard" ;;
+  esac
+  # Opting in writes onFailure only when the installed claude validates the
+  # field: a claude that says nothing about a bad value leaves the row as it was.
+  mkdir -p "$home/probe-bin"
+  printf '%s\n' '#!/bin/sh' 'echo "Claude Code doctor"' > "$home/probe-bin/claude"
+  chmod +x "$home/probe-bin/claude"
+  out="$(PATH="$home/probe-bin:$PATH" OMS_GUARD_FAIL_CLOSED=1 run_install "$home" 2>&1)" ||
+    { printf '%s\n' "$out"; fail "an unsupported fail-closed request must not fail the install"; }
+  case "$out" in
+    *"OMS_GUARD_FAIL_CLOSED=1 was not applied"*) ;;
+    *) printf '%s\n' "$out"; fail "an unsupported fail-closed request should be reported" ;;
+  esac
+  ! grep -q onFailure "$home/.claude/settings.json" || fail "an unprobed claude must not get the onFailure field"
+  cat > "$home/probe-bin/claude" <<'EOF'
+#!/bin/sh
+[ "$1" = doctor ] || exit 1
+grep -q '"onFailure":"oms-probe"' .claude/settings.json || exit 0
+echo 'Invalid settings'
+echo '- hooks.PreToolUse.0.hooks.0.onFailure: Invalid value. Expected one of: "continue", "block"'
+EOF
+  PATH="$home/probe-bin:$PATH" OMS_GUARD_FAIL_CLOSED=1 run_install "$home" >/dev/null 2>&1 ||
+    fail "the fail-closed opt-in should install"
+  python3 - "$home/.claude/settings.json" <<'PY' || fail "only the command guard row should carry onFailure block"
+import json, sys
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+marked = [h["command"].rsplit("/", 1)[-1] for entries in hooks.values() for e in entries
+          for h in e.get("hooks", []) if "onFailure" in h]
+assert marked == ["command-guard-hook.sh"], marked
+guard = [h for e in hooks["PreToolUse"] for h in e["hooks"] if h["command"].endswith("command-guard-hook.sh")]
+assert guard[0]["onFailure"] == "block" and guard[0]["timeout"] == 5, guard
+PY
+  out="$(run_default_doctor "$home")"
+  case "$out" in
+    *"registered fail-open"*) printf '%s\n' "$out"; fail "a fail-closed guard must not be noted as fail-open" ;;
+  esac
+  case "$out" in
+    *"ok: claude hooks registered"*) ;;
+    *) printf '%s\n' "$out"; fail "onFailure on the guard row must not read as drift" ;;
+  esac
+  run_surfaces "$home" >/dev/null || fail "--surfaces should pass with a fail-closed guard"
+  # An update that does not repeat the request keeps the choice; =0 undoes it.
+  run_install "$home" >/dev/null || fail "a plain reinstall should succeed"
+  grep -q '"onFailure": "block"' "$home/.claude/settings.json" || fail "a plain reinstall must keep the fail-closed choice"
+  OMS_GUARD_FAIL_CLOSED=0 run_install "$home" >/dev/null || fail "turning fail-closed off should succeed"
+  ! grep -q onFailure "$home/.claude/settings.json" || fail "OMS_GUARD_FAIL_CLOSED=0 should remove the field"
+  if OMS_GUARD_FAIL_CLOSED=maybe run_install "$home" >/dev/null 2>&1; then
+    fail "an unknown OMS_GUARD_FAIL_CLOSED value should be refused"
+  fi
   python3 - "$home/.claude/settings.json" "$home" <<'PY' || fail "the lookalike user hook must survive"
 import json, sys
 hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]

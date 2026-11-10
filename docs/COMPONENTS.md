@@ -1714,6 +1714,24 @@ environment the session was started from turns the guard off, while the same
 text typed inside a command does nothing because the provider starts the hook.
 A person who means a refused command can also run it in their own shell.
 
+A guard that cannot run at all (its script or runtime is missing, it crashes or
+passes its timeout) lets the call through by default, because that is what
+Claude Code does with a failed hook. `OMS_GUARD_FAIL_CLOSED=1
+scripts/install-claude-hooks.sh` registers the guard row with Claude Code's
+`"onFailure": "block"` instead, so such a failure stops the Bash call. The
+field is written only after the installed `claude` proves it validates it
+(`claude doctor` is handed a deliberately invalid value, offline); otherwise
+the install says so and changes nothing. A later install or update without the
+variable keeps the choice, `OMS_GUARD_FAIL_CLOSED=0` removes it, and `oms
+doctor` notes a guard that is still registered fail-open. It is opt-in because
+a checkout that was moved or deleted would then block every Bash call in
+Claude Code until the row is removed from `settings.json`. The guard's own
+parse failures still allow the command either way.
+
+Codex and Antigravity remain uncovered. No Codex or Antigravity CLI was
+available to confirm a pre-tool hook contract, `codex execpolicy` rules or
+Antigravity `command(...)` deny rules, so nothing is generated for them.
+
 
 #### Hook ownership and audits
 

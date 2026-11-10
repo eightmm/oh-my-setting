@@ -1727,6 +1727,10 @@ for row in surfaces:
         print("%s: %s%s" % (kind, label, " (%s)" % detail if detail else ""))
 for event, script in retired:
     print("retired: %s -> %s (still registered)" % (event, script))
+# Not a registration problem: a guard that would let a call through when the hook itself cannot run.
+for event, script in (lib.fail_open(hooks, surfaces, [root]) if hasattr(lib, "fail_open") else ()):
+    if not problems.get((event, script)):
+        print("fail-open: %s -> %s" % (event, script))
 # User-owned status lines are preserved by the installer and count as wired.
 for key in ("statusLine", "subagentStatusLine"):
     status = settings.get(key) if isinstance(settings, dict) else None
@@ -1739,6 +1743,16 @@ PY
     return 0
   fi
   problems="$(oms_strip_cr "$problems")"
+  local open_guards=""
+  open_guards="$(printf '%s\n' "$problems" | sed -n 's/^fail-open: //p')"
+  problems="$(printf '%s\n' "$problems" | sed '/^fail-open: /d')"
+  if [ -n "$open_guards" ]; then
+    while IFS= read -r line; do
+      echo "note: claude guard $line is registered fail-open: if the hook itself cannot run, the call goes through (opt in: OMS_GUARD_FAIL_CLOSED=1 $INSTALL_ROOT/scripts/install-claude-hooks.sh)"
+    done <<EOF
+$open_guards
+EOF
+  fi
   if [ -n "$problems" ]; then
     while IFS= read -r line; do
       echo "fail: claude hook $line"
