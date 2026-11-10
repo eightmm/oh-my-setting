@@ -376,7 +376,8 @@ def data_label(item):
         return "-"
     splits = item.get("splits") if isinstance(item.get("splits"), dict) else {}
     counts = ",".join("%s=%s" % (shown(label), splits[label]) for label in sorted(splits))
-    return str(item.get("manifest_sha256") or "")[:12] + (" (%s)" % counts if counts else "")
+    policy = item.get("policy") if isinstance(item.get("policy"), str) and item.get("policy") else ""
+    return str(item.get("manifest_sha256") or "")[:12] + (" (%s)" % counts if counts else "") + (" policy=%s" % shown(policy) if policy else "")
 da, db = data_rows(a), data_rows(b)
 for name in sorted(set(da) | set(db)):
     line("data:" + shown(name), data_label(da.get(name)), data_label(db.get(name)))

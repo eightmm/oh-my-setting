@@ -1740,7 +1740,11 @@ ML/Slurm workflows use local-first experiment controls:
   `--data NAME` (repeatable) links the run to a manifest made by
   `oms data-manifest create --name NAME`: the capsule records the manifest's
   fingerprint (its content without timestamp and note) and each split's row
-  count, never data, and an unknown name stops before the command runs.
+  count, never data, plus the split `policy` the manifest declares (when it
+  declares one; `oms run diff` shows it after the row counts), and an unknown name
+  stops before the command runs. A capture without `--data` in a repo that has
+  manifests prints one advisory stderr line naming up to five of them; it never
+  fails and is silent when no manifest exists.
   `verify` warns when the manifest's recorded splits have since changed and
   `oms run diff` shows a `data:NAME` line; neither re-reads the split files, so
   `oms data-manifest check --name NAME` remains the drift check. Manifests

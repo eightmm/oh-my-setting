@@ -58,8 +58,9 @@ run options:
   --seed N         Seed to record. Repeatable.
   --data NAME      Data manifest (`oms data-manifest create --name NAME`) the
                    run reads. Records the manifest's fingerprint and split
-                   row counts, not data; an unknown NAME stops before the command
-                   runs. Repeatable.
+                   row counts and the declared split policy, not data; an
+                   unknown NAME stops before the command runs. Repeatable. With
+                   manifests present and no --data, one advisory line names them.
   --metrics PATH   JSON metrics file folded into the capsule result.
   --no-ledger      Do not also append a run-ledger row.
   --ledger PATH    Ledger path for the companion row (default run-ledger default).
@@ -446,6 +447,22 @@ manifest_dir() {
   printf '%s\n' "${OMS_MANIFEST_DIR:-$STATE_ROOT/.oms/manifests}"
 }
 
+# One advisory line when the repo has data manifests and the run named none; never a failure.
+data_hint() {
+  local dir file names=() total=0 shown
+  [ "${#DATA[@]}" -eq 0 ] || return 0
+  dir="$(manifest_dir)"
+  for file in "$dir"/*.json; do
+    [ -f "$file" ] || continue
+    total=$((total + 1))
+    [ "${#names[@]}" -ge 5 ] || names+=("$(basename "$file" .json)")
+  done
+  [ "$total" -gt 0 ] || return 0
+  shown="${names[*]}"
+  [ "$total" -le 5 ] || shown="$shown ... ($total manifests)"
+  echo "capsule: data manifests exist ($shown) but no --data was given; add --data NAME to record which data this run read" >&2
+}
+
 # Which recorded data fingerprints the run read: per --data NAME the manifest
 # fingerprint (its content without timestamp and note), its creation time and
 # each split's row count. The manifest is read, never recomputed, and no data
@@ -490,6 +507,9 @@ for name in os.environ.get("OMS_DATA", "").splitlines():
     if isinstance(manifest, dict):
         if isinstance(manifest.get("ts"), str):
             row["manifest_ts"] = manifest["ts"][:40]
+        # The declared split policy (data-manifest create --policy), only when the manifest has one.
+        if isinstance(manifest.get("policy"), str) and manifest["policy"]:
+            row["policy"] = manifest["policy"][:40]
         splits = {}
         for split in manifest.get("splits") or []:
             if isinstance(split, dict) and isinstance(split.get("label"), str) and len(splits) < 64:
@@ -554,6 +574,7 @@ cmd_run() {
   # Resolved before anything is written: an unknown manifest must not leave a half-made bundle.
   local data_rows
   data_rows="$(data_json)" || exit 2
+  data_hint
   local ts id bundle
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
