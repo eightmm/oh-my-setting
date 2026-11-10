@@ -1923,4 +1923,33 @@ python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["state"] =
   fail "linked sync namespace altered the landing receipt"
 rm -f "$receipt_dir/sync"
 
+# land notes is a read-only skeleton: subjects grouped by type, landed commits marked, nothing tagged or pushed.
+notes_from="$(git -C "$repo" rev-list --max-parents=0 HEAD | tail -n 1)"
+git -C "$repo" commit -q --allow-empty -m 'feat(panel)!: a new board row'
+git -C "$repo" commit -q --allow-empty -m 'fix: a wrong count'
+notes_head="$(git -C "$repo" rev-parse HEAD)"
+notes_tags="$(git -C "$repo" tag | wc -l | tr -d ' ')"
+notes_tip="$(remote_tip)"
+"$LAND" notes --repo "$repo" --from "$notes_from" --to HEAD > "$TMP/notes.out" 2>&1 ||
+  fail "land notes failed: $(cat "$TMP/notes.out")"
+grep -Fq "# Notes for ${notes_from:0:7}..${notes_head:0:7}" "$TMP/notes.out" || fail "notes heading names the range"
+grep -Fq -- "- panel: a new board row (" "$TMP/notes.out" || fail "a scoped subject keeps its scope"
+grep -Fq '## Breaking (marked `!`)' "$TMP/notes.out" || fail "a ! subject is listed as breaking"
+grep -Fq -- "- a wrong count (${notes_head:0:7})" "$TMP/notes.out" || fail "a fix subject is listed under its type"
+grep -Fq -- "- gate: echo sync linked (${link_sha:0:7}) [land: passed]" "$TMP/notes.out" ||
+  fail "a commit with a passed land receipt is marked, under other: $(cat "$TMP/notes.out")"
+! grep -Fq -- "(${notes_head:0:7}) [land:" "$TMP/notes.out" || fail "a commit that was never landed carries no mark"
+"$LAND" notes --repo "$repo" --from "$notes_from" --to HEAD --output "$TMP/notes.md" > /dev/null ||
+  fail "land notes --output failed"
+cmp -s "$TMP/notes.out" "$TMP/notes.md" || fail "--output writes the same skeleton"
+if "$LAND" notes --repo "$repo" --from "$notes_from" --to HEAD --output "$TMP/notes.md" > "$TMP/notes-again.out" 2>&1; then
+  fail "land notes --output must not replace a file"
+fi
+if "$LAND" notes --repo "$repo" --from HEAD --to "$notes_from" > "$TMP/notes-back.out" 2>&1; then
+  fail "a backward range must be refused"
+fi
+[ "$(git -C "$repo" rev-parse HEAD)" = "$notes_head" ] && [ "$(git -C "$repo" tag | wc -l | tr -d ' ')" = "$notes_tags" ] &&
+  [ "$(remote_tip)" = "$notes_tip" ] && [ -z "$(git -C "$repo" status --porcelain)" ] ||
+  fail "land notes must not commit, tag, push or leave files in the repository"
+
 echo "land-smoke: ok"

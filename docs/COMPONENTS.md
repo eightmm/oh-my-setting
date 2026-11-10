@@ -1511,6 +1511,13 @@ fields in JSON and text output. Keeping this mutable operation separate preserve
 the original landing receipt bytes and handed-off digests, including on retries;
 the companion is not imported as landing evidence.
 
+`oms land notes --from REV --to REV [--output NEW_FILE]` prints a release-notes skeleton
+for that range: first-parent commit subjects grouped by Conventional Commit type, `!`
+subjects repeated under Breaking, and `[land: passed]` on the commits that were the head
+of a passed land on this machine. It is deterministic and calls no model; the wording is
+a person's. It creates no tag, release, commit or CHANGELOG edit, and `--output` only
+creates a new file.
+
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
 compiles each bounded Bash-compatible glob once, and emits one deny-first

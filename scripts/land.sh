@@ -26,6 +26,12 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
                [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH]
                [--sync-shared PATH]
        land.sh status [--repo PATH] [--json] [--active-exit]
+       land.sh notes [--repo PATH] --from REV --to REV [--output NEW_FILE]
+
+notes prints a release-notes skeleton for REV..REV: first-parent commit
+subjects grouped by Conventional Commit type, with the commits this checkout's
+land receipts recorded marked. It is read-only apart from --output, which
+creates a new file and never replaces one; no tag, release or commit is made.
 
 Preconditions: a clean tracked tree, HEAD ahead of REMOTE/TARGET with the
 remote tip as an ancestor (rebase first otherwise), and a gate command
@@ -91,6 +97,13 @@ re-query CI for its exact SHA while that SHA remains reachable from the fetched
 target; this never reruns the gate or push and never installs.
 EOF
 }
+
+# Read-only: a release-notes skeleton from one range's commit subjects and this
+# checkout's land receipts. It starts no job, takes no lock and pushes nothing.
+if [ "${1:-}" = notes ]; then
+  shift
+  exec python3 "$ROOT/scripts/lib/land_notes.py" "$@"
+fi
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=2700
 SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO="" SYNC_TO=""
