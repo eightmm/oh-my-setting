@@ -1652,6 +1652,21 @@ output, unused = read_page(lambda width, view: panel_reader.render_view(view, lo
                            iter([[("pagedown",)], [("q",)]]), size=(80, 10))
 assert output.count("WORKER model unknown · Pinned reader") >= 2 and output.count("[Summary]") >= 2, output
 assert "rows 1-" in output and "updated unknown" in output, output
+# Position cue: how much is left, clamped at the end instead of paging into blank space.
+assert [panel_reader.position_label(*args) for args in ((0, 6, 6), (0, 6, 339), (333, 6, 339))] == [
+    "rows 1-6/6 all", "rows 1-6/339 1%", "rows 334-339/339 end"]
+output, unused = read_page(lambda width: "\n".join("l%d" % i for i in range(20)),
+                           iter([[("pagedown",)], [("pagedown",)], [("pagedown",)], [("pagedown",)], [("q",)]]),
+                           size=(60, 12))
+final_frame = output.split("\033[H\033[2J")[-1]
+assert "rows 15-20/20 end" in final_frame and "l19" in final_frame, final_frame
+# Wrapped list items hang under their text and keep nesting; the Raw view and Results share the helper.
+from panel_view import hanging_wrap
+assert hanging_wrap("  - nested " + "word " * 8, 24) == [
+    "  - nested word word", "    word word word word", "    word word"], hanging_wrap("  - nested " + "word " * 8, 24)
+assert hanging_wrap("12. " + "ab " * 10, 16)[1].startswith("    ab") and hanging_wrap("plain " * 6, 14)[1] == "plain plain"
+raw_list = panel_reader.render_view("Raw", {}, {"answer": "- " + "word " * 20}, width=30, color=False).splitlines()
+assert raw_list[3].startswith("  - word") and all(row.startswith("    word") for row in raw_list[4:]), raw_list
 output, unused = read_page(lambda width, view: panel_reader.render_view(view, long_report, markdown_call),
                            iter([[("tab",)], [("q",)]]), size=(80, 10))
 raw_frame = output.split("\033[H\033[2J")[-1]
