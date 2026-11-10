@@ -578,6 +578,9 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
         active_task_id = str(criterion.get("active_task_id", ""))
         if not ACTIVE_TASK_ID_RE.fullmatch(active_task_id):
             raise CoreError("current task criterion has no valid active task lineage")
+    criterion_digest = criterion.get("criterion_digest")
+    if not isinstance(criterion_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", criterion_digest):
+        raise CoreError("current acceptance criterion has no valid statement fingerprint")
     existing = {evidence_ref(row) for row in artifact_rows(repo)}
     task_ref = "task-verification:%s" % base.get("task", {}).get("task_id", "")
     if ref not in existing and ref != task_ref:
@@ -591,7 +594,7 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
         if status == "verified":
             raise CoreError("cannot bind verified evidence without a readable, current worktree fingerprint")
         verified_state, verified_head = "", None
-    row = {"schema": 1, "binding_id": "binding-%s" % __import__("uuid").uuid4().hex, "action": "bind", "created_at": utc_now(), "criterion_id": criterion_id, "evidence_ref": ref, "status": status, "evidence_type": bounded_line(evidence_type, 80), "note": bounded_line(note, 300), "verified_head": verified_head or None, "dependency_digests": dependency_digests}
+    row = {"schema": 1, "binding_id": "binding-%s" % __import__("uuid").uuid4().hex, "action": "bind", "created_at": utc_now(), "criterion_id": criterion_id, "criterion_digest": criterion_digest, "evidence_ref": ref, "status": status, "evidence_type": bounded_line(evidence_type, 80), "note": bounded_line(note, 300), "verified_head": verified_head or None, "dependency_digests": dependency_digests}
     if not dependency_digests:
         row["verified_state"] = verified_state or None
     if plan_id:
@@ -602,10 +605,20 @@ def bind(repo: Path, criterion_id: str, ref: str, status: str, *, evidence_type:
     return row
 
 
-def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str, resolved: Collection[str] = (), worktree_state: str = "") -> Dict[str, Any]:
+def _evidence_item(row: Mapping[str, Any], repo: Path, *, support: str, head: str, resolved: Collection[str] = (), worktree_state: str = "", criterion_digest: str = "") -> Dict[str, Any]:
     status = (str(row.get("status", "inconclusive")) if support == "explicit-binding"
               else outcome(row) or str(row.get("status", "inconclusive")))
     stale = _stale(row, repo, head)
+    if support == "explicit-binding":
+        stored_digest = row.get("criterion_digest")
+        if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                   for value in (stored_digest, criterion_digest)):
+            # Legacy bindings remain readable, but an id alone cannot attest
+            # to the current statement. Never invent a digest on their behalf.
+            if status == "verified":
+                status = "inconclusive"
+        else:
+            stale = stale or stored_digest != criterion_digest
     dependencies = row.get("dependency_digests", row.get("dependencies"))
     if support == "explicit-binding" and not (isinstance(dependencies, dict) and dependencies):
         stored_state = row.get("verified_state")
@@ -795,9 +808,10 @@ def build_coverage(repo: Path, base: Optional[Mapping[str, Any]] = None, *, use_
                 continue
         merged = dict(row_by_ref.get(str(binding.get("evidence_ref", "")), {}))
         merged.update(binding)
-        # A legacy binding cannot borrow a fingerprint from its source row.
+        # A legacy binding cannot borrow fingerprints from its source row.
         merged["verified_state"] = binding.get("verified_state")
-        by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head, resolved=resolved, worktree_state=worktree_state))
+        merged["criterion_digest"] = binding.get("criterion_digest")
+        by_criterion[criterion_id].append(_evidence_item(merged, repo, support="explicit-binding", head=head, resolved=resolved, worktree_state=worktree_state, criterion_digest=criterion.get("criterion_digest", "")))
     task = base_envelope.get("task", {})
     if task.get("verification") == "fresh":
         task_ref = "task-verification:%s" % task.get("task_id", "")

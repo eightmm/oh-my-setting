@@ -170,8 +170,15 @@ oms runtime evidence bind \
 
 The projection reads existing artifact, plan-progress, lifecycle, and task
 verification receipts. A binding is append-only and can reference only an
-existing receipt. Dependency file digests and the verified Git head turn old
-passes into `stale` evidence after relevant changes.
+existing receipt. Dependency file digests, or a worktree fingerprint when no
+dependencies are declared, turn old passes into `stale` evidence after relevant
+changes. Explicit bindings also capture the full normalized criterion statement,
+before display truncation. Changing that statement while retaining its ID makes
+the binding stale, including for task and plan-task criteria. The criterion
+digest does not include unrelated contract prose. Legacy bindings without a
+valid criterion digest remain readable, but their otherwise fresh `verified`
+claims project as `inconclusive` until rebound; reads never upgrade or rewrite
+old receipts.
 
 Schema-3 plans carry an immutable `plan_id`. Automatic task admissions,
 explicit `covers`, and bindings for a plan task count only when that lineage

@@ -364,6 +364,18 @@ class RuntimeFixture(RuntimeFixtureBase):
         statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
         self.assertEqual(statuses['project-safe'], 'verified')
 
+        # Scoped evidence follows its criterion, not every PROJECT.md edit.
+        project = self.repo / 'PROJECT.md'
+        original = project.read_text(encoding='utf-8')
+        project.write_text(original.replace('Ship the runtime core.', 'Ship the tested runtime core.').replace(
+            '- [id:project-safe] Portable state', '- [x] [id:project-safe] Portable   state'), encoding='utf-8')
+        statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+        self.assertEqual(statuses['project-safe'], 'verified')
+        project.write_text(original.replace('Portable state carries no authority.', 'Portable state carries no write authority.'), encoding='utf-8')
+        statuses = {item['id']: item['status'] for item in evidence.build_coverage(self.repo)['criteria']}
+        self.assertEqual(statuses['project-safe'], 'stale')
+        project.write_text(original, encoding='utf-8')
+
         # An unscoped attestation covers the worktree too, including changes
         # that do not advance HEAD. Its own ignored receipt must not age it.
         default = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
@@ -431,6 +443,112 @@ class RuntimeFixture(RuntimeFixtureBase):
                     with self.assertRaises(CoreError):
                         evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified')
                 self.assertEqual(bindings.read_bytes(), before)
+
+    def test_explicit_binding_tracks_full_criterion_statements(self) -> None:
+        # None of these edits changes an id or a declared file dependency.
+        # Task and plan files are ignored, so even an unscoped worktree
+        # fingerprint cannot detect changes to their criterion statements.
+        project = self.repo / 'PROJECT.md'
+        task = self.repo / '.oms' / 'task' / 'current.md'
+        plan = self.repo / '.oms' / 'plan' / 'tasks.json'
+        originals = {path: path.read_bytes() for path in (project, task, plan)}
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        cases = ((project, 'project-safe', 'Portable state carries no authority.'),
+                 (task, 'task-tests', 'Focused tests pass.'),
+                 (plan, 'plan-task-t1', 'Implement core'))
+        for path, criterion_id, statement in cases:
+            for dependencies in (['scripts/sample.py'], []):
+                with self.subTest(source=path.name, dependencies=dependencies):
+                    for original_path, contents in originals.items():
+                        original_path.write_bytes(contents)
+                    if bindings.exists():
+                        bindings.unlink()
+                    long_statement = 'The declared behavior stays compatible. ' * 16 + statement
+                    path.write_text(path.read_text(encoding='utf-8').replace(statement, long_statement), encoding='utf-8')
+                    bound = evidence.bind(self.repo, criterion_id, 'evt-api', 'verified', dependencies=dependencies)
+                    unchanged = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == criterion_id)
+                    self.assertEqual(unchanged['status'], 'verified')
+                    self.assertEqual(unchanged['evidence'][-1]['binding_id'], bound['binding_id'])
+
+                    # The changed tail is outside the public display limit.
+                    path.write_text(path.read_text(encoding='utf-8').replace(statement, statement + ' Additional checks pass.'), encoding='utf-8')
+                    changed = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == criterion_id)
+                    self.assertEqual(changed['text'], unchanged['text'])
+                    self.assertEqual(changed['status'], 'stale')
+                    self.assertTrue(changed['evidence'][-1]['stale'])
+
+                    evidence.bind(self.repo, criterion_id, 'evt-api', 'verified', dependencies=dependencies)
+                    rebound = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == criterion_id)
+                    self.assertEqual(rebound['status'], 'verified')
+
+    def test_explicit_binding_preserves_statement_punctuation(self) -> None:
+        project = self.repo / 'PROJECT.md'
+        task = self.repo / '.oms' / 'task' / 'current.md'
+        plan = self.repo / '.oms' / 'plan' / 'tasks.json'
+        originals = {path: path.read_bytes() for path in (project, task, plan)}
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        cases = ((project, 'project-safe', 'Portable state carries no authority.'),
+                 (task, 'task-tests', 'Focused tests pass.'),
+                 (plan, 'plan-task-t1', 'Implement core'),
+                 # Preserve the implicit IDs emitted before lossless parsing.
+                 (project, 'criterion-573a079a2f04', '[id:project-safe] Portable state carries no authority.'),
+                 (task, 'criterion-b3f1e4b09c26', '[id:task-tests] Focused tests pass.'))
+        for path, criterion_id, statement in cases:
+            edits = (('-1 is rejected.', '1 is rejected.'),) if criterion_id.startswith('criterion-') else (
+                ('-1 is rejected.', '1 is rejected.'),
+                ('--force is rejected.', 'force is rejected.'),
+                ('The literal argument ends in --', 'The literal argument ends in'))
+            for before, after in edits:
+                with self.subTest(source=path.name, statement=before):
+                    for original_path, contents in originals.items():
+                        original_path.write_bytes(contents)
+                    if bindings.exists():
+                        bindings.unlink()
+                    path.write_text(path.read_text(encoding='utf-8').replace(statement, before), encoding='utf-8')
+                    evidence.bind(self.repo, criterion_id, 'evt-api', 'verified', dependencies=['scripts/sample.py'])
+                    unchanged = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == criterion_id)
+                    self.assertEqual(unchanged['status'], 'verified')
+                    self.assertEqual(unchanged['text'], before)
+                    path.write_text(path.read_text(encoding='utf-8').replace(before, after), encoding='utf-8')
+                    changed = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == criterion_id)
+                    self.assertEqual(changed['status'], 'stale')
+
+    def test_explicit_binding_requires_its_own_criterion_digest(self) -> None:
+        bound = evidence.bind(self.repo, 'project-safe', 'evt-api', 'verified', dependencies=['scripts/sample.py'])
+        bindings = self.repo / '.oms' / 'evidence' / 'bindings.jsonl'
+        index = self.repo / '.oms' / 'artifacts' / 'index.jsonl'
+        source = read_jsonl(index)[0]
+        # A binding cannot borrow new metadata from the referenced receipt.
+        source['criterion_digest'] = bound.get('criterion_digest')
+        index.write_text(json.dumps(source) + '\n', encoding='utf-8')
+        legacy = dict(bound)
+        legacy.pop('criterion_digest', None)
+        invalid_metadata = ({}, {'criterion_digest': None}, {'criterion_digest': ''},
+                            {'criterion_digest': 'unknown'}, {'criterion_digest': 7})
+        for status in ('verified', 'failed', 'inconclusive', 'skipped_with_reason'):
+            for metadata in invalid_metadata:
+                with self.subTest(status=status, metadata=metadata):
+                    bindings.write_text(json.dumps(dict(legacy, status=status, **metadata)) + '\n', encoding='utf-8')
+                    before = bindings.read_bytes()
+                    projected = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == 'project-safe')
+                    self.assertEqual(projected['status'], 'inconclusive' if status == 'verified' else status)
+                    self.assertEqual(bindings.read_bytes(), before)
+
+        bindings.write_text(json.dumps(bound) + '\n', encoding='utf-8')
+        old_envelope = projection.build_base_envelope(self.repo)
+        for criterion in old_envelope['criteria']:
+            criterion.pop('criterion_digest', None)
+        projected = next(item for item in evidence.build_coverage(self.repo, old_envelope)['criteria'] if item['id'] == 'project-safe')
+        self.assertEqual(projected['status'], 'inconclusive')
+
+        project = self.repo / 'PROJECT.md'
+        project.write_text(project.read_text(encoding='utf-8').replace(
+            'Portable state carries no authority.', 'Portable state carries no write authority.'), encoding='utf-8')
+        for status in ('verified', 'failed', 'inconclusive', 'skipped_with_reason'):
+            with self.subTest(changed_statement_status=status):
+                bindings.write_text(json.dumps(dict(bound, status=status)) + '\n', encoding='utf-8')
+                projected = next(item for item in evidence.build_coverage(self.repo)['criteria'] if item['id'] == 'project-safe')
+                self.assertEqual(projected['status'], 'stale')
 
     @unittest.skipUnless(hasattr(os, 'getuid'), 'the row cache is disabled without POSIX ownership')
     def test_coverage_row_cache_matches_full_read_across_append_rewrite_and_torn_tail(self) -> None:

@@ -10,6 +10,15 @@ from .common import MAX_JSONL_ROWS, CoreError, bounded_line, canonical_json, git
 from .failures import classify
 from .markdown import bullet_items, first_nonempty, normalized_line, parse_scope, section_text, section_text_exact, sections, stable_criterion_id, strip_criterion_marker
 
+def _criterion_statement(raw: str) -> str:
+    # List syntax is already removed by bullet_items. Hyphens here belong
+    # to the statement, including numeric signs and command-line flags.
+    text = re.sub(r'^\s*\[[ xX]\]\s*', '', raw)
+    return strip_criterion_marker(' '.join(text.split()))
+
+def _criterion_digest(source: str, text: str) -> str:
+    return sha256_text(source + '\0' + text)
+
 def _project_file(repo: Path) -> Dict[str, Any]:
     path = repo / 'PROJECT.md'
     if not path.is_file() or path.is_symlink():
@@ -22,7 +31,7 @@ def _project_file(repo: Path) -> Dict[str, Any]:
     constraints_text = section_text(body, ['constraint', 'scope', '제약', '범위'])
     scope_lines = bullet_items(constraints_text) or constraints_text.splitlines()
     status = metadata.get('status', '') or first_nonempty(section_text(body, ['status', '상태']), 80)
-    return {'present': True, 'source': source_descriptor(path, repo), 'metadata': metadata, 'status': status, 'goal': goal, 'criteria': bullet_items(criteria_text), 'constraints': [normalized_line(item) for item in scope_lines if normalized_line(item)], 'scope': parse_scope(scope_lines)}
+    return {'present': True, 'source': source_descriptor(path, repo), 'metadata': metadata, 'status': status, 'goal': goal, 'criteria': bullet_items(criteria_text, preserve_text=True), 'constraints': [normalized_line(item) for item in scope_lines if normalized_line(item)], 'scope': parse_scope(scope_lines)}
 
 def _task_status(repo: Path, payload: Any = None) -> Dict[str, Any]:
     # The packet's status verb belongs to the installed harness, not to the
@@ -66,7 +75,7 @@ def _task_packet(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
     verification = status.get('verification') if isinstance(status, dict) else None
     if verification not in ('fresh', 'stale', 'none'):
         verification = 'unknown'
-    return {'present': True, 'source': source_descriptor(path, repo), 'metadata': metadata, 'task_id': bounded_line(status.get('task_id', metadata.get('task_id', '')), 160), 'status': bounded_line(status.get('status', metadata.get('status', 'active')), 40).lower(), 'goal': goal, 'constraints': [normalized_line(item) for item in constraint_lines if normalized_line(item)], 'criteria': bullet_items(criteria_text), 'verify_present': bool(verify_text.strip()), 'verify_digest': sha256_text(verify_text.strip()) if verify_text.strip() else '', 'verification': verification, 'state': first_nonempty(section_text_exact(body, ['current state', '현재 상태']), 1000), 'next': first_nonempty(section_text_exact(body, ['next step', '다음 단계']), 1000), 'scope': parse_scope(constraint_lines), 'budget': budget, 'stale': bool(status.get('stale')) if isinstance(status, dict) else False}
+    return {'present': True, 'source': source_descriptor(path, repo), 'metadata': metadata, 'task_id': bounded_line(status.get('task_id', metadata.get('task_id', '')), 160), 'status': bounded_line(status.get('status', metadata.get('status', 'active')), 40).lower(), 'goal': goal, 'constraints': [normalized_line(item) for item in constraint_lines if normalized_line(item)], 'criteria': bullet_items(criteria_text, preserve_text=True), 'verify_present': bool(verify_text.strip()), 'verify_digest': sha256_text(verify_text.strip()) if verify_text.strip() else '', 'verification': verification, 'state': first_nonempty(section_text_exact(body, ['current state', '현재 상태']), 1000), 'next': first_nonempty(section_text_exact(body, ['next step', '다음 단계']), 1000), 'scope': parse_scope(constraint_lines), 'budget': budget, 'stale': bool(status.get('stale')) if isinstance(status, dict) else False}
 
 def _task_list(raw: Any) -> List[Dict[str, Any]]:
     if isinstance(raw, dict):
@@ -152,7 +161,9 @@ def _plan_state(repo: Path, status_snapshot: Any = None) -> Dict[str, Any]:
         forbidden = parse_path_list(row.get('forbidden', row.get('forbidden_paths', [])))
         all_allowed.extend(allowed); all_forbidden.extend(forbidden)
         verify = str(row.get('verify', '') or '')
-        tasks.append({'id': bounded_line(row.get('id', ''), 160), 'title': bounded_line(row.get('title', row.get('goal', '')), 300), 'state': bounded_line(row.get('state', 'ready'), 40).lower(), 'depends': [bounded_line(item, 160) for item in row.get('depends', row.get('dependencies', []))] if isinstance(row.get('depends', row.get('dependencies', [])), list) else [], 'scope': {'allowed': allowed, 'forbidden': forbidden}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'provider': bounded_line(row.get('provider', ''), 80), 'lease_id_present': bool(row.get('lease_id')), 'artifact_present': bool(row.get('artifact')), 'patch_present': bool(row.get('patch'))})
+        title = str(row.get('title', row.get('goal', '')) or '')
+        statement = _criterion_statement(title) or ('Plan task %s is admitted.' % bounded_line(row.get('id', ''), 160))
+        tasks.append({'id': bounded_line(row.get('id', ''), 160), 'title': bounded_line(title, 300), 'criterion_digest': _criterion_digest('plan-task', statement), 'state': bounded_line(row.get('state', 'ready'), 40).lower(), 'depends': [bounded_line(item, 160) for item in row.get('depends', row.get('dependencies', []))] if isinstance(row.get('depends', row.get('dependencies', [])), list) else [], 'scope': {'allowed': allowed, 'forbidden': forbidden}, 'verify_present': bool(verify), 'verify_digest': sha256_text(verify) if verify else '', 'provider': bounded_line(row.get('provider', ''), 80), 'lease_id_present': bool(row.get('lease_id')), 'artifact_present': bool(row.get('artifact')), 'patch_present': bool(row.get('patch'))})
     acceptance = str(raw.get('accept', raw.get('acceptance', '')) or '')
     status = _plan_status(repo, status_snapshot)
     count = len(tasks)
@@ -252,16 +263,17 @@ def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping
     for source, values, weight in (('project', project.get('criteria', []), 2), ('task', task.get('criteria', []), 2)):
         if not isinstance(values, list): continue
         for raw in values:
-            text = strip_criterion_marker(normalized_line(str(raw)))
+            text = _criterion_statement(str(raw))
             if not text: continue
-            criterion_id = stable_criterion_id(source, str(raw))
+            # Keep legacy IDs separate from the lossless statement used as proof.
+            criterion_id = stable_criterion_id(source, normalized_line(str(raw)))
             if not _claim_criterion_id(seen, criterion_id, text.lower()): continue
-            item = {'id': criterion_id, 'text': bounded_line(text, 500), 'source': source, 'weight': weight}
+            item = {'id': criterion_id, 'text': bounded_line(text, 500), 'criterion_digest': _criterion_digest(source, text), 'source': source, 'weight': weight}
             if source == 'task':
                 item['active_task_id'] = bounded_line(task.get('task_id', ''), 160)
             result.append(item)
     if plan.get('acceptance_present'):
-        digest = str(plan.get('acceptance_digest', '')); result.append({'id': 'criterion-plan-acceptance-' + digest[:10], 'text': 'The plan-level acceptance command passes on the final tree.', 'source': 'plan', 'weight': 3, 'command_digest': digest})
+        digest = str(plan.get('acceptance_digest', '')); result.append({'id': 'criterion-plan-acceptance-' + digest[:10], 'text': 'The plan-level acceptance command passes on the final tree.', 'criterion_digest': sha256_text('plan\0' + digest), 'source': 'plan', 'weight': 3, 'command_digest': digest})
     # Every plan task is a criterion of its own: an explicit [id:...] in the
     # title wins, otherwise the task id names it deterministically. Admission
     # receipts for the task are the evidence (see evidence.build_coverage) —
@@ -276,7 +288,7 @@ def _criteria(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping
         criterion_id = explicit.group(1) if explicit else 'plan-task-' + task_id
         if not _claim_criterion_id(seen, criterion_id, task_id.lower()):
             continue
-        result.append({'id': criterion_id, 'text': bounded_line(strip_criterion_marker(title) or ('Plan task %s is admitted.' % task_id), 500), 'source': 'plan-task', 'weight': 1, 'plan_task_id': task_id, 'plan_id': str(plan.get('plan_id', ''))})
+        result.append({'id': criterion_id, 'text': bounded_line(strip_criterion_marker(title) or ('Plan task %s is admitted.' % task_id), 500), 'criterion_digest': row.get('criterion_digest', ''), 'source': 'plan-task', 'weight': 1, 'plan_task_id': task_id, 'plan_id': str(plan.get('plan_id', ''))})
     return result
 
 def _objective(project: Mapping[str, Any], task: Mapping[str, Any], plan: Mapping[str, Any]) -> Dict[str, str]:

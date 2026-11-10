@@ -68,22 +68,24 @@ def section_text_exact(mapping: Mapping[str, Sequence[str]], names: Sequence[str
     return "\n".join(body).strip()
 
 
-def bullet_items(text: str) -> List[str]:
+def bullet_items(text: str, *, preserve_text: bool = False) -> List[str]:
+    """Extract list bodies; content fingerprints can defer lossy normalization."""
     result: List[str] = []
     pending = ""
+    checkbox = "" if preserve_text else r"(?:\[[ xX]\]\s*)?"
     for raw in text.splitlines():
-        match = re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(?:\[[ xX]\]\s*)?(.*)$", raw)
+        match = re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)" + checkbox + r"(.*)$", raw)
         if match:
             if pending:
-                result.append(normalized_line(pending))
+                result.append(pending if preserve_text else normalized_line(pending))
             pending = match.group(1).strip()
         elif pending and raw.startswith(("  ", "\t")):
             pending += " " + raw.strip()
         elif pending:
-            result.append(normalized_line(pending))
+            result.append(pending if preserve_text else normalized_line(pending))
             pending = ""
     if pending:
-        result.append(normalized_line(pending))
+        result.append(pending if preserve_text else normalized_line(pending))
     return [item for item in result if item]
 
 
