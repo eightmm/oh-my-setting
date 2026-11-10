@@ -1089,6 +1089,15 @@ same `allowed` paths. It shows how much of a plan is sequential before it is
 approved; neither the proposal nor the plan stores it, and `plan-run` still
 claims one ready task at a time.
 
+Under each proposed task the listing prints one `size:` line: the tracked files
+its `allowed` paths cover (`git ls-files`), the directories they sit in and how
+many look like tests. Past 40 files or 8 directories, or for a repository-wide
+scope, the line adds `large for one task (advisory …)`. It is a count, not a
+score: no model judges complexity, files the task will create are not counted,
+and nothing is refused. To split a task that reads as too large, ask for a new
+proposal with narrower scopes (`--allowed`, `--id-prefix`) before applying, or
+`oms agent-plan cancel` the task and apply a replacement proposal.
+
 
 ### Discover work and review proposals
 
