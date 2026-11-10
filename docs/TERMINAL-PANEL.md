@@ -2055,7 +2055,12 @@ The reader retains answer lines and reflows them when resized; Up/Down moves one
 and Home/End goes to the first/last page. Page keys and the wheel expose the complete
 retained preview. The footer reads `rows a-b/N` followed by `all`, the percentage
 read so far, or `end`; paging stops at the last full page. Wrapped list items hang
-under their text and keep their nesting. The registered result and source artifacts retain their full bounded
+under their text and keep their nesting. After a resize the reader keeps its place by
+the text above the first shown row, also when the view has no section headings. Page
+keys move by the visible body rows, so a notice row never makes one line vanish. A
+Summary excerpt cut at its line limit ends with `[... N more lines · r opens Raw]`.
+The Messages kind column shows a capital (`Q`, `N`, `H`...) when the board is too
+narrow for the word, and the footer offers `Enter Chat` only with a selection. The registered result and source artifacts retain their full bounded
 content. The menu's numbered list shows titles, outcome, verifier and app status before
 loading any normalized answers. Select a number to open that task's detail and return to
 the list afterward. Browsing performs read-only queries; it does not dispatch, accept a

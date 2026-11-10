@@ -102,6 +102,16 @@ def event_tail(repo, attempt_id, maximum=EVENT_TAIL_BYTES):
     return rows, bool(not started and (start or rows_truncated))
 
 
+def cut_wrapped(wrap, text, width, limit):
+    """`wrap(text, width, limit)` rows, or the first `limit` rows plus a note of how many remain and
+    which existing key (r, the Raw view) shows the whole answer."""
+    cap = 20000  # bounds the wrap work; past it the count is a lower bound
+    rows = wrap(text, width, 10 ** 6, max_chars=min(max(1, len(text)), cap))
+    if len(rows) <= limit and len(text) <= cap:
+        return rows
+    return rows[:limit] + ["[... %d%s more lines · r opens Raw]" % (len(rows) - limit, "+" if len(text) > cap else "")]
+
+
 def render_view(view, report, call, events=(), patch=None, width=100, timeline_truncated=False,
                 patch_error=False, heading=None, color=None, transcript=()):
     """Render one bounded, read-only view for a recorded call."""
@@ -190,12 +200,12 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                 sections = re.split(r"(?m)^\s*#{0,3}\s*(?:What changed|Answer|Recommendation|Findings|Remaining uncertainty)\s*:?\s*$",
                                     str(answer), flags=re.I)
                 excerpt = next((part.strip() for part in sections if part.strip()), "")
-                lines.extend(wrapped(readable(excerpt, paragraphs=True), max(8, width), 12))
+                lines.extend(cut_wrapped(wrapped, readable(excerpt, paragraphs=True), max(8, width), 12))
                 limit = re.search(r"(?ims)^\s*#{0,3}\s*Remaining uncertainty\s*:?\s*$\n(.*?)(?=^\s*#{1,3}\s|\Z)",
                                   str(answer))
                 if limit:
                     lines.extend(("", "Author-stated limits"))
-                    lines.extend(wrapped(readable(limit.group(1), paragraphs=True), max(8, width), 8))
+                    lines.extend(cut_wrapped(wrapped, readable(limit.group(1), paragraphs=True), max(8, width), 8))
             else:
                 lines.append("No result recorded yet")
             changes = call.get("changes") or {}
@@ -429,6 +439,23 @@ def position_label(offset, body_height, total):
     return "rows %d-%d/%d %s" % (offset + 1, last, total, tail)
 
 
+def resume_offset(old_lines, offset, new_lines):
+    """Where `new_lines` (the same text wrapped again) should start so the reader keeps its place.
+
+    The anchor is the count of visible non-space characters above the first shown row, which
+    survives re-wrapping where a row number does not; a row that began mid-line resumes in the
+    row that now holds that character."""
+    def visible(line):
+        return len(re.sub(r"\s+", "", re.sub(r"\033\[[0-9;]*m", "", line)))
+    before = sum(visible(line) for line in old_lines[:max(0, offset)])
+    seen = 0
+    for index, line in enumerate(new_lines):
+        seen += visible(line)
+        if seen > before:
+            return index
+    return len(new_lines)
+
+
 def page(render, board, on_refresh=None):
     """Scroll `render(width)` until q, Esc or the end of input, or until the board pane is gone (a reader never
     outlives its board); focus then returns to the board."""
@@ -439,6 +466,7 @@ def page(render, board, on_refresh=None):
         "[" + name + "]" if name == view else name for name in READER_VIEWS)
     updated, notice, query, matches, full_lines, searching = None, "", None, [], None, False
     artifact, source_time, zoomed, trusted_style = None, None, False, False
+    laid_out, previous = None, []
 
     def plain(value):
         return re.sub(r"\033\[[0-9;]*m", "", value)
@@ -486,6 +514,7 @@ def page(render, board, on_refresh=None):
                             points = [i for i in sections() if i <= offset]
                             anchor = plain(lines[points[-1]]).strip() if points else None
                             within = offset - points[-1] if points else 0
+                            previous = lines
                             if content and (plain(content[0]).startswith("Tab: [") or
                                     plain(content[0]).startswith(("[Summary]  ", "Summary  ")) and
                                     "Events" in plain(content[0]) and "Diff" in plain(content[0])):
@@ -500,6 +529,9 @@ def page(render, board, on_refresh=None):
                                 matching = next((i for i, line in enumerate(lines) if plain(line).strip() == anchor), None)
                                 if matching is not None:
                                     offset = matching + within
+                            elif not anchor and laid_out not in (None, width) and next_artifact == artifact:
+                                offset = resume_offset(previous, offset, lines)  # no headings: keep the place by text
+                            laid_out = width
                             artifact, source_time, trusted_style = next_artifact, next_time, next_style
                             matches = find_matches()
                         drawn = None
@@ -541,6 +573,7 @@ def page(render, board, on_refresh=None):
                     sys.stdout.write("\033[H\033[2J" + "\n".join(fit_line(line, size[0]) for line in frame[:size[1]]))
                     sys.stdout.flush()
                     drawn = (offset, size, len(lines), notice, view, query)
+                page_rows = max(1, body_height)  # a notice row takes one body row; paging must not skip it
                 for event in inputs.wait(1):
                     kind = event[0]
                     if searching:
@@ -595,8 +628,8 @@ def page(render, board, on_refresh=None):
                             zoomed = not zoomed
                             drawn = None
                     offset = (0 if kind == "home" else len(lines) if kind == "end" else offset + (
-                        event[1] if kind == "scroll" else {"up": -1, "down": 1, "pageup": -height, "pagedown": height,
-                                                           " ": height}.get(kind, 0)))
+                        event[1] if kind == "scroll" else {"up": -1, "down": 1, "pageup": -page_rows, "pagedown": page_rows,
+                                                           " ": page_rows}.get(kind, 0)))
                 if time.monotonic() >= alive:
                     if tmux("display-message", "-p", "-t", board, "#{pane_id}").stdout.strip() != board:
                         return 0

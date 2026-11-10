@@ -1059,6 +1059,16 @@ aligned_message_lines = [line for line in aligned_message_text.splitlines() if "
 assert len(aligned_message_lines) == 2, aligned_message_text
 aligned_message_columns = [display_width(line[:line.index("ALIGN-")]) for line in aligned_message_lines]
 assert aligned_message_columns == [40, 40], (aligned_message_columns, aligned_message_lines)
+# Narrow boards tag the kind with its capital instead of cutting it to `no…`; wide ones keep the word.
+narrow_kind_rows = [line for line in board("messages", 40, 30)[1].splitlines() if " · line 2" in line]
+assert narrow_kind_rows and all(re.search(r"\d\d:\d\d [●○] [NQ] ", line) for line in narrow_kind_rows), narrow_kind_rows
+assert "no…" not in board("messages", 40, 30)[1] and " question " in board("messages", 60, 30)[1]
+# Nothing selected: Enter has nothing to open, so the footer does not offer Chat.
+for pick, offered in ((None, False), (("chat", "m2"), True)):
+    for height in (12, 30):
+        footer_row = render(msg_report, "codex", 60, height, view="graph", navigation={"selected": pick, "tab": "detail"},
+                            main_attempt="a2").splitlines()[-1]
+        assert ("Enter Chat" in footer_row) == offered, (pick, height, footer_row)
 def thread(count, text=None):
     return [{"id": "t%d" % i, "sender": "peer", "recipient": "main", "message_kind": "note", "pending_for": [],
              "ts": "2026-10-12T19:00:00Z", "text": text if text and i == 2 else "body %d" % i} for i in range(count)]
