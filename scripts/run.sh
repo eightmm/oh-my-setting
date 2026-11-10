@@ -44,6 +44,7 @@ Usage: run.sh new [--note TEXT]
        run.sh timeline [--since ISO8601|--today] [--limit N] [--agent NAME] [--tool NAME] [--json]
        run.sh validate [--dir DIR]
        run.sh capsule [run-capsule args...]
+       run.sh checkpoints [DIR ...] [--max N] [--strict] [--json]
 
 The run spine: a canonical run_id and an append-only join index
 (.oms/runs/index.jsonl) over the independent run tools.
@@ -642,6 +643,7 @@ case "${1:-}" in
   timeline) shift; cmd_timeline "$@" ;;
   validate) shift; cmd_validate "$@" ;;
   capsule) shift; exec "$ROOT/scripts/run-capsule.sh" "$@" ;;
+  checkpoints) shift; exec "$ROOT/scripts/run-checkpoints.sh" "$@" ;;
   -h|--help) usage ;;
   "") usage >&2; exit 2 ;;
   *) fail "unknown subcommand: $1" ;;
