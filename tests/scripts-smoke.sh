@@ -33590,6 +33590,112 @@ assert rows[0].get("count") == 1, rows[0]
   fi
 }
 
+test_fail_ledger_list_stalls() {
+  local project="$TMP/fail-ledger-stalls"
+  local out ledger progress
+
+  make_committed_repo "$project"
+  ledger="$project/.oms/failures.jsonl"
+  progress="$project/.oms/plan/progress.jsonl"
+  mkdir -p "$project/.oms/plan"
+  stall_fixture() {  # KIND SPEC... ; rows are "A" or "B" (ledger) / "sha:reason" (progress)
+    local kind="$1"; shift
+    STALL_KIND="$kind" STALL_ROWS="$*" python3 -c '
+import json, os, time
+ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+n = 0
+for item in os.environ["STALL_ROWS"].split():
+    n += 1
+    if os.environ["STALL_KIND"] == "ledger":
+        # Cosmetic noise per row: pid, time of day and a temp path differ.
+        cmd = {"A": "pytest tests/a.py --basetemp /tmp/run%d/x" % (1000 + n),
+               "B": "make lint"}[item[0]]
+        if item.endswith("+"):
+            print(json.dumps({"schema": 2, "event": "resolved", "ts": ts, "fingerprint": item[0]}))
+            continue
+        print(json.dumps({"schema": 2, "event": "fail", "ts": ts, "fingerprint": item[0],
+                          "kind": "cmd", "cmd": cmd, "exit": 1,
+                          "summary": "boom pid=%d at 12:00:%02d" % (4000 + n, n % 60)}))
+    else:
+        sha, reason = item.split(":")
+        print(json.dumps({"schema": 1, "kind": "terminal", "ts": ts, "run_id": "r%d" % n,
+                          "cycle": 1, "status": "park", "reason": reason, "base_sha": sha}))
+'
+  }
+
+  # No ledger at all: advisory, exit 0, says so.
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" ||
+    fail "--stalls must exit 0 without a ledger"
+  contains "$out" 'stalls: none' || fail "empty ledger should report no stalls: $out"
+
+  # Same failure 3x despite differing pid, time and temp path: error-repeat.
+  stall_fixture ledger A A A > "$ledger"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" || fail "--stalls failed"
+  contains "$out" 'stall: error-repeat x3' || fail "three identical failures: $out"
+  contains "$out" 'ask the human' || fail "finding must name a next step: $out"
+  stall_fixture ledger A A > "$ledger"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" || fail "--stalls failed"
+  contains "$out" 'stalls: none' || fail "two failures are not a stall: $out"
+
+  # A/B alternation of failures, six long; five is not enough.
+  stall_fixture ledger A B A B A B > "$ledger"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" || fail "--stalls failed"
+  contains "$out" 'stall: alternation x6' || fail "A/B alternation: $out"
+  stall_fixture ledger A B A B A > "$ledger"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" || fail "--stalls failed"
+  contains "$out" 'stalls: none' || fail "five alternating events are below the threshold: $out"
+
+  # A pass in the middle breaks the run (progressing sequence).
+  stall_fixture ledger A A A+ A > "$ledger"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" || fail "--stalls failed"
+  contains "$out" 'stalls: none' || fail "a resolve must reset the run: $out"
+
+  # Thresholds come from the environment; 0 turns a rule off.
+  stall_fixture ledger A A > "$ledger"
+  out="$(cd "$project" && OMS_STALL_ERROR_REPEAT=2 "$ROOT/scripts/fail-ledger.sh" list --stalls)" ||
+    fail "--stalls failed"
+  contains "$out" 'stall: error-repeat x2' || fail "OMS_STALL_ERROR_REPEAT=2: $out"
+  stall_fixture ledger A A A > "$ledger"
+  out="$(cd "$project" && OMS_STALL_ERROR_REPEAT=0 "$ROOT/scripts/fail-ledger.sh" list --stalls)" ||
+    fail "--stalls failed"
+  contains "$out" 'stalls: none' || fail "0 must disable the rule: $out"
+
+  # goal-drive runs ending on the same reason at the same HEAD: no new evidence.
+  : > "$ledger"
+  stall_fixture progress abc:stuck abc:stuck abc:stuck > "$progress"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls --json)" || fail "--stalls --json failed"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+f = d["stalls"]
+assert d["schema"] == 1 and len(f) == 1, d
+assert f[0]["rule"] == "no-new-evidence" and f[0]["count"] == 3, f
+' || fail "--stalls --json must name no-new-evidence x3"
+  stall_fixture progress abc:stuck def:stuck abc:stuck > "$progress"
+  out="$(cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls)" || fail "--stalls failed"
+  contains "$out" 'stalls: none' || fail "a moved HEAD is new evidence: $out"
+
+  # Rule (a), same action and same non-error result, has no producer in the
+  # ledger (successes are not recorded); exercise the pure function directly.
+  python3 -I -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("sd", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+ev = lambda r: {"action": "run x", "result": r, "error": False}
+assert [f["rule"] for f in m.detect_stalls([ev("ok")] * 4)] == ["repeat"]
+assert m.detect_stalls([ev("ok")] * 3) == []
+assert m.detect_stalls([ev("ok"), ev("ok"), ev("n"), ev("ok"), ev("ok")]) == []
+' "$ROOT/scripts/lib/stall_detect.py" || fail "pure repeat rule"
+
+  # The surface stays read-only and refuses mixing with listing filters.
+  if ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" list --stalls --limit 3 ) >/dev/null 2>&1; then
+    fail "--stalls must reject --limit"
+  fi
+  if ( cd "$project" && "$ROOT/scripts/fail-ledger.sh" record --stalls --cmd x --exit 1 ) >/dev/null 2>&1; then
+    fail "--stalls is only for list"
+  fi
+}
+
 test_experiment_board_list_json() {
   local project="$TMP/board-json"
   local out
