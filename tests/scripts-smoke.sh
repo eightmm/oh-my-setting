@@ -2838,6 +2838,56 @@ test_project_doctor_checks_subdirectory_loaders() {
   fi
   contains "$out" 'sub: general block differs between AGENTS.md and GEMINI.md' ||
     fail "doctor must report nested GEMINI body conflicts: $out"
+
+  # --budget: what each CLI always loads for this project, read as text. The
+  # home is a fixture so the report sees only what the test planted.
+  local budget="$TMP/doctor-budget" budget_home="$TMP/doctor-budget-home" hop
+  local shared='Always run the focused check before you say a change is done and name the command you ran in the report'
+  mkdir -p "$budget/notes" "$budget_home/.claude" "$budget_home/.codex" "$budget_home/.gemini"
+  printf '# Global\n\n%s.\n' "$shared" > "$budget_home/.claude/CLAUDE.md"
+  cp "$budget_home/.claude/CLAUDE.md" "$budget_home/.codex/AGENTS.md"
+  printf '# Project\n\n- %s.\n\nShort line.\n' "$shared" > "$budget/AGENTS.md"
+  out="$(HOME="$budget_home" CODEX_HOME="$budget_home/.codex" "$ROOT/scripts/project-doctor.sh" --budget --strict "$budget")" && fail "a paragraph loaded twice must fail --budget --strict: $out"
+  contains "$out" 'codex: 2 file(s)' || fail "budget must list the global and project files Codex loads: $out"
+  contains "$out" 'warn: the same 21-word paragraph is loaded from ~/.codex/AGENTS.md and AGENTS.md' ||
+    fail "budget must name a paragraph one provider loads twice, list marker or not: $out"
+  contains "$out" 'antigravity: 1 file(s)' || fail "budget must not invent a global file that is absent: $out"
+  HOME="$budget_home" CODEX_HOME="$budget_home/.codex" "$ROOT/scripts/project-doctor.sh" --budget "$budget" >/dev/null ||
+    fail "budget findings are warnings: without --strict the report exits 0"
+
+  # A CLAUDE.md shadows AGENTS.md for Claude unless it imports it; imports are followed four hops and no further,
+  # and an @path inside a code span or fence is not an import.
+  {
+    printf '# Claude\n\n@notes/h1.md\n\n`@notes/span.md`\n\n'
+    printf '%s\n' '```' '@notes/fence.md' '```'
+  } > "$budget/CLAUDE.md"
+  for hop in 1 2 3 4 5; do printf 'hop %s\n\n@h%s.md\n' "$hop" "$((hop + 1))" > "$budget/notes/h$hop.md"; done
+  printf 'never loaded\n' > "$budget/notes/h6.md"
+  printf 'span\n' > "$budget/notes/span.md"
+  printf 'fence\n' > "$budget/notes/fence.md"
+  out="$(HOME="$budget_home" CODEX_HOME="$budget_home/.codex" OMS_RULES_MAX_LINES=4 "$ROOT/scripts/project-doctor.sh" --budget "$budget")" ||
+    fail "budget should report, not fail: $out"
+  contains "$out" 'warn: AGENTS.md is not read: Claude Code reads AGENTS.md only when no CLAUDE.md is present, and CLAUDE.md is' ||
+    fail "budget must say Claude skips a shadowed AGENTS.md: $out"
+  contains "$out" 'notes/h4.md  (imported by notes/h3.md)' || fail "budget must follow imports four hops: $out"
+  contains "$out" 'warn: notes/h4.md imports notes/h5.md past 4 hops; Claude does not follow it' ||
+    fail "budget must stop at the fourth hop and say so: $out"
+  case "$out" in *'notes/span.md'*|*'notes/fence.md'*|*'l  notes/h5.md'*) fail "code spans, fences and a fifth hop are not loaded: $out" ;; esac
+  contains "$out" 'warn: CLAUDE.md has 9 lines, over the 4-line budget' || fail "budget must apply the line limit: $out"
+  printf '@AGENTS.md\n' > "$budget/CLAUDE.md"
+  out="$(HOME="$budget_home" CODEX_HOME="$budget_home/.codex" "$ROOT/scripts/project-doctor.sh" --budget --json "$budget")" || fail "budget --json should exit 0"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+claude = next(row for row in report["providers"] if row["provider"] == "claude")
+assert report["kind"] == "oms-instruction-budget" and report["schema"] == 1, report
+assert not claude["shadowed"], claude
+assert [f["path"] for f in claude["files"]] == ["~/.claude/CLAUDE.md", "CLAUDE.md", "AGENTS.md"], claude["files"]
+assert all("text" not in f for f in claude["files"]), "file contents must not be in the report"
+' || fail "budget --json must list an imported AGENTS.md as loaded and carry no file text"
+  if "$ROOT/scripts/project-doctor.sh" --json "$budget" >/dev/null 2>&1; then
+    fail "--json without --budget must be refused"
+  fi
 }
 
 test_project_doctor_detects_gemini_body_drift() {

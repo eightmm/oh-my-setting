@@ -504,6 +504,20 @@ Each acceptance criterion is then listed with its current evidence status and th
 tasks that cover it, as `note:` lines: an unproven criterion is unfinished work, not drift.
 Nothing is written and no model is called.
 
+`oms project-doctor --budget [--json] [--strict]` is a separate read-only report of the
+instruction files every session pays for: per provider, the always-loaded rule files for
+a session started in the project (user-level rules, then the chain from the Git top level
+down), each with bytes, words and lines. For Claude Code it follows `@path` imports up
+to four hops, and says when an `AGENTS.md` is not read because a `CLAUDE.md` is present
+and does not import it; both rules come from Claude's memory documentation. Codex's and
+Antigravity's lists are what OMS installs plus their `AGENTS.md`/`GEMINI.md` convention
+and are labelled as not confirmed against the provider's page. A paragraph of twelve or
+more words that one provider loads from two files is named once. Limits are
+`OMS_RULES_MAX_LINES` (200 lines per file) and `OMS_RULES_MAX_TOTAL_BYTES` (32768 per
+provider); these are OMS budgets, not provider limits. Findings are warnings and fail
+only under `--strict`. Files are read as text: nothing runs, no model is called, and
+on-demand skills, hooks and path-scoped rules are not counted.
+
 Council and panel workers need no `PROJECT.md`; autopilot needs a confirmed
 `PROJECT.md`; goal-drive needs an agent-plan with verify commands and a clean tree. `oms
 init` suggests verification from existing repository files (check.sh, pytest, npm, make,
