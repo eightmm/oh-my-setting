@@ -19,6 +19,7 @@ NAME=""
 SCOPE="project"
 ACTION=""
 PROVIDER=""
+SURFACE_JSON=0
 
 usage() {
   cat <<'EOF'
@@ -34,9 +35,12 @@ Options:
   --provider P  claude or codex; required for render.
   --global      Use the global role store instead of the repo; resolve/show
                 fall back only to bundled roles.
+  --json        With surface: print JSON instead of the table.
   -h, --help    Show help.
 
 Commands:
+  surface   Read-only report per bundled role: read_only, tool belt, tool
+            count, MCP on/off (from config/role-contracts.json).
   list      List available role names (repo, global, bundled; deduped).
   show      Print the resolved role file (repo, then global, then bundled).
   path      Print where a role file lives for the chosen scope (may not exist).
@@ -75,7 +79,8 @@ while [ "$#" -gt 0 ]; do
     --global) SCOPE="global"; shift ;;
     -h|--help) usage; exit 0 ;;
     --provider) [ "$#" -ge 2 ] || fail "--provider requires claude or codex"; PROVIDER="$2"; shift 2 ;;
-    list|show|path|resolve|init|render) ACTION="$1"; shift ;;
+    list|show|path|resolve|init|render|surface) ACTION="$1"; shift ;;
+    --json) SURFACE_JSON=1; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
@@ -94,6 +99,14 @@ esac
 if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] &&
    [ "$SCOPE" = global ] && [ "$ACTION" = init ]; then
   fail "a harness child cannot mutate parent-owned host or global state; return the request to the parent agent"
+fi
+
+if [ "$ACTION" = surface ]; then
+  command -v python3 >/dev/null 2>&1 || fail "surface needs python3"
+  if [ "$SURFACE_JSON" = 1 ]; then
+    exec python3 -I "$ROOT/scripts/lib/role_contracts.py" --surface-json
+  fi
+  exec python3 -I "$ROOT/scripts/lib/role_contracts.py" --surface
 fi
 
 proj_dir="$(roles_dir_project "$REPO" 2>/dev/null || true)"

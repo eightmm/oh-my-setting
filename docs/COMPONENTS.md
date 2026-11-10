@@ -949,7 +949,13 @@ subagents remain outside the shell router.
 `config/panel-routing.json`. Nothing enforces it at runtime yet. `python3
 scripts/lib/role_contracts.py` lints it (every role has an entry and vice versa, valid
 enums, read-only roles absent from the panel `WRITERS`) and runs inside the
-role-injection invariant.
+role-injection invariant. The lint also fails when a read-only role resolves to a belt with
+write or spawn tools (Write, Edit, MultiEdit, NotebookEdit, Agent, Task) or when the `--tools`
+belts in `scripts/lib/peer-common.sh` drift from its table; Bash stays in the read belt and is
+bounded by plan mode and the sandbox, not by the belt. `oms agent-role surface [--json]` prints,
+per role, `read_only`, belt, tool count and MCP on/off. Read-only roles resolve to the 4-tool
+belt without MCP (`researcher`: 6 tools); `peer-delegate.sh` defaults to write access, so
+without `--read-only` a read-only role launches with the default surface.
 
 ### Collaboration visibility
 
