@@ -55,11 +55,18 @@ Commands:
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
                  semantic task success.
-  --by KEY       telemetry: group routed operations by day, model, provider
-                 or task and print calls, provider-reported tokens, complete
-                 input/cached/output reports and provider-reported cost per
-                 group. `-` means no call reported the value, `N+?` that only
-                 some did; nothing is priced from tokens. Days are UTC.
+  --by KEY       telemetry: group routed operations by day, model, provider,
+                 task or role and print calls, provider-reported tokens,
+                 complete input/cached/output reports and provider-reported
+                 cost per group. `-` means no call reported the value, `N+?`
+                 that only some did; nothing is priced from tokens. Days are
+                 UTC. `--by role` (recorded on delegate rows; others are
+                 `unknown`) adds cache-read share, delegations whose patch a
+                 later patch-admit/patch-land accepted, tokens per admitted
+                 result and tokens on delegations not admitted, and warns
+                 when a group's share is under OMS_TELEMETRY_CACHE_MIN_PCT
+                 (80) with >= OMS_TELEMETRY_CACHE_MIN_REQUESTS (10) usage
+                 reports. Reported values only: never approval evidence.
   --since WHEN, --until WHEN
                  telemetry: keep only rows whose own time is in the range
                  before applying N. WHEN is YYYY-MM-DD (the whole UTC day) or
@@ -180,10 +187,10 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --by)
-      [ "$#" -ge 2 ] || fail "--by requires day, model, provider or task"
+      [ "$#" -ge 2 ] || fail "--by requires day, model, provider, task or role"
       case "$2" in
-        day|model|provider|task) USAGE_BY="$2" ;;
-        *) fail "--by must be day, model, provider or task" ;;
+        day|model|provider|task|role) USAGE_BY="$2" ;;
+        *) fail "--by must be day, model, provider, task or role" ;;
       esac
       shift 2
       ;;

@@ -16173,8 +16173,63 @@ assert "usage_by" not in r and "matched_rows" not in r["window"], r["window"]
   human="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --since 2026-07-03)"
   contains "$human" 'retained window: 2/6 row(s)' ||
     fail "the summary should honor --since too: $human"
-  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by role >/dev/null 2>&1 ||
-    fail "role is not recorded on index rows and must not be offered as a grouping"
+  # --by role: a delegate row records its role; any other row is `unknown`.
+  # Admission is a later successful patch-admit/patch-land carrying the same
+  # patch digest. Cache share = cache_read / (input + cache_read) as reported,
+  # and a group under the threshold with enough reports is warned about.
+  local roles="$project/roles" dig_a dig_b
+  dig_a="$(printf a | sha256sum | cut -d' ' -f1)"
+  dig_b="$(printf b | sha256sum | cut -d' ' -f1)"
+  mkdir -p "$roles/.oms/artifacts"
+  git -C "$roles" init -q
+  cat > "$roles/.oms/artifacts/index.jsonl" <<EOF
+{"schema":1,"event_id":"r1","ts":"2026-07-01T00:00:01Z","kind":"delegate","provider":"codex","exit":0,"role":"reviewer","tokens":1000,"patch_sha256":"$dig_a","provider_usage":{"input_tokens":100,"cache_read_tokens":300,"output_tokens":10}}
+{"schema":1,"event_id":"r2","ts":"2026-07-01T00:00:02Z","kind":"delegate","provider":"codex","exit":0,"role":"reviewer","tokens":400,"patch_sha256":"$dig_b","provider_usage":{"input_tokens":100,"cache_read_tokens":100,"output_tokens":10}}
+{"schema":1,"event_id":"r3","ts":"2026-07-01T00:00:03Z","kind":"delegate","provider":"claude","exit":1,"role":"builder","tokens":50}
+{"schema":1,"event_id":"r4","ts":"2026-07-01T00:00:04Z","kind":"call","provider":"claude","exit":0,"tokens":20,"provider_usage":{"input_tokens":50,"cache_read_tokens":50,"output_tokens":1,"cache_in_input":true}}
+{"schema":1,"event_id":"r5","ts":"2026-07-01T00:00:05Z","kind":"patch-admit","provider":"local","exit":0,"patch_sha256":"$dig_a"}
+{"schema":1,"event_id":"r6","ts":"2026-07-01T00:00:06Z","kind":"patch-admit","provider":"local","exit":1,"patch_sha256":"$dig_b"}
+EOF
+  by="$(OMS_TELEMETRY_CACHE_MIN_REQUESTS=2 "$ROOT/scripts/artifact-index.sh" --repo "$roles" telemetry --by role)" ||
+    fail "telemetry --by role should run: $by"
+  printf '%s\n' "$by" | grep -Eq '^reviewer +2 +1400 +200 +400 +20 +- +66\.7% +1 +1400 +400$' ||
+    fail "role row: cache 400/600, one admitted, rejected patch's tokens counted: $by"
+  printf '%s\n' "$by" | grep -Eq '^builder +1 +50 +- +- +- +- +- +0 +- +50$' ||
+    fail "a failed delegate with no usage is unadmitted and not priced: $by"
+  printf '%s\n' "$by" | grep -Eq '^unknown +1 +20 +50 +50 +1 +- +100\.0% +0 +- +0$' ||
+    fail "a row without a role is unknown, and cache_in_input is not double counted: $by"
+  contains "$by" 'warning: cache-read share 66.7% is under 80% for role reviewer (2 usage reports)' ||
+    fail "a low-share group with enough reports must be warned about: $by"
+  contains "$by" 'never approval evidence' || fail "role view must say it is not approval evidence: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$roles" telemetry --by role)"
+  ! contains "$by" 'warning:' || fail "under the minimum report count there is no warning: $by"
+  OMS_TELEMETRY_CACHE_MIN_REQUESTS=2 "$ROOT/scripts/artifact-index.sh" --repo "$roles" --json telemetry --by role | python3 -c '
+import json, sys
+block = json.load(sys.stdin)["usage_by"]
+g = {x["group"]: x for x in block["groups"]}
+assert block["by"] == "role" and len(block["warnings"]) == 1 and block["cache_warn"] == {"min_pct": 80, "min_requests": 2}, block
+assert g["reviewer"]["cache_read_share"] == 0.6667 and g["reviewer"]["admitted"] == 1, g
+assert g["reviewer"]["tokens_per_admitted"] == 1400 and g["reviewer"]["not_admitted_tokens"] == 400, g
+assert g["builder"]["not_admitted_results"] == 1 and g["unknown"]["cache_read_share"] == 1.0, g
+' || fail "role JSON should carry share, admission and warnings"
+  # The writer records the role on delegate rows only.
+  local wrote="$project/roles-write"
+  mkdir -p "$wrote"
+  git -C "$wrote" init -q
+  (
+    # shellcheck source=scripts/lib/peer-common.sh
+    . "$ROOT/scripts/lib/peer-common.sh"
+    export OMS_MODEL_ROLE=reviewer
+    ma_append_artifact_index "$wrote" delegate codex 0 "" "" "" "" ""
+    ma_append_artifact_index "$wrote" call codex 0 "" "" "" "" ""
+  ) >/dev/null 2>&1 || fail "role-recording appends should succeed"
+  python3 - "$wrote/.oms/artifacts/index.jsonl" <<'PY' || fail "only delegate rows record the role"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert [r.get("role") for r in rows] == ["reviewer", None], rows
+PY
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by team >/dev/null 2>&1 ||
+    fail "an unknown grouping must be refused"
   ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --since yesterday >/dev/null 2>&1 ||
     fail "an unparseable --since must be refused"
   ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" list --by day >/dev/null 2>&1 ||

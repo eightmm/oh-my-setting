@@ -1063,8 +1063,16 @@ running total is left out of input/cached/output rather than added twice; cost
 is never derived from tokens and groups are not summed. `--since`/`--until` take
 `YYYY-MM-DD` (the whole UTC day) or an ISO-8601 time and apply before `N`; the
 header says how many rows matched and whether `N` cut the oldest off. The index
-is pruned, so this covers retained rows only. Rows record no role, so there is
-no role grouping. `--json` carries the groups under `usage_by`.
+is pruned, so this covers retained rows only. `--json` carries the groups under `usage_by`.
+`--by role` groups by the role a delegate row recorded (new rows only; older and
+non-delegate rows are `unknown`) and adds cache-read share (cache_read / (input +
+cache_read) over complete usage reports; input already containing the cache is
+not added twice), delegations whose patch digest a later successful
+`patch-admit`/`patch-land` row carries, group tokens per admitted result, and
+tokens on delegations not admitted. It warns when a share is under
+`OMS_TELEMETRY_CACHE_MIN_PCT` (80) with at least `OMS_TELEMETRY_CACHE_MIN_REQUESTS`
+(10) usage reports. These are provider-reported values: never approval or
+verification evidence, and nothing is priced from tokens.
 No extra run, timer, model, test omission or automatic delegation is introduced.
 Explicit repeated-failure advice bypasses replay: a different agent contributes
 to that trajectory and its cost, so single-worker evidence is not comparable.
