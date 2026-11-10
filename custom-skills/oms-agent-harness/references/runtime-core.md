@@ -27,6 +27,14 @@ bounded prompt size matter. A nonzero context-debt result means retrieve the
 missing required source before patching. Do not force it onto every interactive
 parent turn.
 
+To see what context cost or whether a saved manifest is still current, use the
+read-only inspector: `oms runtime context-inspect --injections` (bytes OMS hooks
+injected, `--session-hash H` for one session), `--session TRANSCRIPT` (per-tool
+result bytes and repeated reads in one Claude Code JSONL transcript), and
+`MANIFEST --verify-current` (compares current source hashes; not with
+`--compare`). `--format text` prints a readable report. Sizes and hashes only,
+not a judgment of quality.
+
 For a write worker, prefer `oms peer-delegate --context-manifest`: it compiles
 against the detached `HEAD` the worker receives, embeds that exact bundle in
 initial and repair prompts, and records manifest/bundle digests on the artifact

@@ -17,6 +17,13 @@ Run the local scripts for the user; do not send them to external connectors.
    use `--strict-diversity` or `--live-models` only when the task needs those
    checks to become a blocking gate. `--no-model-doctor` is a recovery-only
    escape hatch, not a normal operating mode.
+   Before running `install.sh` or `update.sh`, `install.sh --plan` /
+   `oms update --plan` print what would change and write nothing (steps with no
+   write-free preview are listed as `not-previewed`, not guessed).
+   For CI, `oms ci-status triage [--sha C]` explains a red run read-only (failing
+   jobs, log tail, whether the base is red too); `oms ci-status protection`
+   reports whether CI job `gate` is a required check: exit 2 means unknown, never
+   a pass, and a workflow file alone is not protection.
 3. For legacy links, run `cleanup.sh --dry-run`, inspect its exact scope, then
    use `--apply` when cleanup is authorized. Never delete unrelated plugins,
    caches, regular files, or directories.

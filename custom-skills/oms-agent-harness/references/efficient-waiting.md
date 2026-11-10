@@ -15,7 +15,7 @@ model a result it can act on.
 
 | Waiting on | Do this |
 |---|---|
-| Build, test, script | One blocking call with output sent to a log file; then read a bounded tail or digest, not the stream. |
+| Build, test, script | One blocking call with output sent to a log file; then read a bounded tail or digest, not the stream. `oms output-digest -- CMD` does both: it keeps the whole output in `.oms/artifacts/output-digest/` and prints exit code, failure lines, head, tail and what it left out. It is a reading aid, not verification evidence; verify against the raw file. |
 | Slurm job | `oms job-digest <id> [log] --wait --wait-timeout 540 --max-bytes 16384`. Exit 124 means observation expired; queue state may be unknown. |
 | Native subagent | One long wait. Do not alternate short waits with list or status calls when no new information is expected. |
 | Peer operation | Reuse `oms_peer_result` with the operation ID, `wait_seconds` (0-50, below the host timeout), and the last `cursor` as `after`; unchanged bodies are omitted. Expiry does not restart the peer. |

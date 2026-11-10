@@ -26,7 +26,17 @@ oms agent-memory --repo . recall --text "database migration"
 oms agent-memory --repo . append --agent codex --text "Run the focused check first."
 oms agent-memory --repo . append --source-file src/policy.py --source-line 42 --text "This invariant is enforced here."
 oms agent-memory --repo . pin --agent codex --text "Current migration boundary: v2."
+oms agent-memory --repo . supersede --id EVENT --text "Migration boundary is now v3."
+oms agent-memory --repo . sources
 ```
+
+A wrong or outdated note is corrected with `supersede --id EVENT --text ...` or
+`retire --id EVENT --reason ...`, never edited; `search` and `recall` hide both
+unless `--include-superseded`. Text that must not have been recorded goes
+through `redact` (see Memory write contract). `sources` lists the instruction
+and memory files each provider CLI keeps for this repository (names, sizes,
+counts and times only; nothing is opened or written): use it to see what a
+provider loads before assuming it saw a note.
 
 Use the active task packet for one short-lived handoff. Automatic prompt
 recording is opt-in with `OMS_AUTO_TASK=1`.
@@ -63,7 +73,10 @@ command: use the existing structured fields (`--result`, `--decision`,
 reference the task receipt. Reuse the resume block, inbox or injected daily
 digest first. If past decisions or blockers are missing, read the relevant
 `oms journal show --blockers`, `--today`, `--week` or `--recent N` view;
-do not run every view before planning. For maintenance, use `oms journal status`,
+do not run every view before planning. To find where something was decided or
+tried, `oms journal show --grep TEXT [--kind journal|handoff|thread|dispatch|result] [--limit N]`
+does a bounded, read-only plain-text search of recorded work under `.oms`; it
+finds records, not meaning, so open the hit before relying on it. For maintenance, use `oms journal status`,
 `oms journal rebuild`, or `oms journal sync --force`. Set
 `OMS_WORK_JOURNAL=0` only when a project must opt out. Recurring blockers and
 recorded decisions graduate into shared memory automatically once per local

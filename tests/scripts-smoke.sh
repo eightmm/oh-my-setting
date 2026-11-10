@@ -25054,6 +25054,21 @@ PY
     fail "oms-trace cites consult --all, which the tool no longer documents"
   "$ROOT/scripts/advise.sh" --help 2>&1 | grep -E '^[[:space:]]+--prompt TEXT' > /dev/null ||
     fail "oms-trace cites advise --prompt, which the tool no longer documents"
+
+  # Skills must point at the newer verbs, and each pointer must name a verb the
+  # tool still documents.
+  local harness_refs="$ROOT/custom-skills/oms-agent-harness/references"
+  assert_file_contains "$harness_refs/state-memory.md" 'journal show --grep'
+  assert_file_contains "$harness_refs/efficient-waiting.md" 'oms output-digest'
+  assert_file_contains "$ROOT/custom-skills/oms-trust-boundary/SKILL.md" 'OMS_WORKER_SECRET_GUARD'
+  assert_file_contains "$ROOT/custom-skills/oms-ops/SKILL.md" 'ci-status triage'
+  assert_file_contains "$ROOT/templates/project-skills/oms-dataset-safety/SKILL.md" 'similar compounds'
+  "$ROOT/scripts/output-digest.sh" --help 2>&1 | grep -F -e '--file PATH' > /dev/null ||
+    fail "skills cite output-digest, which the tool no longer documents"
+  "$ROOT/scripts/ci-status.sh" --help 2>&1 | grep -F 'triage [--sha' > /dev/null ||
+    fail "oms-ops cites ci-status triage, which the tool no longer documents"
+  "$ROOT/scripts/data-manifest.sh" --help 2>&1 | grep -F -e '--policy' > /dev/null ||
+    fail "oms-dataset-safety cites data-manifest --policy, which the tool no longer documents"
 }
 
 
