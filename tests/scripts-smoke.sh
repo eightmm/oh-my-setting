@@ -12938,6 +12938,12 @@ assert json.load(sys.stdin)["covers"] == ["REQ-1"]
   mkdir -p "$waved/bin" "$waved/home" "$waved/tests"
   cp "$covered/tests/run.sh" "$waved/tests/run.sh"
   sed 's|- Scope: src/, tests/|- Scope: src/, tests/, docs/|' "$covered/PROJECT.md" > "$waved/PROJECT.md"
+  mkdir -p "$waved/src" "$waved/docs"
+  printf 'core\n' > "$waved/src/core.py"
+  printf 'cli\n' > "$waved/src/cli.py"
+  printf 'usage\n' > "$waved/docs/usage.md"
+  git -C "$waved" add src docs
+  git -C "$waved" commit -q -m "fixture: tracked sources for the size signal"
   oms_smoke_make_fake_provider_stub "$waved/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -12954,6 +12960,34 @@ EOF
   assert_file_contains "$waved/out" "    wave 1: w1, w2"
   assert_file_contains "$waved/out" "    wave 2: w3"
   assert_file_contains "$waved/out" "    wave 3: w4"
+  # Each task also says how much of the repository its scope covers: tracked
+  # files counted with git, never scored and never a gate.
+  assert_file_contains "$waved/out" "    size: 2 tracked file(s) in 1 dir(s), 0 test file(s)"
+  assert_file_contains "$waved/out" "    size: 1 tracked file(s) in 1 dir(s), 0 test file(s)"
+  ! grep -Fq 'large for one task' "$waved/out" || fail "a small scope must not be called large"
+  python3 - "$ROOT/scripts/lib" "$waved" <<'PY' || fail "plan size signal"
+import os, subprocess, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import plan_size
+repo = sys.argv[2]
+os.makedirs(os.path.join(repo, "wide"), exist_ok=True)
+for number in range(plan_size.LARGE_FILES + 1):
+    open(os.path.join(repo, "wide", "f%d.txt" % number), "w").close()
+subprocess.run(["git", "-C", repo, "add", "wide"], check=True)
+wide = plan_size.signal(repo, ["wide/"])
+assert wide["files"] == plan_size.LARGE_FILES + 1 and wide["large"] and not wide["repo_wide"], wide
+assert "large for one task (advisory" in plan_size.line(wide), plan_size.line(wide)
+everything = plan_size.signal(repo, ["."])
+assert everything["repo_wide"] and everything["large"], everything
+assert plan_size.line(everything).startswith("size: repository-wide scope"), plan_size.line(everything)
+fresh = plan_size.signal(repo, ["not-there-yet/"])
+assert fresh["files"] == 0 and not fresh["large"], fresh
+assert plan_size.signal(os.path.join(repo, "no-such-repo"), ["src/"]) is None
+assert plan_size.line(None) == ""
+subprocess.run(["git", "-C", repo, "rm", "-rq", "--cached", "wide"], check=True)
+PY
+  rm -rf "$waved/wide"
   waved_proposal="$(find "$waved/.oms/plan" -name 'proposal-*.json' | sed -n '1p')"
   ! grep -Fq wave "$waved_proposal" || fail "wave numbers are a view; the proposal must not store them"
   waved_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$waved_proposal")"

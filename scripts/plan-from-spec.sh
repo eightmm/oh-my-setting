@@ -1789,7 +1789,7 @@ if [ "$DISCOVER" -eq 1 ]; then
   echo "plan-from-spec: evidence packet: $discovery_evidence (sha256: $packet_digest)"
   echo "plan-from-spec: candidate report: $candidate_report (sha256: $report_digest)"
 fi
-python3 - "$proposal" "$ALLOW_VERIFIER_CHANGE" "$ROOT/scripts/lib" <<'PY'
+python3 - "$proposal" "$ALLOW_VERIFIER_CHANGE" "$ROOT/scripts/lib" "$REPO" <<'PY'
 import json, re, sys
 
 sys.dont_write_bytecode = True
@@ -1816,6 +1816,14 @@ for t in proposed:
         print("    assignment: " + json.dumps(t["assignment"], sort_keys=True))
     if t.get("covers"):
         print("    covers: " + ", ".join(t["covers"]))
+    # How much of the repository the scope covers: counted, never scored, never a gate.
+    try:
+        import plan_size
+        sized = plan_size.line(plan_size.signal(sys.argv[4], t.get("allowed")))
+    except Exception:
+        sized = ""
+    if sized:
+        print("    " + sized)
     # A task whose verify names a file inside its own scope is admittable only
     # while the patch leaves that file alone: patch-admit refuses a patch that
     # rewrites the test judging it, and asks for verifier-change consent the
