@@ -252,6 +252,14 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                 value, rc = record_run(repo, args.id, args.arm, args.seed, _path(repo, args.metrics), command, profile=args.profile, timeout_seconds=args.timeout_seconds, image=args.image, adapter=args.adapter, worktree=_path(repo, args.worktree) if args.worktree else None, allow_existing_metrics=args.allow_existing_metrics, budget_reason=args.reason)
                 emit(value, args.pretty)
                 return rc
+            elif args.experiment_action == 'sweep':
+                from .experiment_sweep import emit_text, plan as plan_sweep
+                value = plan_sweep(load_json_argument(args.sweep))
+                if args.emit:
+                    print(emit_text(value, args.emit))
+                    for note in value['notes']:
+                        print('note: ' + note, file=sys.stderr)
+                    return 0
             elif args.experiment_action == 'summarize':
                 value = summarize_experiment(repo, args.id)
             elif args.experiment_action == 'evaluate':
