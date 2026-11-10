@@ -27562,6 +27562,40 @@ test_agent_role_and_delegate_injection() {
   assert_one_artifact_contains "$empty_project/.oms/artifacts/delegate" 'codex-*.md' \
     'IMPLEMENTATION-WORKER-STRATEGY'
   make_committed_repo "$project"
+  # A bundled read_only role launches with read access unless the caller says otherwise.
+  local access_out access_case
+  access_case() {  # EXPECTED_ACCESS ENV_ASSIGNMENT ROLE [EXTRA_ARGS...]
+    local want="$1" assignment="$2" role="$3"
+    shift 3
+    access_out="$( cd "$project" && env "$assignment" OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+      OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --role "$role" \
+      --artifact-dir "$project/access-arts" --prompt "access $role" "$@" 2>&1 )" ||
+      fail "dry-run --role $role should succeed"
+    case "$access_out" in *"route: codex /"*" / $want"*) ;; *) fail "--role $role should resolve $want access: $access_out" ;; esac
+  }
+  access_case read X=1 reviewer
+  case "$access_out" in *'role reviewer is read_only'*'OMS_DELEGATE_ROLE_WRITE=1'*) ;; *) fail "read default should name the override" ;; esac
+  access_case write X=1 builder
+  case "$access_out" in *'is read_only'*) fail "a writer role should not print the read default" ;; esac
+  access_case read X=1 reviewer --read-only
+  case "$access_out" in *'is read_only'*) fail "explicit --read-only should not print the default note" ;; esac
+  access_case write OMS_DELEGATE_ROLE_WRITE=1 reviewer
+  access_case write X=1 reviewer --apply
+  # A project override with the bundled name keeps today's write default.
+  mkdir -p "$project/.oms/roles"
+  printf '# Role: reviewer\n\nPROJECT-OVERRIDE\n' > "$project/.oms/roles/reviewer.md"
+  access_case write X=1 reviewer
+  rm -f "$project/.oms/roles/reviewer.md"
+  # An unreadable contract must not break dispatch: one warning, write default.
+  local fixture_root="$TMP/role-access-fixture"
+  mkdir -p "$fixture_root"
+  cp -R "$ROOT/scripts" "$ROOT/roles" "$ROOT/config" "$fixture_root/"
+  printf '{not json' > "$fixture_root/config/role-contracts.json"
+  access_out="$( cd "$project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" OH_MY_SETTING_DELEGATE_DRY_RUN=1 \
+    "$fixture_root/scripts/peer-delegate.sh" --to codex --role reviewer \
+    --artifact-dir "$project/access-arts" --prompt "access broken" 2>&1 )" ||
+    fail "an unreadable role contract must not break dispatch: $access_out"
+  case "$access_out" in *'warning: role contract unreadable'*" / write"*) ;; *) fail "unreadable contract should warn and keep write: $access_out" ;; esac
   ( cd "$project" && "$ROOT/scripts/agent-role.sh" --name reviewer init >/dev/null )
   printf '# Role: reviewer\n\nBe a STRICT-API-REVIEWER. Output GATE.\n' > "$project/.oms/roles/reviewer.md"
   (cd "$project" && "$ROOT/scripts/agent-role.sh" list) | grep -Fx reviewer > /dev/null ||
@@ -27672,6 +27706,15 @@ rows = {r["role"]: r for r in role_contracts.surface(json.loads((root / "config/
 assert (rows["reviewer"]["belt"], rows["reviewer"]["tools"], rows["reviewer"]["mcp"]) == ("read", 4, False)
 assert (rows["researcher"]["belt"], rows["researcher"]["tools"]) == ("read+web", 6)
 assert (rows["builder"]["belt"], rows["builder"]["tools"], rows["builder"]["mcp"]) == ("default", None, True)
+assert (rows["reviewer"]["delegate_default"], rows["builder"]["delegate_default"]) == ("read", "write")
+assert role_contracts.role_access("reviewer") == "read" and role_contracts.role_access("builder") == "write"
+assert role_contracts.role_access("no-such-role") == "write"
+try:
+    role_contracts.role_access("reviewer", root / "config/missing.json")
+except OSError:
+    pass
+else:
+    raise AssertionError("an unreadable contract should raise")
 PY
 
   # Prompt-cache stability: render the same bundled-role prefix in two repos

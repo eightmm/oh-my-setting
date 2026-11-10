@@ -960,8 +960,13 @@ write or spawn tools (Write, Edit, MultiEdit, NotebookEdit, Agent, Task) or when
 belts in `scripts/lib/peer-common.sh` drift from its table; Bash stays in the read belt and is
 bounded by plan mode and the sandbox, not by the belt. `oms agent-role surface [--json]` prints,
 per role, `read_only`, belt, tool count and MCP on/off. Read-only roles resolve to the 4-tool
-belt without MCP (`researcher`: 6 tools); `peer-delegate.sh` defaults to write access, so
-without `--read-only` a read-only role launches with the default surface.
+belt without MCP (`researcher`: 6 tools). `peer-delegate.sh --role NAME` launches a bundled
+role whose contract says `read_only: true` with read access exactly as `--read-only` would, and
+prints one stderr line naming the override, when no access flag was given. `--apply`,
+`--interactive`, panel dispatch and `OMS_DELEGATE_ROLE_WRITE=1` (there is no write flag) keep the
+old write default; project or global role files with the bundled name, roles missing from the
+contract and no `--role` are unchanged; an unreadable contract warns once and keeps write.
+The `delegate-default` column shows that access (`read` or `write`).
 
 ### Collaboration visibility
 
