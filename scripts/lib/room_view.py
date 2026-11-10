@@ -1243,6 +1243,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     minimum_tree = min(2, len(gates)) + min(2, len(counsel)) + min(2, len(workers)) or int(bool(folded_calls))
     goal_rows = goal_box(report, width, unicode)
     goal_reserve = dock_rows if height >= 28 else min(dock_rows, 4)
+    import panel_work_health
+    # Below the dock's 28 rows every row belongs to the call tree, so the graph shows the line only from there.
+    health_rows = panel_work_health.lines(report, ranked, width, height, unicode, primary) if height >= 28 else []
+    goal_reserve += len(health_rows)
     if height >= 28:
         goal_reserve += int(bool(room.get("swaps"))) + int(bool(report.get("swap_state")))
     goal_cap = max(3, total_rows - len(lines) - goal_reserve - main_rows - minimum_tree - 1)
@@ -1259,6 +1263,8 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         add(text, style_key or "text")
     if goal_overflow:
         bands.append({"name": "goal", "y1": goal_top, "y2": len(lines), "x1": 1, "x2": width})
+    for text, spans in health_rows:
+        lines.append("".join(styled(clipped(part, width), tone) for part, tone in spans))
     if room.get("swaps") and height >= 24:
         add(swap_line(room), "metadata")
     if report.get("swap_state"):

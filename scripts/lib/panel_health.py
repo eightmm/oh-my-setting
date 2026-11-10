@@ -167,6 +167,10 @@ def render(report, width, height, footer=None, now=None):
     mains = sum(m.get("role") == "main" and m.get("state") in
                 LIVE_STATES | {"blocked", "waiting_input", "waiting_approval", "review"} for m in members)
     rows.append("Main: %s live" % mains)
+    import panel_work_health
+    work = panel_work_health.describe(report)
+    if work["segments"]:
+        rows.append("Work: " + " / ".join(part["text"] for part in work["segments"]))
     mains = mapping(report.get("dead_mains"))
     dead = mains.get("releasable") or []
     if dead:

@@ -784,6 +784,15 @@ nothing recorded shows no line. The two ledgers are read on the 5-second collect
 their file changed. The CI part is an observation of the last recorded run, not a verification of this
 checkout, and the line shows no quota or tokens.
 
+A `↻ stalls N` segment (ASCII `! stalls N`, attention colour) counts the findings of `oms fail-ledger list
+--stalls`. The panel calls the detector library on the failure ledger and goal-drive progress log in-process
+(no subprocess), parses them again only when a file changed, and lets a finding age out by
+`OMS_STALL_MAX_AGE` on its own. It ranks just below `waiting on you`, above failed. It is an observation of
+recorded repeats, not evidence that work failed. The same line, with the same widths and drop order, also sits
+under the goal box of the graph view (28 rows or more, where the call tree keeps its rows) and in the control
+window's menu header (16 rows or more, dropped first when the inbox would get short). `oms panel --health`
+adds a `Work:` row to its text and a `work` object (`segments`, `stalls`) to its JSON.
+
 Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS / WORKERS,
 followed by each call and its task title. Main rows can show `? N open` questions and
 `cN%` context used. When room history contains earlier mains, they fold to their status
