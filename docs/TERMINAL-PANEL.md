@@ -861,8 +861,11 @@ provider the account label, every reported window with `used`, `resets_at`, `res
 reads only what a provider already wrote into a file OMS reads today and calls nothing. Every
 missing value is `{"unreported": reason}`, never a zero: Claude's windows and cache share come
 from the status-line HUD cache of the selected main (a record over ten minutes old shows its age,
-not its numbers), Codex's weekly window from the newest session log (its 5-hour window is not
-read), and Antigravity reports no quota window locally, so it shows only OMS-recorded token
+not its numbers), Codex's windows from the `rate_limits` of the newest session log (the
+10080-minute window is `weekly`, the 300-minute one is `5h`, and any other length is listed as
+`<minutes>m` rather than guessed at; each needs a 0 to 100 percentage and a reset still ahead,
+and the tightest fresh one leads the strip, as for Claude; a Codex 5-hour window raises no `!`
+cue and is not in `--health`), and Antigravity reports no quota window locally, so it shows only OMS-recorded token
 counts of the calls OMS delegated to it (7 days), not a quota. No provider records a per-day
 token total here, and quota is never estimated from tokens.
 

@@ -232,48 +232,87 @@ def _codex_session_file(home):
     return max(files, key=lambda path: path.stat().st_mtime_ns) if files else None
 
 
+def _codex_log_limits(now, home=None):
+    """The newest log's last `rate_limits` object and its event time as (limits, observed), or None.
+
+    Reads only the bounded tail of the newest session log and caches it per home by file identity; the
+    callers recheck every window's expiry on each call, cache hit or not. May raise OSError and friends."""
+    default_home = home is None
+    home = Path(home if home is not None else os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
+    path = _codex_session_file(home)
+    if path is None:
+        return None
+    info = path.stat()
+    if not stat.S_ISREG(info.st_mode) or (default_home and now - info.st_mtime > CODEX_WEEK_SECONDS):
+        return None
+    key = (str(path), info.st_ino, info.st_mtime_ns, info.st_size)
+    cached_key, cached_reading = _CODEX_QUOTA_CACHE.get(str(home), (None, ({}, None)))
+    limits, observed = cached_reading
+    if key != cached_key:
+        limits = {}
+        observed = None
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            start = max(0, opened.st_size - CODEX_TAIL_BYTES)
+            handle.seek(start)
+            body = handle.read(CODEX_TAIL_BYTES)
+        if start:
+            body = body.partition(b"\n")[2]
+        for line in reversed(body.splitlines()):
+            if b'"rate_limits"' not in line:
+                continue
+            try:
+                row = mapping(json.loads(line))
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            payload = mapping(row.get("payload"))
+            if "rate_limits" in row or "rate_limits" in payload:
+                limits = mapping(row.get("rate_limits") if "rate_limits" in row
+                                 else payload.get("rate_limits"))
+                observed = _stamp(row.get("timestamp"))
+                break
+        _CODEX_QUOTA_CACHE[str(home)] = (key, (limits, observed))
+    return limits, observed
+
+
+def codex_short_windows(now, *, home=None):
+    """The non-weekly windows of the newest Codex log's `rate_limits`, shortest first.
+
+    Each is {"minutes", "used", "resets_at", "observed_at"} for a `primary` or `secondary` window whose
+    `window_minutes` is a positive whole number other than the weekly 10080, with a 0-100 `used_percent` and a
+    reset still ahead; the same freshness, sanity and reset rules as the weekly reading. Only the 300-minute
+    window is named (5h); the caller labels any other by its minutes. Empty when nothing qualifies."""
+    try:
+        found = _codex_log_limits(now, home)
+        if found is None:
+            return []
+        limits, observed = found
+        windows = {}
+        for name in ("primary", "secondary"):
+            window = mapping(limits.get(name))
+            minutes = number(window.get("window_minutes"))
+            if minutes is None or minutes == 0 or minutes == 10080 or minutes != int(minutes):
+                continue
+            used, reset = percent(window.get("used_percent")), number(window.get("resets_at"))
+            if used is not None and reset is not None and reset > now:
+                windows.setdefault(int(minutes), {"minutes": int(minutes), "used": used, "resets_at": reset,
+                                                  "observed_at": observed})
+        return [windows[minutes] for minutes in sorted(windows)]
+    except (OSError, ValueError, TypeError, OverflowError, RuntimeError):
+        return []
+
+
 def codex_weekly_reading(now, *, detail=False, home=None):
     """Use only the newest log's bounded quota tail, rechecking expiry on cache hits."""
     try:
-        default_home = home is None
-        home = Path(home if home is not None else os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
-        path = _codex_session_file(home)
-        if path is None:
+        found = _codex_log_limits(now, home)
+        if found is None:
             return {}
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode) or (default_home and now - info.st_mtime > CODEX_WEEK_SECONDS):
-            return {}
-        key = (str(path), info.st_ino, info.st_mtime_ns, info.st_size)
-        cached_key, cached_reading = _CODEX_QUOTA_CACHE.get(str(home), (None, ({}, None)))
-        limits, observed = cached_reading
-        if key != cached_key:
-            limits = {}
-            observed = None
-            fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                         | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
-            with os.fdopen(fd, "rb") as handle:
-                opened = os.fstat(handle.fileno())
-                if not stat.S_ISREG(opened.st_mode):
-                    return {}
-                start = max(0, opened.st_size - CODEX_TAIL_BYTES)
-                handle.seek(start)
-                body = handle.read(CODEX_TAIL_BYTES)
-            if start:
-                body = body.partition(b"\n")[2]
-            for line in reversed(body.splitlines()):
-                if b'"rate_limits"' not in line:
-                    continue
-                try:
-                    row = mapping(json.loads(line))
-                except (ValueError, UnicodeError, RecursionError):
-                    continue
-                payload = mapping(row.get("payload"))
-                if "rate_limits" in row or "rate_limits" in payload:
-                    limits = mapping(row.get("rate_limits") if "rate_limits" in row
-                                     else payload.get("rate_limits"))
-                    observed = _stamp(row.get("timestamp"))
-                    break
-            _CODEX_QUOTA_CACHE[str(home)] = (key, (limits, observed))
+        limits, observed = found
         for name in ("primary", "secondary"):
             window = mapping(limits.get(name))
             if window.get("window_minutes") != 10080:
@@ -472,6 +511,9 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
             log = codex_weekly_reading(now, detail=True)
             if log:
                 row.update(weekly_used=log["used"], source=log["source"])
+            shorts = codex_short_windows(now)
+            if shorts and row["source"] == "unavailable":
+                row["source"] = "session log"
             row.update(native_models=current, native_model_checked=repo is not None)
             from provider_accounts import load_accounts
             try:
@@ -518,6 +560,10 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
         if log and row.get("source") == "session log":
             row.update({key: value for key, value in (("weekly_resets_at", log.get("resets_at")),
                                                       ("observed_at", log.get("observed_at"))) if value is not None})
+        if provider == "codex" and shorts and row.get("source") == "session log":
+            row["short_windows"] = shorts
+            if row.get("observed_at") is None and not log:
+                row["observed_at"] = shorts[0]["observed_at"]
         output[provider] = row
     output["antigravity"] = {"context_left": None, "weekly_used": None, "source": "unavailable"}
     output["antigravity"].update(antigravity_artifact_reading(repo, now))
