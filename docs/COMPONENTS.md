@@ -536,6 +536,16 @@ more words that one provider loads from two files is named once. Limits are
 provider); these are OMS budgets, not provider limits. Findings are warnings and fail
 only under `--strict`. Files are read as text: nothing runs, no model is called, and
 on-demand skills, hooks and path-scoped rules are not counted.
+
+Provider prompt caches match a byte-exact prefix, so text OMS loads ahead of the task
+must not change per render. `scripts/check.sh invariants` (`test_global_rules_stay_compact_and_route_workflows`,
+`test_agent_role_and_delegate_injection`) fails when the global rules, project templates,
+roles or output style hold a timestamp, `$(date)`, `$RANDOM`, `$$`, `mktemp`, a temp path,
+a UUID or an epoch (naming `file:line`), when the delegated-worker prompt before `## Brief`
+differs between two renders under a different clock second, `TZ`, `TMPDIR`, cwd and artifact
+dir, or when `oms runtime context` compiles different bytes for the same files created in
+another order. The SessionStart resume block and per-turn hints are not covered: the first
+carries day-granular idle counts and an mtime-ordered room list, and both are computed once.
 A team can pin the OMS baseline it expects in a tracked `.oms-team.json`
 at the project root (`.oms/` and `PROJECT.md` are untracked by default, so
 neither can carry it):
