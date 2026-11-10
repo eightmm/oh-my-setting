@@ -576,6 +576,66 @@ recent_out="$("$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --recent 
 [ "$(printf '%s\n' "$recent_out" | wc -l | tr -d ' ')" = 3 ] ||
   fail "journal show --recent 3 did not return three event lines"
 
+# `show --grep` searches what OMS recorded under .oms without an index: every
+# kind is named with where to open it, a secret-looking excerpt is withheld,
+# caps are reported, and the scan writes nothing.
+search_repo="$TMP/search-repo"
+mkdir -p "$search_repo/.oms/threads" "$search_repo/.oms/handoffs" \
+  "$search_repo/.oms/panel-state/dispatch-logs" "$search_repo/.oms/artifacts/panel-results" \
+  "$search_repo/.oms/work-journal/daily"
+git -C "$search_repo" init -q
+leak="gh""p_$(printf '%036d' 0 | tr 0 a)"
+printf '%s\n' '{"event_id":"ev-1","occurred_at":"2026-11-02T00:00:00Z","outcome":{"summary":"scaffold split 실험 kept"}}' \
+  > "$search_repo/.oms/work-journal/events.jsonl"
+printf '%s\n' '{"thread":"room-a","ts":"2026-11-03T00:00:00Z","text":"scaffold loader question"}' \
+  "{\"thread\":\"room-a\",\"ts\":\"2026-11-04T00:00:00Z\",\"text\":\"scaffold key $leak\"}" \
+  > "$search_repo/.oms/threads/room-a.jsonl"
+printf 'Handoff\nnext: rebuild the scaffold manifest\n' > "$search_repo/.oms/handoffs/h1.md"
+printf 'worker says Scaffold done\n' > "$search_repo/.oms/panel-state/dispatch-logs/call-1.log"
+printf '# Result\nscaffold accepted by the owner\n' > "$search_repo/.oms/artifacts/panel-results/result-t1-1.md"
+printf 'scaffold outside\n' > "$TMP/outside.md"
+ln -s "$TMP/outside.md" "$search_repo/.oms/handoffs/link.md"
+before_tree="$(cd "$search_repo" && find .oms | sort)"
+search_out="$("$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep SCAFFOLD)" ||
+  fail "journal show --grep should exit 0 on a match"
+for expected in 'journal  2026-11-02T00:00:00Z  ev-1' 'open: .oms/work-journal/events.jsonl:1' \
+  'open: oms thread show --id room-a  (.oms/threads/room-a.jsonl:1)' 'open: .oms/handoffs/h1.md:2' \
+  'dispatch ' 'open: .oms/panel-state/dispatch-logs/call-1.log:1' 'open: .oms/artifacts/panel-results/result-t1-1.md:2' \
+  '6 match(es) in 5 file(s)' '[withheld: sensitive-looking content]' 'not that anything was verified'; do
+  case "$search_out" in *"$expected"*) ;; *) fail "journal show --grep output lacks: $expected
+$search_out" ;; esac
+done
+case "$search_out" in *"$leak"*|*outside*) fail "journal show --grep printed a secret-looking excerpt or followed a symlink" ;; esac
+[ "$(cd "$search_repo" && find .oms | sort)" = "$before_tree" ] || fail "journal show --grep must not write under .oms"
+"$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep '실험' --kind journal --json |
+  python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["matches"] == 1 and d["hits"][0]["id"] == "ev-1" and d["complete"] and d["kinds"] == ["journal"], d' ||
+  fail "journal show --grep --json should match text stored escaped in a JSON row"
+limited="$("$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep scaffold --limit 1)"
+case "$limited" in *'showing 1, newest first'*'5 more match(es) not shown'*) ;; *) fail "journal show --grep --limit should count what it left out: $limited" ;; esac
+rc=0; "$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep no-such-text >/dev/null || rc=$?
+[ "$rc" = 1 ] || fail "journal show --grep without a match should exit 1, got $rc"
+rc=0; "$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep '' >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "journal show --grep with empty text should exit 2, got $rc"
+rc=0; "$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep x --limit 0 >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "journal show --grep --limit 0 should exit 2, got $rc"
+rc=0; "$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep x --kind nope >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "journal show --grep with an unknown kind should exit 2, got $rc"
+# A file past the per-file cap is read from its end and the report says so.
+{ printf 'earlyneedle at the start\n'; seq 1 200000 | sed 's/.*/filler line/'; printf 'lateneedle at the end\n'; } \
+  > "$search_repo/.oms/handoffs/big.md"
+capped="$("$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep lateneedle --kind handoff)"
+case "$capped" in *'big.md:200002'*'incomplete: 1 file(s) longer than'*) ;; *) fail "journal show --grep should report the per-file cap and keep line numbers: $capped" ;; esac
+rc=0; "$ROOT/scripts/journal.sh" show --repo "$search_repo" --grep earlyneedle --kind handoff > "$TMP/early.out" || rc=$?
+{ [ "$rc" = 1 ] && grep -q '^incomplete: ' "$TMP/early.out"; } ||
+  fail "a miss in a capped scan must say the scan was incomplete"
+rm -f "$search_repo/.oms/handoffs/big.md"
+# Without the shared scanner no excerpt is printed at all.
+mkdir -p "$TMP/search-lib"
+cp "$ROOT/scripts/lib/recorded_search.py" "$TMP/search-lib/"
+unscanned="$(python3 "$TMP/search-lib/recorded_search.py" --repo "$search_repo" --grep scaffold)"
+case "$unscanned" in *'[withheld: the secret scanner could not run]'*) ;; *) fail "an unscannable excerpt must be withheld: $unscanned" ;; esac
+case "$unscanned" in *'loader question'*|*'rebuild the'*) fail "an unscanned excerpt was printed" ;; esac
+
 # Distillation promotes a recurring unresolved blocker once, then advances its
 # cursor so a second run cannot append the same lesson.
 distill_repo="$TMP/distill-repo"

@@ -4665,6 +4665,13 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--period", metavar="YYYY-MM-DD|YYYY-Www")
     mode.add_argument("--blockers", action="store_true")
     mode.add_argument("--recent", type=int, metavar="N")
+    mode.add_argument(
+        "--grep", metavar="TEXT",
+        help="search recorded work under .oms for plain text: journal, handoff, thread, "
+             "dispatch and result records; bounded and read-only")
+    show.add_argument("--kind", action="append", choices=("journal", "handoff", "thread", "dispatch", "result"),
+                      help="with --grep: only this kind of record (repeatable)")
+    show.add_argument("--limit", type=int, metavar="N", help="with --grep: matches to show (default 20, at most 200)")
     show.add_argument("--json", action="store_true")
     sync = sub.add_parser("sync")
     sync.add_argument("--repo", default=".")
@@ -4683,6 +4690,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_show(store: JournalStore, args: argparse.Namespace) -> int:
+    if args.grep is not None:
+        import recorded_search
+
+        return recorded_search.run(str(store.repo), args.grep, args.kind, args.limit, args.json)
+    if args.kind or args.limit is not None:
+        print("error: --kind and --limit apply only with --grep", file=sys.stderr)
+        return 2
     if args.recent is not None:
         events = store.recent_events(limit=args.recent)
         if args.json:
