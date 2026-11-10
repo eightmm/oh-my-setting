@@ -22272,6 +22272,8 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   assert_file_contains "$out" "choice 4 | why: because 4 | rejected: alt 4"
   assert_file_contains "$out" "choice 2 | why: because 2 | rejected: alt 2"
   assert_file_contains "$out" "(1 older decision(s) dropped"
+  assert_file_contains "$out" "- decisions: 4 recorded (newest under ## Decisions)"
+  assert_file_contains "$out" "  - drop the cache layer"
   if grep -Fq "choice 1 " "$out"; then
     fail "oldest decision must be dropped first"
   fi
@@ -22284,6 +22286,11 @@ test_session_handoff_carries_resume_contract_and_dissents() {
   assert_file_contains "$out" "longlonglong"
   assert_file_contains "$out" "older decision(s) dropped"
   if grep -Fq "choice 3 " "$out"; then fail "byte cap must drop older decisions"; fi
+  # A row the decision log does not parse still renders, exactly once.
+  printf -- '-   2026-01-01T00:00:00Z [x] spaced choice\n' >> "$cwd/.oms/task/current.md"
+  out="$(OMS_CLAUDE_HOME="$home" "$ROOT/scripts/session-handoff.sh" \
+    capture --agent claude --cwd "$cwd" --out "$home/decisions-spaced.md" 2>/dev/null)"
+  [ "$(grep -c 'spaced choice' "$out")" = 1 ] || fail "every decision row must render exactly once: $out"
 }
 
 test_session_handoff_dissents_from_typed_outcome() {
@@ -27563,7 +27570,7 @@ test_agent_role_and_delegate_injection() {
     'IMPLEMENTATION-WORKER-STRATEGY'
   make_committed_repo "$project"
   # A bundled read_only role launches with read access unless the caller says otherwise.
-  local access_out access_case
+  local access_out
   access_case() {  # EXPECTED_ACCESS ENV_ASSIGNMENT ROLE [EXTRA_ARGS...]
     local want="$1" assignment="$2" role="$3"
     shift 3

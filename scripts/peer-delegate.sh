@@ -581,7 +581,7 @@ delegate_role_read_default() {
     return 0
   fi
   [ "$access" = read ] || return 0
-  WORKER_ACCESS=read
+  WORKER_ACCESS="read"
   echo "role $ROLE is read_only in config/role-contracts.json: launching with read access as --read-only would (override: OMS_DELEGATE_ROLE_WRITE=1)" >&2
 }
 delegate_role_read_default

@@ -20,6 +20,8 @@ import sys
 CAP = 1536
 PACKET_LIMIT = 64 * 1024
 FILES, DECISIONS = 8, 3
+# Same test handoff_decisions.py applies to each stripped line of the section.
+STAMPED = re.compile(r"^- (\d{4}-\d{2}-\d{2})T\S*Z \[[^\]]*\] (.+)$")
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -126,10 +128,18 @@ def changed_line(repo):
 def decision_lines(repo, active):
     if not active:
         return ["- decisions: not recorded (no active task)"]
-    rows = bullets(packet_sections(repo).get("Decisions", ""))
-    if not rows:
+    body = packet_sections(repo).get("Decisions", "")
+    # `agent-task update --decision` rows render once, capped, in the Decisions block.
+    stamped = sum(1 for line in body.splitlines() if STAMPED.match(line.strip()))
+    plain = bullets("\n".join(line for line in body.splitlines() if not STAMPED.match(line.strip())))
+    if not stamped and not plain:
         return ["- decisions: not recorded"]
-    return ["- decisions (task packet, newest last):"] + ["  - " + one_line(row, 160) for row in rows[-DECISIONS:]]
+    lines = []
+    if stamped:
+        lines.append("- decisions: %d recorded (newest under ## Decisions)" % stamped)
+    if plain:
+        lines += ["- decisions (task packet, newest last):"] + ["  - " + one_line(row, 160) for row in plain[-DECISIONS:]]
+    return lines
 
 
 def main(argv):
