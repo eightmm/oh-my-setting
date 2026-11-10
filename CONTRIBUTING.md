@@ -33,7 +33,25 @@ asserts on recorded state. It is a regression instrument for harness behavior,
 not a benchmark of model quality. A scenario for a known defect is listed in
 `xfail_branch` with the branch that fixes it and prints `xfail(BRANCH)`; once
 that fix lands it reports `unexpected-pass` and the suite fails until the entry
-is removed.
+is removed. A scenario the environment cannot run exits 77 and prints
+`skip(REASON)`.
+
+The `hook-*` scenarios check the registered Claude Code guards (the
+`PreToolUse` rows of `scripts/install-claude-hooks.sh --print-expected`:
+`command-guard-hook.sh` and `git-move-guard-hook.sh`) by driving each script
+with the JSON payload the provider sends. A refused payload exits 2 with one
+reason line on stderr; an allowed one exits 0 with nothing on stderr; the
+registered matcher equals the tool the script's payload check expects (a grep
+over the source); and removing or altering a guard row in a fixture
+`settings.json` is reported by `oms doctor` in both modes. For a degraded
+environment (no `python3` on PATH, Bash older than 5, a truncated payload, the
+helper library missing) the property is that a guard never passes a payload it
+would refuse without a diagnostic on stderr. Fail-open with a diagnostic holds;
+silent fail-open does not, and is listed in `xfail_branch` as
+`owner-decision:SLUG` until the hook's owner rules on it. The suite ends with a
+hook-by-condition matrix (`blocks`, `passes+diagnostic`, `passes silently`; also
+under `hook_matrix` with `--json`). A new `PreToolUse` row fails the matcher
+scenario until it has conformance scenarios of its own.
 
 ## Style
 
