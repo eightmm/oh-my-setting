@@ -1373,6 +1373,17 @@ in force. The rules add to the seat instructions and override none of them.
 for three or more findings. It is a suggestion only: the owner adds a rule to
 PROJECT.md by hand, and nothing writes one.
 
+`oms peer-review --gate --security-audit PROVIDER` turns patch-admit's
+`security: ADVISE` into a recorded reading. When the reviewed change touches
+the same risk paths (hooks, installers, permissions, settings, workflows,
+deletions and the like), PROVIDER gets one read-only call under the
+`security-auditor` role with the diff, and the run prints `security: pass`,
+`fail` or `incomplete` and appends a `review-security` row to the artifact
+index (exit 0, 1 or 2). No risk path means no call (`security: skipped`). An
+answer without a final `SECURITY: pass|fail` line, a missing provider or a
+withheld prompt is `incomplete`, never a pass. The verdict is advisory: it does
+not change the GATE verdict or exit code, and no scanner is run.
+
 ### Acceptance freshness and reuse
 
 Acceptance stays fresh by default. An explicit `- Acceptance reuse: same-run`
