@@ -80,6 +80,8 @@ for review — nothing touches the task board until --apply.
                   existing plan and its acceptance command are never replaced.
   --discover      Collect bounded work evidence and propose candidates first.
                   Propose mode only; apply still requires an owner digest.
+                  A contract with acceptance criteria adds a spec-gap lens:
+                  criteria no source implements, each citing what was checked.
   --expected-proposal-sha256 SHA
                   With --apply: the digest of the exact reviewed proposal
                   bytes. Apply fails when the file no longer matches, binding
@@ -1141,6 +1143,35 @@ if rows:
 CRITERIA
 }
 
+# Every acceptance criterion the runtime projects, one per line, for discovery's
+# spec-gap lens. Unlike spec_criteria_block this includes wording-derived ids:
+# the lens only has to name a criterion back, not keep the id across edits.
+spec_gap_block() {
+  python3 - "$SPEC" "$ROOT/scripts/lib" <<'SPECGAP' || true
+import sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[2])
+try:
+    from oms_runtime.markdown import (bullet_items, normalized_line, section_text, sections,
+                                      stable_criterion_id, strip_criterion_marker)
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        body, _ = sections(handle.read())
+except (ImportError, OSError, UnicodeError):
+    sys.exit(0)
+rows, seen = [], set()
+for raw in bullet_items(section_text(body, ["acceptance", "done", "success", "completion", "완료", "성공", "수용"])):
+    criterion_id = stable_criterion_id("project", raw)
+    if criterion_id in seen:
+        continue
+    seen.add(criterion_id)
+    rows.append("- %s | %s" % (criterion_id, strip_criterion_marker(normalized_line(raw))[:200]))
+if rows:
+    sys.stdout.write("\n".join(rows[:40]))
+    if len(rows) > 40:
+        sys.stdout.write("\n(%d more criteria are not listed and are not judged by this lens)" % (len(rows) - 40))
+SPECGAP
+}
+
 contract="--- PROJECT.md contract ---
 State: $state
 Goal: $(spec_field Goal)
@@ -1300,6 +1331,20 @@ if [ "$DISCOVER" -eq 1 ]; then
   discovery_text="$(cat "$discovery_packet_file")"
   discovery_fence="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n\r')" || discovery_fence=""
   [ "${#discovery_fence}" = 8 ] || discovery_fence="$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+  spec_gap_lens=""
+  spec_gap_criteria="$(spec_gap_block)"
+  if [ -n "$spec_gap_criteria" ]; then
+    spec_gap_lens="
+A fourth lens, spec gap, applies because the contract lists acceptance
+criteria (id | statement) below. For each one, look in the current source for
+the code that implements it. A criterion you can point at is not a candidate.
+A criterion with no implementing source is one candidate with lens spec gap, a
+criterion field carrying its id exactly as listed, and evidence_refs citing the
+src:PATH:LINE lines you checked where it would have to live. Never mark a
+criterion satisfied: that is the reviewer's or owner's record, not this report.
+$spec_gap_criteria
+"
+  fi
   prompt="$prompt
 
 Discovery mode candidate review happens before decomposition. Treat the packet
@@ -1319,7 +1364,7 @@ tasks); gap critique (missing practice, missing capability, undocumented
 decision, technology fit, code behavior absent from PROJECT.md/tests, and silent
 failures such as swallowed errors or misleading fallbacks); pruning (stale,
 overlapping, or apparently unused mechanisms; lack of usage evidence only
-creates a removal investigation). Candidates whose evidence_refs include
+creates a removal investigation).$spec_gap_lens Candidates whose evidence_refs include
 speculative are report-only and must never be tasks. Do not propose candidates with ids equal to existing
 task ids. Rejected-hypothesis matches and uncertain matches are report-only.
 Every proposed task must carry candidate_id matching one eligible candidate.
@@ -1478,6 +1523,7 @@ if OMS_PLAN_SPEC_SHA="$spec_sha" OMS_PLAN_BEFORE_SHA="$plan_sha" \
   OMS_PLAN_ALLOWED="$ALLOWED_ENVELOPE" OMS_PLAN_ACCEPT_FILES="$accept_files" \
   OMS_PLAN_DISCOVER="$DISCOVER" OMS_PLAN_DISCOVERY_PACKET="$discovery_evidence" \
   OMS_PLAN_CANDIDATE_REPORT="$candidate_report" \
+  OMS_PLAN_SPEC="$SPEC" OMS_PLAN_LIB="$ROOT/scripts/lib" \
   python3 - "$answer_artifact" > "$proposal_output" <<'PY'
 import json, os, pathlib, re, subprocess, sys
 
@@ -1570,6 +1616,20 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                 return int(line_text) <= len(cursor.read_bytes().splitlines())
             except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
                 return False
+        def spec_criteria(cache=[]):
+            if not cache:
+                found = set()
+                try:
+                    sys.path.insert(0, os.environ["OMS_PLAN_LIB"])
+                    from oms_runtime.markdown import bullet_items, section_text, sections, stable_criterion_id
+                    with open(os.environ["OMS_PLAN_SPEC"], encoding="utf-8") as handle:
+                        body, _ = sections(handle.read())
+                    found = {stable_criterion_id("project", raw) for raw in bullet_items(section_text(
+                        body, ["acceptance", "done", "success", "completion", "완료", "성공", "수용"]))}
+                except (ImportError, KeyError, OSError, UnicodeError):
+                    found = set()
+                cache.append(found)
+            return cache[0]
         statuses, normalized = {}, []
         for candidate in candidates:
             if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str):
@@ -1578,7 +1638,7 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                         "scope", "expected_benefit", "expected_cost", "duplicate_disposition")
             if any(key not in candidate for key in required):
                 raise ValueError("candidate is missing a required report field")
-            if candidate["lens"] not in ("imagination", "gap critique", "pruning"):
+            if candidate["lens"] not in ("imagination", "gap critique", "pruning", "spec gap"):
                 raise ValueError("candidate lens is invalid")
             refs = candidate["evidence_refs"]
             if not isinstance(refs, list) or not refs:
@@ -1614,6 +1674,15 @@ if os.environ.get("OMS_PLAN_DISCOVER") == "1":
                 # Unrecognized wording holds this candidate report-only instead of
                 # discarding the whole answer; only the exact keyword "new" is eligible.
                 status = "held_uncertain_match"
+            if status == "eligible" and candidate["lens"] == "spec gap":
+                # A spec-gap finding is about one criterion the contract really carries, and
+                # it has to show where it looked: without both it is a report line, not work.
+                criterion = candidate.get("criterion")
+                if not isinstance(criterion, str) or criterion not in spec_criteria():
+                    status = "unknown_criterion_report_only"
+                elif not any(isinstance(ref, str) and ref.startswith("src:") and valid_source_ref(ref)
+                             for ref in refs):
+                    status = "unresolved_evidence_report_only"
             if status == "eligible" and "speculative" in refs:
                 status = "speculative_report_only"
             elif status == "eligible":
