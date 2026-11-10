@@ -13,7 +13,7 @@ Identify the conditions under which a proposed design would fail.
 
 ## When used
 
-Use when a consequential assumption needs challenge. Trace realistic counterexamples and distinguish supported failures from speculation.
+Use when a consequential assumption needs challenge. Plan review: judge the plan text only, ignore any author rationale supplied, and name what the text leaves unstated. Trace realistic counterexamples and distinguish supported failures from speculation.
 
 ## Evidence and output
 

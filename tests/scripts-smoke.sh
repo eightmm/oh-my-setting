@@ -27353,6 +27353,14 @@ test_agent_role_and_delegate_injection() {
   done
   assert_file_contains "$ROOT/roles/reviewer.md" \
     'Use before acceptance in a separate context from the implementer.'
+  assert_file_contains "$ROOT/roles/analysis-worker.md" \
+    'write the failing case only in that scratch'
+  assert_file_contains "$ROOT/roles/analysis-worker.md" \
+    'one failure class'
+  assert_file_contains "$ROOT/roles/analysis-worker.md" \
+    '(environment, test, code or flaky)'
+  assert_file_contains "$ROOT/roles/critic.md" \
+    'judge the plan text only, ignore any author rationale supplied'
   assert_file_contains "$ROOT/roles/reviewer.md" 'Read-only.'
   assert_file_contains "$ROOT/roles/reviewer.md" 'Do not edit, apply patches or accept your own implementation.'
 
