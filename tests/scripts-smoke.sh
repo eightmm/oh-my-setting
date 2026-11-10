@@ -1032,6 +1032,70 @@ test_project_doctor_warns_structure_drift() {
   if contains "$out" 'src/ layout'; then
     fail "doctor must not require an ML src/ layout absent from the template"
   fi
+
+  # --contract: one read-only look at what PROJECT.md points at. A target that
+  # is not there warns (and fails only under --strict); an unproven criterion
+  # is a note, because unfinished work is not drift.
+  local contract_out contract="$TMP/doctor-contract" contract_before contract_rc=0
+  make_committed_repo "$contract"
+  mkdir -p "$contract/tests" "$contract/docs" "$contract/.oms/plan"
+  printf 'exit 0\n' > "$contract/tests/run.sh"
+  printf '# design\n' > "$contract/docs/design.md"
+  cat > "$contract/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: confirmed
+
+## Project
+
+- Goal: ship a tiny greeting CLI
+- Scope: src/, tests/
+
+## Verification
+
+- Required checks: bash tests/run.sh
+- Required check files: tests/run.sh
+
+## Decisions
+
+- References: docs/design.md
+
+## Acceptance criteria
+
+- [id:REQ-1] WHEN run THE SYSTEM SHALL print hello
+- [id:REQ-2] WHEN given a name THE SYSTEM SHALL print it
+EOF
+  printf '{"tasks":{"c1":{"id":"c1","covers":["REQ-1"]}}}\n' > "$contract/.oms/plan/tasks.json"
+  contract_before="$(cd "$contract" && find . -path ./.git -prune -o -type f -print | sort | xargs cksum)"
+  contract_out="$("$ROOT/scripts/project-doctor.sh" --contract --strict "$contract")" ||
+    fail "a contract whose targets all exist must pass --contract --strict: $contract_out"
+  contains "$contract_out" 'ok: contract: Required check files: 1 path(s) exist' || fail "check files not confirmed: $contract_out"
+  contains "$contract_out" 'ok: contract: References: 1 path(s) exist' || fail "references not confirmed: $contract_out"
+  contains "$contract_out" 'note: criterion REQ-1: ' || fail "criteria not summarised: $contract_out"
+  contains "$contract_out" 'plan task c1' || fail "the covering plan task is not named: $contract_out"
+  contains "$contract_out" 'note: criterion REQ-2: ' || fail "an uncovered criterion is still listed: $contract_out"
+  contains "$contract_out" 'project-doctor: contract ok' || fail "missing contract verdict: $contract_out"
+  if contains "$contract_out" 'managed blocks'; then fail "--contract must not run the block checks: $contract_out"; fi
+  [ "$contract_before" = "$(cd "$contract" && find . -path ./.git -prune -o -type f -print | sort | xargs cksum)" ] ||
+    fail "--contract must not write into the project"
+  # Break three pointers: a check file, a reference, and a covered criterion.
+  sed -e 's|^- Required check files: tests/run.sh|- Required check files: tests/run.sh, tests/gone.sh|' \
+    -e 's|^- References: docs/design.md|- References: docs/design.md, docs/lost.md|' \
+    "$contract/PROJECT.md" > "$contract/PROJECT.md.new" && mv "$contract/PROJECT.md.new" "$contract/PROJECT.md"
+  printf '{"tasks":{"c1":{"id":"c1","covers":["REQ-1","REQ-9"]}}}\n' > "$contract/.oms/plan/tasks.json"
+  contract_out="$("$ROOT/scripts/project-doctor.sh" --contract "$contract")" ||
+    fail "broken pointers warn without --strict: $contract_out"
+  contains "$contract_out" 'warn: contract: Required check files names tests/gone.sh, which does not exist' ||
+    fail "missing check file not reported: $contract_out"
+  contains "$contract_out" 'warn: contract: References names docs/lost.md, which does not exist' ||
+    fail "missing reference not reported: $contract_out"
+  contains "$contract_out" 'warn: contract: plan task c1 covers REQ-9, which the spec does not carry' ||
+    fail "stale covers target not reported: $contract_out"
+  contains "$contract_out" 'project-doctor: contract ok (with warnings)' || fail "missing warning verdict: $contract_out"
+  contract_out="$("$ROOT/scripts/project-doctor.sh" --contract --strict "$contract")" || contract_rc=$?
+  [ "$contract_rc" = 1 ] || fail "--contract --strict must fail on a broken pointer, got $contract_rc: $contract_out"
   case "$out" in *'gitignored dirs'*) ;; *) fail "missing tracked-in-ignored warning" ;; esac
   case "$out" in *'big model.ckpt'*) ;; *) fail "missing over-10MB warning (filename with space must survive)" ;; esac
 
