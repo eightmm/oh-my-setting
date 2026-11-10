@@ -17820,6 +17820,37 @@ EOF
   HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/clean" 2>&1 ||
     fail "a clean install should pass the doctor: $(cat "$home_dir/clean")"
   assert_file_contains "$home_dir/clean" "no skills installed under a superseded name"
+
+  # The listing budget is advisory: what every installed description costs each
+  # CLI before a skill is opened. It never fails the doctor.
+  local long_text near
+  long_text="$(printf 'routing detail %.0s' $(seq 1 120))"
+  near="Review a pull request diff for correctness regressions security problems and missing tests before merge"
+  mkdir -p "$home_dir/.claude/skills/oms-long" "$home_dir/.claude/skills/oms-twin-a" \
+    "$home_dir/.claude/skills/oms-twin-b" "$home_dir/.codex/skills/oms-small" \
+    "$home_dir/.claude/plugins/cache/market/vendor-plugin/1.0.0/skills/oms-twin-a"
+  printf -- '---\nname: oms-long\ndescription: %s\nwhen_to_use: %s\n---\n' "$long_text" "$long_text" \
+    > "$home_dir/.claude/skills/oms-long/SKILL.md"
+  printf -- '---\nname: oms-twin-a\ndescription: %s\n---\n' "$near" > "$home_dir/.claude/skills/oms-twin-a/SKILL.md"
+  printf -- '---\nname: oms-twin-b\ndescription: %s now\n---\n' "$near" > "$home_dir/.claude/skills/oms-twin-b/SKILL.md"
+  printf -- '---\nname: oms-small\ndescription: A short description for one small Codex skill.\n---\n' \
+    > "$home_dir/.codex/skills/oms-small/SKILL.md"
+  printf -- '---\nname: oms-twin-a\ndescription: The copy a plugin ships under the same name.\n---\n' \
+    > "$home_dir/.claude/plugins/cache/market/vendor-plugin/1.0.0/skills/oms-twin-a/SKILL.md"
+  HOME="$home_dir" OMS_SKILL_LISTING_CHARS=1000 "$ROOT/scripts/skill-doctor.sh" >"$home_dir/budget" 2>&1 ||
+    fail "the listing budget is advisory, not a doctor failure: $(cat "$home_dir/budget")"
+  assert_file_contains "$home_dir/budget" "## Skill listing budget"
+  assert_file_contains "$home_dir/budget" "ok: Codex: 1 skill(s), descriptions total 46 characters (budget 1000)"
+  assert_file_contains "$home_dir/budget" "warn: Claude: 3 skill(s), descriptions total"
+  assert_file_contains "$home_dir/budget" "over the 1000-character listing budget (OMS_SKILL_LISTING_CHARS)"
+  assert_file_contains "$home_dir/budget" "warn: Claude skill oms-long lists"
+  assert_file_contains "$home_dir/budget" "Claude Code cuts the listing at 1536"
+  assert_file_contains "$home_dir/budget" "note: Claude skills oms-twin-a and oms-twin-b have nearly the same description"
+  assert_file_contains "$home_dir/budget" \
+    "note: skill oms-twin-a is installed at user level and also shipped by a Claude plugin (cache: market/vendor-plugin/1.0.0)"
+  assert_file_contains "$home_dir/budget" "skill-doctor: ok"
+  ! grep -Fq "routing detail routing detail" "$home_dir/budget" ||
+    fail "the listing budget must not print a description"
 }
 
 test_skill_doctor_checks_agy_loaded_skills() {

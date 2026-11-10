@@ -24,6 +24,10 @@ Codex's effective overlay, and skills a previous install left under a
 superseded name. When agy is on PATH, report each enabled oms-* skill its
 loaded-skill list lacks. Flag any SKILL.md over the load budget
 (OMS_SKILL_WORDS, default 900) or holding references/ nothing links to.
+Advisory: per CLI, the summed length of installed skill descriptions against
+OMS_SKILL_LISTING_CHARS (default 8000), a Claude listing entry over 1,536
+characters, a user-level skill a Claude plugin also ships, and two skills
+whose descriptions nearly coincide.
 Read-only; takes no arguments.
 EOF
       exit 0
@@ -104,6 +108,13 @@ fi
 if [ "$oversized" -eq 0 ]; then
   printf 'ok: every SKILL.md is within the load budget and links its references\n'
 fi
+
+# What the installed skills cost before any of them is opened: every name and
+# description goes into the list each CLI shows its agent. Advisory and
+# read-only; a reader that cannot run says so instead of failing the doctor.
+printf '\n## Skill listing budget\n\n'
+python3 "$ROOT/scripts/lib/skill_listing_budget.py" 2>/dev/null ||
+  printf 'skip: the listing budget could not be read\n'
 
 if [ "$OMS_OPS_FAILED" -ne 0 ]; then
   printf 'skill-doctor: failed\n'
