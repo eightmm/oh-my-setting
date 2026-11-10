@@ -389,8 +389,49 @@ def native_activity(repo: str) -> dict:
     }
 
 
-GROUPINGS = ("day", "model", "provider", "task")
+GROUPINGS = ("day", "model", "provider", "task", "role")
 USAGE_KEYS = ("input_tokens", "cache_read_tokens", "output_tokens")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+ROLE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
+def admitted_digests(rows: list[dict[str, object]]) -> set:
+    """Patch digests a successful patch-admit/patch-land row accepted (whole index)."""
+    found = set()
+    for row in rows:
+        digest = row.get("patch_sha256")
+        if (row.get("kind") in ("patch-admit", "patch-land") and integer(row.get("exit")) == 0
+                and isinstance(digest, str) and SHA256_RE.match(digest) and digest != EMPTY_SHA256):
+            found.add(digest)
+    return found
+
+
+def add_role_stats(group: dict, row: dict[str, object], tokens: Optional[int],
+                   detail: Optional[dict], admitted: set) -> None:
+    """Cache and admission figures for one row of a --by role group."""
+    if (detail and detail.get("session_cumulative") is not True
+            and all(integer(detail.get(key)) is not None for key in USAGE_KEYS)):
+        # A provider whose input already includes the cache read must not have
+        # it added again to the denominator.
+        extra = 0 if detail.get("cache_in_input") is True else detail["cache_read_tokens"]
+        group["cache_denominator"] += detail["input_tokens"] + extra
+    if row.get("kind") != "delegate":
+        return
+    digest = row.get("patch_sha256")
+    if isinstance(digest, str) and digest in admitted:
+        group["admitted"] += 1
+    else:
+        group["not_admitted_results"] += 1
+        group["not_admitted_tokens"] += tokens or 0
 
 
 def parse_bound(value: Optional[str], end: bool) -> Optional[datetime.datetime]:
@@ -430,6 +471,9 @@ def group_label(repo: str, row: dict[str, object], by: str) -> str:
         value = row.get("provider")
     elif by == "task":
         value = row.get("task_id")
+    elif by == "role":
+        value = row.get("role")
+        return value if isinstance(value, str) and ROLE_RE.match(value) else "unknown"
     else:
         metrics = artifact_model_metrics(repo, row)
         if metrics["model_attribution"] == "ambiguous":
@@ -493,6 +537,7 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
         and row.get("kind") in ELIGIBLE_KINDS
     ]
     resolved = resolved_events(rows)
+    admitted = admitted_digests(rows) if by == "role" else set()
     exit_counts = Counter()
     verification = Counter()
     fallback = Counter()
@@ -631,7 +676,14 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
             route["provider_reported_tokens"] += tokens
         if by:
             label = group_label(repo, row, by)
-            add_to_group(groups.setdefault(label, empty_group(label)), repo, row, tokens, detail)
+            if label not in groups:
+                groups[label] = empty_group(label)
+                if by == "role":
+                    groups[label].update({"cache_denominator": 0, "admitted": 0,
+                                          "not_admitted_results": 0, "not_admitted_tokens": 0})
+            add_to_group(groups[label], repo, row, tokens, detail)
+            if by == "role":
+                add_role_stats(groups[label], row, tokens, detail, admitted)
 
     first_ts = selected[0].get("ts", "") if selected else ""
     last_ts = selected[-1].get("ts", "") if selected else ""
@@ -734,6 +786,27 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
             "omitted_rows": len(matched) - len(selected),
             "groups": [groups[key] for key in sorted(groups)],
         }
+        if by == "role":
+            min_pct = env_int("OMS_TELEMETRY_CACHE_MIN_PCT", 80)
+            min_requests = env_int("OMS_TELEMETRY_CACHE_MIN_REQUESTS", 10)
+            warnings = []
+            for group in report["usage_by"]["groups"]:
+                denominator = group.pop("cache_denominator")
+                group["cache_read_share"] = (
+                    round(group["cache_read_tokens"] / denominator, 4) if denominator else None)
+                group["tokens_per_admitted"] = (
+                    round(group["provider_reported_tokens"] / group["admitted"])
+                    if group["admitted"] and group["token_reports"] else None)
+                share = group["cache_read_share"]
+                if share is not None and share * 100 < min_pct and group["usage_reports"] >= min_requests:
+                    warnings.append("cache-read share %.1f%% is under %d%% for role %s (%d usage reports)"
+                                    % (share * 100, min_pct, group["group"], group["usage_reports"]))
+            report["usage_by"].update({
+                "admission_basis": "delegate rows whose patch digest a later successful patch-admit/patch-land row "
+                                   "carries; reported values, never approval or verification evidence",
+                "cache_warn": {"min_pct": min_pct, "min_requests": min_requests},
+                "warnings": warnings,
+            })
     from repair_replay import repeated, valid_trace
     delegates = [row for row in selected if row.get("kind") == "delegate"]
     traces = [row["repair_replay"] for row in delegates if valid_trace(row.get("repair_replay"))]
@@ -875,6 +948,9 @@ def emit_usage_by(report: dict) -> None:
     if window.get("undated_rows"):
         print("undated: %d row(s) carry no time and are outside any range" % window["undated_rows"])
     head = (block["by"], "calls", "tokens", "input", "cached", "output", "cost-usd")
+    by_role = block["by"] == "role"
+    if by_role:
+        head += ("cache%", "admitted", "tok/admit", "unadmitted-tok")
     table = [head] + [(
         group["group"], str(group["calls"]),
         reported(group["provider_reported_tokens"], group["token_reports"], group["calls"]),
@@ -882,7 +958,12 @@ def emit_usage_by(report: dict) -> None:
         reported(group["cache_read_tokens"], group["usage_reports"], group["calls"]),
         reported(group["output_tokens"], group["usage_reports"], group["calls"]),
         reported(group["cost_usd"], group["cost_reports"], group["calls"]),
-    ) for group in block["groups"]]
+    ) + ((
+        "-" if group["cache_read_share"] is None else "%.1f%%" % (group["cache_read_share"] * 100),
+        str(group["admitted"]),
+        "-" if group["tokens_per_admitted"] is None else str(group["tokens_per_admitted"]),
+        str(group["not_admitted_tokens"]),
+    ) if by_role else ()) for group in block["groups"]]
     widths = [max(len(line[column]) for line in table) for column in range(len(head))]
     for line in table:
         print("  ".join([line[0].ljust(widths[0])] + [cell.rjust(widths[n]) for n, cell in enumerate(line) if n]).rstrip())
@@ -892,6 +973,12 @@ def emit_usage_by(report: dict) -> None:
     if excluded:
         print("cumulative: %d resumed-session report(s) carry a running total and are left out of "
               "input/cached/output" % excluded)
+    for warning in block.get("warnings", ()):
+        print("warning: " + warning)
+    if by_role:
+        print("admitted = delegate rows whose patch a later patch-admit/patch-land accepted; "
+              "tok/admit = group tokens / admitted; unadmitted-tok = tokens on the other delegate rows; "
+              "reported values, never approval evidence")
     print("reported values only: `-` none reported, `+?` some calls reported nothing; "
           "no cost is derived from tokens and groups are not summed")
 

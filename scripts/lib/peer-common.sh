@@ -1935,6 +1935,7 @@ ma_append_artifact_index() {
   OMS_INDEX_CONTEXT_DEBT="${OMS_INDEX_CONTEXT_DEBT:-}" \
   OMS_INDEX_OPERATION_ID="${OMS_INDEX_OPERATION_ID:-${OMS_OPERATION_ID:-${OMS_HARNESS_CALL_ID:-}}}" \
   OMS_INDEX_RUN_ID="${OMS_RUN_ID:-}" OMS_INDEX_DELEGATION_ID="${OMS_DELEGATION_ID:-}" \
+  OMS_INDEX_ROLE="${OMS_MODEL_ROLE:-}" \
   OMS_INDEX_ATTEMPT_ID="${OMS_ATTEMPT_ID:-${OMS_LAST_ATTEMPT_ID:-}}" \
   OMS_INDEX_PARENT_EVENT_ID="${OMS_PARENT_EVENT_ID:-}" \
   OMS_INDEX_MODEL_CLASS="${OMS_MODEL_RESOLVED_CLASS:-}" \
@@ -2046,6 +2047,11 @@ if plan_id:
 delegation_id = safe_id(os.environ.get("OMS_INDEX_DELEGATION_ID", ""))
 if delegation_id:
     row["delegation_id"] = delegation_id
+# The strategy role a delegation ran under; only delegate rows carry it, so
+# a role exported into a nested call never labels an unrelated row.
+role_name = safe_id(os.environ.get("OMS_INDEX_ROLE", ""))
+if kind == "delegate" and role_name:
+    row["role"] = role_name
 attempt_id = safe_id(os.environ.get("OMS_INDEX_ATTEMPT_ID", ""))
 if attempt_id:
     row["attempt_id"] = attempt_id
