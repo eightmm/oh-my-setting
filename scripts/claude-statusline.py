@@ -364,6 +364,14 @@ def write_context_cache(payload: Dict[str, Any]) -> None:
         if reported is not None:
             record[key] = {"used_percentage": reported,
                            "resets_at": finite_number(window.get("resets_at"), 0.0, 4_000_000_000.0)}
+    # How much of the last request's input the provider read from its prompt
+    # cache: a share of the token counts it reported for that request, absent
+    # when it reported none. Not a quota and not a price.
+    usage = mapping(context.get("current_usage"))
+    parts = [finite_number(usage.get(key)) for key in
+             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+    if all(part is not None and part >= 0 for part in parts) and sum(parts) > 0:
+        record["cache_read_share"] = round(100 * parts[2] / sum(parts))
     try:
         os.makedirs(cache_dir, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".ctx-", dir=cache_dir)

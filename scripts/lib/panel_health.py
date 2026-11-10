@@ -47,6 +47,13 @@ def project(report, now=None):
                 "Wait for the reset or check the native quota; OMS keeps the selected model and provider.",
                 warning_at_most=10, full_at_most=0)
             items[-1].update(resets_at=row.get("five_hour_resets_at"), advisory=True)
+        # Listed only when the status line recorded it: how much of the main's last request input came from the
+        # provider's prompt cache. A reading, not a limit: it has no warning band and never moves the level.
+        share = percent(row.get("cache_read_share")) if readable and report.get("capacity_stale") is not True else None
+        if share is not None:
+            items.append({"kind": "cache", "label": provider.capitalize() + " prompt cache read", "used": share,
+                          "limit": 100, "status": "ok", "advisory": True,
+                          "action": "Share of the last request's input tokens the provider read from its cache."})
     shared = mapping(report.get("room"))
     members = shared.get("participants")
     if isinstance(members, list) and not shared.get("error"):
@@ -175,8 +182,11 @@ def render(report, width, height, footer=None, now=None):
             rows.append("  %s / %s / %s / %s / %s [unverifiable]" % tuple(clean(main.get(key), 160) for key in
                         ("attempt", "provider", "state", "age", "label")))
             rows.append("  " + clean(main.get("reason"), 160))
-    for item in project(report)["items"]:
+    for item in project(report, now)["items"]:
         if item["kind"] in {"context", "quota"} or item["label"] == "Room mains":
+            continue
+        if item["kind"] == "cache":
+            rows.append("%s%% of last input [reported] %s" % (item["used"], item["label"]))
             continue
         value = "--" if item["used"] is None else "%s/%s" % (item["used"], item["limit"])
         rows.append("%s [%s] %s" % (value, item["status"], item["label"]))

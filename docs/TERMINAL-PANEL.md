@@ -823,6 +823,14 @@ counts: an unreported, stale or rolled-over window says nothing, and nothing is 
 from token counts. It is an advisory: it changes neither the health level nor any
 session, and starts no swap.
 
+When the Claude status line payload carries the last request's `current_usage` token
+counts, the HUD cache also records `cache_read_share`: the percentage of that request's
+input tokens (fresh, cache-creation and cache-read) the provider read from its prompt
+cache. `oms panel --health` lists it as `80% of last input [reported] Claude prompt
+cache read`, and `--health --json` as an advisory item of kind `cache`. It is a ratio of
+reported counts for one request, not a quota, a price or a cache-lifetime timer; with no
+counts reported nothing is listed, and it has no warning band.
+
 A proven existing tmux pane can supply numeric fields from its last eight visible native
 footer lines. `TUI` or `HUD/TUI` labels those mirrored readings; native output may lag
 while idle and changed footer formats become unknown. The watcher performs no native

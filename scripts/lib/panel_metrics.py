@@ -68,9 +68,14 @@ def cached(consumer, now):
         five_used, five_reset = percent(five.get("used_percentage")), number(five.get("resets_at"))
         if five_reset is not None and five_reset <= now:
             five_used = None
-        return {"context_left": None if used is None else 100 - used,
-                "weekly_used": weekly, "five_hour_used": five_used,
-                "five_hour_resets_at": None if five_used is None else five_reset, "source": "HUD"}
+        row = {"context_left": None if used is None else 100 - used,
+               "weekly_used": weekly, "five_hour_used": five_used,
+               "five_hour_resets_at": None if five_used is None else five_reset, "source": "HUD"}
+        # The share of the last request's input read from the prompt cache, when the status line recorded one.
+        share = percent(data.get("cache_read_share"))
+        if share is not None and share >= 0:
+            row["cache_read_share"] = share
+        return row
     except (OSError, ValueError, RecursionError):
         return {}
 
