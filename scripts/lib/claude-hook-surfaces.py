@@ -6,8 +6,10 @@ one the installer would leave unchanged.
 
 A hook is OMS-owned only when its command names a registered script under
 the current root or a verified OMS checkout, either directly (legacy) or
-through that same root's Python entry launcher. Arbitrary wrappers and
-same-named scripts elsewhere stay user-owned: never rewritten or removed.
+through that same root's Python entry launcher. A launcher row whose root no
+longer exists is still ours, so a moved or deleted checkout cannot strand a
+blocking row. Arbitrary wrappers and same-named scripts elsewhere stay
+user-owned: never rewritten or removed.
 """
 
 import os
@@ -77,6 +79,17 @@ def is_oms_root(candidate, roots):
     )
 
 
+def _dead_launcher(command, root):
+    """True for the managed launcher form whose checkout is gone from disk."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return (len(argv) == 4 and argv[0] == "bash" and argv[2] == "bash"
+            and _norm(argv[1]) == root + "/scripts/lib/python-entry.sh"
+            and not os.path.lexists(root))
+
+
 def owned_script(hook, roots):
     if not isinstance(hook, dict) or hook.get("type", "command") != "command":
         return None
@@ -90,7 +103,9 @@ def owned_script(hook, roots):
     root = parts[0]
     if not (root.startswith("/") or (len(root) > 2 and root[1:3] == ":/")):
         return None
-    return parts[2] if is_oms_root(root, roots) else None
+    if is_oms_root(root, roots) or _dead_launcher(command, root):
+        return parts[2]
+    return None
 
 
 def matcher_ok(entry, matcher):
@@ -107,6 +122,10 @@ def _desired_hook(hook, surface, command_root):
         fixed.pop("timeout", None)
     else:
         fixed["timeout"] = surface["timeout"]
+    # Only a capable guard may keep an opt-in `block`; anything else is not
+    # something the manifest asks for.
+    if not (surface.get("fail_closed") and fixed.get("onFailure") == "block"):
+        fixed.pop("onFailure", None)
     return fixed
 
 
@@ -273,6 +292,13 @@ def audit(hooks, surfaces, command_root, roots):
             issues.append(("drift", "timeout %s, expected %s" % (
                 hook.get("timeout", "absent"),
                 "absent" if row["timeout"] is None else row["timeout"])))
+        if "onFailure" in hook and not (row.get("fail_closed") and hook["onFailure"] == "block"):
+            issues.append(("drift", "onFailure %r, expected absent%s" % (
+                hook["onFailure"], " or 'block'" if row.get("fail_closed") else "")))
+        path = entry_path(str(hook.get("command")), "bash")
+        if path is not None and _dead_launcher(
+                hook["command"], _norm(path).rsplit("/", 2)[0]):
+            issues.append(("drift", "dead OMS hook: its checkout no longer exists"))
         if not matcher_ok(entry, row["matcher"]):
             issues.append(("drift", "matcher %r, expected %r" % (
                 entry.get("matcher"), row["matcher"])))

@@ -502,6 +502,56 @@ PY
   if OMS_GUARD_FAIL_CLOSED=maybe run_install "$home" >/dev/null 2>&1; then
     fail "an unknown OMS_GUARD_FAIL_CLOSED value should be refused"
   fi
+  # A probe failure with the opt-in downgrades an existing block (it would
+  # contradict the fail-open warning); a hand-written onFailure value is
+  # audited and converged away, a block on a non-guard row too.
+  local cfg="$home/.claude/settings.json" stub_ok
+  stub_ok="$(cat "$home/probe-bin/claude")"
+  OMS_GUARD_FAIL_CLOSED=1 PATH="$home/probe-bin:$PATH" run_install "$home" >/dev/null 2>&1 || fail "fail-closed opt-in should install"
+  grep -q '"onFailure": "block"' "$cfg" || fail "fixture needs a block"
+  printf '%s\n' '#!/bin/sh' 'echo "Claude Code doctor"' > "$home/probe-bin/claude"
+  PATH="$home/probe-bin:$PATH" OMS_GUARD_FAIL_CLOSED=1 run_install "$home" >/dev/null 2>&1 || fail "an unprobed opt-in must not fail"
+  ! grep -q onFailure "$cfg" || fail "an unprobed opt-in must downgrade an existing block"
+  printf '%s\n' "$stub_ok" > "$home/probe-bin/claude"
+  python3 - "$cfg" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); n = 0
+for es in d["hooks"].values():
+    for e in es:
+        for h in e["hooks"]:
+            if h["command"].endswith("command-guard-hook.sh"):
+                h["onFailure"] = "oms-bogus"
+            elif h["command"].endswith("skill-router.sh"):
+                h["onFailure"] = "block"
+json.dump(d, open(sys.argv[1], "w"))
+PY
+  out="$(run_default_doctor "$home")"
+  case "$out" in *"onFailure 'oms-bogus'"*"onFailure 'block'"*|*"onFailure 'block'"*"onFailure 'oms-bogus'"*) ;; *) printf '%s\n' "$out"; fail "doctor should flag unrequested onFailure values" ;; esac
+  run_install "$home" >/dev/null || fail "install should converge onFailure"
+  ! grep -q onFailure "$cfg" || fail "converge must drop onFailure the manifest does not ask for"
+  # A dead blocking row from a checkout that is gone: doctor names it and the
+  # installer replaces it, and removal deletes it even with a bad opt-in value.
+  python3 - "$cfg" "$home" <<'PY'
+import json, shlex, sys
+d = json.load(open(sys.argv[1])); dead = sys.argv[2] + "/gone-checkout"
+for es in d["hooks"].values():
+    for e in es:
+        for h in e["hooks"]:
+            if h["command"].endswith("command-guard-hook.sh"):
+                h["command"] = " ".join(shlex.quote(a) for a in (
+                    "bash", dead + "/scripts/lib/python-entry.sh", "bash", dead + "/scripts/command-guard-hook.sh"))
+                h["onFailure"] = "block"
+json.dump(d, open(sys.argv[1], "w"))
+PY
+  cp "$cfg" "$home/dead-settings.json"
+  out="$(run_default_doctor "$home")"
+  case "$out" in *"dead OMS hook"*) ;; *) printf '%s\n' "$out"; fail "doctor should report a dead OMS hook row" ;; esac
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" OMS_LOCK_DIR="$home/.locks" \
+    OMS_GUARD_FAIL_CLOSED=maybe bash "$ROOT/scripts/install-claude-hooks.sh" --remove --settings "$home/dead-settings.json" >/dev/null 2>&1 ||
+    fail "--remove must ignore an invalid OMS_GUARD_FAIL_CLOSED"
+  ! grep -q gone-checkout "$home/dead-settings.json" || fail "--remove must delete a dead OMS row"
+  run_install "$home" >/dev/null || fail "install should replace a dead OMS row"
+  ! grep -q gone-checkout "$cfg" || fail "install must replace a dead OMS row"
   python3 - "$home/.claude/settings.json" "$home" <<'PY' || fail "the lookalike user hook must survive"
 import json, sys
 hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]

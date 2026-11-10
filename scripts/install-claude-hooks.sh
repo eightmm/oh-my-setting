@@ -351,20 +351,25 @@ if [ -z "$OWNERSHIP_RECEIPT" ]; then mkdir -p "$(dirname "$SETTINGS")"; fi
 EXPECTED_JSON="$(print_expected_json)"
 
 FAIL_CLOSED_MODE=keep
-case "${OMS_GUARD_FAIL_CLOSED:-}" in
-  "") ;;
-  0) FAIL_CLOSED_MODE=off ;;
-  1)
-    if [ "$REMOVE" = 1 ] || [ -n "$OWNERSHIP_RECEIPT" ]; then
-      :
-    elif claude_on_failure_supported; then
-      FAIL_CLOSED_MODE=on
-    else
-      echo "warning: OMS_GUARD_FAIL_CLOSED=1 was not applied: the installed claude does not validate a hook's onFailure field (or claude is not on PATH), so the command guard stays fail-open" >&2
-    fi
-    ;;
-  *) fail "OMS_GUARD_FAIL_CLOSED must be 0 or 1" ;;
-esac
+# Removal never depends on this opt-in: a bad value must not block it.
+if [ "$REMOVE" != 1 ]; then
+  case "${OMS_GUARD_FAIL_CLOSED:-}" in
+    "") ;;
+    0) FAIL_CLOSED_MODE=off ;;
+    1)
+      if [ -n "$OWNERSHIP_RECEIPT" ]; then
+        :
+      elif claude_on_failure_supported; then
+        FAIL_CLOSED_MODE=on
+      else
+        # An existing block would contradict the warning: downgrade it.
+        FAIL_CLOSED_MODE=off
+        echo "warning: OMS_GUARD_FAIL_CLOSED=1 was not applied: the installed claude does not validate a hook's onFailure field (or claude is not on PATH), so the command guard is registered fail-open" >&2
+      fi
+      ;;
+    *) fail "OMS_GUARD_FAIL_CLOSED must be 0 or 1" ;;
+  esac
+fi
 
 OMS_CH_OWNERSHIP="$OWNERSHIP_RECEIPT" \
   OMS_CH_SETTINGS="$SETTINGS" \
