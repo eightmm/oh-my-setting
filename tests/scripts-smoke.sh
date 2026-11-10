@@ -24902,7 +24902,18 @@ test_global_rules_stay_compact_and_route_workflows() {
   line_count="$(wc -l < "$global_rules" | tr -d ' ')"
   [ "$line_count" -le 160 ] || fail "global rules exceed 160 lines"
   word_count="$(wc -w < "$global_rules" | tr -d ' ')"
-  [ "$word_count" -le 720 ] || fail "global rules exceed 720 words"
+  [ "$word_count" -le 775 ] || fail "global rules exceed 775 words"
+  # Named verbs must exist as scripts, or the always-loaded rules send agents nowhere.
+  assert_file_contains "$global_rules" 'oms output-digest -- CMD'
+  assert_file_contains "$global_rules" 'oms journal show --grep TEXT'
+  assert_file_contains "$global_rules" 'oms agent-memory recall QUERY'
+  for verb in output-digest journal agent-memory; do
+    [ -f "$ROOT/scripts/$verb.sh" ] || fail "global rules name oms $verb without scripts/$verb.sh"
+  done
+  assert_file_contains "$global_rules" 'Attribution trailers (Co-Authored-By, session link) allowed'
+  if grep -q 'No attribution trailers' "$global_rules"; then
+    fail "global rules must not forbid attribution trailers"
+  fi
   assert_file_contains "$ROOT/AGENTS.md" 'rules/global-AGENTS.md'
   assert_file_contains "$ROOT/AGENTS.md" 'scripts/check.sh'
   assert_file_contains "$global_rules" 'oms-agent-harness'
