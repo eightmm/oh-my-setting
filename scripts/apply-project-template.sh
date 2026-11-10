@@ -363,7 +363,7 @@ refuse_symlinks() {
 }
 destinations=("${FILES[@]}" PROJECT.md)
 if [ "$BASE_STYLE" = "ml" ]; then
-  destinations+=(.gitignore scripts/ml_smoke.py scripts/check.sh)
+  destinations+=(.gitignore scripts/ml_smoke.py scripts/ml_resume_smoke.py scripts/check.sh)
   # skill-forge stores under .oms/skills and links into both CLI skill roots;
   # the per-skill leaves are its own owned links, so only the roots are walked.
   destinations+=(.oms/skills .agents/skills .claude/skills)
@@ -464,6 +464,20 @@ if [ "$BASE_STYLE" = "ml" ]; then
       mkdir -p "$PROJECT_DIR/scripts"
       cp "$ML_SMOKE_SRC" "$ML_SMOKE_DST"
       echo "created $ML_SMOKE_DST"
+    fi
+  fi
+
+  RESUME_SMOKE_SRC="$ROOT/templates/ml_resume_smoke.py"
+  RESUME_SMOKE_DST="$PROJECT_DIR/scripts/ml_resume_smoke.py"
+  if [ -f "$RESUME_SMOKE_SRC" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "would scaffold $RESUME_SMOKE_DST"
+    elif [ -e "$RESUME_SMOKE_DST" ]; then
+      echo "skip existing $RESUME_SMOKE_DST"
+    else
+      mkdir -p "$PROJECT_DIR/scripts"
+      cp "$RESUME_SMOKE_SRC" "$RESUME_SMOKE_DST"
+      echo "created $RESUME_SMOKE_DST"
     fi
   fi
 

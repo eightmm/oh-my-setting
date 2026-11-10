@@ -876,6 +876,11 @@ test_apply_ml_scaffolds_check_contract() {
   assert_file_contains "$project2/scripts/check.sh" "Project verification contract"
   [ -f "$project2/scripts/ml_smoke.py" ] || fail "ml_smoke.py not scaffolded"
   assert_file_contains "$project2/scripts/ml_smoke.py" "One-batch ML interface smoke"
+  [ -f "$project2/scripts/ml_resume_smoke.py" ] || fail "ml_resume_smoke.py not scaffolded"
+  python3 "$project2/scripts/ml_resume_smoke.py" >/dev/null ||
+    fail "scaffolded resume smoke does not pass on its demo plug-in"
+  python3 "$project2/scripts/ml_resume_smoke.py" --self-test >/dev/null ||
+    fail "resume smoke did not detect a checkpoint that omits RNG/optimizer/scheduler state"
 
   printf 'custom smoke\n' > "$project/scripts/ml_smoke.py"
   "$ROOT/scripts/apply-project-template.sh" ml "$project" >/dev/null
