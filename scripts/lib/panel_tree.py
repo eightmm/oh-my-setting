@@ -4,7 +4,7 @@ import re
 
 from dashboard_projection import clean, display_width, listing, mapping
 from panel_metrics import usage_line
-from panel_view import (ATTENTION_STATES, LIVE_STATES, PALETTE, activity, box_edge, box_row, clipped,
+from panel_view import (ATTENTION_STATES, LIVE_STATES, tint, activity, box_edge, box_row, clipped,
                         _repo_root, main_occupied, menu_rows, status_alerts, TERMINAL_STATES, worker_rows, wrapped,
                         role_style, call_identity, glyph, paint, color_count, light_theme, age_label,
                         JUDGE_ROLES, WORKER_ROLES, paint_card_edges, judge_band, band_style, role_legend,
@@ -557,12 +557,11 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         fitted = footer_hints(navigation, width, managed, unicode, chosen, True)
         footer[-hint_rows:] = fitted[:hint_rows] + [""] * max(0, hint_rows - len(fitted))
         output += [""] * max(0, height - len(output) - len(footer))
-    output += [PALETTE["dim"] + clipped(line, width) + "\033[0m" if color and
-               line.startswith(("╭", "╰", "+", "OMS records")) else clipped(line, width)
+    output += [tint(clipped(line, width), "dim", color and line.startswith(("╭", "╰", "+", "OMS records")))
                for line in footer]
     if bar:
         row = len(output) - hint_rows - 1
-        output[row] = PALETTE["main" if bar[1] else "dim"] + output[row] + "\033[0m" if color else output[row]
+        output[row] = tint(output[row], "main" if bar[1] else "dim", color)
         hits += [{"y": row + 1, "x1": x1, "x2": x2, "action": ("spawn", name)} for x1, x2, name in bar[1]]
     for hit in dock_hits:
         target = hit["action"]

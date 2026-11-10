@@ -258,11 +258,24 @@ def status_tag(state, *, exit_code=None, unicode=True) -> str:
     return "[" + (glyph(mark, unicode) + " " if mark else "") + state + "]"
 
 
+RESET = "\033[0m"
+
+
 def paint(text, token, *, color=False, colors=16, light=False, bold=False) -> str:
     preference = os.environ.get("OMS_PANEL_COLOR", "").lower()
-    if not color or preference in {"0", "no", "false", "never"} or "NO_COLOR" in os.environ:
+    # A dumb terminal cannot interpret SGR even when colour is forced; NO_COLOR and "never" always win.
+    if (not color or preference in {"0", "no", "false", "never"} or "NO_COLOR" in os.environ
+            or os.environ.get("TERM") == "dumb"):
         return text
-    return _sgr(token, colors, light, bold) + text + "\033[0m"
+    return _sgr(token, colors, light, bold) + text + RESET
+
+
+def tint(text, token, color=True) -> str:
+    """Whole-cell style through the same palette and gates as paint(); a token outside the palette stays plain."""
+    if not color or token not in PALETTE:
+        return text
+    return paint(text, token, color=True, colors=color_count(), light=light_theme(),
+                 bold=token in BOLD_TOKENS)
 
 
 def paint_card_edges(text, token, *, unicode=True, color=False, colors=16, light=False):
@@ -277,13 +290,21 @@ def paint_card_edges(text, token, *, unicode=True, color=False, colors=16, light
 def _sgr(token, colors, light, bold):
     style = TOKEN_ALIASES.get(token, token)
     dark, bright, sgr = TOKEN_COLORS.get(style, TOKEN_COLORS["unknown"])
+    # Plain white (37) is invisible on a light background; bright black (90) reads on both.
     code = "38;5;%s" % (bright if light else dark) if colors >= 256 and dark is not None else str(
-        37 if light and style in {"unknown", "dim", "metadata"} else sgr)
+        90 if light and sgr == 37 else sgr)
     return "\033[" + ("1;" if bold else "") + code + "m"
 
 
 def color_count():
-    return 256 if "256color" in os.environ.get("TERM", "") else 16
+    """Palette depth by capability: 256 for a 256-colour or truecolor terminal, else the 16 basic colours."""
+    term = os.environ.get("TERM", "")
+    if "256color" in term or "direct" in term or os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        return 256
+    return 16
+
+
+BOLD_TOKENS = {"main", "codex", "head"}
 
 
 class _Palette(dict):
@@ -292,7 +313,7 @@ class _Palette(dict):
         return ""
 
 
-PALETTE = _Palette({name: _sgr(name, color_count(), light_theme(), name in {"main", "codex", "head"})
+PALETTE = _Palette({name: _sgr(name, color_count(), light_theme(), name in BOLD_TOKENS)
                     for name in list(TOKEN_COLORS) + list(TOKEN_ALIASES)})
 
 
@@ -1251,10 +1272,10 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     lines, hits = [], []
     for text, style in zip(head, styles):
         lines.append(clipped(text, width))
-        lines[-1] = (PALETTE[style] + lines[-1] + "\033[0m") if color else lines[-1]
+        lines[-1] = tint(lines[-1], style, color)
     if boxed:
         title = "Needs you" + (sep + "%s" % len(items) if items else "") + (sep + "Up/Down, Enter opens" if items and not navigation.get("line_input") else "")
-        lines.append((PALETTE["alert" if items else "dim"] if color else "") + box_edge(title, width, unicode) + ("\033[0m" if color else ""))
+        lines.append(tint(box_edge(title, width, unicode), "alert" if items else "dim", color))
     for entry in body:
         text, style, action = entry[:3]
         row_id = entry[3] if len(entry) > 3 else None
@@ -1265,9 +1286,9 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
         if boxed:
             value = box_row(value, width, unicode)
         if color and chosen:
-            value = PALETTE[style] + "\033[7m" + value + "\033[0m"
+            value = tint("\033[7m" + value, style)
         elif color:
-            value = PALETTE[style] + value + "\033[0m"
+            value = tint(value, style)
         lines.append(value)
         if action is not None:
             hits.append({"y": len(lines), "x1": 1, "x2": width, "action": action, "row_id": row_id})
@@ -1321,7 +1342,7 @@ def render_unavailable(report, width, height, color, unicode, previous, menu, ma
     lines = []
     for text, style in head[:body] + [(line, "dim" if line.startswith("F5") else "main") for line in footer]:
         text = clipped(text, width)
-        lines.append(PALETTE[style] + text + "\033[0m" if color else text)
+        lines.append(tint(text, style, color))
     return "\n".join(lines[:budget])
 
 
@@ -1374,7 +1395,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     def add(text="", style=None):
         value = clipped(text, width)
         if color and style:
-            value = PALETTE[style] + value + "\033[0m"
+            value = tint(value, style)
         lines.append(value)
 
     footer = []
