@@ -1397,6 +1397,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
+  stage artifact-view python3 tests/test_artifact_view.py
   stage doctor-surfaces bash tests/doctor-surfaces-smoke.sh
   stage runtime-core-integration bash tests/runtime-core-integration-smoke.sh
   stage autonomy-verification bash tests/autonomy-verification-smoke.sh
