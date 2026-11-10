@@ -27,6 +27,8 @@ def load(name):
 
 inspector = load("context_inspect")
 policy = load("child_policy")
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+from oms_runtime import context_session as session_view  # noqa: E402  (a package import: it shares the inspector's errors)
 ERROR = inspector.InspectionError
 CLI = "--cli" in sys.argv
 if CLI:
@@ -274,6 +276,82 @@ class FilesystemTests(unittest.TestCase):
         with patch.object(inspector.os, "read", read_and_change), self.assertRaises(ERROR):
             inspector.inspect_files(self.repo, "pack.json")
 
+    def test_injection_ledger_is_summed_by_hook_and_session_without_text(self):
+        hooks = self.repo / ".oms" / "hooks"
+        hooks.mkdir(parents=True)
+        self.assertEqual(session_view.inspect_injections(self.repo)["injections"], 0)
+        rows = [{"action": "injection", "status": "resume", "bytes": 900, "lines": 9, "session": "s1", "source": "startup"},
+                {"action": "injection", "status": "resume", "bytes": 1100, "lines": 11, "session": "s1", "source": "compact"},
+                {"action": "injection", "status": "prompt", "bytes": 40, "lines": 1, "session": "s2"},
+                {"action": "telemetry", "bytes": 5000, "session": "s2"},
+                {"action": "injection", "status": "resume", "bytes": "many", "session": "s2"},
+                {"action": "injection", "status": "private text\u0007", "bytes": 3, "session": "s2"}]
+        (hooks / "events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows) + "{broken\n", encoding="utf-8")
+        before = tree_bytes(self.repo)
+        value = session_view.inspect_injections(self.repo, limit=1)
+        self.assertEqual((value["injections"], value["bytes"], value["invalid_rows"]), (3, 2040, 3))
+        self.assertEqual(value["by_hook"], {"total": 2, "omitted": 1, "items": [
+            {"hook": "resume", "calls": 2, "bytes": 2000, "largest": 1100}]})
+        self.assertEqual(value["by_session"]["items"], [{"session": "s1", "calls": 2, "bytes": 2000, "largest": 1100}])
+        sources = session_view.inspect_injections(self.repo)["by_session_start_source"]["items"]
+        self.assertEqual({row["source"]: row["bytes"] for row in sources},
+                         {"compact": 1100, "startup": 900, "unrecorded": 40})
+        self.assertEqual(session_view.inspect_injections(self.repo, session="s2")["bytes"], 40)
+        self.assertNotIn("private text", json.dumps(value))
+        self.assertTrue(value["not_counted"])
+        self.assertEqual(before, tree_bytes(self.repo))
+        for bad in (0, 101, "3"):
+            with self.assertRaises(session_view.InspectionError):
+                session_view.inspect_injections(self.repo, limit=bad)
+        with self.assertRaises(session_view.InspectionError):
+            session_view.inspect_injections(self.repo, session="not a hash\n")
+        (hooks / "events.jsonl").unlink()
+        (hooks / "events.jsonl").symlink_to(self.file)
+        with self.assertRaises(session_view.InspectionError):
+            session_view.inspect_injections(self.repo)
+
+    def test_transcript_tool_results_are_counted_in_bytes_without_text(self):
+        inside, outside = str(self.repo / "src" / "a.py"), str(self.root / "elsewhere.txt")
+        def use(ident, name, **fields):
+            return {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "private reasoning"}, {"type": "tool_use", "id": ident, "name": name, "input": fields}]}}
+        def result(ident, content):
+            return {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": ident, "content": content}]}}
+        rows = [use("t1", "Read", file_path=inside), result("t1", "x" * 300),
+                use("t2", "Read", file_path="src/a.py"), result("t2", [{"type": "text", "text": "y" * 200}]),
+                use("t3", "Read", file_path=outside), result("t3", "z" * 10),
+                use("t4", "Bash", command="echo private-command"), result("t4", "\u00e9" * 50),
+                result("gone", "w" * 7), {"type": "user", "message": {"content": "plain prompt"}}]
+        transcript = self.root / "session.jsonl"
+        transcript.write_text("".join(json.dumps(row) + "\n" for row in rows) + "not json\n", encoding="utf-8")
+        before = tree_bytes(self.repo)
+        value = session_view.inspect_session(self.repo, str(transcript), limit=2)
+        self.assertEqual(value["format"], "claude-jsonl")
+        self.assertEqual((value["tool_calls"], value["tool_results"], value["unmatched_results"], value["unread_lines"]),
+                         (4, 5, 1, 1))
+        self.assertEqual(value["result_bytes"], 300 + 200 + 10 + 100 + 7)
+        self.assertEqual(value["by_tool"]["items"], [
+            {"tool": "Read", "results": 3, "bytes": 510, "largest": 300},
+            {"tool": "Bash", "results": 1, "bytes": 100, "largest": 100}])
+        self.assertEqual(value["by_tool"]["omitted"], 1)
+        self.assertEqual(value["file_reads"], {"distinct_in_repository": 1, "outside_repository": 1,
+                                               "repeated": {"total": 1, "omitted": 0, "items": [{"path": "src/a.py", "reads": 2}]}})
+        text = json.dumps(value)
+        for private in ("private", "elsewhere", str(self.root)):
+            self.assertNotIn(private, text)
+        self.assertEqual(before, tree_bytes(self.repo))
+        other = self.root / "other.jsonl"
+        other.write_text('{"type":"session_meta","payload":{"cwd":"x"}}\n', encoding="utf-8")
+        self.assertEqual(session_view.inspect_session(self.repo, str(other))["format"], "unknown")
+        with self.assertRaises(session_view.InspectionError) as caught:
+            session_view.inspect_session(self.repo, str(self.root / "absent.jsonl"))
+        self.assertNotIn(str(self.root), str(caught.exception))
+        with patch.object(session_view, "MAX_TRANSCRIPT_BYTES", 8), self.assertRaises(session_view.InspectionError):
+            session_view.inspect_session(self.repo, str(transcript))
+        self.assertTrue(policy.child_action_is_read_only(argparse.Namespace(command="context-inspect", session=None)))
+        self.assertFalse(policy.child_action_is_read_only(
+            argparse.Namespace(command="context-inspect", session=str(transcript))))
+
     def test_error_does_not_echo_input_or_path(self):
         self.file.write_text('{"private-fixture-value":', encoding="utf-8")
         with self.assertRaises(ERROR) as caught:
@@ -319,6 +397,22 @@ if CLI:
                 self.assertEqual(pair.returncode, 0, pair.stderr)
                 self.assertEqual(json.loads(pair.stdout)["delta"]["selected_bytes"], 0)
                 self.assertEqual(call("context-inspect", "pack.json", "--limit", "0").returncode, 2)
+                # The same verb reads the injection ledger or one transcript instead of a manifest; exactly one of the three.
+                ledger = call("context-inspect", "--injections", child=True)
+                self.assertEqual(ledger.returncode, 0, ledger.stderr)
+                self.assertEqual(json.loads(ledger.stdout)["kind"], "oms-context-injections")
+                transcript = repo / "t.jsonl"
+                transcript.write_text(json.dumps({"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t", "content": "abc"}]}}) + "\n", encoding="utf-8")
+                seen = call("context-inspect", "--session", str(transcript))
+                self.assertEqual(seen.returncode, 0, seen.stderr)
+                self.assertEqual(json.loads(seen.stdout)["result_bytes"], 3)
+                self.assertEqual(call("context-inspect", "--session", str(transcript), child=True).returncode, 2)
+                for wrong in (("context-inspect",), ("context-inspect", "pack.json", "--injections"),
+                              ("context-inspect", "--injections", "--verify-current"),
+                              ("context-inspect", "pack.json", "--session-hash", "abc")):
+                    self.assertEqual(call(*wrong).returncode, 2, wrong)
+                transcript.unlink()
                 self.assertEqual(call("context", "--target", "src.py", child=True).returncode, 2)
                 self.assertEqual(before, tree_bytes(repo))
 

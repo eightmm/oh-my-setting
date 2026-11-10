@@ -51,7 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     inspection = commands.add_parser(
         'context-inspect', help='inspect saved context metadata and optionally verify source files',
         parents=[shared_options])
-    inspection.add_argument('manifest', help='existing manifest inside the selected repository')
+    inspection.add_argument('manifest', nargs='?', help='existing manifest inside the selected repository')
+    inspection.add_argument('--injections', action='store_true',
+                            help='instead of a manifest: bytes OMS hooks injected into sessions, from the hook event ledger')
+    inspection.add_argument('--session-hash', help='with --injections: one recorded session hash')
+    inspection.add_argument('--session', metavar='TRANSCRIPT',
+                            help='instead of a manifest: per-tool result bytes and repeated reads in one Claude Code JSONL transcript')
     inspection.add_argument('--compare', help='compare with another saved manifest; never run either pack')
     inspection.add_argument('--verify-current', action='store_true', help='compare current source hashes (incompatible with --compare)')
     inspection.add_argument('--limit', type=int, default=10, help='rows per displayed list, 1..100 (default: 10)')
