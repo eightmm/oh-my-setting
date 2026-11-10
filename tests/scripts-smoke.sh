@@ -44270,6 +44270,19 @@ EOF
   printf '%s\n' "$out" | grep >/dev/null '1 with a verify contract' ||
     fail "status should surface the contract count: $out"
 
+  # The molecular-data template is opt-in (not every ML repository is
+  # chemistry): it must pass the same add gate a person installs it through,
+  # and it must not make OMS carry a chemistry dependency.
+  out="$("$ROOT/scripts/skill-forge.sh" --repo "$project" add --name oms-chem-validity \
+    --file "$ROOT/templates/project-skills/oms-chem-validity/SKILL.md" 2>&1)" ||
+    fail "the shipped oms-chem-validity template must pass the add gate: $out"
+  [ -f "$project/.oms/skills/oms-chem-validity/SKILL.md" ] || fail "oms-chem-validity was not installed"
+  assert_file_contains "$project/.oms/skills/oms-chem-validity/SKILL.md" "invariant_pack"
+  ! grep -Eq '^(import|from) rdkit' "$ROOT"/scripts/*.py "$ROOT"/scripts/lib/*.py ||
+    fail "OMS itself must not import a chemistry library"
+  grep -Fq 'oms-ml-experiment oms-dataset-safety; do' "$ROOT/scripts/apply-project-template.sh" ||
+    fail "the ML template installs exactly its two general skills; chemistry stays opt-in"
+
   # Status compares a project's bytes to the running OMS template and only
   # advises; it never replaces a customized local copy.
   mkdir -p "$(dirname "$template")" "$(dirname "$imported_template")"

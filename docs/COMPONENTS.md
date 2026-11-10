@@ -2098,6 +2098,14 @@ ML/Slurm workflows use local-first experiment controls:
   or is gone. OMS never runs the chemistry or the clustering, and every
   `leakage` report ends by saying it compared exact matches only: analogs,
   homologs and other near-duplicates need the project's similarity tooling.
+- An opt-in project skill for molecular data,
+  `templates/project-skills/oms-chem-validity/SKILL.md`: parse failures,
+  duplicates after standardization, salt and stereo policy, label units and
+  censoring, replicates, how split keys were computed, pose validity beside
+  RMSD, and licenses. The ML template does not install it; a chemistry project
+  adds it with `oms skill-forge add --name oms-chem-validity --file PATH`. Each
+  check is the project's own command, registered in the experiment contract's
+  `invariant_pack`; OMS carries no chemistry dependency.
 - `oms experiment-board` for claims and collision avoidance. `finish --verdict
   supported|not_supported|inconclusive|aborted` records how the hypothesis came
   out, and `--tags a,b` on `claim` or `finish` labels it. A later `claim` lists,
