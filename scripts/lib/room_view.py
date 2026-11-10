@@ -1117,6 +1117,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     # Earlier mains of the room stay readable; the live one leads.
     mains = [m for m in members if m.get("role") == "main"]
     selected = navigation.get("selected")
+    marked_ids = navigation.get("changed") or ()
     owners = {key: m for m in mains for key in (m["participant"], m.get("attempt")) if key}
     # A held current main (blocked, waiting, presence unknown) still leads any ended predecessor.
     primary = owners.get(main_attempt) or next((m for m in mains if m["state"] in LIVE_STATES), next(
@@ -1358,10 +1359,14 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
             else:
                 connector = ("└╌ " if n == len(shown) - 1 and not hidden else "├╌ ") if unicode else ("`- " if n == len(shown) - 1 and not hidden else "+- ")
             mark = glyph("selected", unicode) + " " if action(member) == selected else "  "
+            moved = mark == "  " and (member.get("participant") in marked_ids or member.get("attempt") in marked_ids)
+            if moved:
+                # The selection marker's own two columns: a just-changed row never shifts the layout.
+                mark = glyph("changed", unicode) + " "
             band_prefix = (glyph(name, unicode) + " " + (name.title() + " " if n == 0 else "")) if name != "calls" else ""
             values = band_tails[id(member)]
             age = values[2][0]
-            _, spans = format_tail_row([(" " * stem, "text"), (connector, style_key), (mark, "text")],
+            _, spans = format_tail_row([(" " * stem, "text"), (connector, style_key), (mark, "alert" if moved else "text")],
                                        (band_prefix + member_identity(member), style_key), values, tail_plan)
             lines.append("".join(styled(text, tone, action(member) == selected and tone == style_key)
                                  for text, tone in spans))

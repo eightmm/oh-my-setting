@@ -872,13 +872,15 @@ Rendering frames makes no state writes or model calls; state collection remains 
 five seconds, plus collection time.
 
 A call that is new, or whose state moved, since the previous snapshot is marked `✦`
-(`*` in ASCII) for about three seconds in the tree and list views. The mark sits in
+(`*` in ASCII) for about three seconds in the tree, list and graph views. In the graph
+it marks the call rows of the bands (gate, counsel, workers); the main box and the
+expanded card of a selected call do not draw it. The mark sits in
 the two columns the selection marker uses, so no row moves or changes width when it
 appears or ends; a selected row keeps its own marker, and color only tints the glyph.
 The first snapshot of a room, a room switch and the snapshot after a failed or held
 read mark nothing. It ends without waiting for another snapshot, costs one repaint
 when it does, and never changes ordering, attention counts, the bell or the notifier.
-Reduced motion shows no mark; the graph view does not draw it.
+Reduced motion shows no mark.
 
 Interactive watch collects state and quota readings in one background read at a time. It
 keeps the last frame available for input while a read is pending, and applies completed
