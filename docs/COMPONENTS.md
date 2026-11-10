@@ -1658,6 +1658,18 @@ ML/Slurm workflows use local-first experiment controls:
   studies; `oms runtime experiment launch` pre-registers a single command
   through the same run ledger (replacing `research-runner`).
 - `oms data-manifest` for fingerprints, split checks, and leakage evidence.
+  `create --policy random|group|scaffold|cold|time` declares how the splits
+  were made, and `leakage` then checks that policy's invariant on the columns
+  the project precomputed: no `--key-column` value across splits for `group`
+  and `scaffold`, no `--entity-column` value (drug, target, ...) across splits
+  for `cold`, each column on its own, and for `time` every row of a later
+  `--split` later than every row of an earlier one on `--time-column` (numbers
+  or ISO-8601 dates; list splits oldest first). An ID repeated inside one split
+  is a warning. `--derive-cmd` and `--derive-script` record the command and the
+  script digest behind the key columns; `check` warns when that script changed
+  or is gone. OMS never runs the chemistry or the clustering, and every
+  `leakage` report ends by saying it compared exact matches only: analogs,
+  homologs and other near-duplicates need the project's similarity tooling.
 - `oms experiment-board` for claims and collision avoidance.
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local
   GPU work. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps

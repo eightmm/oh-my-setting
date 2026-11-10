@@ -20771,6 +20771,88 @@ test_data_manifest_key_column_leakage() {
     --key-column nope --split train=train.csv >/dev/null 2>&1 ); then
     fail "unknown key-column must fail create"
   fi
+
+  # Every leakage report says what it did not compare, and names the policy.
+  contains "$out" 'policy: none declared (checked: ID overlap; key overlap on scaffold)' ||
+    fail "an undeclared policy must be reported as undeclared"
+  contains "$out" 'note: exact matches only' || fail "leakage must say it compared exact matches only"
+
+  # A declared policy is checked for what it needs before anything is written.
+  dm() { ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" "$@" ); }
+  dm create --name p1 --id-column id --policy scaffold --split train=train.csv >/dev/null 2>&1 &&
+    fail "--policy scaffold without a key column must fail create"
+  dm create --name p1 --id-column id --policy cold --split train=train.csv >/dev/null 2>&1 &&
+    fail "--policy cold without an entity column must fail create"
+  dm create --name p1 --id-column id --policy time --split train=train.csv >/dev/null 2>&1 &&
+    fail "--policy time without a time column must fail create"
+  dm create --name p1 --id-column id --policy stratified --split train=train.csv >/dev/null 2>&1 &&
+    fail "an unknown policy must fail create"
+  dm create --name p1 --id-column id --time-column y --split train=train.csv >/dev/null 2>&1 &&
+    fail "--time-column without --policy time must fail create"
+  [ ! -e "$md/p1.json" ] || fail "a refused create must not leave a manifest"
+
+  # scaffold: the declared policy is violated by the shared key, and the report says which policy.
+  dm create --name sc --id-column id --policy scaffold --key-column scaffold \
+    --split train=train.csv --split test=test.csv >/dev/null || fail "scaffold policy create failed"
+  rc=0; out="$(dm leakage --name sc)" || rc=$?
+  [ "$rc" = 1 ] || fail "a scaffold shared across splits must exit 1 under --policy scaffold"
+  contains "$out" 'policy: scaffold (checked: ID overlap; key overlap on scaffold)' ||
+    fail "leakage must name the declared policy: $out"
+
+  # cold: every entity column on its own; a shared target leaks though drugs are disjoint.
+  printf 'id,drug,target,date\np1,d1,t1,2020-01-05\np2,d2,t2,2020-03-01\np2,d2,t2,2020-03-01\n' > "$d/ctrain.csv"
+  printf 'id,drug,target,date\np3,d3,t1,2021-02-01\np4,d4,t9,2020-02-01\n' > "$d/ctest.csv"
+  dm create --name cold --id-column id --policy cold --entity-column drug --entity-column target \
+    --split train=ctrain.csv --split test=ctest.csv >/dev/null || fail "cold policy create failed"
+  rc=0; out="$(dm leakage --name cold)" || rc=$?
+  [ "$rc" = 1 ] || fail "a shared target must exit 1 under --policy cold"
+  contains "$out" 'ok[drug]      train ∩ test: no overlap' || fail "disjoint drugs must read clean: $out"
+  contains "$out" 'LEAKAGE[target] train ∩ test: 1 shared key(s)' || fail "the shared target must be flagged: $out"
+  # A row repeated inside one split is a warning, never the exit code.
+  contains "$out" 'WARN    train: 1 ID(s) appear more than once inside the split' ||
+    fail "a repeated ID inside a split must be warned about: $out"
+  dm check --name cold >/dev/null || fail "entity columns must be fingerprinted like key columns"
+
+  # time: splits are listed oldest first; one test row older than the newest train row leaks.
+  dm create --name tm --id-column id --policy time --time-column date \
+    --split train=ctrain.csv --split test=ctest.csv >/dev/null || fail "time policy create failed"
+  rc=0; out="$(dm leakage --name tm)" || rc=$?
+  [ "$rc" = 1 ] || fail "a test row older than train must exit 1 under --policy time"
+  contains "$out" 'LEAKAGE[time:date] train -> test: 1 row(s) of test are not later than the newest train row' ||
+    fail "the out-of-order row must be counted: $out"
+  ! contains "$out" '2020-03-01' || fail "time values stay out of the report without --show-examples"
+  out="$(dm leakage --name tm --show-examples)" || true
+  contains "$out" 'newest train: 2020-03-01; oldest test: 2020-02-01' || fail "--show-examples must show the boundary: $out"
+  printf 'id,drug,target,date\np3,d3,t1,2021-02-01\np4,d4,t9,2020-03-02\n' > "$d/ctest.csv"
+  dm create --name tm --id-column id --policy time --time-column date \
+    --split train=ctrain.csv --split test=ctest.csv >/dev/null || fail "time policy recreate failed"
+  out="$(dm leakage --name tm)" || fail "an ordered time split must pass: $out"
+  contains "$out" 'ok[time:date]      train -> test: every test row is later' || fail "ordered splits must read ok: $out"
+  # Numbers order as numbers (9 < 10), and a column that is neither fails closed.
+  printf 'id,t\na,9\n' > "$d/n1.csv"; printf 'id,t\nb,10\n' > "$d/n2.csv"
+  dm create --name num --id-column id --policy time --time-column t --split a=n1.csv --split b=n2.csv >/dev/null ||
+    fail "numeric time create failed"
+  dm leakage --name num >/dev/null || fail "numeric time values must order as numbers"
+  printf 'id,t\nb,soon\n' > "$d/n2.csv"
+  rc=0; dm leakage --name num >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unorderable time column must fail closed (exit 2), got $rc"
+
+  # Where the keys came from: the command as text, the script by digest; check warns, never drifts.
+  printf 'print("scaffold")\n' > "$d/keys.py"
+  dm create --name dv --id-column id --policy scaffold --key-column scaffold \
+    --derive-cmd 'python keys.py   train.csv' --derive-script keys.py --split train=train.csv >/dev/null ||
+    fail "derive create failed"
+  grep -Fq '"cmd": "python keys.py train.csv"' "$md/dv.json" || fail "derive command must be recorded as one line"
+  grep -Fq '"script_sha256"' "$md/dv.json" || fail "derive script digest must be recorded"
+  out="$(dm check --name dv)" || fail "an unchanged key script must not fail check"
+  contains "$out" 'ok    derive: key script unchanged' || fail "check must report the key script: $out"
+  printf 'print("scaffold v2")\n' > "$d/keys.py"
+  out="$(dm check --name dv)" || fail "a changed key script is a warning, not drift"
+  contains "$out" 'WARN  derive: key script changed since the manifest was written' ||
+    fail "check must warn about a changed key script: $out"
+  dm create --name dv2 --id-column id --derive-script nope.py --split train=train.csv >/dev/null 2>&1 &&
+    fail "a missing --derive-script must fail create"
+  return 0
 }
 
 test_data_manifest_fail_closed_and_name() {
