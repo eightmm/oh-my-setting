@@ -22477,6 +22477,9 @@ case "$jid" in
     [ ! -e "$0.done" ] ||
       echo "3008|COMPLETED|0:0|00:07:00|c1|2026-01-02T04:06:00|2026-01-02T04:10:00|2026-01-02T04:17:00|cpu=8|gpu03" ;;
   3009) echo "3009|NODE_FAIL|0:0|00:00:40|c1|2026-01-02T05:00:00|2026-01-02T05:01:00|Unknown||None assigned" ;;
+  # 3010 carries the limit and CPU fields too: two GPUs for 30 minutes of a
+  # one-hour limit, 16 CPUs that did four CPU-hours of work.
+  3010) echo "3010|COMPLETED|0:0|00:30:00|c1|2026-01-02T06:00:00|2026-01-02T06:10:00|2026-01-02T06:40:00|billing=16,cpu=16,gres/gpu:a100=2,mem=64G|gpu04|01:00:00|16|04:00:00" ;;
   *) : ;;
 esac
 EOF
@@ -22599,7 +22602,36 @@ test_run_reconcile_records_terminal_jobs() {
   printf '%s\n' '{"schema": 1, "job_id": "3009", "state": "COMPLETED", "submit": "2025-06-01T00:00:00"}' >> "$rec"
   ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3009 >"$d/nodefail.out" 2>&1 ) || fail "node-fail apply failed"
   assert_file_contains "$rec" '"job_id": "3009", "state": "NODE_FAIL"'
-  assert_file_contains "$rec" '"cluster": "c1", "submit": "2026-01-02T05:00:00", "start": "2026-01-02T05:01:00"}'
+  assert_file_contains "$rec" '"cluster": "c1", "submit": "2026-01-02T05:00:00", "start": "2026-01-02T05:01:00", "usage": {"elapsed_seconds": 40, "queue_wait_seconds": 60}}'
+
+  # What a job consumed is arithmetic over sacct's own fields: allocated GPUs
+  # times elapsed, start minus submit, elapsed over the limit, TotalCPU over
+  # allocated CPU time. An array sums its tasks; a requeued job counts the
+  # preempted attempt too. A field sacct did not give leaves its figure out.
+  printf '%s\n' '{"ts":"t","slurm_job_id":"3010","exit":0,"note":"experiment=exp-a arm=baseline","cmd":["g"]}' >> "$d/ledger.jsonl"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3010 >"$d/usage.apply" 2>&1 ) || fail "usage apply failed"
+  assert_file_contains "$rec" '"usage": {"elapsed_seconds": 1800, "queue_wait_seconds": 600, "gpu_hours": 1.0, "time_efficiency": 0.5, "cpu_efficiency": 0.5}'
+  assert_file_contains "$rec" '"usage": {"elapsed_seconds": 90, "queue_wait_seconds": 120, "gpu_hours": 0.025}'
+  assert_file_contains "$rec" '"usage": {"elapsed_seconds": 720, "queue_wait_seconds": 300, "gpu_hours": 0.0}'
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" usage --ledger "$d/ledger.jsonl" >"$d/usage.out" 2>&1 ) || fail "usage failed"
+  assert_file_contains "$d/usage.out" "gpu-hours: 1.025 allocated over 3 job(s); "
+  assert_file_contains "$d/usage.out" "time efficiency (elapsed / requested limit): 50% mean over 1 job(s); "
+  assert_file_contains "$d/usage.out" "cpu efficiency (TotalCPU / allocated cpu time): 50% mean over 1 job(s); "
+  assert_file_contains "$d/usage.out" "gpu utilisation: unknown"
+  assert_file_contains "$d/usage.out" "memory efficiency: unknown"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" usage --ledger "$d/ledger.jsonl" --experiment exp-a >"$d/usage.exp" 2>&1 ) ||
+    fail "experiment usage failed"
+  assert_file_contains "$d/usage.exp" "run usage for experiment exp-a: 1 recorded job(s) (COMPLETED=1)"
+  assert_file_contains "$d/usage.exp" "gpu-hours: 1.0 allocated over 1 job(s)"
+  assert_file_contains "$d/usage.exp" "queue wait: 00:10:00 total over 1 job(s)"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" usage --ledger "$d/ledger.jsonl" --experiment none --json >"$d/usage.json" 2>&1 ) ||
+    fail "empty usage failed"
+  assert_file_contains "$d/usage.json" '"gpu_hours": null'
+  assert_file_contains "$d/usage.json" '"jobs": 0'
+  # Usage reads recorded rows only: with no sacct at all it answers the same.
+  ( cd "$d" && env OMS_SACCT_CMD=/nonexistent OMS_SQUEUE_CMD=/nonexistent OMS_RECONCILE_FILE="$rec" \
+    "$SH" usage --ledger "$d/ledger.jsonl" --job 3010 >"$d/usage.job" 2>&1 ) || fail "offline usage failed"
+  assert_file_contains "$d/usage.job" "gpu-hours: 1.0 allocated over 1 job(s)"
   before="$(wc -l < "$rec")"
   ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3009 >/dev/null 2>&1 &&
     env "${env_pfx[@]}" "$SH" apply --job 3008 >/dev/null 2>&1 &&
