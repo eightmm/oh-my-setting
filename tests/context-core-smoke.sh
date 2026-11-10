@@ -126,6 +126,9 @@ test_context_manifest_inspector() {
     fail "saved context inspection failed"
 }
 
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/test_output_digest.py" --cli ||\
+  fail "output digest failed"
+
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/test_work_inspect.py" --cli ||\
   fail "work inspection failed"
 

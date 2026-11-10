@@ -14,6 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
     shared_options.add_argument('--repo', default=argparse.SUPPRESS, help='project repository or directory')
     shared_options.add_argument('--pretty', action='store_true', default=argparse.SUPPRESS, help='pretty-print JSON')
     commands = parser.add_subparsers(dest='command', required=True)
+    from .output_digest import register as register_output_digest
+    register_output_digest(commands, shared_options)
     envelope = commands.add_parser('envelope', help='project the effective TaskEnvelope', parents=[shared_options])
     envelope.add_argument('action', choices=('show', 'write'), nargs='?', default='show')
     envelope.add_argument('--output', default='.oms/runtime/effective-contract.json')

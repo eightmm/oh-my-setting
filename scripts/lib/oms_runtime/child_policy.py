@@ -20,7 +20,7 @@ def child_action_is_read_only(args: argparse.Namespace) -> bool:
         return getattr(args, "action", None) == "show"
     if command == "evidence":
         return getattr(args, "evidence_action", None) in ("show", "unbound", "matrix")
-    if command in ("next", "brief"):
+    if command in ("next", "brief", "output-digest"):
         return True
     if command == "failure":
         return getattr(args, "failure_action", None) in ("classify", "catalog")
