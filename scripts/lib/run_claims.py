@@ -15,9 +15,12 @@ import sys
 
 SCHEMA = 1
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+CAPSULE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 MAX_TEXT = 300
 MAX_RUNS = 32
 HASH_MAX = 536870912
+CAPSULE_MAX = 8 * 1024 * 1024
 
 
 def fail(message):
@@ -53,7 +56,7 @@ def rows(path):
                 continue
             try:
                 row = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 bad += 1
                 continue
             if isinstance(row, dict) and isinstance(row.get("id"), str):
@@ -72,39 +75,64 @@ def latest(path):
     return list(by_id.values()), bad
 
 
-def capsule_for(run, runs_dir, spine):
-    """(capsule id, capsule dict) for a capsule id or a spine run id, else (None, None)."""
-    if not isinstance(run, str) or not run or "/" in run or run in (".", ".."):
-        return None, None
+def safe_capsule_id(value):
+    return isinstance(value, str) and CAPSULE_ID_RE.fullmatch(value) is not None
+
+
+def capsule_for(run, runs_dir, spine, resolve_run=True):
+    """Return the capsule id, parsed snapshot and SHA-256 of the same bytes, or three Nones.
+
+    Recording may resolve a run alias. Checking a saved capsule id never follows
+    that alias again or accepts a different id inside its file.
+    """
+    if not safe_capsule_id(run):
+        return None, None, None
     path = os.path.join(runs_dir, run, "capsule.json")
+    from_spine = False
     if not os.path.isfile(path):
+        if not resolve_run:
+            return None, None, None
+        from_spine = True
         path = None
         try:
             with open(spine, encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     try:
                         row = json.loads(line)
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         continue
                     if (isinstance(row, dict) and row.get("run_id") == run
                             and row.get("tool") == "run-capsule" and row.get("path")):
                         path = row["path"]  # the run's last capsule, as `run diff` reads it
         except OSError:
             path = None
-        if not path or not os.path.isfile(path):
-            return None, None
+        if not isinstance(path, str) or not path or not os.path.isfile(path):
+            return None, None, None
     try:
-        with open(path, encoding="utf-8") as handle:
-            capsule = json.load(handle)
-    except (OSError, ValueError):
-        return None, None
-    if not isinstance(capsule, dict) or not isinstance(capsule.get("id"), str):
-        return None, None
-    return capsule["id"], capsule
+        if os.path.getsize(path) > CAPSULE_MAX:
+            return None, None, None
+        with open(path, "rb") as handle:
+            raw = handle.read(CAPSULE_MAX + 1)
+        if len(raw) > CAPSULE_MAX:
+            return None, None, None
+        capsule = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None, None, None
+    if (not isinstance(capsule, dict) or not safe_capsule_id(capsule.get("id"))
+            or not from_spine and capsule["id"] != run):
+        return None, None, None
+    return capsule["id"], capsule, hashlib.sha256(raw).hexdigest()
+
+
+def digest_matches(expected, actual):
+    return isinstance(expected, str) and SHA256_RE.fullmatch(expected) is not None and expected == actual
 
 
 def recorded_metric(capsule, metric):
-    metrics = (capsule.get("result") or {}).get("metrics")
+    result = capsule.get("result")
+    metrics = result.get("metrics") if isinstance(result, dict) else None
+    if not isinstance(metric, str):
+        return None
     value = metrics.get(metric) if isinstance(metrics, dict) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
@@ -168,7 +196,7 @@ def claims_add(env, args):
     tolerance = number(opts["tolerance"], "--tolerance")
     if tolerance < 0:
         fail("--tolerance must not be negative")
-    capsule_id, capsule = capsule_for(opts["run"], env["runs"], env["spine"])
+    capsule_id, capsule, digest = capsule_for(opts["run"], env["runs"], env["spine"])
     if capsule is None:
         fail("--run %s: no capsule recorded for it (capture one with: oms run capsule run --metrics FILE -- CMD)"
              % opts["run"])
@@ -181,7 +209,8 @@ def claims_add(env, args):
         fail("--id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
     emit({"schema": SCHEMA, "id": ident, "ts": env["ts"], "agent": env["agent"],
           "where": one_line(opts["where"]), "metric": one_line(opts["metric"], 120),
-          "value": value, "tolerance": tolerance, "run": opts["run"], "capsule": capsule_id})
+          "value": value, "tolerance": tolerance, "run": opts["run"], "capsule": capsule_id,
+          "capsule_sha256": digest})
     state = "matches" if abs(value - recorded) <= tolerance else "DOES NOT MATCH"
     sys.stderr.write("claim %s: %s=%s %s the recorded %s (tolerance %s) in capsule %s\n"
                      % (ident, opts["metric"], fmt(value), state, fmt(recorded), fmt(tolerance), capsule_id))
@@ -231,8 +260,17 @@ def claims_check(env, args):
     for claim in claims:
         result = {"id": claim["id"], "where": claim.get("where") or "", "metric": claim.get("metric"),
                   "claimed": claim.get("value"), "tolerance": claim.get("tolerance") or 0,
-                  "capsule": claim.get("capsule"), "recorded": None, "notes": []}
-        capsule_id, capsule = capsule_for(claim.get("capsule"), env["runs"], env["spine"])
+                  "capsule": claim.get("capsule"), "recorded": None, "notes": [],
+                  "capsule_content_verifies": None}
+        capsule_id, capsule, digest = capsule_for(claim.get("capsule"), env["runs"], env["spine"],
+                                                  resolve_run=False)
+        if capsule is not None:
+            if "capsule_sha256" not in claim:
+                result["notes"].append("unverified: capsule content was not pinned when the claim was recorded")
+            else:
+                result["capsule_content_verifies"] = digest_matches(claim["capsule_sha256"], digest)
+                if not result["capsule_content_verifies"]:
+                    result["notes"].append("stale: capsule content changed or its recorded digest is invalid")
         claimed = claim.get("value")
         if capsule is None:
             result["status"] = "missing"
@@ -248,12 +286,15 @@ def claims_check(env, args):
                 result["notes"].append("capsule records no numeric %s" % claim.get("metric"))
             else:
                 result["status"] = "match" if abs(claimed - recorded) <= result["tolerance"] else "mismatch"
-            exit_code = (capsule.get("result") or {}).get("exit")
+            capsule_result = capsule.get("result")
+            exit_code = capsule_result.get("exit") if isinstance(capsule_result, dict) else None
             if exit_code not in (0, None):
                 result["notes"].append("run exited %s" % exit_code)
-            if (capsule.get("git") or {}).get("dirty"):
+            git = capsule.get("git")
+            if isinstance(git, dict) and git.get("dirty"):
                 result["notes"].append("run had uncommitted changes")
-            if len(capsule.get("seeds") or []) <= 1:
+            seeds = capsule.get("seeds")
+            if not isinstance(seeds, list) or len(seeds) <= 1:
                 result["notes"].append("single seed")
             if verify:
                 verdict = capsule_verifies(env, capsule_id, cache)
@@ -266,12 +307,14 @@ def claims_check(env, args):
     counts = {}
     for result in results:
         counts[result["status"]] = counts.get(result["status"], 0) + 1
-    stale = sum(1 for result in results if result.get("capsule_verifies") is False)
+    stale = sum(1 for result in results if result.get("capsule_verifies") is False
+                or result["capsule_content_verifies"] is False)
+    unverified = sum(1 for result in results if result["capsule_content_verifies"] is None)
     broken = counts.get("mismatch", 0) + counts.get("missing", 0)
-    code = 1 if broken or bad or (strict and stale) else 0
+    code = 1 if broken or bad or (strict and (stale or unverified)) else 0
     if as_json:
         print(json.dumps({"schema": SCHEMA, "kind": "oms-run-claims-check", "claims": results,
-                          "counts": counts, "stale": stale, "unreadable_rows": bad,
+                          "counts": counts, "stale": stale, "unverified": unverified, "unreadable_rows": bad,
                           "verified_capsules": verify}, ensure_ascii=False, sort_keys=True))
         return code
     for result in results:
@@ -285,8 +328,9 @@ def claims_check(env, args):
     if bad:
         print("unreadable: %d row(s) in the claims file could not be parsed" % bad)
     summary = ", ".join("%d %s" % (counts[key], key) for key in ("match", "mismatch", "missing") if counts.get(key))
-    print("claims: %s%s; recorded values only, nothing was re-run and a match is not a reproduction"
-          % (summary or "none recorded", ", %d stale" % stale if stale else ""))
+    print("claims: %s%s%s; recorded values only, nothing was re-run and a match is not a reproduction"
+          % (summary or "none recorded", ", %d stale" % stale if stale else "",
+             ", %d unverified" % unverified if unverified else ""))
     return code
 
 
@@ -340,19 +384,23 @@ def figure_record(env, args):
             fail("--%s is not a readable regular file (or is over the hash cap): %s" % (label, path))
         record[label] = relative
         record[label + "_sha256"] = digest
-    capsules = []
+    capsules, capsule_digests = [], {}
     for run in runs:
-        capsule_id, capsule = capsule_for(run, env["runs"], env["spine"])
+        capsule_id, capsule, digest = capsule_for(run, env["runs"], env["spine"])
         if capsule is None:
             fail("--run %s: no capsule recorded for it" % run)
+        if capsule_id in capsule_digests and capsule_digests[capsule_id] != digest:
+            fail("--run %s: capsule changed while figure inputs were being recorded" % run)
         if capsule_id not in capsules:
             capsules.append(capsule_id)
+            capsule_digests[capsule_id] = digest
     existing = {row["id"] for row in rows(env["figures"])[0]}
     ident = ident or new_id("fig", existing, env["ts"])
     if not NAME_RE.match(ident):
         fail("--id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
     record.update({"schema": SCHEMA, "id": ident, "ts": env["ts"], "agent": env["agent"],
-                   "command": one_line(command or "", 500), "capsules": capsules})
+                   "command": one_line(command or "", 500), "capsules": capsules,
+                   "capsule_sha256": capsule_digests})
     emit(record)
     sys.stderr.write("figure %s: recorded %s from %s (%d input run(s)); nothing was run\n"
                      % (ident, record["output"], record["script"], len(capsules)))
@@ -388,12 +436,24 @@ def figure_verify(env, args):
                 reasons.append("%s is gone or unreadable: %s" % (label, path))
             elif digest != figure.get(label + "_sha256"):
                 reasons.append("%s changed since it was recorded: %s" % (label, path))
-        for capsule_id in figure.get("capsules") or []:
-            if capsule_for(capsule_id, env["runs"], env["spine"])[1] is None:
+        capsules = figure.get("capsules", [])
+        if not isinstance(capsules, list) or len(capsules) > MAX_RUNS or not all(map(safe_capsule_id, capsules)):
+            reasons.append("input capsule list is invalid")
+            capsules = []
+        pins = figure.get("capsule_sha256", {})
+        for capsule_id in capsules:
+            _, capsule, digest = capsule_for(capsule_id, env["runs"], env["spine"], resolve_run=False)
+            if capsule is None:
                 reasons.append("input capsule not found: %s" % capsule_id)
+            elif not isinstance(pins, dict):
+                reasons.append("input capsule digest record is invalid: %s" % capsule_id)
+            elif capsule_id not in pins:
+                reasons.append("unverified: input capsule content was not pinned: %s" % capsule_id)
+            elif not digest_matches(pins[capsule_id], digest):
+                reasons.append("input capsule changed since it was recorded or its digest is invalid: %s" % capsule_id)
         results.append({"id": figure["id"], "output": figure.get("output"), "script": figure.get("script"),
                         "status": "stale" if reasons else "current", "reasons": reasons,
-                        "command": figure.get("command") or "", "capsules": figure.get("capsules") or []})
+                        "command": figure.get("command") or "", "capsules": capsules})
     stale = sum(1 for result in results if result["status"] == "stale")
     code = 1 if stale or bad else 0
     if as_json:
