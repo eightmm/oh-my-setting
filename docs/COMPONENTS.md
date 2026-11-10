@@ -1107,6 +1107,31 @@ oms patch-admit --patch path/to/change.patch  # optional read-only preview
 oms patch-land --patch path/to/change.patch   # runs admission, then mutates
 ```
 
+**Commit attribution (best effort).** `patch-land` never commits, so after it applies a
+patch it appends one `landing` row to `.oms/attribution.jsonl` (schema 1, append-only
+through the durable JSONL writer): the base, the tree the patch produces, the changed
+paths, and the attempt (`OMS_ATTEMPT_ID`), task, provider, model and room OMS already
+recorded. When `oms land` pushes commits it appends one `commit` row for each commit a
+landing explains: `author_kind` is `ai` only when the commit's tree equals that patch's
+tree and the attempt is recorded in the lifecycle events; `mixed` when the commit sits
+directly on the patch's base and touches its paths but its tree differs (the parent edited
+the patch first); `unknown` when the attempt is not recorded. Commits OMS cannot tie to a
+landing get no row, and `human` is reserved: nothing writes it. No prompt text or diff
+content is stored, and a ledger failure only warns, never failing the landing. Commits that
+are never pushed with `oms land` (and `patch-land --recover` landings) are not recorded.
+Field names follow the Agent Trace contributor-type vocabulary (`ai`, `human`, `mixed`,
+`unknown`); this is not a claim of compliance with any spec.
+
+`oms land blame-session [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE` prints
+each commit's row or `unrecorded` and a summary (`N ai / N human / N mixed / N unknown / N
+unrecorded`). It is a `land` sub-action, beside `notes`, because the rows are written by
+the land path and it shares the commit-range reading. `--file` restricts to commits
+touching the path (`git rev-list ... -- PATH`). An unrecorded commit whose `git patch-id
+--stable` equals a recorded commit's is reported `moved from <sha>` (rebase or cherry-pick;
+matched on patch-id alone, since a rebase changes the tree, with `same_tree` in JSON).
+`--export-notes` writes the rows as git notes under `refs/notes/oms-attribution`, a local
+ref OMS never pushes.
+
 ## Security boundary
 
 The harness provides isolation and post-run detection, not a complete process

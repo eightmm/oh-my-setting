@@ -421,6 +421,72 @@ OMS_ATTEMPT_ID=att_exact_owner OMS_REQUIRE_LANDING_APPROVAL=1 \
 grep -Fxq 'attempt approved' "$attempt_repo/file.txt" ||
   fail "matching attempt did not land its approved patch"
 
+# Commit attribution: a landed worker patch leaves a landing row naming its
+# attempt, the commit is tied to it by tree, and nothing but ids is stored.
+ATTRIB="$ROOT/scripts/lib/attribution.py"
+attr_repo="$TMP/attr-repo"
+init_base_repo "$attr_repo"
+attr_patch="$TMP/attr.patch"
+printf 'worker line\n' > "$attr_repo/file.txt"
+git -C "$attr_repo" diff --binary > "$attr_patch"
+git -C "$attr_repo" restore file.txt
+attr_real="$("$ROOT/scripts/agent-events.sh" --repo "$attr_repo" start --provider codex --tool delegate --task-id t_attr)"
+OMS_ATTEMPT_ID="$attr_real" "$LAND" --repo "$attr_repo" --patch "$attr_patch" --verify true >/dev/null 2>"$TMP/attr-land.err" ||
+  fail "attribution fixture landing failed: $(cat "$TMP/attr-land.err")"
+git -C "$attr_repo" add file.txt && git -C "$attr_repo" commit -qm 'worker change'
+attr_head="$(git -C "$attr_repo" rev-parse HEAD)"
+python3 "$ATTRIB" commits --repo "$attr_repo" --range "HEAD~1..HEAD" --receipt rcpt_fixture >/dev/null
+python3 - "$attr_repo" "$attr_real" "$attr_head" <<'PY' || fail "attribution ledger rows are wrong"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1] + "/.oms/attribution.jsonl")]
+kinds = [r["kind"] for r in rows]
+assert kinds == ["landing", "commit"], kinds
+land, commit = rows
+assert land["attempt"] == sys.argv[2] and land["attempt_recorded"] is True, land
+assert commit["commit"] == sys.argv[3] and commit["author_kind"] == "ai", commit
+assert commit["attempt"] == sys.argv[2] and commit["task"] == "", commit
+assert commit["provider"] == "codex" and commit["model"] == "unknown", commit
+assert commit["files_changed"] == 1 and commit["evidence"]["land_receipt"] == "rcpt_fixture", commit
+assert len(commit["parents"]) == 1 and len(commit["tree"]) >= 40, commit
+text = open(sys.argv[1] + "/.oms/attribution.jsonl").read()
+assert "worker line" not in text, "diff content leaked into the ledger"
+PY
+git -C "$attr_repo" commit -q --allow-empty -m 'human change'
+if python3 "$ATTRIB" blame --repo "$attr_repo" --json nonexistent..HEAD >/dev/null 2>&1; then fail "a bad range must be refused"; fi
+python3 "$ATTRIB" blame --repo "$attr_repo" --json "$attr_head~1..HEAD" > "$TMP/blame.json" ||
+  fail "blame-session --json failed"
+python3 - "$TMP/blame.json" "$attr_head" <<'PY' || fail "blame-session json shape is wrong"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["schema"] == 1 and doc["summary"] == {"ai": 1, "human": 0, "mixed": 0, "unknown": 0, "unrecorded": 1, "moved": 0}, doc
+by = {c["commit"]: c for c in doc["commits"]}
+assert by[sys.argv[2]]["status"] == "recorded" and by[sys.argv[2]]["author_kind"] == "ai", doc
+assert [c["status"] for c in doc["commits"]] == ["unrecorded", "recorded"], doc
+PY
+python3 "$ATTRIB" blame --repo "$attr_repo" "$attr_head~1..HEAD" | tail -n 1 |
+  grep -Fxq 'summary: 1 ai / 0 human / 0 mixed / 0 unknown / 1 unrecorded' || fail "blame-session summary line is wrong"
+# A cherry-pick of the recorded commit is reported as moved, not unrecorded.
+git -C "$attr_repo" checkout -q -b pick "$attr_head~1"
+git -C "$attr_repo" commit -q --allow-empty -m 'unrelated base shift'
+git -C "$attr_repo" cherry-pick "$attr_head" >/dev/null
+python3 "$ATTRIB" blame --repo "$attr_repo" HEAD | grep -Fq "ai moved from ${attr_head:0:12}" ||
+  fail "a cherry-picked recorded commit was not reported as moved"
+# Notes export is opt-in and writes only a local ref.
+python3 "$ATTRIB" blame --repo "$attr_repo" --export-notes "$attr_head~1..$attr_head" >/dev/null || fail "notes export failed"
+git -C "$attr_repo" notes --ref refs/notes/oms-attribution show "$attr_head" | grep -Fq '"author_kind": "ai"' ||
+  fail "exported note lacks the row"
+# Attribution is best effort: an unwritable ledger warns and the landing still succeeds.
+fail_repo="$TMP/attr-fail"
+init_base_repo "$fail_repo"
+printf 'second\n' > "$fail_repo/file.txt"
+git -C "$fail_repo" diff --binary > "$TMP/attr-fail.patch"
+git -C "$fail_repo" restore file.txt
+mkdir -p "$fail_repo/.oms/attribution.jsonl"
+"$LAND" --repo "$fail_repo" --patch "$TMP/attr-fail.patch" --verify true >"$TMP/attr-fail.out" 2>&1 ||
+  fail "an unwritable attribution ledger failed the landing: $(cat "$TMP/attr-fail.out")"
+grep -Fq 'warning: attribution: landing not recorded' "$TMP/attr-fail.out" || fail "ledger failure did not warn"
+grep -Fxq second "$fail_repo/file.txt" || fail "landing did not apply with an unwritable ledger"
+
 PLAN="$ROOT/scripts/agent-plan.sh"
 
 # Old Soul-bound receipts are preserved, not silently converted into authority.

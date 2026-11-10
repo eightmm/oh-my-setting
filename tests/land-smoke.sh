@@ -1797,6 +1797,7 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
   rset() { :; }
   receipt_value() { :; }
+  record_attribution() { :; }
   oms_test_growth() { :; }
   can_resume() { return 1; }
   request_stamp() { printf '%s\n' "$STAMP"; }
@@ -1951,5 +1952,32 @@ fi
 [ "$(git -C "$repo" rev-parse HEAD)" = "$notes_head" ] && [ "$(git -C "$repo" tag | wc -l | tr -d ' ')" = "$notes_tags" ] &&
   [ "$(remote_tip)" = "$notes_tip" ] && [ -z "$(git -C "$repo" status --porcelain)" ] ||
   fail "land notes must not commit, tag, push or leave files in the repository"
+
+# Commit attribution: a worker patch's landing row plus a later commit with the same tree is
+# recorded as ai when `oms land` pushes it; a plain commit in the same push stays unrecorded.
+attr_attempt="$("$ROOT/scripts/agent-events.sh" --repo "$repo" start --provider codex --tool delegate --task-id t_attr)" ||
+  fail "could not create a fixture attempt"
+echo human > "$repo/human.txt"; git -C "$repo" add human.txt; git -C "$repo" commit -q -m 'human commit'
+attr_human="$(git -C "$repo" rev-parse HEAD)"
+echo worker > "$repo/worker.txt"; git -C "$repo" add worker.txt
+git -C "$repo" diff --cached --binary > "$TMP/attr-worker.patch"; git -C "$repo" reset -q worker.txt; rm -f "$repo/worker.txt"
+OMS_ATTEMPT_ID="$attr_attempt" python3 "$ROOT/scripts/lib/attribution.py" landed --repo "$repo" \
+  --landing-id land-fixture --base "$(git -C "$repo" rev-parse HEAD)" --patch "$TMP/attr-worker.patch" --task t_attr ||
+  fail "attribution landed writer failed"
+git -C "$repo" apply "$TMP/attr-worker.patch"; git -C "$repo" add worker.txt; git -C "$repo" commit -q -m 'worker commit'
+attr_worker="$(git -C "$repo" rev-parse HEAD)"
+"$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/attr-land.out" 2>&1 || fail "attribution land failed: $(cat "$TMP/attr-land.out")"
+grep -Fq 'attribution: recorded 1 commit(s)' "$TMP/attr-land.out" || fail "land did not report the recorded commit: $(cat "$TMP/attr-land.out")"
+"$LAND" blame-session --repo "$repo" --json "$attr_human^..$attr_worker" > "$TMP/attr-blame.json" ||
+  fail "land blame-session failed"
+python3 - "$TMP/attr-blame.json" "$attr_worker" "$attr_human" "$attr_attempt" <<'PY' || fail "blame-session after land is wrong"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+by = {c["commit"]: c for c in doc["commits"]}
+assert by[sys.argv[2]]["author_kind"] == "ai" and by[sys.argv[2]]["attempt"] == sys.argv[4], doc
+assert by[sys.argv[2]]["evidence"]["land_receipt"], doc
+assert by[sys.argv[3]]["status"] == "unrecorded", doc
+assert doc["summary"]["ai"] == 1 and doc["summary"]["unrecorded"] == 1, doc
+PY
 
 echo "land-smoke: ok"
