@@ -24,6 +24,12 @@ Commands:
                               carries the oms- prefix, and the content must
                               pass spec validation and the sensitive-content
                               scrubber; then linked and hidden from git.
+                              Each add records an admission row (source,
+                              SKILL.md and file-set digests) in
+                              .oms/skill-admissions.jsonl.
+  admit NAME [--source S]     Re-record a reviewed local skill's current
+                              digests after an edit; skill-doctor warns
+                              'changed since admission' until you do.
   validate [NAME]             Validate one or all project skills.
   link                        (Re)link valid skills into .agents/skills and
                               .claude/skills; prune stale owned links.
@@ -361,6 +367,49 @@ cmd_lifecycle() {
   fi
 }
 
+# Append one admission row (name, source as given, SKILL.md and file-set
+# digests, admitter, time) to .oms/skill-admissions.jsonl so a later silent
+# edit shows up in skill-doctor. Advisory: a failed append warns, and the
+# skill then reads as unrecorded.
+ADMISSION_LIB="$ROOT/scripts/lib/skill_admission.py"
+ADMISSION_STORE="$REPO/.oms/skill-admissions.jsonl"
+
+record_admission() {
+  local name="$1" source="$2" row_tmp
+  row_tmp="$(agent_memory_mktemp)" || { echo "warning: could not record admission of $name" >&2; return 0; }
+  if ! python3 -I "$ADMISSION_LIB" row --repo "$REPO" --name "$name" --source "$source" > "$row_tmp"; then
+    rm -f "$row_tmp"; echo "warning: could not record admission of $name" >&2; return 0
+  fi
+  if agent_memory_file_has_sensitive_content "$row_tmp"; then
+    python3 -I "$ADMISSION_LIB" row --repo "$REPO" --name "$name" --source "(redacted)" > "$row_tmp" || true
+  fi
+  append_admission_row() {
+    python3 "$ROOT/scripts/lib/durable-jsonl.py" --label skill-admissions.jsonl append "$ADMISSION_STORE" < "$row_tmp"
+  }
+  mkdir -p "$(dirname "$ADMISSION_STORE")"
+  agent_memory_ensure_oms_ignore_for_path "$ADMISSION_STORE" 2>/dev/null || true
+  oms_with_file_lock "$ADMISSION_STORE" append_admission_row ||
+    echo "warning: could not record admission of $name in $ADMISSION_STORE" >&2
+  rm -f "$row_tmp"
+}
+
+# Re-record the current bytes of an existing local skill after review.
+cmd_admit() {
+  local name="" source="admit"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source) [ "$#" -ge 2 ] || fail "--source requires a value"; source="$2"; shift 2 ;;
+      -*) fail "unknown admit argument: $1" ;;
+      *) [ -z "$name" ] || fail "admit takes one name"; name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || fail "admit requires a skill name"
+  valid_name "$name" || fail "skill names are lowercase kebab-case: $name"
+  [ -f "$SKILLS_DIR/$name/SKILL.md" ] || fail "no such local project skill: $name"
+  record_admission "$name" "$source"
+  echo "skill-forge: recorded admission of $name"
+}
+
 cmd_add() {
   local name="" file="" dir
   while [ "$#" -gt 0 ]; do
@@ -399,6 +448,7 @@ cmd_add() {
     rm -rf "$dir"
     fail "rejected $name: $reason (a project skill is standing context; scrub it first)"
   fi
+  record_admission "$name" "${file:-stdin}"
   cmd_link >/dev/null
   echo "skill-forge: added $name ($dir/SKILL.md)"
 }
@@ -604,6 +654,7 @@ cmd_contracts() {
 
 case "${1:-}" in
   add) shift; cmd_add "$@" ;;
+  admit) shift; cmd_admit "$@" ;;
   contracts) shift; cmd_contracts "$@" ;;
   validate) shift; cmd_validate "$@" ;;
   link) shift; cmd_link "$@" ;;

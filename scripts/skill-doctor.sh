@@ -30,6 +30,9 @@ characters, a user-level skill a Claude plugin also ships, and two skills
 whose descriptions nearly coincide.
 Total the OMS text a session carries before any task: the global rules
 and every catalog skill's listing description.
+Warn (exit code unchanged) when a local project skill under .oms/skills has no
+admission row ("unrecorded") or differs from its last one ("changed since
+admission"); rows come from 'oms skill-forge add' and 'admit'.
 Read-only; takes no arguments.
 EOF
       exit 0
@@ -109,6 +112,18 @@ if [ -d "$skills_dir" ]; then
 fi
 if [ "$oversized" -eq 0 ]; then
   printf 'ok: every SKILL.md is within the load budget and links its references\n'
+fi
+
+# Local project skills (.oms/skills of the current repo) against their last
+# admission row. Warnings only: a silent edit is made visible, never blocked,
+# and the exit code does not change.
+printf '\n## Project skill admission\n\n'
+admission_out="$(python3 -I "$ROOT/scripts/lib/skill_admission.py" check --repo "$PWD" 2>/dev/null)" ||
+  admission_out='skip: the admission record could not be read'
+if [ -n "$admission_out" ]; then
+  printf '%s\n' "$admission_out"
+else
+  printf 'ok: no local project skills to check\n'
 fi
 
 # What the installed skills cost before any of them is opened: every name and
