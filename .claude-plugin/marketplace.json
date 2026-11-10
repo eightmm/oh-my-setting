@@ -1,0 +1,27 @@
+{
+  "name": "oh-my-setting",
+  "owner": {
+    "name": "eightmm"
+  },
+  "metadata": {
+    "description": "The oh-my-setting (OMS) skills as a Claude Code plugin, for setups that only load skills from plugins. The skills call the oms command, so they need an oh-my-setting install; this manifest installs nothing by itself and the OMS installer does not register it."
+  },
+  "plugins": [
+    {
+      "name": "oms-skills",
+      "source": "./custom-skills",
+      "description": "OMS harness skills (state and memory, spec interview, tracing, trust boundary, careful mode, Slurm and GPU workstation). They call the oms command: install oh-my-setting first. The Slurm and GPU skills are listed on every machine here, where the installer links them only if the cluster or GPU tool is present. Hooks, MCP tools and the panel are not part of this plugin.",
+      "strict": false,
+      "skills": [
+        "./oms-ops",
+        "./oms-agent-harness",
+        "./oms-spec-interview",
+        "./oms-trace",
+        "./oms-slurm",
+        "./oms-gpu-workstation",
+        "./oms-trust-boundary",
+        "./oms-careful"
+      ]
+    }
+  ]
+}

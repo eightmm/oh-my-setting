@@ -17922,6 +17922,38 @@ test_global_skill_names_are_namespaced() {
   python3 "$ROOT/scripts/validate-skills.py" "$ROOT" >"$TMP/validate-skills.out" 2>&1 ||
     fail "the skill catalog should validate: $(cat "$TMP/validate-skills.out")"
 
+  # The static Claude Code marketplace manifest offers exactly the enabled
+  # custom skills; nothing installs or registers it, so drift is caught here.
+  local market="$TMP/marketplace-drift"
+  mkdir -p "$market/scripts" "$market/.claude-plugin"
+  cp -R "$ROOT/custom-skills" "$market/custom-skills"
+  cp "$ROOT/skills.manifest.json" "$market/skills.manifest.json"
+  cp "$ROOT/scripts/validate-skills.py" "$market/scripts/validate-skills.py"
+  cp "$ROOT/.claude-plugin/marketplace.json" "$market/.claude-plugin/marketplace.json"
+  python3 "$market/scripts/validate-skills.py" "$market" >"$market/out" 2>&1 ||
+    fail "the shipped marketplace manifest should validate: $(cat "$market/out")"
+  rm "$market/.claude-plugin/marketplace.json"
+  python3 "$market/scripts/validate-skills.py" "$market" >"$market/out" 2>&1 ||
+    fail "a checkout without the marketplace manifest is still valid: $(cat "$market/out")"
+  python3 - "$ROOT/.claude-plugin/marketplace.json" "$market/.claude-plugin/marketplace.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+plugin = doc["plugins"][0]
+assert plugin["strict"] is False and plugin["source"] == "./custom-skills", plugin
+plugin["skills"] = [item for item in plugin["skills"] if item != "./oms-trace"] + ["./oms-absent"]
+plugin["strict"] = True
+plugin["description"] = "no prerequisite named"
+json.dump(doc, open(sys.argv[2], "w"))
+PY
+  if python3 "$market/scripts/validate-skills.py" "$market" >"$market/out" 2>&1; then
+    fail "a marketplace manifest that drifted from the skill catalog must fail validation"
+  fi
+  assert_file_contains "$market/out" "enabled skill is not offered by any plugin: custom-skills/oms-trace"
+  assert_file_contains "$market/out" "lists a path with no SKILL.md: custom-skills/oms-absent"
+  assert_file_contains "$market/out" "offers a skill skills.manifest.json does not enable: custom-skills/oms-absent"
+  assert_file_contains "$market/out" "needs \"strict\": false"
+  assert_file_contains "$market/out" "must say its skills need the oms command"
+
   renames="$(bash -c '. "$1/scripts/lib/agent-install-state.sh"; oms_ops_legacy_skill_renames' \
     _ "$ROOT")" || fail "the rename table should be readable"
 

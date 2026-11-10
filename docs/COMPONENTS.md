@@ -512,6 +512,24 @@ ships, and two skills whose descriptions share at least 80% of their words.
 Only frontmatter is read, no description is printed, and none of it fails the
 doctor. Codex plugin and Gemini extension skills are not read.
 
+For a Claude Code setup that loads skills only from plugins, the repository
+is also a marketplace: `.claude-plugin/marketplace.json` offers the enabled
+`custom-skills/` as one plugin, `oms-skills`.
+
+```text
+claude plugin marketplace add eightmm/oh-my-setting
+claude plugin install oms-skills@oh-my-setting
+```
+
+The manifest is static. No OMS installer, update or doctor registers or reads
+it, and a normal install keeps linking skills as before; using both lists each
+skill twice (once as `oms-skills:NAME`). The plugin carries skills only, no
+hooks, MCP tools or panel, and the skills call `oms`, so they still need an
+oh-my-setting install. The Slurm and GPU skills are offered on every machine,
+where linking installs them only when the tool is present.
+`scripts/validate-skills.py` fails when the manifest and
+`skills.manifest.json` disagree. There is no Gemini extension manifest.
+
 Use `oms skill-forge add|validate|link` for ordinary local guidance. Neither
 external bundle management nor evaluation is required for a local edit.
 `oms skill-forge status` gives kind-specific recovery guidance for skills that
