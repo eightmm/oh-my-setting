@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OMS Study Results v1",
+  "type": "object",
+  "required": ["schema", "kind", "rows", "metric_directions"],
+  "properties": {
+    "schema": {"const": 1},
+    "kind": {"const": "oms-study-results"},
+    "metric_directions": {
+      "type": "object", "minProperties": 1, "maxProperties": 50,
+      "additionalProperties": {"enum": ["min", "max"]}
+    },
+    "rows": {
+      "type": "array", "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": ["run_id", "case_id", "variant", "repeat", "status", "metrics", "params", "artifacts"],
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+          "case_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+          "variant": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+          "repeat": {"type": "integer", "minimum": 0},
+          "status": {"enum": ["complete", "failed", "interrupted"]},
+          "metrics": {"type": "object", "additionalProperties": {"type": "number"}},
+          "params": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean", "null"]}},
+          "artifacts": {
+            "type": "array", "maxItems": 200,
+            "items": {
+              "type": "object", "required": ["path", "type", "label"],
+              "properties": {
+                "path": {"type": "string", "minLength": 1, "maxLength": 500},
+                "type": {"type": "string"}, "label": {"type": "string"},
+                "format": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,19}$"},
+                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$comment": "Runtime additionally enforces finite numbers, unique run IDs, normalized non-symlink repository paths, required metrics on complete rows, bounded bytes, and content hashes. Extra artifact metadata such as frame/alignment is preserved."
+}

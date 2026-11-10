@@ -106,6 +106,7 @@ explains overlapping entrypoints.
 | `run-reconcile` | Reconcile long-running Slurm jobs with saved run records. | `oms run-reconcile` | [ML and HPC](#ml-and-hpc) |
 | `slurm-lint` | Static check of a Slurm job script against the cluster snapshot's QOS; prints a preemption-aware template. | `oms slurm-lint` | [ML and HPC](#ml-and-hpc) |
 | `run` | Tie experiment and execution records together. | `oms run` | [ML and HPC](#ml-and-hpc) |
+| `study` | Execute fixed benchmark suites, rescore retained outputs, track coverage and corrections, bind baselines, select Pareto fronts and fork DVC file-stage workflows. | `oms study` | [Study workflows](STUDY-WORKFLOWS.md) |
 | `tsp-queue` | Queue local jobs through task-spooler. | `oms tsp-queue` | [ML and HPC](#ml-and-hpc) |
 | `runtime` | Inspect typed projections and optional execution services. | `oms runtime` | [Runtime guide](OMS-RUNTIME.md) |
 | `harness` | Run Codex, Pi or Claude Code harnesses with a Codex login. | `oms harness` | [Codex harnesses](CODEX-HARNESSES.md) |

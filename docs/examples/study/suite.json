@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "kind": "oms-study-suite",
+  "base_id": "arithmetic-fixtures-v1",
+  "cases": [
+    {"case_id": "small", "input": {"x": 2}, "expected": 3},
+    {"case_id": "large", "input": {"x": 10}, "expected": 11}
+  ],
+  "variants": [
+    {
+      "name": "baseline", "params": {"offset": 0}, "output_format": "json",
+      "command": {
+        "argv": ["python3", "{file:docs/examples/study/generate.py}", "{input}", "{output}"],
+        "files": ["docs/examples/study/generate.py"], "timeout_seconds": 30
+      }
+    },
+    {
+      "name": "offset-one", "params": {"offset": 1}, "output_format": "json",
+      "command": {
+        "argv": ["python3", "{file:docs/examples/study/generate.py}", "{input}", "{output}"],
+        "files": ["docs/examples/study/generate.py"], "timeout_seconds": 30
+      }
+    }
+  ],
+  "repeats": [0, 1],
+  "evaluator": {
+    "argv": ["python3", "{file:docs/examples/study/evaluate.py}", "{input}", "{prediction}", "{output}"],
+    "files": ["docs/examples/study/evaluate.py"], "timeout_seconds": 30
+  },
+  "metric_directions": {"error": "min", "cost": "min"}
+}

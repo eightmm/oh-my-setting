@@ -256,6 +256,7 @@ snapshot
 state
 state-verify
 status
+study
 sync-shared
 thread
 tick
