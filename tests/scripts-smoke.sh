@@ -25520,6 +25520,18 @@ test_large_skills_use_progressive_disclosure() {
   for ref in question-ui project-bootstrap spec-templates; do
     assert_file_contains "$skill" "references/$ref.md"
   done
+  # The optional design-note form hangs off the contract shapes, not the router,
+  # so the always-loaded skill body does not grow for a step that is never required.
+  local shapes="$ROOT/custom-skills/oms-spec-interview/references/spec-templates.md"
+  local design_note="$ROOT/custom-skills/oms-spec-interview/references/design-note.md"
+  assert_file_contains "$shapes" "(design-note.md)"
+  assert_file_contains "$shapes" "- References:"
+  for ref in Context Alternatives Decision Interface Risks Verification; do
+    grep -Fxq "## $ref" "$design_note" || fail "design note form lacks its $ref section"
+  done
+  assert_file_contains "$design_note" "not approval or verification evidence"
+  [ "$(wc -w < "$design_note" | tr -d ' ')" -le 320 ] || fail "design note reference is too large"
+  ! grep -Fq "design-note" "$skill" || fail "the design note must stay out of the spec-interview router"
 
   # A method, not a catalogue: the whole value is the contract, the evidence
   # ranking, and the three commands it hands off to. Anything longer is prose

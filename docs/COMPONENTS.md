@@ -474,6 +474,13 @@ Say “Start this project.” or “이 프로젝트 시작해줘.” The
   implementation.
 - Ongoing harness project: report current state and the next actionable step.
 
+A decision that needs its alternatives, interface or risks kept can use the
+skill's optional design-note form (Context, Alternatives, Decision, Interface,
+Risks, Verification) in a tracked file that `Decisions` names under
+`- References:`; `oms plan-from-spec` already reads those documents before it
+decomposes. The form is never required, and a note is not approval or
+verification evidence.
+
 `general`, `ml`, and `slurm` templates add a managed policy block and a small
 verification contract without overwriting user content. `oms project-private`
 keeps `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `PROJECT.md` out of commits via
