@@ -47,6 +47,7 @@ SLURM_SNAPSHOT="${OH_MY_SETTING_GENERATE_SLURM:-}"
 LINK_MODE="${OH_MY_SETTING_LINK_MODE:-}"
 INSTALL_REF_OVERRIDE=""
 CHECK_ONLY=0
+PLAN_ONLY=0
 ROLLBACK=0
 PROBE_AGY=0
 FALLBACK_TO_EDGE=0
@@ -57,7 +58,7 @@ FALLBACK_TO_EDGE=0
 
 usage() {
   cat <<'EOF'
-Usage: update.sh [--check] [--rollback] [--ref REF] [--fallback-to-edge] [--tools] [--no-tools] [--no-doctor] [--probe-agy-surfaces] [-h|--help]
+Usage: update.sh [--check] [--plan] [--rollback] [--ref REF] [--fallback-to-edge] [--tools] [--no-tools] [--no-doctor] [--probe-agy-surfaces] [-h|--help]
 
 Update transactionally, preserving the installed component profile. Link or
 doctor failure restores the previous commit, links, and install receipt.
@@ -69,6 +70,11 @@ A worker or call that starts during the update is not detected.
 
 Options:
   --check       Fetch and report whether the configured ref has changed.
+  --plan        Print what relinking and re-registering this checkout would
+                change under the recorded component profile, and change
+                nothing: no fetch, lock, link or settings edit. The fetch
+                and steps with no write-free preview are listed as
+                not-previewed.
   --rollback    Restore the previous successful commit from the receipt.
   --ref REF     Switch to an explicit branch, tag, or commit.
   --fallback-to-edge
@@ -99,6 +105,7 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check) CHECK_ONLY=1; shift ;;
+    --plan) PLAN_ONLY=1; shift ;;
     --rollback) ROLLBACK=1; shift ;;
     --ref)
       [ "$#" -ge 2 ] || { echo "error: --ref requires a value" >&2; exit 2; }
@@ -117,6 +124,10 @@ done
 
 [ "$CHECK_ONLY" != "1" ] || [ "$ROLLBACK" != "1" ] || {
   echo "error: --check and --rollback cannot be combined" >&2
+  exit 2
+}
+[ "$PLAN_ONLY" != "1" ] || { [ "$CHECK_ONLY" != "1" ] && [ "$ROLLBACK" != "1" ] && [ "$PROBE_AGY" != "1" ]; } || {
+  echo "error: --plan cannot be combined with --check, --rollback or --probe-agy-surfaces" >&2
   exit 2
 }
 [ "$ROLLBACK" != "1" ] || [ -z "$INSTALL_REF_OVERRIDE" ] || {
@@ -151,7 +162,7 @@ update_lifecycle_exit() {
   oms_install_lifecycle_lock_release
   exit "$code"
 }
-if [ "$CHECK_ONLY" != 1 ]; then
+if [ "$CHECK_ONLY" != 1 ] && [ "$PLAN_ONLY" != 1 ]; then
   trap update_lifecycle_exit EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
@@ -384,6 +395,14 @@ case "$OH_MY_SETTING_LINK_MODE" in
   auto|copy|symlink) ;;
   *) echo "error: install link mode must be auto, copy, or symlink" >&2; exit 2 ;;
 esac
+
+# --plan stops here: the component profile above is resolved exactly as an
+# update resolves it, and nothing has been locked, fetched or written.
+if [ "$PLAN_ONLY" = 1 ]; then
+  plan_tools=providers
+  [ "$SKIP_TOOLS" != 1 ] || [ "$REFRESH_PROVIDERS" != 0 ] || plan_tools=skip
+  OMS_PLAN_TOOLS="$plan_tools" exec "$ROOT/scripts/install-plan.sh" --update
+fi
 
 current="$(git -C "$ROOT" rev-parse HEAD)"
 current_short="$(git -C "$ROOT" rev-parse --short HEAD)"
