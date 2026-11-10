@@ -15769,6 +15769,26 @@ assert rows[("codex", "gpt-fast")]["usage_detail"] == {"input_tokens": 20, "cach
   contains "$human" 'tokens: provider=antigravity model=agy-model input=130 cached=45 output=12 reports=1' ||
     fail "human telemetry omitted provider detail: $human"
 
+  # Two resumed-session reports carry a running total. The per-route sums must
+  # leave them out, as the grouped view does, and say how many were left out.
+  printf '%s\n' '{"kind":"call","provider":"codex","model_class":"fast","selected_model":"gpt-fast","provider_usage":{"provider":"codex","input_tokens":5000,"cache_read_tokens":100,"output_tokens":50,"session_cumulative":true}}' >> "$index"
+  printf '%s\n' '{"kind":"call","provider":"codex","model_class":"fast","selected_model":"gpt-fast","provider_usage":{"provider":"codex","input_tokens":9000,"cache_read_tokens":200,"output_tokens":90,"session_cumulative":true}}' >> "$index"
+  "$ROOT/scripts/artifact-index.sh" --repo "$project" --json telemetry | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+rows = {(x["provider"], x["selected_model"]): x for x in r["routes"]}
+codex = rows[("codex", "gpt-fast")]
+assert codex["usage_detail"] == {"input_tokens": 20, "cache_read_tokens": 10, "output_tokens": 3, "reports": 1}, codex
+assert codex["operations"] == 4 and codex["cumulative_reports_excluded"] == 2, codex
+assert rows[("antigravity", "agy-model")]["cumulative_reports_excluded"] == 0
+assert r["usage"]["cumulative_reports_excluded"] == 2, r["usage"]
+' || fail "cumulative reports must stay out of the per-route sums and be counted"
+  human="$("$ROOT/scripts/artifact-index.sh" --repo "$project" telemetry)"
+  contains "$human" 'tokens: provider=codex model=gpt-fast input=20 cached=10 output=3 reports=1' ||
+    fail "human telemetry added a resumed session's running total: $human"
+  contains "$human" 'cumulative: 2 resumed-session report(s) carry a running total and are left out of the tokens lines' ||
+    fail "human telemetry must disclose the excluded cumulative reports: $human"
+
   # --by groups the same rows by a recorded field, and --since/--until bound
   # them by their own time. Only reported values are shown: `-` when no call
   # in the group reported one, `N+?` when only some did; a resumed session's
