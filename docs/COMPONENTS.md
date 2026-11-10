@@ -1104,6 +1104,18 @@ rule; only designated landing readers validate native anchors. The private gener
 directory is a cooperating-OMS ownership boundary, not an OS isolation boundary against
 hostile code running as the same user.
 
+`peer-delegate` also lints the text on both sides of a delegation, mechanically
+and without a model call (`scripts/lib/delegation_lint.py`). A caller brief of
+240 bytes or more prints `warning: brief:` lines when it lacks a goal, scope or
+out-of-scope, expected output, stop condition or file path pointers, or is a
+script of more than seven numbered steps with no goal; `--strict-brief` makes
+those warnings refuse the run (exit 2) before any worker starts. A returned
+result that lacks a short summary, an explicit unresolved line, `path:line` on
+its findings, or (writers) a changed-files list prints `warning: result:` and
+records the codes as `result_lint` on the delegate row of the artifact index.
+The lint checks shape only: a clean result is never verification evidence, and
+no `result_lint` field means clean or not linted.
+
 ```bash
 oms peer-delegate --to codex --prompt "Implement the bounded change."
 oms patch-admit --patch path/to/change.patch  # optional read-only preview

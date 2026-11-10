@@ -87,6 +87,7 @@ TERMINALIZE_RESUMED_REPAIR=0
 plan_started=0
 plan_finalized=0
 plan_brief_file=""
+STRICT_BRIEF=0
 REPAIR=0
 # write is the delegation default; --read-only narrows it so a reviewer or
 # auditor role runs with the authority its mandate describes. Authority still
@@ -222,6 +223,9 @@ Options:
                        No source bodies; default: off (direct source discovery).
   --no-graph-context   Disable preparation requested by an earlier --graph-context.
   --dry-run            Write prompt and empty patch without calling the CLI.
+  --strict-brief       Refuse (exit 2) a caller brief that lacks a goal, scope,
+                       output form, stop condition or file pointers. Without it
+                       the same findings are only `warning: brief:` lines.
   -h, --help           Show this help.
 
 Environment:
@@ -292,6 +296,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--prompt requires text"
       PROMPT="$2"
       shift 2
+      ;;
+    --strict-brief)
+      STRICT_BRIEF=1
+      shift
       ;;
     --brief-file)
       [ "$#" -ge 2 ] || fail "--brief-file requires path"
@@ -571,6 +579,20 @@ if [ -n "$BRIEF_FILE" ]; then
   [ -f "$BRIEF_FILE" ] || fail "brief file not found: $BRIEF_FILE"
 elif [ -z "$PROMPT" ] && [ -z "$PLAN_TASK_ID" ]; then
   fail "--prompt, --brief-file, or --plan-task is required"
+fi
+
+# Advisory shape check of the caller's own brief (a plan-hydrated stub is not
+# caller text). Warnings only; --strict-brief is the one opt-in refusal.
+if [ -n "$BRIEF_FILE" ] || [ -n "$PROMPT" ]; then
+  brief_lint_args=(brief -)
+  [ "$STRICT_BRIEF" = 0 ] || brief_lint_args+=(--strict)
+  if [ -n "$BRIEF_FILE" ]; then
+    python3 "$(ma_scripts_dir)/lib/delegation_lint.py" "${brief_lint_args[@]}" < "$BRIEF_FILE" >/dev/null ||
+      fail "--strict-brief: brief lint reported warnings"
+  else
+    printf '%s\n' "$PROMPT" | python3 "$(ma_scripts_dir)/lib/delegation_lint.py" "${brief_lint_args[@]}" >/dev/null ||
+      fail "--strict-brief: brief lint reported warnings"
+  fi
 fi
 
 oms_require_peer_owner || exit $?
@@ -3186,6 +3208,15 @@ fi
 if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
   index_exit=6
 fi
+result_lint_codes=""
+if [ "$DRY_RUN" = 0 ] && [ "$worker_status" -eq 0 ]; then
+  result_lint_args=(result -)
+  [ "$WORKER_ACCESS" != write ] || [ "$REPORT_ONLY" = 1 ] || result_lint_args+=(--writer)
+  # Advisory and recorded beside the result row; a clean lint is never evidence.
+  result_lint_codes="$({ ma_final_attempt_output "$artifact" || extract_output "$artifact"; } 2>/dev/null |
+    python3 "$(ma_scripts_dir)/lib/delegation_lint.py" "${result_lint_args[@]}" || true)"
+fi
+OMS_INDEX_RESULT_LINT="$result_lint_codes" \
 OMS_INDEX_SCRATCH_PATH="${keep_investigation_scratch:+$worktree_parent/tmp}" \
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
   OMS_INDEX_BASE_REPO="$DELEGATE_SOURCE_REPO" ma_append_artifact_index "$REPO" delegate "${route_provider:-$TO}" "$index_exit" "$artifact" "$patch_file" "$prompt_file" "$verify_status" "$REVIEW_ARTIFACT" "${repair_replay_base:-HEAD}" || true

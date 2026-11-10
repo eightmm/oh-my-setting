@@ -2022,6 +2022,11 @@ row = {
 answer_quality = os.environ.get("OMS_INDEX_ANSWER_QUALITY", "")
 if answer_quality in ("empty", "truncated", "blocked", "invalid-deliberation"):
     row["answer_quality"] = answer_quality
+result_lint = [c for c in os.environ.get("OMS_INDEX_RESULT_LINT", "").strip().split(",")
+               if re.fullmatch(r"[a-z-]{1,40}", c)]
+if kind == "delegate" and result_lint:
+    # Warnings only: absence means clean or not linted, never "verified".
+    row["result_lint"] = result_lint[:8]
 scratch_path = os.environ.get("OMS_INDEX_SCRATCH_PATH", "")
 if kind == "delegate" and scratch_path:
     row["scratch_path"] = scratch_path

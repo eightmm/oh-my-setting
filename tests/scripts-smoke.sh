@@ -7454,6 +7454,37 @@ test_delegate_dry_run() {
     --artifact-dir "$TMP/delegate-dry-panel" --prompt "Scoped helper" >/dev/null
   assert_one_artifact_contains "$TMP/delegate-dry-panel" 'codex-scoped-helper-*.md' '- allowed paths: scripts/a.sh, tests/b.sh'
   assert_one_artifact_contains "$TMP/delegate-dry-panel" 'codex-scoped-helper-*.md' '- forbidden paths: secrets/'
+  # Brief lint is advisory: a long unshaped brief warns, a short one stays quiet,
+  # a shaped one is silent, and only --strict-brief refuses.
+  local lint_brief="$TMP/delegate-lint-brief.md" lint_i
+  : > "$lint_brief"
+  for lint_i in 1 2 3 4 5 6 7 8 9; do
+    printf '%s. Open the thing and change the other thing a little further down.\n' "$lint_i" >> "$lint_brief"
+  done
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$TMP/delegate-lint" --brief-file "$lint_brief" >"$TMP/delegate-lint.out" 2>"$TMP/delegate-lint.err" ||
+    fail "brief lint must stay advisory without --strict-brief: $(cat "$TMP/delegate-lint.err")"
+  assert_file_contains "$TMP/delegate-lint.err" 'warning: brief: no stated goal'
+  assert_file_contains "$TMP/delegate-lint.err" 'warning: brief: step-by-step script with no stated goal'
+  assert_file_contains "$TMP/delegate-lint.err" 'warning: brief: no file path pointers'
+  if OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$TMP/delegate-lint-strict" --brief-file "$lint_brief" --strict-brief >/dev/null 2>"$TMP/delegate-lint-strict.err"; then
+    fail "--strict-brief must refuse a brief with lint warnings"
+  fi
+  assert_file_contains "$TMP/delegate-lint-strict.err" '--strict-brief: brief lint reported warnings'
+  [ ! -d "$TMP/delegate-lint-strict" ] || [ -z "$(ls -A "$TMP/delegate-lint-strict")" ] ||
+    fail "--strict-brief must refuse before any artifact is written"
+  printf 'Goal: fix the parser.\nScope: scripts/lib/parse.py only; out of scope: tests.\nOutput: a summary of the change.\nDone when: scripts/check.sh passes.\nStart at scripts/lib/parse.py:10 and keep the change minimal for the reviewer to read.\n' > "$lint_brief"
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
+    --artifact-dir "$TMP/delegate-lint-ok" --brief-file "$lint_brief" --strict-brief >/dev/null 2>"$TMP/delegate-lint-ok.err" ||
+    fail "a shaped brief must pass --strict-brief: $(cat "$TMP/delegate-lint-ok.err")"
+  ! grep -q 'warning: brief:' "$TMP/delegate-lint-ok.err" || fail "a shaped brief must lint silently"
+  # Result lint: warnings on stderr, codes on stdout.
+  local lint_codes
+  lint_codes="$(printf 'Done.\n\n## Findings\n- bug in scripts/a.sh\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --writer 2>/dev/null)"
+  [ "$lint_codes" = "finding-without-pointer,no-unresolved-line,no-changed-files" ] || fail "result lint codes: $lint_codes"
+  lint_codes="$(printf 'Fixed the parser.\n\nChanged files: scripts/a.sh\n\n## Findings\n- scripts/a.sh:3 off by one\n\nUnresolved: none\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --writer 2>/dev/null)"
+  [ -z "$lint_codes" ] || fail "a complete result must lint clean: $lint_codes"
   # A continuation resolves its default verifier on its recorded base, which
   # here still has the check script that HEAD has since removed.
   local with_check
@@ -7765,6 +7796,13 @@ EOF
   [ -f "$project/delegated.txt" ] || fail "applied patch should create delegated.txt in main tree"
   assert_file_contains "$project/delegated.txt" "hello from worker"
   assert_one_artifact_contains "$artifact_dir" 'codex-create-delegated-file-*.md' 'worker done'
+  # The terse worker answer is linted and the warning codes ride on the index row.
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "delegate row must record result_lint"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+row = [r for r in rows if r.get("kind") == "delegate" and r.get("exit") == 0][-1]
+assert row.get("result_lint") == ["no-unresolved-line", "no-changed-files"], row
+PY
 }
 
 test_delegate_nested_apply_preserves_parent_only_capture_guard() {
