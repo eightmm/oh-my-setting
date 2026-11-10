@@ -43,7 +43,7 @@ GLYPHS = {"running": ("⟳", "~"), "spinner": ("⠋⠙⠹⠸", "|/-\\"),
           "cancelled": ("⊘", "x"), "guard_stop": ("⛔", "!"), "timed_out": ("⏱", "!"),
           "verified": ("✓", "+"), "failed": ("✗", "!"),
           "waiting": ("!", "!"), "unknown": ("?", "?"), "idle": ("○", "o"),
-          "selected": ("▸", ">"), "expanded": ("▾", "v"), "dot": ("•", "o"),
+          "selected": ("▸", ">"), "changed": ("✦", "*"), "expanded": ("▾", "v"), "dot": ("•", "o"),
           "swatch": ("■", "#"), "separator": ("·", "/"), "ellipsis": ("…", "..."),
           "right": ("→", "->"), "up": ("↑", "^"), "down": ("↓", "v"),
           "top_left": ("╭", "+"), "top_right": ("╮", "+"), "bottom_left": ("╰", "+"),
@@ -1560,6 +1560,7 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
     record_tails = dict(zip(record_tails, tail_plan["rows"]))
     shown = 0
     selected = (navigation or {}).get("selected")
+    changed = (navigation or {}).get("changed") or ()
 
     def list_row(identity, style, values, action=None, details=None, connector="", plan=tail_plan):
         nonlocal space
@@ -1568,7 +1569,11 @@ def render(report, provider, width=100, height=28, color=False, unicode=True,
         tag, tag_tone = values[0]
         age = values[2][0]
         gutter = glyph("selected", unicode) + " " if action and action == selected else "  "
-        value, spans = format_tail_row([(gutter, "text"), (connector, style)],
+        moved = gutter == "  " and action and action[1] in changed
+        if moved:
+            # The selection marker's own two columns: a just-changed row never shifts the layout.
+            gutter = glyph("changed", unicode) + " "
+        value, spans = format_tail_row([(gutter, "alert" if moved else "text"), (connector, style)],
                                        (identity, style), values, plan)
         if action and action == selected and space >= 4 and width >= 28:
             add(box_edge(identity, width, unicode, dashed=True), style)
