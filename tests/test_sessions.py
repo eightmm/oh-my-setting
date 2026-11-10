@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
@@ -37,7 +38,14 @@ with open(os.environ["OMS_FAKE_LOG"], "a") as f:
     f.write(json.dumps({"provider": p, "argv": a, "cwd": os.getcwd(),
                        "room": os.environ.get("OMS_ROOM_ID"),
                        "attempt": os.environ.get("OMS_AGENT_ATTEMPT_ID"),
-                       "policy": os.environ.get("OMS_FAKE_POLICY")}) + "\n")
+                       "policy": os.environ.get("OMS_FAKE_POLICY"),
+                       "inherited_authority": {key: os.environ.get(key) for key in (
+                           "OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_REPO", "OMS_PANEL_SESSION", "OMS_STATE_REPO",
+                           "OMS_PLAN_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID", "OMS_APPROVAL_ID", "OMS_LANDING_ID",
+                           "OMS_EXECUTOR_ID", "OMS_HARNESS_CALL_ID", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO")}}) + "\n")
+if os.environ.get("OMS_FAKE_HOLD_SECONDS"):
+    import time
+    time.sleep(float(os.environ["OMS_FAKE_HOLD_SECONDS"]))
 fork = "--fork-session" in a or "--fork" in a or "fork" in a
 if fork:
     sid = a[a.index("--session-id") + 1] if "--session-id" in a else str(uuid.uuid4())
@@ -252,6 +260,20 @@ class SessionsTest(unittest.TestCase):
                 else:
                     self.assertEqual(call["argv"], ["--fork", str(self.paths[provider])])
 
+    def test_native_fork_drops_parent_authority_and_state_routing(self):
+        keys = ("OMS_PANEL_MAIN_ATTEMPT", "OMS_PANEL_REPO", "OMS_PANEL_SESSION", "OMS_STATE_REPO",
+                "OMS_PLAN_ID", "OMS_LEASE_ID", "OMS_PLAN_LEASE_ID", "OMS_APPROVAL_ID", "OMS_LANDING_ID",
+                "OMS_EXECUTOR_ID", "OMS_HARNESS_CALL_ID", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO")
+        markers = {key: "parent-authority" for key in keys}
+        markers.update(OMS_PANEL_REPO=str(self.repo), OMS_STATE_REPO=str(self.repo),
+                       OMS_INDEX_BASE_REPO=str(self.repo), DELEGATE_SOURCE_REPO=str(self.repo))
+        row = self.cli("fork", *self.source_args(), "--apply", env=markers)
+        call = self.native_calls()[-1]
+        self.assertEqual(call["cwd"], row["worktree"])
+        self.assertNotEqual(call["cwd"], str(self.repo))
+        self.assertEqual(call["inherited_authority"], dict.fromkeys(keys))
+        self.assertEqual(call["policy"], "preserved")
+
     def test_resume_and_conversation_restore_are_independent_of_file_restore(self):
         self.dirty()
         before = (self.git("diff", "--binary"), self.git("diff", "--cached", "--binary"))
@@ -310,6 +332,21 @@ class SessionsTest(unittest.TestCase):
                             report["right"]["artifacts"]["files"][0]["sha256"])
         self.assertNotIn("left artifact", json.dumps(report))
 
+    def test_ambient_git_environment_cannot_hide_fork_untracked_changes(self):
+        first, second = self.prepared(), self.prepared()
+        (Path(first["worktree"]) / "choice.txt").write_text("left-only untracked\n")
+        inherited = {"GIT_DIR": str(self.repo / ".git"), "GIT_WORK_TREE": str(self.repo)}
+        report = self.cli("compare", first["id"], second["id"], env=inherited)
+        self.assertEqual([row["path"] for row in report["files"]], ["choice.txt"])
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        self.git("init", "-q", "-b", "main", cwd=foreign)
+        (foreign / "foreign.txt").write_text("wrong repository\n")
+        (self.repo / "local.txt").write_text("selected repository\n")
+        plan = self.cli("fork", *self.source_args(), env={"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign)})
+        self.assertEqual(plan["files"]["untracked_captured"], 1)
+        self.assertEqual(plan["files"]["untracked_omitted"], 0)
+
     def test_worker_symlink_ambiguity_and_home_scope_boundaries(self):
         for child in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_HARNESS_DELEGATE_DEPTH": "2"}):
             self.cli("search", "phrase", env=child, ok=False)
@@ -350,6 +387,28 @@ class SessionsTest(unittest.TestCase):
             processes = list(executor.map(lambda _: invoke(), range(2)))
         self.assertEqual(sorted(item.returncode for item in processes), [0, 2])
         self.assertEqual(len(self.native_calls()), 1)
+
+    def test_standalone_resume_claim_excludes_concurrent_oms_and_releases_after_exit(self):
+        argv = ["bash", str(ENTRY), "--repo", str(self.repo), "resume", *self.source_args(), "--apply"]
+        first = subprocess.Popen(argv, cwd=self.repo, env=dict(self.env, OMS_FAKE_HOLD_SECONDS="3"),
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 10
+            while not self.native_calls() and first.poll() is None and time.monotonic() < deadline:
+                time.sleep(.03)
+            self.assertEqual(len(self.native_calls()), 1)
+            second = subprocess.run(argv, cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(second.returncode, 75, second.stdout + second.stderr)
+            self.assertIn("state lock", second.stderr)
+            self.assertEqual(len(self.native_calls()), 1)
+            stdout, stderr = first.communicate(timeout=10)
+            self.assertEqual(first.returncode, 0, stdout + stderr)
+            self.cli("resume", *self.source_args(), "--apply")
+            self.assertEqual(len(self.native_calls()), 2)
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.communicate()
 
     def test_managed_resume_keeps_the_existing_native_owner_guard(self):
         for action in (("new", "--id", "session-room", "--participant", "main-codex"),
