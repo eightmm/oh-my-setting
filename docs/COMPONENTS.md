@@ -2192,7 +2192,14 @@ ML/Slurm workflows use local-first experiment controls:
   or a known QOS those checks print `unknown`, never a pass; it exits 1 on any
   warning. `oms slurm-lint --template` prints `templates/slurm-job.sh`, a
   starting script that forwards the warning signal, waits for the checkpoint and
-  resumes from the newest one; Slurm, not the script, does the requeue. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
+  resumes from the newest one; Slurm, not the script, does the requeue.
+  `oms slurm-lint --preview SCRIPT` prints, before any submission, what the
+  `#SBATCH` lines ask for (GPUs, wall time, array size, GPU-hours as an upper
+  bound, GPUs held at once) beside the per-job and group `gres/gpu` limits in the
+  snapshot's QOS and association rows, with the snapshot's age. A quantity the
+  script or snapshot does not state prints `unknown`. It is static only: Slurm's
+  `--test-only` is not called, and the snapshot has no GPU-hour budget to compare
+  with. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
   the scheduler polling inside one shell call instead of repeated model turns:
   a spent budget exits 124 with observation incomplete and the job untouched, the
   digest is capped to whole lines with the omission stated, and a repeating
