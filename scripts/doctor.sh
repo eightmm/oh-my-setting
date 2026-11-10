@@ -40,6 +40,8 @@ REPAIR=0
 SURFACES=0
 TOOL_LOCK_ONLY=0
 EXTENSIONS_ONLY=0
+MCP_PINS_ONLY=0
+MCP_PIN_RECORD=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
@@ -74,6 +76,7 @@ usage() {
 Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--repair] [--surfaces] [--tool-lock] [--contract]
        doctor.sh --extensions [--repo PATH] [--json]
+       doctor.sh --mcp [--pin] [--repo PATH] [--json]
                  [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
 
@@ -123,6 +126,13 @@ values, headers and URL paths are never printed. It notes a server one CLI
 has and another lacks, and one name with different targets; a file that
 cannot be parsed is "unread", not empty. Rows never change the exit status.
 
+--mcp reads the same files and compares each MCP server's launch shape
+(transport, command, arguments, URL, environment variable names; never values)
+with a hash recorded in a private pin file, reporting new, changed and removed
+servers, unpinned npx/bunx/uvx packages and plain http to a non-loopback host.
+Nothing is written unless you add --pin, which records the current servers as
+your approval. No server starts and tool descriptions are not fetched.
+
 --repo selects the project whose .oms state is inspected without changing
 install ownership. --json returns the same verdict as a bounded structured
 report. --remediation-plan prints only exact remedies already emitted by the
@@ -144,6 +154,8 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --extensions) EXTENSIONS_ONLY=1; shift ;;
+    --mcp) MCP_PINS_ONLY=1; shift ;;
+    --pin) MCP_PIN_RECORD=1; shift ;;
     --json) REPORT_JSON=1; shift ;;
     --remediation-plan) REPORT_PLAN=1; shift ;;
     --repair) REPAIR=1; FORWARD_ARGS+=(--repair); shift ;;
@@ -201,6 +213,19 @@ if [ "$EXTENSIONS_ONLY" = 1 ]; then
   extension_args=(--repo "$REPORT_REPO")
   [ "$REPORT_JSON" = 0 ] || extension_args+=(--json)
   exec python3 -I "$ROOT/scripts/lib/doctor-extensions.py" "${extension_args[@]}"
+fi
+
+if [ "$MCP_PINS_ONLY" = 1 ] || [ "$MCP_PIN_RECORD" = 1 ]; then
+  if [ "$MCP_PINS_ONLY" = 0 ] || [ "$EXTENSIONS_ONLY" = 1 ] || [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] ||
+     [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ]; then
+    echo "error: --mcp is a standalone report; only --pin, --repo and --json go with it" >&2
+    exit 2
+  fi
+  command -v python3 >/dev/null 2>&1 || { echo "error: --mcp needs python3" >&2; exit 2; }
+  mcp_args=(--repo "$REPORT_REPO")
+  [ "$REPORT_JSON" = 0 ] || mcp_args+=(--json)
+  [ "$MCP_PIN_RECORD" = 0 ] || mcp_args+=(--pin)
+  exec python3 -I "$ROOT/scripts/lib/doctor-mcp-pins.py" "${mcp_args[@]}"
 fi
 
 if [ "$REPORT_JSON" = 1 ] && [ "$REPORT_PLAN" = 1 ]; then

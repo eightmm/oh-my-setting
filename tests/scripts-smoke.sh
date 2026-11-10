@@ -3019,6 +3019,38 @@ assert not any("codex" in item.get("missing", []) for item in report["mismatches
   if (cd "$project" && HOME="$home_dir" "$ROOT/scripts/doctor.sh" --extensions --repair) >/dev/null 2>&1; then
     fail "--extensions must refuse to run with --repair"
   fi
+
+  # --mcp: launch shapes are pinned in a private file; nothing is written without --pin.
+  local pins="$TMP/doctor-mcp-pins.json"
+  cat > "$home_dir/.claude.json" <<JSON
+{"mcpServers": {
+  "fetcher": {"command": "npx", "args": ["-y", "some-mcp"], "env": {"FETCH_VAR": "$ext_word"}},
+  "plain": {"url": "http://mcp.example.test/x"},
+  "fixed": {"command": "npx", "args": ["-y", "@scope/pkg@1.2.3"]}}}
+JSON
+  : > "$home_dir/.codex/config.toml"
+  out="$(cd "$project" && HOME="$home_dir" CODEX_HOME="$home_dir/.codex" OMS_MCP_PIN_FILE="$pins" "$ROOT/scripts/doctor.sh" --mcp)" ||
+    fail "the pin report exits 0: $out"
+  [ ! -e "$pins" ] || fail "--mcp without --pin must not write a pin file"
+  contains "$out" 'no baseline recorded' || fail "a missing baseline must be said: $out"
+  contains "$out" 'warn: claude:user:fetcher: npx runs a package with no pinned version' || fail "unpinned npx must warn: $out"
+  contains "$out" 'warn: claude:user:plain: plain http to a non-loopback host' || fail "plain http must warn: $out"
+  case "$out" in *"claude:user:fixed: npx"*|*"$ext_word"*) fail "a versioned package must not warn and values must not print: $out" ;; esac
+  (cd "$project" && HOME="$home_dir" CODEX_HOME="$home_dir/.codex" OMS_MCP_PIN_FILE="$pins" "$ROOT/scripts/doctor.sh" --mcp --pin) >/dev/null ||
+    fail "--pin should record"
+  [ "$(stat -c '%a' "$pins" 2>/dev/null || stat -f '%Lp' "$pins")" = 600 ] || fail "the pin file must be private"
+  grep -F "$ext_word" "$pins" >/dev/null && fail "no environment value may reach the pin file"
+  cat > "$home_dir/.claude.json" <<JSON
+{"mcpServers": {
+  "fetcher": {"command": "npx", "args": ["-y", "other-mcp"]},
+  "fixed": {"command": "npx", "args": ["-y", "@scope/pkg@1.2.3"]},
+  "added": {"command": "node"}}}
+JSON
+  out="$(cd "$project" && HOME="$home_dir" CODEX_HOME="$home_dir/.codex" OMS_MCP_PIN_FILE="$pins" "$ROOT/scripts/doctor.sh" --mcp)" ||
+    fail "the pin report exits 0 on drift: $out"
+  contains "$out" 'new: claude:user:added' || fail "an added server must be reported: $out"
+  contains "$out" 'changed: claude:user:fetcher' || fail "a changed server must be reported: $out"
+  contains "$out" 'removed: claude:user:plain' || fail "a removed server must be reported: $out"
 }
 
 # smoke-weight: 24
