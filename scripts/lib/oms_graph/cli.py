@@ -20,6 +20,7 @@ from .project import history as project_history
 from .project import build as project_build
 from .project import context as project_context
 from .project import orientation as project_orientation
+from .project import unreferenced as project_unreferenced
 from .project.query import Graph
 from oms_runtime.common import CoreError, atomic_write_bytes, read_json, repo_root
 
@@ -31,7 +32,7 @@ HTML_FRAGMENT_MAX_BYTES = 1024 * 1024
 # `build` is the explicit form: neither may refresh behind the caller's back.
 AUTO_REFRESH_ACTIONS = (
     "map", "find", "api", "search", "neighbors", "trace", "blast",
-    "affected", "coupling", "context",
+    "affected", "coupling", "unreferenced", "context",
 )
 
 
@@ -128,6 +129,10 @@ def build_parser() -> argparse.ArgumentParser:
     coupling.add_argument("--min-degree", type=float, default=project_history.DEFAULT_MIN_DEGREE, help="minimum coupling degree, percent of average revisions")
     coupling.add_argument("--limit", type=int, default=40)
     coupling.add_argument("--json", action="store_true")
+    unreferenced = project_sub.add_parser("unreferenced", help="symbols with no incoming graph edge; review candidates, not proof of dead code", parents=[shared_options])
+    unreferenced.add_argument("--limit", type=int, default=100, help="0 = all")
+    unreferenced.add_argument("--include-tests", action="store_true")
+    unreferenced.add_argument("--json", action="store_true")
     affected = project_sub.add_parser("affected", help="fail-open affected-test plan for an exact Git range", parents=[shared_options])
     affected.add_argument("--base", required=True)
     affected.add_argument("--head", default="HEAD")
@@ -151,7 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="emit the bounded task graph data consumed by an MCP Apps renderer")
     for reader in (
         show_map, find, api, search, neighbors, trace, blast, affected,
-        coupling, context,
+        coupling, unreferenced, context,
     ):
         reader.add_argument("--no-refresh", action="store_true", help="read the graph as it stands; never build or refresh it")
     execution = groups.add_parser("exec", help="advanced opt-in execution graph; ordinary work uses existing plans/autopilot", parents=[shared_options])
@@ -586,11 +591,24 @@ def _project_coupling(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
+def _project_unreferenced(args: argparse.Namespace, repo: Path, state: Path) -> int:
+    if args.limit < 0:
+        raise GraphError("unreferenced: --limit >= 0")
+    report = project_unreferenced.unreferenced_report(_index(repo, state)[1], limit=args.limit, include_tests=args.include_tests)
+    if args.json:
+        emit(report, args.pretty)
+        return 0
+    print("unreferenced: %d candidate(s)%s -- %s" % (report["total"], " (truncated)" if report["truncated"] else "", report["note"]))
+    for row in report["candidates"]:
+        print("%s  %s  %s:%s" % (row["id"], row["kind"], row["path"], row["line"] if row["line"] is not None else "?"))
+    return 0
+
+
 PROJECT_ACTIONS = {"build": _project_build, "ensure": _project_ensure, "check": _project_check, "map": _project_map,
                    "find": _project_find, "api": _project_api, "search": _project_search,
                    "neighbors": _project_neighbors, "trace": _project_trace,
                    "blast": _project_blast, "affected": _project_affected,
-                   "coupling": _project_coupling, "context": _project_context}
+                   "coupling": _project_coupling, "unreferenced": _project_unreferenced, "context": _project_context}
 
 STOP_STATUSES = ("gate", "blocked", "exhausted", "waiting", "invalid")
 
