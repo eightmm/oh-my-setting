@@ -40,6 +40,14 @@ malformed or oversized input, expired or missing credentials, replay or
 duplicate requests, and concurrent state changes. Check that denial is
 fail-closed and that logs and responses do not expose secrets or internals.
 
+Two opt-in or report-only OMS aids, both seatbelts: `OMS_WORKER_SECRET_GUARD=1`
+denies a Claude child's Read tool the secret paths and drops credential-shaped
+variables from a provider child's environment, but `cat`, `grep -r` or a script
+the worker runs still read files, and Codex and Antigravity get no read rule.
+`oms doctor --security` reports user-level provider settings (bypass modes,
+sandbox flags) as data, changes nothing and cannot see project settings,
+managed policy or flags, so it is not the posture of a session.
+
 Never probe a live third-party or production system without explicit authority.
 For review output, report actionable findings first with file/line evidence,
 then residual risk, assumptions, and skipped or impossible checks. If no

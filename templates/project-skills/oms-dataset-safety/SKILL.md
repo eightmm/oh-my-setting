@@ -16,6 +16,11 @@ project. The manifest check is cheap; run it first.
    then `oms data-manifest leakage --name <manifest>` whenever registered
    splits exist. A run that starts before the leakage check passes is a
    result you may have to retract.
+   `create --policy random|group|scaffold|cold|time` declares how the splits
+   were made, so `leakage` checks that policy's invariant on the columns you
+   pass (`--key-column`, `--entity-column`, `--time-column`). It compares exact
+   matches only: similar compounds and homologous sequences are not compared;
+   use the project's similarity tooling for those.
 3. **Re-check on change**: regenerating a split, adding data, or changing
    preprocessing invalidates the old verdict — re-run the manifest check;
    it also catches split drift against the recorded state.
