@@ -16,6 +16,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 . "$ROOT_LIB/oms-common.sh"
 # shellcheck source=scripts/lib/file-lock.sh
 . "$ROOT_LIB/file-lock.sh"
+# shellcheck source=scripts/lib/critical-paths.sh
+. "$ROOT_LIB/critical-paths.sh"
 
 REPO="${OMS_STATE_REPO:-$PWD}"
 STATE_ROOT=""
@@ -56,8 +58,13 @@ record   Append a failure for CMD (exit N), optionally with a recommended next
          the second unresolved failure of the same command it names `oms advise`
          (OMS_ADVISE_AFTER_FAILURES sets the threshold, 0 disables): the rules
          ask for an outside read after repeated failures, and retrying the same
-         thing is what happens when nothing says so.
-check    Exit 3 (and print prior context) if CMD's fingerprint is a known
+         thing is what happens when nothing says so. Two more mechanical
+         one-line suggestions use the same channel and switch
+         (lib/advise_triggers.py): an unresolved merge/rebase conflict in the
+         tree, and a change touching a path on check.sh's critical-path list
+         (lib/critical-paths.sh). Each prints once per fingerprint; the row
+         records it in `advised`. Nothing here calls a model.
+check   Exit 3 (and print prior context) if CMD's fingerprint is a known
          UNRESOLVED failure; exit 0 otherwise. Gate a retry with this.
          --ignore-state keeps the schema-2 git-state clearing out of the
          verdict, for failures that no repo change can plausibly fix (a
@@ -164,6 +171,28 @@ advise_hint_if_repeated() {
   [ "$fails" -ge "$threshold" ] || return 0
   printf 'fail-ledger: %s has failed %dx unresolved; reassess the evidence; optional outside read if authorized (oms advise --prompt "...")\n' \
     "$fp" "$fails" >&2
+}
+
+# Facts for the mechanical advisor triggers in lib/advise_triggers.py, one per
+# line: "conflict" while the index holds unmerged paths (a merge, rebase,
+# cherry-pick or stash pop stopped on a conflict), and "contract:<reason>" for
+# the first changed path (vs the upstream merge-base, else HEAD; untracked
+# included) that the gate's own critical-path list names. No second list.
+advise_signals() {
+  local base path reason
+  if git -C "$STATE_ROOT" ls-files -u 2>/dev/null | grep -q .; then
+    echo conflict
+  fi
+  base="$(git -C "$STATE_ROOT" merge-base HEAD '@{upstream}' 2>/dev/null)" || base=HEAD
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if reason="$(oms_critical_path_reason "$path")"; then
+      echo "contract:$reason"
+      break
+    fi
+  done < <(git -C "$STATE_ROOT" diff --name-only --no-renames "$base" -- 2>/dev/null
+    git -C "$STATE_ROOT" ls-files --others --exclude-standard 2>/dev/null)
+  return 0
 }
 
 fingerprint_of() {
@@ -298,7 +327,21 @@ EOF
       outbound_evidence="${outbound_evidence}${outbound_evidence:+
 }${evidence}"
     done
-    FAILURE_CODE="$(OMS_OUTBOUND_EVIDENCE="$outbound_evidence" OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
+    # Extra advisor triggers (same OMS_ADVISE_AFTER_FAILURES=0 off switch):
+    # decided before the append so the row can carry which ones it printed.
+    advised_ids=""
+    advised_text=""
+    if [ "${OMS_ADVISE_AFTER_FAILURES:-2}" != 0 ]; then
+      trigger_out="$(advise_signals |
+        python3 -X utf8 -I -B "$ROOT_LIB/advise_triggers.py" "$LEDGER" "$fp" 2>/dev/null)" || trigger_out=""
+      while IFS=$'\t' read -r trigger_id trigger_text; do
+        [ -n "$trigger_id" ] || continue
+        advised_ids="${advised_ids}${advised_ids:+,}$trigger_id"
+        advised_text="${advised_text}${trigger_text}
+"
+      done <<< "$trigger_out"
+    fi
+    FAILURE_CODE="$(OMS_ADVISED="$advised_ids" OMS_OUTBOUND_EVIDENCE="$outbound_evidence" OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
       OMS_FP="$fp" OMS_KIND="$KIND" OMS_CMD="$CMD" OMS_EXIT="$EXIT_CODE" OMS_SUMMARY="$SUMMARY" OMS_NEXT="$NEXT" \
       OMS_STATE_FP="$(state_fingerprint)" \
       OMS_RUNTIME_LIB="$ROOT/scripts/lib" OMS_FAILURE_CODE="${FAILURE_CODE:-}" \
@@ -313,6 +356,8 @@ if os.environ.get("OMS_SUMMARY"):
     row["summary"] = os.environ["OMS_SUMMARY"]
 if os.environ.get("OMS_NEXT"):
     row["next"] = os.environ["OMS_NEXT"]
+if os.environ.get("OMS_ADVISED"):
+    row["advised"] = os.environ["OMS_ADVISED"].split(",")
 evidence = []
 for item in os.environ.get("OMS_OUTBOUND_EVIDENCE", "").splitlines():
     try:
@@ -359,6 +404,7 @@ PY
         ;;
     esac
     advise_hint_if_repeated "$fp" "$fails"
+    [ -z "$advised_text" ] || printf '%s' "$advised_text" >&2
     ;;
   check)
     [ -n "$CMD" ] || fail "check requires --cmd"

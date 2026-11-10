@@ -84,4 +84,66 @@ rc=0
 OMS_FAIL_LEDGER="$legacy" bash -c 'cd "$1" && "$2" check --cmd legacy' _ "$repo" "$tool" >/dev/null 2>&1 || rc=$?
 [ "$rc" = 3 ] || fail "legacy unresolved failure should remain blocking"
 
+# Mechanical advisor triggers beyond the repeat count (lib/advise_triggers.py):
+# a conflict in the index and a critical-path change each add one suggestion
+# line, once per fingerprint, and never when the tree is ordinary.
+adv="$TMP/adv"
+mkdir -p "$adv"
+git -C "$adv" init -q -b main
+git -C "$adv" config user.email test@example.com
+git -C "$adv" config user.name Test
+printf 'one\n' > "$adv/file.txt"
+git -C "$adv" add file.txt
+git -C "$adv" commit -qm base
+adv_record() {  # adv_record CMD -> combined output
+  (cd "$adv" && "$tool" record --cmd "$1" --exit 1 2>&1) || fail "record failed for $1"
+}
+adv_lines() { printf '%s\n' "$1" | grep -c 'fail-ledger: advise:' || true; }
+
+out="$(adv_record 'adv ordinary one')"
+[ "$(adv_lines "$out")" = 0 ] || fail "an ordinary tree must add no trigger line: $out"
+printf 'two\n' > "$adv/file.txt"
+mkdir -p "$adv/docs"
+printf 'doc\n' > "$adv/docs/note.md"
+out="$(adv_record 'adv docs only')"
+[ "$(adv_lines "$out")" = 0 ] || fail "a docs/source edit is not a contract change: $out"
+
+mkdir -p "$adv/config"
+printf '{}\n' > "$adv/config/x.json"
+out="$(adv_record 'adv contract one')"
+printf '%s\n' "$out" | grep -Fq 'fail-ledger: advise: the tree changes a contract or public-surface path (contract-boundary:config/x.json)' ||
+  fail "a critical-path change should name its reason: $out"
+printf '%s\n' "$out" | grep -F 'advise:' | grep -Fq 'oms advise' ||
+  fail "the suggestion must name the advisor command: $out"
+printf '%s\n' "$out" | grep -F 'advise:' | grep -Fq 'if authorized' ||
+  fail "the suggestion must not authorize a model call: $out"
+out="$(adv_record 'adv contract one')"
+[ "$(adv_lines "$out")" = 0 ] || fail "a trigger prints once per fingerprint: $out"
+out="$(adv_record 'adv contract two')"
+[ "$(adv_lines "$out")" = 1 ] || fail "a different fingerprint gets its own suggestion: $out"
+out="$(cd "$adv" && OMS_ADVISE_AFTER_FAILURES=0 "$tool" record --cmd 'adv contract three' --exit 1 2>&1)"
+[ "$(adv_lines "$out")" = 0 ] || fail "OMS_ADVISE_AFTER_FAILURES=0 must silence triggers: $out"
+grep -F '"advised": ["contract_surface"]' "$adv/.oms/failures.jsonl" > /dev/null ||
+  fail "the printing row should record which trigger it printed"
+rm -rf "$adv/config" "$adv/docs"
+
+git -C "$adv" checkout -q -- file.txt
+git -C "$adv" checkout -q -b side
+printf 'side\n' > "$adv/file.txt"
+git -C "$adv" commit -qam side
+git -C "$adv" checkout -q main
+printf 'main\n' > "$adv/file.txt"
+git -C "$adv" commit -qam mainline
+out="$(adv_record 'git merge side before')"
+[ "$(adv_lines "$out")" = 0 ] || fail "no conflict yet, so no suggestion: $out"
+git -C "$adv" merge side >/dev/null 2>&1 || true
+out="$(adv_record 'git merge side')"
+printf '%s\n' "$out" | grep -Fq 'advise: a merge/rebase conflict is unresolved in the tree' ||
+  fail "an unmerged index should suggest the advisor: $out"
+out="$(adv_record 'git merge side')"
+[ "$(adv_lines "$out")" = 0 ] || fail "the conflict suggestion prints once per fingerprint: $out"
+git -C "$adv" merge --abort
+out="$(adv_record 'git merge side after abort')"
+[ "$(adv_lines "$out")" = 0 ] || fail "a resolved or aborted conflict must not suggest: $out"
+
 echo "autonomy-failure-smoke: ok"
