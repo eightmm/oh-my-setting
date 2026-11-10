@@ -145,7 +145,7 @@ def panel_environment():
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_AUTO_SWAP", "OMS_PANEL_ATTENTION_BELL", "OMS_PANEL_ATTENTION_CMD",
                        "OMS_PANEL_COLOR", "NO_COLOR",
                        "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
-                       "CLAUDE_CONFIG_DIR",
+                       "CLAUDE_CONFIG_DIR", "OMS_QUOTA_WARN_PCT",
                        "OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_PANEL_HOST", "OMS_PANEL_VIEW",
                        "OMS_PANEL_THEME", "COLORFGBG", EXECUTION_ENV) if name in os.environ]
 

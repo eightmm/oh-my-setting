@@ -5333,6 +5333,30 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
     assert next(item for item in spent_view["items"] if "5-hour" in item["label"])["status"] == "full", spent_view
     assert spent_view["level"] == panel_health.project(without_five)["level"], spent_view
     assert panel_health.alerts(spent) == panel_health.alerts(without_five), panel_health.alerts(spent)
+    # OMS_QUOTA_WARN_PCT is the person's own line on the reported windows: off unless set, one row id per provider
+    # window (never a value, so staying past the line is one warning), and silent for anything not reported now.
+    far = dict(five_health, provider_status={"claude": dict(five_row, five_hour_used=82, five_hour_resets_at=4_000_000_000)})
+    assert panel_health.quota_warnings(far) == [] and not any("Quota" in line for line in panel_health.alerts(far))
+    with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": "80"}):
+        assert panel_health.quota_warnings(far) == [(("quota", "claude", "5h"), "Claude 5h 82% used")], panel_health.quota_warnings(far)
+        assert panel_health.alerts(far) == ["! Quota past your 80% line: Claude 5h 82% used"], panel_health.alerts(far)
+        assert panel_health.quota_warnings(five_health, 1000) == [], "23% used is under the line"
+        assert panel_health.project(far)["level"] == panel_health.project(without_five)["level"]
+        both = dict(far, provider_status={"claude": dict(far["provider_status"]["claude"], weekly_used=91)})
+        assert [ident for ident, unused in panel_health.quota_warnings(both)] == [("quota", "claude", "5h"), ("quota", "claude", "week")]
+        assert panel_health.quota_warnings(dict(both, provider_status={"claude": dict(five_row, five_hour_used=82,
+            five_hour_resets_at=1300, weekly_used=91)}), 1200)[0][1] == "Claude 5h 82% used, resets in 1m"
+        for label, quiet in (("rolled over", (dict(far, provider_status={"claude": dict(five_row, five_hour_used=82,
+                                 five_hour_resets_at=1300, weekly_used=None)}), 1300)),
+                             ("stale frame", (dict(far, capacity_stale=True), None)),
+                             ("failed collection", (dict(far, collection={"ok": False}), None)),
+                             ("stale cache", (dict(far, provider_status={"claude": dict(far["provider_status"]["claude"],
+                                 source="cache stale")}), None)),
+                             ("not reported", (without_five, None))):
+            assert [w for w in panel_health.quota_warnings(quiet[0], quiet[1]) if w[0][2] == "5h"] == [], label
+    for off in ("0", "", "nonsense", "-5"):
+        with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": off}):
+            assert panel_health.quota_warnings(far) == [], off
     cache.unlink()
     if os.name != "nt":
         cache.symlink_to(project / "value.txt")

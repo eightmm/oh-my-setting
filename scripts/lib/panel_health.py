@@ -80,11 +80,42 @@ def project(report, now=None):
     return {"schema": 1, "level": level, "items": items}
 
 
+def quota_warnings(report, now=None):
+    """Reported quota windows at or past the person's own line, as [(row id, text)]; empty unless
+    OMS_QUOTA_WARN_PCT is set to 1..99 (percent used).
+
+    Only a percentage the provider reported counts: nothing here is derived from tokens, and an unreported,
+    stale or rolled-over window says nothing. The row id names the provider and the window, never a value, so
+    a window that stays past the line is one warning; it re-arms when the reading drops back under the line,
+    which is what a reset does. An advisory: it moves neither the health level nor any session."""
+    line = env_int("OMS_QUOTA_WARN_PCT", 0, minimum=0, maximum=99)
+    if not line or report.get("capacity_stale") is True or mapping(report.get("collection")).get("ok") is not True:
+        return []
+    found = []
+    for provider in ("claude", "codex"):
+        row = mapping(mapping(report.get("provider_status")).get(provider))
+        if row.get("source") in {"cache stale", "unavailable"}:
+            continue
+        window = five_hour(row, now)
+        if window is not None and 100 - window[0] >= line:
+            found.append((("quota", provider, "5h"), "%s 5h %s%% used%s" % (
+                provider.capitalize(), 100 - window[0], ", resets in " + window[1] if window[1] else "")))
+        weekly = percent(row.get("weekly_used"))
+        if weekly is not None and weekly >= line:
+            found.append((("quota", provider, "week"), "%s week %s%% used" % (provider.capitalize(), weekly)))
+    return found
+
+
 def alerts(report):
     pressured = [item for item in project(report)["items"]
                  if item["status"] in {"full", "urgent", "warning"} and not item.get("advisory")]
-    return ["! Capacity: " + "; ".join("%s %s/%s" % (item["label"], item["used"], item["limit"])
-            for item in pressured)] if pressured else []
+    lines = ["! Capacity: " + "; ".join("%s %s/%s" % (item["label"], item["used"], item["limit"])
+             for item in pressured)] if pressured else []
+    warned = quota_warnings(report)
+    if warned:
+        lines.append("! Quota past your %s%% line: %s" % (
+            env_int("OMS_QUOTA_WARN_PCT", 0, minimum=0, maximum=99), "; ".join(text for unused, text in warned)))
+    return lines
 
 
 def render(report, width, height, footer=None, now=None):
