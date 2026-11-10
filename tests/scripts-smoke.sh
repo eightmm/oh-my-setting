@@ -26856,6 +26856,8 @@ def tree(edit):
     shutil.rmtree(work, ignore_errors=True)
     (work / "config").mkdir(parents=True)
     shutil.copytree(root / "roles", work / "roles")
+    (work / "scripts/lib").mkdir(parents=True)
+    shutil.copy(root / "scripts/lib/peer-common.sh", work / "scripts/lib/peer-common.sh")
     data = json.loads((root / "config/role-contracts.json").read_text())
     edit(data["roles"], work)
     (work / "config/role-contracts.json").write_text(json.dumps(data))
@@ -26873,7 +26875,27 @@ expect(lambda r, w: r["critic"].update(may_delegate=True), "may_delegate must be
 expect(lambda r, w: r["critic"].update(writes="assigned-paths"), "contradicts")
 expect(lambda r, w: r["verifier"].update(returns=["no such line"]), "not present in the role file")
 expect(lambda r, w: r["builder"].update(read_only=True, writes="none"), "listed as a writer")
+
+def widen(w):
+    path = w / "scripts/lib/peer-common.sh"
+    path.write_text(path.read_text().replace('--tools "Read,Grep,Glob,Bash"', '--tools "Read,Grep,Glob,Bash,Edit"'))
+expect(lambda r, w: widen(w), "read belt contains write tools: Edit")
+expect(lambda r, w: (w / "scripts/lib/peer-common.sh").unlink(), "tool belts cannot be checked")
+saved = role_contracts.WEB_ROLES
+role_contracts.WEB_ROLES = set()
+try:
+    assert role_contracts.belt_for("researcher", {"read_only": True})[0] == "read"
+finally:
+    role_contracts.WEB_ROLES = saved
+rows = {r["role"]: r for r in role_contracts.surface(json.loads((root / "config/role-contracts.json").read_text())["roles"])}
+assert (rows["reviewer"]["belt"], rows["reviewer"]["tools"], rows["reviewer"]["mcp"]) == ("read", 4, False)
+assert (rows["researcher"]["belt"], rows["researcher"]["tools"]) == ("read+web", 6)
+assert (rows["builder"]["belt"], rows["builder"]["tools"], rows["builder"]["mcp"]) == ("default", None, True)
 PY
+  surface_out="$("$ROOT/scripts/agent-role.sh" surface)" || fail "agent-role surface should print the report"
+  case "$surface_out" in *'reviewer'*'true'*'read'*'4'*'off'*) ;; *) fail "surface should list reviewer on the read belt" ;; esac
+  "$ROOT/scripts/agent-role.sh" surface --json | python3 -c 'import json,sys; assert len(json.load(sys.stdin)["roles"]) == 20' ||
+    fail "surface --json should list every role"
 }
 
 test_global_rules_stay_compact_and_route_workflows() {
