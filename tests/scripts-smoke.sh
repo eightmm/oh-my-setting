@@ -12338,6 +12338,74 @@ assert json.load(sys.stdin)["assignment"] == {"provider":"claude", "workload":"r
     --expected-proposal-sha256 "$proposal_sha" >/dev/null ||
     fail "exact assignment proposal replay should succeed"
 
+  # A task may say which acceptance criteria it proves. The ids are checked
+  # against the spec, kept on the plan task, and the criteria no task covers
+  # are named at review -- advisory, on stderr, never an exit code.
+  local covered="$TMP/plan-from-spec-covers" covered_proposal covered_sha
+  make_committed_repo "$covered"
+  mkdir -p "$covered/bin" "$covered/home" "$covered/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$covered/tests/run.sh"
+  chmod +x "$covered/tests/run.sh"
+  cat > "$covered/PROJECT.md" <<'EOF'
+# PROJECT.md
+
+## Status
+
+- State: confirmed
+
+## Project
+
+- Goal: ship a tiny greeting CLI
+- Scope: src/, tests/
+- Non-goals: packaging
+
+## Verification
+
+- Required checks: bash tests/run.sh
+
+## Acceptance criteria
+
+- [id:REQ-1] WHEN run THE SYSTEM SHALL print hello
+- [id:REQ-2] WHEN given a name THE SYSTEM SHALL print it
+EOF
+  oms_smoke_make_fake_provider_stub "$covered/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > "$HOME/planner-prompt"
+printf '{"tasks":[{"id":"%s1","title":"feat: greeting core","allowed":["src/"],"verify":"bash tests/run.sh","covers":["%s"]}]}\n' "${OMS_TEST_PREFIX:-c}" "${OMS_TEST_COVERS:-REQ-1}"
+EOF
+  HOME="$covered/home" NVM_DIR="$covered/home/.nvm" PATH="$covered/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --to codex >"$covered/out" 2>"$covered/err" ||
+    fail "a proposal with covers should succeed: $(tail -4 "$covered/err")"
+  assert_file_contains "$covered/home/planner-prompt" "- REQ-2 | WHEN given a name THE SYSTEM SHALL print it"
+  assert_file_contains "$covered/out" "    covers: REQ-1"
+  assert_file_contains "$covered/err" 'warning: coverage: no task covers REQ-2: "WHEN given a name THE SYSTEM SHALL print it"'
+  ! grep -Fq 'no task covers REQ-1' "$covered/err" || fail "a covered criterion must not be reported: $(cat "$covered/err")"
+  covered_proposal="$(find "$covered/.oms/plan" -name 'proposal-*.json' | sed -n '1p')"
+  [ -n "$covered_proposal" ] || fail "covers proposal file missing"
+  covered_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$covered_proposal")"
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --apply "$covered_proposal" \
+    --expected-proposal-sha256 "$covered_sha" >"$covered/apply-out" 2>"$covered/apply-err" ||
+    fail "apply with covers should succeed: $(tail -4 "$covered/apply-err")"
+  assert_file_contains "$covered/apply-err" "warning: coverage: no task covers REQ-2"
+  "$ROOT/scripts/agent-plan.sh" --repo "$covered" show --id c1 | python3 -c '
+import json,sys
+assert json.load(sys.stdin)["covers"] == ["REQ-1"]
+' || fail "reviewed covers were lost during proposal apply"
+  "$ROOT/scripts/agent-plan.sh" --repo "$covered" brief --id c1 > "$covered/brief"
+  assert_file_contains "$covered/brief" "covers: REQ-1"
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --apply "$covered_proposal" \
+    --expected-proposal-sha256 "$covered_sha" >/dev/null 2>&1 ||
+    fail "exact covers proposal replay should succeed"
+  # An id the spec does not carry is refused before anything is proposed.
+  rc=0
+  OMS_TEST_PREFIX=n OMS_TEST_COVERS=REQ-9 HOME="$covered/home" NVM_DIR="$covered/home/.nvm" \
+    PATH="$covered/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --to codex >"$covered/bad-out" 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "an unknown covers id should refuse with exit 3, got $rc: $(tail -4 "$covered/bad-out")"
+  # The first proposal declared no covers against a spec that lists no
+  # criteria: nothing to say, so no coverage line at all.
+  ! grep -Fq 'coverage:' "$project/out" || fail "a spec without criteria must print no coverage line"
+
   local discovery="$TMP/plan-from-spec-discovery" discovery_bin="$TMP/plan-from-spec-discovery/bin"
   local discovery_home="$TMP/plan-from-spec-discovery/home" readers="$TMP/plan-from-spec-discovery/readers"
   local discovery_proposal packet report discovery_rc=0 proposal_count

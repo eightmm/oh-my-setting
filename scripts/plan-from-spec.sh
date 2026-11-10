@@ -201,8 +201,25 @@ fi
 # dependencies that stay inside the proposal).
 validate_proposal() {  # FILE [APPLY] -> prints "ok <count>" or fails with reason
   python3 - "$1" "$MAX_TASKS" "$ID_PREFIX" "$ALLOWED_ENVELOPE" "$PLAN_FILE" "${2:-0}" \
-    "$ROOT/scripts/lib/path_scope.py" "$REPO" "$ROOT/scripts/lib/task-assignment.py" "$COLLABORATION" "$WORKER_PROVIDER" "$is_oms_repo" <<'PY'
+    "$ROOT/scripts/lib/path_scope.py" "$REPO" "$ROOT/scripts/lib/task-assignment.py" "$COLLABORATION" "$WORKER_PROVIDER" "$is_oms_repo" \
+    "$SPEC" "$ROOT/scripts/lib" <<'PY'
 import json, os, re, runpy, shlex, sys
+
+sys.dont_write_bytecode = True
+
+
+def spec_criterion_ids():
+    """Ids of the project criteria the runtime would project from the spec, or None when it cannot be read."""
+    sys.path.insert(0, sys.argv[14])
+    try:
+        from oms_runtime.markdown import bullet_items, section_text, sections, stable_criterion_id
+        with open(sys.argv[13], encoding="utf-8") as handle:
+            body, _ = sections(handle.read())
+    except (ImportError, OSError, UnicodeError):
+        return None
+    bullets = bullet_items(section_text(
+        body, ["acceptance", "done", "success", "completion", "완료", "성공", "수용"]))
+    return [stable_criterion_id("project", raw) for raw in bullets]
 
 path_scope = runpy.run_path(sys.argv[7])
 within_envelope = path_scope["within_envelope"]
@@ -507,11 +524,13 @@ except ValueError:
     sys.stderr.write("existing plan is invalid JSON\n"); sys.exit(3)
 
 seen = []
+covers_re = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
+known_criteria = None
 for t in tasks:
     if not isinstance(t, dict):
         sys.stderr.write("task entries must be objects\n"); sys.exit(3)
-    if set(t) - {"assignment"} != {"id", "title", "allowed", "verify", "depends"}:
-        sys.stderr.write("task entries must match id/title/allowed/verify/depends with optional assignment\n"); sys.exit(3)
+    if set(t) - {"assignment", "covers"} != {"id", "title", "allowed", "verify", "depends"}:
+        sys.stderr.write("task entries must match id/title/allowed/verify/depends with optional assignment and covers\n"); sys.exit(3)
     try:
         validate_assignment(t.get("assignment", {}))
         if sys.argv[10] == "auto":
@@ -572,6 +591,20 @@ for t in tasks:
             sys.stderr.write("task %s depends on unknown/later task %s\n" % (tid, dep)); sys.exit(3)
         if existing[dep].get("state") != "done":
             sys.stderr.write("task %s depends on unfinished existing task %s\n" % (tid, dep)); sys.exit(3)
+    if "covers" in t:
+        covers = t["covers"]
+        if (not isinstance(covers, list) or not covers or len(covers) > 15
+                or any(not isinstance(cid, str) or not covers_re.fullmatch(cid) for cid in covers)
+                or len(covers) != len(set(covers))):
+            sys.stderr.write("task %s covers must be 1..15 unique criterion ids\n" % tid); sys.exit(3)
+        if known_criteria is None:
+            known_criteria = spec_criterion_ids()
+            if known_criteria is None:
+                sys.stderr.write("task %s declares covers but the spec's criteria cannot be read\n" % tid); sys.exit(3)
+        unknown = [cid for cid in covers if cid not in known_criteria]
+        if unknown:
+            sys.stderr.write("task %s covers unknown criterion id(s): %s (%d criteria in the spec)\n"
+                             % (tid, " ".join(unknown), len(set(known_criteria)))); sys.exit(3)
     seen.append(tid)
 print("ok %d" % len(tasks))
 PY
@@ -754,6 +787,57 @@ print(",".join(files))
 PY
 }
 
+# Advisory: which project criteria no proposed task says it covers. Read with
+# the runtime's Markdown helpers so the ids are the ones the envelope projects.
+# Never changes an exit code; an unreadable spec or proposal prints nothing.
+proposal_coverage_notes() {  # PROPOSAL
+  python3 - "$1" "$SPEC" "$ROOT/scripts/lib" <<'PY' || true
+import json, sys, unicodedata
+
+sys.dont_write_bytecode = True
+proposal, spec, lib = sys.argv[1:]
+sys.path.insert(0, lib)
+try:
+    from oms_runtime.markdown import (bullet_items, normalized_line, section_text, sections,
+                                      stable_criterion_id, strip_criterion_marker)
+    with open(spec, encoding="utf-8") as handle:
+        body, _ = sections(handle.read())
+    with open(proposal, encoding="utf-8") as handle:
+        tasks = json.load(handle).get("tasks") or []
+except (ImportError, OSError, UnicodeError, ValueError, AttributeError):
+    sys.exit(0)
+
+def shown(value, limit=60):
+    value = "".join(ch if unicodedata.category(ch)[0] != "C" else " " for ch in value)
+    value = " ".join(value.split())
+    return value if len(value) <= limit else value[:limit - 3] + "..."
+
+criteria = []
+for raw in bullet_items(section_text(body, ["acceptance", "done", "success", "completion", "완료", "성공", "수용"])):
+    criterion_id = stable_criterion_id("project", raw)
+    if criterion_id not in [item[0] for item in criteria]:
+        criteria.append((criterion_id, strip_criterion_marker(normalized_line(raw))))
+if not criteria:
+    sys.exit(0)
+covered = set()
+declared = 0
+for task in tasks:
+    covers = task.get("covers") if isinstance(task, dict) else None
+    if isinstance(covers, list) and covers:
+        declared += 1
+        covered.update(str(item) for item in covers)
+if not declared:
+    sys.stderr.write("note: coverage: no task declares covers, so %d acceptance criteria are not assigned to a task "
+                     "(optional: \"covers\": [\"%s\"])\n" % (len(criteria), shown(criteria[0][0], 40)))
+    sys.exit(0)
+missing = [item for item in criteria if item[0] not in covered]
+for criterion_id, statement in missing[:8]:
+    sys.stderr.write("warning: coverage: no task covers %s: \"%s\"\n" % (shown(criterion_id, 40), shown(statement)))
+if len(missing) > 8:
+    sys.stderr.write("warning: coverage: %d more criteria are covered by no task\n" % (len(missing) - 8))
+PY
+}
+
 # Advisory requirement-quality lint for a spec candidate. It only prints
 # `warning: spec: ...` lines: the acceptance contract above stays the sole
 # pass/fail judge, so a noisy heuristic can never block an adopt. Criteria are
@@ -901,6 +985,7 @@ PY
   esac
   out="$(validate_proposal "$APPLY_FILE" 1)" || exit 3
   count="${out#ok }"
+  proposal_coverage_notes "$APPLY_FILE"
   [ -f "$SPEC" ] || fail "PROJECT.md is required to bind a proposal apply"
   goal="$(spec_field Goal)"
   acceptance_meta="$(acceptance_contract)" || exit 2
@@ -1031,6 +1116,31 @@ prefix_rule="ids match [A-Za-z0-9._-]+ and are unique"
 scope_rule="stay inside PROJECT.md Scope"
 [ -z "$ALLOWED_ENVELOPE" ] || scope_rule="every allowed path stays inside this immutable envelope: $ALLOWED_ENVELOPE"
 
+# The acceptance criteria that carry an explicit [id:...], one per line, for the
+# planner's optional per-task `covers`. Empty (and the prompt unchanged) when
+# the spec names none: a wording-derived id is not something to ask a planner for.
+spec_criteria_block() {
+  python3 - "$SPEC" "$ROOT/scripts/lib" <<'CRITERIA' || true
+import re, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[2])
+try:
+    from oms_runtime.markdown import (bullet_items, normalized_line, section_text, sections,
+                                      stable_criterion_id, strip_criterion_marker)
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        body, _ = sections(handle.read())
+except (ImportError, OSError, UnicodeError):
+    sys.exit(0)
+rows = []
+for raw in bullet_items(section_text(body, ["acceptance", "done", "success", "completion", "완료", "성공", "수용"])):
+    if re.search(r"\[(?:id|criterion):", raw, re.I):
+        rows.append("- %s | %s" % (stable_criterion_id("project", raw),
+                                   strip_criterion_marker(normalized_line(raw))[:200]))
+if rows:
+    sys.stdout.write("\nAcceptance criteria (id | statement):\n" + "\n".join(rows[:40]))
+CRITERIA
+}
+
 contract="--- PROJECT.md contract ---
 State: $state
 Goal: $(spec_field Goal)
@@ -1043,7 +1153,7 @@ $(spec_section Verification)
 Interface and Data:
 $(spec_section 'Interface and Data')
 Decisions:
-$(spec_section Decisions)
+$(spec_section Decisions)$(spec_criteria_block)
 If Decisions names References, read those repository documents before decomposing; if one does not exist, say so in the affected task title.
 Existing plan (id | state | title | scope):
 $plan_context
@@ -1086,7 +1196,9 @@ fallback_model, reasoning_effort, workload (standard or routine). Do not invent
 model names or choose another company without parent-reviewed authority.
 No provider/model/role/workload fields outside assignment; no child delegation.
 
-Return ONLY one JSON object, no prose, with this shape (tasks may also include assignment):
+Return ONLY one JSON object, no prose, with this shape (tasks may also include assignment, and
+\"covers\": [\"criterion-id\"] when the contract's acceptance criteria carry [id:...] markers
+and the task's verify proves those criteria):
 {\"tasks\": [{\"id\": \"t1\", \"title\": \"feat: ...\", \"allowed\": [\"path/prefix\"],
 \"verify\": \"one mechanical shell command\", \"depends\": [\"earlier-id\"]}]}
 
@@ -1609,6 +1721,8 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
         t["id"], t["title"], ",".join(t["allowed"]), t["verify"], deps))
     if t.get("assignment"):
         print("    assignment: " + json.dumps(t["assignment"], sort_keys=True))
+    if t.get("covers"):
+        print("    covers: " + ", ".join(t["covers"]))
     # A task whose verify names a file inside its own scope is admittable only
     # while the patch leaves that file alone: patch-admit refuses a patch that
     # rewrites the test judging it, and asks for verifier-change consent the
@@ -1632,6 +1746,7 @@ for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
                   " consent" % root)
             break
 PY
+proposal_coverage_notes "$proposal"
 # Under autopilot the sole continuation is the digest-bound autopilot run,
 # which the parent prints itself; standalone advice would bypass that entrance.
 if [ "${OMS_AUTOPILOT:-0}" != 1 ]; then
