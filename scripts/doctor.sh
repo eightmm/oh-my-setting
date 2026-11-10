@@ -39,6 +39,7 @@ REQUIRE_TOOLS="${OH_MY_SETTING_REQUIRE_TOOLS:-0}"
 REPAIR=0
 SURFACES=0
 TOOL_LOCK_ONLY=0
+SECURITY_ONLY=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
@@ -72,6 +73,7 @@ usage() {
   cat <<'EOF'
 Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--repair] [--surfaces] [--tool-lock] [--contract]
+                 [--security]
                  [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
 
@@ -112,6 +114,18 @@ unknown without execution. Disabled version probes are labeled "not probed".
 --tool-lock is a standalone read-only validation of the exact versions,
 download URLs, and payload digests owned by tools.lock.json.
 
+--security is a standalone read-only report of the permission and sandbox
+posture of the provider CLIs: Claude Code bypass mode, its skipped
+confirmation, blanket shell allow rules and sandbox switch; Codex
+danger-full-access, approval_policy never and sandbox network access, per
+profile; Antigravity blanket mcp(*) / unsandboxed(*) rules and its terminal
+sandbox; and which sandbox tools are on PATH. Settings files are parsed as
+data: no provider command runs and nothing a file names is executed. Rows are
+findings (ok, warn, info, unknown) and never change the exit status; a file
+that cannot be read is unknown, not ok. The report records a fingerprint of
+its own findings under the user state directory and says which section
+changed since the last check; it changes no provider file.
+
 --repo selects the project whose .oms state is inspected without changing
 install ownership. --json returns the same verdict as a bounded structured
 report. --remediation-plan prints only exact remedies already emitted by the
@@ -137,6 +151,7 @@ while [ "$#" -gt 0 ]; do
     --repair) REPAIR=1; FORWARD_ARGS+=(--repair); shift ;;
     --surfaces) SURFACES=1; FORWARD_ARGS+=(--surfaces); shift ;;
     --tool-lock) TOOL_LOCK_ONLY=1; FORWARD_ARGS+=(--tool-lock); shift ;;
+    --security) SECURITY_ONLY=1; shift ;;
     --contract)
       # The cross-CLI conformance fixture (loader parity, MCP registration
       # parity, fail-open hook no-ops) is slower than a health pass and runs
@@ -186,7 +201,8 @@ if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } && [ "$REPAIR" = 1 ]; t
   exit 2
 fi
 if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
-   { [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ]; }; then
+   { [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ] ||
+     [ "$SECURITY_ONLY" = 1 ]; }; then
   echo "error: structured doctor reports cannot wrap a standalone report mode" >&2
   exit 2
 fi
@@ -197,6 +213,18 @@ if [ "$CONTRACT_ONLY" = 1 ]; then
     echo "warn: host Python is older than 3.11; reinstall to provision the managed runtime"
   fi
   exec bash "$ROOT/scripts/lib/provider-contract.sh" --check
+fi
+
+if [ "$SECURITY_ONLY" = 1 ]; then
+  if [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ]; then
+    echo "error: --security is a standalone read-only report; run it alone" >&2
+    exit 2
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: --security needs python3" >&2
+    exit 2
+  }
+  exec python3 -I "$ROOT/scripts/lib/doctor-security.py"
 fi
 
 doctor_probe_cache_cleanup() {
