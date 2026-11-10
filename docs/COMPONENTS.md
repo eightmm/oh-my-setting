@@ -2367,6 +2367,17 @@ different targets. A file that cannot be parsed is `unread` and that CLI is left
 the comparison. Codex plugin state is not in a file the report parses and is reported as
 not read. Rows never change the exit status.
 
+`oms doctor --mcp [--pin] [--repo PATH] [--json]` reads the same files and hashes each
+server's launch shape (transport, command, arguments, URL, environment variable names;
+never values) into a private pin file (`~/.config/oh-my-setting/mcp-pins.json`, mode 600,
+override with `OMS_MCP_PIN_FILE`). Without `--pin` nothing is written: the report lists
+`new`, `changed` and `removed` servers against the recorded pins and warns on an
+`npx`/`bunx`/`uvx` package with no pinned version and on plain `http` to a non-loopback
+host. `--pin` records the current servers; that is the person's approval, never inferred
+from the report. A provider whose file cannot be parsed is `unknown`: its pins are not
+compared and `--pin` keeps them. Servers are never started, so tool descriptions are not
+hashed; the exit status is 0.
+
 
 #### Optional hints and budgets
 
