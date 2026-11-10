@@ -106,11 +106,11 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
                 patch_error=False, heading=None, color=None, transcript=()):
     """Render one bounded, read-only view for a recorded call."""
     from dashboard_projection import display_width
-    from panel_view import (call_identity, clipped, light_theme, paint, role_style, status_tag,
+    from panel_view import (call_identity, clipped, color_count, light_theme, paint, role_style, status_tag,
                             wrapped, _result_blocks, _result_structured)
     from room_view import readable
     color = sys.stdout.isatty() if color is None else color
-    colors = 256 if "256color" in os.environ.get("TERM", "") else 16
+    colors = color_count()
     light = light_theme()
     def ink(value, style_name, bold=False):
         return paint(value, style_name, color=color, colors=colors, light=light, bold=bold)

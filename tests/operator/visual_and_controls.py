@@ -74,7 +74,7 @@ with patch.dict(os.environ, {}, clear=True):
         for light in (False, True):
             for token, shades in dict(ROLE_COLORS, **STATE_COLORS).items():
                 text = paint("한글", token, color=True, colors=colors, light=light, bold=True)
-                sgr = "38;5;%s" % shades[int(light)] if colors == 256 else str(37 if light and token in {"unknown", "dim"} else shades[2])
+                sgr = "38;5;%s" % shades[int(light)] if colors == 256 else str(90 if light and shades[2] == 37 else shades[2])
                 assert text == "\033[1;" + sgr + "m한글\033[0m", (token, text)
                 assert display_width(re.sub(r"\033\[[0-9;]*m", "", text)) == 4
             assert paint("role", "main", color=True, colors=colors, light=light) != paint("state", "running", color=True, colors=colors, light=light)
@@ -122,6 +122,52 @@ for mode in ("tree", "summary", "list", "compact", "detail"):
             assert all(1 <= h["y"] <= len(text.splitlines()) and 1 <= h["x1"] <= h["x2"] <= width for h in nav.get("hits", [])), nav
             if not unicode:
                 assert all(ch.isascii() or ch in "한글 목표" for ch in text), text
+# One frame under every colour capability: plain modes leak no escape, each styled line closes its style,
+# and every code belongs to the semantic palette of that depth.
+from panel_view import TOKEN_COLORS, color_count
+visual_fixture["attempts"]["active_recent"] += [
+    {"attempt_id": "visual-failed", "state": "failed", "exit": 1, "parent_attempt_id": "visual-main",
+     "panel": {"role": "worker", "purpose": "builder", "room_id": "visual", "room_participant": "visual-failed",
+               "model": "gpt-6.1-sol", "label": "visual-failed"}}]
+visual_fixture["room"]["participants"].append({"participant": "visual-failed", "role": "worker", "joined": True,
+    "parent": "visual-main", "model": "gpt-6.1-sol", "label": "visual-failed"})
+sgr_any, sgr_reset = re.compile(r"\033\[[0-9;]*m"), "\033[0m"
+palette_256 = {str(shade) for dark, bright, _ in TOKEN_COLORS.values() if dark is not None for shade in (dark, bright)}
+palette_16 = {str(sgr) for _, _, sgr in TOKEN_COLORS.values()} | {"90"}
+capabilities = {"no-color": {"NO_COLOR": "1", "TERM": "xterm-256color"}, "never": {"OMS_PANEL_COLOR": "never", "TERM": "xterm-256color"},
+                "dumb": {"OMS_PANEL_COLOR": "always", "TERM": "dumb"}, "16": {"TERM": "xterm"},
+                "256": {"TERM": "xterm-256color"}, "tmux-16": {"TERM": "screen"}, "truecolor": {"TERM": "xterm", "COLORTERM": "truecolor"}}
+for mode in ("tree", "list", "detail", "graph"):
+    for width, height in ((40, 12), (60, 12), (80, 30), (120, 30)):
+        for light in (False, True):
+            frames = {}
+            for name, setting in capabilities.items():
+                with patch.dict(os.environ, dict(setting, OMS_PANEL_THEME="light" if light else "dark"), clear=True):
+                    frames[name] = render(visual_fixture, "codex", width, height, view=mode, color=True)
+            for name in ("no-color", "never", "dumb"):
+                assert "\033" not in frames[name], (name, mode, width, height)
+            for name, frame in frames.items():
+                assert sgr_any.sub("", frame) == sgr_any.sub("", frames["no-color"]), (name, mode, width, height)
+                for line in frame.splitlines():
+                    spans = sgr_any.findall(line)
+                    assert not spans or spans[-1] == sgr_reset, (name, mode, width, height, line)
+                    for span in spans:
+                        parts = span[2:-1].split(";")
+                        if parts == ["0"] or parts == ["7"]:
+                            continue
+                        parts = [part for part in parts if part != "1"]
+                        if name in {"256", "truecolor"}:
+                            assert parts[:2] == ["38", "5"] and parts[2] in palette_256 or parts == ["39"], (name, span)
+                        elif name in {"16", "tmux-16"}:
+                            assert len(parts) == 1 and parts[0] in palette_16 | {"39"}, (name, span)
+                            assert not (light and parts[0] == "37"), (name, span)
+            # Colour is never the only cue: the failed call also carries a glyph and a label.
+            if mode == "tree" and height >= 30:
+                assert "[✗ failed: exit 1]" in frames["no-color"], frames["no-color"]
+for setting, depth in (({"TERM": "xterm"}, 16), ({"TERM": "screen"}, 16), ({"TERM": "tmux-256color"}, 256),
+                       ({"TERM": "xterm", "COLORTERM": "24bit"}, 256), ({"TERM": "xterm-direct"}, 256), ({}, 16)):
+    with patch.dict(os.environ, setting, clear=True):
+        assert color_count() == depth, (setting, depth)
 # PANEL_VISUAL_TOKENS_END
 
 # Judge bands use bounded, cached artifact judgments rather than command exits.
