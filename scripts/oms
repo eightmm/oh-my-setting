@@ -225,6 +225,7 @@ journal
 land
 model-doctor
 models
+output-digest
 panel
 patch-admit
 patch-land
