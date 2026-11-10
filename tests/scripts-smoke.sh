@@ -26326,20 +26326,58 @@ test_delegate_plan_task_hydrates_brief_and_verify() {
 
   make_committed_repo "$project"
   mkdir -p "$project/src"
+  printf 'value = 1\n' > "$project/src/frobnicator.py"
+  git -C "$project" add src/frobnicator.py
+  git -C "$project" commit -qm scope-fixture
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" add --id t1 \
-      --title "Fix the frobnicator" --verify "echo custom-verify-marker" >/dev/null )
+      --title "Fix the frobnicator" --allowed src/ --verify "echo custom-verify-marker" >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-plan.sh" claim --id t1 --provider codex >/dev/null )
+  "$ROOT/scripts/agent-memory.sh" --repo "$project" append --paths 'src/**' \
+    --text 'The frobnicator needs the scoped regression fixture.' >/dev/null
+  "$ROOT/scripts/agent-memory.sh" --repo "$project" append --paths 'docs/**' \
+    --text 'The frobnicator handbook has unrelated instructions.' >/dev/null
 
   local out
-  out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
-    --to codex --plan-task t1 2>&1)" || fail "plan-task dry-run should succeed"
+  out="$(cd "$project" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_MEMORY_TARGET_PATHS=docs/guide.md \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --plan-task t1 --memory 2>&1)" || fail "plan-task dry-run should succeed"
   contains "$out" "plan-verify: echo custom-verify-marker" ||
     fail "verify should be hydrated from the plan task"
   assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'Fix the frobnicator'
-  out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
-    --to codex --plan-task t1 2>&1)" || fail "subdir plan-task dry-run should succeed"
+  assert_one_artifact_contains "$project/.oms/artifacts/delegate" 'codex-*.md' 'scoped regression fixture'
+  if grep -R -Fq 'handbook has unrelated instructions' "$project/.oms/artifacts/delegate"; then
+    fail "a frozen plan scope must replace inherited memory targets"
+  fi
+  out="$(cd "$project/src" && OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_MEMORY_TARGET_PATHS=docs/guide.md \
+    "$ROOT/scripts/peer-delegate.sh" --to codex --plan-task t1 --memory 2>&1)" || fail "subdir plan-task dry-run should succeed"
   contains "$out" "plan-verify: echo custom-verify-marker" ||
     fail "verify must hydrate from the plan task even when run from a subdirectory"
+
+  local source="$TMP/delegate-hydrate-source" cross_artifacts="$TMP/delegate-hydrate-cross-artifacts"
+  make_committed_repo "$source"
+  mkdir -p "$source/remote"
+  printf 'value = 1\n' > "$source/remote/frobnicator.py"
+  git -C "$source" add remote/frobnicator.py
+  git -C "$source" commit -qm remote-scope-fixture
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" add --id remote \
+    --title 'Fix the remote frobnicator' --allowed remote/ --verify true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$project" claim --id remote --provider codex >/dev/null
+  "$ROOT/scripts/agent-memory.sh" --repo "$project" append --paths 'remote/**' \
+    --text 'The remote frobnicator uses the state-owned memory invariant.' >/dev/null
+  out="$(env -u MA_READ_SOURCE_REPO OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_PANEL_DISPATCH=1 \
+    OMS_ROOM_REPO="$project" OMS_MEMORY_TARGET_PATHS=docs/guide.md "$ROOT/scripts/peer-delegate.sh" \
+    --repo "$source" --to codex --plan-task remote --memory --artifact-dir "$cross_artifacts" 2>&1)" ||
+    fail "cross-repository plan recall dry-run should succeed: $out"
+  assert_one_artifact_contains "$cross_artifacts" 'codex-remote-*.md' 'state-owned memory invariant'
+  out="$(MA_READ_SOURCE_REPO="$project" OH_MY_SETTING_DELEGATE_DRY_RUN=1 OMS_PANEL_DISPATCH=1 \
+    OMS_ROOM_REPO="$project" OMS_PANEL_ALLOWED_PATHS=remote/ OMS_MEMORY_TARGET_PATHS=docs/guide.md \
+    "$ROOT/scripts/peer-delegate.sh" --repo "$source" --to codex --memory --no-verify \
+    --prompt 'Fix the remote frobnicator' --artifact-dir "$cross_artifacts" 2>&1)" ||
+    fail "cross-repository panel recall dry-run should succeed: $out"
+  assert_one_artifact_contains "$cross_artifacts" 'codex-fix-the-remote-frobnicator-*.md' 'state-owned memory invariant'
+  if grep -R -Fq 'handbook has unrelated instructions' "$cross_artifacts"; then
+    fail "cross-repository task recall reused inherited targets"
+  fi
+  assert_not_exists "$source/.oms/memory"
 }
 
 test_agent_plan_touch_prevents_reclaim() {
@@ -42382,6 +42420,136 @@ test_shared_memory_context_ranked_recall() {
     '. "$1"; ma_write_shared_memory_context "$2" "parser tests"' _ "$lib" "$repo")"
   contains "$out" 'handbook chapter' || fail "injected recall should carry a note scoped to the named paths: $out"
   if contains "$out" 'frozen grammar fixture'; then fail "injected recall carried another scope: $out"; fi
+
+  # Frozen task paths are scope patterns, not recall's concrete target names.
+  # Resolve tracked paths, apply deny rules, and retain declared new files.
+  local peer="$ROOT/scripts/lib/peer-common.sh" scope note_id
+  mkdir -p "$repo/src/parser/denied" "$repo/docs" "$repo/ignored" "$repo/.github/jobs" "$repo/github/jobs"
+  printf 'fixture\n' > "$repo/src/parser/tokens.py"
+  printf 'fixture\n' > "$repo/src/parser/denied/omit.py"
+  printf 'fixture\n' > "$repo/docs/guide.md"
+  printf 'fixture\n' > "$repo/.github/jobs/main.yml"
+  printf 'fixture\n' > "$repo/github/jobs/main.yml"
+  printf 'ignored/\n' > "$repo/.gitignore"
+  printf 'private fixture\n' > "$repo/ignored/checkpoint.bin"
+  git -C "$repo" add src docs .gitignore .github github
+  git -C "$repo" commit -qm recall-scope-fixture
+  "$memory" --repo "$repo" append --paths 'src/parser/denied/**' \
+    --text 'Parser tests denied scope lesson.' >/dev/null
+  "$memory" --repo "$repo" append --paths 'new/**' \
+    --text 'Parser tests new file invariant.' >/dev/null
+  "$memory" --repo "$repo" append --paths 'ignored/**' \
+    --text 'Parser tests ignored checkpoint lesson.' >/dev/null
+  "$memory" --repo "$repo" append --paths '.github/**' \
+    --text 'Parser tests hidden workflow invariant.' >/dev/null
+  "$memory" --repo "$repo" append --paths 'github/**' \
+    --text 'Parser tests visible workflow distraction.' >/dev/null
+  for scope in retired redacted; do
+    "$memory" --repo "$repo" append --paths 'src/parser/**' \
+      --text "Parser tests $scope scope lesson." >/dev/null
+    note_id="$("$memory" --repo "$repo" search --json "$scope scope lesson" 2>/dev/null |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+    if [ "$scope" = retired ]; then
+      "$memory" --repo "$repo" retire --id "$note_id" --reason obsolete >/dev/null
+    else
+      "$memory" --repo "$repo" redact --id "$note_id" --apply >/dev/null
+    fi
+  done
+  for scope in 'src/parser/' 'src/parser/*.py'; do
+    out="$(OMS_MEMORY_TARGET_PATHS=docs/guide.md bash -c \
+      '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "$3" "src/parser/denied/"' \
+      _ "$peer" "$repo" "$scope")"
+    contains "$out" 'frozen grammar fixture' || fail "task scope lost its matching note: $out"
+    contains "$out" 'focused parser test' || fail "task scope lost an unscoped note: $out"
+    for bad in 'handbook chapter' 'denied scope lesson' 'retired scope lesson' 'redacted scope lesson'; do
+      if contains "$out" "$bad"; then fail "task scope injected ineligible memory: $bad"; fi
+    done
+  done
+  out="$(bash -c '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "docs/" ""' \
+    _ "$peer" "$repo")"
+  contains "$out" 'handbook chapter' || fail "changing task paths did not change recall"
+  if contains "$out" 'frozen grammar fixture'; then fail "changed task retained its previous scope"; fi
+  out="$(bash -c '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "new/parser.py" ""' \
+    _ "$peer" "$repo")"
+  contains "$out" 'new file invariant' || fail "a declared new file must supply a recall target"
+  out="$(bash -c '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "ignored/**" ""' \
+    _ "$peer" "$repo")"
+  if contains "$out" 'ignored checkpoint lesson'; then fail "task recall must not discover ignored files"; fi
+  out="$(bash -c '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" ".github/" ""' \
+    _ "$peer" "$repo")"
+  contains "$out" 'hidden workflow invariant' || fail "dot-directory task scope lost its note"
+  if contains "$out" 'visible workflow distraction'; then fail "dot-directory task scope became another directory"; fi
+  out="$("$memory" --repo "$repo" recall --target ./.github/jobs/main.yml parser tests 2>/dev/null)"
+  contains "$out" 'hidden workflow invariant' || fail "literal ./ removal changed a dot-directory target"
+  if contains "$out" 'visible workflow distraction'; then fail "./ normalization stripped a real leading dot"; fi
+  out="$(OMS_MEMORY_TARGET_PATHS=docs/guide.md bash -c \
+    '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "" ""' _ "$peer" "$repo")"
+  if contains "$out" 'handbook chapter'; then fail "an empty task scope inherited another task target"; fi
+  (
+    . "$peer"
+    MA_KIND=delegate
+    export OMS_MEMORY_TARGET_PATHS=docs/guide.md
+    ma_write_harness_context "$repo" 1 0 0 'parser tests' 'src/parser/' 'src/parser/denied/' >/dev/null
+    [ "$OMS_MEMORY_TARGET_PATHS" = docs/guide.md ] || fail "task targets leaked into the caller environment"
+    ma_write_harness_context "$repo" 1 0 0 'parser tests' > "$repo/legacy-recall"
+    unset OMS_MEMORY_TARGET_PATHS
+    ma_write_harness_context "$repo" 1 0 0 'parser tests' 'docs/' '' >/dev/null
+    [ -z "${OMS_MEMORY_TARGET_PATHS+x}" ] || fail "task recall exported a target into later calls"
+    ma_write_harness_context "$repo" 1 0 0 'parser tests docs/guide.md' > "$repo/unknown-recall"
+  )
+  assert_file_contains "$repo/legacy-recall" 'handbook chapter'
+  if grep -Fq 'handbook chapter' "$repo/unknown-recall"; then fail "prompt text supplied an undeclared task scope"; fi
+
+  # State/context owners can differ from a source index (including a managed
+  # scratch branch). Explicit source binding must win over the registry owner.
+  local source_repo="$TMP/memory-recall-source"
+  make_committed_repo "$source_repo"
+  mkdir -p "$source_repo/remote"
+  printf 'fixture\n' > "$source_repo/remote/entry.py"
+  git -C "$source_repo" add remote/entry.py
+  git -C "$source_repo" commit -qm source-scope
+  "$memory" --repo "$repo" append --paths 'remote/**' \
+    --text 'Parser tests remote source invariant.' >/dev/null
+  out="$(env -u MA_READ_SOURCE_REPO OMS_PANEL_DISPATCH=1 OMS_ROOM_REPO="$repo" REPO="$repo" \
+    bash -c '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "remote/" "" "$3"' \
+    _ "$peer" "$repo" "$source_repo")"
+  contains "$out" 'remote source invariant' || fail "task targets were resolved against the state repository"
+  assert_not_exists "$source_repo/.oms"
+  python3 - "$source_repo" <<'PY'
+import subprocess, sys
+git = ["git", "-C", sys.argv[1]]
+blob = subprocess.check_output(git + ["hash-object", "-w", "--stdin"], input=b"fixture\n").decode().strip()
+rows = "".join("100644 %s\tbounded/%05d.py\n" % (blob, index) for index in range(10001))
+subprocess.run(git + ["update-index", "--index-info"], input=rows.encode(), check=True)
+PY
+  out="$(env -u MA_READ_SOURCE_REPO OMS_PANEL_DISPATCH=1 OMS_ROOM_REPO="$repo" REPO="$repo" \
+    OMS_MEMORY_TARGET_PATHS=docs/guide.md bash -c \
+    '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 "parser tests" "remote/" "" "$3"' \
+    _ "$peer" "$repo" "$source_repo" 2> "$repo/scope-limit.err")"
+  contains "$out" 'focused parser test' || fail "scope enumeration limit lost unscoped recall"
+  if contains "$out" 'remote source invariant' || contains "$out" 'handbook chapter'; then
+    fail "scope enumeration limit reused partial or inherited targets"
+  fi
+  assert_file_contains "$repo/scope-limit.err" 'tracked-path limit; scoped recall omitted'
+
+  local timeout_bin="$TMP/memory-target-timeout" timeout_status=0
+  mkdir -p "$timeout_bin"
+  printf '#!/bin/sh\nexec sleep 30\n' > "$timeout_bin/git"
+  chmod +x "$timeout_bin/git"
+  out="$(PATH="$timeout_bin:$PATH" bash -c '. "$1"; ma_task_memory_targets "$2" "src/" ""' \
+    _ "$peer" "$repo" 2> "$repo/scope-timeout.err")" || timeout_status=$?
+  [ "$timeout_status" -ne 0 ] && [ -z "$out" ] || fail "a stalled target lookup must fail without targets"
+  assert_file_contains "$repo/scope-timeout.err" 'unavailable; scoped recall omitted'
+
+  python3 -c 'print("scopebudget " * 800)' | "$memory" --repo "$repo" append --paths 'src/parser/**' --stdin >/dev/null
+  bash -c '. "$1"; MA_KIND=delegate; ma_write_harness_context "$2" 1 0 0 scopebudget "src/parser/" ""' \
+    _ "$peer" "$repo" > "$repo/budget-recall"
+  python3 - "$repo/budget-recall" <<'PY' || fail "task recall exceeded the existing memory budget"
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+recall = text.split("### relevant recall (project)\n", 1)[1].split("\n--- end harness context ---", 1)[0]
+assert 3900 <= len(recall.rstrip("\n").encode("utf-8")) <= 4000
+PY
   for bad in '/etc/passwd' '../outside/**' 'a b'; do
     if (cd "$repo" && bash "$memory" append --paths "$bad" --text "never recorded" >/dev/null 2>&1); then
       fail "--paths must refuse: $bad"

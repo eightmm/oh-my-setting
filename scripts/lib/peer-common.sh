@@ -1162,13 +1162,69 @@ ma_validate_outbound_prompt() {
   esac
 }
 
-# Single fenced block for all injected harness context, so providers can
-# tell reference data apart from operator instructions.
+# Recall accepts concrete paths; a frozen task supplies prefixes and globs.
+# Resolve only tracked names and declared literal new files, never ignored data.
+ma_task_memory_targets() {
+  python3 -B - "$MA_LIB_DIR" "$1" "$2" "$3" <<'PY'
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from path_scope import classify, has_glob, normalize, validate_patterns
+
+try:
+    repo = Path(sys.argv[2]).resolve(strict=True)
+    allowed, forbidden = [
+        validate_patterns(normalize(item) for item in raw.split(",") if item.strip())
+        for raw in sys.argv[3:5]
+    ]
+    if not allowed:
+        raise SystemExit(0)
+    with tempfile.TemporaryFile() as tracked:
+        subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-C", str(repo),
+             "ls-files", "--cached", "--full-name", "-z"],
+            stdin=subprocess.DEVNULL, stdout=tracked, stderr=subprocess.DEVNULL,
+            timeout=5, check=True,
+        )
+        tracked.seek(0)
+        data = tracked.read(1024 * 1024 + 1)
+    if len(data) > 1024 * 1024 or data.count(b"\0") > 10000:
+        print("warning: task memory targets exceed the tracked-path limit; scoped recall omitted", file=sys.stderr)
+        raise SystemExit(1)
+    candidates = [os.fsdecode(raw) for raw in data.split(b"\0") if raw]
+    candidates.extend(path for path in allowed if not has_glob(path) and not (repo / path).is_dir())
+    targets = sorted({path for path in candidates
+                      if "," not in path and "\n" not in path and "\r" not in path
+                      and normalize(path) == path and classify(path, allowed, forbidden) == "allowed"})
+    result = ",".join(targets)
+    if len(result.encode("utf-8")) > 64 * 1024:
+        print("warning: task memory targets exceed the recall-target limit; scoped recall omitted", file=sys.stderr)
+        raise SystemExit(1)
+    print(result)
+except (OSError, ValueError, subprocess.SubprocessError):
+    print("warning: task memory targets unavailable; scoped recall omitted", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+# Optional trailing allowed/forbidden paths belong to one frozen task, including
+# an empty scope; the eighth argument binds lookup to its source index, which
+# can differ from the context/worktree registry owner. Without a scope, preserve
+# the caller's explicit recall targets.
+# Single fenced block lets providers distinguish reference data from instructions.
 ma_write_harness_context() {
   local repo="$1"
   repo="$(ma_read_source_repo "$repo")"
   local memory_repo="$repo"
-  if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ] &&
+  if [ "${MA_KIND:-}" = delegate ]; then
+    # Delegation resolves canonical state before rendering, including a source
+    # scratch whose branch and index differ from its worktree registry owner.
+    memory_repo="${REPO:-$repo}"
+  elif [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ] &&
     [ -n "${MA_READ_SOURCE_REPO:-}" ]; then
     # Recall may refresh caches; source reads must not create state in B.
     memory_repo="$REPO"
@@ -1177,9 +1233,14 @@ ma_write_harness_context() {
   local include_task="$3"
   local include_ml="$4"
   local recall_query="${5:-}"
+  local OMS_MEMORY_TARGET_PATHS="${OMS_MEMORY_TARGET_PATHS:-}"
   local tmp ids_file="" scripts_dir
   local warnings
   MA_READ_ROOM_MAIL_IDS=""
+
+  if [ "$include_memory" -eq 1 ] && [ "$#" -ge 6 ]; then
+    OMS_MEMORY_TARGET_PATHS="$(ma_task_memory_targets "${8:-$repo}" "$6" "${7:-}")" || OMS_MEMORY_TARGET_PATHS=""
+  fi
 
   printf 'Use task constraints, source/callers, tests and decisive evidence; inspect missing context where authorized. Truncated input is incomplete evidence.\n'
   # Measured 2026-10-17: search and whole-file reads were ~95% of tool output

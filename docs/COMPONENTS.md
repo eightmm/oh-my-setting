@@ -1237,10 +1237,24 @@ A note can be scoped to the paths it is about: `oms agent-memory append --paths
 a matching path ranks ahead of everything else, a note scoped elsewhere is left
 out, and unscoped notes follow in their usual order. A scoped note stays out of
 `summary.md` and out of the recall injected into provider context, unless the
-caller names the work's paths in `OMS_MEMORY_TARGET_PATHS`; nothing in OMS sets
-that variable yet, so today scoped notes reach a session through `recall
---target` and plain `recall`/`search`, which still find them. Project memory
-only; the index needs no rebuild, because the scope is read from the log.
+caller names the work's paths in `OMS_MEMORY_TARGET_PATHS` or a delegation has
+a frozen plan/panel path scope. With memory attachment enabled, that task scope
+replaces inherited targets for the call, including when the scope is empty.
+Prefixes and globs select tracked paths from the selected source index, with
+forbidden paths excluded; declared literal new files also qualify. Memory stays
+in the canonical state repository even when the source is another checkout or
+scratch branch. This selection precedes the detached worker checkout and does
+not attest to its exact bytes. Ignored files are not discovered. The lookup has
+a five-second deadline and refuses results exceeding 10,000 tracked paths,
+1 MiB of path names, or 64 KiB of resolved targets. A limit or lookup failure
+omits scoped recall with a warning; unscoped recall keeps its existing behavior.
+An omitted plan prompt uses the frozen task title as the recall query. Calls
+without a frozen task retain explicit `OMS_MEMORY_TARGET_PATHS`; task targets
+do not persist into later calls. The existing five-note, 4,000-byte recall
+budget and citation, retirement and redaction filters still apply. Plain
+`recall`/`search` continue to find scoped notes. Project memory only; the index
+needs no rebuild, because scope is read from the log. Active handoff packets
+and compiled context manifests do not supply this delegated-task scope.
 
 Project memory is clone-local, so a note leaves its clone only on request.
 `oms agent-memory promote --id EVENT --global` copies one active note into

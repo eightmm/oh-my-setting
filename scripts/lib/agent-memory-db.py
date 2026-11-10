@@ -1083,7 +1083,7 @@ def apply_path_scope(entries, scopes, targets, drop_unmatched):
     """
     if not scopes:
         return list(entries)
-    targets = [target.strip().lstrip("./") for target in targets if target.strip()]
+    targets = [re.sub(r"^(?:\./)+", "", target.strip()) for target in targets if target.strip()]
     matched, rest = [], []
     for row in entries:
         globs = scopes.get(str(row[0]))
