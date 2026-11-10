@@ -899,6 +899,8 @@ def brief_text(t):
     lines.append("verify: %s" % (t.get("verify") or "(none)"))
     if t.get("assignment"):
         lines.append("assignment: %s" % json.dumps(t["assignment"], sort_keys=True))
+    if t.get("covers"):
+        lines.append("covers: %s" % ", ".join(t["covers"]))
     if t.get("role"):
         lines.append("role: %s" % t["role"])
     return "\n".join(lines)
@@ -1110,7 +1112,7 @@ if act == "apply-proposal":
     for index, raw in enumerate(raw_tasks):
         if not isinstance(raw, dict):
             die("proposal task %d must be an object" % index)
-        if set(raw) - {"assignment"} != {"id", "title", "allowed", "verify", "depends"}:
+        if set(raw) - {"assignment", "covers"} != {"id", "title", "allowed", "verify", "depends"}:
             die("proposal task %d fields do not match the exact reviewed schema" % index)
         try:
             assignment = validate_assignment(raw.get("assignment", {}))
@@ -1167,7 +1169,16 @@ if act == "apply-proposal":
         if not isinstance(role, str):
             die("proposal task %s role must be a string" % task_id)
         reject_controls(role, "proposal task %s role" % task_id)
+        # Which acceptance criteria the task says it proves. The proposer checked the ids against the
+        # spec; here only the shape is checked, and the list is part of what a replay must match.
+        covers = raw.get("covers", [])
+        if (not isinstance(covers, list) or ("covers" in raw and not covers) or len(covers) > 15
+                or any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", item)
+                       for item in covers)
+                or len(covers) != len(set(covers))):
+            die("proposal task %s covers must be 1..15 unique criterion ids" % task_id)
         prepared.append({
+            "covers": list(covers),
             "id": task_id, "title": title.strip(), "depends": list(depends),
             "allowed_paths": cleaned_allowed, "forbidden_paths": cleaned_forbidden,
             "verify": verify, "role": role, "assignment": assignment,
@@ -1192,6 +1203,8 @@ if act == "apply-proposal":
             current = tasks[item["id"]]
             if current.get("assignment", {}) != item["assignment"]:
                 die("existing task %s assignment does not match the reviewed proposal" % item["id"])
+            if current.get("covers", []) != item["covers"]:
+                die("existing task %s covers do not match the reviewed proposal" % item["id"])
             if any(current.get(name, "" if name in ("verify", "role") else []) != item[name]
                    for name in immutable):
                 die("existing task %s does not match the reviewed proposal" % item["id"])
@@ -1283,6 +1296,7 @@ if act == "apply-proposal":
             "executor_soul_sha256": "", "lease_epoch": 0, "lease_id": "",
             "autopilot_owner_id": "",
             "review_lease_id": "", "repair_count": 0, "repair_artifact": "",
+            **({"covers": item["covers"]} if item["covers"] else {}),
             "created": ts, "updated": ts,
         }
     save(d)

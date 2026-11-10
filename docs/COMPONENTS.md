@@ -1132,6 +1132,17 @@ task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot
 abandon`. It is not an unbounded autonomous loop.
 
+A proposal task may carry `"covers": ["REQ-1"]`: the acceptance criteria its
+verify proves, by the ids the runtime projects from the spec (an explicit
+`[id:...]`, else the wording-derived id). An id the spec does not carry refuses
+the proposal; the list is kept on the plan task (`oms agent-plan show`, `brief`)
+and is part of what an exact replay must match. At propose and at apply,
+`warning: coverage: no task covers REQ-2: "..."` names each criterion no task
+claims (one `note:` when no task declares any). The lines are advisory, on
+stderr, and never change an exit code. `covers` on a task is a plan-time
+statement, not evidence: admission coverage is still what `patch-admit --covers`
+records, and nothing forwards a task's list there yet.
+
 
 ### Discover work and review proposals
 
