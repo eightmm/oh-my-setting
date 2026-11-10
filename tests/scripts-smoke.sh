@@ -5246,6 +5246,94 @@ EOF
   assert_file_contains "$TMP/findings-out" 'security: incomplete (codex; advisory'
   ! HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
     --providers claude --security-audit codex --prompt "No gate" > "$TMP/findings-out" 2>&1 || fail "--security-audit without --gate must be refused"
+
+  # --since-last reviews only the commits added since the last completed review
+  # of the same base, says so, and falls back to a full review on any doubt.
+  # The partial outcome is its own row kind, so it can never satisfy a landing
+  # check that reads review-outcome.
+  local inc="$TMP/review-since-last" first_sha since_id
+  make_committed_repo "$inc"
+  printf '/artifacts/\n/bin/\n/home/\n' > "$inc/.gitignore"
+  git -C "$inc" add .gitignore
+  git -C "$inc" commit -qm 'test: ignore'
+  git -C "$inc" checkout -q -b feature
+  printf 'first change\n' > "$inc/a.txt"
+  git -C "$inc" add a.txt
+  git -C "$inc" commit -qm 'test: first'
+  first_sha="$(git -C "$inc" rev-parse HEAD)"
+  mkdir -p "$inc/bin" "$inc/home"
+  printf 'fail\n' > "$inc/bin/mode"
+  cat > "$inc/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat > "$(dirname "$0")/prompt"
+if [ "$(cat "$(dirname "$0")/mode")" = fail ]; then
+  printf 'Findings:\n```findings\n'
+  printf '%s\n' '{"file": "a.txt", "line": 1, "severity": "blocking", "summary": "First change is wrong", "quote": "first change"}'
+  printf '```\nGATE: fail\n'
+else
+  printf 'Findings:\nNo findings\nGATE: pass\n'
+fi
+EOF
+  chmod +x "$inc/bin/claude"
+  since_run() {
+    HOME="$inc/home" PATH="$inc/bin:/usr/bin:/bin" "$review" --repo "$inc" --artifact-dir "$inc/artifacts" \
+      --providers claude --gate --no-verify --base main "$@" > "$TMP/since-out" 2>&1
+  }
+  rc=0
+  since_run --prompt "Full review" || rc=$?
+  [ "$rc" = 1 ] || fail "the full review should fail on its seat, got $rc: $(cat "$TMP/since-out")"
+  grep -qF 'first change' "$inc/bin/prompt" || fail "the full review must show the whole branch diff"
+  ! grep -q 'since-last: ' "$TMP/since-out" || fail "a plain review prints no since-last line"
+  since_id="$(HOME="$inc/home" "$review" findings list --artifact-dir "$inc/artifacts" --repo "$inc" | awk '/blocking/{print $1}')"
+  [ -n "$since_id" ] || fail "the full review recorded no blocking finding"
+  printf 'second change\n' > "$inc/b.txt"
+  git -C "$inc" add b.txt
+  git -C "$inc" commit -qm 'test: second'
+  printf 'pass\n' > "$inc/bin/mode"
+  rc=0
+  since_run --since-last --prompt "Incremental review" || rc=$?
+  [ "$rc" = 0 ] || fail "the incremental review should pass, got $rc: $(cat "$TMP/since-out")"
+  assert_file_contains "$TMP/since-out" "since-last: incremental review of the commits added since ${first_sha:0:12}"
+  assert_file_contains "$TMP/since-out" "verdict: incremental since ${first_sha:0:12}"
+  grep -qF 'second change' "$inc/bin/prompt" || fail "the incremental prompt must carry the new commit's diff"
+  ! grep -qF 'first change' "$inc/bin/prompt" || fail "the incremental prompt must not re-send the reviewed diff"
+  grep -qF 'Incremental review: this branch was already reviewed' "$inc/bin/prompt" || fail "the prompt must say it is incremental"
+  grep -qF "$since_id" "$inc/bin/prompt" || fail "the prompt must list the earlier open blocking finding"
+  "$review" findings list --artifact-dir "$inc/artifacts" --repo "$inc" | grep -q "^$since_id  open " ||
+    fail "an incremental review must not change a finding's status"
+  python3 - "$inc/.oms/artifacts/index.jsonl" "$first_sha" <<'PYSINCE' || fail "incremental outcome is not recorded as advisory: $(tail -c 1500 "$inc/.oms/artifacts/index.jsonl")"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+full = [r for r in rows if r.get("kind") == "review-outcome"]
+inc = [r for r in rows if r.get("kind") == "review-incremental"]
+assert len(full) == 1 and len(inc) == 1, [r.get("kind") for r in rows]
+assert full[0]["review_scope"]["head"] == sys.argv[2] and "incremental" not in full[0]["review_scope"], full[0]
+assert inc[0]["review_scope"]["incremental"] is True and inc[0]["review_scope"]["since"] == sys.argv[2], inc[0]
+assert inc[0]["review_scope"]["base"] == full[0]["review_scope"]["base"], inc[0]
+PYSINCE
+  # A rewritten history cannot be reviewed incrementally: say why, review all.
+  git -C "$inc" reset -q --hard main
+  printf 'rewritten\n' > "$inc/a.txt"
+  git -C "$inc" add a.txt
+  git -C "$inc" commit -qm 'test: rewritten'
+  rc=0
+  since_run --since-last --prompt "After rewrite" || rc=$?
+  [ "$rc" = 0 ] || fail "the fallback full review should pass, got $rc: $(cat "$TMP/since-out")"
+  assert_file_contains "$TMP/since-out" 'since-last: falling back to a full review: the earlier reviewed head'
+  assert_file_contains "$TMP/since-out" 'is not an ancestor of HEAD'
+  ! grep -q 'verdict: incremental' "$TMP/since-out" || fail "a fallback run is a full review and must not say incremental"
+  grep -qF 'rewritten' "$inc/bin/prompt" || fail "the fallback must review the whole diff"
+  ! grep -qF 'Incremental review: this branch was already reviewed' "$inc/bin/prompt" || fail "a fallback prompt is not incremental"
+  [ "$(grep -Ec '"kind": ?"review-outcome"' "$inc/.oms/artifacts/index.jsonl")" = 2 ] ||
+    fail "the fallback review is a full review-outcome row"
+  rc=0
+  since_run --since-last --no-diff --prompt "No diff" || rc=$?
+  [ "$rc" != 0 ] || fail "--since-last with --no-diff must be refused"
+  rc=0
+  HOME="$inc/home" PATH="$inc/bin:/usr/bin:/bin" "$review" --repo "$inc" --artifact-dir "$inc/artifacts" \
+    --providers claude --gate --no-verify --since-last --prompt "No base" > "$TMP/since-out" 2>&1 || rc=$?
+  [ "$rc" != 0 ] || fail "--since-last without --base must be refused"
+  assert_file_contains "$TMP/since-out" '--since-last requires --base REF'
 }
 
 test_prompt_takers_refuse_a_mistyped_option() {

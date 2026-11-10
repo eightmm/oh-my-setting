@@ -1715,6 +1715,24 @@ kept and reads `unconfirmed`. A label is one more reader's opinion on a
 citation: the GATE verdict, the exit code and the finding's status do not move,
 and a failed confirm call is a warning. It is off unless asked for.
 
+`oms peer-review --base REF --since-last` (gate or plain) reviews a branch that
+was already reviewed by looking only at what was added since. Every review
+outcome row now carries `review_scope` (`run`, `head`, `base`, `diff_sha256`,
+`gate`, additive). The lookup takes the most recent completed review with the
+same resolved base whose head is an ancestor of the current HEAD, diffs from
+that head, and the prompt says it is incremental, names the earlier run, time
+and verdict, and lists that run's still-open blocking findings (id, location,
+summary) so seats can say whether the new commits address them; no finding's
+status changes. If there is no earlier review, it did not complete, the base
+moved, its head is not an ancestor (rebase or force-push) or nothing was added,
+the run prints `since-last: falling back to a full review: REASON` and reviews
+everything. An incremental run prints `verdict: incremental since SHA` and
+records its outcome as kind `review-incremental` (`review_scope.incremental`,
+`since`), a kind no landing, panel or status consumer reads, so it is advisory
+and never stands in for a full pass; it is refused with `--no-diff`, without
+`--base`, and as a candidate or panel gate. Uncommitted edits are diffed too,
+as for any `--base` review.
+
 A repository says what its reviews treat as blocking with one item in
 PROJECT.md's Verification section: `- Review rules: TEXT`, with indented
 continuation lines (at most 2,000 bytes). Every review prompt carries it, read
