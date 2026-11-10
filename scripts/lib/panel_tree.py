@@ -379,8 +379,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     heading = "OMS" + sep + (os.path.basename(clean(repo.get("name")) or str(repo.get("path") or "").rstrip("/\\")) or "repository")
     alerts = status_alerts(report)
     banner = goal_banner(report, width, unicode, True)
-    head = [{"text": clipped(heading, width), "style": "main"},
-            {"text": clipped(usage_line(report, width, unicode), width), "style": "dim"}]
+    from provider_usage import strip
+    # One row per provider on a wide, tall pane; otherwise one row, so the MAIN card keeps its place.
+    head = [{"text": clipped(heading, width), "style": "main"}] + strip(report, width, height, unicode)
     if height >= 20:
         legend_spans, room_left = [], width
         for i, (text, style) in enumerate(role_legend(unicode)):

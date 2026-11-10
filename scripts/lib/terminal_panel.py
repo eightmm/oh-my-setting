@@ -125,6 +125,8 @@ def main(argv=None):
     parser.add_argument("--health", action="store_true", help="read context, reported quota, room bounds and private slot/history capacity")
     parser.add_argument("--sessions", action="store_true",
                         help="read-only normalized status of every recorded session (one line each; --json for schema 1)")
+    parser.add_argument("--usage", action="store_true",
+                        help="read-only usage of Claude, Codex and Antigravity as each reported it locally (--json for schema 1)")
     parser.add_argument("--metrics", action="store_true",
                         help="read-only recorded metrics; follow-up task IDs have no producer linkage")
     parser.add_argument("--since", metavar="DURATION", help="limit --metrics to records within a duration (for example 7d)")
@@ -259,6 +261,8 @@ def main(argv=None):
         parser.error("--health is a read-only report; use --repo, --room and optional --json")
     if args.sessions and (args.dry_run or args.view or args.attention_only):
         parser.error("--sessions is a read-only report; use --repo, --room and optional --json")
+    if args.usage and (args.dry_run or args.view or args.attention_only):
+        parser.error("--usage is a read-only report; use --repo, --room and optional --json")
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
     if args.page is not None and not (args.results and not args.task_id):
@@ -269,7 +273,7 @@ def main(argv=None):
         parser.error("--alias requires --dispatch")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
-                                     args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions)) > 1:
+                                     args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions, args.usage)) > 1:
         parser.error("choose one panel operation")
     if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.accept or args.finalize):
         parser.error("--json is only available for panel state or results")
@@ -413,7 +417,7 @@ def main(argv=None):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
             or args.spawn_main or args.swap_main or not (
-            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions)) and (
+            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions or args.usage)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
@@ -459,7 +463,7 @@ def main(argv=None):
             raise ValueError("--host tmux conflicts with --layout inline")
         if args.room:
             room.identifier(args.room, "room")
-            if room.status(repo, args.room)["closed"] and not (args.chats or args.open_chat or args.health or args.sessions):
+            if room.status(repo, args.room)["closed"] and not (args.chats or args.open_chat or args.health or args.sessions or args.usage):
                 raise ValueError("selected room is closed")
             os.environ["OMS_ROOM_ID"] = args.room
         if args.sessions:
@@ -481,6 +485,18 @@ def main(argv=None):
                 print(json.dumps(panel_health.project(state), ensure_ascii=False))
             else:
                 print(panel_health.render(state, 120, 100))
+            return status
+        if args.usage:
+            import provider_usage
+            from panel_metrics import collect
+            if args.room:
+                state, status = snapshot(repo, room_id=args.room)
+            else:
+                state, status, *_ = read_panel(repo, caller_owner(), None, False)
+            # Collected even without a room participant, so the Codex session log and agy artifacts still show.
+            state = dict(state, provider_status=collect(state, repo=repo))
+            usage = provider_usage.snapshot(state)
+            print(json.dumps(usage, ensure_ascii=False, indent=2) if args.json else provider_usage.text(usage))
             return status
         if args.metrics:
             from panel_metrics import aggregate, metrics_text

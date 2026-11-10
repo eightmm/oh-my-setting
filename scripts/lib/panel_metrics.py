@@ -46,6 +46,26 @@ def _hud_record(consumer):
         return {}
 
 
+READING_FRESH_SECONDS = 600
+
+
+def hud_observation(consumer, now):
+    """When the session's status line last wrote its HUD cache and the weekly reset it reported.
+
+    Kept apart from cached(), which drops a stale record's numbers: the strip needs the age of a reading
+    cached() refuses, and the weekly reset time cached() never carried."""
+    data = _hud_record(consumer)
+    stamp = number(data.get("ts"))
+    if stamp is None or stamp > now:
+        return {}
+    row = {"observed_at": stamp}
+    week = mapping(data.get("seven_day"))
+    reset = number(week.get("resets_at"))
+    if reset is not None and reset > now and percent(week.get("used_percentage")) is not None:
+        row["weekly_resets_at"] = reset
+    return row
+
+
 def cached(consumer, now):
     try:
         data = _hud_record(consumer)
@@ -54,7 +74,7 @@ def cached(consumer, now):
             return {}
         if timestamp > now:
             return {}
-        if now - timestamp > 600:
+        if now - timestamp > READING_FRESH_SECONDS:
             return {"source": "cache stale"}
         used = percent(data.get("used_percentage"))
         week = mapping(data.get("seven_day"))
@@ -447,14 +467,24 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
         # Earlier mains of the room stay in its record; nodes() orders the live, then the newest, first.
         selected = selected or candidates[:1]
         row = {"context_left": None, "weekly_used": None, "source": "unavailable"}
+        log = {}
         if provider == "codex":
-            row.update(codex_weekly_reading(now))
+            log = codex_weekly_reading(now, detail=True)
+            if log:
+                row.update(weekly_used=log["used"], source=log["source"])
             row.update(native_models=current, native_model_checked=repo is not None)
             from provider_accounts import load_accounts
             try:
                 config = load_accounts()
                 if config["configured"] and provider in config["providers"]:
                     row["accounts"] = account_readings(provider, config, now)
+                    here = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
+                    for entry in config["providers"][provider].get("accounts", []):
+                        try:
+                            if Path(entry["home"]).expanduser().resolve() == here:
+                                row["account_label"] = entry["id"]
+                        except (OSError, RuntimeError):
+                            continue
                     errors = [ident + ": " + item["error"] for ident, item in row["accounts"].items()
                               if item.get("error")]
                     if errors:
@@ -480,8 +510,14 @@ def collect(report, main_attempt=None, now=None, repo=None, _tick=None):
                             reading[key] = visible[key]
                             reading["source"] = "HUD/TUI"
             row.update({key: value for key, value in reading.items() if value is not None})
+            if provider == "claude" and main.get("consumer"):
+                row.update(hud_observation(main["consumer"], now))
             if main["state"] in {"done", "failed", "cancelled", "timed_out", "abandoned"}:
                 row["context_left"] = None
+        # The age and reset of a log reading only describe it while the row still carries that reading.
+        if log and row.get("source") == "session log":
+            row.update({key: value for key, value in (("weekly_resets_at", log.get("resets_at")),
+                                                      ("observed_at", log.get("observed_at"))) if value is not None})
         output[provider] = row
     output["antigravity"] = {"context_left": None, "weekly_used": None, "source": "unavailable"}
     output["antigravity"].update(antigravity_artifact_reading(repo, now))

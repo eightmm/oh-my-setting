@@ -841,6 +841,31 @@ cache read`, and `--health --json` as an advisory item of kind `cache`. It is a 
 reported counts for one request, not a quota, a price or a cache-lifetime timer; with no
 counts reported nothing is listed, and it has no warning band.
 
+The task board replaces that line with a provider strip for Claude, Codex and Antigravity (the
+control menu and the reader keep the line above). At 80 columns and 24 rows or more it is one
+row per provider: `Claude      ▮▮▯▯▯ weekly 41% used · resets in 3d4h · 5h 23% · 1 live`. The bar
+and percentage are the tightest fresh window (the one with the most used), then the time to its
+reset, the other window and the count of live seats (the main plus workers running or waiting,
+not advisors or reviewers). A shorter or narrower pane folds it into one row, at 60 columns
+`C ▮▮▯▯▯ 41% 3d4h ·1 │ X ▮▮▮▯▯ 62% 3d4h ·1 │ A — ·0`, which drops its bars, then its full names,
+as the width shrinks; under 56 columns it is `C 41% · X 62% · A —`, so the MAIN card keeps its
+place on a 12-row pane. A trailing `~` (or `stale 11m`) marks a reading older than the ten-minute
+HUD freshness limit; the percentage is of quota used, and `!` marks a window past your
+`OMS_QUOTA_WARN_PCT` line and `!!` one with 10% or less left (the health screen's own band),
+neither on a stale reading. Provider names take the palette's warm main colour (Claude), counsel
+blue (Codex) and lavender judge colour (Antigravity); the marks carry the meaning without colour.
+
+`oms panel --usage [--json]` prints the snapshot behind the strip and exits (schema 1: per
+provider the account label, every reported window with `used`, `resets_at`, `resets_in`,
+`age_seconds`, `source` and `stale`, the context, the cache-read share and the live seats). It
+reads only what a provider already wrote into a file OMS reads today and calls nothing. Every
+missing value is `{"unreported": reason}`, never a zero: Claude's windows and cache share come
+from the status-line HUD cache of the selected main (a record over ten minutes old shows its age,
+not its numbers), Codex's weekly window from the newest session log (its 5-hour window is not
+read), and Antigravity reports no quota window locally, so it shows only OMS-recorded token
+counts of the calls OMS delegated to it (7 days), not a quota. No provider records a per-day
+token total here, and quota is never estimated from tokens.
+
 A proven existing tmux pane can supply numeric fields from its last eight visible native
 footer lines. `TUI` or `HUD/TUI` labels those mirrored readings; native output may lag
 while idle and changed footer formats become unknown. The watcher performs no native
