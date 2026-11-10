@@ -6026,6 +6026,23 @@ ma_run_debate_rounds() {
   if [ "${MA_KIND:-}" = ask ] && [ -n "${THREAD_ID:-}" ]; then council_notes_file="$debate_dir/council-notes"; fi
 
   debate_stable_round=""
+  # --until-agreement state (inert otherwise): rounds run, stop reason and one
+  # "round N" line per round naming the seats whose verdict line moved.
+  local -a prev_key=()
+  local round_keys=() changed fail_note="" seat_key
+  debate_rounds_run=0
+  debate_stop_reason=""
+  debate_round_changes=""
+  if [ "${MA_UNTIL_AGREEMENT:-0}" = 1 ]; then
+    for i in "${!provider_names[@]}"; do
+      if [ "${alive[i]}" = 1 ]; then
+        prev_key[i]="$(ma_verdict_key "${last_arts[i]}")"
+      else
+        debate_stop_reason="seat failed: $(ma_council_seat_label "$i" "${provider_names[i]%:optional}") did not answer round 1"
+      fi
+    done
+    [ -z "$debate_stop_reason" ] || return 0
+  fi
   for ((round = 2; round <= DEBATE + 1; round++)); do
     ma_refresh_council_answers || return 2
     if [ -n "$council_notes_file" ]; then
@@ -6039,6 +6056,7 @@ ma_run_debate_rounds() {
     done
     if [ "${#active[@]}" -lt 2 ]; then
       echo "debate round $round skipped: fewer than two active providers" >&2
+      [ "${MA_UNTIL_AGREEMENT:-0}" != 1 ] || debate_stop_reason="seat failed: fewer than two active seats"
       break
     fi
 
@@ -6106,6 +6124,7 @@ ma_run_debate_rounds() {
       fi
       # Drop failed provider from later rounds; keep its last good answer.
       alive[i]=0
+      fail_note="${fail_note:+$fail_note, }$(ma_council_seat_label "$i" "${provider_names[i]%:optional}") (${quality:-$([ "$rc" -eq 124 ] && echo timeout || echo "exit $rc")})"
       case "${provider_names[i]}" in
         *:optional)
           seat_optional_failure[i]="${quality:-exit $rc}"
@@ -6117,6 +6136,35 @@ ma_run_debate_rounds() {
       dropped=$((dropped + 1))
       dropped_names+=("${provider_names[i]}")
     done
+
+    # --until-agreement: tally this round's verdict lines with the same
+    # grouping as the synthesis tally, record who moved, then stop on a dead
+    # seat, on agreement, or at the cap. Never retries; no model decides.
+    if [ "${MA_UNTIL_AGREEMENT:-0}" = 1 ]; then
+      debate_rounds_run=$((debate_rounds_run + 1))
+      round_keys=()
+      changed=""
+      for k in "${!r_idx[@]}"; do
+        i="${r_idx[k]}"
+        [ "${alive[i]}" = 1 ] || continue
+        seat_key="$(ma_verdict_key "${r_arts[k]}")"
+        round_keys+=("$seat_key")
+        if [ "$seat_key" != "${prev_key[i]:-}" ]; then
+          changed="${changed:+$changed, }$(ma_council_seat_label "$i" "${provider_names[i]%:optional}")"
+        fi
+        prev_key[i]="$seat_key"
+      done
+      debate_round_changes="${debate_round_changes}- round $round changed verdict line: ${changed:-none}"$'\n'
+      if [ -n "$fail_note" ]; then
+        debate_stop_reason="seat failed: $fail_note"
+        break
+      elif ma_keys_agree "${round_keys[@]}"; then
+        debate_stop_reason="agreed"
+        break
+      fi
+      debate_stop_reason="cap reached"
+      continue
+    fi
 
     # Stability exit: when every seat called this round answered and declared
     # "none" under "Changed from previous round:", a further round can only
@@ -6154,36 +6202,87 @@ ma_run_debate_rounds() {
 # Verdict:/Recommendation:/Answer: line of their final answer (lowercased,
 # whitespace collapsed, cut at 80 bytes). It is a count of identical lines, not
 # a judgement; no model reads it and it never decides anything.
-ma_agreement_tally() {
-  local i line key keys="" label labels count
-  for i in "${!artifacts[@]}"; do
-    [ "${seat_exit[i]:-0}" = 0 ] && [ -z "${seat_quality[i]:-}" ] || continue
-    line="$(extract_output "${last_arts[i]}" 2>/dev/null | LC_ALL=C awk '
-      { l = $0; sub(/^[ \t>*#-]+/, "", l); low = tolower(l) }
-      want != "" && l !~ /^[ \t]*$/ { print want " " l; exit }
-      low ~ /^(verdict|recommendation|answer)[ \t*]*:/ {
-        sub(/^[^:]*:[ \t*]*/, "", l); name = low; sub(/[ \t*]*:.*/, "", name)
-        if (l ~ /^[ \t]*$/) { want = name ":"; next }
-        print name ": " l; exit
-      }')"
-    if [ -z "$line" ]; then
-      key="(no verdict line)"
-    else
-      key="$(printf '%s\n' "$line" | tr '[:upper:]' '[:lower:]' | tr -s ' \t' ' ' | LC_ALL=C tr -cd '[:print:]' | cut -c1-80 | ma_sanitize_quoted_output | tr '\n' ' ')"
-    fi
-    label="$(ma_council_seat_label "$i" "${provider_names[i]%:optional}")"
-    keys="${keys}${key}"$'\t'"${label}"$'\n'
+ma_verdict_key() {  # ARTIFACT -> the grouping key of one answer
+  local line
+  line="$(extract_output "$1" 2>/dev/null | LC_ALL=C awk '
+    { l = $0; sub(/^[ \t>*#-]+/, "", l); low = tolower(l) }
+    want != "" && l !~ /^[ \t]*$/ { print want " " l; exit }
+    low ~ /^(verdict|recommendation|answer)[ \t*]*:/ {
+      sub(/^[^:]*:[ \t*]*/, "", l); name = low; sub(/[ \t*]*:.*/, "", name)
+      if (l ~ /^[ \t]*$/) { want = name ":"; next }
+      print name ": " l; exit
+    }')"
+  if [ -z "$line" ]; then
+    printf '%s\n' "(no verdict line)"
+  else
+    printf '%s\n' "$line" | tr '[:upper:]' '[:lower:]' | tr -s ' \t' ' ' | LC_ALL=C tr -cd '[:print:]' | cut -c1-80 | ma_sanitize_quoted_output | tr '\n' ' '
+  fi
+}
+
+# Whether KEYS (one verdict key per answering seat) is a full agreement: at
+# least two seats, one group, no seat without a verdict line. The same grouping
+# as the tally; no model call decides it.
+ma_keys_agree() {
+  [ "$#" -ge 2 ] || return 1
+  local first="$1" key
+  [ "$first" != "(no verdict line)" ] || return 1
+  for key in "$@"; do
+    [ "$key" = "$first" ] || return 1
   done
-  [ -n "$keys" ] || return 0
-  printf '## Agreement tally\n\n'
-  printf 'Mechanical tally of identical verdict lines, not a decision: matching text is not agreement on substance and differing text is not proof of disagreement.\n\n'
+}
+
+# Bullet lines for tab-separated "key<TAB>label" rows in $1.
+ma_agreement_group_lines() {
+  local keys="$1" key labels count
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     labels="$(printf '%s' "$keys" | awk -F'\t' -v k="$key" '$1 == k { printf "%s%s", (n++ ? ", " : ""), $2 }')"
     count="$(printf '%s' "$keys" | awk -F'\t' -v k="$key" '$1 == k { n++ } END { print n + 0 }')"
     printf -- '- %s seat(s) [%s]: `%s`\n' "$count" "$labels" "$key"
   done < <(printf '%s' "$keys" | cut -f1 | awk '!seen[$0]++')
+}
+
+ma_agreement_keys() {  # key<TAB>label rows for the seats that answered
+  local i key label
+  for i in "${!artifacts[@]}"; do
+    [ "${seat_exit[i]:-0}" = 0 ] && [ -z "${seat_quality[i]:-}" ] || continue
+    key="$(ma_verdict_key "${last_arts[i]}")"
+    label="$(ma_council_seat_label "$i" "${provider_names[i]%:optional}")"
+    printf '%s\t%s\n' "$key" "$label"
+  done
+}
+
+ma_agreement_tally() {
+  local keys
+  keys="$(ma_agreement_keys)"
+  [ -n "$keys" ] || return 0
+  keys="${keys}"$'\n'
+  printf '## Agreement tally\n\n'
+  printf 'Mechanical tally of identical verdict lines, not a decision: matching text is not agreement on substance and differing text is not proof of disagreement.\n\n'
+  ma_agreement_group_lines "$keys"
   printf '\n'
+}
+
+# --until-agreement block: rounds run, why the loop stopped, who moved each
+# round, and the groups still standing when it did not agree.
+ma_until_agreement_block() {
+  [ "${MA_UNTIL_AGREEMENT:-0}" = 1 ] || return 0
+  local keys
+  printf '## Until agreement\n\n'
+  printf -- '- rounds run: %s of at most %s\n' "${debate_rounds_run:-0}" "$DEBATE"
+  printf -- '- stop reason: %s\n' "${debate_stop_reason:-cap reached}"
+  printf '%s' "${debate_round_changes:-}"
+  case "${debate_stop_reason:-cap reached}" in
+    agreed) ;;
+    *)
+      keys="$(ma_agreement_keys)"
+      printf -- '- result: no agreement\n'
+      if [ -n "$keys" ]; then
+        printf 'Remaining groups:\n\n'
+        ma_agreement_group_lines "${keys}"$'\n'
+      fi ;;
+  esac
+  printf '\nAgreement here is a tally of identical verdict lines, not correctness; cost scales with rounds.\n\n'
 }
 
 ma_write_synthesis() {
@@ -6233,7 +6332,9 @@ ma_write_synthesis() {
       printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
     fi
     printf -- '- success: %d/%d providers\n' "$ok" "$total"
-    if [ "${DEBATE:-0}" -gt 0 ]; then
+    if [ "${MA_UNTIL_AGREEMENT:-0}" = 1 ]; then
+      printf -- '- debate rounds: until agreement, at most %d\n' "$DEBATE"
+    elif [ "${DEBATE:-0}" -gt 0 ]; then
       printf -- '- debate rounds: %d\n' "$DEBATE"
     fi
     if [ "${MA_KIND:-}" = ask ] && [ -n "${THREAD_ID:-}" ]; then
@@ -6244,6 +6345,7 @@ ma_write_synthesis() {
         "$debate_stable_round"
     fi
     printf '\n'
+    ma_until_agreement_block
     ma_agreement_tally
     printf '## Prompt\n\n'
     printf '```\n'

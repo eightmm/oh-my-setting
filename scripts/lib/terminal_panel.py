@@ -142,6 +142,10 @@ def main(argv=None):
     parser.add_argument("--council", action="store_true", help="run the Codex, Claude and Antigravity debate (deep tier by default)")
     parser.add_argument("--rounds", type=int, help="council debate rounds, 1 or 2; --lenses requires 0 (default with lenses)")
     parser.add_argument("--lenses", help="--council only: 2..12 unique comma-separated names [a-z0-9-]+, 1..32 characters each; one blind seat each")
+    parser.add_argument("--until-agreement", action="store_true",
+                        help="--council only: debate until every answering seat shares one verdict line or the cap is reached "
+                             "(a tally of identical lines, not correctness; cost scales with rounds); replaces --rounds, excludes --lenses")
+    parser.add_argument("--max-rounds", type=int, metavar="N", help="--until-agreement only: round cap, 1 to 6 (default 4)")
     parser.add_argument("--thread", help="council thread ID; a fresh thread prefix with --lenses")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
     parser.add_argument("--export", metavar="FILE",
@@ -326,7 +330,17 @@ def main(argv=None):
         parser.error("--label requires --dispatch or --council")
     if (args.rounds is not None or args.thread or args.lenses is not None) and not args.council:
         parser.error("--rounds, --thread and --lenses require --council")
-    if args.rounds is None:
+    if (args.until_agreement or args.max_rounds is not None) and not args.council:
+        parser.error("--until-agreement and --max-rounds require --council")
+    if args.max_rounds is not None and not args.until_agreement:
+        parser.error("--max-rounds requires --until-agreement")
+    if args.until_agreement and args.lenses is not None:
+        parser.error("--until-agreement and --lenses are mutually exclusive: blind independent seats never see each other's answers")
+    if args.until_agreement and args.rounds is not None:
+        parser.error("--until-agreement replaces --rounds; set the cap with --max-rounds")
+    if args.until_agreement and args.max_rounds is not None and not 1 <= args.max_rounds <= 6:
+        parser.error("--max-rounds must be 1 to 6")
+    if args.rounds is None and not args.until_agreement:
         args.rounds = 0 if args.lenses is not None else 1
     if (args.summary_file or args.outcome or args.evidence or args.notify or args.verify_timeout is not None) and not args.finalize:
         parser.error("finalization options require --finalize")
@@ -517,14 +531,16 @@ def main(argv=None):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     result = council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
-                                     args.thread, args.rounds, True, args.workload or "deep", lenses=args.lenses)
+                                     args.thread, args.rounds, True, args.workload or "deep", lenses=args.lenses,
+                                     until_agreement=args.until_agreement, max_rounds=args.max_rounds)
                 if output.getvalue():
                     plan = json.loads(output.getvalue())
                     plan.update(task_id=args.task_id, label=args.label)
                     print(json.dumps(plan, ensure_ascii=False))
                 return result
             return council(repo, args.owner or caller_owner(), args.task_id, args.label, args.prompt,
-                           args.thread, args.rounds, False, args.workload or "deep", lenses=args.lenses)
+                           args.thread, args.rounds, False, args.workload or "deep", lenses=args.lenses,
+                           until_agreement=args.until_agreement, max_rounds=args.max_rounds)
         if args.mail:
             participant = room.identifier(args.mail, "participant")
 

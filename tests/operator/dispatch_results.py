@@ -3080,6 +3080,13 @@ for key in ("OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_M
 (capability_dir / "antigravity.models").write_text("fixture-unrouted\n")
 default_plan = json.loads(call(lens_args + ["--dry-run"], lens_env))
 assert default_plan["primary_calls"] == 4 and default_plan["seats"] == 2
+assert "--debate" in default_plan["argv"] and "--until-agreement" not in default_plan["argv"]
+for extra, cap in (([], "4"), (["--max-rounds", "2"], "2"), (["--max-rounds", "5"], "5")):
+    until_plan = json.loads(call(lens_args + ["--until-agreement", "--dry-run"] + extra, lens_env))
+    until_argv = until_plan["argv"]
+    assert "--debate" not in until_argv and "--until-agreement" in until_argv, until_argv
+    assert until_argv[until_argv.index("--max-rounds") + 1] == cap, until_argv
+    assert until_plan["primary_calls"] == until_plan["seats"] * (int(cap) + 1), until_plan
 for size in (2, 3, 12):
     names = ",".join("lens-%s" % n for n in range(size))
     plan = json.loads(call(lens_args + ["--lenses", names, "--dry-run"], lens_env))
@@ -3120,7 +3127,13 @@ for options, message in ((["--lenses", ""], "lenses"), (["--lenses", "one"], "2.
                          (["--lenses", "one,,two"], "[a-z0-9-]+"),
                          (["--lenses", "one,two,"], "[a-z0-9-]+"),
                          (["--lenses", "one,two", "--rounds", "1"], "--rounds 0"),
-                         (["--lenses", "one,two", "--rounds", "bad"], "invalid int")):
+                         (["--lenses", "one,two", "--rounds", "bad"], "invalid int"),
+                         (["--until-agreement", "--lenses", "one,two"], "mutually exclusive"),
+                         (["--until-agreement", "--rounds", "1"], "--max-rounds"),
+                         (["--until-agreement", "--max-rounds", "6"], "12-call budget"),
+                         (["--until-agreement", "--max-rounds", "7"], "1 to 6"),
+                         (["--until-agreement", "--max-rounds", "0"], "1 to 6"),
+                         (["--max-rounds", "3"], "requires --until-agreement")):
     result = subprocess.run(lens_args + options, env=lens_env, capture_output=True, text=True,
                             timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90")))
     assert result.returncode != 0 and message in result.stderr, result

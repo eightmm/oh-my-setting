@@ -3094,8 +3094,20 @@ def _print_dispatch_next_ready(repo, owner):
         pass
 
 
-def council_command(repo, prompt, task_id, label, thread=None, rounds=None, workload="deep", lenses=None):
+def council_command(repo, prompt, task_id, label, thread=None, rounds=None, workload="deep", lenses=None,
+                    until_agreement=False, max_rounds=None):
     from terminal_panel import ENTRY, MAX_PROMPT, PROVIDERS, policy, safe_label
+    if max_rounds is not None and not until_agreement:
+        raise ValueError("council --max-rounds requires --until-agreement")
+    if until_agreement:
+        if lenses is not None:
+            raise ValueError("council --until-agreement cannot combine with --lenses: blind independent seats never see each other's answers")
+        if rounds is not None:
+            raise ValueError("council --until-agreement replaces --rounds; set the cap with --max-rounds")
+        max_rounds = 4 if max_rounds is None else max_rounds
+        if not 1 <= max_rounds <= 6:
+            raise ValueError("council --max-rounds must be 1 to 6")
+        rounds = max_rounds  # worst case, so the call budget below is checked against the cap
     rounds = (0 if lenses is not None else 1) if rounds is None else rounds
     if lenses is not None:
         names = lenses.split(",")
@@ -3107,7 +3119,7 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
             raise ValueError("council lenses must be unique")
         if rounds != 0:
             raise ValueError("council --lenses requires --rounds 0")
-    elif not 1 <= rounds <= 2:
+    elif not until_agreement and not 1 <= rounds <= 2:
         raise ValueError("council rounds must be 1 or 2")
     if not task_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", task_id):
         raise ValueError("council needs a valid task ID")
@@ -3240,8 +3252,9 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
             raise ValueError("council: %s seat unavailable: lenses require codex, claude and antigravity" % missing)
     targets = ",".join(item["provider"] + ":model=" + item["model"] for item in seats)
     argv = ["bash", str(ENTRY), "peer-ask", "--repo", str(repo),
-            "--providers", targets, "--debate", str(rounds), "--deliberation",
-            "--require-complete", "--no-task", "--no-memory", "--reasoning-effort", "high", "--prompt", prompt]
+            "--providers", targets,
+            *(["--until-agreement", "--max-rounds", str(rounds)] if until_agreement else ["--debate", str(rounds)]),
+            "--deliberation", "--require-complete", "--no-task", "--no-memory", "--reasoning-effort", "high", "--prompt", prompt]
     if thread and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", thread):
         raise ValueError("invalid council thread ID")
     if lenses is not None:
@@ -3252,7 +3265,8 @@ def council_command(repo, prompt, task_id, label, thread=None, rounds=None, work
     return argv
 
 
-def council(repo, owner, task_id, label, prompt, thread=None, rounds=None, dry_run=False, workload="deep", lenses=None):
+def council(repo, owner, task_id, label, prompt, thread=None, rounds=None, dry_run=False, workload="deep", lenses=None,
+            until_agreement=False, max_rounds=None):
     from terminal_panel import MAIN_OWNERS, active_mains, child_environment, council_command, events, safe_label, provider_catalog
     from terminal_panel import update_activity
     if owner not in MAIN_OWNERS:
@@ -3282,14 +3296,18 @@ def council(repo, owner, task_id, label, prompt, thread=None, rounds=None, dry_r
             where = {k: refs_[k] for k in ("panel_room_id", "panel_room_participant") if refs_.get(k)}
         where.setdefault("panel_room_id", room_id or "")
         where.setdefault("panel_room_participant", env.get("OMS_ROOM_PARTICIPANT") or "")
-    if lenses is None:
+    if until_agreement:
+        argv = council_command(repo, prompt, task_id, label, thread, rounds, workload, lenses=lenses,
+                               until_agreement=True, max_rounds=max_rounds)
+    elif lenses is None:
         argv = council_command(repo, prompt, task_id, label, thread, rounds, workload)
     else:
         argv = council_command(repo, prompt, task_id, label, thread, rounds, workload, lenses=lenses)
     # Advertise the seats actually launched: route tiers may hold fewer or more than two entries.
     seats = argv[argv.index("--providers") + 1].split(",")
     families = len({seat.split(":", 1)[0] for seat in seats})
-    primary_calls = len(seats) * (int(argv[argv.index("--debate") + 1]) + 1)
+    # With --until-agreement this is the worst case at the cap; the loop may stop earlier.
+    primary_calls = len(seats) * (int(argv[argv.index("--max-rounds" if until_agreement else "--debate") + 1]) + 1)
     if dry_run:
         print(json.dumps({"schema": 1, "kind": "oms-panel-council-plan", "argv": argv,
                           "seats": len(seats), "families": families, "primary_calls": primary_calls,
