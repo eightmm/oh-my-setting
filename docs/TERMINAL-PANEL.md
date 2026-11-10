@@ -896,6 +896,14 @@ leases or acceptance evidence; a recent file write is shown as `active`, never a
 model, counting a task once per model it touched and grouping attempts without a
 recorded model as `unknown`.
 
+`oms panel --metrics` also carries `route_history` (in `--json` and as `route` lines): write
+attempts grouped by role (`panel_purpose`) x provider x model x effort (`panel_effort`,
+`unrecorded` when absent) with attempts, admitted, rejected, reworked, admit rate over
+decided tasks and median reported tokens. `--min-samples N` (default 3) hides groups with
+fewer than N decided tasks and says how many. Per role, a `suggest` line names the best
+admit rate among shown groups; it is reported history for a person to weigh, never a
+routing decision, and nothing is applied or stored.
+
 On a capable terminal the sidebar animates live-state indicators at four frames per
 second using the cached snapshot. Borders and role dividers stay still. Only changed
 rows are redrawn; resizing triggers a complete repaint. Starting, working, verifying and
