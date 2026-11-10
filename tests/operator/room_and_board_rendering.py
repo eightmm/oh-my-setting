@@ -5357,6 +5357,31 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
     for off in ("0", "", "nonsense", "-5"):
         with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": off}):
             assert panel_health.quota_warnings(far) == [], off
+    # The status line records how much of the last request's input was read from the prompt cache, as a share of
+    # the token counts the provider reported for that request. No counts, no share; health lists it as a reading.
+    with patch("time.time", return_value=1000.0):
+        for usage, share in (({"input_tokens": 100, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 800}, 80),
+                             ({"input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, 0),
+                             ({"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}, None),
+                             ({"input_tokens": 100, "cache_read_input_tokens": 800}, None),
+                             ({"input_tokens": 100, "cache_creation_input_tokens": True, "cache_read_input_tokens": 800}, None),
+                             (None, None)):
+            runpy.run_path(str(root / "scripts/claude-statusline.py"))["write_context_cache"]({
+                "session_id": five_session, "context_window": {"used_percentage": 38, "current_usage": usage}})
+            assert json.loads((hud / ("ctx-" + five_consumer[:24] + ".json")).read_text()).get("cache_read_share") == share, usage
+            assert cached(five_consumer, 1000).get("cache_read_share") == share, usage
+    warm = dict(five_health, provider_status={"claude": dict(five_row, cache_read_share=80)})
+    warm_item = [item for item in panel_health.project(warm)["items"] if item["kind"] == "cache"]
+    assert len(warm_item) == 1 and {key: warm_item[0][key] for key in ("label", "used", "limit", "status", "advisory")} == {
+        "label": "Claude prompt cache read", "used": 80, "limit": 100, "status": "ok", "advisory": True}, warm_item
+    assert "80% of last input [reported] Claude prompt cache read" in panel_health.render(warm, 100, 40, now=1000)
+    assert panel_health.project(warm)["level"] == panel_health.project(five_health)["level"]
+    assert panel_health.alerts(warm) == panel_health.alerts(five_health)
+    for label, quiet in (("not recorded", five_health), ("stale frame", dict(warm, capacity_stale=True)),
+                         ("failed collection", dict(warm, collection={"ok": False})),
+                         ("invalid", dict(warm, provider_status={"claude": dict(five_row, cache_read_share=180)}))):
+        assert not any(item["kind"] == "cache" for item in panel_health.project(quiet)["items"]), label
+        assert "prompt cache" not in panel_health.render(quiet, 100, 40, now=1000), label
     cache.unlink()
     if os.name != "nt":
         cache.symlink_to(project / "value.txt")
