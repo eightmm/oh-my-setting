@@ -28,6 +28,11 @@ ID_INDEX=""
 SHOW_EXAMPLES=0
 declare -a SPLITS=()
 declare -a KEY_COLUMNS=()
+declare -a ENTITY_COLUMNS=()
+POLICY=""
+TIME_COLUMN=""
+DERIVE_CMD=""
+DERIVE_SCRIPT=""
 SCAN_FILE=""
 cleanup_done=0
 
@@ -53,12 +58,33 @@ create options:
                      exact-ID overlap misses: the project precomputes columns
                      like inchikey, scaffold, uniprot, sequence_cluster, or
                      assay_id, and this flags train/eval overlap on each.
+  --policy P         Declare how the splits were made, so `leakage` checks that
+                     policy's invariant and not only ID overlap:
+                       random    exact ID overlap only
+                       group     needs --key-column; no key may cross splits
+                       scaffold  as group, for a precomputed scaffold key
+                       cold      needs --entity-column; no entity (drug, target,
+                                 ...) may cross splits, each column on its own
+                       time      needs --time-column; list --split oldest first;
+                                 every row of a later split must be later than
+                                 every row of an earlier one
+  --time-column NAME CSV/TSV header column holding a number or an ISO-8601
+                     date (YYYY-MM-DD...) for --policy time.
+  --entity-column NAME  CSV/TSV header column for --policy cold. Repeatable;
+                     also recorded and checked like a --key-column.
+  --derive-cmd TEXT  The command that computed the key columns (recorded as
+                     text; never run here).
+  --derive-script FILE  The script that computed them; its sha256 is recorded
+                     and `check` warns when the file changed or is gone.
   --note TEXT        Free-text note.
   (default: each non-empty line is one ID.)
 
 check    Recompute current split files; nonzero exit on any drift.
 leakage  Report ID overlap between splits; nonzero exit if any overlap. Also
-         reports overlap on every recorded --key-column, tagged [key].
+         reports overlap on every recorded --key-column, tagged [key], the
+         declared policy's invariant, and IDs repeated inside one split
+         (a warning). Exact matches only: analogs, homologs and other
+         near-duplicates need the project's own similarity tooling.
   --show-examples    Print up to 5 overlapping IDs/keys (off by default; values
                      may be sensitive).
 EOF
@@ -253,17 +279,47 @@ cmd_create() {
   [ -n "$NAME" ] || fail "create requires --name"
   [ "${#SPLITS[@]}" -gt 0 ] || fail "create requires at least one --split LABEL=FILE"
 
+  case "$POLICY" in
+    ""|random) ;;
+    group|scaffold)
+      [ "${#KEY_COLUMNS[@]}" -gt 0 ] ||
+        fail "--policy $POLICY needs at least one --key-column holding the precomputed group key" ;;
+    cold)
+      [ "${#ENTITY_COLUMNS[@]}" -gt 0 ] ||
+        fail "--policy cold needs at least one --entity-column" ;;
+    time)
+      [ -n "$TIME_COLUMN" ] || fail "--policy time needs --time-column" ;;
+    *) fail "--policy must be one of: random, group, scaffold, cold, time" ;;
+  esac
+  [ -z "$TIME_COLUMN" ] || [ "$POLICY" = time ] || fail "--time-column needs --policy time"
+  [ "${#ENTITY_COLUMNS[@]}" -eq 0 ] || [ "$POLICY" = cold ] || fail "--entity-column needs --policy cold"
+  [ -z "$DERIVE_SCRIPT" ] || [ -f "$DERIVE_SCRIPT" ] || fail "--derive-script not found: $DERIVE_SCRIPT"
+  # An entity column is checked exactly like a key column, so it is one.
+  local entity known seen
+  for entity in "${ENTITY_COLUMNS[@]:-}"; do
+    [ -n "$entity" ] || continue
+    seen=0
+    for known in "${KEY_COLUMNS[@]:-}"; do
+      [ "$known" != "$entity" ] || seen=1
+    done
+    [ "$seen" = 1 ] || KEY_COLUMNS+=("$entity")
+  done
+  # Every column looked up by header name is validated in every split below.
+  local -a header_columns=()
+  [ "${#KEY_COLUMNS[@]}" -eq 0 ] || header_columns=("${KEY_COLUMNS[@]}")
+  [ -z "$TIME_COLUMN" ] || header_columns+=("$TIME_COLUMN")
+
   mkdir -p "$MANIFEST_DIR"
   agent_memory_ensure_oms_ignore_for_path "$MANIFEST_DIR" 2>/dev/null || true
 
   # Key columns are looked up by CSV/TSV header name; validate they exist in
   # every split before recording them, so leakage cannot silently no-op later.
-  if [ "${#KEY_COLUMNS[@]}" -gt 0 ]; then
+  if [ "${#header_columns[@]}" -gt 0 ]; then
     local pair label file
     for pair in "${SPLITS[@]}"; do
       label="${pair%%=*}"; file="${pair#*=}"
       [ -f "$file" ] || fail "split file not found: $file"
-      OMS_FILE="$file" OMS_KEYS="$(printf '%s\n' "${KEY_COLUMNS[@]}")" python3 <<'PY' || exit $?
+      OMS_FILE="$file" OMS_KEYS="$(printf '%s\n' "${header_columns[@]}")" python3 <<'PY' || exit $?
 import csv, os, sys
 path = os.environ["OMS_FILE"]
 keys = [k for k in os.environ["OMS_KEYS"].splitlines() if k]
@@ -298,12 +354,16 @@ PY
   tmp="$(mktemp)" || fail "mktemp failed"
   local keys_nl=""
   [ "${#KEY_COLUMNS[@]}" -gt 0 ] && keys_nl="$(printf '%s\n' "${KEY_COLUMNS[@]}")"
-  OMS_SPLITS="$splits_json" OMS_KEYS="$keys_nl" python3 - "$SCHEMA" "$NAME" "$ts" "$NOTE" \
-    "$ID_COLUMN" "$ID_INDEX" > "$tmp" <<'PY'
-import json, os, sys
+  local entities_nl=""
+  [ "${#ENTITY_COLUMNS[@]}" -gt 0 ] && entities_nl="$(printf '%s\n' "${ENTITY_COLUMNS[@]}")"
+  OMS_SPLITS="$splits_json" OMS_KEYS="$keys_nl" OMS_ENTITIES="$entities_nl" OMS_POLICY="$POLICY" \
+  OMS_TIME_COLUMN="$TIME_COLUMN" OMS_DERIVE_CMD="$DERIVE_CMD" OMS_DERIVE_SCRIPT="$DERIVE_SCRIPT" \
+    python3 - "$SCHEMA" "$NAME" "$ts" "$NOTE" "$ID_COLUMN" "$ID_INDEX" > "$tmp" <<'PY'
+import hashlib, json, os, sys
 a = sys.argv[1:]
-keys = [k for k in os.environ.get("OMS_KEYS", "").splitlines() if k]
-print(json.dumps({
+env = os.environ.get
+keys = [k for k in env("OMS_KEYS", "").splitlines() if k]
+manifest = {
     "schema": int(a[0]),
     "name": a[1],
     "ts": a[2],
@@ -312,7 +372,29 @@ print(json.dumps({
     "id_index": a[5],
     "leakage_keys": keys,
     "splits": json.loads(os.environ["OMS_SPLITS"]),
-}, ensure_ascii=False, indent=2))
+}
+# Optional: how the splits were made and where their keys came from. Absent
+# fields mean "not declared"; readers that predate them never look.
+if env("OMS_POLICY"):
+    manifest["policy"] = env("OMS_POLICY")
+if env("OMS_TIME_COLUMN"):
+    manifest["time_column"] = env("OMS_TIME_COLUMN")
+entities = [k for k in env("OMS_ENTITIES", "").splitlines() if k]
+if entities:
+    manifest["entity_columns"] = entities
+derive = {}
+if env("OMS_DERIVE_CMD"):
+    derive["cmd"] = " ".join(env("OMS_DERIVE_CMD").split())[:500]
+if env("OMS_DERIVE_SCRIPT"):
+    digest = hashlib.sha256()
+    with open(env("OMS_DERIVE_SCRIPT"), "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    derive["script"] = env("OMS_DERIVE_SCRIPT")
+    derive["script_sha256"] = digest.hexdigest()
+if derive:
+    manifest["derive"] = derive
+print(json.dumps(manifest, ensure_ascii=False, indent=2))
 PY
   SCAN_FILE="$tmp"
   if agent_memory_file_has_sensitive_content "$tmp"; then
@@ -393,6 +475,27 @@ m = json.load(open(sys.argv[1]))
 for s in m.get("splits", []):
     print(json.dumps(s, ensure_ascii=False))' "$p")
 EOF
+  # Where the keys came from: a changed or missing key script is a warning, not
+  # drift (the key sets themselves are fingerprinted above), because the keys on
+  # disk may predate the edit.
+  OMS_MANIFEST="$p" python3 <<'PY'
+import hashlib, json, os
+derive = json.load(open(os.environ["OMS_MANIFEST"])).get("derive")
+if isinstance(derive, dict) and derive.get("script"):
+    path = derive["script"]
+    if not os.path.isfile(path):
+        print("WARN  derive: key script is gone (%s)" % path)
+    else:
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != derive.get("script_sha256"):
+            print("WARN  derive: key script changed since the manifest was written (%s); "
+                  "recompute the keys and recreate the manifest" % path)
+        else:
+            print("ok    derive: key script unchanged")
+PY
   [ "$drift" = 0 ] || exit 1
 }
 
@@ -524,6 +627,128 @@ PY
     *) fail "leakage: key-column check failed" ;;
   esac
 
+  # The declared split policy's own invariant, IDs repeated inside one split,
+  # and what none of this looked at. Exit 1 = the policy is violated, 2 = the
+  # manifest or a file cannot support the check (fail closed).
+  local policy_found=0
+  OMS_MANIFEST="$p" OMS_SHOW="$SHOW_EXAMPLES" python3 <<'PY' || policy_found=$?
+import csv, json, os, re, sys
+
+m = json.load(open(os.environ["OMS_MANIFEST"]))
+show = os.environ.get("OMS_SHOW") == "1"
+policy = m.get("policy") or ""
+keys = [k for k in m.get("leakage_keys", []) if isinstance(k, str)]
+entities = [k for k in m.get("entity_columns", []) if isinstance(k, str)]
+splits = [(s["label"], s["file"]) for s in m.get("splits", [])]
+found = 0
+
+def stop(text):
+    sys.stderr.write("leakage: %s\n" % text)
+    sys.exit(2)
+
+def table(path):
+    with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+        sample = fh.read(4096); fh.seek(0)
+        delim = "\t" if "\t" in sample and sample.count("\t") >= sample.count(",") else ","
+        return list(csv.reader(fh, delimiter=delim))
+
+def ids(path):
+    col, idx = m.get("id_column") or "", m.get("id_index")
+    if col or idx not in ("", None):
+        rows = table(path)
+        if not rows:
+            return []
+        if col:
+            if col not in rows[0]:
+                stop("recorded id-column %r not in header of %s" % (col, path))
+            ci, body = rows[0].index(col), rows[1:]
+        else:
+            ci, body = int(idx), rows
+        return [r[ci].strip() for r in body if len(r) > ci and r[ci].strip()]
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return [ln.strip() for ln in fh if ln.strip()]
+
+# A row counted twice inside one split inflates that split and, in a time or
+# group split, can hide which copy the policy was applied to.
+for label, path in splits:
+    seen, repeated = set(), set()
+    for value in ids(path):
+        (repeated if value in seen else seen).add(value)
+    if repeated:
+        print("WARN    %s: %d ID(s) appear more than once inside the split" % (label, len(repeated)))
+        if show:
+            for value in sorted(repeated)[:5]:
+                print("    " + value)
+
+if policy in ("group", "scaffold") and not keys:
+    stop("policy %s is declared but the manifest records no key column" % policy)
+if policy == "cold" and not (entities and all(e in keys for e in entities)):
+    stop("policy cold is declared but its entity columns are not recorded as keys")
+
+if policy == "time":
+    column = m.get("time_column") or ""
+    if not column:
+        stop("policy time is declared but the manifest records no time column")
+    values = {}
+    for label, path in splits:
+        rows = table(path)
+        if not rows or column not in rows[0]:
+            stop("recorded time-column %r not in header of %s" % (column, path))
+        ci = rows[0].index(column)
+        raw = [r[ci].strip() if len(r) > ci else "" for r in rows[1:]]
+        empty = sum(1 for v in raw if not v)
+        if empty:
+            print("WARN    %s: %d row(s) have no %s value and were not ordered" % (label, empty, column))
+        raw = [v for v in raw if v]
+        if not raw:
+            stop("split %s has no %s values to order" % (label, column))
+        values[label] = raw
+    def number(text):
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        return value if value == value and abs(value) != float("inf") else None
+    flat = [v for vals in values.values() for v in vals]
+    if all(number(v) is not None for v in flat):
+        ordered = {label: [number(v) for v in vals] for label, vals in values.items()}
+    elif all(re.match(r"\d{4}-\d{2}-\d{2}", v) for v in flat):
+        ordered = values  # ISO-8601 sorts as text
+    else:
+        stop("time column %r must hold numbers or ISO-8601 dates (YYYY-MM-DD...) throughout" % column)
+    labels = [label for label, _ in splits]
+    for i in range(len(labels)):
+        for j in range(i + 1, len(labels)):
+            early, late = labels[i], labels[j]
+            newest = max(ordered[early])
+            behind = sum(1 for v in ordered[late] if v <= newest)
+            if behind:
+                found = 1
+                print("LEAKAGE[time:%s] %s -> %s: %d row(s) of %s are not later than the newest %s row"
+                      % (column, early, late, behind, late, early))
+                if show:
+                    print("    newest %s: %s; oldest %s: %s" % (early, newest, late, min(ordered[late])))
+            else:
+                print("ok[time:%s]      %s -> %s: every %s row is later" % (column, early, late, late))
+
+if policy:
+    checked = ["ID overlap"]
+    if keys:
+        checked.append("key overlap on " + ", ".join(keys))
+    if policy == "time":
+        checked.append("time order on " + (m.get("time_column") or ""))
+    print("policy: %s (checked: %s)" % (policy, "; ".join(checked)))
+else:
+    print("policy: none declared (checked: ID overlap%s)" % ("; key overlap on " + ", ".join(keys) if keys else ""))
+print("note: exact matches only; similar compounds, homologous sequences and other near-duplicates were not compared")
+sys.exit(found)
+PY
+  case "$policy_found" in
+    0) ;;
+    1) found=1 ;;
+    *) fail "leakage: split policy check failed" ;;
+  esac
+
   [ "$found" = 0 ] || exit 1
 }
 
@@ -574,6 +799,11 @@ parse_common_args() {
         case "$2" in *[!0-9]*|"") fail "--id-index must be a non-negative integer" ;; esac
         ID_INDEX="$2"; shift 2 ;;
       --key-column) [ "$#" -ge 2 ] || fail "--key-column requires a name"; KEY_COLUMNS+=("$2"); shift 2 ;;
+      --policy) [ "$#" -ge 2 ] || fail "--policy requires a name"; POLICY="$2"; shift 2 ;;
+      --time-column) [ "$#" -ge 2 ] || fail "--time-column requires a name"; TIME_COLUMN="$2"; shift 2 ;;
+      --entity-column) [ "$#" -ge 2 ] || fail "--entity-column requires a name"; ENTITY_COLUMNS+=("$2"); shift 2 ;;
+      --derive-cmd) [ "$#" -ge 2 ] || fail "--derive-cmd requires text"; DERIVE_CMD="$2"; shift 2 ;;
+      --derive-script) [ "$#" -ge 2 ] || fail "--derive-script requires a file"; DERIVE_SCRIPT="$2"; shift 2 ;;
       --note) [ "$#" -ge 2 ] || fail "--note requires text"; NOTE="$2"; shift 2 ;;
       --show-examples) SHOW_EXAMPLES=1; shift ;;
       *) fail "unknown argument: $1" ;;
