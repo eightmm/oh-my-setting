@@ -544,6 +544,17 @@ more words that one provider loads from two files is named once. Limits are
 provider); these are OMS budgets, not provider limits. Findings are warnings and fail
 only under `--strict`. Files are read as text: nothing runs, no model is called, and
 on-demand skills, hooks and path-scoped rules are not counted.
+
+`oms project-doctor --prompts [--json] [--strict] [SOURCE_DIR]` audits the prompt text OMS
+ships (`rules/`, `roles/`, `templates/*AGENTS.md`, `prompts/`, skill `SKILL.md`; the
+installation by default). Per file it prints words, bytes and whether the file is injected
+every session, on demand or `unknown`; a class is only named when the script that delivers
+it (`link.sh`, `apply-project-template.sh`, `agent-role.sh`, `skill-doctor.sh`) still holds
+its marker text. Findings are lines matching `config/prompt-audit-patterns.txt` (an
+editable list of over-emphasis phrases written for older models), sentences of eight or
+more words repeated across always-injected files after lowercasing, and the
+always-injected word total per provider. Advisory: exit 0 unless `--strict` and a finding
+exists. Nothing runs and no model is called.
 A team can pin the OMS baseline it expects in a tracked `.oms-team.json`
 at the project root (`.oms/` and `PROJECT.md` are untracked by default, so
 neither can carry it):

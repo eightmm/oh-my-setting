@@ -2971,6 +2971,36 @@ assert all("text" not in f for f in claude["files"]), "file contents must not be
   if "$ROOT/scripts/project-doctor.sh" --json "$budget" >/dev/null 2>&1; then
     fail "--json without --budget must be refused"
   fi
+
+  # --prompts audits shipped prompt text: injection class comes from the delivering script's marker,
+  # a sentence carried by two always-injected files and an over-emphasis phrase are findings.
+  local src="$TMP/prompt-audit-src" dup='Run the focused check before you say a change is done and name it in the report'
+  mkdir -p "$src/rules" "$src/roles" "$src/templates" "$src/config" "$src/scripts" "$src/custom-skills/oms-x"
+  printf '%s\n' 'rules/global-AGENTS.md $HOME/.claude/CLAUDE.md $HOME/.codex/AGENTS.md' > "$src/scripts/link.sh"
+  printf '%s\n' 'templates/project-' > "$src/scripts/apply-project-template.sh"
+  printf '%s\n' 'injected into a delegated worker brief' > "$src/scripts/agent-role.sh"
+  printf '# Rules\n\n- %s.\n- Please double-check everything twice.\n' "$dup" > "$src/rules/global-AGENTS.md"
+  printf '# Project\n\n%s.\n' "$dup" > "$src/templates/project-general-AGENTS.md"
+  printf '# Role\n\n%s.\n' "$dup" > "$src/roles/r.md"
+  printf '# Skill\n' > "$src/custom-skills/oms-x/SKILL.md"
+  printf '%s\n' '# comment' '\bdouble[- ]check\b' > "$src/config/prompt-audit-patterns.txt"
+  out="$("$ROOT/scripts/project-doctor.sh" --prompts "$src")" || fail "prompt audit is advisory and must exit 0: $out"
+  contains "$out" 'always ' || fail "prompt audit must list injected files: $out"
+  contains "$out" 'on-demand' && contains "$out" 'roles/r.md' || fail "a role is on demand: $out"
+  contains "$out" 'unknown' && contains "$out" 'custom-skills/oms-x/SKILL.md' || fail "a skill with no delivery marker is unknown: $out"
+  contains "$out" 'rules/global-AGENTS.md: 1 line(s) match emphasis pattern' || fail "prompt audit must flag the listed phrase: $out"
+  contains "$out" 'in 2 always-injected files (rules/global-AGENTS.md, templates/project-general-AGENTS.md)' ||
+    fail "prompt audit must name a sentence two always-injected files carry, not the on-demand role: $out"
+  contains "$out" 'claude: 25 always-injected words' || fail "prompt audit must total global words per provider: $out"
+  contains "$out" 'antigravity: always-injected words unknown' || fail "a provider with no delivery marker is unknown: $out"
+  "$ROOT/scripts/project-doctor.sh" --prompts --strict "$src" >/dev/null 2>&1 && fail "--prompts --strict must fail on findings"
+  "$ROOT/scripts/project-doctor.sh" --prompts --json "$src" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+assert report["kind"] == "oms-prompt-audit" and report["findings"] == 2, report
+assert [f["injection"] for f in report["files"]][:2] == ["always", "on-demand"], report["files"]
+' || fail "prompt audit --json must carry classes and the finding count"
+  ! "$ROOT/scripts/project-doctor.sh" --prompts --budget "$src" >/dev/null 2>&1 || fail "--prompts must refuse --budget"
 }
 
 test_project_doctor_detects_gemini_body_drift() {

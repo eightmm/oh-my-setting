@@ -1,0 +1,12 @@
+# Over-emphasis phrases that `oms project-doctor --prompts` flags in prompt text.
+# One regular expression per line (case-insensitive unless wrapped in (?-i:...));
+# blank lines and # lines are ignored.
+# These were written for older models; current models follow plain instructions and
+# spend extra tool rounds and input tokens on repeated verification and shouted rules.
+\bdouble[- ]check\b
+\bbe (?:extremely|very|highly) (?:thorough|careful)\b
+\balways verify (?:twice|again)\b
+\bverify (?:twice|again and again)\b
+\bit is (?:absolutely )?(?:critical|crucial) that\b
+(?-i:\b(?:IMPORTANT|CRITICAL|WARNING):)
+(?-i:\b(?:MUST|NEVER|ALWAYS)\b.*\b(?:MUST|NEVER|ALWAYS)\b)
