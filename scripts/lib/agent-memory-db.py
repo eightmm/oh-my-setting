@@ -1456,6 +1456,8 @@ def main() -> int:
     parser.add_argument("--view", default="")
     parser.add_argument("--target-path", default="")
     parser.add_argument("--scoped", choices=("keep", "drop"), default="keep")
+    # recall only: a handoff directory whose digests are offered as pointers.
+    parser.add_argument("--handoffs", default="")
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("--limit must not be negative")
@@ -1534,6 +1536,16 @@ def main() -> int:
             entries = entries[: args.limit]
             touch_access(db, entries)
             shown = emit(entries, args.json, validation, "query relevance with access decay; citation status reported when available", status)
+            if args.handoffs:
+                import agent_memory_handoffs
+                for pointer in agent_memory_handoffs.pointers(args.handoffs, args.query, secret_free):
+                    if args.json:
+                        sys.stdout.write(json.dumps({"schema": SCHEMA_VERSION, **pointer}, ensure_ascii=False) + "\n")
+                    else:
+                        sys.stdout.write(agent_memory_handoffs.render(pointer) + "\n")
+                        sys.stdout.write("[selection: session handoff whose head matches the query; a pointer, not the digest; event=%s]\n\n"
+                                         % pointer["event_id"])
+                    shown += 1
             sys.stderr.write(
                 'memory: %d recalled entr%s for "%s"\n'
                 % (shown, "y" if shown == 1 else "ies", args.query)

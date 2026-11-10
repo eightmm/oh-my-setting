@@ -11,13 +11,24 @@ oms_memory_prev="" oms_memory_at=0
 for oms_memory_arg in "$@"; do
   oms_memory_at=$((oms_memory_at + 1))
   case "$oms_memory_prev" in
-    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--paths|--target|--from|--select|--kind|--accept|--retire|--reject)
+    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--paths|--target|--from|--select|--kind|--accept|--retire|--reject|--to)
       oms_memory_prev=""; continue ;;
   esac
   case "$oms_memory_arg" in
     import|review)
       exec python3 -X utf8 "$ROOT/scripts/lib/agent_memory_review.py" "$oms_memory_arg" \
         "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
+    promote|graduate)
+      exec python3 -X utf8 "$ROOT/scripts/lib/agent_memory_promote.py" "$oms_memory_arg" \
+        "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
+    recall)
+      # recall --all-repos reads every registered clone's index and writes nothing.
+      case " $* " in
+        *" --all-repos "*)
+          exec python3 -X utf8 "$ROOT/scripts/lib/agent_memory_promote.py" recall-all \
+            "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
+      esac
+      break ;;
     -*) oms_memory_prev="$oms_memory_arg" ;;
     *) break ;;
   esac
@@ -119,6 +130,9 @@ Options:
                     matching path rank first; notes scoped elsewhere are left out.
   --id ID           supersede/retire: target event_id from search/recall JSON.
   --reason TEXT     retire: reason for retirement.
+  --all-repos       recall: rank the query in every repository registered with
+                    `oms tick`, read-only (each index as last synchronized; no
+                    recall receipt). --limit is per repository (default 5).
   --include-superseded search/recall: include superseded and retired notes, marked.
   --include-stale   search/recall: include cited notes whose source can no
                     longer be verified. Default recall omits them.
@@ -134,6 +148,13 @@ Commands:
   pin               Append a short note to pins.md.
   supersede         Append a replacement note linked to --id.
   retire            Append a retirement record linked to --id.
+  promote --id ID --global [--apply]
+                    Copy one project note to global memory (a dry run without
+                    --apply; parent only). The text is rescanned after machine
+                    paths are normalized; the copy cites the event ID only.
+  graduate --id ID --to AGENTS.md|PROJECT.md
+                    Print, as a diff, how the note would read in a checked-in
+                    document. Never writes; retire the note after the edit lands.
   compact           Regenerate summary.md from source memory.
   search PATTERN    Print memory + pins entries matching PATTERN (case-
                     insensitive substring over header and body) from SQLite;
@@ -453,10 +474,17 @@ case "$ACTION" in
     ;;
   recall)
     [ -n "$TEXT" ] || { echo "error: recall requires --text QUERY (or a positional query)" >&2; exit 2; }
+    # Project recall also points at session handoff digests whose head matches.
+    HANDOFF_ARGS=()
+    case "$MEMORY_FILE" in
+      */.oms/memory/shared.md)
+        [ "$SCOPE" != project ] || HANDOFF_ARGS=(--handoffs "${MEMORY_FILE%/memory/shared.md}/handoffs") ;;
+    esac
     agent_memory_db_command "$MEMORY_FILE" recall \
       --query "$TEXT" \
       --agent "$AGENT_SEARCH" \
       --limit "${LIMIT:-20}" \
+      "${HANDOFF_ARGS[@]}" \
       "${JSON_ARGS[@]}"
     ;;
   health)

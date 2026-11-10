@@ -39699,6 +39699,98 @@ test_shared_memory_context_ranked_recall() {
     fail "--paths applies only to append"
   fi
   ! grep -q 'never recorded' "$repo/.oms/memory/shared.md" || fail "a refused --paths must not append"
+  # Explicit project recall also points at session handoff digests whose head
+  # matches: a pointer and one line, never the digest body; a sensitive-looking
+  # line is withheld; machine header lines do not match; injected recall and
+  # global recall carry no pointer, and a removed digest stops matching.
+  local handoffs="$repo/.oms/handoffs"
+  mkdir -p "$handoffs"
+  printf '%s\n' '# Session handoff: claude abc' '' '- captured: 2026-11-09T10:00:00Z' '- agent: claude' \
+    '- cwd: /work/zebracrossing' '' '## Last assistant summary' '' 'Wired the quokka loader.' \
+    'BODY-ONLY-LINE must never be printed by recall.' '' '## Original request (historical)' '' \
+    'Make the quokka loader read the manifest first.' > "$handoffs/claude-abc.md"
+  printf '%s\n' '# Session handoff: codex d' '' '- captured: 2026-11-08T10:00:00Z' '- agent: codex' '' \
+    '## Original request (historical)' '' "api_k""ey: abcdefgh12345678 quokka thing" > "$handoffs/codex-d.md"
+  out="$(cd "$repo" && bash "$memory" recall quokka loader 2>&1)" || fail "a handoff match alone must be a hit: $out"
+  contains "$out" 'handoff digest: Make the quokka loader read the manifest first.' &&
+    contains "$out" 'open: oms session-handoff show claude-abc.md' ||
+    fail "recall should point at the matching handoff digest: $out"
+  contains "$out" 'handoff digest: [withheld: sensitive-looking content]' &&
+    contains "$out" 'open: oms session-handoff show codex-d.md' ||
+    fail "a sensitive-looking handoff line must be withheld with its pointer kept: $out"
+  if contains "$out" 'BODY-ONLY-LINE' || contains "$out" 'abcdefgh12345678'; then
+    fail "recall must not print a digest body or a withheld line: $out"
+  fi
+  out="$(cd "$repo" && bash "$memory" recall --json quokka 2>/dev/null)"
+  contains "$out" '"event_id": "handoff:claude-abc.md"' && contains "$out" '"kind": "handoff"' ||
+    fail "handoff pointers should be typed in recall JSON: $out"
+  if (cd "$repo" && bash "$memory" recall zebracrossing >/dev/null 2>&1); then
+    fail "a handoff's machine header must not match"
+  fi
+  out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2" "quokka loader"' _ "$lib" "$repo")"
+  if contains "$out" 'handoff digest'; then fail "injected recall must not carry handoff pointers: $out"; fi
+  rm -f "$handoffs/claude-abc.md" "$handoffs/codex-d.md"
+  if (cd "$repo" && bash "$memory" recall quokka >/dev/null 2>&1); then
+    fail "a removed handoff digest must stop matching"
+  fi
+
+  # A project note leaves its clone three explicit ways: promote copies it to
+  # global memory (dry run unless --apply, parent only, once), graduate only
+  # prints a diff for a checked-in document, and recall --all-repos reads the
+  # registered clones' indexes without writing to them.
+  local global="$TMP/memory-recall-global.md" registry="$TMP/memory-recall-registry.txt" note before
+  ( cd "$repo" && bash "$memory" append --agent claude \
+      --text "Wombat fixtures regenerate with make fixtures, never by hand." >/dev/null )
+  note="$(cd "$repo" && bash "$memory" search --json wombat 2>/dev/null |
+    python3 -c 'import json,sys; print(json.loads(sys.stdin.readline())["event_id"])')"
+  out="$(cd "$repo" && OH_MY_SETTING_GLOBAL_MEMORY="$global" bash "$memory" promote --id "$note" --global 2>&1)" ||
+    fail "promote dry run failed: $out"
+  contains "$out" 'dry run; nothing changed' || fail "promote must default to a dry run: $out"
+  [ ! -e "$global" ] || fail "a promote dry run must not create global memory"
+  if (cd "$repo" && OMS_HARNESS_CHILD=1 OH_MY_SETTING_GLOBAL_MEMORY="$global" \
+      bash "$memory" promote --id "$note" --global --apply >/dev/null 2>&1); then
+    fail "a harness child must not promote to global memory"
+  fi
+  out="$(cd "$repo" && OH_MY_SETTING_GLOBAL_MEMORY="$global" bash "$memory" promote --id "$note" --global --apply 2>&1)" ||
+    fail "promote --apply failed: $out"
+  grep -Fq 'Wombat fixtures regenerate with make fixtures' "$global" &&
+    grep -Fq "(promoted from project note $note)" "$global" ||
+    fail "promote --apply should append the note and its origin ID to global memory"
+  if grep -Fq "$repo" "$global" || grep -Fq 'memory-recall-ctx' "$global"; then
+    fail "a promoted note must not carry the repository path or name"
+  fi
+  out="$(cd "$repo" && OH_MY_SETTING_GLOBAL_MEMORY="$global" bash "$memory" promote --id "$note" --global --apply 2>&1)"
+  contains "$out" 'already in global memory' || fail "a second promote must be a no-op: $out"
+  [ "$(grep -Fc 'Wombat fixtures regenerate' "$global")" = 1 ] || fail "promote appended twice"
+  if (cd "$repo" && OH_MY_SETTING_GLOBAL_MEMORY="$global" bash "$memory" promote --id no-such-id --global --apply >/dev/null 2>&1); then
+    fail "promote must refuse an unknown ID"
+  fi
+  printf '# Project\n\n## Decisions\n\n- keep it small\n\n## Notes\n\n- n\n' > "$repo/PROJECT.md"
+  before="$(cat "$repo/PROJECT.md")"
+  out="$(cd "$repo" && bash "$memory" graduate --id "$note" --to PROJECT.md 2>&1)" || fail "graduate failed: $out"
+  contains "$out" '+- Wombat fixtures regenerate with make fixtures, never by hand.' &&
+    contains "$out" ' - keep it small' && contains "$out" "retire --id $note --reason graduated" ||
+    fail "graduate should print the diff under Decisions and the retire step: $out"
+  [ "$(cat "$repo/PROJECT.md")" = "$before" ] || fail "graduate must never write the document"
+  if (cd "$repo" && bash "$memory" graduate --id "$note" --to README.md >/dev/null 2>&1); then
+    fail "graduate must refuse any other target"
+  fi
+  printf '%s\n' "$repo" "$TMP/memory-recall-absent" > "$registry"
+  ( cd "$repo" && bash "$memory" recall wombat >/dev/null 2>&1 ) || fail "recall should index the wombat note"
+  before="$(cd "$repo/.oms/memory" && cksum memory.sqlite3 shared.md)"
+  out="$(cd "$TMP" && OMS_TICK_REGISTRY="$registry" bash "$memory" recall --all-repos wombat fixtures 2>&1)" ||
+    fail "recall --all-repos should find the note: $out"
+  contains "$out" "$note" && contains "$out" 'Wombat fixtures regenerate' &&
+    contains "$out" '2 registered repositories (1 without an index)' && contains "$out" 'nothing was written' ||
+    fail "recall --all-repos should name the hit, the repositories read and that it wrote nothing: $out"
+  [ "$(cd "$repo/.oms/memory" && cksum memory.sqlite3 shared.md)" = "$before" ] ||
+    fail "recall --all-repos must not write to a clone's index or log"
+  if (cd "$TMP" && OMS_HARNESS_CHILD=1 OMS_TICK_REGISTRY="$registry" bash "$memory" recall --all-repos wombat >/dev/null 2>&1); then
+    fail "a harness child must not read other repositories' memory"
+  fi
+  if (cd "$TMP" && OMS_TICK_REGISTRY="$registry" bash "$memory" recall --all-repos nosuchwordanywhere >/dev/null 2>&1); then
+    fail "recall --all-repos without a hit must exit nonzero"
+  fi
 }
 
 test_memory_recall_tracks_access_for_decay() {
