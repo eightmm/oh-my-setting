@@ -42594,6 +42594,67 @@ assert row["status"] == "verified", row
 ' || fail "repo state hid stale task verification: $state_json"
 }
 
+test_cite_notes_verify_and_bibtex() {
+  local project="$TMP/cite-notes" srv="$TMP/cite-srv" cite="$ROOT/scripts/cite.sh"
+  local out port pid=""
+  make_committed_repo "$project"
+  (
+    cd "$project"
+    "$cite" add --id https://doi.org/10.1234/Good.1 --title "A Good Paper" --year 2020 \
+      --claim "reports 3% gain" --locator "Table 2" >/dev/null || fail "add doi failed"
+    "$cite" add --id arxiv:2101.00001 --title "Graph Nets for Binding" --year 2021 >/dev/null ||
+      fail "add arxiv failed"
+    "$cite" add --id 10.1234/wrongtitle --title "Invented Title" --year 2019 >/dev/null
+    "$cite" add --id 10.1234/gone --title "Ghost" >/dev/null
+    if "$cite" add --id "not-an-id" --title "x" >/dev/null 2>&1; then
+      fail "malformed id should exit non-zero"
+    fi
+  ) || return 1
+  [ -f "$project/.oms/literature.jsonl" ] || fail "literature.jsonl not written"
+
+  # Offline: syntax only, never verified, no network used.
+  out="$(cd "$project" && "$cite" verify)" && fail "offline verify must not report all verified"
+  out="$(cd "$project" && "$cite" verify 2>&1 || true)"
+  contains "$out" 'nothing is verified without --online' || fail "offline note missing: $out"
+  contains "$out" 'invalid-id' || fail "malformed id not flagged: $out"
+
+  # Online against a local static server (fixture-verified only).
+  mkdir -p "$srv/works/10.1234"
+  printf '{"message":{"title":["A Good Paper"],"issued":{"date-parts":[[2020,5]]}}}' > "$srv/works/10.1234/good.1"
+  printf '{"message":{"title":["Real Title"],"issued":{"date-parts":[[2019]]}}}' > "$srv/works/10.1234/wrongtitle"
+  printf '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Graph Nets\n for Binding</title><published>2021-01-04T00:00:00Z</published></entry></feed>' > "$srv/api"
+  python3 -m http.server 0 --bind 127.0.0.1 --directory "$srv" > "$srv.log" 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    port="$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$srv.log" | head -n 1)"
+    [ -n "$port" ] && break
+    sleep 1
+  done
+  [ -n "$port" ] || { kill "$pid" 2>/dev/null; fail "fixture server did not start"; }
+  out="$(cd "$project" && NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 \
+    OMS_CITE_CROSSREF_URL="http://127.0.0.1:$port/works/" OMS_CITE_ARXIV_URL="http://127.0.0.1:$port/api" \
+    "$cite" verify --online 2>&1 || true)"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  contains "$out" 'verified   doi:10.1234/good.1' || fail "matching doi not verified: $out"
+  contains "$out" 'verified   arxiv:2101.00001' || fail "matching arxiv not verified: $out"
+  contains "$out" 'mismatch   doi:10.1234/wrongtitle: title differs' || fail "title mismatch missed: $out"
+  contains "$out" 'not-found  doi:10.1234/gone' || fail "missing record not reported: $out"
+
+  # Status persists (last row wins); BibTeX carries it.
+  out="$(cd "$project" && "$cite" list)"
+  contains "$out" 'mismatch' || fail "status not persisted: $out"
+  out="$(cd "$project" && "$cite" export --bibtex)"
+  contains "$out" '@misc{doi_10_1234_good_1,' || fail "bibtex key missing: $out"
+  contains "$out" 'eprint = {2101.00001}' || fail "bibtex eprint missing: $out"
+  contains "$out" 'note = {OMS status: verified}' || fail "bibtex status missing: $out"
+
+  # An unreachable registry never yields verified.
+  out="$(cd "$project" && NO_PROXY=127.0.0.1 no_proxy=127.0.0.1 OMS_CITE_CROSSREF_URL="http://127.0.0.1:1/works/" \
+    "$cite" verify --id 10.1234/good.1 --online 2>&1 || true)"
+  contains "$out" 'unverified' && contains "$out" 'lookup failed' || fail "failed lookup must stay unverified: $out"
+}
+
 test_portable_capsule_rejects_unknown_fields() {
   local project="$TMP/portable-capsule-fields"
   make_committed_repo "$project"
