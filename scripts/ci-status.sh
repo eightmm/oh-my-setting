@@ -20,6 +20,7 @@ set -euo pipefail
 # never absent and never a pass. `triage` reads why HEAD's run is red: the
 # failing jobs, a bounded scanned tail of each one's log, and whether the same
 # job is also red on the base branch. It prints a brief and changes nothing.
+# `suggest` maps the recorded facts to suggested next commands (read-only).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
@@ -34,6 +35,8 @@ ACTION="status"
 branch=""
 limit=20
 triage_sha=""
+suggest_json=0
+suggest_refresh=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     status) ACTION="status"; shift ;;
@@ -43,6 +46,9 @@ while [ "$#" -gt 0 ]; do
     flaky) ACTION="flaky"; shift ;;
     protection) ACTION="protection"; shift ;;
     triage) ACTION="triage"; shift ;;
+    suggest) ACTION="suggest"; shift ;;
+    --json) suggest_json=1; shift ;;
+    --refresh) suggest_refresh=1; shift ;;
     --limit)
       [ "$#" -ge 2 ] || { echo "error: --limit needs a positive integer" >&2; exit 2; }
       limit="$2"
@@ -67,8 +73,9 @@ Usage: ci-status.sh [status|record|tick] [branch]
        ci-status.sh protection [branch]
        ci-status.sh triage [--sha COMMIT] [branch]
        ci-status.sh flaky [branch]
+       ci-status.sh suggest [--json] [--refresh] [branch]
 
-status  Print the latest CI run and fail on a completed red result (default).
+status Print the latest CI run and fail on a completed red result (default).
 record  Also append the result to .oms/ci.jsonl and Work Journal. A completed
         red run's row also names its failing jobs and checks when gh can
         list them (not from tick, which has no time for the log).
@@ -79,6 +86,13 @@ flaky   List commits whose recorded CI went red and later green without a
         new commit, with the jobs and checks the red run named. Reads
         .oms/ci.jsonl only; an observation, not a verdict, and nothing is
         skipped, quarantined or re-run.
+suggest Map what is already recorded (CI ledger, PR comment packet, merge
+        observation, open blocking findings) to suggested next commands, with
+        how long each has waited against the rule's escalation line. Rules:
+        config/ci-suggestions.json. Read-only: nothing is sent, retried,
+        merged or recorded, and no network is used unless --refresh, which
+        runs the read-only `triage` to learn whether a red job is also red on
+        the base. Exit 0 suggestions, 1 nothing recorded, 2 usage.
 protection
         Report whether CI job 'gate' is a required check on the branch
         (default: the repository's default branch), from branch protection
@@ -113,6 +127,10 @@ EOF
 done
 if [ -n "$triage_sha" ] && [ "$ACTION" != triage ]; then
   echo "error: --sha is only read by triage" >&2
+  exit 2
+fi
+if [ "$ACTION" != suggest ] && [ "$suggest_json$suggest_refresh" != 00 ]; then
+  echo "error: --json and --refresh are only read by suggest" >&2
   exit 2
 fi
 # `protection` asks about the destination, so its default is the repository's
@@ -196,6 +214,16 @@ PY
   # network I/O. The next scheduled pass can retry.
   oms_try_file_lock "$marker" ci_tick_locked || true
   exit 0
+fi
+
+if [ "$ACTION" = suggest ]; then
+  # Recorded facts only; scripts/lib/ci_suggest.py holds the contract.
+  state_root="$(oms_repo_root "$PWD")"
+  suggest_args=(--harness "$ROOT" --repo "$state_root" --branch "$branch"
+    --ledger "${OMS_CI_LEDGER:-$state_root/.oms/ci.jsonl}")
+  [ "$suggest_json" -eq 0 ] || suggest_args+=(--json)
+  [ "$suggest_refresh" -eq 0 ] || suggest_args+=(--refresh)
+  exec python3 -I "$ROOT/scripts/lib/ci_suggest.py" "${suggest_args[@]}"
 fi
 
 if [ "$ACTION" = flaky ]; then

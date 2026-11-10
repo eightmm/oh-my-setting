@@ -28056,6 +28056,174 @@ EOF
   ( cd "$flaky" && OMS_GH_BIN="$flaky_bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
   grep -Fq '"conclusion": "failure"' "$flaky/.oms/ci.jsonl" || fail "an unreadable failed log must not lose the CI row"
   ! grep -Fq 'failed_jobs' "$flaky/.oms/ci.jsonl" || fail "an unreadable failed log names nothing"
+
+  # `suggest` maps recorded facts to a suggested command and a waiting age. It
+  # reads records only, and calls gh only for --refresh (the read-only triage).
+  local sg="$TMP/ci-suggest" sgbin="$TMP/ci-suggest-bin" sgout="$TMP/ci-suggest.out" sgtip sgrc
+  local sgnow="2026-11-10T01:00:00Z" sgrow
+  make_committed_repo "$sg"
+  git -C "$sg" checkout -q -b feature
+  sgtip="$(git -C "$sg" rev-parse HEAD)"
+  mkdir -p "$sgbin" "$sg/.oms"
+  cat > "$sgbin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$(dirname "$0")/calls"
+run() { printf '{"databaseId":%s,"status":"completed","conclusion":"%s","workflowName":"CI","headSha":"%s","url":"http://ci/%s"}' "$1" "$2" "$3" "$1"; }
+case "$*" in
+  "api --method GET repos/{owner}/{repo}") echo '{"default_branch":"trunk"}' ;;
+  "run list --branch feature"*) echo "[$(run 21 failure "$(cat "$(dirname "$0")/tip")")]" ;;
+  "run list --branch trunk"*) echo "[$(run 10 failure bbbb111122223333)]" ;;
+  "run view 21 --json jobs") echo '{"jobs":[{"name":"lint","conclusion":"failure"}]}' ;;
+  "run view 10 --json jobs") printf '{"jobs":[{"name":"lint","conclusion":"%s"}]}\n' "$(cat "$(dirname "$0")/base")" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$sgbin/gh"
+  printf '%s' "$sgtip" > "$sgbin/tip"
+  suggest() {  # ARGS... -> $sgout, $sgrc
+    sgrc=0
+    ( cd "$sg" && OMS_CI_SUGGEST_NOW="$sgnow" OMS_GH_BIN="$sgbin/gh" "$ROOT/scripts/ci-status.sh" suggest "$@" ) > "$sgout" 2>&1 || sgrc=$?
+  }
+  row() {  # STATUS CONCLUSION TS [EXTRA JSON]
+    printf '{"schema":1,"ts":"%s","branch":"feature","sha":"%s","status":"%s","conclusion":"%s"%s}\n' "$3" "$sgtip" "$1" "$2" "${4:-}"
+  }
+  : > "$sgbin/calls"
+  suggest
+  [ "$sgrc" -eq 1 ] || fail "nothing recorded exits 1 (rc=$sgrc): $(cat "$sgout")"
+  assert_file_contains "$sgout" "nothing is recorded to go on"
+  assert_file_contains "$sgout" "run: oms ci-status record feature"
+  # a pending run: the same row is under, then over, the 30m line
+  row in_progress "" 2026-11-10T00:45:00Z > "$sg/.oms/ci.jsonl"
+  suggest
+  assert_file_contains "$sgout" "waiting 15m, under the 30m line"
+  row in_progress "" 2026-11-10T00:00:00Z > "$sg/.oms/ci.jsonl"
+  suggest
+  assert_file_contains "$sgout" "waiting 60m, over the 30m line: tell the owner"
+  # red, base comparison not recorded
+  row completed failure 2026-11-10T00:30:00Z ',"failed_jobs":["lint"]' > "$sg/.oms/ci.jsonl"
+  suggest
+  [ "$sgrc" -eq 0 ] || fail "suggestions exit 0 (rc=$sgrc)"
+  assert_file_contains "$sgout" "ci-red: CI is red on the tip"
+  assert_file_contains "$sgout" "failed jobs: lint"
+  assert_file_contains "$sgout" "run: oms ci-status triage --sha $sgtip feature"
+  assert_file_contains "$sgout" "base comparison: unknown"
+  [ ! -s "$sgbin/calls" ] || fail "suggest without --refresh must not call gh: $(cat "$sgbin/calls")"
+  # --refresh asks the existing read-only triage; both answers
+  printf 'success' > "$sgbin/base"
+  suggest --refresh
+  assert_file_contains "$sgout" "ci-red-regression:"
+  printf 'failure' > "$sgbin/base"
+  suggest --refresh
+  assert_file_contains "$sgout" "ci-red-preexisting:"
+  assert_file_contains "$sgout" "do not block on them"
+  grep -q . "$sgbin/calls" || fail "--refresh should have called gh"
+  ! grep -Evq '^(run list|run view [0-9]+ --json jobs|run view [0-9]+ --log-failed|api --method GET repos/\{owner\}/\{repo\})' "$sgbin/calls" ||
+    fail "--refresh may only issue the read-only triage requests: $(cat "$sgbin/calls")"
+  # red then green on the same commit: re-check, and nothing stands in the way
+  { row completed failure 2026-11-10T00:10:00Z ',"failed_jobs":["lint"]'; row completed success 2026-11-10T00:20:00Z; } > "$sg/.oms/ci.jsonl"
+  suggest
+  assert_file_contains "$sgout" "ci-flaky: CI went red and then green"
+  assert_file_contains "$sgout" "run: oms ci-status flaky feature"
+  assert_file_contains "$sgout" "ready-to-land:"
+  assert_file_contains "$sgout" "run: oms land   (for the owner to run"
+  assert_file_contains "$sgout" "under the 24h line"
+  # a recorded PR without a comment packet leaves comments unknown: not ready
+  row completed success 2026-11-10T00:20:00Z ',"pr_number":12' > "$sg/.oms/ci.jsonl"
+  suggest
+  assert_file_contains "$sgout" "review comments: unknown (no packet for PR #12"
+  ! grep -q 'ready-to-land:' "$sgout" || fail "unknown comments must not read as ready"
+  # a packet: current comments are suggested, outdated ones are not
+  mkdir -p "$sg/.oms/artifacts/pr-comments"
+  printf '{"schema":1,"kind":"oms-pr-review-comments","pr":12,"read_at":"2026-11-08T01:00:00Z","pr_head":"%s","comments":[{"id":1,"state":"current"},{"id":2,"state":"outdated"}]}\n' \
+    "$sgtip" > "$sg/.oms/artifacts/pr-comments/pr12-aaaa.json"
+  suggest
+  assert_file_contains "$sgout" "review-comments-current:"
+  assert_file_contains "$sgout" "1 current of 2"
+  assert_file_contains "$sgout" "oms draft-pr --intent INTENT comments"
+  assert_file_contains "$sgout" "waiting 48h, over the 24h line: tell the owner"
+  ! grep -q 'ready-to-land:' "$sgout" || fail "a current comment stands in the way of ready"
+  sed -i.bak 's/"state":"current"/"state":"outdated"/' "$sg/.oms/artifacts/pr-comments/pr12-aaaa.json"
+  rm -f "$sg/.oms/artifacts/pr-comments/pr12-aaaa.json.bak"
+  suggest
+  ! grep -q 'review-comments-current:' "$sgout" || fail "outdated comments are not suggested"
+  assert_file_contains "$sgout" "ready-to-land:"
+  # an open blocking finding
+  mkdir -p "$sg/.oms/artifacts/review"
+  printf '{"schema":1,"kind":"review-finding","id":"f-0123456789ab","severity":"blocking","anchor":"in-diff","file":"a.sh","line":3,"summary":"unquoted variable","seat":"s1","run":"R1","ts":"2026-11-10T00:00:00Z"}\n' \
+    > "$sg/.oms/artifacts/review/_findings-R1.jsonl"
+  suggest
+  assert_file_contains "$sgout" "blocking-findings-open:"
+  assert_file_contains "$sgout" "run: oms peer-review findings list --status open"
+  ! grep -q 'ready-to-land:' "$sgout" || fail "an open blocking finding stands in the way of ready"
+  # a merge whose tree differs from the reviewed tree
+  mkdir -p "$sg/.oms/artifacts/pr-merged"
+  printf '{"schema":1,"kind":"oms-pr-merge-observation","branch":"feature","pr":12,"tree":"changed-after-review","reviewed_tree":"1111111111111111111111111111111111111111","merged_tree":"2222222222222222222222222222222222222222","observed_at":"2026-11-10T00:50:00Z"}\n' \
+    > "$sg/.oms/artifacts/pr-merged/observations.jsonl"
+  suggest
+  assert_file_contains "$sgout" "merged-tree-changed:"
+  assert_file_contains "$sgout" "run: git diff --stat 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222"
+  assert_file_contains "$sgout" "nothing was sent to an agent, retried, merged or recorded"
+  suggest --json
+  python3 -I -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["schema"]==1 and d["kind"]=="oms-ci-suggest" and d["branch"]=="feature", d
+assert {s["rule"] for s in d["suggestions"]}>={"blocking-findings-open","merged-tree-changed"}, d' "$sgout" ||
+    fail "suggest --json should be schema 1 kind oms-ci-suggest: $(cat "$sgout")"
+  ( cd "$sg" && "$ROOT/scripts/ci-status.sh" triage --json ) >/dev/null 2>&1 && fail "--json outside suggest must be refused"
+
+  # Every field a rule names must exist in a record of its kind, so a renamed
+  # field breaks here instead of silently silencing a rule. The ledger row is
+  # a real one written by `record`; comments, merged and findings are fixtures
+  # whose field names must also appear in the writing source (findings: the
+  # `findings list --json` output the rule reads).
+  local fld="$TMP/ci-suggest-fields" fldbin="$TMP/ci-suggest-fields-bin"
+  make_committed_repo "$fld"
+  mkdir -p "$fldbin"
+  cp "$flaky_bin/gh" "$fldbin/gh"
+  printf 'failure' > "$fldbin/conclusion"
+  ( cd "$fld" && OMS_GH_BIN="$fldbin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
+  sgrow="$(tail -n 1 "$fld/.oms/ci.jsonl")"
+  ( cd "$sg" && OMS_GH_BIN="$sgbin/gh" "$ROOT/scripts/ci-status.sh" triage --sha "$sgtip" feature ) > "$TMP/ci-suggest.triage" 2>&1 || true
+  python3 -I "$ROOT/scripts/lib/review_findings.py" list --json --repo "$sg" \
+    --artifact-dir "$sg/.oms/artifacts/review" > "$TMP/ci-suggest.findings"
+  python3 -I - "$ROOT" "$sgrow" "$sg/.oms/artifacts/pr-comments/pr12-aaaa.json" \
+    "$sg/.oms/artifacts/pr-merged/observations.jsonl" "$TMP/ci-suggest.findings" \
+    "$TMP/ci-suggest.triage" <<'PY' || fail "a rule names a field its record does not have"
+import json, os, re, sys
+root, ci_row, comments, merged, findings, triage = sys.argv[1:]
+rules = json.load(open(os.path.join(root, "config/ci-suggestions.json")))["rules"]
+
+def keys(value, out):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out.add(k)
+            keys(v, out)
+    elif isinstance(value, list):
+        for v in value:
+            keys(v, out)
+    return out
+
+def jsonl(path):
+    return [json.loads(line) for line in open(path) if line.strip()]
+
+have = {"ci": keys(json.loads(ci_row), set()), "comments": keys(json.load(open(comments)), set()),
+        "merged": keys(jsonl(merged), set()), "findings": keys(json.load(open(findings)), set())}
+text = open(triage).read()
+have["triage"] = {m for m in ("job", "base") if re.search(r"^(- )?\s*%s:" % m, text, re.M)}
+writers = {"comments": "scripts/lib/draft_pr_followup.py", "merged": "scripts/lib/draft_pr_followup.py",
+           "findings": "scripts/lib/review_findings.py"}
+bad = []
+for rule in rules:
+    kind = rule["record"]
+    source = open(os.path.join(root, writers[kind])).read() if kind in writers else ""
+    for field in rule["fields"]:
+        if field not in have[kind]:
+            bad.append((rule["id"], field, "missing from the record"))
+        if kind in writers and '"%s"' % field not in source:
+            bad.append((rule["id"], field, "not written by " + writers[kind]))
+print(bad) if bad else None
+sys.exit(1 if bad else 0)
+PY
 }
 
 test_delegation_liveness_in_state() {
