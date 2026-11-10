@@ -72,6 +72,7 @@ oms panel --repo . --host tmux --launch claude
 oms panel --repo . --reopen                # restore only a missing tmux board
 oms panel --repo . --json                  # read-only status and role policy
 oms panel --repo . --routes                # read-only role policy
+oms panel --repo . --recommend debug --diff main..HEAD --failed 2   # read-only tier/effort advice
 oms panel --repo . --providers --json      # registered CLI peers; no provider execution
 oms panel --repo . --watch --owner claude  # read-only activity sidebar
 oms panel --repo . --watch --view compact --attention-only
@@ -1496,6 +1497,20 @@ prints each role's tier and chosen candidate, plus
 these kinds and the write-capable roles. Dispatch and council owner defaults use
 `OMS_AGENT`, then Claude's `CLAUDECODE`/`CLAUDE_CODE_ENTRYPOINT` markers, then
 Codex's `CODEX_SANDBOX` marker, otherwise Codex; `--owner` overrides detection.
+
+`oms panel --recommend KIND` (explore, mechanical-edit, implement, debug, design,
+review, summarize) prints the first row of
+[`config/task-routing-rules.json`](../config/task-routing-rules.json) that matches
+the kind, a risk (`low`, `medium`, `high`) and a size (`small`, `medium`, `large`),
+with its tier, effort and reason; `--json` prints the same. Give `--diff RANGE` to
+measure risk (the review gate's risk-path selectors) and size (lines and files,
+bucket limits in the file), or give both `--risk` and `--size`. It launches nothing and
+keeps an explicit `--model`, `--reasoning-effort` or `--workload` you pass. With
+`--failed N` (N of 2 or more) it adds a suggestion: raise effort one step, and once
+effort is already `high`, raise the tier; `deep` is the ceiling because frontier is
+reserved for security audits. The table is checked by `python3 scripts/lib/route_rules.py`
+(unknown keys, unreachable rows, missing default row); the thresholds are starting
+points, not measured. Run work you can verify at low effort and re-run only the failures higher.
 
 
 #### Main workflow and briefs

@@ -134,6 +134,13 @@ def main(argv=None):
     parser.add_argument("--view", choices=("auto", "summary", "compact", "detail", "graph", "tree"), help="activity density for the menu or --watch")
     parser.add_argument("--attention-only", action="store_true", help="show only calls awaiting action in the menu or --watch")
     parser.add_argument("--routes", action="store_true", help="show the panel role policy without calling models")
+    parser.add_argument("--recommend", metavar="KIND",
+                        help="read-only tier/effort advice for a task kind (explore, mechanical-edit, implement, debug, design, review, summarize); "
+                             "needs --diff RANGE or --risk with --size; --failed N adds an escalation suggestion; --json supported")
+    parser.add_argument("--risk", choices=("low", "medium", "high"), help="--recommend: risk class when no --diff is given")
+    parser.add_argument("--size", choices=("small", "medium", "large"), help="--recommend: size bucket when no --diff is given")
+    parser.add_argument("--diff", metavar="RANGE", help="--recommend: git diff range (for example main..HEAD) to measure risk and size")
+    parser.add_argument("--failed", type=int, metavar="N", help="--recommend: failed attempts so far; 2 or more prints an escalation suggestion")
     parser.add_argument("--task", help="task for the native main (requires --launch)")
     parser.add_argument("--dispatch", choices=tuple(KINDS), metavar="ROLE", help="run one bounded role task: " + ", ".join(KINDS))
     parser.add_argument("--main", help="assert the dispatch caller's own main participant (never select another main)")
@@ -265,8 +272,13 @@ def main(argv=None):
         parser.error("--alias requires --dispatch")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
-                                     args.chats, args.open_chat, args.health, args.mail, args.metrics)) > 1:
+                                     args.chats, args.open_chat, args.health, args.mail, args.metrics, args.recommend)) > 1:
         parser.error("choose one panel operation")
+    if args.recommend:
+        import route_rules
+        return route_rules.cli(args, parser.error)
+    if args.risk or args.size or args.diff or args.failed is not None:
+        parser.error("--risk, --size, --diff and --failed require --recommend")
     if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.accept or args.finalize):
         parser.error("--json is only available for panel state or results")
     if args.open_chat and args.json and not args.dry_run:
