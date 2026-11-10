@@ -5,6 +5,7 @@ Distinct from docs/EXPERIMENTS.jsonl, the machine ledger written by run-ledger.
 
 Record a narrative only when it adds interpretation beyond the existing ledger.
 Each entry links the run ID, hypothesis, config diff, result and conclusion.
+Numbers used in a claim come only from a script run recorded in the ledger, not from a notebook cell.
 
 ---
 

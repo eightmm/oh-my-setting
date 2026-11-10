@@ -487,6 +487,11 @@ oms project-doctor .
 oms project-private --check
 ```
 
+In a git project, `project-doctor` also reads each tracked `.ipynb` (at most 50,
+plain JSON, read-only) and warns when it stores 1 KiB or more of cell outputs or
+its `execution_count` values do not increase in file order. It never strips or
+rewrites a notebook.
+
 Council and panel workers need no `PROJECT.md`; autopilot needs a confirmed
 `PROJECT.md`; goal-drive needs an agent-plan with verify commands and a clean tree. `oms
 init` suggests verification from existing repository files (check.sh, pytest, npm, make,

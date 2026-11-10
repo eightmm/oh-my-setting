@@ -1051,6 +1051,31 @@ test_project_doctor_warns_structure_drift() {
   if contains "$out" 'link.ckpt'; then
     fail "tracked symlink must not be measured by its target size"
   fi
+
+  # Notebook hygiene: a tracked notebook with stored outputs and a reversed
+  # execution_count is reported; a clean one and an untracked one are not.
+  local pad
+  pad="$(printf 'x%.0s' $(seq 1 1500))"
+  mkdir -p "$project/notebooks"
+  printf '{"cells":[{"cell_type":"code","execution_count":3,"source":["a=1"],"outputs":[{"output_type":"stream","text":["%s"]}]},{"cell_type":"code","execution_count":2,"source":["b=1"],"outputs":[]}],"nbformat":4}\n' \
+    "$pad" > "$project/notebooks/dirty.ipynb"
+  printf '{"cells":[{"cell_type":"code","execution_count":null,"source":["a=1"],"outputs":[]}],"nbformat":4}\n' \
+    > "$project/notebooks/clean.ipynb"
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "doctor should still warn-pass"
+  if contains "$out" 'dirty.ipynb stores outputs'; then
+    fail "untracked notebook must not be inspected by the hygiene check"
+  fi
+  git -C "$project" add -f notebooks/dirty.ipynb notebooks/clean.ipynb >/dev/null
+  out="$("$ROOT/scripts/project-doctor.sh" "$project")" || fail "notebook hygiene must warn, not fail"
+  contains "$out" 'notebooks/dirty.ipynb stores outputs in 1 code cell(s)' ||
+    fail "missing stored-output notebook warning: $out"
+  contains "$out" 'notebooks/dirty.ipynb ran out of order' ||
+    fail "missing execution_count reversal warning: $out"
+  if contains "$out" 'clean.ipynb stores' || contains "$out" 'clean.ipynb ran'; then
+    fail "clean notebook must not be flagged: $out"
+  fi
+  grep -Fq "$pad" "$project/notebooks/dirty.ipynb" ||
+    fail "hygiene check must never rewrite a notebook"
 }
 
 test_project_doctor_warns_unregistered_experiments() {
