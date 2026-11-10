@@ -21733,6 +21733,95 @@ test_oms_run_diff_compares_capsules() {
   if ( cd "$d" && OMS_RUN_INDEX="$spine" "$SH" diff "$a" no-such-run >/dev/null 2>&1 ); then
     fail "diff with an unknown run should fail"
   fi
+
+  # Claims tie a number a report states to the capsule that recorded it, and
+  # figure records tie an image to its script and input runs. Both only read:
+  # nothing is re-run. Most checks here pass --no-verify to stay on the number
+  # comparison; the capsule comparison has its own case at the end.
+  local claims="$d/.oms/claims.jsonl" figures="$d/.oms/figures.jsonl" rc=0
+  run_prov() { ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" "$SH" "$@" ); }
+  run_prov claims add --metric auc --value 0.82 --run "$b" --where 'paper/results.tex:42' --id tab1-auc \
+    >/dev/null 2>"$d/claim-add.err" || fail "claims add failed: $(cat "$d/claim-add.err")"
+  assert_file_contains "$d/claim-add.err" "claim tab1-auc: auc=0.82 matches the recorded 0.82"
+  run_prov claims add --metric auc --value 0.75 --tolerance 0.02 --run "$a" --id base-auc >/dev/null 2>&1 ||
+    fail "claims add with a tolerance failed"
+  [ "$(wc -l < "$claims" | tr -d ' ')" = 2 ] || fail "each claim is one appended row"
+  out="$(run_prov claims check --no-verify)" || fail "claims inside tolerance must check clean: $out"
+  contains "$out" "match    tab1-auc  auc: claimed 0.82, recorded 0.82 (tolerance 0)" || fail "claims check missing the exact match: $out"
+  contains "$out" "@ paper/results.tex:42" || fail "claims check dropped where the number is stated"
+  contains "$out" "match    base-auc  auc: claimed 0.75, recorded 0.74 (tolerance 0.02)" || fail "tolerance not applied: $out"
+  contains "$out" "note: single seed" || fail "a one-seed run must be noted, not ranked: $out"
+  contains "$out" "nothing was re-run and a match is not a reproduction" || fail "claims check must not read as a reproduction"
+  # A number the capsule did not record is a mismatch and fails the check; re-recording the id corrects it.
+  run_prov claims add --metric auc --value 0.9 --run "$b" --id tab1-auc >/dev/null 2>"$d/claim-add.err" ||
+    fail "a claim that disagrees is still recorded so check can report it"
+  assert_file_contains "$d/claim-add.err" "DOES NOT MATCH"
+  rc=0; out="$(run_prov claims check --no-verify)" || rc=$?
+  [ "$rc" = 1 ] || fail "a mismatched claim must exit 1, got $rc"
+  contains "$out" "mismatch tab1-auc  auc: claimed 0.9, recorded 0.82" || fail "mismatch not reported: $out"
+  contains "$out" "1 match, 1 mismatch" || fail "claims summary wrong: $out"
+  out="$(run_prov claims check --no-verify --json)" || true
+  contains "$out" '"kind": "oms-run-claims-check"' || fail "claims check --json missing its kind"
+  run_prov claims add --metric auc --value 0.82 --run "$b" --id tab1-auc >/dev/null 2>&1 || fail "correcting a claim failed"
+  run_prov claims check --no-verify tab1-auc >/dev/null || fail "the corrected claim must check clean"
+  # Refusals write nothing: unknown run, a metric the capsule lacks, a non-number, a bool metric.
+  rc=0; run_prov claims add --metric auc --value 0.5 --run no-such-run >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unknown run must be refused"
+  rc=0; run_prov claims add --metric f1 --value 0.5 --run "$b" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a metric the capsule did not record must be refused"
+  rc=0; run_prov claims add --metric ok --value 1 --run "$b" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a boolean metric is not a number to claim"
+  rc=0; run_prov claims add --metric auc --value high --run "$b" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a non-numeric value must be refused"
+  [ "$(wc -l < "$claims" | tr -d ' ')" = 4 ] || fail "a refused claim must not be written"
+  # A capsule that is gone makes its claim missing, never a silent pass.
+  mv "$d/.oms/runs" "$d/.oms/runs.away"
+  rc=0; out="$(run_prov claims check --no-verify 2>&1)" || rc=$?
+  mv "$d/.oms/runs.away" "$d/.oms/runs"
+  [ "$rc" = 1 ] || fail "claims whose capsules are gone must exit 1"
+  contains "$out" "missing  tab1-auc" || fail "missing capsule not reported: $out"
+
+  # Figures: digests of the output and the script, the input runs, and a command kept as text.
+  mkdir -p "$d/figs" "$d/plots"
+  printf 'png-bytes-v1\n' > "$d/figs/roc.png"
+  printf 'print("plot")\n' > "$d/plots/roc.py"
+  printf 'touch "%s/figure-command-ran"\n' "$d" > "$d/regen.sh"
+  run_prov figure record --output figs/roc.png --script plots/roc.py --run "$a" --run "$b" \
+    --command "sh regen.sh" --id fig-roc >/dev/null 2>"$d/fig.err" || fail "figure record failed: $(cat "$d/fig.err")"
+  assert_file_contains "$d/fig.err" "figure fig-roc: recorded figs/roc.png from plots/roc.py (2 input run(s)); nothing was run"
+  out="$(run_prov figure verify)" || fail "an untouched figure must verify: $out"
+  contains "$out" "current  fig-roc  figs/roc.png  <- plots/roc.py  (2 input run(s))" || fail "figure verify line wrong: $out"
+  printf 'print("plot v2")\n' > "$d/plots/roc.py"
+  rc=0; out="$(run_prov figure verify)" || rc=$?
+  [ "$rc" = 1 ] || fail "a figure whose script changed must exit 1"
+  contains "$out" "stale    fig-roc" || fail "stale figure not reported: $out"
+  contains "$out" "script changed since it was recorded: plots/roc.py" || fail "stale reason missing: $out"
+  contains "$out" "recorded command (not run): sh regen.sh" || fail "the recorded command must be shown, not run: $out"
+  [ ! -e "$d/figure-command-ran" ] || fail "figure verify must never run the recorded command"
+  rm -f "$d/figs/roc.png"
+  rc=0; out="$(run_prov figure verify fig-roc --json)" || rc=$?
+  [ "$rc" = 1 ] || fail "a missing figure output must exit 1"
+  contains "$out" "output is gone or unreadable: figs/roc.png" || fail "missing output not reported: $out"
+  # Paths outside the repository and unknown input runs are refused; nothing is written.
+  printf 'x\n' > "$TMP/outside.png"
+  rc=0; run_prov figure record --output "$TMP/outside.png" --script plots/roc.py >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an output outside the repository must be refused"
+  printf 'png\n' > "$d/figs/roc.png"
+  rc=0; run_prov figure record --output figs/roc.png --script plots/roc.py --run no-such-run >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unknown input run must be refused"
+  [ "$(wc -l < "$figures" | tr -d ' ')" = 1 ] || fail "a refused figure must not be written"
+  # With the capsule comparison on, a claim whose run still matches the tree is clean; once the tree
+  # moves on the number still matches but is stale, which only --strict turns into a failure.
+  out="$(run_prov claims check)" || fail "claims on an unchanged tree must check clean: $out"
+  ! contains "$out" "stale" || fail "an unchanged tree is not stale: $out"
+  git -C "$d" commit --allow-empty -m later >/dev/null
+  out="$(run_prov claims check)" || fail "a stale capsule alone must not fail the check: $out"
+  contains "$out" "note: stale: the tree no longer matches the run's capsule" || fail "stale capsule not noted: $out"
+  contains "$out" "2 match, 2 stale" || fail "stale count missing: $out"
+  rc=0; run_prov claims check --strict >/dev/null || rc=$?
+  [ "$rc" = 1 ] || fail "claims check --strict must fail on a stale capsule"
+  # The records are ordinary .oms JSONL: the spine's validator reads them.
+  run_prov validate >/dev/null 2>&1 || fail "claims and figures rows must pass run validate"
 }
 
 test_run_ledger_top_ranks_metrics() {
@@ -42490,6 +42579,7 @@ generate-slurm-reference
 import-agent-result
 install-autoupdate
 run-capsule
+run-claims
 uninstall-autoupdate
 write-machine-snapshot
 telemetry-hook

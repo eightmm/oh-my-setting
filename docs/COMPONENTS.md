@@ -1654,6 +1654,21 @@ ML/Slurm workflows use local-first experiment controls:
   `verify` and `oms run diff` report conda and module differences as
   information; only commit and uncommitted-diff drift fail `verify`.
   `OMS_RUN_CAPSULE_CONDA_TIMEOUT` (1–600 seconds, default 30) bounds the export.
+- `oms run claims` and `oms run figure` for where a report's numbers and
+  figures came from. `claims add --metric KEY --value N --run ID [--tolerance T]
+  [--where paper/results.tex:42]` records that a stated number is that metric
+  of that run's capsule; an unknown run or a metric the capsule did not record
+  is refused. `claims check` reports each claim as `match`, `mismatch` (outside
+  the absolute tolerance) or `missing`, notes single-seed, failed and dirty
+  runs, and marks a claim `stale` when `run capsule verify` no longer matches
+  the tree; it exits 1 on a mismatch or missing claim, and on a stale one only
+  with `--strict`. `figure record --output FILE --script FILE [--run ID]...
+  [--command TEXT]` stores both files' sha256, the input runs and the command
+  as text; `figure verify` reports `stale` when either file changed or an
+  input capsule is gone and prints the recorded command without running it.
+  Records are local append-only rows in `.oms/claims.jsonl` and
+  `.oms/figures.jsonl`. Nothing is re-run: a match says the report still
+  agrees with what was recorded, not that the result reproduces.
 - `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
   studies; `oms runtime experiment launch` pre-registers a single command
   through the same run ledger (replacing `research-runner`).
