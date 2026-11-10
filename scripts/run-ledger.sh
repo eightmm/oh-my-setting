@@ -85,6 +85,11 @@ Metric contract (optional, git-tracked beside the ledger):
    "eval_command": "python eval.py", "eval_code": ["eval.py"]}}}
 Each finished row records, per declared metric, those fields and a digest
 that also covers the eval_code files' contents. Rows without it keep working.
+An optional "splits": {"test": {"role": "final"}, "val": {"role": "selection"}}
+block marks a split's role. `top` then adds an advisory on stderr: how many
+recorded runs reported a metric measured on a final split (per seed group
+where present) and, when more than one variant did, "test split evaluated N
+times across M variants". The roles are not part of any digest and gate nothing.
 
 Each row records its gate decision: "passed", "skipped" (with reason),
 "recorded" (command is the check itself, or already ran), or "none"
@@ -214,6 +219,11 @@ try:
 except contract_lib.ContractError as error:
     sys.stderr.write("error: metric contract unreadable (%s); fix it or move it aside\n" % error)
     sys.exit(2)
+try:  # advisory only: never changes the ranking, the output or the exit code
+    for note in contract_lib.final_split_report(sys.argv[1], contract_lib.load_split_roles(contract_lib.contract_path(sys.argv[1]))):
+        sys.stderr.write("top: " + note + "\n")
+except contract_lib.ContractError as error:
+    sys.stderr.write("warning: split roles ignored (%s)\n" % error)
 current = contract_lib.metric_record(declared, os.environ["OMS_RL_ROOT"]) if declared else None
 if declared and direction and direction != declared["direction"]:
     sys.stderr.write("warning: the metric contract declares %s for %s; ranking --%s as asked\n"

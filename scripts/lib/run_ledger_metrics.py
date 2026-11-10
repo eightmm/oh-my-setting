@@ -201,3 +201,83 @@ def group_summaries(rows, metric):
                     statistics.stdev(values) if len(values) > 1 else None,
                     _bootstrap_ci(values, group + metric) if len(values) > 1 else None, sorted(by_seed)))
     return out, loose
+
+
+SPLIT_ROLES = ("selection", "final")
+
+
+def load_split_roles(path):
+    """{split: role} from the contract's optional top-level "splits" block; {} when there is none.
+    The block is advisory: it never enters a metric's digest, so adding it keeps every recorded row comparable."""
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise ContractError(str(error))
+    splits = doc.get("splits") if isinstance(doc, dict) else None
+    if splits is None:
+        return {}
+    if not isinstance(splits, dict) or len(splits) > MAX_METRICS:
+        raise ContractError('"splits" must be an object of at most %d splits' % MAX_METRICS)
+    roles = {}
+    for name, spec in splits.items():
+        role = spec.get("role") if isinstance(spec, dict) else None
+        if role not in SPLIT_ROLES:
+            raise ContractError('split %s: role must be "selection" or "final"' % _text(name, name, "split name"))
+        roles[name] = role
+    return roles
+
+
+def final_split_report(ledger, roles, show=10):
+    """Advisory lines on how often runs reported a metric measured on a `final` split. [] without such a split.
+    A run counts once however many final-split metrics it reported. A variant is the run's seed group, else the
+    command at its commit and diff, so reruns of one configuration are not several variants. The split a row
+    measured is the one it recorded; the role is today's contract's."""
+    final = {name for name, role in roles.items() if role == "final"}
+    if not final:
+        return []
+    runs, variants, by_group, names = 0, set(), {}, set()
+    try:
+        handle = open(ledger, encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    with handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            metrics = row.get("metrics") if isinstance(row, dict) else None
+            recorded = row.get("metric_contract") if isinstance(row, dict) else None
+            if not isinstance(metrics, dict) or not isinstance(recorded, dict):
+                continue
+            hit = {recorded[key].get("split") for key, value in metrics.items()
+                   if numeric(value) and isinstance(recorded.get(key), dict)
+                   and isinstance(recorded[key].get("split"), str)} & final
+            if not hit:
+                continue
+            runs += 1
+            names |= hit
+            group = row.get("group")
+            if isinstance(group, str) and group:
+                by_group[group] = by_group.get(group, 0) + 1
+                variants.add(group)
+            else:
+                variants.add(hashlib.sha256(json.dumps([row.get("cmd"), row.get("git_sha"),
+                                                         row.get("dirty_hash")]).encode("utf-8")).hexdigest()[:12])
+    if not runs:
+        return []
+    label = ", ".join(sorted(names))
+    lines = ["advisory: %d recorded run(s) reported a metric on the final split %s" % (runs, label)]
+    for group in sorted(by_group)[:show]:
+        lines.append("  seed group %s: %d run(s)" % (group[:60], by_group[group]))
+    if len(by_group) > show:
+        lines.append("  ... %d more seed group(s)" % (len(by_group) - show))
+    if sum(by_group.values()) < runs:
+        lines.append("  no seed group: %d run(s)" % (runs - sum(by_group.values())))
+    if len(variants) > 1:
+        lines.append("advisory: %s %s evaluated %d times across %d variants"
+                     % (label, "split" if len(names) == 1 else "splits", runs, len(variants)))
+    return lines
