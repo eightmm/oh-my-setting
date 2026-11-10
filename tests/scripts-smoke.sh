@@ -21072,7 +21072,7 @@ test_check_affected_selects_python_test_files() {
   mkdir -p "$repo/scripts/lib" "$repo/tests"
   printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
   cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
-  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/critical-paths.sh" "$ROOT/scripts/lib/file-lock.sh" \
     "$ROOT/scripts/lib/check-parallel.sh" "$repo/scripts/lib/"
   cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
   cat > "$repo/scripts/graph.sh" <<'SH'
@@ -21155,7 +21155,7 @@ test_check_ci_parity_panel_dispatch_runs_full_operator_suite() {
   mkdir -p "$repo/scripts/lib" "$repo/tests/operator" "$repo/bin"
   printf '.oms/\n__pycache__/\n' > "$repo/.gitignore"
   cp "$ROOT/scripts/check.sh" "$repo/scripts/check.sh"
-  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/critical-paths.sh" "$ROOT/scripts/lib/file-lock.sh" \
     "$ROOT/scripts/lib/check-parallel.sh" "$repo/scripts/lib/"
   cp -R "$ROOT/scripts/lib/oms_runtime" "$repo/scripts/lib/"
   cat > "$repo/scripts/graph.sh" <<'SH'

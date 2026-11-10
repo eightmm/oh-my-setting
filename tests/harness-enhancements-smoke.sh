@@ -966,7 +966,7 @@ test_gate_fingerprints_full_oms_state() {
   mkdir -p "$gate/scripts/lib" "$gate/tests"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
-  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/critical-paths.sh" "$ROOT/scripts/lib/file-lock.sh" \
     "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/check-parallel.sh" "$gate/scripts/lib/"
   printf '.oms/\n' > "$gate/.gitignore"
   cat > "$gate/scripts/graph.sh" <<'EOF'
@@ -1221,7 +1221,7 @@ test_invariants_gate_checks_committed_staged_and_worktree_sources() {
 
   mkdir -p "$gate/scripts/lib" "$gate/tests"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
-  cp "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/scripts/lib/check-maintenance.sh" \
+  cp "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/critical-paths.sh" \
     "$ROOT/scripts/lib/file-lock.sh" "$ROOT/scripts/lib/poll.sh" \
     "$ROOT/scripts/lib/provider-registry.sh" "$gate/scripts/lib/"
   cat > "$gate/scripts/check-python.sh" <<'EOF'
@@ -1291,7 +1291,7 @@ test_affected_gate_runs_positive_evidence_and_fails_open() {
   mkdir -p "$gate/scripts/lib" "$gate/tests" "$gate/lib"
   cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
   cp "$ROOT/scripts/lib/oms-state-inventory.py" "$gate/scripts/lib/oms-state-inventory.py"
-  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/file-lock.sh" \
+  cp "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/critical-paths.sh" "$ROOT/scripts/lib/file-lock.sh" \
     "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/provider-registry.sh" \
     "$ROOT/scripts/lib/check-parallel.sh" "$gate/scripts/lib/"
   cp "$ROOT/tests/run-smoke-shard.sh" "$gate/tests/run-smoke-shard.sh"
