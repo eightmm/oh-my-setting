@@ -869,7 +869,9 @@ unknown models and fallback routes cannot justify early stopping. A stop remains
 a failure. `OMS_REPAIR_REPLAY=0` retains the cap and records outcomes without
 reading history; `oms artifact-index telemetry` reports recorded/delegation
 counts, selections and stops, not a measured token or wall-clock saving.
-Telemetry also reports complete provider usage details by recorded route, with input, cached and output subtotals; incomplete reports are omitted.
+Telemetry also reports complete provider usage details by recorded route, with input, cached and output subtotals; incomplete reports are omitted, and so is a
+resumed session's running total (counted on a `cumulative:` line; `--json` carries
+the count as `cumulative_reports_excluded` per route and under `usage`).
 `oms artifact-index telemetry --by day|model|provider|task` groups the same routed
 operations and prints, per group, calls, provider-reported tokens, complete
 input/cached/output reports and provider-reported cost. `-` means no call in the

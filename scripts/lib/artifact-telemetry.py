@@ -319,6 +319,7 @@ def empty_route(provider: str, model_class: str, selected_model: str) -> dict:
         "token_reports": 0,
         "provider_reported_tokens": 0,
         "usage_detail": {"reports": 0, "input_tokens": 0, "cache_read_tokens": 0, "output_tokens": 0},
+        "cumulative_reports_excluded": 0,
         "duration_reports": 0,
         "wall_seconds": 0.0,
         "verified_success": 0,
@@ -603,7 +604,11 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
 
         detail = artifact_usage_metrics(repo, row)
         keys = ("input_tokens", "cache_read_tokens", "output_tokens")
-        if detail and all(integer(detail.get(key)) is not None for key in keys):
+        if detail and detail.get("session_cumulative") is True:
+            # Same rule as the grouped view: a resumed session's running total
+            # would count the earlier calls' tokens twice.
+            route["cumulative_reports_excluded"] += 1
+        elif detail and all(integer(detail.get(key)) is not None for key in keys):
             route["usage_detail"]["reports"] += 1
             for key in keys:
                 route["usage_detail"][key] += detail[key]
@@ -692,6 +697,7 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
                 "total": sum(prompt_byte_values),
                 "basis": "recorded primary prompt only; excludes provider-added context, retries and repair prompts; not tokens",
             },
+            "cumulative_reports_excluded": sum(route["cumulative_reports_excluded"] for route in routes.values()),
             "provider_reported_tokens": {
                 "reports": len(token_values),
                 "total": sum(token_values),
@@ -840,6 +846,9 @@ def emit_human(report: dict) -> None:
                 route["fallback_used"],
             )
         )
+    if usage["cumulative_reports_excluded"]:
+        print("cumulative: %d resumed-session report(s) carry a running total and are left out of the "
+              "tokens lines" % usage["cumulative_reports_excluded"])
 
 
 def reported(total, reports: int, calls: int) -> str:
