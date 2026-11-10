@@ -41,10 +41,13 @@ Options:
   --file PATH     Digest this file instead of running a command.
   --exit-code N   With --file: the exit code to report. Default: unknown.
 
-Raw captures live in .oms/artifacts/output-digest/ (mode 600); the newest 50
-are kept. A harness child keeps none. If the shown lines look like they carry
-a secret, or the scan cannot run, the lines are withheld and only the counts,
-the exit code and the raw path are printed.
+Captures live in .oms/artifacts/output-digest/ (mode 600); the newest 50
+are kept. A harness child keeps none. Before the capture is kept, every line
+the secret scan flags is replaced by [oms-redacted:CLASS] (CLASS names the
+pattern class, never the value); the exit code and the sha256 describe that
+stored file. If the scan cannot run the stored file is one marker line. If the
+shown lines still look like they carry a secret, they are withheld and only the
+counts, the exit code and the path are printed.
 
 Exit: the command's exit code; 125 when this tool itself failed in run mode;
 with --file, 0 on success and 2 on a bad request.
@@ -163,11 +166,18 @@ status=0
 duration_s=$(( $(date +%s) - start_s ))
 
 if [ "$STORE" -eq 1 ]; then
-  # The raw file is local and stays whole; say so when it looks sensitive.
+  # Store-time redaction: lines the shared secret scan flags are replaced by
+  # [oms-redacted:CLASS] before anything stays under .oms. Fail closed when the
+  # scan cannot run: the stored file becomes one marker line.
   raw_rc=0
-  agent_memory_file_secret_status "$capture" 2>/dev/null || raw_rc=$?
-  [ "$raw_rc" -eq 1 ] ||
-    echo "output-digest: note: the raw capture may carry a secret; it is local (mode 600) under .oms" >&2
+  redacted_lines="$(agent_memory_redact_secret_lines "$capture" 2>/dev/null)" || raw_rc=$?
+  case "$raw_rc" in
+    0) echo "output-digest: note: $redacted_lines line(s) matching the secret scan were replaced by [oms-redacted:CLASS] markers in the stored capture" >&2 ;;
+    1) ;;
+    *)
+      printf '[oms-redacted:scan-failed]\n' > "$capture"
+      echo "output-digest: note: the secret scan could not run; the stored capture was replaced by a marker" >&2 ;;
+  esac
   # Bounded retention: only this tool's own captures, oldest first.
   extra=0
   while IFS= read -r old; do

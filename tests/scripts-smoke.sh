@@ -1711,10 +1711,28 @@ test_output_digest_keeps_failures_and_exit_code() {
   out="$(VALUE="abcdEFGH1234abcdEFGH1234abcdEFGH1234abcd" NAME="$name" "$ROOT/scripts/output-digest.sh" -- \
     sh -c 'echo "export $NAME=$VALUE"; exit 1' 2>"$dir/secret.err")" || rc=$?
   [ "$rc" -eq 1 ] || fail "a withheld digest must keep the exit code (got $rc)"
-  contains "$out" 'shown: nothing; the lines look like they carry a secret' || fail "secret-looking lines should be withheld: $out"
   contains "$out" 'abcdEFGH1234' && fail "the secret-looking value must not be printed"
-  contains "$out" 'raw: .oms/artifacts/output-digest/' || fail "a withheld digest still names the raw file"
-  assert_file_contains "$dir/secret.err" "the raw capture may carry a secret"
+  contains "$out" 'raw: .oms/artifacts/output-digest/' || fail "a redacted digest still names the stored file"
+  assert_file_contains "$dir/secret.err" "replaced by [oms-redacted:CLASS] markers"
+
+  # Store-time redaction: the stored file carries a marker naming the class, never the value;
+  # other lines and the line count survive; a key block collapses; the result scans clean.
+  local ghtok pem_begin
+  ghtok="gh""p_$(printf 'a%.0s' $(seq 1 36))"
+  pem_begin="-----BE""GIN PRIVATE KEY-----"
+  rc=0
+  out="$(NAME="$name" GHT="$ghtok" PEMB="$pem_begin" "$ROOT/scripts/output-digest.sh" -- sh -c '
+    echo before; echo "export $NAME=abcdEFGH1234abcdEFGH1234abcdEFGH1234abcd"
+    echo "clone with $GHT now"; echo "$PEMB"; echo QUJDREVGR0hJSktMTU5PUA==; echo "-----END PRIVATE KEY-----"; echo after
+    exit 4' 2>"$dir/redact.err")" || rc=$?
+  [ "$rc" -eq 4 ] || fail "redaction must keep the command's exit code (got $rc)"
+  raw="$(printf '%s\n' "$out" | sed -n 's/^raw: \([^ ]*\)  sha256=.*/\1/p')"
+  [ "$(cat "$raw")" = "$(printf 'before\n[oms-redacted:token-assignment]\n[oms-redacted:github-token]\n[oms-redacted:private-key]\nafter')" ] ||
+    fail "the stored capture should hold markers in place of flagged lines: $(cat "$raw")"
+  grep -q 'abcdEFGH1234\|aaaaaaaaaaaa\|QUJDREVG' "$raw" && fail "no secret value may stay in the stored capture"
+  bash -c ". '$ROOT/scripts/lib/agent-memory-common.sh'; agent_memory_file_secret_status '$raw'" &&
+    fail "the redacted capture must scan clean"
+  assert_file_contains "$dir/redact.err" "3 line(s)"
 
   # --no-store keeps nothing; --file digests an existing capture and runs nothing; a harness child keeps none.
   rm -rf .oms
