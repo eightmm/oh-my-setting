@@ -532,6 +532,17 @@ skills are named `oms-*` so they cannot collide with your own skills in the
 shared skill roots. Newly forged project skills are also `oms-*`; stored legacy
 names remain readable and are not renamed automatically.
 
+`oms skill-doctor` ends with an advisory listing budget: per CLI, how many
+skills are installed and how long their descriptions are in total, against
+`OMS_SKILL_LISTING_CHARS` (default 8000 characters, the fallback Codex
+documents for its initial skill list; an OMS budget, not a provider limit
+OMS measured). It also names a Claude skill whose description plus
+`when_to_use` passes the 1,536 characters Claude Code documents as the listing
+cut, a user-level skill that a Claude plugin in `~/.claude/plugins/cache` also
+ships, and two skills whose descriptions share at least 80% of their words.
+Only frontmatter is read, no description is printed, and none of it fails the
+doctor. Codex plugin and Gemini extension skills are not read.
+
 Use `oms skill-forge add|validate|link` for ordinary local guidance. Neither
 external bundle management nor evaluation is required for a local edit.
 `oms skill-forge status` gives kind-specific recovery guidance for skills that
