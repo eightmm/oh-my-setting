@@ -25,6 +25,7 @@ ARTIFACT_DIR=""
 NO_DIFF=0
 BASE_REF=""
 SYNTHESIZE=""
+CONFIRM=""
 ML_PRESET=0
 INCLUDE_MEMORY=0
 INCLUDE_TASK=0
@@ -123,6 +124,13 @@ Options:
                        provider context). The debate stops
                        early when every seat declares "none" under "Changed
                        from previous round:".
+  --confirm PROVIDER   Gate mode: put the blocking findings only one seat
+                       reported to PROVIDER (use a different model family)
+                       for one label each: confirmed, refuted or unverified.
+                       One extra read-only call, off by default. The labels
+                       are recorded beside the findings; they never change
+                       the GATE verdict, and a finding nobody confirmed is
+                       kept and listed as unconfirmed.
   --gate               Require each reviewer to end with GATE: pass or
                        GATE: fail, then print verdicts and exit with the gate
                        status. Review mode only.
@@ -574,6 +582,12 @@ while [ "$#" -gt 0 ]; do
       fi
       shift
       ;;
+    --confirm)
+      [ "$#" -ge 2 ] || fail "--confirm requires a provider"
+      CONFIRM="$(oms_provider_normalize "$2" 2>/dev/null)" ||
+        fail "--confirm requires a registered provider"
+      shift 2
+      ;;
     --export-only)
       EXPORT_ONLY=1
       shift
@@ -697,6 +711,7 @@ fi
 # prose is advisory and never projects a criterion to verified. Both the
 # id set and the presence of a verify command are checked before any
 # reviewer is called or any artifact is written.
+[ -z "$CONFIRM" ] || [ "$GATE" -eq 1 ] || fail "--confirm requires --gate"
 if [ -n "$COVERS" ]; then
   [ "$GATE" -eq 1 ] || fail "--covers requires --gate"
   [ -n "$VERIFY_CMD" ] ||
@@ -1181,6 +1196,38 @@ print(json.dumps({
     echo "warning: review findings were not recorded" >&2
   rm -rf "$review_finding_windows"
   review_finding_windows=""
+  # One more reader for what a single seat claimed. Advisory end to end: any
+  # failure here is a warning, and the verdict above is already decided.
+  if [ -n "$CONFIRM" ] && [ "$DRY_RUN" != "1" ]; then
+    confirm_prompt="$(mktemp)" || fail "mktemp failed"
+    confirm_rc=0
+    python3 -I "$(ma_scripts_dir)/lib/review_confirm.py" prompt --run "$timestamp" \
+      --artifact-dir "$ARTIFACT_DIR" --provider "$CONFIRM" > "$confirm_prompt" || confirm_rc=$?
+    confirm_binary="$CONFIRM"
+    [ "$CONFIRM" = "antigravity" ] && confirm_binary="agy"
+    if [ "$confirm_rc" -eq 3 ]; then
+      echo "confirm: no single-seat blocking finding to put to $CONFIRM"
+    elif [ "$confirm_rc" -ne 0 ]; then
+      echo "warning: confirm pass could not list findings" >&2
+    elif ! ma_validate_outbound_prompt "$confirm_prompt"; then
+      echo "warning: confirm pass skipped; sensitive-looking outbound context" >&2
+    elif ! command -v "$confirm_binary" >/dev/null 2>&1; then
+      echo "warning: confirm provider missing: $confirm_binary" >&2
+    else
+      confirm_file="$ARTIFACT_DIR/_confirm-$slug-$timestamp.md"
+      MA_READ_ROOM_MAIL_IDS=""
+      export OMS_MODEL_OPERATION=review-confirm
+      if ma_run_routed_provider "$CONFIRM" read "$confirm_prompt" "$confirm_file" "$MA_READ_SOURCE_REPO" \
+        peer-review-confirm "$REPO" "$OMS_OPERATION_ID"; then
+        python3 -I "$(ma_scripts_dir)/lib/review_confirm.py" record --run "$timestamp" \
+          --artifact-dir "$ARTIFACT_DIR" --provider "$CONFIRM" --answer "$confirm_file" ||
+          echo "warning: confirm labels were not recorded" >&2
+      else
+        echo "warning: confirm pass failed ($CONFIRM); the findings stay unconfirmed" >&2
+      fi
+    fi
+    rm -f "$confirm_prompt"
+  fi
   # A structural failure exits before the collector serializes; the row then
   # goes out without a payload, which is honest. A clean pass with no typed
   # outcome is the inconsistent state that must fail closed.

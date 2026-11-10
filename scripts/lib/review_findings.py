@@ -330,8 +330,17 @@ def record(directory, ident, state, entry, **fields):
     return row
 
 
+def confirmations(directory):
+    here = os.path.dirname(os.path.abspath(__file__))  # isolated mode leaves the script's directory off the path
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import review_confirm
+    return review_confirm.latest(directory), review_confirm.note
+
+
 def listing(args):
     findings, events = load(args.artifact_dir)
+    confirmed, confirm_note = confirmations(args.artifact_dir)
     rows = []
     for ident in sorted(findings, key=lambda key: (findings[key]["ts"], key)):
         entry = findings[ident]
@@ -342,6 +351,9 @@ def listing(args):
                      "anchor": entry.get("anchor"), "quote_found": entry.get("quote_found"),
                      "file": entry.get("file"), "line": entry.get("line"), "summary": entry.get("summary"),
                      "seat": entry.get("seat"), "run": entry.get("run"), "sightings": len(entry["runs"])})
+        if ident in confirmed:
+            rows[-1]["confirmation"] = {key: confirmed[ident].get(key) for key in ("label", "by", "run", "reason")}
+            rows[-1]["note"] = "; ".join(part for part in (note, confirm_note(confirmed[ident])) if part)
     if args.json:
         print(json.dumps({"schema": SCHEMA, "findings": rows}, ensure_ascii=False, sort_keys=True))
         return 0
@@ -367,6 +379,11 @@ def show(args):
     if entry.get("quote"):
         print("  quote: " + clean(entry["quote"]))
     print("  reported by %s in %d run(s), last %s" % (clean(entry.get("seat"), 80), len(entry["runs"]), clean(entry.get("run"), 64)))
+    confirmed, confirm_note = confirmations(args.artifact_dir)
+    if ident in confirmed:
+        print("  second opinion (run %s): %s%s" % (
+            clean(confirmed[ident].get("run"), 64), confirm_note(confirmed[ident]),
+            ": " + clean(confirmed[ident].get("reason"), 300) if confirmed[ident].get("reason") else ""))
     for event in history:
         detail = clean(event.get("reason") or event.get("note") or "", 200)
         extra = " verify=%s" % clean(event["verify_artifact_id"], 80) if event.get("verify_artifact_id") else ""
