@@ -203,8 +203,14 @@ def _arrange(report, calls):
             if key in latest:
                 latest[key]["superseded"] = True
             latest[key] = member
-    rank = lambda member: (0 if member["state"] in LIVE_STATES else 2 if member["state"] in {"done", "cancelled"} else 1, -member.get("seq", 0))
+    rank = lambda member: (call_rank(member["state"]), -member.get("seq", 0))
     return sorted(output, key=rank)
+
+
+def call_rank(state):
+    """Row order within a group: waits on the owner, running, failed and the rest, finished."""
+    return (0 if state in {"blocked", "waiting_input", "waiting_approval", "review"} else
+            1 if state in LIVE_STATES else 3 if state in {"done", "cancelled"} else 2)
 
 
 def main_state(member):
@@ -1155,7 +1161,7 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     hidden_calls = [c for c in everyone.get(primary["participant"], []) if not c.get("_native")] if primary else []
     compact = height < 20 or mapping(report.get("collection")).get("ok") is not True or room.get("error")
     folded_calls = hidden_calls if interactive and compact and not attention_only and not children else []
-    children.sort(key=lambda m: (m["state"] not in LIVE_STATES, call_order(m)[1:]))
+    children.sort(key=lambda m: (call_rank(m["state"]), call_order(m)[1:]))
     judges = [c for c in children if role_style(c.get("role"), c.get("purpose")) == "judge"]
     gates = [c for c in judges if judge_band(c.get("role"), c.get("purpose")) == "gate"]
     counsel = [c for c in judges if c not in gates]
@@ -1818,7 +1824,7 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
                     identities += re.findall(r"COUNCIL [A-Z][a-z]+ \d+(?:\.\d+)?", line)
                 for identity in sorted(identities, key=display_width, reverse=True):
                     if identity in line:
-                        style_key = role_style(identity.split(" ", 1)[0].lower())
+                        style_key = "dim" if active == "past" and not picked else role_style(identity.split(" ", 1)[0].lower())
                         line = line.replace(identity, paint(identity, style_key, color=color, colors=colors, light=light, bold=picked))
                 if active == "past":
                     ended_call = next((call for call in past if action(call) == target), None)

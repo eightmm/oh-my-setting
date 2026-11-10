@@ -11,7 +11,7 @@ from panel_view import (ATTENTION_STATES, LIVE_STATES, tint, activity, box_edge,
                         plan_tail_columns, format_tail_row, judgment_tag, judgment_tone, call_ending, ending_tag, call_tokens)
 from room_view import (action as member_action, past_calls, context_note, open_count, footer_hints,
                        goal_banner, native_advisors, nodes, plan_idle,
-                       settler, spawn_bar, call_classifier, CALL_GROUPS, declared_status, main_state, main_words)
+                       settler, spawn_bar, call_classifier, call_rank, CALL_GROUPS, declared_status, main_state, main_words)
 
 
 def render_tree(report, width, height, color=False, unicode=True, frame=None, menu=False,
@@ -84,7 +84,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     def visual_role(call):
         return purpose(call) if purpose(call) in JUDGE_ROLES | WORKER_ROLES else call.get("role")
 
-    calls.sort(key=lambda call: call["state"] not in LIVE_STATES)
+    calls.sort(key=lambda call: call_rank(call["state"]))
     def token_label(call):
         if call.get("_native") or not call.get("attempt"):
             return ""
@@ -307,6 +307,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             leading = [r for r in compact_rows if r is first_main_row or r is first_call_row]
             rows = leading + [r for r in compact_rows if r not in leading]
             items = [r["action"] for r in rows]
+    if mains and not attention_only and not any(classify(c) != "past" for c in calls):
+        # Settled calls leave the board for Past; say so instead of drawing a bare main.
+        add("  " + ("No active calls%s%s finished, see Past" % (sep, len(past)) if past else "No calls yet"), "dim")
     if not mains and not calls:
         add("No main connected" if room.get("id") else "Select a work room", "dim")
         if menu and not navigation["main_occupied"]:
@@ -486,7 +489,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if activity_head:
         heading = "Activity%s%s%s main%s%s%s call%s" % (
             sep + "attention" if attention_only else "", sep, len(mains),
-            "" if len(mains) == 1 else "s", sep, len(calls), "" if len(calls) == 1 else "s")
+            "" if len(mains) == 1 else "s", sep, len(calls) - len(past), "" if len(calls) - len(past) == 1 else "s")
+        if past:
+            heading += "%s%s past" % (sep, len(past))
         shown.append({"text": box_edge(heading, width, unicode) if boxed else clipped(heading, width),
                       "style": "border"})
     shown += body[offset:offset + body_budget]
