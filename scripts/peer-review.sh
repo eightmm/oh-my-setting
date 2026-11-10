@@ -76,9 +76,14 @@ the seats saw and the file itself (in-diff, context, outside-scope,
 anchor-not-found; unclassified when no diff was attached) and records them
 beside the review-scope artifact; no model is called and the GATE verdict is
 unchanged. A finding is open until someone records otherwise: fix is a claim,
-verify needs the artifact id or file name of a passing gate-verify receipt
-recorded after the fix, dismiss is the owner's and needs a reason (a harness
-worker or reviewer cannot), reopen needs a reason. A fixed or verified
+verify needs a fix recorded with --commit SHA and the artifact id or file name
+of a passing gate-verify receipt recorded after it. The receipt must pin a
+scope with a clean tracked tree at that commit, cover the cited file and use
+the original review base. Rerun the gate with --base ORIGINAL_BASE --verify CMD
+after recording the fix.
+Older receipts without that scope remain readable but cannot verify a finding.
+dismiss is the owner's and needs a reason (a harness worker or reviewer cannot),
+reopen needs a reason. A fixed or verified
 finding that a later review reports again reads open. Every status is a
 record, never approval or verification evidence. Each action takes
 --artifact-dir PATH (default: ./.oms/artifacts/review) and --repo PATH.
@@ -1029,12 +1034,19 @@ env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnul
 head_result = subprocess.run(git + ["rev-parse", "--verify", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
 head = head_result.stdout.decode().strip() if head_result.returncode == 0 else ""
 paths = []
+tracked_clean = False
 if omitted != "1":
     paths = subprocess.check_output(git + ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, "--"] + sys.argv[5:], env=env).decode("utf-8", "surrogateescape").split("\0")
-    base = subprocess.check_output(git + ["rev-parse", base], env=env).decode().strip()
+    base = subprocess.check_output(git + ["rev-parse", "--verify", base + "^{commit}" if head else base], env=env).decode().strip()
+    if head:
+        # Finding verification can name this commit only when tracked bytes match it.
+        clean = subprocess.run(git + ["diff", "--no-ext-diff", "--no-textconv", "--quiet", head, "--"], env=env)
+        if clean.returncode not in (0, 1):
+            raise SystemExit("cannot determine whether the review's tracked tree matches HEAD")
+        tracked_clean = clean.returncode == 0
 scope = {"schema": 1, "kind": "review-scope", "base": base,
     "head": head, "diff_sha256": digest, "paths": [p for p in paths if p],
-    "diff_included": omitted != "1", "external_recovery": "not-covered"}
+    "diff_included": omitted != "1", "tracked_clean": tracked_clean, "external_recovery": "not-covered"}
 if os.environ.get("OMS_REVIEW_CANDIDATE_RECEIPT"):
     with open(os.environ["OMS_REVIEW_CANDIDATE_RECEIPT"], encoding="utf-8") as handle:
         scope["candidate"] = json.load(handle)
@@ -1210,7 +1222,7 @@ print(json.dumps({
     "status": status,
 }))')" || fail "could not compose the gate verify coverage payload"
       OMS_INDEX_COVERS_JSON="$gate_verify_covers" ma_append_artifact_index \
-        "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" ||
+        "$REPO" review-verify local "$gate_verify_exit" "$gate_verify_artifact" "" "" "$gate_verify_exit" "$review_scope_file" ||
         fail "gate verify receipt was not recorded; failing closed"
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass (${gate_verify_seconds}s)"
