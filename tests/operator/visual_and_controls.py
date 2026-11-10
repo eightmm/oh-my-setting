@@ -2429,6 +2429,30 @@ with patch.object(panel, "results", side_effect=result_query) as query, \
     panel.browse_results(Path("."))
     assert query.call_args_list[2].args == (Path("."), "two"), query.call_args_list
     assert "SECOND DETAIL" in output.getvalue() and "FIRST DETAIL" not in output.getvalue()
+# --results --page N reads the next 20 retained tasks; past the end it points to the Work Journal.
+paged = []
+def page_query(repo, task_id=None, participant=None, offset=0):
+    paged.append(offset)
+    return {"rows": sample_rows if offset < 40 else [], "truncated": offset < 20, "offset": offset}
+with patch.object(panel, "results", side_effect=page_query), \
+        patch.object(panel, "repository", return_value=Path(".")), \
+        patch.object(panel, "git_toplevel", return_value=Path(".")), \
+        patch.object(panel, "work_repository", return_value=Path(".")), \
+        patch.object(panel, "native_repository", return_value=Path(".")), \
+        patch.object(panel.sys, "stdout", io.StringIO()) as page_out:
+    assert panel.main(["--repo", ".", "--results", "--page", "2"]) == 0
+    assert panel.main(["--repo", ".", "--results", "--page", "3"]) == 0
+    assert paged == [20, 40], paged
+    assert "No results on page 3" in page_out.getvalue() and "oms journal" in page_out.getvalue(), page_out.getvalue()
+page_one = panel.render_results({"rows": sample_rows, "truncated": True, "offset": 20, "coverage": "x"}, 100)
+assert "Page 2; older tasks: oms panel --results --page 3" in page_one, page_one
+for bad in (["--results", "--page", "0"], ["--results", "--page", "2", "--task-id", "t"], ["--page", "2"]):
+    with patch.object(panel.sys, "stderr", io.StringIO()), patch.object(panel, "git_toplevel", return_value=Path(".")):
+        try:
+            panel.main(["--repo", "."] + bad)
+            raise AssertionError(bad)
+        except SystemExit as error:
+            assert error.code == 2, bad
 # OPERATOR_FIXTURE_BEGIN control
 def empty_control(*args, **kwargs):
     kwargs["cache"].update(status=0, state={"collection": {"ok": True}, "attempts": {"active_recent": []}})

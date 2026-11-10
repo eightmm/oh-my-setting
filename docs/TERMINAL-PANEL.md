@@ -83,6 +83,7 @@ oms panel --repo . --swap-main codex [--model MODEL]
 oms panel --repo . --results               # summaries first, ordinary scrollable text
 oms panel --repo . --results --task-id ID --json
 oms panel --repo . --results --task-id ID --export result.md   # the reader's text, to a new local file
+oms panel --repo . --results --page 2      # the next 20 retained tasks (1-based; no --task-id)
 oms panel --repo . --room team --chats --json
 oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run --json
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
