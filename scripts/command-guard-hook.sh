@@ -29,6 +29,13 @@
 # as `bypassed`. The log is a record of what the guard saw, not a boundary: any
 # process of the same user, a worker included, can write or remove the file.
 # `command-guard-hook.sh --audit [N]` summarizes the newest N rows.
+#
+# Before refusing git reset --hard, git clean or a whole-worktree discard in a
+# repository that already keeps OMS state, the guard takes a checkpoint of the
+# tracked changes and the untracked files (`oms checkpoint create --untracked
+# --reuse`) and names it in the refusal, so the work survives if the person
+# then runs the command themselves. It has three seconds; past that the
+# refusal stands and says no checkpoint was taken.
 
 ROOT="${BASH_SOURCE[0]%/*}/.."
 AUDIT_LOG="${XDG_STATE_HOME:-${HOME:-}/.local/state}/oh-my-setting/command-guard.jsonl"
@@ -124,7 +131,48 @@ sys.path.insert(0, sys.argv[1])
 child = sys.argv[2] == "1"
 mode = sys.argv[3]
 audit_log = sys.argv[4]
+checkpoint_script = sys.argv[5]
+# The refusals whose command would have discarded work a checkpoint can hold.
+CHECKPOINTED = frozenset(("git-reset-hard", "git-clean", "git-discard-worktree"))
+CHECKPOINT_SECONDS = 3
 from hook_state import direct_shell_segments
+
+
+def checkpoint(rule, base):
+    """Save what the refused command would have discarded; a sentence for the refusal.
+
+    Only in a repository that already keeps OMS state, and only inside the
+    hook's time budget: a slow or failed capture is said, never waited for.
+    The same state refused twice reuses the first checkpoint."""
+    import signal
+    top = toplevel(base) if base else None
+    if not top or not os.path.isdir(os.path.join(top, ".oms")) or os.path.islink(os.path.join(top, ".oms")):
+        return "No checkpoint was taken (this repository keeps no OMS state)."
+    try:
+        process = subprocess.Popen(
+            ["bash", checkpoint_script, "--repo", top, "create", "--untracked", "--reuse",
+             "--label", "pre-" + rule, "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            start_new_session=True, text=True)
+    except OSError:
+        return "No checkpoint was taken."
+    try:
+        out, _ = process.communicate(timeout=CHECKPOINT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        process.communicate()
+        return "No checkpoint was taken (it did not finish in time)."
+    try:
+        ident = json.loads(out).get("id") if process.returncode == 0 else None
+    except ValueError:
+        ident = None
+    if not isinstance(ident, str) or not re.fullmatch(r"cp-[A-Za-z0-9._-]+", ident):
+        return "No checkpoint was taken."
+    return ("The uncommitted and untracked work was saved first as checkpoint %s "
+            "(oms checkpoint restore %s to see what it would bring back)." % (ident, ident))
 
 
 def literal(text):
@@ -364,13 +412,20 @@ try:
         record(rule, "bypassed" if mode == "bypass" else "refused", name, command)
         if mode != "bypass":
             print("%s. Instead: %s." % (reason, instead))
+            if rule in CHECKPOINTED:
+                print(checkpoint(rule, base))
 except Exception:
     pass
 PY
 
 child=0
 [ "${OMS_HARNESS_CHILD:-}" != 1 ] || child=1
-reason="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" "$child" "$mode" "$AUDIT_LOG" 2>/dev/null || true)"
+reason="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" "$child" "$mode" "$AUDIT_LOG" \
+  "$ROOT/scripts/checkpoint.sh" 2>/dev/null || true)"
 [ -n "$reason" ] || exit 0
-echo "command guard: ${reason%%$'\n'*} If a person means it, they run it in their own shell (or start the session with OMS_COMMAND_GUARD=0)." >&2
+saved=""
+case "$reason" in
+  *$'\n'*) saved="${reason#*$'\n'}"; saved=" ${saved%%$'\n'*}" ;;
+esac
+echo "command guard: ${reason%%$'\n'*}${saved} If a person means it, they run it in their own shell (or start the session with OMS_COMMAND_GUARD=0)." >&2
 exit 2

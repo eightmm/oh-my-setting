@@ -3,9 +3,14 @@ set -euo pipefail
 
 # Reversible snapshots of tracked Git state. A checkpoint records the index
 # (HEAD -> index) separately from unstaged changes (index -> worktree), so a
-# restore preserves what was staged. Untracked files are deliberately left
-# alone. Restore is a dry-run unless --apply is explicit and always creates a
-# recovery checkpoint before touching tracked files.
+# restore preserves what was staged. Restore is a dry-run unless --apply is
+# explicit and always creates a recovery checkpoint before touching tracked
+# files.
+#
+# Untracked files are left alone unless `create --untracked` asks: then the
+# regular untracked, unignored files that fit a size cap are copied into the
+# checkpoint, and a restore writes back only the ones that are missing. A file
+# that exists is never replaced, so restoring cannot lose newer work.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
@@ -17,7 +22,11 @@ CHECKPOINT_ID=""
 LABEL=""
 AS_JSON=0
 APPLY=0
+UNTRACKED=0
+REUSE=0
+UNTRACKED_ONLY=0
 CHECKPOINT_ROOT=""
+UNTRACKED_LIB="$ROOT/scripts/lib/checkpoint_untracked.py"
 
 usage() {
   cat <<'EOF'
@@ -25,7 +34,8 @@ Usage: checkpoint.sh [--repo PATH] <create|list|verify|restore> [ID] [options]
 
 Create and restore local snapshots of tracked staged/unstaged Git state.
 Checkpoints live under REPO/.oms/checkpoints and are never committed.
-Untracked files are counted for visibility but are not captured or modified.
+Untracked files are counted for visibility; they are captured only with
+create --untracked, and a restore never replaces a file that exists.
 
 Commands:
   create              Save the current index and tracked worktree changes.
@@ -35,10 +45,21 @@ Commands:
   restore ID          Validate a restore without changing files (default).
   restore ID --apply  Create an automatic backup, then replace tracked index
                       and worktree state. Requires the same HEAD as creation.
+                      Captured untracked files that are missing are written
+                      back; existing files are left alone.
 
 Options:
   --repo PATH  Git repository. Default: current directory.
   --label TEXT Short human label for create.
+  --untracked  With create: also copy the regular untracked, unignored files
+               (8 MiB a file, 64 MiB and 5000 files in all; the rest are
+               counted as omitted). The copy stays in .oms/checkpoints.
+  --reuse      With create: when the newest checkpoint with the same label
+               already holds exactly this state, print its ID instead of
+               creating another.
+  --untracked-only
+               With restore: write back missing untracked files only; tracked
+               state and HEAD are not compared or changed.
   --json       Emit JSON (list emits one object per line).
   --apply      Required to perform restore; otherwise restore is a dry-run.
   -h, --help   Show this help.
@@ -158,6 +179,13 @@ try:
             digest = hashlib.sha256(handle.read()).hexdigest()
         if digest != metadata.get(key):
             raise ValueError("checksum mismatch for %s" % name)
+    archive = os.path.join(directory, "untracked.tar")
+    if metadata.get("untracked_sha256") or os.path.lexists(archive):
+        if os.path.islink(archive) or not os.path.isfile(archive):
+            raise ValueError("missing or unsafe untracked.tar")
+        with open(archive, "rb") as handle:
+            if hashlib.sha256(handle.read()).hexdigest() != metadata.get("untracked_sha256"):
+                raise ValueError("checksum mismatch for untracked.tar")
     print(head)
 except (OSError, ValueError, json.JSONDecodeError) as error:
     print("error: invalid checkpoint: %s" % error, file=sys.stderr)
@@ -165,9 +193,14 @@ except (OSError, ValueError, json.JSONDecodeError) as error:
 PY
 }
 
+# Prints the new checkpoint's ID, or `reused:ID` when REUSE (third argument)
+# found the newest checkpoint with this label already holding exactly this state.
 checkpoint_create_raw() {
   local label="$1"
+  local with_untracked="${2:-0}"
+  local reuse="${3:-0}"
   local id head created tmp index_hash worktree_hash untracked_count
+  local capture="" fingerprint="-" existing=""
 
   ensure_supported_tree || return $?
   mkdir -p "$CHECKPOINT_ROOT"
@@ -191,12 +224,35 @@ checkpoint_create_raw() {
   worktree_hash="$(oms_sha256_file "$tmp/worktree.patch")"
   untracked_count="$(git -C "$REPO" ls-files --others --exclude-standard -- |
     awk 'END { print NR + 0 }')"
+  if [ "$with_untracked" -eq 1 ]; then
+    if ! capture="$(python3 "$UNTRACKED_LIB" capture "$REPO" "$tmp")" || [ -z "$capture" ]; then
+      echo "error: could not capture untracked files" >&2
+      rm -rf "$tmp"
+      return 1
+    fi
+    fingerprint="$(OMS_CAPTURE="$capture" python3 -c \
+      'import json, os; print(json.loads(os.environ["OMS_CAPTURE"])["untracked_fingerprint"])')" || {
+      rm -rf "$tmp"
+      return 1
+    }
+  fi
+  if [ "$reuse" -eq 1 ]; then
+    existing="$(python3 "$UNTRACKED_LIB" match "$CHECKPOINT_ROOT" "$label" "$head" \
+      "$index_hash" "$worktree_hash" "$fingerprint" 2>/dev/null |
+      python3 -c 'import json, sys; print(json.load(sys.stdin).get("id") or "")' 2>/dev/null || true)"
+    if [ -n "$existing" ] && valid_id "$existing"; then
+      rm -rf "$tmp"
+      printf 'reused:%s\n' "$existing"
+      return 0
+    fi
+  fi
 
-  if ! python3 - "$tmp/meta.json" "$id" "$created" "$head" "$label" \
+  if ! OMS_CAPTURE="$capture" python3 - "$tmp/meta.json" "$id" "$created" "$head" "$label" \
       "$index_hash" "$worktree_hash" "$untracked_count" <<'PY'
 import json, os, sys
 
 path, ident, created, head, label, index_hash, worktree_hash, untracked = sys.argv[1:]
+capture = json.loads(os.environ.get("OMS_CAPTURE") or "{}")
 payload = {
     "schema": 1,
     "id": ident,
@@ -209,6 +265,7 @@ payload = {
     "unstaged_bytes": os.path.getsize(os.path.join(os.path.dirname(path), "worktree.patch")),
     "untracked_count": int(untracked),
 }
+payload.update(capture)
 with open(path, "w", encoding="utf-8", newline="\n") as handle:
     json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
     handle.write("\n")
@@ -324,14 +381,79 @@ replace_tracked_state() {
   [ "$rc" -eq 0 ] && tracked_state_matches "$target_dir"
 }
 
+# One line on what a checkpoint's untracked capture holds, or holds back.
+untracked_capture_line() {
+  python3 - "$1/meta.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    meta = json.load(handle)
+if "untracked_captured" not in meta:
+    print("checkpoint: untracked files were not captured")
+else:
+    omitted = meta.get("untracked_omitted", 0)
+    print("checkpoint: captured %d untracked file(s)%s" % (
+        meta["untracked_captured"],
+        "; %d omitted (over the size cap or not a regular file)" % omitted if omitted else ""))
+PY
+}
+
 cmd_create_locked() {
-  local id
-  id="$(checkpoint_create_raw "$LABEL")" || return $?
+  local id verb=created
+  id="$(checkpoint_create_raw "$LABEL" "$UNTRACKED" "$REUSE")" || return $?
+  case "$id" in
+    reused:*) id="${id#reused:}"; verb=reused ;;
+  esac
   if [ "$AS_JSON" -eq 1 ]; then
     cat "$CHECKPOINT_ROOT/$id/meta.json"
   else
-    echo "checkpoint: created $id"
-    echo "checkpoint: untracked files were not captured"
+    echo "checkpoint: $verb $id"
+    untracked_capture_line "$CHECKPOINT_ROOT/$id"
+  fi
+}
+
+# Write back the captured untracked files that are missing (dry unless APPLY).
+# Prints the report as JSON; an existing file is never replaced.
+untracked_restore_report() {
+  local dir="$1"
+  if [ "$APPLY" -eq 1 ]; then
+    python3 "$UNTRACKED_LIB" restore "$REPO" "$dir/untracked.tar" --apply
+  else
+    python3 "$UNTRACKED_LIB" restore "$REPO" "$dir/untracked.tar"
+  fi
+}
+
+untracked_restore_line() {
+  OMS_REPORT="$1" python3 -c '
+import json, os
+r = json.loads(os.environ["OMS_REPORT"])
+if r["applied"]:
+    print("checkpoint: wrote back %d missing untracked file(s); %d already present were left alone%s" % (
+        r["written"], r["present"], "; %d refused" % r["refused"] if r["refused"] else ""))
+else:
+    print("checkpoint: %d captured untracked file(s) are missing and would be written back; %d already present would be left alone%s" % (
+        r["missing"], r["present"], "; %d would be refused" % r["refused"] if r["refused"] else ""))
+'
+}
+
+cmd_restore_untracked_locked() {
+  local id="$CHECKPOINT_ID"
+  local dir report
+  dir="$(checkpoint_dir "$id")" || return 2
+  if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+    echo "error: checkpoint not found or unsafe: $id" >&2
+    return 2
+  fi
+  checkpoint_metadata_head "$dir" "$id" >/dev/null || return 1
+  [ -f "$dir/untracked.tar" ] || {
+    echo "error: checkpoint $id captured no untracked files (create it with --untracked)" >&2
+    return 1
+  }
+  report="$(untracked_restore_report "$dir")" || return 1
+  if [ "$AS_JSON" -eq 1 ]; then
+    printf '{"schema":1,"id":"%s","untracked_only":true,"untracked":%s}\n' "$id" "$report"
+  else
+    untracked_restore_line "$report"
+    [ "$APPLY" -eq 1 ] || echo "checkpoint: dry-run; pass --apply to write the missing files"
   fi
 }
 
@@ -352,12 +474,22 @@ cmd_restore_locked() {
   ensure_supported_tree || return $?
   checkpoint_verify_raw "$id" || return $?
 
+  local untracked_report=""
+  if [ -f "$dir/untracked.tar" ] && [ "$APPLY" -eq 0 ]; then
+    untracked_report="$(untracked_restore_report "$dir")" || return 1
+  fi
   if [ "$APPLY" -eq 0 ]; then
-    if [ "$AS_JSON" -eq 1 ]; then
+    if [ "$AS_JSON" -eq 1 ] && [ -n "$untracked_report" ]; then
+      printf '{"schema":1,"id":"%s","dry_run":true,"applicable":true,"untracked":%s}\n' "$id" "$untracked_report"
+    elif [ "$AS_JSON" -eq 1 ]; then
       printf '{"schema":1,"id":"%s","dry_run":true,"applicable":true}\n' "$id"
     else
       echo "checkpoint: dry-run ok for $id (pass --apply to restore)"
-      echo "checkpoint: untracked files will remain untouched"
+      if [ -n "$untracked_report" ]; then
+        untracked_restore_line "$untracked_report"
+      else
+        echo "checkpoint: untracked files will remain untouched"
+      fi
     fi
     return 0
   fi
@@ -368,12 +500,23 @@ cmd_restore_locked() {
   }
   backup_dir="$CHECKPOINT_ROOT/$backup_id"
   if replace_tracked_state "$dir"; then
-    if [ "$AS_JSON" -eq 1 ]; then
+    if [ -f "$dir/untracked.tar" ]; then
+      # Tracked state is back; the untracked copy only fills in what is missing.
+      untracked_report="$(untracked_restore_report "$dir")" || {
+        echo "error: tracked state was restored from $id, but its untracked files could not be written back" >&2
+        return 1
+      }
+    fi
+    if [ "$AS_JSON" -eq 1 ] && [ -n "$untracked_report" ]; then
+      printf '{"schema":1,"id":"%s","applied":true,"backup_id":"%s","untracked":%s}\n' \
+        "$id" "$backup_id" "$untracked_report"
+    elif [ "$AS_JSON" -eq 1 ]; then
       printf '{"schema":1,"id":"%s","applied":true,"backup_id":"%s"}\n' \
         "$id" "$backup_id"
     else
       echo "checkpoint: restored $id"
       echo "checkpoint: recovery backup $backup_id"
+      [ -z "$untracked_report" ] || untracked_restore_line "$untracked_report"
     fi
     return 0
   fi
@@ -423,6 +566,9 @@ while [ "$#" -gt 0 ]; do
     --label) [ "$#" -ge 2 ] || fail "--label requires text"; LABEL="$2"; shift 2 ;;
     --json) AS_JSON=1; shift ;;
     --apply) APPLY=1; shift ;;
+    --untracked) UNTRACKED=1; shift ;;
+    --reuse) REUSE=1; shift ;;
+    --untracked-only) UNTRACKED_ONLY=1; shift ;;
     create|list|verify|restore)
       [ -z "$ACTION" ] || fail "only one command may be used"
       ACTION="$1"
@@ -454,6 +600,11 @@ case "$LABEL" in
   *$'\n'*|*$'\r'*) fail "--label cannot contain newlines" ;;
 esac
 [ "$(printf '%s' "$LABEL" | wc -c | tr -d ' ')" -le 120 ] || fail "--label is limited to 120 bytes"
+if [ "$ACTION" != create ]; then
+  [ "$UNTRACKED" -eq 0 ] || fail "--untracked applies only to create"
+  [ "$REUSE" -eq 0 ] || fail "--reuse applies only to create"
+fi
+[ "$ACTION" = restore ] || [ "$UNTRACKED_ONLY" -eq 0 ] || fail "--untracked-only applies only to restore"
 case "$ACTION" in
   create)
     [ -z "$CHECKPOINT_ID" ] || fail "create takes no checkpoint ID"
@@ -479,6 +630,10 @@ case "$ACTION" in
   restore)
     [ -n "$CHECKPOINT_ID" ] || fail "restore requires an ID"
     [ -z "$LABEL" ] || fail "--label applies only to create"
-    oms_with_file_lock "$CHECKPOINT_ROOT/.operation" cmd_restore_locked
+    if [ "$UNTRACKED_ONLY" -eq 1 ]; then
+      oms_with_file_lock "$CHECKPOINT_ROOT/.operation" cmd_restore_untracked_locked
+    else
+      oms_with_file_lock "$CHECKPOINT_ROOT/.operation" cmd_restore_locked
+    fi
     ;;
 esac

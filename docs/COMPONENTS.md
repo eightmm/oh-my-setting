@@ -2143,6 +2143,23 @@ newest N rows (default 50) counted by verdict and rule. The log records what
 the guard saw and is not a boundary: any process of the same user, an OMS
 worker included, can write or remove the file.
 
+Before it refuses `git reset --hard`, `git clean` or a whole-worktree discard
+in a repository that already has `.oms`, the guard saves what the command
+would have discarded with `oms checkpoint create --untracked --reuse --label
+pre-<rule>` and names the checkpoint in the refusal. The same state refused
+again reuses that checkpoint. The capture has three seconds inside the hook's
+five; a slow or failed capture is said (`No checkpoint was taken`) and the
+refusal stands either way.
+
+`oms checkpoint create --untracked` also copies the regular untracked,
+unignored files into the checkpoint (8 MiB a file, 64 MiB and 5000 files in
+all; symlinks and anything over the cap are counted as omitted, and `.git` and
+`.oms` are never read). A restore writes a captured file back only where
+nothing is at that path now, so it cannot replace newer work; `restore ID
+--untracked-only [--apply]` does just that part and does not require the HEAD
+the checkpoint was taken at. The copy stays local under `.oms/checkpoints`
+with no content scan, like the patches beside it.
+
 A guard that cannot run at all (its script or runtime is missing, it crashes or
 passes its timeout) lets the call through by default, because that is what
 Claude Code does with a failed hook. `OMS_GUARD_FAIL_CLOSED=1

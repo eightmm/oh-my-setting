@@ -595,6 +595,76 @@ test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
     >/dev/null 2>&1; then
     fail "checkpoint restore must refuse a different HEAD"
   fi
+
+  # --untracked copies the regular untracked files; a restore writes back only
+  # the ones that are missing and never replaces a file that exists.
+  local cp="$ROOT/scripts/checkpoint.sh" kept reused report rc
+  mkdir -p "$repo/notes/deep" "$TMP/checkpoint-outside"
+  printf 'note-one\n' > "$repo/notes/deep/n.txt"
+  printf 'scratch-old\n' > "$repo/scratch.txt"
+  ln -s "$TMP/checkpoint-outside" "$repo/link-out"
+  kept="$(cd "$repo" && bash "$cp" create --untracked --label keep --json)" || fail "create --untracked failed"
+  checkpoint_id="$(OMS_TEST_REPORT="$kept" python3 -c 'import json,os; print(json.loads(os.environ["OMS_TEST_REPORT"])["id"])')"
+  OMS_TEST_REPORT="$kept" python3 -c '
+import json, os
+meta = json.loads(os.environ["OMS_TEST_REPORT"])
+assert meta["untracked_captured"] == 3 and meta["untracked_omitted"] == 1, meta  # local.txt from above too
+assert len(meta["untracked_sha256"]) == 64 and len(meta["untracked_fingerprint"]) == 64, meta
+' || fail "create --untracked must count captured files and the symlink it left out: $kept"
+  [ -f "$repo/notes/deep/n.txt" ] && [ -L "$repo/link-out" ] || fail "create --untracked must not touch the worktree"
+  reused="$(cd "$repo" && bash "$cp" create --untracked --reuse --label keep)" || fail "create --reuse failed"
+  printf '%s\n' "$reused" | grep -Fq "checkpoint: reused $checkpoint_id" ||
+    fail "--reuse must return the identical checkpoint: $reused"
+  printf 'more\n' >> "$repo/notes/deep/n.txt"
+  reused="$(cd "$repo" && bash "$cp" create --untracked --reuse --label keep)" || fail "create --reuse failed after a change"
+  printf '%s\n' "$reused" | grep -Fq "checkpoint: created " ||
+    fail "--reuse must create a new checkpoint once an untracked file changed: $reused"
+  printf 'note-one\n' > "$repo/notes/deep/n.txt"
+  rc=0; (cd "$repo" && bash "$cp" list --untracked) >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "--untracked outside create must be refused (rc=$rc)"
+
+  rm -rf "$repo/notes"
+  printf 'scratch-newer\n' > "$repo/scratch.txt"
+  git -C "$repo" commit -q --allow-empty -m moved-head
+  (cd "$repo" && bash "$cp" restore "$checkpoint_id" --untracked-only) > "$TMP/checkpoint-untracked-dry" ||
+    fail "restore --untracked-only dry-run failed"
+  grep -Fq "1 captured untracked file(s) are missing and would be written back; 2 already present" \
+    "$TMP/checkpoint-untracked-dry" || fail "the dry-run counts missing and present files: $(cat "$TMP/checkpoint-untracked-dry")"
+  [ ! -e "$repo/notes" ] || fail "restore --untracked-only wrote without --apply"
+  report="$(cd "$repo" && bash "$cp" restore "$checkpoint_id" --untracked-only --apply --json)" ||
+    fail "restore --untracked-only --apply failed on a later HEAD"
+  OMS_TEST_REPORT="$report" python3 -c '
+import json, os
+r = json.loads(os.environ["OMS_TEST_REPORT"])["untracked"]
+assert (r["written"], r["present"], r["refused"]) == (1, 2, 0), r
+' || fail "restore --untracked-only reports what it wrote: $report"
+  [ "$(cat "$repo/notes/deep/n.txt")" = note-one ] || fail "the missing untracked file was not written back"
+  [ "$(cat "$repo/scratch.txt")" = scratch-newer ] || fail "restore must never replace an untracked file that exists"
+  [ -z "$(ls -A "$TMP/checkpoint-outside")" ] || fail "restore wrote through a symlink"
+  # A tampered archive is refused, and a member that escapes the repository is never written.
+  rm -rf "$repo/notes"
+  printf 'x' >> "$repo/.oms/checkpoints/$checkpoint_id/untracked.tar"
+  if (cd "$repo" && bash "$cp" restore "$checkpoint_id" --untracked-only --apply) >/dev/null 2>&1; then
+    fail "a checkpoint whose untracked archive changed must be refused"
+  fi
+  [ ! -e "$repo/notes" ] || fail "a refused restore must write nothing"
+  python3 - "$TMP/checkpoint-evil.tar" <<'PY'
+import io, sys, tarfile
+with tarfile.open(sys.argv[1], "w") as archive:
+    for name in ("../escaped.txt", ".git/hooks/pre-commit", "ok/inside.txt"):
+        member = tarfile.TarInfo(name)
+        member.size = 2
+        archive.addfile(member, io.BytesIO(b"x\n"))
+PY
+  report="$(python3 "$ROOT/scripts/lib/checkpoint_untracked.py" restore "$repo" "$TMP/checkpoint-evil.tar" --apply)" ||
+    fail "the untracked restore helper failed on a hostile archive"
+  OMS_TEST_REPORT="$report" python3 -c '
+import json, os
+r = json.loads(os.environ["OMS_TEST_REPORT"])
+assert (r["written"], r["refused"]) == (1, 2), r
+' || fail "members outside the repository or under .git are refused: $report"
+  [ ! -e "$TMP/escaped.txt" ] && [ ! -e "$repo/.git/hooks/pre-commit" ] && [ -f "$repo/ok/inside.txt" ] ||
+    fail "a hostile archive wrote outside its bounds"
 }
 
 checkpoint_ids() {
