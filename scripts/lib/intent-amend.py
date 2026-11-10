@@ -15,6 +15,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 import unicodedata
 
 sys.dont_write_bytecode = True
@@ -50,14 +51,17 @@ def read_regular(path):
 
 
 def write_new(path, data, mode=0o600):
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
+    descriptor, temporary = tempfile.mkstemp(prefix=".intent-", dir=os.path.dirname(path))
     try:
+        os.fchmod(descriptor, mode)
         offset = 0
         while offset < len(data):
             offset += os.write(descriptor, data[offset:])
         os.fsync(descriptor)
+        os.link(temporary, path)
     finally:
         os.close(descriptor)
+        os.unlink(temporary)
 
 
 def clean_reason(reason):
@@ -105,15 +109,19 @@ def draft(project, intent_dir, ident, reason):
     candidate = os.path.join(intent_dir, ident + ".md")
     binding = os.path.join(intent_dir, ident + ".amend.json")
     base = hashlib.sha256(data).hexdigest()
+    created = False
     try:
         write_new(candidate, "".join(lines).encode("utf-8"), 0o644)
+        created = True
         write_new(binding, (json.dumps({
             "schema": 1, "kind": "intent-amendment", "id": ident, "base_project_sha256": base,
             "reason": reason, "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
-    except FileExistsError:
-        die("an amendment candidate named %s already exists" % ident)
     except OSError as exc:
+        if created:
+            os.unlink(candidate)
+        if isinstance(exc, FileExistsError):
+            die("an amendment candidate named %s already exists" % ident)
         die("cannot write the amendment candidate: %s" % (exc.strerror or exc))
     print(base)
 
@@ -136,7 +144,10 @@ def criteria_of(text, lib):
     body, _ = sections(text)
     found = {}
     for raw in bullet_items(section_text(body, CRITERIA_HEADINGS)):
-        found.setdefault(stable_criterion_id("project", raw), strip_criterion_marker(normalized_line(raw)))
+        criterion_id = stable_criterion_id("project", raw)
+        if criterion_id in found:
+            die("duplicate criterion id %s" % shown(criterion_id, 80))
+        found[criterion_id] = strip_criterion_marker(normalized_line(raw))
     return found
 
 
@@ -214,20 +225,30 @@ def publish(project, staged, intent_dir, ident, expected, delta_json):
         "modified": changes.get("modified", []), "removed": changes.get("removed", []),
     }
     try:
+        descriptor = os.open(os.path.join(intent_dir, "amendments.jsonl"),
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                die("receipt is not a regular file")
+            data = (json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            original_size = os.fstat(descriptor).st_size
+            try:
+                offset = 0
+                while offset < len(data):
+                    offset += os.write(descriptor, data[offset:])
+                os.fsync(descriptor)
+            except OSError:
+                os.ftruncate(descriptor, original_size)
+                raise
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        die("cannot write the amendment receipt: %s" % (exc.strerror or exc))
+    try:
         os.chmod(staged, stat.S_IMODE(os.stat(project).st_mode))
         os.replace(staged, project)
     except OSError as exc:
         die("cannot replace PROJECT.md: %s" % (exc.strerror or exc))
-    # The contract is replaced; a receipt that cannot be appended is reported, not rolled back: the
-    # archive already holds the previous bytes under their digest.
-    try:
-        with open(os.path.join(intent_dir, "amendments.jsonl"), "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError as exc:
-        sys.stderr.write("warning: intent amend: the receipt could not be appended (%s); the previous contract "
-                         "is at .oms/intents/%s\n" % (exc.strerror or exc, receipt["archive"]))
     print(previous)
 
 

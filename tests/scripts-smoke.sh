@@ -1115,6 +1115,14 @@ EOF
   if contains "$contract_out" 'managed blocks'; then fail "--contract must not run the block checks: $contract_out"; fi
   [ "$contract_before" = "$(cd "$contract" && find . -path ./.git -prune -o -type f -print | sort | xargs cksum)" ] ||
     fail "--contract must not write into the project"
+  sed 's/^- References:/- References (repo-relative paths\/sections):/' "$contract/PROJECT.md" > "$contract/PROJECT.md.new"
+  mv "$contract/PROJECT.md.new" "$contract/PROJECT.md"
+  printf '%s\n' '- [id:REQ-1] duplicate' >> "$contract/PROJECT.md"
+  contract_out="$("$ROOT/scripts/project-doctor.sh" --contract "$contract")" || fail "doctor should warn"
+  contains "$contract_out" 'ok: contract: References: 1 path(s) exist' || fail "canonical references missing"
+  contains "$contract_out" 'warn: contract: duplicate criterion id REQ-1' || fail "duplicate criterion missing"
+  sed -e 's/^- References (repo-relative paths\/sections):/- References:/' -e '/duplicate$/d' "$contract/PROJECT.md" > "$contract/PROJECT.md.new"
+  mv "$contract/PROJECT.md.new" "$contract/PROJECT.md"
   # Break three pointers: a check file, a reference, and a covered criterion.
   sed -e 's|^- Required check files: tests/run.sh|- Required check files: tests/run.sh, tests/gone.sh|' \
     -e 's|^- References: docs/design.md|- References: docs/design.md, docs/lost.md|' \
@@ -13615,6 +13623,11 @@ assert json.load(sys.stdin)["covers"] == ["REQ-1"]
   "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --apply "$covered_proposal" \
     --expected-proposal-sha256 "$covered_sha" >/dev/null 2>&1 ||
     fail "exact covers proposal replay should succeed"
+  OMS_TEST_PREFIX=n OMS_TEST_COVERS=REQ-2 HOME="$covered/home" NVM_DIR="$covered/home/.nvm" \
+    PATH="$covered/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --to codex >"$covered/extend-out" 2>"$covered/extend-err" ||
+    fail "extending a covered plan should succeed"
+  ! grep -Fq 'no task covers REQ-1' "$covered/extend-err" || fail "existing task coverage was ignored"
 
   # The review says how the tasks would group side by side: a dependency waits
   # one wave, and two tasks that may write the same paths never share one. It is
@@ -14627,6 +14640,53 @@ PY
   assert_file_contains "$project/amend-same" "does not change the contract"
   cmp -s "$project/PROJECT.md" "$project/contract-before" || fail "a refused amendment must leave PROJECT.md alone"
   printf '\n## Acceptance criteria\n\n- [id:REQ-1] WHEN given a name THE SYSTEM SHALL greet it\n' >> "$intent_dir/$amend_id.md"
+  python3 - "$ROOT/scripts/lib/intent-amend.py" "$project" "$ROOT/scripts/lib" <<'PYFAULT'
+import importlib.util, os, pathlib, sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("intent_amend", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+target = root / "partial-archive"
+with patch.object(module.os, "write", side_effect=OSError("injected write failure")):
+    try:
+        module.write_new(str(target), b"contents")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("write failure did not propagate")
+assert not target.exists(), "partial final file survived"
+assert not list(root.glob(".intent-*")), "temporary file survived"
+text = "## Acceptance criteria\n- [id:X] one\n- [id:X] two\n"
+try:
+    module.criteria_of(text, sys.argv[3])
+except SystemExit:
+    pass
+else:
+    raise AssertionError("duplicate criteria were accepted")
+PYFAULT
+  for child_env in OMS_HARNESS_CHILD OMS_HARNESS_DELEGATE_DEPTH; do
+    if env "$child_env=1" "$ROOT/scripts/intent.sh" amend --repo "$project" --reason blocked > "$project/child-out" 2>&1; then
+      fail "child amend must refuse"
+    fi
+    if env "$child_env=1" "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" > "$project/child-out" 2>&1; then
+      fail "child adopt must refuse"
+    fi
+    assert_file_contains "$project/child-out" 'parent-only'
+  done
+  cp "$intent_dir/$amend_id.amend.json" "$project/binding-copy"
+  printf '{}\n' > "$intent_dir/$amend_id.amend.json"
+  if "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" > "$project/binding-out" 2>&1; then
+    fail "unbound amendment must refuse"
+  fi
+  assert_file_contains "$project/binding-out" 'binding does not match'
+  mv "$project/binding-copy" "$intent_dir/$amend_id.amend.json"
+  ln -s ../../PROJECT.md "$intent_dir/amendments.jsonl"
+  if "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" > "$project/link-out" 2>&1; then
+    fail "receipt symlink must refuse"
+  fi
+  cmp -s "$project/PROJECT.md" "$project/contract-before" || fail "receipt failure changed contract"
+  rm "$intent_dir/amendments.jsonl"
   "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" \
     > "$project/amend-adopt" 2>&1 || fail "the amendment should adopt: $(tail -5 "$project/amend-adopt")"
   assert_file_contains "$project/amend-adopt" "ADDED REQ-1: WHEN given a name THE SYSTEM SHALL greet it"

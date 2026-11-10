@@ -98,7 +98,7 @@ def report_paths(label, values, want_file):
 raw_files = field("Verification", "Required check files") or ""
 report_paths("Required check files", [part for part in re.split(r"[ \t,]+", raw_files) if part], True)
 
-references = field("Decisions", "References") or ""
+references = field("Decisions", "References") or field("Decisions", "References (repo-relative paths/sections)") or ""
 candidates = [part for part in re.split(r"[,;]+", references)
               if part.strip() and " " not in part.strip().strip("`") and re.search(r"[/.]", part)]
 report_paths("References", candidates, False)
@@ -113,7 +113,9 @@ try:
     criteria = []
     for raw in bullet_items(section_text(body, CRITERIA_HEADINGS)):
         criterion_id = stable_criterion_id("project", raw)
-        if criterion_id not in [item[0] for item in criteria]:
+        if criterion_id in [item[0] for item in criteria]:
+            say("warn", "contract: duplicate criterion id %s" % shown(criterion_id, 80))
+        else:
             criteria.append((criterion_id, strip_criterion_marker(normalized_line(raw))))
 except Exception:  # the runtime helpers are optional here: without them only the path checks run
     criteria = None

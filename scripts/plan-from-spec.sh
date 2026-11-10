@@ -807,11 +807,11 @@ PY
 # the runtime's Markdown helpers so the ids are the ones the envelope projects.
 # Never changes an exit code; an unreadable spec or proposal prints nothing.
 proposal_coverage_notes() {  # PROPOSAL
-  OMS_PFS_MILESTONE_IDS="${MILESTONE_IDS:-}" python3 - "$1" "$SPEC" "$ROOT/scripts/lib" <<'PY' || true
+  OMS_PFS_MILESTONE_IDS="${MILESTONE_IDS:-}" python3 - "$1" "$SPEC" "$ROOT/scripts/lib" "$REPO/.oms/plan/tasks.json" <<'PY' || true
 import json, os, sys, unicodedata
 
 sys.dont_write_bytecode = True
-proposal, spec, lib = sys.argv[1:]
+proposal, spec, lib, plan = sys.argv[1:]
 sys.path.insert(0, lib)
 try:
     from oms_runtime.markdown import (bullet_items, normalized_line, section_text, sections,
@@ -839,6 +839,13 @@ if wanted:
     criteria = [item for item in criteria if item[0] in wanted]
 if not criteria:
     sys.exit(0)
+try:
+    with open(plan, encoding="utf-8") as handle:
+        existing = json.load(handle).get("tasks") or {}
+    if isinstance(existing, dict):
+        tasks.extend(existing.values())
+except (OSError, ValueError, AttributeError, TypeError):
+    pass
 covered = set()
 declared = 0
 for task in tasks:

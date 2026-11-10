@@ -604,6 +604,11 @@ project_sha256() {  # digest of PROJECT.md as it is now
   python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$SPEC"
 }
 
+if [ "$ACTION" = amend ] || [ "$ACTION" = adopt ]; then
+  [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
+    fail "$ACTION is parent-only; a harness child cannot change the contract"
+fi
+
 if [ "$ACTION" = amend ]; then
   [ -f "$SPEC" ] && [ ! -L "$SPEC" ] ||
     fail "there is no adopted PROJECT.md to amend; a first contract goes through: intent.sh draft"
@@ -955,6 +960,18 @@ if [ "$ACTION" = adopt ]; then
     [ -f "$SPEC" ] && [ ! -L "$SPEC" ] || fail "PROJECT.md is gone; there is nothing for this amendment to replace"
     [ "$(project_sha256)" = "$EXPECTED_PROJECT_SHA" ] ||
       fail "PROJECT.md changed since this amendment was drafted; draft a new one: intent.sh amend --reason ..."
+    python3 - "$INTENT_DIR/$INTENT_ID.amend.json" "$EXPECTED_PROJECT_SHA" <<'PYBIND' ||
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        binding = json.load(handle)
+    if binding.get("base_project_sha256") != sys.argv[2]:
+        sys.exit(1)
+except (OSError, ValueError, AttributeError):
+    sys.exit(1)
+PYBIND
+      fail "amendment binding does not match PROJECT.md; draft a new amendment"
+
   else
     [ -z "$EXPECTED_PROJECT_SHA" ] || fail "--expected-project-sha256 applies only to an amendment candidate (intent.sh amend)"
     if [ -e "$SPEC" ] || [ -L "$SPEC" ]; then
