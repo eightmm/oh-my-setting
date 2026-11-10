@@ -185,6 +185,42 @@ def converge(hooks, surfaces, command_root, roots):
         entries.append(entry)
 
 
+def _guard_hooks(hooks, surfaces, roots):
+    """The live owned hook of each surface the manifest marks fail-closed capable."""
+    capable = {(row["event"], row["script"]) for row in surfaces if row.get("fail_closed")}
+    for event, entry in _entries(hooks):
+        for hook in entry["hooks"]:
+            script = owned_script(hook, roots)
+            if script is not None and (event, script) in capable:
+                yield (event, script), hook
+
+
+def apply_fail_closed(hooks, surfaces, roots, mode):
+    """Set or clear Claude Code's `onFailure: "block"` on the capable guard rows.
+
+    mode "on" writes it, "off" removes it and "keep" leaves each row as found,
+    so an earlier opt-in survives an update that does not repeat the request.
+    Only the fail-closed capable rows are touched; a user's own hook and every
+    other OMS row keep whatever they carry. Returns the surfaces changed."""
+    changed = []
+    if mode not in ("on", "off"):
+        return changed
+    for key, hook in _guard_hooks(hooks, surfaces, roots):
+        if mode == "on" and hook.get("onFailure") != "block":
+            hook["onFailure"] = "block"
+            changed.append(key)
+        elif mode == "off" and "onFailure" in hook:
+            del hook["onFailure"]
+            changed.append(key)
+    return changed
+
+
+def fail_open(hooks, surfaces, roots):
+    """Capable guard surfaces whose live registration does not block when the hook itself fails."""
+    return sorted(key for key, hook in _guard_hooks(hooks, surfaces, roots)
+                  if hook.get("onFailure") != "block")
+
+
 def remove(hooks, roots):
     """Delete every owned hook; user siblings keep their entry and order."""
     for event in list(hooks):
