@@ -245,7 +245,7 @@ EOF
     }
     call t-working > /dev/null
     attempt="$(call t-done)"
-    "$OMS" agent-events --repo "$repo" transition --attempt "$attempt" --state verifying --then review --then done > /dev/null
+    "$OMS" agent-events --repo "$repo" transition --attempt "$attempt" --state verifying --then review --then "done" > /dev/null
     attempt="$(call t-failed)"
     "$OMS" agent-events --repo "$repo" transition --attempt "$attempt" --state failed --reason-code eval-fixture > /dev/null
     attempt="$(call t-blocked)"
