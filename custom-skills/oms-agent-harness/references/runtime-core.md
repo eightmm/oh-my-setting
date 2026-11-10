@@ -124,3 +124,35 @@ Classify once, then follow the canonical recovery. In particular:
 - verifier mutation and scope violation reject the patch;
 - unknown remote side effects are never replayed;
 - exhausted budgets preserve partial evidence and stop.
+
+## Advisory verbs: which to run
+
+Each verb below only reads recorded state or the working tree: no model call,
+and nothing it prints is approval, verification, or gate evidence. Run it when
+you hold the question; none starts, retries, kills, or merges anything.
+
+| Question | Command | Prints |
+|---|---|---|
+| Should I delegate this? | None: a judgment call. | Use [model-routing.md](model-routing.md) and [roles.md](roles.md). |
+| Is the brief good enough? | `oms peer-delegate --to NAME --brief-file F` (add `--strict-brief` to refuse) | `warning: brief:` lines for a missing goal, scope, output form, stop condition or file pointers; briefs under 240 bytes are not linted. |
+| How deep should the review be? | `oms peer-review advise [--base REF]` | `none`, `single`, `gate+security` or `council`, with reasons. |
+| Is something looping? | `oms fail-ledger list --stalls` | Repeated or alternating failures and no-evidence goal-drive runs, or `stalls: none`. |
+| Where did tokens go? | `oms artifact-index telemetry --by role` | Per role: calls, reported tokens, cache share, admitted patches, tokens on unadmitted ones. |
+| How big are injected prompts? | `oms project-doctor --prompts` | Words and bytes per shipped prompt file, whether it loads every session, repeated sentences. |
+| Is the prompt prefix cache-stable? | `bash scripts/check.sh invariants` (source checkout) | Fails with `file:line` on a timestamp, temp path or unordered listing in injected text. |
+| What do always-loaded rules cost here? | `oms project-doctor --budget` | Bytes, words, lines of loaded instruction files per provider. |
+| Which role has which authority? | `config/role-contracts.json` | Per role: `read_only`, `writes` scope, required `returns` lines. Linted, not enforced at runtime. |
+| Is the contract's evidence there? | `oms project-doctor --contract .` | Missing referenced files and each criterion's evidence status. |
+| How exposed are the provider CLIs? | `oms doctor --security` | ok/warn/info rows for bypass modes, blanket allows, sandbox switches. |
+| Could this host sandbox? | `oms doctor --sandbox` | Per-mechanism availability (bwrap, namespaces, AppArmor, Landlock). |
+| What does each provider support? | `oms doctor --providers` | Provider by function matrix, marked fixture or live. |
+| Who is editing these paths? | `oms lease list`, `oms lease check PATH...` | Active and expired advisory leases; `check` exits 1 on a conflict. |
+| How do candidates compare? | `oms candidate table --metric KEY` | Candidates by tool:metric, each number linked to a run or receipt. |
+| What would CI records suggest next? | `oms ci-status suggest` | Suggested commands from recorded CI, review and finding facts; unknown stays `unknown`. |
+| What is actionable in the plan? | `oms agent-plan ready` | Task ids whose dependencies are done, in claim order. |
+| What do I tell the next session? | `oms session-handoff prompt` | An editable Markdown prompt drafted from OMS records. |
+| Who wrote this commit? | `oms land blame-session COMMIT_OR_RANGE` | Recorded attribution per commit (ai, human, mixed, unknown, `unrecorded`). |
+| Are checkpoints piling up? | `oms run checkpoints` | Per directory: file count, size, `ok:` or `warn:` against latest/best. |
+| What needs attention? | `oms inbox --repo .` | Ranked items with one exact next command each. |
+
+Read the output as a prompt to look, then verify in the source of record.

@@ -35,7 +35,7 @@ approvals, commit intents, or publication intents.
 | Delegation | When authorized: `oms panel --dispatch ROLE`, `oms peer-delegate --to NAME` (one write). Load [roles.md](references/roles.md), [model-routing.md](references/model-routing.md), [delegation-artifacts.md](references/delegation-artifacts.md) as needed. |
 | Verification and landing | Run local checks directly. For creating a project verification skill, see [verification skill guidance](references/verification-skill.md). `oms peer-review --gate` is for authorized peer review, not every edit. `patch-land` admits/applies worker patches; `oms land` gates/pushes/updates a committed worktree when authorized. |
 | Continuity | Journal for history, agent-memory for stable facts, session-handoff for local sessions, runtime capsule for sanitized transfer. See [state-memory.md](references/state-memory.md). |
-| Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows use [runtime-core.md](references/runtime-core.md). |
+| Operations | `oms doctor` for health, `oms update` for install updates, `oms tick` for scheduled repo maintenance. Optional profile/backend/experiment flows and the advisory-verb table use [runtime-core.md](references/runtime-core.md). |
 
 Use `oms list` for entrypoints, command routing for variants,
 and `oms list --all` for compatibility primitives. Read only references
