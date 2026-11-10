@@ -2395,6 +2395,22 @@ with patch.object(panel.sys, "stdout", io.StringIO()) as output:
     panel.draw_frame("first\nchanged", (42, 34), True, last)
     panel.draw_frame("small", (24, 18), True, last)
     assert output.getvalue().count("\033[2J") == 2 and "\033[2;1H\033[2Kchanged" in output.getvalue()
+# An identical frame writes nothing; a changed row, or a frame that grows or shrinks, repaints only the differing rows
+# in one write and never clears the pane.
+with patch.object(panel.sys, "stdout", io.StringIO()) as output:
+    last = panel.draw_frame("a\nb\nc", (42, 34), True)
+    painted = len(output.getvalue())
+    panel.draw_frame("a\nb\nc", (42, 34), True, last)
+    assert len(output.getvalue()) == painted, "an unchanged frame wrote bytes"
+    panel.draw_frame("a\nB\nc", (42, 34), True, last)
+    assert output.getvalue()[painted:] == "\033[2;1H\033[2KB", output.getvalue()[painted:]
+    painted = len(output.getvalue())
+    panel.draw_frame("a\nb", (42, 34), True, last)
+    assert output.getvalue()[painted:] == "\033[3;1H\033[J"
+    painted = len(output.getvalue())
+    panel.draw_frame("a\nb\nc\nd", (42, 34), True, last)
+    assert output.getvalue()[painted:] == "\033[4;1H\033[2Kd"
+    assert output.getvalue().count("\033[2J") == 1
 with patch.object(panel.subprocess, "run", side_effect=subprocess.TimeoutExpired("tmux", 5)):
     assert panel.pane_option("@oms_panel_view") == ""
 # A failed collection remains visible and the same watcher recovers on its next
