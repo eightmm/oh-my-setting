@@ -604,8 +604,8 @@ for usage, land_active, ack, manual, rolled, changed_at, changed_owner in swap_c
         if changed_at == "auto_commit":
             assert not any("@oms_panel_swap_attempt" in call.args[0] for call in runs.call_args_list)
         # Cleanup must be conditional on the verified owner even when that pane now names someone else.
-        for call in runs.call_args_list:
-            command = call.args[0]
+        for run_call in runs.call_args_list:
+            command = run_call.args[0]
             if "set-option -w -u" in command[-1]:
                 assert command[1:5] == ["if-shell", "-F", "-t", "%1"], command
                 assert "#{==:#{window_id},@1}" in command[-2], command
