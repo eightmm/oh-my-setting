@@ -102,6 +102,8 @@ APPLY=0
 DISPOSITION=""
 COMPLETION_OTHER_OPTION=0
 CANCEL_OTHER_OPTION=0
+DISCOVERED_FROM=""
+LIMIT=""
 
 usage() {
   cat <<'EOF'
@@ -139,7 +141,13 @@ Commands:
   add    --id ID --title TEXT        Add a task (state: ready).
          [--depends a,b] [--allowed "p1,p2"] [--forbidden "p3"]
          [--assignment '{"provider":"claude","workload":"routine"}']
-         [--verify CMD] [--role NAME]
+         [--verify CMD] [--role NAME] [--discovered-from TASK_ID]
+                                     --discovered-from records work found while
+                                     doing TASK_ID (must exist): the new task
+                                     carries a discovered_from link, TASK_ID
+                                     does not depend on it and keeps its state.
+                                     With it, --id may be omitted: a short
+                                     collision-checked id is generated.
   claim  --id ID --provider NAME [--ttl SECONDS]   Claim a ready task for a worker.
   start  --id ID [--lease-id TOKEN]  Mark a claimed task running.
   touch  --id ID [--lease-id TOKEN]  Heartbeat a claimed/running task: refresh
@@ -250,7 +258,11 @@ Commands:
                                      for a plan-scoped evidence producer.
   list   [--state STATE] [--json]    List tasks (optionally by state); --json
                                      emits every task's `show` view at once.
-  ready                              Print ids actionable now (deps done).
+  ready  [--json] [--limit N]        Print ids actionable now (deps done), in
+                                     claim order; --json adds title, allowed,
+                                     verify, depends, why_ready (schema 1).
+  discovered [--json]                Read-only: tasks recorded with add
+                                     --discovered-from, grouped by parent.
   retro  [--json]                    Read-only: what took more than one try
                                      (cycles, repairs, amendments), blocked and
                                      cancelled tasks with their reasons, where
@@ -354,6 +366,10 @@ while [ "$#" -gt 0 ]; do
     --depends) [ "$#" -ge 2 ] || fail "--depends requires list"; [ "$DEPENDS_SET" = 0 ] || fail "--depends given twice; pass one comma-separated list \"p1,p2\""; DEPENDS="$2"; DEPENDS_SET=1; shift 2 ;;
     --allowed) [ "$#" -ge 2 ] || fail "--allowed requires list"; [ "$ALLOWED_SET" = 0 ] || fail "--allowed given twice; pass one comma-separated list \"p1,p2\""; ALLOWED="$2"; ALLOWED_SET=1; shift 2 ;;
     --role) [ "$#" -ge 2 ] || fail "--role requires a name"; ROLE="$2"; shift 2 ;;
+    --discovered-from) [ "$#" -ge 2 ] || fail "--discovered-from requires a task id"; DISCOVERED_FROM="$2"; shift 2 ;;
+    --limit) [ "$#" -ge 2 ] || fail "--limit requires a count"
+             case "$2" in ''|*[!0-9]*|0) fail "--limit must be a positive integer" ;; esac
+             LIMIT="$2"; shift 2 ;;
     --forbidden) [ "$#" -ge 2 ] || fail "--forbidden requires list"; [ "$FORBIDDEN_SET" = 0 ] || fail "--forbidden given twice; pass one comma-separated list \"p1,p2\""; FORBIDDEN="$2"; FORBIDDEN_SET=1; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires command"; VERIFY="$2"; VERIFY_SET=1; shift 2 ;;
     --reuse-pass) [ "$#" -ge 2 ] || fail "--reuse-pass requires a run id"; REUSE_PASS_RUN="$2"; shift 2 ;;
@@ -409,7 +425,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel|amend|retro)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|discovered|status|next|brief|accept|lint-verify|cancel|amend|retro)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -421,6 +437,8 @@ done
 [ "$ALL_INACTIVE" = 0 ] || [ "$ACTION" = cancel ] || fail "--all-inactive requires cancel"
 [ "$APPLY" = 0 ] || [ "$ACTION" = retire ] || fail "--apply is valid only with retire"
 [ "$APPLY" = 0 ] || [ "$CHECK_ONLY" = 0 ] || fail "retire --apply and --check are mutually exclusive"
+[ -z "$DISCOVERED_FROM" ] || [ "$ACTION" = add ] || fail "--discovered-from is valid only with add"
+[ -z "$LIMIT" ] || [ "$ACTION" = ready ] || fail "--limit is valid only with ready"
 [ -z "$REUSE_PASS_RUN" ] || [ "$ACTION" = accept ] || fail "--reuse-pass requires accept"
 if [ -n "$LANDED_COMMIT" ]; then
   [ "$ACTION" = finish ] || fail "--landed-commit requires finish"
@@ -499,7 +517,7 @@ case "$ACTION" in
 esac
 PLAN_READ_ONLY=0
 case "$ACTION" in
-  show|evidence-snapshot|list|ready|status|brief|retro) PLAN_READ_ONLY=1 ;;
+  show|evidence-snapshot|list|ready|discovered|status|brief|retro) PLAN_READ_ONLY=1 ;;
   next) [ "$CLAIM" = 1 ] || PLAN_READ_ONLY=1 ;;
 esac
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
@@ -693,6 +711,7 @@ export OMS_PLAN_FILE="$PY_PLAN_FILE" OMS_ACTION="$ACTION" OMS_TS="$ts" \
   OMS_EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256_SET="$EXPECTED_REVIEW_EXECUTOR_SOUL_SHA256_SET" \
   OMS_EXPECTED_REVIEW_LEASE_ID_SET="$EXPECTED_REVIEW_LEASE_ID_SET" \
   OMS_EXPECTED_LANDING_RECEIPT_SHA256_SET="$EXPECTED_LANDING_RECEIPT_SHA256_SET" \
+  OMS_DISCOVERED_FROM="$DISCOVERED_FROM" OMS_LIMIT="$LIMIT" \
   OMS_DEPENDS="$DEPENDS" OMS_ALLOWED="$ALLOWED" OMS_FORBIDDEN="$FORBIDDEN" \
   OMS_VERIFY="$VERIFY" OMS_VERIFY_SET="$VERIFY_SET" OMS_ALLOWED_SET="$ALLOWED_SET" OMS_ACCEPT="$ACCEPT" OMS_ROLE="$ROLE" OMS_STATE_FILTER="$STATE_FILTER" OMS_CLAIM="$CLAIM" \
   OMS_INCLUDE_RUNNING="$INCLUDE_RUNNING" OMS_INCLUDE_REVIEW="$INCLUDE_REVIEW" \
@@ -1415,7 +1434,7 @@ fi
 # freezes worker-marker publication while it judges liveness, in the global
 # marker set -> plan order. Ordinary plan transitions never nest these locks.
 case "$ACTION" in
-  show|evidence-snapshot|list|ready|status|brief)
+  show|evidence-snapshot|list|ready|discovered|status|brief)
     plan_run
     ;;
   next)

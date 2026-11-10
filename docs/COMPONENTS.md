@@ -1525,6 +1525,26 @@ verdict per path. The public single-path scope operations remain compatible;
 the batch operation is an internal performance boundary for large diffs.
 
 
+### What can start now, and work found on the way
+
+`oms agent-plan ready [--json] [--limit N]` is the plan's own "actionable now" test (the
+one `next` and `status --json` `actionable` use): a task whose dependencies are all verified
+done and that is `ready`, or whose claim has expired. Plain output stays one id per line in
+claim order (creation time, then insertion order). `--json` is schema 1: `total` (before
+`--limit`) and `tasks` with `id`, `title`, `allowed`, `verify`, `depends`, `why_ready`, and
+`discovered_from` when set. It reads like `list` and writes nothing; it is not approval.
+
+`oms agent-plan add ... --discovered-from TASK_ID` records work found while doing `TASK_ID`
+(which must exist) so it is not lost. The new task gets an optional `discovered_from` field.
+It is a provenance link only: the parent does not depend on the new task and keeps its state.
+The task passes the same admission as any `add` (a contract-bound plan still takes new
+tasks only through a reviewed proposal). With `--discovered-from`, `--id` may be omitted: a
+`d-xxxxxx` id is generated from title, time and pid and checked for collision under the plan
+lock. `oms agent-plan discovered [--json]` lists them grouped by parent, and `show`, `brief`,
+`ready --json` and `status` (a `discovered` map, present only when links exist) carry the
+link. Plans without the field read exactly as before; the plan schema number is unchanged
+because readers, including proposal replay, compare named fields only.
+
 ### Look back before retiring
 
 `oms agent-plan retro [--json]` is a read-only summary of what the current plan cost:

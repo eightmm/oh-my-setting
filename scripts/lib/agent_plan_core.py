@@ -901,11 +901,13 @@ def brief_text(t):
         lines.append("assignment: %s" % json.dumps(t["assignment"], sort_keys=True))
     if t.get("covers"):
         lines.append("covers: %s" % ", ".join(t["covers"]))
+    if t.get("discovered_from"):
+        lines.append("discovered_from: %s" % t["discovered_from"])
     if t.get("role"):
         lines.append("role: %s" % t["role"])
     return "\n".join(lines)
 
-read_only_actions = {"show", "evidence-snapshot", "list", "ready", "status", "next", "brief"}
+read_only_actions = {"show", "evidence-snapshot", "list", "ready", "discovered", "status", "next", "brief"}
 needs_retirement_guard = act not in read_only_actions
 if act == "next" and env("OMS_CLAIM") == "1":
     needs_retirement_guard = True
@@ -1372,7 +1374,21 @@ if act == "add":
         assignment = validate_assignment(json.loads(env("OMS_TASK_ASSIGNMENT")))
     except (ValueError, TypeError) as exc:
         die(str(exc))
-    i = require_id(); title = env("OMS_TITLE")
+    found_in = env("OMS_DISCOVERED_FROM")
+    if found_in:
+        if not ID_RE.fullmatch(found_in): die("--discovered-from must match [A-Za-z0-9._-]+")
+        if found_in not in tasks: die("unknown --discovered-from task id: %s" % found_in)
+    if not env("OMS_ID") and found_in:
+        # Optional short id for work found mid-task; checked under the plan lock.
+        n = 0
+        while True:
+            seed = "%s|%s|%d|%d" % (env("OMS_TITLE"), ts, os.getpid(), n)
+            i = "d-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:6]
+            if i not in tasks: break
+            n += 1
+    else:
+        i = require_id()
+    title = env("OMS_TITLE")
     if not title: die("--title is required for add")
     reject_controls(title, "task title")
     reject_controls(env("OMS_VERIFY"), "task verify")
@@ -1398,6 +1414,9 @@ if act == "add":
         "repair_artifact": "",
         "created": ts, "updated": ts,
     }
+    if found_in:
+        # A provenance link only: the parent neither depends on this task nor changes state.
+        tasks[i]["discovered_from"] = found_in
     save(d); print("plan: added %s (%s)" % (i, title)); sys.exit(0)
 
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):
@@ -1978,14 +1997,65 @@ if act == "next":
         print(brief_text(t))
     sys.exit(0)
 
+def discovered_groups():
+    groups = {}
+    for t in ordered:
+        if t.get("discovered_from"):
+            groups.setdefault(t["discovered_from"], []).append(t)
+    return groups
+
 if act == "ready":
     # Ids only: this output is consumed. The expiry note goes to stderr.
+    limit = int(env("OMS_LIMIT") or 0)
+    rows = []
     for t in ordered:
         if not contract_actionable(d, t):
             continue
-        if claim_expired(t):
+        expired = claim_expired(t)
+        if expired:
             sys.stderr.write("plan: %s %s; counted as ready\n" % (t["id"], expiry_note(t)))
-        print(t["id"])
+        deps = t.get("depends", [])
+        why = ("claim expired; " if expired else "state ready; ") + (
+            "dependencies done: " + ", ".join(deps) if deps else "no dependencies")
+        rows.append((t, why))
+    total = len(rows)
+    if limit:
+        rows = rows[:limit]
+    if env("OMS_AS_JSON") == "1":
+        items = []
+        for t, why in rows:
+            item = {"id": t["id"], "title": t["title"],
+                    "allowed": t.get("allowed_paths", []), "verify": t.get("verify", ""),
+                    "depends": t.get("depends", []), "why_ready": why}
+            if t.get("discovered_from"):
+                item["discovered_from"] = t["discovered_from"]
+            items.append(item)
+        print(json.dumps({"schema": 1, "plan_id": d.get("plan_id", ""), "total": total,
+                          "tasks": items}, ensure_ascii=False, indent=2))
+    else:
+        for t, _ in rows:
+            print(t["id"])
+    sys.exit(0)
+
+if act == "discovered":
+    groups = discovered_groups()
+    parents = []
+    for pid, kids in groups.items():
+        parent = tasks.get(pid)
+        parents.append({"id": pid, "state": completion_view(parent)["state"] if parent else "missing",
+                        "discovered": [{"id": k["id"], "title": k["title"],
+                                        "state": completion_view(k)["state"]} for k in kids]})
+    if env("OMS_AS_JSON") == "1":
+        print(json.dumps({"schema": 1, "plan_id": d.get("plan_id", ""),
+                          "count": sum(len(p["discovered"]) for p in parents),
+                          "parents": parents}, ensure_ascii=False, indent=2))
+        sys.exit(0)
+    if not parents:
+        print("discovered: (none)")
+    for p in parents:
+        print("%s (%s):" % (p["id"], p["state"]))
+        for k in p["discovered"]:
+            print("  %-10s %-9s %s" % (k["id"], k["state"], k["title"]))
     sys.exit(0)
 
 if act == "list":
@@ -2050,7 +2120,9 @@ if act == "status":
             wave_of = plan_waves["waves"](open_tasks)
         except Exception:
             wave_of = {}
+        found = {p: [k["id"] for k in kids] for p, kids in discovered_groups().items()}
         print(json.dumps({
+            **({"discovered": found} if found else {}),
             "schema": 1, "present": os.path.exists(path),
             "plan_sha256": hashlib.sha256(plan_raw).hexdigest() if plan_raw else "",
             "task_count": count, "nonempty": count > 0,
@@ -2121,6 +2193,10 @@ if act == "status":
     waiting = [t["id"] for t in ordered
                if t["state"] == "ready" and not deps_done(d, t)]
     if waiting: print("waiting on deps: %s" % " ".join(waiting))
+    found = discovered_groups()
+    if found:
+        print("discovered: %s" % "; ".join(
+            "%s <- %s" % (p, ",".join(k["id"] for k in kids)) for p, kids in found.items()))
     sys.exit(0)
 
 die("unhandled action: %s" % act)
