@@ -7,13 +7,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 VERBOSE=0
 JSON=0
 REPO=""
+FINGERPRINT=0
+COMPARE=""
 
 usage() {
   cat <<'EOF'
 Usage: status.sh [--verbose] [--repo PATH] [--json]
+       status.sh --fingerprint
+       status.sh --compare FILE [--json]
 
 Show install ownership, links, tool paths, snapshots, task, plugin, and update
 state. --verbose also runs tool version and Codex plugin probes.
+--fingerprint prints a content-free JSON fingerprint of this installation
+(versions, receipt fields, digests; no paths); --compare FILE diffs it against a
+fingerprint saved on another machine (exit 1 when they differ).
 EOF
 }
 
@@ -21,6 +28,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --verbose) VERBOSE=1 ;;
     --json) JSON=1 ;;
+    --fingerprint) FINGERPRINT=1 ;;
+    --compare)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --compare requires a file" >&2; exit 2; }
+      COMPARE="$2"
+      shift ;;
     --repo)
       [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --repo requires a path" >&2; exit 2; }
       REPO="$2"
@@ -48,6 +60,19 @@ if [ -f "$RECEIPT" ]; then
     RECEIPT_STATE="invalid"
     INSTALL_ROOT="$ROOT"
   fi
+fi
+
+if [ "$FINGERPRINT" = 1 ] || [ -n "$COMPARE" ]; then
+  [ "$FINGERPRINT" = 0 ] || [ -z "$COMPARE" ] || { echo "error: --fingerprint and --compare are exclusive" >&2; exit 2; }
+  command -v python3 >/dev/null 2>&1 || { echo "error: fingerprint needs python3" >&2; exit 2; }
+  receipt_arg=""
+  [ "$RECEIPT_STATE" != valid ] || receipt_arg="$RECEIPT"
+  if [ -n "$COMPARE" ]; then
+    compare_args=()
+    [ "$JSON" = 0 ] || compare_args+=(--json)
+    exec python3 -I "$ROOT/scripts/lib/install-fingerprint.py" compare "$INSTALL_ROOT" "$receipt_arg" "$COMPARE" ${compare_args[@]+"${compare_args[@]}"}
+  fi
+  exec python3 -I "$ROOT/scripts/lib/install-fingerprint.py" print "$INSTALL_ROOT" "$receipt_arg"
 fi
 
 load_user_tool_paths() {
