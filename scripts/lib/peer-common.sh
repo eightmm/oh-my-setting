@@ -2162,6 +2162,14 @@ if review_payload:
         sys.stderr.write("error: typed review outcome payload has no seats\n")
         sys.exit(3)
     row["review"] = review_obj
+scope_payload = os.environ.get("OMS_INDEX_REVIEW_SCOPE_JSON", "")
+if scope_payload and kind in ("review-outcome", "review-incremental") and len(scope_payload) <= 2048:
+    try:
+        scope_obj = json.loads(scope_payload)
+    except ValueError:
+        scope_obj = None
+    if isinstance(scope_obj, dict):
+        row["review_scope"] = scope_obj
 row.update(path_fields("artifact", artifact_raw))
 row.update(path_fields("patch", patch_raw))
 row.update(path_fields("source", source_raw))

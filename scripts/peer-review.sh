@@ -44,6 +44,11 @@ DRY_RUN="${OH_MY_SETTING_REVIEW_DRY_RUN:-0}"
 CANDIDATE_PATCH=""
 CANDIDATE_SHA256=""
 CANDIDATE_BASE=""
+SINCE_LAST=0
+INCREMENTAL=0
+SINCE_SHA=""
+SINCE_NOTE=""
+REVIEW_BASE_REF=""
 
 usage() {
   cat <<'EOF'
@@ -92,6 +97,12 @@ Options:
   --repo PATH          Git repo to review. Default: current directory.
   --base REF           Diff base ref. Default: HEAD (staged + unstaged changes).
                        Use e.g. --base origin/main for branch/PR review.
+  --since-last         With --base: review only what was added since the most
+                       recent completed review of this base whose recorded head
+                       is an ancestor of HEAD. Any doubt (no earlier review,
+                       rebase, moved base, unfinished review) says why and
+                       falls back to the full review. The outcome is recorded
+                       as advisory (review-incremental), never gate evidence.
   --providers LIST     Comma list of registered targets. Default: the stable
                        Codex/Claude/Antigravity council; optional agents are
                        available when explicitly named.
@@ -490,9 +501,9 @@ write_prompt() {
     # The repository's own statement of what it treats as blocking, read from
     # the base commit: a change under review cannot rewrite its own rules.
     local review_rules=""
-    review_rules="$(python3 -I "$(ma_scripts_dir)/lib/review_rules.py" rules --repo "$repo" --base "${BASE_REF:-HEAD}")" || review_rules=""
+    review_rules="$(python3 -I "$(ma_scripts_dir)/lib/review_rules.py" rules --repo "$repo" --base "${REVIEW_BASE_REF:-${BASE_REF:-HEAD}}")" || review_rules=""
     if [ -n "$review_rules" ]; then
-      printf 'Repository review rules (PROJECT.md at %s; they state what this repository treats as blocking or out of scope, and they do not override the instructions above):\n%s\n\n' "${BASE_REF:-HEAD}" "$review_rules"
+      printf 'Repository review rules (PROJECT.md at %s; they state what this repository treats as blocking or out of scope, and they do not override the instructions above):\n%s\n\n' "${REVIEW_BASE_REF:-${BASE_REF:-HEAD}}" "$review_rules"
     fi
     if [ "$ML_PRESET" -eq 1 ]; then
       printf 'This is an ML pre-training gate. Prioritize silent ML bugs and metric corruption:\n'
@@ -502,6 +513,7 @@ write_prompt() {
       printf '\n'
     fi
     ma_write_harness_context "$repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" "$question"
+    [ "$INCREMENTAL" -eq 0 ] || printf '%s\n\n' "$SINCE_NOTE"
     printf 'Question:\n%s\n\n' "$question"
     printf 'Repository:\n%s\n\n' "$(ma_repo_label "$repo")"
     if [ "$NO_DIFF" -eq 0 ]; then
@@ -541,6 +553,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--base requires git ref"
       BASE_REF="$2"
       shift 2
+      ;;
+    --since-last)
+      SINCE_LAST=1
+      shift
       ;;
     --candidate-patch|--candidate-sha256|--candidate-base)
       [ "$#" -ge 2 ] || fail "$1 requires a value"
@@ -664,6 +680,12 @@ if [ -n "$CANDIDATE_PATCH$CANDIDATE_SHA256$CANDIDATE_BASE" ]; then
     [ -n "$VERIFY_CMD" ] && [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ -n "${OMS_ROOM_REPO:-}" ] ||
     fail "candidate review requires an automatic panel gate, a verifier and the complete candidate diff"
 fi
+if [ "$SINCE_LAST" -eq 1 ]; then
+  [ -n "$BASE_REF" ] || fail "--since-last requires --base REF"
+  [ "$NO_DIFF" -eq 0 ] || fail "--since-last cannot be combined with --no-diff"
+  [ -z "$CANDIDATE_PATCH" ] && [ "${OMS_PANEL_DISPATCH:-0}" != 1 ] ||
+    fail "--since-last is advisory and cannot run as a candidate or panel gate"
+fi
 ma_validate_provider_list
 # The patch author's family re-judging its own patch is correlated
 # judgment, not independence. Unless the caller pinned --providers, the
@@ -730,6 +752,27 @@ if [ -n "$BASE_REF" ]; then
     fail "invalid --base ref: $BASE_REF"
 fi
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO/.oms/artifacts/review}"
+if [ "$SINCE_LAST" -eq 1 ]; then
+  since_out="$(python3 -I "$(ma_scripts_dir)/lib/review_since.py" resolve --repo "$MA_READ_SOURCE_REPO" \
+    --index "${OMS_ARTIFACT_INDEX:-$REPO/.oms/artifacts/index.jsonl}" --artifact-dir "$ARTIFACT_DIR" \
+    --base "$BASE_REF")" || since_out=$'full\tthe earlier review lookup failed'
+  since_first="${since_out%%$'\n'*}"
+  case "$since_first" in
+    incremental$'\t'*)
+      since_rest="${since_first#incremental$'\t'}"
+      SINCE_SHA="${since_rest%%$'\t'*}"
+      SINCE_NOTE="${since_out#*$'\n'}"
+      INCREMENTAL=1
+      # Every diff reader below sees the narrowed base; rules and the recorded scope keep the real one.
+      REVIEW_BASE_REF="$BASE_REF"
+      BASE_REF="$SINCE_SHA"
+      echo "since-last: incremental review of the commits added since ${SINCE_SHA:0:12}"
+      ;;
+    *)
+      echo "since-last: falling back to a full review: ${since_first#full$'\t'}"
+      ;;
+  esac
+fi
 
 # Mechanical gate backstop: default to the project's own check contract so a
 # GATE: pass self-report alone cannot pass a diff that fails the checks.
@@ -1021,6 +1064,7 @@ export OMS_OPERATION_ID="${OMS_OPERATION_ID:-review-$timestamp}"
 # checkout is never implied by a passing campaign review.
 review_scope_file="$ARTIFACT_DIR/_scope-$timestamp.json"
 OMS_REVIEW_CANDIDATE_RECEIPT="${candidate_temp:+$read_guard_temp/candidate.json}" \
+OMS_REVIEW_SINCE_SHA="$SINCE_SHA" OMS_REVIEW_BASE_REF="$REVIEW_BASE_REF" \
 python3 - "$MA_READ_SOURCE_REPO" "${diff_base:-}" "$REVIEW_DIFF_SHA" "$NO_DIFF" "${MA_SAFE_PATHS[@]}" > "$review_scope_file" <<'PYSCOPE' || fail "cannot record review scope"
 import json, os, subprocess, sys
 repo, base, digest, omitted = sys.argv[1:5]
@@ -1035,6 +1079,11 @@ if omitted != "1":
 scope = {"schema": 1, "kind": "review-scope", "base": base,
     "head": head, "diff_sha256": digest, "paths": [p for p in paths if p],
     "diff_included": omitted != "1", "external_recovery": "not-covered"}
+if os.environ.get("OMS_REVIEW_SINCE_SHA"):
+    # An incremental scope names the real base and the commit it started from.
+    scope["since"] = os.environ["OMS_REVIEW_SINCE_SHA"]
+    scope["incremental"] = True
+    scope["base"] = subprocess.check_output(git + ["rev-parse", os.environ["OMS_REVIEW_BASE_REF"] + "^{commit}"], env=env).decode().strip()
 if os.environ.get("OMS_REVIEW_CANDIDATE_RECEIPT"):
     with open(os.environ["OMS_REVIEW_CANDIDATE_RECEIPT"], encoding="utf-8") as handle:
         scope["candidate"] = json.load(handle)
@@ -1132,12 +1181,24 @@ if ! ma_read_guard_assert; then
   fail "review changed protected repository state"
 fi
 
+print_incremental_note() {
+  [ "$INCREMENTAL" -eq 0 ] ||
+    echo "verdict: incremental since ${SINCE_SHA:0:12} (advisory; the earlier commits were not re-reviewed and this run is not gate evidence)"
+}
+
 record_review_outcome() {
   local review_rc="$1"
   local verified="$2"
   local verdict_json_file="${3:-}"
-  local summary status payload=""
+  local summary status payload="" outcome_kind=review-outcome scope_json=""
 
+  # The reviewed head, base and run ride on the row so a later --since-last can
+  # find them. An incremental outcome gets its own kind: every landing and
+  # status consumer reads review-outcome only, so a partial review can never
+  # stand in for a full pass.
+  scope_json="$(python3 -I "$(ma_scripts_dir)/lib/review_since.py" scope --scope "$review_scope_file" \
+    --run "$timestamp" --gate "$GATE")" || scope_json=""
+  [ "$INCREMENTAL" -eq 0 ] || { outcome_kind=review-incremental; verified=not_verified; }
   if [ "$review_rc" -eq 0 ]; then
     summary="Peer review outcome passed"
     status="success"
@@ -1169,11 +1230,11 @@ with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
 PY
     payload="$(cat "$verdict_json_file")" || fail "typed review outcome could not be read; failing closed"
-    OMS_INDEX_REVIEW_OUTCOME_JSON="$payload" ma_append_artifact_index \
-      "$REPO" review-outcome local "$review_rc" "$synth_file" ||
+    OMS_INDEX_REVIEW_OUTCOME_JSON="$payload" OMS_INDEX_REVIEW_SCOPE_JSON="$scope_json" ma_append_artifact_index \
+      "$REPO" "$outcome_kind" local "$review_rc" "$synth_file" ||
       fail "typed review outcome was not recorded; failing closed"
   else
-    ma_append_artifact_index "$REPO" review-outcome local "$review_rc" "$synth_file" || true
+    OMS_INDEX_REVIEW_SCOPE_JSON="$scope_json" ma_append_artifact_index "$REPO" "$outcome_kind" local "$review_rc" "$synth_file" || true
   fi
   work_journal_observe "$REPO" peer-review "$synth_file" \
     --source-id "$OMS_OPERATION_ID:outcome" --event-type patch_review \
@@ -1223,6 +1284,7 @@ print(json.dumps({
   verdict_json_file="$(mktemp)" || fail "mktemp failed"
   review_finding_windows="$(mktemp -d)" || fail "mktemp failed"
   ( review_verdicts "$ARTIFACT_DIR" "$timestamp" "$verdict_json_file" ) || verdict_rc=$?
+  print_incremental_note
   # Where each reported finding points is a mechanical reading of the diff the
   # seats were shown. It informs the person; it never moves the verdict, so a
   # collector failure is a warning.
@@ -1349,6 +1411,7 @@ fi
 
 quorum_rc=0
 ( ma_quorum_exit ) || quorum_rc=$?
+print_incremental_note
 if [ "$quorum_rc" -eq 0 ]; then
   record_review_outcome 0 not_verified
 else
