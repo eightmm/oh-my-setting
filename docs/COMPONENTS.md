@@ -2152,7 +2152,13 @@ ML/Slurm workflows use local-first experiment controls:
   or is gone. OMS never runs the chemistry or the clustering, and every
   `leakage` report ends by saying it compared exact matches only: analogs,
   homologs and other near-duplicates need the project's similarity tooling.
-- `oms experiment-board` for claims and collision avoidance.
+- `oms experiment-board` for claims and collision avoidance. `finish --verdict
+  supported|not_supported|inconclusive|aborted` records how the hypothesis came
+  out, and `--tags a,b` on `claim` or `finish` labels it. A later `claim` lists,
+  on stderr, the finished experiments that share one of its tags or its id with
+  their verdict and result, so a rejected idea is seen before it is run again.
+  Matching is exact tag or id equality, never similarity, and the list informs
+  without refusing the claim.
 - `oms run-reconcile`, `oms job-digest`, and `oms tsp-queue` for Slurm or local
   GPU work. `oms run-reconcile apply` records a finished job once per
   submission (job id and submit time) and copies what `sacct` reports beside the
