@@ -2016,7 +2016,7 @@ def render_results(report, width=100, compact=False, heading=None):
     add(report.get("coverage") or "Retained OMS evidence")
     offset = report.get("offset")
     offset = offset if isinstance(offset, int) and offset > 0 else 0
-    page = offset // 20 + 1 if offset % 20 == 0 else 0
+    page = offset // 20 + 1 if offset and offset % 20 == 0 else 0
     if page and not rows:
         add("No results on page %d. Older work that was pruned from the retained index is in the Work Journal "
             "(oms journal)." % page)
