@@ -48,6 +48,15 @@ Subcommands:
             (the repo containing --cwd; the Work Journal digest points there).
   list      List captured handoff digests (newest first); --json for machines.
   show FILE Print a captured digest to stdout.
+  prompt    Print an editable next-session prompt (Markdown) built from OMS
+            records: goal, plan state, decisions, open findings, verified /
+            not verified, next step, pointers. No model call, read-only.
+
+prompt options:
+  --cwd PATH       Project dir (default: OMS_STATE_REPO or current dir).
+  --max-bytes N    Bound the output (512-65536, default 4096); the cut is
+                   named on a "truncated:" line.
+  --output FILE    Write to a new file (refuses to overwrite) and print its path.
 
 list options:
   --json           Emit JSON.
@@ -879,7 +888,29 @@ cmd_show() {
   cat "$f"
 }
 
+cmd_prompt() {
+  local cwd="${OMS_STATE_REPO:-$PWD}" max="" out="" repo
+  local -a extra=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cwd) [ "$#" -ge 2 ] || fail "--cwd requires a path"; cwd="$2"; shift 2 ;;
+      --max-bytes)
+        [ "$#" -ge 2 ] || fail "--max-bytes requires a count"
+        case "$2" in ''|*[!0-9]*) fail "--max-bytes requires a positive integer: $2" ;; esac
+        max="$2"; shift 2 ;;
+      --output) [ "$#" -ge 2 ] || fail "--output requires a new file path"; out="$2"; shift 2 ;;
+      *) fail "unknown prompt option: $1" ;;
+    esac
+  done
+  repo="$(oms_repo_root "$cwd" 2>/dev/null || true)"
+  [ -n "$repo" ] && [ -d "$repo" ] || fail "cannot resolve a state repo for --cwd: $cwd"
+  [ -z "$max" ] || extra+=(--max-bytes "$max")
+  [ -z "$out" ] || extra+=(--output "$out")
+  exec python3 -I "$ROOT/scripts/lib/handoff_prompt.py" --repo "$repo" ${extra[@]+"${extra[@]}"}
+}
+
 case "${1:-}" in
+  prompt) shift; cmd_prompt "$@" ;;
   capture) shift; cmd_capture "$@" ;;
   list) shift; cmd_list "$@" ;;
   show) shift; cmd_show "$@" ;;
