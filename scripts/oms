@@ -208,6 +208,7 @@ consult
 dashboard
 data-manifest
 decide
+deps
 doctor
 draft-pr
 experiment-board

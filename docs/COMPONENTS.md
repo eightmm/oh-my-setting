@@ -117,6 +117,7 @@ explains overlapping entrypoints.
 | `status` | Show install, task and update status. | `oms status` | [Install and ownership](#install-and-ownership) |
 | `doctor` | Check managed links, tools, skills and manifest sync. | `oms doctor` | [Install and ownership](#install-and-ownership) |
 | `project-doctor` | Check project agent-facing files for agreement. | `oms project-doctor` | [Project onboarding](#project-onboarding) |
+| `deps` | Show the version of a third-party package a project pins and has installed. | `oms deps show NAME` | [Project onboarding](#project-onboarding) |
 | `skill-doctor` | Diagnose and rightsize installed skills. | `oms skill-doctor` | [Local skills and optional bundle operations](#local-skills-and-optional-bundle-operations) |
 | `skill-forge` | Create, validate and manage project skills. | `oms skill-forge` | [Local skills and optional bundle operations](#local-skills-and-optional-bundle-operations) |
 | `model-doctor` | Probe provider binaries and cached capabilities. | `oms model-doctor` | [Models and reasoning effort](#models-and-reasoning-effort) |
@@ -522,6 +523,19 @@ Council and panel workers need no `PROJECT.md`; autopilot needs a confirmed
 `PROJECT.md`; goal-drive needs an agent-plan with verify commands and a clean tree. `oms
 init` suggests verification from existing repository files (check.sh, pytest, npm, make,
 Cargo, then Go), or `<your test command>` when no runner is recognized.
+
+`oms deps show NAME [--repo PATH] [--json]` answers "which version of this
+library does this project really use" without a hosted documentation
+service. It prints the version each root lockfile pins (`requirements*.txt`,
+`constraints*.txt`, `uv.lock`, `poetry.lock`, `pdm.lock`, `Pipfile.lock`,
+`environment*.yml`, `package-lock.json`, `Cargo.lock`), the range
+`pyproject.toml` declares, and for Python the installed version, location
+and the URLs the package's own `METADATA` declares, from `./.venv`,
+`./venv`, `VIRTUAL_ENV` or `CONDA_PREFIX`. It notes lockfiles that disagree
+and an installed version that is not a pinned one. Nothing is fetched,
+imported or run, and nothing is written: URLs are shown as declared, without
+credentials or query strings, and are not checked. Exit 0 found, 1 not
+found, 2 bad request.
 
 ## Local skills and optional bundle operations
 
