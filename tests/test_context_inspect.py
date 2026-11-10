@@ -27,6 +27,7 @@ def load(name):
 
 inspector = load("context_inspect")
 policy = load("child_policy")
+reporter = load("context_report")
 ERROR = inspector.InspectionError
 CLI = "--cli" in sys.argv
 if CLI:
@@ -192,6 +193,114 @@ class ProjectionTests(unittest.TestCase):
         self.assertFalse(policy.child_action_is_read_only(argparse.Namespace(command="future-unknown")))
 
 
+class ReportTests(unittest.TestCase):
+    def test_debt_precedes_sizes_and_does_not_double_count_truncation(self):
+        data = manifest()
+        data["selected"][0].update(bytes_selected=75, omitted_bytes=60, selection="head")
+        data.update(context_debt=2, missing_required=["src.py", "required.md"],
+                    truncated_required=["src.py"], sufficient=False)
+        data["omitted"] = [{"path": "required.md", "reason": "not available"}]
+        value = inspector.inspect_manifest(data)
+        before = deepcopy(value)
+        text = reporter.render_report(value)
+        self.assertLess(text.index("Required context debt"), text.index("Recorded byte budget"))
+        self.assertIn("Required context debt (recorded): 2", text)
+        self.assertIn("Truncated required sources (subset above): 1 total", text)
+        self.assertIn("Recorded sufficient: no", text)
+        self.assertIn("size unreported", text)
+        self.assertIn("Current sources: not checked", text)
+        self.assertIn("Source payload 75 B; framing 65 B", text)
+        self.assertEqual(before, value)
+
+    def test_report_uses_no_io_or_processes(self):
+        value = inspector.inspect_manifest(manifest())
+        with patch("builtins.open", side_effect=AssertionError("unexpected read")), \
+                patch.object(os, "open", side_effect=AssertionError("unexpected descriptor")), \
+                patch.object(subprocess, "run", side_effect=AssertionError("unexpected process")):
+            text = reporter.render_report(value)
+        self.assertIn("no bundle verification or acceptance judgment", text)
+        self.assertIn("not the provider's full context", text)
+        self.assertIn("Source SHA-256: " + value["sources"]["items"][0]["sha256"], text)
+
+    def test_nested_list_limits_remain_visible(self):
+        data = manifest()
+        data["selected"] += [source("other.py"), source("third.py", b"z" * 200)]
+        data.update(selected_bytes=500, remaining_bytes=500)
+        text = reporter.render_report(inspector.inspect_manifest(data, limit=1))
+        self.assertIn("Selected sources (largest recorded payload first): 3 total; 1 shown; 2 not shown", text)
+        self.assertIn("Paths: 2 total; 1 shown; 1 not shown", text)
+        self.assertIn("candidates only", text)
+        self.assertIn("does not prove the selected slices duplicate", text)
+
+    def test_unicode_and_terminal_control_labels_are_bounded(self):
+        data = manifest()
+        path = "자료/검토e\u0301.py"
+        data["targets"] = [path]
+        data["selected"][0]["path"] = path
+        data["selected"][0]["reason"] = "한글\x1b[31m\x07\u0085\u2028\u2029\u202e" + "가" * 400
+        value = inspector.inspect_manifest(data)
+        before = deepcopy(value)
+        text = reporter.render_report(value)
+        self.assertIn(path, text)
+        for char in ("\x1b", "\x07", "\u0085", "\u2028", "\u2029", "\u202e"):
+            self.assertNotIn(char, text)
+        self.assertIn("[label shortened]", text)
+        self.assertNotIn("가" * 200, text)
+        self.assertEqual(before, value)
+
+    def test_empty_pack_is_not_a_current_verification(self):
+        data = manifest()
+        data.update(selected=[], targets=[], selected_bytes=0, remaining_bytes=1000)
+        text = reporter.render_report(inspector.inspect_manifest(data))
+        self.assertIn("Used 0 B / 1000 B; remaining 1000 B", text)
+        self.assertIn("Recorded sufficient: yes", text)
+        self.assertIn("Current sources: not checked", text)
+        self.assertIn("0 total; 0 shown; 0 not shown", text)
+        self.assertIn("no bundle verification or acceptance judgment", text)
+
+    def test_comparison_direction_mismatch_and_change_fields(self):
+        left, right = manifest(), manifest()
+        right["selected"][0]["reason"] = "required context"
+        right["selected"].append(source("added.py", b"new"))
+        right.update(selected_bytes=180, remaining_bytes=820, phase="review", targets=["added.py"],
+                     contract_state_digest="c" * 64)
+        value = inspector.compare_manifests(left, right)
+        before = deepcopy(value)
+        text = reporter.render_report(value)
+        for phrase in ("right minus left", "different workflow phases", "different target sets",
+                       "different recorded contract states", "Used: +40 B", "Remaining: -40 B",
+                       "Added selected sources: 1 total", "Fields: reason"):
+            self.assertIn(phrase, text)
+        reverse = reporter.render_report(inspector.compare_manifests(right, left))
+        self.assertIn("Used: -40 B", reverse)
+        self.assertIn("Removed selected sources: 1 total", reverse)
+        self.assertEqual(before, value)
+
+    def test_equal_metadata_and_missing_identity_keep_qualifications(self):
+        data = manifest()
+        text = reporter.render_report(inspector.compare_manifests(data, data))
+        self.assertIn("Recorded scope: matches; current task/repository identity is not verified", text)
+        self.assertIn("Zero deltas do not prove identical packs", text)
+        data["contract_state_digest"] = None
+        text = reporter.render_report(inspector.compare_manifests(data, data))
+        self.assertIn("contract identity unavailable", text)
+        self.assertIn("Recorded scope: different or unknown", text)
+
+    def test_comparison_counts_remain_visible_at_limit(self):
+        left, right = manifest(), manifest()
+        left.update(selected=[source("left.py")], targets=["left.py"])
+        right["selected"] += [source("b.py"), source("c.py")]
+        right.update(selected_bytes=400, remaining_bytes=600)
+        text = reporter.render_report(inspector.compare_manifests(left, right, limit=1))
+        self.assertIn("Added selected sources: 3 total; 1 shown; 2 not shown", text)
+        self.assertIn("Removed selected sources: 1 total; 1 shown; 0 not shown", text)
+
+    def test_unknown_report_contract_is_refused(self):
+        for value in ({"schema": True}, {"schema": 2}, {"schema": 1, "kind": "other"}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                reporter.render_report(value)
+
+
 class FilesystemTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="oms-inspect-")
@@ -239,6 +348,11 @@ class FilesystemTests(unittest.TestCase):
         self.assertEqual(current["changed_paths"], {"total": 2, "items": ["at-limit"], "omitted": 1})
         self.assertEqual(current["missing_paths"]["items"], ["missing"])
         self.assertNotIn("no source or bundle files were read", value["note"])
+        text = reporter.render_report(value)
+        self.assertIn("7 selected; 1 unchanged; 2 changed; 1 missing; 3 unreadable", text)
+        self.assertIn("Changed source paths: 2 total; 1 shown; 1 not shown", text)
+        self.assertNotIn("Current sources: not checked", text)
+        self.assertIn("not an atomic snapshot", text)
         with self.assertRaises(ERROR):
             inspector.inspect_files(self.repo, "pack.json", compare="pack.json", verify_current=True)
 
@@ -318,6 +432,29 @@ if CLI:
                 pair = call("context-inspect", "pack.json", "--compare", "pack.json", "--limit", "1")
                 self.assertEqual(pair.returncode, 0, pair.stderr)
                 self.assertEqual(json.loads(pair.stdout)["delta"]["selected_bytes"], 0)
+                explicit_json = call("context-inspect", "pack.json", "--format", "json")
+                self.assertEqual(explicit_json.returncode, 0, explicit_json.stderr)
+                self.assertEqual(json.loads(explicit_json.stdout), value)
+                text = call("context-inspect", "pack.json", "--format", "text", child=True)
+                self.assertEqual(text.returncode, 0, text.stderr)
+                self.assertIn("OMS context inspection", text.stdout)
+                self.assertIn("Current sources: not checked", text.stdout)
+                current_text = call("context-inspect", "pack.json", "--format", "text", "--verify-current")
+                self.assertEqual(current_text.returncode, 0, current_text.stderr)
+                self.assertIn("1 missing", current_text.stdout)
+                compare_text = call("context-inspect", "pack.json", "--compare", "pack.json", "--format", "text")
+                self.assertEqual(compare_text.returncode, 0, compare_text.stderr)
+                self.assertIn("right minus left", compare_text.stdout)
+                self.assertIn("Used: +0 B", compare_text.stdout)
+                # Invalid combinations fail before any manifest is read.
+                bad = call("context-inspect", "absent.json", "--format", "text", "--pretty")
+                self.assertEqual(bad.returncode, 2)
+                self.assertIn("--pretty applies only to JSON", bad.stderr)
+                self.assertEqual(bad.stdout, "")
+                self.assertEqual(call("context-inspect", "pack.json", "--format", "unknown").returncode, 2)
+                bad = call("context-inspect", "pack.json", "--compare", "pack.json", "--verify-current", "--format", "text")
+                self.assertEqual(bad.returncode, 2)
+                self.assertEqual(bad.stdout, "")
                 self.assertEqual(call("context-inspect", "pack.json", "--limit", "0").returncode, 2)
                 self.assertEqual(call("context", "--target", "src.py", child=True).returncode, 2)
                 self.assertEqual(before, tree_bytes(repo))

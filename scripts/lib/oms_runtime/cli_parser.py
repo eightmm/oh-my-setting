@@ -55,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspection.add_argument('--compare', help='compare with another saved manifest; never run either pack')
     inspection.add_argument('--verify-current', action='store_true', help='compare current source hashes (incompatible with --compare)')
     inspection.add_argument('--limit', type=int, default=10, help='rows per displayed list, 1..100 (default: 10)')
+    inspection.add_argument('--format', choices=('json', 'text'), default='json',
+                            help='output format (default: json); text is a read-only report')
     profile = commands.add_parser('profile', help='optional capability contracts', parents=[shared_options])
     profile_sub = profile.add_subparsers(dest='profile_action', required=True)
     profile_sub.add_parser('list', parents=[shared_options])

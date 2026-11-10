@@ -47,6 +47,40 @@ current tasks or valid experiment controls. No winning run, quality improvement,
 token saving or billing saving is inferred. Existing `experiment compare` and
 `benchmark compare` retain their separate contracts.
 
+## Human-readable report
+
+Use `--format text` for a plain, noninteractive report. JSON remains the default
+on both terminals and pipes; `--format json --pretty` retains the existing JSON
+contract. `--format text --pretty` is rejected before reading a manifest.
+
+```bash
+oms runtime context-inspect before.json --format text
+oms runtime context-inspect before.json --verify-current --format text
+oms runtime context-inspect before.json --compare after.json --format text
+```
+
+The report puts recorded required-context debt and current-source observations
+before byte totals. Truncated required paths are explicitly a subset of the
+missing/incomplete list, not additional debt. A query without `--verify-current`
+says **not checked**, never unchanged. When requested, the read-time hash counts
+and bounded changed/missing paths are shown; this is not an atomic snapshot or
+bundle verification. Unreadable files remain unreadable rather than becoming 0
+changes or a success verdict. The renderer itself opens no files.
+
+Every list, including paths inside repeated-hash groups, shows total, shown and
+not-shown counts from the existing projection. Omission size `null` is printed
+as `unreported`, not zero. Comparisons label their direction **right minus left**
+and display recorded-scope differences or missing identity before signed byte
+and debt deltas. Zero deltas do not prove identical packs or a better result.
+
+Text output uses headings and indented rows, not padded columns, terminal modes,
+colors or control sequences. Paths/reasons remain Unicode; display controls and
+line separators are neutralized. Labels longer than 160 code points have an
+explicit `[label shortened]` marker; JSON keeps the full metadata. This is a
+read-only report, not a clickable task selector or automatic panel integration.
+Terminal wrapping is left to the terminal; no fixed cell-width guarantee is made.
+Metadata can still be private. No summary is sent to a model or remote service.
+
 ## Bounds, authority and compatibility
 
 Manifest reads require an own-UID, single-link regular file inside the selected
@@ -84,7 +118,11 @@ The existing `tests/context-core-smoke.sh` invokes it with `--cli`, adding an
 end-to-end compiler → saved manifest → inspector/compare test through
 `scripts/runtime.sh`. That test removes the listed source and bundle before
 inspection and checks repository bytes remain unchanged. It also checks the
-child boundary and invalid-limit exit.
+child boundary and invalid-limit exit. Text/report assertions extend this same
+suite: ordering, subset counts, bounded lists, Unicode/control handling, unknown
+identity and delta direction. The CLI case also compares default/explicit JSON,
+text inspection/source verification/comparison, child access and invalid format
+combinations without changing repository bytes.
 
 Run the nearest registered suite, not a new CI lane:
 
