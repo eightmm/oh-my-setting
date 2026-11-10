@@ -41366,7 +41366,7 @@ $body"
 
 test_shared_memory_context_ranked_recall() {
   local repo="$TMP/memory-recall-ctx"
-  local out
+  local out bad
 
   make_committed_repo "$repo"
   ( cd "$repo" &&
@@ -41398,6 +41398,49 @@ test_shared_memory_context_ranked_recall() {
   if contains "$out" 'relevant recall'; then
     fail "no query must mean no recall section"
   fi
+
+  # A note scoped to paths belongs to work on those paths: plain recall still
+  # finds it, a target ranks a match first and leaves other scopes out, and
+  # neither the compact summary nor injected recall carries it unasked.
+  local memory="$ROOT/scripts/agent-memory.sh" lib="$ROOT/scripts/lib/agent-memory-common.sh"
+  ( cd "$repo" &&
+    bash "$memory" append --paths 'src/parser/**,*.yaml' \
+      --text "The parser tokenizer tests need the frozen grammar fixture." >/dev/null &&
+    bash "$memory" append --paths 'docs/**' \
+      --text "The parser tests guide lives in the handbook chapter." >/dev/null )
+  assert_file_contains "$repo/.oms/memory/shared.md" 'paths: src/parser/**,*.yaml'
+  if grep -q 'frozen grammar fixture\|handbook chapter' "$repo/.oms/memory/summary.md"; then
+    fail "a path-scoped note must stay out of the compact summary"
+  fi
+  out="$(cd "$repo" && bash "$memory" recall parser tests 2>/dev/null)"
+  contains "$out" 'frozen grammar fixture' && contains "$out" 'handbook chapter' ||
+    fail "plain recall must still find path-scoped notes: $out"
+  out="$(cd "$repo" && bash "$memory" recall --target src/parser/lexer/tokens.py parser tests 2>/dev/null)"
+  [ "$(printf '%s\n' "$out" | grep -v '^$' | sed -n 2p)" = "The parser tokenizer tests need the frozen grammar fixture." ] ||
+    fail "a note scoped to the target path must rank first: $out"
+  contains "$out" 'focused parser test' || fail "an unscoped note must survive a target: $out"
+  if contains "$out" 'handbook chapter'; then fail "a note scoped elsewhere must be left out: $out"; fi
+  out="$(cd "$repo" && bash "$memory" recall --target ./config.yaml,tools/x.py parser tests 2>/dev/null)"
+  contains "$out" 'frozen grammar fixture' || fail "a single-level glob must match a top-level file: $out"
+  out="$(cd "$repo" && bash "$memory" recall --target nested/config.yaml parser tests 2>/dev/null)"
+  if contains "$out" 'frozen grammar fixture'; then fail "a single * must not cross a directory: $out"; fi
+  out="$(cd "$repo" && bash -c '. "$1"; ma_write_shared_memory_context "$2" "parser tests"' _ "$lib" "$repo")"
+  if contains "$out" 'frozen grammar fixture' || contains "$out" 'handbook chapter'; then
+    fail "injected recall must not carry a path-scoped note when the work's paths are unknown: $out"
+  fi
+  out="$(cd "$repo" && OMS_MEMORY_TARGET_PATHS=docs/guide.md bash -c \
+    '. "$1"; ma_write_shared_memory_context "$2" "parser tests"' _ "$lib" "$repo")"
+  contains "$out" 'handbook chapter' || fail "injected recall should carry a note scoped to the named paths: $out"
+  if contains "$out" 'frozen grammar fixture'; then fail "injected recall carried another scope: $out"; fi
+  for bad in '/etc/passwd' '../outside/**' 'a b'; do
+    if (cd "$repo" && bash "$memory" append --paths "$bad" --text "never recorded" >/dev/null 2>&1); then
+      fail "--paths must refuse: $bad"
+    fi
+  done
+  if (cd "$repo" && bash "$memory" search --paths 'src/**' parser >/dev/null 2>&1); then
+    fail "--paths applies only to append"
+  fi
+  ! grep -q 'never recorded' "$repo/.oms/memory/shared.md" || fail "a refused --paths must not append"
 }
 
 test_memory_recall_tracks_access_for_decay() {

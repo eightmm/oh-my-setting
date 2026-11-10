@@ -824,6 +824,8 @@ agent_memory_write_metadata() {
     printf 'git_sha: %s\n' "$git_sha"
     printf 'git_dirty: %s\n' "$git_dirty"
     printf 'git_state: %s\n' "$git_state"
+    # A note scoped to paths (append --paths): recalled for work on those paths only.
+    [ -z "${OMS_MEMORY_NOTE_PATHS:-}" ] || [ "$kind" = retirement ] || printf 'paths: %s\n' "$OMS_MEMORY_NOTE_PATHS"
     if [ -n "$citation_file" ] && [ -s "$citation_file" ]; then
       cat "$citation_file"
     fi
@@ -1019,7 +1021,9 @@ agent_memory_refresh_summary() {
     in_metadata {
       if ($0 == "-->") {
         in_metadata=0
-      } else if ($0 ~ /^source_path:[[:space:]]*[^[:space:]]/) {
+      } else if ($0 ~ /^(source_path|paths):[[:space:]]*[^[:space:]]/) {
+        # A cited note is revalidated on recall and a path-scoped note belongs
+        # to work on its paths: neither is general recent context.
         pending_cited=1
       }
       next
@@ -1421,7 +1425,8 @@ agent_memory_emit_recall_section() {
   [ -n "$query" ] || return 1
   out="$(agent_memory_mktemp)" || return 1
   if ! agent_memory_db_command "$memory_file" recall \
-      --query "$query" --limit "$limit" > "$out" 2>/dev/null; then
+      --query "$query" --limit "$limit" \
+      --scoped drop --target-path "${OMS_MEMORY_TARGET_PATHS:-}" > "$out" 2>/dev/null; then
     rm -f "$out"; return 1
   fi
   [ -s "$out" ] || { rm -f "$out"; return 1; }
