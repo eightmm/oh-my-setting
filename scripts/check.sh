@@ -825,7 +825,9 @@ prepare_affected_gate() {
   local plan_rows="$CHECK_RUNTIME/affected-plan.rows"
   local graph_err="$CHECK_RUNTIME/affected-graph.err"
   local selector_changes="$CHECK_RUNTIME/affected-selector-changes"
-  local kind first second third path docs_only=1 scoped_only=1
+  local kind first second third path docs_only=1 scoped_only=1 critical_reason
+  # shellcheck source=scripts/lib/critical-paths.sh
+  . "$ROOT/scripts/lib/critical-paths.sh"
 
   AFFECTED_NATIVE=false
   AFFECTED_PYTHON=false
@@ -857,29 +859,12 @@ prepare_affected_gate() {
       custom-skills/*.md|templates/*.md|roles/*.md) ;;
       *) scoped_only=0 ;;
     esac
-    case "$path" in
-      .github/workflows/*|scripts/check.sh|scripts/graph.sh|scripts/lib/oms_graph/*|tests/graph-smoke.sh|tests/run-smoke-shard.sh)
-        AFFECTED_MODE=full
-        AFFECTED_REASONS="selector-boundary:$path"
-        break
-        ;;
-      AGENTS.md|*/AGENTS.md|CLAUDE.md|*/CLAUDE.md|GEMINI.md|*/GEMINI.md|PROJECT.md|SECURITY.md)
-        AFFECTED_MODE=full
-        AFFECTED_REASONS="contract-boundary:$path"
-        break
-        ;;
-      custom-skills/*.md|templates/*.md) ;;
-      install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
-      scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
-      scripts/lib/oms-common.sh|\
-      scripts/lib/install*|scripts/lib/python-runtime.sh|scripts/lib/*lock*|scripts/lib/*state*|\
-      scripts/lib/*artifact*|scripts/lib/oms_runtime/common.py|scripts/lib/oms_runtime/child_policy.py|\
-      scripts/lib/durable-jsonl.py|rules/*|config/*|templates/*|custom-skills/*|plugins/*)
-        AFFECTED_MODE=full
-        AFFECTED_REASONS="contract-boundary:$path"
-        break
-        ;;
-    esac
+    # The shared list also drives the fail-ledger's advisor suggestion.
+    if critical_reason="$(oms_critical_path_reason "$path")"; then
+      AFFECTED_MODE=full
+      AFFECTED_REASONS="$critical_reason"
+      break
+    fi
   done < "$selector_changes"
 
   if ! git diff --quiet "$QUICK_TO" -- ||
