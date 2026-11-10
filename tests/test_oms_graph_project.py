@@ -17,7 +17,7 @@ from oms_graph.project.affected import affected_plan
 from oms_graph.errors import GraphError
 from oms_graph import render
 from oms_graph.project.build import build, check, ensure, load_graph
-from oms_graph.project.context import context_pack, select_context
+from oms_graph.project.context import context_pack, select_context, signature_map
 from oms_graph.project.benchmark import history_cases, run as benchmark_run
 from oms_graph.project.query import Graph
 from oms_graph.project import analytics, history
@@ -298,6 +298,59 @@ class ProjectGraphTest(unittest.TestCase):
                         "assert not any(n in sys.modules for n in "
                         "('oms_graph.runner', 'oms_graph.commit'))",
                         str(ROOT / "scripts/lib")], check=True)
+
+    def test_signature_map_fills_ranked_files_inside_the_byte_budget(self) -> None:
+        self.write(
+            "lease.py",
+            '"""Lease lifecycle utilities."""\n\n'
+            "class Lease:\n"
+            "    def recover(self, task, *, force=False):\n"
+            '        marker = "LEASE_BODY_MARKER"\n'
+            "        return task, force, marker\n\n"
+            + "".join("def lease_helper_%02d(task):\n    return task\n\n" % number for number in range(30)),
+        )
+        self.write("lease_cli.py", "import lease\n\ndef lease_main(argv):\n    return lease.Lease().recover(argv)\n")
+        notebook = {"cells": [
+            {"cell_type": "markdown", "metadata": {}, "source": ["def lease_prose(): pass\n"]},
+            {"cell_type": "code", "execution_count": 1, "metadata": {},
+             "outputs": [{"output_type": "stream", "name": "stdout", "text": ["def lease_ghost_output(): pass\n"]}],
+             "source": ["def lease_notebook_step(frame):\n", "    return frame\n"]}],
+            "metadata": {"language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5}
+        self.write("lease_study.ipynb", json.dumps(notebook, indent=1) + "\n")
+        index = Graph(self.graph())
+
+        wide = signature_map(self.repo, index, task="lease recover", max_bytes=64 * 1024, state=self.state)
+        self.assertEqual(wide["retrieval"]["status"], "matched")
+        self.assertEqual((wide["truncated"], wide["omitted"]), ([], []))
+        self.assertEqual(wide["files"][0]["path"], "lease.py", "the lexical entry leads, as in the context pack")
+        self.assertEqual([row["path"] for row in wide["files"]],
+                         select_context(self.repo, index, task="lease recover", state=self.state)["files"])
+        self.assertEqual(wide["bytes"], len(wide["text"].encode("utf-8")))
+        self.assertIn("lease.py  # Lease lifecycle utilities.\n", wide["text"])
+        self.assertIn("  4  def Lease.recover(self, task, *, force=...)\n", wide["text"])
+        self.assertIn("def lease_notebook_step(frame)", wide["text"])
+        # Declarations only: no body, no Markdown cell and no notebook output reaches the view.
+        for leaked in ("LEASE_BODY_MARKER", "lease_ghost_output", "lease_prose", "return task"):
+            self.assertNotIn(leaked, wide["text"])
+        self.assertEqual(wide, signature_map(self.repo, index, task="lease recover", max_bytes=64 * 1024, state=self.state))
+        self.assertFalse((self.state / "context").exists(), "the view ranks without writing a pack")
+
+        tight = signature_map(self.repo, index, task="lease recover", max_bytes=400, state=self.state)
+        self.assertLessEqual(tight["bytes"], 400)
+        self.assertEqual(tight["bytes"], len(tight["text"].encode("utf-8")))
+        self.assertTrue(tight["text"].endswith("\n"), "a cut falls on a line boundary")
+        self.assertEqual(tight["truncated"], ["lease.py"])
+        self.assertEqual([row["path"] for row in tight["files"]], ["lease.py"])
+        self.assertLess(tight["files"][0]["shown"], tight["files"][0]["symbols"])
+        # Rank order holds after the cut: a smaller, lower-ranked file never takes the leftover bytes.
+        self.assertEqual(tight["omitted"], [row["path"] for row in wide["files"][1:]])
+        self.assertTrue(tight["omitted"])
+
+        anchored = signature_map(self.repo, index, task="", entry_paths=["lease_cli.py"], state=self.state)
+        self.assertEqual(anchored["files"][0]["path"], "lease_cli.py")
+        for bad in (255, 256 * 1024 + 1):
+            with self.assertRaises(GraphError):
+                signature_map(self.repo, index, task="lease", max_bytes=bad, state=self.state)
 
     def test_trace_is_a_bounded_projection_with_explicit_loss(self) -> None:
         nodes = [{"id": "root", "kind": "file", "path": "root.py"}]

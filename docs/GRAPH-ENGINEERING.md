@@ -904,6 +904,17 @@ deleted paths are dropped, `--path` focuses on pairs touching a path, and
 `--limit` bounds the JSON with `truncated`/`omitted`. Harness children may run
 it (read-only, regenerable, like the other readers).
 
+Signature map (`context.signature_map`): `oms graph project map --signatures
+--task TEXT [--max-bytes N]` ranks files exactly as `context` does
+(`select_context`, no pack written) and prints each ranked file's `api`
+signatures until the byte budget (default 8192, 256–262144) is spent. Every
+line is a declaration the parsers extracted: no body, no comment block, no
+Markdown or notebook output cell. A file cut at a line boundary is named in
+`truncated`, a ranked file that got no room in `omitted`, and once one file is
+cut no lower-ranked file takes the leftover bytes. `--entry-path` anchors it
+to exact files, `--max-files` bounds the ranking, and `--task`/`--entry-path`
+without `--signatures` are refused. It is deterministic and makes no model call.
+
 Context pack (`context.py`): lexical query → path-deduplicated entry nodes →
 EXTRACTED/INFERRED neighborhood (depth 2; AMBIGUOUS omitted) → confidence-
 and-distance-ranked files, tests, selectable test cases, capped blast view,
@@ -973,6 +984,7 @@ oms graph project build  [--force] [--include GLOB]... [--exclude GLOB]... [--ma
 oms graph project ensure [--max-files N]
 oms graph project check
 oms graph project map    [--json] [--html-fragment ABS|--ui-model] [--limit 1..200] [--depth 0..4]
+oms graph project map    --signatures --task TEXT [--entry-path P]... [--max-bytes 256..262144] [--max-files 1..200] [--json]
 oms graph project find   QUERY [--kind KIND] [--limit N]
 oms graph project api    PATH [--limit 1..2000]
 oms graph project search TEXT [--limit 1..500]

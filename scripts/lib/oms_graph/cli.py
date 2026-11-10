@@ -84,6 +84,14 @@ def build_parser() -> argparse.ArgumentParser:
     show_map.add_argument("--depth", type=int, default=2, help="neighbor depth in the HTML overview (0-4)")
     show_map.add_argument("--json", action="store_true")
     show_map.add_argument("--brief", action="store_true", help="print the cached orientation brief (not combinable with --json or visual outputs)")
+    show_map.add_argument("--signatures", action="store_true",
+                          help="with --task: the files ranked for the task as extracted signatures, inside --max-bytes (no bodies, nothing written)")
+    show_map.add_argument("--task", default="", help="task text ranked the same way as `context` (requires --signatures)")
+    show_map.add_argument("--max-bytes", type=int, default=project_context.SIGNATURE_MAP_DEFAULT_BYTES,
+                          help="byte budget of the signature text (256-262144)")
+    show_map.add_argument("--max-files", type=int, default=12, help="ranked files considered by --signatures (1-200)")
+    show_map.add_argument("--entry-path", action="append", default=[], metavar="PATH",
+                          help="with --signatures: anchor to an exact repo-relative file; repeatable")
     map_visual = show_map.add_mutually_exclusive_group()
     map_visual.add_argument("--html-fragment", default="", metavar="ABSOLUTE_PATH",
                             help="write a bounded interactive HTML fragment for an agent UI")
@@ -288,10 +296,42 @@ def _validate_map_args(args: argparse.Namespace) -> None:
         raise GraphError("project map cannot combine --json with a visual output")
     if args.brief and (args.json or args.ui_model or args.html_fragment):
         raise GraphError("project map --brief cannot combine with --json, --ui-model or --html-fragment")
+    if args.signatures:
+        if not str(args.task).strip() and not args.entry_path:
+            raise GraphError("project map --signatures requires --task TEXT or --entry-path PATH")
+        if args.brief or args.ui_model or args.html_fragment:
+            raise GraphError("project map --signatures cannot combine with --brief, --ui-model or --html-fragment")
+        if not (project_context.SIGNATURE_MAP_MIN_BYTES <= args.max_bytes <= project_context.SIGNATURE_MAP_MAX_BYTES):
+            raise GraphError("project map --max-bytes must be between %d and %d"
+                             % (project_context.SIGNATURE_MAP_MIN_BYTES, project_context.SIGNATURE_MAP_MAX_BYTES))
+        if args.max_files < 1 or args.max_files > 200:
+            raise GraphError("project map --max-files must be between 1 and 200")
+    elif str(args.task).strip() or args.entry_path:
+        raise GraphError("project map --task and --entry-path require --signatures")
+
+
+def _project_signature_map(args: argparse.Namespace, repo: Path, state: Path, index: Graph) -> int:
+    result = project_context.signature_map(repo, index, task=args.task, max_bytes=args.max_bytes,
+                                           max_files=args.max_files, state=state, entry_paths=args.entry_path)
+    if result["retrieval"]["status"] != "matched":
+        print("graph map: " + result["retrieval"]["hint"], file=sys.stderr)
+    if args.json:
+        emit(result, args.pretty)
+        return 0
+    print("signature map: %d file(s), %d of %d bytes; orientation, not evidence"
+          % (len(result["files"]), result["bytes"], result["max_bytes"]))
+    sys.stdout.write(result["text"])
+    for path in result["truncated"]:
+        print("truncated: %s" % path)
+    for path in result["omitted"]:
+        print("omitted: %s" % path)
+    return 0
 
 
 def _project_map(args: argparse.Namespace, repo: Path, state: Path) -> int:
     full_graph, index = _index(repo, state)
+    if args.signatures:
+        return _project_signature_map(args, repo, state, index)
     if args.brief:
         revision = str(full_graph.get("revision", ""))
         text = project_orientation.read(state, revision)

@@ -802,6 +802,20 @@ OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project coupling --limit 1 
   > "$work/child-coupling.out" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 0 ] || fail "a child must be able to read coupling (exit $child_rc): $(cat "$work/child-coupling.out")"
 
+# The signature map is a reader too: a child may run it, and its flags are
+# refused before any refresh.
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project map --signatures --task "graph" --max-bytes 512 \
+  > "$work/child-signatures.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 0 ] || fail "a child must be able to read the signature map (exit $child_rc): $(cat "$work/child-signatures.out")"
+grep -q '^signature map: ' "$work/child-signatures.out" || fail "signature map header missing: $(cat "$work/child-signatures.out")"
+for bad in "--task graph" "--signatures" "--signatures --task graph --max-bytes 10" "--signatures --task graph --brief"; do
+  bad_rc=0
+  # shellcheck disable=SC2086  # each case is a list of words
+  "$OMS" graph --repo "$exec_repo" project map $bad > "$work/bad-map.out" 2>&1 || bad_rc=$?
+  [ "$bad_rc" -ne 0 ] || fail "project map $bad must be refused: $(cat "$work/bad-map.out")"
+done
+
 # A delegated child may evaluate a route but never submit an execution decision.
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec route coding-change \

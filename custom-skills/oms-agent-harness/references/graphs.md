@@ -20,6 +20,7 @@ oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 
 oms graph project blast --base origin/main   # --limit N bounds the JSON lists
 oms graph project coupling --path scripts/plan-run.sh   # co-change pairs from Git history; structural=no = the parsers cannot see it
 oms graph project affected --base origin/main --head HEAD --json
+oms graph project map --signatures --task "lease recovery" --max-bytes 4096   # ranked files as signatures, no bodies
 oms graph project ensure         # explicit build-or-refresh; check reports only
 ```
 
