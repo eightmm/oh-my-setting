@@ -2565,8 +2565,12 @@ The footer shows at most three hints chosen by the selection (a main: `Enter Cha
 `a Ask advisor`; a call: `Enter Show`, `w Worktree` when it applies;
 `Esc Close` while a preview or detail is open; on the Messages and Debate tabs the arrows, `Enter` and the filter or target keys) and always ends with the fixed panel keys
 `F9 Chat⇄Board  m Modes  F12 Keys  ? Keys` when space allows (`q Quit` and `? Keys` on a standalone watcher); narrow managed footers drop `F12 Keys` before `? Keys`. `?` swaps in the full list of keys
-that work in that view, with `v Expand` or `v Collapse` following the board's state.
-Notices disappear on the next input or after ten seconds.
+that work in that view, with `v Expand` or `v Collapse` following the board's state, `x Transcript`
+on a call, `[ ]` on the Log tab, paging keys and `Ctrl+L`; a hint that fits no row is dropped whole and
+the list ends in `…` when any were dropped. A key with no binding in the board shows `Key not bound here;
+? lists the keys`. The control menu's `[k]` groups and the result reader's key row come from tables in
+`panel_keymap.py` (the reader drops whole hints, lowest priority first, at narrow widths). Notices
+disappear on the next input or after ten seconds.
 
 `a` in the watcher asks an advisor for the selected main (or the shown one). In tmux it
 opens a popup that takes one question and runs `oms panel --dispatch advisor --main

@@ -1037,6 +1037,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         else:
                             refused_selection = event[0] == "enter" and navigation.get("selection_moved")
                             action = choose(("down",) if event[0] == "tab" and not navigation.get("tab_strip_visible", False) else event, navigation)
+                            if event[0] == "unbound":
+                                navigation["notice"] = "Key not bound here; ? lists the keys"
                             shown = None if action or refused_selection else panel_reader.picked(event, navigation)
                             if shown:
                                 # A click or Enter previews in the board; the call's full content opens on the right.

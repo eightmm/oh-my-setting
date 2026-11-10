@@ -2338,7 +2338,8 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
         keys = [panel_hint('question_hide'), panel_hint('esc_back'), panel_hint('f5_control') if managed else "", panel_hint('k_capacity'), panel_hint('u_refresh'),
                 (panel_hint('enter_collapse') if navigation.get("messages_view", {}).get("open") is not None and navigation.get("messages_view", {}).get("open") == navigation.get("messages_view", {}).get("selected") else panel_hint('enter_expand')) if tabs and navigation.get("tab") == "messages" else
                 panel_hint('enter_open_right') if managed and kind in {"result", "debate"} else panel_hint('enter_open'),
-                panel_hint('move', unicode), panel_hint('space_fold'), panel_hint('a_ask_advisor'),
+                panel_hint('move', unicode),
+                panel_hint('space_fold') if kind == "group" or kind == "chat" and not graph else "", panel_hint('a_ask_advisor'),
                 panel_hint('w_worktree') if worktree else "", panel_hint('c_cancel_call') if cancelable else "",
                 mail_hint if mail else panel_hint('f_open_right') if message_call or managed and navigation.get("full_result") else
                 panel_hint('f_full_result') if navigation.get("full_result") else "",
@@ -2349,14 +2350,26 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 panel_hint('r_read_all') if tabs and navigation.get("tab") == "needs" else "",
                 panel_hint('l_latest_unread') if tabs and navigation.get("tab") == "needs" else "",
                 panel_hint('shift_drag_copy') if managed else "", panel_hint('m_modes') if managed else "",
-                toggle if managed else panel_hint('q_quit'), panel_hint('f12_keys') if managed else ""]
+                toggle if managed else panel_hint('q_quit'), panel_hint('f12_keys') if managed else "",
+                panel_hint('transcript') if kind == "result" else "", panel_hint('i_headers') if managed else "",
+                panel_hint('previous_filter') + "  " + panel_hint('next_filter') if tabs and navigation.get("tab") == "log" else "",
+                panel_hint('pageup'), panel_hint('pagedown'), panel_hint('home'), panel_hint('end'),
+                panel_hint('ctrl_l_repaint')]
         lines = [""]
         for key in [k for k in keys if k]:
             key = clipped(key, width)
             if lines[-1] and display_width(lines[-1] + "  " + key) > width:
                 lines.append("")
             lines[-1] += ("  " if lines[-1] else "") + key
-        return lines[:max(0, navigation.get("help_rows", 4))]
+        limit = max(0, navigation.get("help_rows", 4))
+        if limit and len(lines) > limit:
+            # Whole hints drop from the end; say so rather than hide that more keys exist.
+            more = "…" if unicode else "..."
+            last = lines[limit - 1]
+            while "  " in last and display_width(last + "  " + more) > width:
+                last = last.rsplit("  ", 1)[0]
+            lines[limit - 1] = clipped(last + "  " + more, width)
+        return lines[:limit]
     # The dock falls back to Detail for a tab it does not show (an empty Past list, say); the hints follow the dock.
     tab = navigation.get("tab") if tabs and navigation.get("tab_body_visible", True) and not navigation.get("detail") and \
         navigation.get("tab") in navigation.get("visible_tabs", [navigation.get("tab")]) else None

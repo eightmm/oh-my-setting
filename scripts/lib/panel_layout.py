@@ -75,23 +75,25 @@ PANEL_KEYS = (
     ('horizontal', 'Filter', ('board',), 'filter'),
     ('horizontal', 'Target', ('board',), 'target'),
     ('x', 'Transcript', ('board',), 'transcript'),
-    ('[', '', ('board',), 'previous_filter'),
-    (']', '', ('board',), 'next_filter'),
-    ('pageup', '', ('board', 'reader'), 'pageup'),
-    ('pagedown', '', ('board', 'reader'), 'pagedown'),
+    ('[', 'Log older', ('board',), 'previous_filter'),
+    (']', 'Log newer', ('board',), 'next_filter'),
+    ('pageup', 'Page up', ('board', 'reader'), 'pageup'),
+    ('pagedown', 'Page down', ('board', 'reader'), 'pagedown'),
     ('up', '', ('board', 'reader'), 'up'),
     ('down', '', ('board', 'reader'), 'down'),
     ('left', '', ('board', 'reader'), 'left'),
     ('right', '', ('board', 'reader'), 'right'),
-    ('home', '', ('board', 'reader'), 'home'),
-    ('end', '', ('board', 'reader'), 'end'),
+    ('home', 'First', ('board', 'reader'), 'home'),
+    ('end', 'Last', ('board', 'reader'), 'end'),
+    ('repaint', 'Repaint', ('board', 'reader'), 'ctrl_l_repaint'),
 )
 _HINTS = {name: (key, label) for key, label, contexts, name in PANEL_KEYS}
 
 
 def panel_hint(name, unicode=True):
     key, label = _HINTS[name]
-    key = {"vertical": "↑↓" if unicode else "^v", "horizontal": "←→" if unicode else "<>", "escape": "Esc", "enter": "Enter", "tab": "Tab", " ": "Space", "shift-drag": "Shift-drag"}.get(key, key)
+    key = {"vertical": "↑↓" if unicode else "^v", "horizontal": "←→" if unicode else "<>", "escape": "Esc", "enter": "Enter", "tab": "Tab", " ": "Space", "shift-drag": "Shift-drag",
+                  "pageup": "PgUp", "pagedown": "PgDn", "home": "Home", "end": "End", "repaint": "Ctrl+L"}.get(key, key)
     return key + " " + label
 
 

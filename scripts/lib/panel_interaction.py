@@ -943,9 +943,8 @@ def interactive(repo, view="auto", attention_only=False):
                 delivered = retry_delivery(repo, task_id)
                 previous = "app delivery: " + delivered["receipt"]["status"]
             elif choice != "9":
-                available = help_rows(menu_rows(200, 100, expanded=True, managed=managed_session(),
-                                                occupied=navigation.get("main_occupied", True), installed=navigation.get("installed")), 200)
-                raise ValueError("choose " + ", ".join(re.findall(r"\[([^]]+)\]", " ".join(available))))
+                from panel_keymap import control_keys
+                raise ValueError("choose " + ", ".join(control_keys()))
         except EOFError:
             return 0
         except NativeShutdown:

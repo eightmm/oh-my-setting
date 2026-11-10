@@ -1111,7 +1111,7 @@ def event_keys(function):
         for operand in node.comparators:
             values = operand.elts if isinstance(operand, (ast.Set, ast.Tuple, ast.List)) else [operand]
             found.update(item.value for item in values if isinstance(item, ast.Constant) and isinstance(item.value, str))
-    return found - {"click", "eof", "repaint", "scroll"}
+    return found - {"click", "eof", "repaint", "scroll", "unbound"}
 
 board_keys = set().union(*(event_keys(function) for function in
     (panel_watch.watch, panel_input.choose, panel_navigation.tab_event, panel_reader.picked)))
@@ -1119,7 +1119,7 @@ table_keys = {row[0] for row in panel_layout.PANEL_KEYS}
 assert board_keys <= table_keys, board_keys - table_keys
 assert {key for key, command in panel.MAIN_KEYS} == {row[0] for row in panel_layout.PANEL_KEYS if "root" in row[2]}
 # Direction pairs and terminal copy/scroll gestures are display aliases for input events.
-aliases = {"vertical", "horizontal", "shift-drag", "wheel"}
+aliases = {"vertical", "horizontal", "shift-drag", "wheel", "repaint"}
 assert table_keys <= board_keys | aliases | set(dict(panel.MAIN_KEYS)) | {"left", "right"}, table_keys - board_keys - aliases - set(dict(panel.MAIN_KEYS)) - {"left", "right"}
 assert set(panel._MAIN_COMMANDS) == set(dict(panel.MAIN_KEYS))
 
@@ -5953,6 +5953,56 @@ assert "Confirm in tmux prompt" in " ".join(confirm_hint), confirm_hint
 expanded_message_nav = {"tab_strip_visible": True, "tab": "messages",
                         "messages_view": {"selected": "message-1", "open": "message-1"}}
 assert "Enter Collapse" in " ".join(footer_hints(expanded_message_nav, 80, True, True, None, True))
+# Key discoverability: the tables are the help, in both directions.
+import itertools
+import panel_keymap
+shown_hints = set()
+for kind, managed, tabs, tab, extra in itertools.product(
+        (("chat", "m"), ("result", "c"), ("debate", "d"), ("group", "g"), ("tab", "t"), None), (True, False),
+        (True, False), ("log", "detail", "messages", "debate", "plan", "past", "needs"),
+        ({}, {"main_occupied": False}, {"expanded": True}, {"message_has_call": False}, {"full_mail": ("mail", "m"), "full_result": ("result", "c")}, {"detail": {"x": 1}},
+         {"reader_open": True, "group_tree": True}, {"messages_view": {"selected": "a", "open": "a"}},
+         {"needs_finalize": {"k": 1}, "needs_ids": [("result", "c")], "needs_keys": ["k"]})):
+    for keys_help in (False, True):
+        help_nav = dict({"selected": kind, "tab_strip_visible": tabs, "tab_body_visible": True, "tab": tab, "keys_help": keys_help,
+                    "help_rows": 60, "main_occupied": True, "message_has_call": True,
+                    "cancel_owner": {"participant": "m", "attempt": "a"}}, **extra)
+        for graph in (True, False):
+            for member in (None, {"location": "worktree:a/b", "state": "working", "parent": "m"}):
+                for glyphs in (True, False):
+                    shown_hints.update(footer_hints(help_nav, 400, managed, glyphs, member, graph))
+shown_text = "\n".join(shown_hints) + "\n" + "\n".join(panel.keys_help(("claude", "pi", "codex")))  # F12's tmux list
+for key, label, contexts, name in panel_layout.PANEL_KEYS:
+    if "board" in contexts and label and key not in {"wheel"}:
+        assert panel_layout.panel_hint(name) in shown_text or panel_layout.panel_hint(name, False) in shown_text, name
+# Every key the board's `?` list names is bound, and the narrow list says when it dropped hints.
+narrow = footer_hints({"keys_help": True, "help_rows": 2, "main_occupied": True}, 40, True, True, None, False)
+assert len(narrow) == 2 and narrow[-1].endswith("…") and all(display_width(row) <= 40 for row in narrow), narrow
+ascii_narrow = footer_hints({"keys_help": True, "help_rows": 2}, 40, False, False, None, False)
+assert ascii_narrow[-1].endswith("...") and ascii_narrow[-1].isascii(), ascii_narrow
+# Control menu: every key the dispatcher handles is in the table the menu renders, and the reverse.
+import ast, terminal_panel as control_panel
+handled = set()
+for node in ast.walk(ast.parse(inspect.getsource(control_panel.interactive))):
+    if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "choice"):
+        for operand in node.comparators:
+            items = operand.elts if isinstance(operand, (ast.Tuple, ast.Set, ast.List)) else [operand]
+            handled.update(item.value for item in items if isinstance(item, ast.Constant) and isinstance(item.value, str))
+handled -= {"u"}  # `u` is the board's refresh spelling of 9 and reads as 9 before dispatch
+assert handled == set(panel_keymap.control_keys()), handled ^ set(panel_keymap.control_keys())
+expanded_menu = "\n".join("\n".join(menu_rows(200, 100, expanded=True, managed=True, occupied=occupied))
+                          for occupied in (True, False))
+assert all("[%s]" % key in expanded_menu for key in panel_keymap.control_keys()), expanded_menu
+# Reader: each hinted key is handled by the reader loop, and narrow panes drop whole hints, never cut one.
+reader_source = inspect.getsource(panel_reader.page)
+for key, label, rank in panel_keymap.READER_KEYS:
+    for part in key.replace("[ ]", "[,]").replace("/", ",").split(","):
+        assert '"%s"' % {"Tab": "tab", "Space": " ", "Esc": "escape"}.get(part, part) in reader_source, part
+full_reader = panel_keymap.reader_hint(200, True)
+for width in range(11, 160):
+    row = panel_keymap.reader_hint(width, True)
+    assert display_width(row) <= width and row.endswith("q/Esc close"), (width, row)
+    assert all(part.strip() in full_reader for part in row.split("  ")), (width, row)
 assert "Sol 6.1 worker for Opus 5.5 · failed: Fix parser" in inbox, inbox
 assert "waiting for approval: Run migration" in inbox and "patch awaits admission: Write patch" in inbox, inbox
 assert "Opus 5.5 main · to all: Which branch?" in inbox and "\033" not in inbox, inbox

@@ -922,10 +922,11 @@ def box_row(text, width, unicode=True, dashed=False):
 def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=True, occupied=False, installed=None):
     """Starting a main, rooms, refresh and quit; the board's own keys are not repeated."""
     quit_label = "Detach" if managed else "Quit"
-    other = ("[s] Swap main  " if occupied else "") + "[o] Rooms  [k] Capacity  [9] Refresh  [?] More  [q] " + quit_label
-    harnesses = [("claude", "[1] Claude"), ("pi", "[2] Pi"), ("codex", "[0] Codex")]
-    start_keys = [label for name, label in harnesses if installed is None or name in installed]
-    starts = "  ".join(start_keys + (["[3] Resume", "[t] Task"] if start_keys else []))
+    from panel_keymap import control_text
+    table = dict(quit_label=quit_label, occupied=occupied, installed=installed)
+    other = control_text("OTHER", **table)
+    start_keys = control_text("START", only="120", **table).split("  ") if control_text("START", only="120", **table) else []
+    starts = control_text("START", **table) if start_keys else ""
 
     def wrap_groups(text, row_width, limit):
         groups = [group.strip() for group in re.findall(r"\[[^]]+\](?: [^[]+)?", text)]
@@ -943,7 +944,7 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
             rows.append(current)
         return [clipped(line, row_width) for line in rows[:limit]]
     if height < 20 or width < 28:
-        options = (["[s] Swap main [o] Rooms [k] Capacity [9] Refresh [?] [q] " + quit_label,
+        options = ([control_text("OTHER", short_more=True, **table).replace("  ", " "),
                     "[s] [o] [k] [9] [?] [q]"] if occupied else
                    [" ".join(start_keys + ["[?]", "[q] " + quit_label]),
                     " ".join(re.findall(r"\[[^]]+\]", " ".join(start_keys)) + ["[?]", "[q]"])])
@@ -951,11 +952,7 @@ def menu_rows(width, height, unicode=True, expanded=False, managed=False, keys=T
         return [clipped(compact, width)]
     groups = ([] if occupied else [("START", starts)] if start_keys else []) + [("OTHER", other)]
     if expanded:
-        groups += [("OPEN", "[h] Chats  [r] Results  [g] Graph  [z] Panel"),
-                   ("TERMINAL", "[j] Terminals and jobs"),
-                   ("WORK", "[5] Explain  [6] Implement  [e] Researcher  [a] Advisor  [7] Review  [c] Council"),
-                   ("SETUP", "[4] Main provider  [p] CLIs  [8] Dashboard"),
-                   ("RESULT", "[f] Finalize  [n] Retry delivery")]
+        groups += [(name, control_text(name)) for name in ("OPEN", "TERMINAL", "WORK", "SETUP", "RESULT")]
     mode = "all shortcuts" if expanded else "press a key" if keys else "key + Enter"
     lines = [box_edge("Actions" + (" · " if unicode else " / ") + mode, width, unicode)]
     if width < 60 and not expanded:

@@ -531,12 +531,8 @@ def page(render, board, on_refresh=None):
                     else:
                         frame = [title, state, tabs, ""] + body + [footer]
                         # Keep a single bottom region; the key hint is part of it.
-                        hint = ("Tab View  r Raw  e Events  d Diff  i " + ("Info" if size[0] < 120 else "Run info") +
-                                "  x Transcript  [ ] Section  o Outline  "
-                                "/ Search  n/N Match  " + ("z Zoom  " if size[0] < 120 or zoomed else "") + "q/Esc close")
-                        if len(hint) > size[0]:
-                            hint = "q/Esc close  Tab View  x Transcript  / Search"
-                        frame.append(hint)
+                        from panel_keymap import reader_hint
+                        frame.append(reader_hint(size[0], size[0] < 120 or zoomed, size[0] >= 120))
                     fit_line = styled_clip if trusted_style else clipped
                     sys.stdout.write("\033[H\033[2J" + "\n".join(fit_line(line, size[0]) for line in frame[:size[1]]))
                     sys.stdout.flush()
