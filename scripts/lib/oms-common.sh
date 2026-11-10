@@ -4068,7 +4068,6 @@ PY
 # keeps equal fingerprints, and the comparison then fails closed (hard), never open.
 # shellcheck disable=SC2034  # read by peer-delegate.sh after a failed snapshot
 OMS_WG_SNAPSHOT_ERROR=""
-# shellcheck disable=SC2034
 # Fingerprints of the user-level files that decide what the next session runs:
 # provider settings, shell start files and git config. One "digest<TAB>label"
 # line each; labels are fixed names, never contents. A provider CLI may update
@@ -4154,6 +4153,7 @@ oms_user_config_changed() {  # BEFORE AFTER
   printf '%s' "$found"
 }
 
+# shellcheck disable=SC2034
 oms_worker_surface_snapshot() {
   local repo="$1"
   local dir="$2"
