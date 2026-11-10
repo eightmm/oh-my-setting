@@ -22673,6 +22673,48 @@ test_experiment_board_lifecycle_and_duplicate_guard() {
   all="$(OMS_EXPERIMENT_BOARD="$board" "$SH" list --all 2>/dev/null)"
   contains "$all" "$id" || fail "--all must show finished experiment"
   contains "$all" "owner=claude" || fail "owner must stay the claimer"
+
+  # A negative result is findable before the next claim: finish records a
+  # verdict and tags, and a claim sharing a tag (exact match) lists it first.
+  local b=(env "OMS_EXPERIMENT_BOARD=$board" OMS_AGENT=claude "$SH")
+  "${b[@]}" claim --id warmup-a --hypothesis "longer warmup helps" --tags "Warmup, lr" >/dev/null 2>"$d/claim1.err" ||
+    fail "tagged claim failed"
+  ! grep -q 'finished experiment' "$d/claim1.err" || fail "a first tagged claim has nothing earlier to list"
+  "${b[@]}" finish --id warmup-a --verdict not_supported --result "no gain over 3 seeds" >/dev/null 2>"$d/finish.err" ||
+    fail "finish with a verdict failed"
+  assert_file_contains "$d/finish.err" "done: warmup-a (not_supported)"
+  assert_file_contains "$board" '"verdict": "not_supported"'
+  assert_file_contains "$board" '"tags": ["warmup", "lr"]'
+  ( cd "$d" && "$ROOT/scripts/run.sh" validate --dir "$d/.oms" ) >/dev/null 2>&1 ||
+    fail "run validation rejected a finished experiment that carries a verdict and tags"
+  "${b[@]}" claim --id warmup-b --hypothesis "cosine warmup helps" --tags warmup >/dev/null 2>"$d/claim2.err" ||
+    fail "a claim sharing a tag with a rejected experiment must still succeed"
+  assert_file_contains "$d/claim2.err" "1 finished experiment(s) share this claim's tags or id:"
+  assert_file_contains "$d/claim2.err" "  warmup-a  not_supported  [warmup]  no gain over 3 seeds"
+  assert_file_contains "$d/claim2.err" "a not_supported result is a recorded outcome, not a ban"
+  # Exact tags only: a different tag, or one that merely contains it, lists nothing.
+  "${b[@]}" claim --id other --hypothesis "unrelated" --tags warmup-long,schedule >/dev/null 2>"$d/claim3.err" ||
+    fail "unrelated tagged claim failed"
+  ! grep -q 'finished experiment' "$d/claim3.err" || fail "tags must match exactly: $(cat "$d/claim3.err")"
+  # Re-claiming an id that already ended lists its outcome without any tag.
+  "${b[@]}" claim --id warmup-a --hypothesis "longer warmup helps" >/dev/null 2>"$d/claim4.err" ||
+    fail "re-claiming a finished id failed"
+  assert_file_contains "$d/claim4.err" "  warmup-a  not_supported  [same id]  no gain over 3 seeds"
+  "${b[@]}" show --id warmup-a > "$d/show.out" 2>&1 || fail "show failed"
+  assert_file_contains "$d/show.out" "verdict=not_supported"
+  assert_file_contains "$d/show.out" "tags=warmup,lr"
+  # The verdict vocabulary and tag spelling are closed; a bad one writes nothing.
+  local rows
+  rows="$(wc -l < "$board")"
+  rc=0; "${b[@]}" finish --id warmup-b --verdict maybe >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unknown verdict must be refused (got $rc)"
+  rc=0; "${b[@]}" claim --id bad --hypothesis h --tags "has space" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a tag outside [a-z0-9._-] must be refused (got $rc)"
+  rc=0; "${b[@]}" start --id warmup-b --tags warmup >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "--tags outside claim and finish must be refused (got $rc)"
+  rc=0; "${b[@]}" claim --id bad --hypothesis h --verdict supported >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "--verdict on claim must be refused (got $rc)"
+  [ "$rows" = "$(wc -l < "$board")" ] || fail "a refused request must not append to the board"
 }
 
 test_experiment_board_stale_reclaim() {
