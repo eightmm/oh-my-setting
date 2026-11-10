@@ -20,6 +20,7 @@ from oms_graph.project.build import build, check, ensure, load_graph
 from oms_graph.project.context import context_pack, select_context, signature_map
 from oms_graph.project.benchmark import history_cases, run as benchmark_run
 from oms_graph.project.query import Graph
+from oms_graph.project.symbol import symbol_view, view_text
 from oms_graph.project import analytics, history
 
 
@@ -204,6 +205,37 @@ class ProjectGraphTest(unittest.TestCase):
             and edge["relation"] == "calls"
             for edge in graph["edges"]
         ))
+
+    def test_symbol_view_separates_extracted_inferred_and_text_only(self) -> None:
+        self.write("core.py", "def settle(task):\n    return task\n")
+        self.write("use.py", "from core import settle\n\ndef run(task):\n    return settle(task)\n")
+        self.write("tests/test_core.py", "from core import settle\n\ndef test_settle():\n    assert settle(1) == 1\n")
+        self.write("notes.md", "Call settle after the lease ends; resettle is another word.\n")
+        index = Graph(self.graph())
+        view = symbol_view(self.repo, index, "settle")
+        self.assertEqual((view["match"], view["text_query"]), ("exact", "settle"))
+        self.assertEqual([row["id"] for row in view["extracted"]["definitions"]], ["symbol:core.py::settle"])
+        self.assertEqual(view["extracted"]["definitions"][0]["signature"], "def settle(task)")
+        self.assertEqual([(row["source"], row["line"]) for row in view["extracted"]["callers"]], [("symbol:use.py::run", 4)])
+        self.assertEqual([row["source"] for row in view["extracted"]["tests"]], ["symbol:tests/test_core.py::test_settle"])
+        self.assertEqual(view["inferred"], [])
+        text = {(row["path"], row["line"]) for row in view["text_only"]}
+        self.assertIn(("notes.md", 1), text)          # prose the parsers link to nothing
+        self.assertNotIn(("use.py", 4), text)         # already an extracted caller
+        self.assertNotIn(("core.py", 1), text)        # the definition itself
+        # A resolver's guess is its own zone, never mixed into what a parser read.
+        guessed = dict(index.graph)
+        guessed["edges"] = [dict(edge, confidence="INFERRED") if edge["target"] == "symbol:core.py::settle"
+                            and edge["source"] == "symbol:use.py::run" else edge for edge in guessed["edges"]]
+        view = symbol_view(self.repo, Graph(guessed), "symbol:core.py::settle", limit=1)
+        self.assertEqual(view["match"], "id")
+        self.assertEqual(view["extracted"]["callers"], [])
+        self.assertEqual([(row["source"], row["confidence"]) for row in view["inferred"]], [("symbol:use.py::run", "INFERRED")])
+        self.assertEqual(len(view["text_only"]), 1)
+        self.assertIn("inferred  use.py:4", view_text(view))
+        missing = symbol_view(self.repo, index, "resettle")
+        self.assertEqual((missing["match"], missing["extracted"]["definitions"]), ("none", []))
+        self.assertEqual([(row["path"], row["line"]) for row in missing["text_only"]], [("notes.md", 1)])
 
     def test_summary_file_api_source_search_and_unparsed_coverage(self) -> None:
         self.write(

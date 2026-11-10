@@ -858,6 +858,21 @@ metadata instead of a broken partial JSON value; `map_summary()` returns counts 
 kind and language, top hubs, and module groups. Analytics
 (`analytics.py`) are stdlib: evidence degrees and structural assurance.
 
+Symbol view (`symbol.py`): `oms graph project symbol NAME [--limit 1..500]
+[--json]` answers "where is it and who uses it" in one read and keeps three
+zones apart. `extracted` holds the definitions (path, line, signature) plus
+the callers and tests whose edges a parser read from source; `inferred` holds
+INFERRED and AMBIGUOUS edges, a resolver's guess; `text_only` holds
+whole-word matches of the bare name that no edge accounts for (an import
+line, a method call the resolver could not bind, prose). NAME is a node id, an
+exact name or qualified name, else a case-insensitive one (`match` says
+which). The text zone reuses `search`, so previews are bounded, secret-shaped
+lines are withheld, notebooks are skipped, and `text_scan` reports stale or
+skipped files. Each zone is cut to `--limit` with the cut counted in
+`omitted`. It refreshes the graph like the other readers, a harness child may
+run it, and MCP exposes it as `oms_project_graph_symbol`. An empty zone is
+not proof that code is unused.
+
 Blast radius (`blast.py`): `changed_paths(repo, base)` compares the working
 tree with `merge-base(base, HEAD)` plus untracked files. Without a base it
 compares with `HEAD`, or combines staged and unstaged paths before the first
@@ -1003,6 +1018,7 @@ oms graph project map    --signatures --task TEXT [--entry-path P]... [--max-byt
 oms graph project find   QUERY [--kind KIND] [--limit N]
 oms graph project api    PATH [--limit 1..2000]
 oms graph project search TEXT [--limit 1..500]
+oms graph project symbol NAME [--limit 1..500] [--json]   # definitions, extracted callers/tests, inferred edges, text-only matches
 oms graph project neighbors NODE [--relation R] [--direction in|out|both]
 oms graph project trace  NODE [--direction in|out] [--depth N]
 oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
