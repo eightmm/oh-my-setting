@@ -758,6 +758,15 @@ A contract fixes:
   threshold over a fixed baseline ([RRSI, §3.3](https://arxiv.org/html/2609.24972v3)).
 - no-regression tolerances
 - invariant commands
+- optional `budget`: `{"runs": N, "gpu_hours": H, "final_evals": K}`, any
+  subset. It is part of the contract digest. `experiment summarize` reports
+  `runs` used and remaining from the run index, and once the count reaches the
+  limit `experiment run` and `experiment launch --contract` refuse another run
+  unless `--reason TEXT` is given; `experiment run` records the reason on the
+  run row. A run already going is never cancelled. `gpu_hours` and
+  `final_evals` are stated limits only: `summarize` shows them with `used:
+  null` and where to look (`oms run-reconcile usage --experiment ID`), because
+  nothing here counts them yet.
 
 A run refuses a pre-existing metrics file by default so stale output cannot be
 silently attributed to a new command. `--allow-existing-metrics` is explicit and

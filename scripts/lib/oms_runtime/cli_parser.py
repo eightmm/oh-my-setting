@@ -210,6 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument('--worktree', default='')
     run_cmd.add_argument('--timeout-seconds', type=int, default=86400)
     run_cmd.add_argument('--allow-existing-metrics', action='store_true')
+    run_cmd.add_argument('--reason', default='', help='recorded justification for a run past the contract budget.runs')
     run_cmd.add_argument('remainder', nargs='+')
     summarize_cmd = experiment_sub.add_parser('summarize', parents=[shared_options])
     summarize_cmd.add_argument('--id', required=True)
