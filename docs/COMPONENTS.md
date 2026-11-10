@@ -776,6 +776,18 @@ their final answer (lowercased, whitespace collapsed, 80 bytes), or `(no verdict
 line)`. It counts identical lines mechanically, is labelled "not a decision", and
 involves no model call; matching text is not agreement on substance.
 
+`oms panel --council --until-agreement [--max-rounds N]` (also `oms peer-ask
+--until-agreement`) is opt-in and replaces `--rounds`/`--debate`: after each debate
+round it applies the tally's own grouping and stops once at least two answering seats
+share one group and none lacks a verdict line; otherwise it continues to the cap
+(default 4, at most 6, still bounded by the 12-primary-call budget, so two seats allow
+a cap of 5). A seat that fails stops the loop with its reason and is never retried;
+the synthesis records rounds run, the stop reason (`agreed`, `cap reached`, `seat
+failed`), which seats changed their verdict line each round, and at the cap or on a
+failure the remaining groups under "no agreement". Agreement is a tally of identical
+lines, not correctness, and cost scales with rounds (each round is one call per
+seat). It cannot be combined with `--lenses` (blind seats never see each other).
+
 
 ### Provider output and evidence
 

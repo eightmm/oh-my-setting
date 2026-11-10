@@ -28,13 +28,13 @@ fail() {
 assert_contains() {
   local file="$1"
   local text="$2"
-  grep -Fq "$text" "$file" || fail "$(basename "$file") missing: $text"
+  grep -Fq -- "$text" "$file" || fail "$(basename "$file") missing: $text"
 }
 
 assert_lacks() {
   local file="$1"
   local text="$2"
-  if grep -Fq "$text" "$file"; then
+  if grep -Fq -- "$text" "$file"; then
     fail "$(basename "$file") must not contain: $text"
   fi
 }
@@ -801,6 +801,113 @@ assert not debate_unchanged('Answer:\nposition\nChanged from previous round:\nno
 assert not debate_unchanged('Answer:\nposition\nChanged from previous round:\nnone\nOther correction:\nrace')
 assert not debate_unchanged('Answer:\nposition\nChanged from previous round:\nnone\n```text\nRemaining disagreements:\nrace\n```')
 PY
+
+# --- --until-agreement: a tally stops the loop, never a model ----------------
+write_debate_prompt() { real_write_debate_prompt "$@"; }  # drop the failing stub above
+write_verdict_artifact() {  # PATH VERDICT
+  printf '## Output\nVerdict: %s\nAnswer: body for %s\nChanged from previous round: moved\n\n## Exit\n\n0\n' "$2" "$2" > "$1"
+}
+ua_reset() {  # CAP: fresh round-1 answers that disagree
+  rm -f "$ARTIFACT_DIR"/*-r[2-9].md
+  DEBATE="$1"
+  provider_names=(codex claude)
+  alive=(1 1)
+  dropped=0
+  dropped_names=()
+  write_verdict_artifact "$ARTIFACT_DIR/codex-uar1.md" ship
+  write_verdict_artifact "$ARTIFACT_DIR/claude-uar1.md" hold
+  last_arts=("$ARTIFACT_DIR/codex-uar1.md" "$ARTIFACT_DIR/claude-uar1.md")
+  artifacts=("${last_arts[@]}")
+  seat_exit=(0 0)
+  seat_quality=('' '')
+  ok=2 total=2
+  MA_KIND=ask
+  prompt_file="$TMP/ua-prompt"
+  printf 'Ship or hold?\n' > "$prompt_file"
+}
+
+# Agreement in the second debate round stops before the third.
+ua_reset 4
+MA_UNTIL_AGREEMENT=1
+run_provider() {
+  case "$3" in
+    *-r2.md) write_verdict_artifact "$3" "$([ "$1" = codex ] && echo ship || echo hold)" ;;
+    *) write_verdict_artifact "$3" ship ;;
+  esac
+}
+ma_run_debate_rounds
+[ "$debate_stop_reason" = agreed ] || fail "agreement in round 3 must stop as agreed (got: $debate_stop_reason)"
+[ "$debate_rounds_run" -eq 2 ] || fail "rounds run must be 2 (got: $debate_rounds_run)"
+[ -f "$ARTIFACT_DIR/codex-stable-$timestamp-r3.md" ] || fail 'the agreeing round must have run'
+if ls "$ARTIFACT_DIR"/*-r4.md >/dev/null 2>&1; then fail 'no round may run after agreement'; fi
+ma_write_synthesis "$TMP/ua-agreed.md"
+assert_contains "$TMP/ua-agreed.md" '## Until agreement'
+assert_contains "$TMP/ua-agreed.md" '- rounds run: 2 of at most 4'
+assert_contains "$TMP/ua-agreed.md" '- stop reason: agreed'
+assert_contains "$TMP/ua-agreed.md" '- round 2 changed verdict line: none'
+grep -Eq -- '^- round 3 changed verdict line: .*claude' "$TMP/ua-agreed.md" || fail 'round 3 mover not recorded'
+assert_lacks "$TMP/ua-agreed.md" 'result: no agreement'
+
+# Never agreeing stops at the cap, reports the standing groups, never loops on.
+ua_reset 3
+run_provider() { write_verdict_artifact "$3" "$([ "$1" = codex ] && echo ship || echo hold)"; }
+ma_run_debate_rounds
+[ "$debate_stop_reason" = 'cap reached' ] || fail "no agreement must stop at the cap (got: $debate_stop_reason)"
+[ "$debate_rounds_run" -eq 3 ] || fail "cap rounds must all run (got: $debate_rounds_run)"
+if ls "$ARTIFACT_DIR"/*-r5.md >/dev/null 2>&1; then fail 'the cap is a hard stop'; fi
+ma_write_synthesis "$TMP/ua-cap.md"
+assert_contains "$TMP/ua-cap.md" '- stop reason: cap reached'
+assert_contains "$TMP/ua-cap.md" '- result: no agreement'
+assert_contains "$TMP/ua-cap.md" 'Remaining groups:'
+assert_contains "$TMP/ua-cap.md" '`verdict: ship `'
+assert_contains "$TMP/ua-cap.md" '`verdict: hold `'
+
+# A seat without a verdict line is never agreement, even when the rest match.
+ua_reset 2
+run_provider() {
+  if [ "$1" = codex ]; then write_verdict_artifact "$3" ship; else printf '## Output\nno verdict here at all\n\n## Exit\n\n0\n' > "$3"; fi
+}
+ma_run_debate_rounds
+[ "$debate_stop_reason" = 'cap reached' ] || fail "a missing verdict line must not count as agreement (got: $debate_stop_reason)"
+
+# A dead seat stops the loop with its reason; the failed seat is not retried.
+ua_reset 4
+calls="$TMP/ua-calls"
+: > "$calls"
+run_provider() {
+  printf '%s %s\n' "$1" "$3" >> "$calls"
+  if [ "$1" = claude ] && [[ "$3" == *-r3.md ]]; then return 1; fi
+  write_verdict_artifact "$3" "$([ "$1" = codex ] && echo ship || echo hold)"
+}
+ma_run_debate_rounds
+case "$debate_stop_reason" in 'seat failed: '*claude*'exit 1'*) ;; *) fail "dead seat reason missing (got: $debate_stop_reason)" ;; esac
+[ "$debate_rounds_run" -eq 2 ] || fail "a dead seat stops the loop in its round (got: $debate_rounds_run)"
+[ "$(grep -c '^claude .*-r3.md' "$calls")" -eq 1 ] || fail 'failed seat must not be retried'
+if ls "$ARTIFACT_DIR"/*-r4.md >/dev/null 2>&1; then fail 'no round may follow a dead seat'; fi
+ma_write_synthesis "$TMP/ua-dead.md"
+assert_contains "$TMP/ua-dead.md" '- stop reason: seat failed: '
+
+# Flag absent: the same disagreeing seats run every budgeted round, nothing recorded.
+ua_reset 3
+MA_UNTIL_AGREEMENT=0
+run_provider() { write_verdict_artifact "$3" "$([ "$1" = codex ] && echo ship || echo hold)"; }
+ma_run_debate_rounds
+{ [ -z "$debate_stop_reason" ] && [ -z "$debate_round_changes" ]; } || fail 'flag absent must record nothing'
+[ -f "$ARTIFACT_DIR/codex-stable-$timestamp-r4.md" ] || fail 'flag absent must run all budgeted rounds'
+ma_write_synthesis "$TMP/ua-off.md"
+assert_lacks "$TMP/ua-off.md" '## Until agreement'
+assert_contains "$TMP/ua-off.md" '- debate rounds: 3'
+
+# CLI: the flag set is bounded and excludes blind lens seats.
+for bad in '--until-agreement --debate 2' '--max-rounds 3' '--until-agreement --max-rounds 7' '--until-agreement --max-rounds 0'; do
+  # shellcheck disable=SC2086
+  if bash "$ROOT/scripts/peer-ask.sh" --dry-run --prompt test $bad >/dev/null 2>&1; then fail "peer-ask accepted: $bad"; fi
+done
+if OMS_COUNCIL_LENSES=a,b bash "$ROOT/scripts/peer-ask.sh" --dry-run --prompt test --until-agreement >"$TMP/ua-lens.out" 2>&1; then
+  fail 'lenses with --until-agreement must be refused'
+fi
+assert_contains "$TMP/ua-lens.out" 'cannot combine with blind lens seats'
+unset MA_UNTIL_AGREEMENT
 
 # Synthesis prose may quote status strings; only the engine's final seats can
 # authorize automatic consumption. A dropped rebuttal retains its old answer

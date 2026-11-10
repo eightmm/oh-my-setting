@@ -24,6 +24,9 @@ INCLUDE_MEMORY=0
 INCLUDE_TASK=0
 INCLUDE_ML_CONTEXT=0
 DEBATE=0
+DEBATE_GIVEN=0
+MA_UNTIL_AGREEMENT=0
+MA_MAX_ROUNDS=""
 REQUIRE_COMPLETE=0
 MA_DELIBERATION=0
 # Internal panel metadata; the public lens option belongs to panel --council.
@@ -91,6 +94,15 @@ Options:
                        seat declares "none" under "Changed from previous
                        round:" — stability, not consensus: recorded
                        disagreements stand.
+  --until-agreement    Opt-in: debate until every answering seat (at least two)
+                       shares one Verdict:/Recommendation:/Answer: line, or the
+                       cap is reached. Replaces --debate; incompatible with
+                       blind lens seats. Agreement is a tally of identical
+                       lines, not correctness; cost scales with rounds. A seat
+                       that fails stops the loop (no retry). The synthesis
+                       records rounds run, the stop reason (agreed, cap
+                       reached, seat failed) and who changed per round.
+  --max-rounds N       With --until-agreement: round cap, 1-6 (default 4).
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
@@ -206,6 +218,16 @@ while [ "$#" -gt 0 ]; do
         0) [ -n "$MA_COUNCIL_LENSES" ] || fail "--debate must be 1-3"; DEBATE=0 ;;
         *) fail "--debate must be 1-3" ;;
       esac
+      DEBATE_GIVEN=1
+      shift 2
+      ;;
+    --until-agreement) MA_UNTIL_AGREEMENT=1; shift ;;
+    --max-rounds)
+      [ "$#" -ge 2 ] || fail "--max-rounds requires a round count"
+      case "$2" in
+        1|2|3|4|5|6) MA_MAX_ROUNDS="$2" ;;
+        *) fail "--max-rounds must be 1-6" ;;
+      esac
       shift 2
       ;;
     --export-only)
@@ -238,6 +260,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -n "$MA_MAX_ROUNDS" ] && [ "$MA_UNTIL_AGREEMENT" != 1 ]; then
+  fail "--max-rounds requires --until-agreement"
+fi
+if [ "$MA_UNTIL_AGREEMENT" = 1 ]; then
+  [ -z "$MA_COUNCIL_LENSES" ] || fail "--until-agreement cannot combine with blind lens seats (--lenses): independent seats never see each other's answers, so there is nothing to debate"
+  [ "$DEBATE_GIVEN" = 0 ] || fail "--until-agreement replaces --debate; set the cap with --max-rounds"
+  DEBATE="${MA_MAX_ROUNDS:-4}"
+fi
 if [ "$MA_DELIBERATION" = 1 ]; then
   [ "$DEBATE" -gt 0 ] || [ -n "$MA_COUNCIL_LENSES" ] || fail "--deliberation requires --debate"
   MA_DEBATE_SECTIONS=$'Answer:\nAlternatives:\nEvidence:\nCounterargument:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:'
