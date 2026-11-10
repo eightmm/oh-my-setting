@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -101,7 +102,8 @@ def stable_snapshot(path: str) -> Snapshot:
 
 
 def legacy_event_id(source: str, ordinal: int, rendered: str) -> str:
-    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+    normalized = rendered.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return "legacy:%s:%d:%s" % (source, ordinal, digest)
 
 
@@ -224,7 +226,7 @@ def parse_shared(text: str, spans: Optional[list] = None) -> list[Entry]:
                 parse_metadata_line(line, metadata_block)
             continue
         match = HEADER_RE.match(line)
-        if match:
+        if match and (not occurred_at or pending_metadata or re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", match.group(1))):
             finish()
             header_index = line_index
             occurred_at = match.group(1)
@@ -1023,14 +1025,14 @@ def memory_state(shared: str, pins: str):
     notes = parse_shared(stable_snapshot(shared).text)
     pinned = parse_pins(stable_snapshot(pins).text)
     status = {}
-    for entry in notes + pinned:
-        if REDACTED_RE.fullmatch(entry.body.strip()):
-            status[entry.event_id] = {"status": "redacted", "by": ""}
     for entry in notes:
         if EVENT_ID_RE.fullmatch(entry.supersedes):
             status[entry.supersedes] = {"status": "superseded", "by": entry.event_id}
         if EVENT_ID_RE.fullmatch(entry.retires):
             status[entry.retires] = {"status": "retired", "by": entry.event_id}
+    for entry in notes + pinned:
+        if REDACTED_RE.fullmatch(entry.body.strip()):
+            status[entry.event_id] = {"status": "redacted", "by": ""}
     return notes, pinned, status
 
 
@@ -1461,9 +1463,15 @@ def redact_entry(shared: str, pins: str, target: str, agent: str, apply: bool) -
     digest of a short credential is a way to guess it."""
     found = []
     for source, path, parse in (("shared", shared, parse_shared), ("pins", pins, parse_pins)):
-        if not os.path.exists(path):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
             continue
-        raw = Path(path).read_bytes()
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise RuntimeError("memory source is not a regular file")
+            raw = handle.read()
         # surrogateescape keeps every byte this does not replace exactly as it was.
         text = raw.decode("utf-8", errors="surrogateescape")
         spans: list = []
@@ -1476,6 +1484,15 @@ def redact_entry(shared: str, pins: str, target: str, agent: str, apply: bool) -
     if not EVENT_ID_RE.fullmatch(target) or len(found) != 1:
         raise RuntimeError("unknown or ambiguous memory ID")
     source, path, text, entry, (start, end) = found[0]
+    source_lines = text.splitlines()
+    if source == "shared" and end < len(source_lines) and HEADER_RE.match(source_lines[end]):
+        raise RuntimeError("ambiguous memory entry boundary; nothing was changed")
+    if source == "shared" and start and any(HEADER_RE.match(line) for line in source_lines[:start]):
+        previous = start - 1
+        while previous >= 0 and not source_lines[previous].strip():
+            previous -= 1
+        if previous < 0 or source_lines[previous].strip() != METADATA_END:
+            raise RuntimeError("ambiguous memory entry boundary; nothing was changed")
     label = "%s %s (%s, %s %s)" % (source, entry.kind, target, entry.occurred_at, entry.agent)
     if REDACTED_RE.fullmatch(entry.body.strip()):
         print("memory: already redacted: %s" % label)
@@ -1487,6 +1504,17 @@ def redact_entry(shared: str, pins: str, target: str, agent: str, apply: bool) -
         print("memory: dry run; nothing changed. Re-run with --apply to remove the text.")
         return 0
     author = re.sub(r"[^A-Za-z0-9._-]", "", agent) or "unknown"
+    if entry.event_id.startswith("legacy:"):
+        metadata_end = start - 1
+        while metadata_end >= 0 and not lines[metadata_end].strip():
+            metadata_end -= 1
+        if metadata_end >= 0 and lines[metadata_end].strip() == METADATA_END:
+            lines.insert(metadata_end, "event_id: %s\n" % entry.event_id)
+        else:
+            lines[start:start] = [METADATA_START + "\n", "event_id: %s\n" % entry.event_id, METADATA_END + "\n"]
+        added = len(lines) - len(text.splitlines(keepends=True))
+        start += added
+        end += added
     tombstone = "[redacted %s by %s: text removed with `oms agent-memory redact`; %d bytes]" % (
         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), author, removed)
     if source == "pins":

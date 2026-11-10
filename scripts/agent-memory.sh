@@ -107,7 +107,7 @@ Files:
 Options:
   --repo PATH       Project repo/directory for project memory. Default: PWD.
   --global          Use global harness memory instead of project memory.
-  --file PATH       Use an explicit shared memory source file.
+  --file PATH       Use an explicit shared memory source file (except redact).
   --agent NAME      Agent label for appended notes / search author filter.
   --text TEXT       Note text for append/pin; query for search/recall.
   --stdin           Read append/pin note from stdin.
@@ -469,10 +469,11 @@ case "$ACTION" in
     echo "memory: $ACTION recorded in $MEMORY_FILE"
     ;;
   redact)
-    if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+    if [ "${OMS_HARNESS_CHILD:-0}" != 0 ] || [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" != 0 ]; then
       echo "error: only the parent session may redact memory; return the request to the parent agent" >&2
       exit 2
     fi
+    [ "$MEMORY_FILE_EXPLICIT" -eq 0 ] || { echo "error: redact does not accept --file" >&2; exit 2; }
     ensure_tmpdir
     agent_memory_redact "$MEMORY_FILE" "$SCOPE" "$AGENT" "$TARGET_ID" "$APPLY"
     ;;
@@ -481,6 +482,7 @@ case "$ACTION" in
       echo "error: sources reports one repository; use --repo, not --global or --file" >&2
       exit 2
     }
+    REPO="$(oms_repo_root "$REPO")" || { echo "error: repository path does not exist" >&2; exit 2; }
     python3 "$ROOT/scripts/lib/agent_memory_sources.py" --repo "$REPO" "${JSON_ARGS[@]}"
     ;;
   pin)

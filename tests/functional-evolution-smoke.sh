@@ -514,6 +514,46 @@ test_memory_redaction_and_native_sources() {
   if bash "$am" --repo "$repo" search "siskin original" >/dev/null 2>&1; then fail "redacting a replacement revived the note it superseded"; fi
   bash "$am" --repo "$repo" search --include-superseded --json "siskin original" | grep -F '"status": "superseded"' >/dev/null || fail "redaction broke the supersession link"
 
+  if OMS_HARNESS_DELEGATE_DEPTH=1 bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null 2>&1; then fail "delegate redacted memory"; fi
+  cp "$repo/.oms/memory/shared.md" "$repo/.oms/memory/summary.md"
+  if bash "$am" --file "$repo/.oms/memory/summary.md" redact --id "$note" --apply >/dev/null 2>&1; then fail "redact accepted explicit file"; fi
+  [ -f "$repo/.oms/memory/summary.md" ] || fail "redact deleted explicit source"
+  mv "$repo/.oms/memory/pins.md" "$repo/.oms/memory/pins.saved"
+  ln -s pins.saved "$repo/.oms/memory/pins.md"
+  if bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null 2>&1; then fail "redact followed symlink"; fi
+  unlink "$repo/.oms/memory/pins.md"
+  mv "$repo/.oms/memory/pins.saved" "$repo/.oms/memory/pins.md"
+  mv "$repo/.oms/memory/pins.md" "$repo/.oms/memory/pins.saved"
+  mkfifo "$repo/.oms/memory/pins.md"
+  if bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null 2>&1; then fail "redact accepted non-regular source"; fi
+  unlink "$repo/.oms/memory/pins.md"
+  mv "$repo/.oms/memory/pins.saved" "$repo/.oms/memory/pins.md"
+  printf 'stale-retry-marker\n' > "$repo/.oms/memory/summary.md"
+  bash "$am" --repo "$repo" redact --id "$link" --apply >/dev/null || fail "redaction retry failed"
+  ! grep -Eq 'stale-retry-marker|\[redacted ' "$repo/.oms/memory/summary.md" || fail "retry retained stale summary or tombstone"
+  bash "$am" --repo "$repo" compact >/dev/null
+  ! grep -Eq '\[redacted |siskin original' "$repo/.oms/memory/summary.md" || fail "compact included inactive memory"
+  repo="$TMP/memory-legacy"
+  make_repo "$repo"
+  mkdir -p "$repo/.oms/memory"
+  printf '## 2020-01-01T00:00:00Z legacy\n\nlegacy-ibis\n' > "$repo/.oms/memory/shared.md"
+  note="$(bash "$am" --repo "$repo" search --json legacy-ibis | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null || fail "legacy redaction failed"
+  bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null || fail "legacy ID changed"
+  printf '\n<!-- oms-memory\nevent_id: later-link\nsupersedes: %s\n-->\n## 2021-01-01T00:00:00Z tester\n\nlater link\n' "$note" >> "$repo/.oms/memory/shared.md"
+  bash "$am" --repo "$repo" search --include-superseded --json redacted | python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; assert any(row["event_id"] == sys.argv[1] and row["supersession"]["status"] == "redacted" for row in rows)' "$note" || fail "redacted status was overwritten"
+  repo="$TMP/memory-invalid"
+  make_repo "$repo"
+  mkdir -p "$repo/.oms/memory"
+  printf '## 2022-01-01T00:00:00Z legacy\n\ninvalid-byte-\\377\n' > "$repo/.oms/memory/shared.md"
+  note="$(bash "$am" --repo "$repo" search --json invalid-byte | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null || fail "invalid byte redaction failed"
+  bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null || fail "invalid byte ID changed"
+  printf 'body-tern\n## ordinary heading\nafter-heading-tern\n' | bash "$am" --repo "$repo" append --stdin >/dev/null
+  note="$(bash "$am" --repo "$repo" search --json body-tern | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null || fail "multiline redaction failed"
+  ! grep -q 'after-heading-tern' "$repo/.oms/memory/shared.md" || fail "body after heading survived"
+
   # sources: names, sizes and counts of what each provider keeps; no file is opened.
   home="$TMP/memory-sources-home"
   mkdir -p "$home/.claude/rules" "$home/.claude/projects/$(printf '%s' "$(cd "$repo" && pwd -P)" | tr -c 'A-Za-z0-9' '-')/memory" \
@@ -544,6 +584,13 @@ assert codex["files"] == 2 and codex["bytes"] == 30, codex
 assert all(set(row) <= {"provider", "role", "path", "kind", "bytes", "files", "modified", "link", "capped"}
            for row in report["sources"]), report
 ' || fail "sources --json shape"
+  mkdir -p "$repo/subdir"
+  out="$(HOME="$home" CODEX_HOME="" bash "$am" --repo "$repo/subdir" sources)" || fail "sources subdir failed"
+  [[ "$out" == *"AGENTS.md"* ]] || fail "sources did not resolve repository root"
+  ln -s "$home" "$TMP/home-link"
+  out="$(HOME="$TMP/home-link" CODEX_HOME="" bash "$am" --repo "$repo" sources)" || fail "sources linked home failed"
+  [[ "$out" == *"~/.claude/CLAUDE.md"* ]] || fail "sources did not resolve home"
+  if bash "$am" --repo "$repo/missing" sources >/dev/null 2>&1; then fail "sources accepted missing repo"; fi
   if bash "$am" --global sources >/dev/null 2>&1; then fail "sources accepted --global"; fi
 }
 

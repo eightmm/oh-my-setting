@@ -17,7 +17,7 @@ MAX_WALK = 2000  # entries stat'ed under one directory before the count is repor
 
 
 def home_dir():
-    return os.path.expanduser("~")
+    return os.path.realpath(os.path.expanduser("~"))
 
 
 def show(path, repo, home):

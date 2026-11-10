@@ -1067,9 +1067,8 @@ agent_memory_refresh_summary() {
   local memory_file="$1"
   local scope="$2"
   local summary_file
-  local tmp
+  local tmp body
   local max_items=40
-  local chars=240
 
   [ -s "$memory_file" ] || return 0
   if agent_memory_file_has_sensitive_content "$memory_file"; then
@@ -1082,44 +1081,10 @@ agent_memory_refresh_summary() {
   mkdir -p "$(dirname "$summary_file")"
   tmp="$(agent_memory_mktemp_beside "$summary_file")" || return 1
 
-  awk -v max_chars="$chars" '
-    $0 == "<!-- oms-memory" {
-      in_metadata=1
-      pending_cited=0
-      next
-    }
-    in_metadata {
-      if ($0 == "-->") {
-        in_metadata=0
-      } else if ($0 ~ /^(source_path|paths):[[:space:]]*[^[:space:]]/) {
-        # A cited note is revalidated on recall and a path-scoped note belongs
-        # to work on its paths: neither is general recent context.
-        pending_cited=1
-      }
-      next
-    }
-    /^## / {
-      current=$0
-      sub(/^## /, "", current)
-      captured=0
-      cited=pending_cited
-      pending_cited=0
-      next
-    }
-    current != "" && captured == 0 && NF {
-      if (cited) {
-        captured=1
-        next
-      }
-      line=$0
-      gsub(/[[:space:]]+/, " ", line)
-      if (length(line) > max_chars) {
-        line=substr(line, 1, max_chars) "..."
-      }
-      print "- " current ": " line
-      captured=1
-    }
-  ' "$memory_file" | tail -n "$max_items" > "$tmp"
+  body="$(agent_memory_mktemp_beside "$summary_file")" || { rm -f "$tmp"; return 1; }
+  agent_memory_db_command "$memory_file" context --view summary > "$body" || { rm -f "$tmp" "$body"; return 1; }
+  tail -n "$max_items" "$body" > "$tmp" || { rm -f "$tmp" "$body"; return 1; }
+  rm -f "$body"
 
   oms_with_file_lock "$summary_file" agent_memory_refresh_summary_write "$summary_file" "$scope" "$tmp"
   rm -f "$tmp"
@@ -1269,33 +1234,15 @@ agent_memory_redact_pins_locked() {
   oms_with_file_lock "$(agent_memory_pins_file "$1")" agent_memory_redact_locked "$@"
 }
 
-agent_memory_redact() {
-  local memory_file="$1"
-  local scope="$2"
-  local agent="$3"
-  local target="$4"
-  local apply="$5"
+agent_memory_redact_apply_locked() {
+  local memory_file="$1" scope="$2" agent="$3" target="$4"
   local db_file candidate rc=0
-
-  case "$target" in ""|*[!A-Za-z0-9._:-]*) echo "error: invalid memory ID" >&2; return 2 ;; esac
-  if [ "$apply" != 1 ]; then
-    # A dry run takes no lock and writes nothing.
-    agent_memory_db_command "$memory_file" redact --target "$target" --agent "$agent" || rc=$?
-    [ "$rc" -ne 3 ] || rc=0
-    return "$rc"
-  fi
-  oms_with_file_lock "$memory_file" agent_memory_redact_pins_locked \
-    "$memory_file" "$target" "$agent" || rc=$?
-  case "$rc" in
-    0) ;;
-    3) return 0 ;;
-    *) return "$rc" ;;
-  esac
-  # Derived copies still hold the text: drop them before rebuilding.
-  rm -f "$(agent_memory_summary_file "$memory_file")"
+  agent_memory_redact_pins_locked "$memory_file" "$target" "$agent" || rc=$?
+  case "$rc" in 0|3) ;; *) return "$rc" ;; esac
+  rm -f "$(agent_memory_summary_file "$memory_file")" || return 1
   db_file="$(agent_memory_db_file "$memory_file")"
   for candidate in "$db_file" "$db_file-journal" "$db_file-wal" "$db_file-shm"; do
-    rm -f "$candidate"
+    rm -f "$candidate" || return 1
   done
   agent_memory_refresh_summary "$memory_file" "$scope" ||
     echo "warning: summary.md was removed and could not be regenerated; run: oms agent-memory compact" >&2
@@ -1305,6 +1252,24 @@ agent_memory_redact() {
   fi
   echo "memory: summary.md and the index were rebuilt without it"
   echo "memory: copies outside the memory store (provider transcripts, handoffs, backups, disk blocks) are not touched"
+}
+
+agent_memory_redact() {
+  local memory_file="$1"
+  local scope="$2"
+  local agent="$3"
+  local target="$4"
+  local apply="$5"
+  local rc=0
+
+  case "$target" in ""|*[!A-Za-z0-9._:-]*) echo "error: invalid memory ID" >&2; return 2 ;; esac
+  if [ "$apply" != 1 ]; then
+    # A dry run takes no lock and writes nothing.
+    agent_memory_db_command "$memory_file" redact --target "$target" --agent "$agent" || rc=$?
+    [ "$rc" -ne 3 ] || rc=0
+    return "$rc"
+  fi
+  oms_with_file_lock "$memory_file" agent_memory_redact_apply_locked "$memory_file" "$scope" "$agent" "$target"
 }
 
 agent_memory_pin_file_unlocked() {
