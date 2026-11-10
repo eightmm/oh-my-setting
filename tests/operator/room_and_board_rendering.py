@@ -5371,6 +5371,32 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
     for off in ("0", "", "nonsense", "-5"):
         with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": off}):
             assert panel_health.quota_warnings(far) == [], off
+    # The same line, read once at delegate dispatch time: one stderr hint from the target provider's last reported
+    # window (named window, percent, age, configured alternative), nothing for stale, rolled-over, missing or
+    # unset, and no record of its own.
+    import quota_hint
+    import tempfile as hint_tempfile
+    with hint_tempfile.TemporaryDirectory() as hint_dir:
+        hint_hud = Path(hint_dir)
+        (hint_hud / ("ctx-" + "ab" * 12 + ".json")).write_text(json.dumps({
+            "ts": 9_000, "used_percentage": 10, "five_hour": {"used_percentage": 87, "resets_at": 12_000},
+            "seven_day": {"used_percentage": 40, "resets_at": 500_000}}))
+        with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": hint_dir}):
+            assert quota_hint.hint("claude", "worker", now=9_180) == "", "unset line is off"
+            with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": "80"}):
+                text = quota_hint.hint("claude", "worker", now=9_180)
+                assert text == ("oms: quota hint: claude 5h window 87% used (last reported 3m ago, resets in 47m); "
+                                "configured alternative: codex gpt-6.1-terra (routine tier); "
+                                "dispatch continues unchanged"), text
+                assert "configured alternative" not in quota_hint.hint("claude", "", now=9_180)
+                assert quota_hint.hint("claude", "worker", now=9_000 + 601) == "", "stale reading"
+                assert quota_hint.hint("claude", "worker", now=12_000) == "", "rolled-over window"
+                assert quota_hint.hint("codex", "worker", now=9_180) == "", "no reading for the target provider"
+                assert quota_hint.hint("claude", "worker", now=8_000) == "", "reading from the future"
+            with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": "90"}):
+                assert quota_hint.hint("claude", "worker", now=9_180) == "", "under the line"
+        with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": hint_dir + "/missing", "OMS_QUOTA_WARN_PCT": "1"}):
+            assert quota_hint.hint("claude", "worker", now=9_180) == "", "missing cache"
     # The status line records how much of the last request's input was read from the prompt cache, as a share of
     # the token counts the provider reported for that request. No counts, no share; health lists it as a reading.
     with patch("time.time", return_value=1000.0):

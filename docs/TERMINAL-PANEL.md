@@ -833,6 +833,16 @@ counts: an unreported, stale or rolled-over window says nothing, and nothing is 
 from token counts. It is an advisory: it changes neither the health level nor any
 session, and starts no swap.
 
+The same line is read once when `peer-delegate.sh` starts a (non-dry-run) dispatch: if the
+target provider's last reported window (Claude 5-hour or weekly from the HUD cache, Codex
+weekly from its session log) is at or past `OMS_QUOTA_WARN_PCT` and was reported within the
+last 10 minutes, one stderr line names the window, the percentage, the age and the first
+other provider configured for the role's tier in `config/panel-routing.json`, for example
+`oms: quota hint: claude 5h window 91% used (last reported 2m ago, resets in 49m); configured
+alternative: codex gpt-6.1-sol (deep tier); dispatch continues unchanged`. Nothing is
+recorded, no provider is swapped and the dispatch is unchanged; a missing, stale or
+rolled-over reading prints nothing.
+
 When the Claude status line payload carries the last request's `current_usage` token
 counts, the HUD cache also records `cache_read_share`: the percentage of that request's
 input tokens (fresh, cache-creation and cache-read) the provider read from its prompt

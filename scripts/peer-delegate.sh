@@ -849,6 +849,8 @@ export OMS_REASONING_FALLBACK_EXPLICIT=""
 export OMS_MODEL_ROLE="$ROLE" OMS_MODEL_OPERATION=delegate
 oms_model_prepare "$TO" || exit $?
 ma_default_read_effort "$TO" "$WORKER_ACCESS"
+# Advisory only: one stderr line when the provider's last reported window is past OMS_QUOTA_WARN_PCT.
+[ "$DRY_RUN" = 1 ] || python3 -B "$(ma_scripts_dir)/lib/quota_hint.py" "$TO" "$ROLE" || true
 if [ -n "$OBSERVED_BINDING" ]; then
   [ -n "$MODEL" ] && [ "$OMS_MODEL_PRIMARY" = "$MODEL" ] && [ -z "$OMS_MODEL_FALLBACK" ] ||
     fail "plan observation requires the selected exact model without fallback"
