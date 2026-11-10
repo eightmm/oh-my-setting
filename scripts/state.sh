@@ -1215,3 +1215,23 @@ else:
         tag = " (STALE — abandoned? end it: change-guard.sh end)" if state["change_guard"]["stale"] else ""
         line("\n## Change-guard: ACTIVE%s" % tag)
 PY
+
+# Advisory only: provider-native memory locations beside .oms/memory, counted
+# from the stat-only sources inventory. Text view of an interactive caller only;
+# any error or a run past one second prints nothing.
+if [ "$AS_JSON" = 0 ] && [ "${OMS_HARNESS_CHILD:-0}" != 1 ]; then
+  python3 -I - "$ROOT/scripts/lib/agent_memory_sources.py" "$REPO" <<'PY' 2>/dev/null || true
+import json, subprocess, sys
+
+try:
+    done = subprocess.run([sys.executable, "-I", sys.argv[1], "--repo", sys.argv[2], "--json"],
+                          capture_output=True, timeout=1, check=True)
+    rows = json.loads(done.stdout)["sources"]
+    count = sum(1 for row in rows if row.get("provider") != "oms" and row.get("role") != "instructions")
+except Exception:
+    count = 0
+if count:
+    print("\nmemory sources: %d provider-native location(s) present besides .oms/memory"
+          " (oms agent-memory sources)" % count)
+PY
+fi

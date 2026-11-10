@@ -1050,6 +1050,10 @@ Antigravity global rules, each with its size, file count and modification time.
 It reads no file, writes nothing, and does not report whether a provider has its
 memory turned on; the Claude auto-memory location is derived from the repository
 path rather than confirmed by the CLI.
+The text view of `oms state` ends with one advisory line counting the
+non-instruction provider locations (auto-memory, subagent memory, Codex
+memories) when any exist; it uses the same stat-only inventory under a one-second
+limit, prints nothing on any error, and is absent from `--json` and for harness children.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
