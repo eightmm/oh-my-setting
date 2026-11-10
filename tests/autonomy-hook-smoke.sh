@@ -1970,6 +1970,47 @@ PY
   [ "$rc" = 2 ] || fail "an unwritable audit log must not turn a refusal into a pass (rc=$rc)"
   rm -f "$base/state"
 
+  # Before refusing a command that would discard work, the guard saves that
+  # work as a checkpoint and names it; the same state refused again reuses it.
+  # A repository without OMS state, or a checkpoint that fails, is still refused.
+  grep -Fq "No checkpoint was taken (this repository keeps no OMS state)." "$base/err" ||
+    fail "a refusal outside OMS state says no checkpoint was taken: $(cat "$base/err")"
+  local saved="$base/saved" first_id again_id
+  mkdir -p "$saved"
+  git init -q "$saved"
+  printf 'one\n' > "$saved/tracked.txt"
+  git -C "$saved" add tracked.txt
+  git -C "$saved" -c user.email=guard@example.test -c user.name=guard commit -q -m base
+  printf 'two\n' >> "$saved/tracked.txt"
+  printf 'only-copy\n' > "$saved/fresh.txt"
+  mkdir "$saved/.oms"
+  rc=0; guard "$saved" "git clean -fd" || rc=$?
+  [ "$rc" = 2 ] || fail "git clean -fd must be refused in a repository with OMS state (rc=$rc)"
+  first_id="$(grep -o 'saved first as checkpoint cp-[A-Za-z0-9._-]*' "$base/err" | awk '{ print $NF }')"
+  [ -n "$first_id" ] || fail "the refusal names the checkpoint it took: $(cat "$base/err")"
+  tar -tf "$saved/.oms/checkpoints/$first_id/untracked.tar" | grep -Fxq fresh.txt ||
+    fail "the pre-refusal checkpoint holds the untracked file"
+  grep -Fq '+two' "$saved/.oms/checkpoints/$first_id/worktree.patch" ||
+    fail "the pre-refusal checkpoint holds the tracked change"
+  [ -f "$saved/fresh.txt" ] && [ "$(tail -n 1 "$saved/tracked.txt")" = two ] ||
+    fail "taking the checkpoint must not touch the worktree"
+  rc=0; guard "$saved" "git clean -fdx" || rc=$?
+  again_id="$(grep -o 'saved first as checkpoint cp-[A-Za-z0-9._-]*' "$base/err" | awk '{ print $NF }')"
+  [ "$rc" = 2 ] && [ "$again_id" = "$first_id" ] ||
+    fail "the same state refused again reuses its checkpoint (rc=$rc, $first_id vs $again_id)"
+  [ "$(find "$saved/.oms/checkpoints" -maxdepth 1 -name 'cp-*' | wc -l | tr -d ' ')" = 1 ] ||
+    fail "a retried refusal must not pile up checkpoints"
+  rc=0; guard "$saved" "git stash drop" || rc=$?
+  [ "$rc" = 2 ] && ! grep -Fq "checkpoint" "$base/err" ||
+    fail "a refusal a checkpoint cannot help takes none (rc=$rc): $(cat "$base/err")"
+  guard "$saved" "git reset --hard" OMS_COMMAND_GUARD=0 || fail "a switched-off guard exits 0"
+  [ "$(find "$saved/.oms/checkpoints" -maxdepth 1 -name 'cp-*' | wc -l | tr -d ' ')" = 1 ] ||
+    fail "a switched-off guard takes no checkpoint"
+  rm -rf "$saved/.oms/checkpoints" && : > "$saved/.oms/checkpoints"
+  rc=0; guard "$saved" "git reset --hard" || rc=$?
+  [ "$rc" = 2 ] && grep -Fq "No checkpoint was taken." "$base/err" ||
+    fail "a checkpoint that cannot be taken never turns a refusal into a pass (rc=$rc): $(cat "$base/err")"
+
   # Malformed payloads fail open.
   for cmd in "" "not json" "{}" '{"tool_input":{"command":["rm -rf /"]}}'; do
     printf '%s' "$cmd" > "$base/payload"
