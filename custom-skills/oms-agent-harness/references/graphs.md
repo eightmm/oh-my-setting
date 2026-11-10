@@ -195,7 +195,7 @@ plan/autopilot hierarchy without this extra layer.
 
 ## Boundaries
 
-- Harness children may run `project build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling|impact`
+- Harness children may run `project build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling|impact|unreferenced`
   and `exec validate|render|route|status|events|test` — the project graph is a
   regenerable cache carrying no authority, and an isolated worktree has no
   other way to get one.

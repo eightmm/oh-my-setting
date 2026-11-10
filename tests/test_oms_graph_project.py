@@ -45,6 +45,24 @@ class ProjectGraphTest(unittest.TestCase):
         build(self.repo, state=self.state)
         return load_graph(self.repo, state=self.state)
 
+    def test_unreferenced_lists_symbols_without_incoming_edges_as_candidates(self) -> None:
+        from oms_graph.project.unreferenced import unreferenced_report
+        self.write("a.py", "def used():\n    return 1\ndef unused():\n    return 2\n"
+                           "class K:\n    def m(self):\n        return used()\n"
+                           "def main():\n    return 0\n")
+        self.write("b.py", "from a import used\nused()\n")
+        self.write("tests/test_a.py", "def test_orphan():\n    assert True\n")
+        index = Graph(self.graph())
+        report = unreferenced_report(index)
+        ids = [row["id"] for row in report["candidates"]]
+        self.assertIn("symbol:a.py::unused", ids)
+        self.assertIn("symbol:a.py::K.m", ids)
+        self.assertNotIn("symbol:a.py::used", ids)
+        self.assertNotIn("symbol:a.py::main", ids)
+        self.assertFalse([item for item in ids if "test_orphan" in item])
+        self.assertIn("candidates only", report["note"])
+        self.assertEqual(unreferenced_report(index, limit=1)["truncated"], True)
+
     def test_environment_readers_are_graph_nodes(self) -> None:
         self.write("a.sh", 'reader() {\n  echo "${OMS_GRAPH_KNOB:-}" "$HOME"\n}\n')
         self.write("b.py", 'import os\ndef reader():\n    return os.getenv("OMS_GRAPH_KNOB")\n')

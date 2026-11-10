@@ -957,6 +957,14 @@ Every list is cut to `--limit` (default 20, 1–500) with the cut counted in
 `omitted`. The brief is labelled orientation: it says where to look and is
 never evidence that a change is safe, tested or approved.
 
+Unreferenced symbols (`unreferenced.py`): `oms graph project unreferenced
+[--limit N] [--include-tests] [--json]` lists function, method and class nodes
+whose only incoming edges are `contains`. `main` and dunder methods are skipped
+and tests are hidden by default. Rows are review candidates, not dead code: a
+dynamic call, decorator, entrypoint table, framework hook or unparsed file
+leaves no edge, and the output says so. It reads the graph only and may run in a
+harness child.
+
 Context pack (`context.py`): lexical query → path-deduplicated entry nodes →
 EXTRACTED/INFERRED neighborhood (depth 2; AMBIGUOUS omitted) → confidence-
 and-distance-ranked files, tests, selectable test cases, capped blast view,
@@ -1036,6 +1044,7 @@ oms graph project neighbors NODE [--relation R] [--direction in|out|both]
 oms graph project trace  NODE [--direction in|out] [--depth N]
 oms graph project blast  [--base REF] [--path P]... [--depth N] [--limit N]   # --limit bounds every JSON list; `truncated`/`omitted` report the cut
 oms graph project coupling [--path P]... [--commits N] [--max-changeset N] [--min-shared N] [--min-degree PCT] [--limit N]
+oms graph project unreferenced [--limit N] [--include-tests] [--json]   # candidates only, never proof of dead code
 oms graph project affected --base REF [--head REF] [--depth N] [--guard GLOB]... [--runnable GLOB]...  # 0 = complete closure; runnable globs add test paths
 oms graph project impact --base REF [--head REF] [--depth N] [--commits N] [--limit 1..500] [--json]   # orientation brief; lists report `omitted`
 oms graph project context --task TEXT [--max-files N] [--bundle] [--base REF] [--json] [--html-fragment ABS|--ui-model]
@@ -1066,7 +1075,7 @@ The graph exists wherever it is read. `project ensure` runs `check` and then
 builds when the graph is absent, refreshes it through the cache when the
 working tree moved, and writes nothing when it is current; it prints `graph:
 fresh revision=...` or the `build` summary line with `built`/`refreshed`.
-Every reader (`map find api search neighbors trace blast affected coupling impact context`) calls it
+Every reader (`map find api search neighbors trace blast affected coupling impact unreferenced context`) calls it
 before loading the graph and sends that summary to **stderr**, so `--json`
 stdout stays parsable. `--no-refresh` on any reader, or `OMS_GRAPH_AUTOBUILD=0`
 globally, reads the graph as it stands — an absent one then fails with the
@@ -1077,7 +1086,7 @@ it with the verb to run; the explicit `build` (which bounds bytes, not files)
 has no such bound, and a refresh of an existing graph is never refused.
 
 Harness children (`OMS_HARNESS_CHILD=1`) may run `project
-build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling|impact`
+build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling|impact|unreferenced`
 and `exec validate|render|route|status|events|test`. `build`/`ensure` are the exception
 to the runtime core's `context` precedent: the project graph is a regenerable
 cache that carries no authority, and a delegated worker in an isolated
