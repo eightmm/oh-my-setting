@@ -101,6 +101,7 @@ explains overlapping entrypoints.
 | `job-digest` | Summarize training or Slurm logs and jobs. | `oms job-digest` | [ML and HPC](#ml-and-hpc) |
 | `run-ledger` | Record a command and its execution metadata. | `oms run-ledger` | [ML and HPC](#ml-and-hpc) |
 | `run-reconcile` | Reconcile long-running Slurm jobs with saved run records. | `oms run-reconcile` | [ML and HPC](#ml-and-hpc) |
+| `slurm-lint` | Static check of a Slurm job script against the cluster snapshot's QOS; prints a preemption-aware template. | `oms slurm-lint` | [ML and HPC](#ml-and-hpc) |
 | `run` | Tie experiment and execution records together. | `oms run` | [ML and HPC](#ml-and-hpc) |
 | `tsp-queue` | Queue local jobs through task-spooler. | `oms tsp-queue` | [ML and HPC](#ml-and-hpc) |
 | `runtime` | Inspect typed projections and optional execution services. | `oms runtime` | [Runtime guide](OMS-RUNTIME.md) |
@@ -1666,7 +1667,16 @@ ML/Slurm workflows use local-first experiment controls:
   and, for an array, each task's ending plus a count per state. A job that ended
   `PREEMPTED` or `NODE_FAIL` while `squeue` still lists its id was requeued: it
   shows as `REQUEUED, attempt n` and is not recorded until that attempt ends.
-  Reconcile only queries the scheduler. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
+  Reconcile only queries the scheduler. `oms slurm-lint SCRIPT` reads a job
+  script's `#SBATCH` lines without running or submitting it and warns about a
+  missing time limit, a log path shared between jobs or array tasks, an array
+  with no concurrency limit, a time limit past the QOS `MaxWall`, and, when the
+  snapshot says the job's QOS preempts by `REQUEUE`, a script that does not ask
+  for `--requeue` or has no `--signal`/trap to checkpoint on. Without a snapshot
+  or a known QOS those checks print `unknown`, never a pass; it exits 1 on any
+  warning. `oms slurm-lint --template` prints `templates/slurm-job.sh`, a
+  starting script that forwards the warning signal, waits for the checkpoint and
+  resumes from the newest one; Slurm, not the script, does the requeue. `oms job-digest <id> --wait --wait-timeout S --max-bytes N` keeps
   the scheduler polling inside one shell call instead of repeated model turns:
   a spent budget exits 124 with observation incomplete and the job untouched, the
   digest is capped to whole lines with the omission stated, and a repeating

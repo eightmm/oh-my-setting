@@ -247,6 +247,7 @@ scratch-worktree
 session-handoff
 skill-doctor
 skill-forge
+slurm-lint
 snapshot
 state
 state-verify

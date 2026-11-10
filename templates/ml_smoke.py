@@ -19,6 +19,8 @@ def main() -> int:
     # TODO 5. backward: loss.backward(); assert gradients are finite.
     # TODO 6. eval mode: model.eval() forward runs without error.
     # TODO 7. checkpoint: save + load a checkpoint round-trip.
+    # TODO 8. preemption (Slurm): send the run SIGUSR1, assert it writes a
+    #         checkpoint, then resume from it for one more step.
     print(
         "ml_smoke: not configured yet; fill the TODO steps in scripts/ml_smoke.py",
         file=sys.stderr,
