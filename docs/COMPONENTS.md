@@ -1946,6 +1946,15 @@ source it cannot read — no `gh`, no permission, a timeout — makes the answer
 never `absent` and never a pass, even when the other source requires `gate`. A review
 count of zero is no requirement. Nothing else runs it, and it changes nothing.
 
+`oms ci-status record` names what failed on a completed red run: the row in
+`.oms/ci.jsonl` gains `failed_jobs` and `failed_checks` (names only, at most twenty
+each, never log text) when `gh` can list the failed log; the session-boundary tick
+skips that lookup, and the next explicit record completes its row. `oms ci-status
+flaky [branch]` then reads the ledger alone and lists the commits recorded red and
+later green without a new commit, with those names counted. It is an observation: a
+rerun also passes when a runner recovers, and nothing is skipped, quarantined or
+re-run on its strength.
+
 Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
