@@ -1724,6 +1724,27 @@ with patch.object(panel.subprocess, "run", return_value=subprocess.CompletedProc
     with patch.object(panel.time, "time", return_value=1200):
         assert panel.main_activity(activity_repo, [activity_main], activity_windows)["activity-main"]["state"] == "busy", "a failed capture cannot prove silence"
     assert not panel.MAIN_OUTPUT
+    # A hung batched tmux read: each window is read at most once, the whole pass stops at its time budget instead
+    # of one hung query per window, and a pane that could not be read never turns a busy main into "quiet".
+    fan_members = [dict(activity_main, participant="fan-%d" % n) for n in range(12)]
+    for fan in fan_members:
+        activity_path.with_name(fan["participant"] + ".json").write_text(
+            json.dumps(dict(activity_row, participant=fan["participant"])))
+    fan_windows = [[fan["participant"], "%%9%02d" % n, str(activity_repo), activity_row["attempt"]]
+                   for n, fan in enumerate(fan_members)]
+    clock = [5000.0]
+    def hung_capture(*args, **kwargs):
+        clock[0] += kwargs["timeout"]
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+    with patch.object(panel.time, "time", return_value=100 + 7 * 24 * 60 * 60), \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel.subprocess, "run", side_effect=hung_capture) as hung:
+        hung_activity = panel.main_activity(activity_repo, fan_members, fan_windows)
+    assert 1 <= hung.call_count <= 4, "a hung tmux read fans out one query per window: %d" % hung.call_count
+    assert len(hung_activity) == len(fan_members) and all(row["state"] == "busy" for row in hung_activity.values()), hung_activity
+    assert not panel.MAIN_OUTPUT, "an unread pane leaves no cached observation to be shown later"
+    for fan in fan_members:
+        activity_path.with_name(fan["participant"] + ".json").unlink()
     activity_path.write_text(json.dumps(dict(activity_row, attempt="fresh", since=1201, updated_at=1201)))
     activity_windows[0][-1] = "fresh"
     with patch.object(panel.time, "time", return_value=1202):
