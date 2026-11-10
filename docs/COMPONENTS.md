@@ -921,6 +921,14 @@ separates parent judgment from bounded execution and defines decision-point
 reviews. Generic role prompts do not select a model or grant delegation authority. Native
 subagents remain outside the shell router.
 
+`config/role-contracts.json` records, per bundled `roles/*.md` file, `read_only`, the
+`writes` scope, literal `returns` lines the role text must contain, and `may_delegate`
+(always false). It restates what the prose already says; tiers stay in
+`config/panel-routing.json`. Nothing enforces it at runtime yet. `python3
+scripts/lib/role_contracts.py` lints it (every role has an entry and vice versa, valid
+enums, read-only roles absent from the panel `WRITERS`) and runs inside the
+role-injection invariant.
+
 ### Collaboration visibility
 
 The [terminal control panel](TERMINAL-PANEL.md) is the human entrypoint: bare

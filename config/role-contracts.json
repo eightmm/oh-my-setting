@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "roles": {
+    "advisor": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "analysis-worker": {"read_only": true, "writes": "scratch", "returns": [], "may_delegate": false},
+    "architect": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "builder": {"read_only": false, "writes": "assigned-paths", "returns": [], "may_delegate": false},
+    "critic": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "decision-advisor": {"read_only": true, "writes": "none", "returns": ["VERDICT:", "RISKS:", "MISSING:", "NEXT:"], "may_delegate": false},
+    "documenter": {"read_only": false, "writes": "assigned-docs", "returns": [], "may_delegate": false},
+    "implementation-worker": {"read_only": false, "writes": "assigned-paths", "returns": [], "may_delegate": false},
+    "integrator": {"read_only": false, "writes": "integration-paths", "returns": [], "may_delegate": false},
+    "patch-reviewer": {"read_only": true, "writes": "none", "returns": ["[P1|P2|P3] title", "no blocking findings"], "may_delegate": false},
+    "performance-engineer": {"read_only": false, "writes": "assigned-paths", "returns": [], "may_delegate": false},
+    "refactorer": {"read_only": false, "writes": "assigned-paths", "returns": [], "may_delegate": false},
+    "release-engineer": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "repo-auditor": {"read_only": true, "writes": "none", "returns": ["no blocking findings"], "may_delegate": false},
+    "researcher": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "reviewer": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "scholar": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "security-auditor": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "test-designer": {"read_only": true, "writes": "none", "returns": [], "may_delegate": false},
+    "verifier": {"read_only": true, "writes": "scratch", "returns": [], "may_delegate": false}
+  }
+}
