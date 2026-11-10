@@ -370,6 +370,7 @@ test_delegate_kill9_recovery_via_gc() {
   mkdir -p "$bin" "$home_dir"
   oms_smoke_make_fake_provider_stub "$bin/codex" <<EOF
 #!/usr/bin/env bash
+case "\${1:-}:\${2:-}" in --version:|--help:|exec:--help) echo fixture; exit 0 ;; esac
 cat > /dev/null
 echo \$\$ > "$project/worker.pid"
 sleep 60
@@ -385,14 +386,17 @@ EOF
     --to codex --repo "$project" --plan-task t1 --no-verify \
     >"$project/out" 2>"$project/err" &
   dpid=$!
-  # Wait for the liveness marker, then SIGKILL the delegate mid-worker.
+  # Wait for the liveness marker and worker entry, then SIGKILL mid-worker.
   for i in $(seq 1 100); do
-    [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] && break
-    kill -0 "$dpid" 2>/dev/null || fail "delegate died before writing its liveness marker: $(cat "$project/err")"
+    [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] &&
+      [ -s "$project/worker.pid" ] && break
+    kill -0 "$dpid" 2>/dev/null || fail "delegate died before starting its worker: $(cat "$project/err")"
     sleep 0.2
   done
   [ -n "$(find "$project/.oms/delegations" -name '*.json' 2>/dev/null)" ] ||
     fail "delegate never wrote a liveness marker"
+  [ -s "$project/worker.pid" ] ||
+    fail "delegate never started its worker: $(cat "$project/err")"
   if ! python3 - "$(find "$project/.oms/delegations" -name '*.json' | sed -n '1p')" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
@@ -429,12 +433,12 @@ PY
   # shared residue cleaner must scan the private delegate root as well as
   # TMPDIR, remove the exact marked directory, and prune its Git registration.
   local leaked
-  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" \
+  HOME="$home_dir" XDG_CACHE_HOME="$home_dir/.cache" PATH="$bin:/usr/bin:/bin" \
     "$ROOT/scripts/cleanup.sh" --apply >"$project/cleanup.out"
   for leaked in "$home_dir/.cache/oh-my-setting/worktrees"/oh-my-setting-delegate.*; do
     [ -d "$leaked" ] || continue
     grep -Fq "repo=$project" "$leaked/.oh-my-setting-tmp" 2>/dev/null || continue
-    fail "cleanup left a crashed delegate worktree: $leaked"
+    fail "cleanup left a crashed delegate worktree: $leaked ($(tr '\n' ' ' < "$project/cleanup.out"))"
   done
   grep -Fq 'dead harness temp dir' "$project/cleanup.out" ||
     fail "cleanup did not report the crashed delegate worktree: $(tr '\n' ' ' < "$project/cleanup.out")"

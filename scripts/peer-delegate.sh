@@ -913,7 +913,9 @@ worker_identity_worktree_stat=""
 worker_identity_gitdir_stat=""
 worker_identity_failed=0
 worker_identity_detail=""
-oms_harness_mark_tmpdir "$worktree_parent" "$delegate_worktree_repo" "$worktree"
+# scratch=1 only for an investigation run, the one kind that may keep its
+# private tmp for owner inspection; cleanup removes any other crashed run's tmp.
+oms_harness_mark_tmpdir "$worktree_parent" "$delegate_worktree_repo" "$worktree" "$$" "$REPORT_ONLY"
 cleanup_delegated_worktree() {
   local cleanup_identity_detail=""
 

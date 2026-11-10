@@ -703,6 +703,31 @@ clean_scratch_run() {
 }
 clean_scratch_run scratchfailed task-scratchfailed failed
 kept_with scratchfailed "is failed with no owner decision and younger than 7 days" "recent clean investigation scratch must be retained"
+# The marker says which run may keep scratch: an investigation (scratch=1)
+# keeps its tmp like a legacy marker; any other run's tmp is disposable.
+clean_scratch_run scratchmarked task-scratchmarked failed
+printf 'scratch=1\n' >> "$TMPDIR/oh-my-setting-delegate.scratchmarked/.oh-my-setting-tmp"
+kept_with scratchmarked "is failed with no owner decision and younger than 7 days" "a marked investigation run must keep its scratch"
+clean_scratch_run writetmp task-writetmp failed
+printf 'scratch=0\n' >> "$TMPDIR/oh-my-setting-delegate.writetmp/.oh-my-setting-tmp"
+cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-delegate.writetmp (dead harness temp dir)" ||
+  fail "a write run's private tmp must not keep its clean worktree"
+clean_scratch_run writeartifact task-writeartifact failed
+printf 'scratch=0\n' >> "$TMPDIR/oh-my-setting-delegate.writeartifact/.oh-my-setting-tmp"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.writeartifact/wt-writeartifact/.oms/artifacts"
+printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.writeartifact/wt-writeartifact/.oms/artifacts/result.md"
+kept_with writeartifact "holds .oms/artifacts/result.md" "a write run's ignored artifact must keep its worktree"
+clean_scratch_run writevenv task-writevenv failed
+printf 'scratch=0\n' >> "$TMPDIR/oh-my-setting-delegate.writevenv/.oh-my-setting-tmp"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.writevenv/wt-writevenv/.venv/src/dep/.git/objects"
+: > "$TMPDIR/oh-my-setting-delegate.writevenv/wt-writevenv/.venv/pyvenv.cfg"
+printf 'unique object\n' > "$TMPDIR/oh-my-setting-delegate.writevenv/wt-writevenv/.venv/src/dep/.git/objects/work"
+kept_with writevenv "regenerable tree holds Git data" "a write run's regenerable tree must still be proven"
+clean_scratch_run legacynotmp task-legacynotmp failed
+rm -r "$TMPDIR/oh-my-setting-delegate.legacynotmp/tmp"
+mkdir -p "$TMPDIR/oh-my-setting-delegate.legacynotmp/wt-legacynotmp/.oms/artifacts"
+printf 'only copy\n' > "$TMPDIR/oh-my-setting-delegate.legacynotmp/wt-legacynotmp/.oms/artifacts/result.md"
+kept_with legacynotmp "holds .oms/artifacts/result.md" "a clean delegate without tmp must still prove its ignored files"
 clean_scratch_run scratchdecided task-scratchdecided failed rejected
 cleanup_out 0 | grep >/dev/null -Fx "removed: $TMPDIR/oh-my-setting-delegate.scratchdecided (dead harness temp dir)" ||
   fail "decided clean investigation scratch must be removed"

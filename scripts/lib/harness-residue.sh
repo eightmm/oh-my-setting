@@ -40,8 +40,8 @@ oms_harness_temp_bases() {
   esac
 }
 
-oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
-  local dir="$1" repo="$2" worktree="$3" owner_pid="${4:-$$}" process_start=""
+oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID [SCRATCH]]
+  local dir="$1" repo="$2" worktree="$3" owner_pid="${4:-$$}" scratch="${5:-}" process_start=""
 
   [ -d "$dir" ] || return 0
   process_start="$(oms_file_lock_process_start_token "$owner_pid" 2>/dev/null || true)"
@@ -52,6 +52,7 @@ oms_harness_mark_tmpdir() {  # DIR REPO WORKTREE [OWNER_PID]
     printf 'repo=%s\n' "$repo"
     printf 'worktree=%s\n' "$worktree"
     printf 'temporary=1\n'
+    [ -z "$scratch" ] || printf 'scratch=%s\n' "$scratch"
   } > "$dir/.oh-my-setting-tmp"
 }
 
@@ -508,6 +509,19 @@ try:
         elif not regenerable(path) and not bytecode(path):
             print("holds ignored file %s" % os.fsdecode(path))
             raise SystemExit(0)
+    if mode == "ignored":
+        # A clean worktree with no run proof: its ignored files and regenerable
+        # trees are all it can lose, so they are the whole proof.
+        proof = hashlib.sha256()
+        for field in (head_commit, staged):
+            proof.update(repr(field).encode() + b"\0")
+        for path in sorted(ignored):
+            proof.update(b"ignored\0" + path + b"\0")
+        for root in sorted(root for root, valid in regenerable_roots.items() if valid):
+            proof.update(b"regenerable\0" + root + b"\0" + regenerable_tree(root))
+        suffix = "; regenerable " + ", ".join(sorted(regenerable_classes)) if regenerable_classes else ""
+        print("ok " + proof.hexdigest() + suffix)
+        raise SystemExit(0)
 
     # The run: the one attempt whose recorded location is this worktree.
     name = "worktree:%s/%s" % (os.path.basename(os.path.dirname(os.path.realpath(wt))), os.path.basename(os.path.realpath(wt)))
@@ -663,11 +677,15 @@ EOF
 # With REPO, KIND and PID (the marker's), a delegate worktree whose finished
 # run and preserved patch prove its work settled is removable; the proof's
 # digest is left in OMS_HARNESS_RESIDUE_PROOF so a caller can recheck it.
-oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID]
+oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID SCRATCH]
   local wt="$1"
   local repo="${2:-}"
   local kind="${3:-}"
   local pid="${4:-}"
+  # SCRATCH is the residue marker's `scratch` value: 0 for a run that never
+  # keeps investigation scratch, so its private tmp is disposable; empty
+  # (a marker written before the field existed) keeps the conservative rule.
+  local scratch="${5:-}"
   local status=""
   local head=""
   local record=""
@@ -678,13 +696,21 @@ oms_harness_worktree_keep_reason() {  # WORKTREE [REPO KIND PID]
   status="$(oms_harness_residue_evidence status "" "$wt" "")"
   case "$status" in
     clean)
-      if [ "$kind" = delegate ] && [ -d "$(dirname "$wt")/tmp" ] && [ ! -L "$(dirname "$wt")/tmp" ]; then
+      if [ "$kind" = delegate ] && [ "$scratch" != 0 ] && [ -d "$(dirname "$wt")/tmp" ] && [ ! -L "$(dirname "$wt")/tmp" ]; then
         OMS_HARNESS_RESIDUE_KEEP_REASON="holds investigation scratch"
         [ -n "$repo" ] && [ -n "$pid" ] && oms_harness_owner_survives "$repo" "$wt" || return 0
         proof="$(oms_harness_residue_evidence settled-clean "$repo" "$wt" "$pid")"
         case "$proof" in
           "ok "*) OMS_HARNESS_RESIDUE_PROOF="${proof#ok }"; OMS_HARNESS_RESIDUE_KEEP_REASON="" ;;
           *) OMS_HARNESS_RESIDUE_KEEP_REASON="$OMS_HARNESS_RESIDUE_KEEP_REASON; not settled: $proof"; return 0 ;;
+        esac
+      elif [ "$kind" = delegate ]; then
+        # Status cannot see ignored files; a crashed run may hold its only
+        # copy of an artifact there, or Git data inside a regenerable tree.
+        proof="$(oms_harness_residue_evidence ignored "" "$wt" "")"
+        case "$proof" in
+          "ok "*) OMS_HARNESS_RESIDUE_PROOF="${proof#ok }" ;;
+          *) OMS_HARNESS_RESIDUE_KEEP_REASON="${proof:-ignored files are unreadable}"; return 0 ;;
         esac
       fi ;;
     dirty)
@@ -737,7 +763,8 @@ oms_harness_classify_dead_residue() {  # BASE DIR MARKER
     "$(oms_harness_read_marker_value "$3" worktree)" || return 1
   oms_harness_worktree_keep_reason "$OMS_HARNESS_SAFE_RESIDUE_WORKTREE" \
     "$OMS_HARNESS_SAFE_RESIDUE_REPO" "$(basename "$2" | sed 's/^oh-my-setting-\([a-z-]*\)\..*/\1/')" \
-    "$(oms_harness_read_marker_value "$3" pid)"
+    "$(oms_harness_read_marker_value "$3" pid)" \
+    "$(oms_harness_read_marker_value "$3" scratch)"
 }
 
 oms_harness_count_stale_worktrees() {
@@ -836,7 +863,7 @@ oms_harness_keep_unverifiable_residue() {  # DIR [VALIDATED_WORKTREE]
     [ -e "$child" ] || [ -L "$child" ] || continue
     leaf="${child##*/}"
     case "$leaf" in
-      .oh-my-setting-tmp|worker-guard|.oms-panel-fixtures.*|continuation.patch|continuation-base|graph-context.json|graph-context.log|worker-guard-snapshot.error) continue ;;
+      .oh-my-setting-tmp|worker-guard|.oms-panel-fixtures.*|continuation.patch|continuation-base|graph-context.json|graph-context.log|worker-guard-snapshot.error|worker-user-config.before|worker-user-config.after) continue ;;
       tmp)
         if [ -n "${2:-}" ] && [ -d "$child" ] && [ ! -L "$child" ]; then
           case "${1##*/}" in oh-my-setting-delegate.*) continue ;; esac
@@ -960,7 +987,8 @@ oms_harness_cleanup_temp_dirs() {
         done
         rm -f ./continuation.patch ./continuation-base \
           ./graph-context.json ./graph-context.log \
-          ./worker-guard-snapshot.error ./.oh-my-setting-tmp 2>/dev/null || true
+          ./worker-guard-snapshot.error ./worker-user-config.before \
+          ./worker-user-config.after ./.oh-my-setting-tmp 2>/dev/null || true
       ); then
         printf 'kept: %s (directory changed during cleanup)\n' "$dir"
         OMS_HARNESS_RESIDUE_KEPT=$((OMS_HARNESS_RESIDUE_KEPT + 1))
