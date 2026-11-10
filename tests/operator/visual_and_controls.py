@@ -122,6 +122,37 @@ for mode in ("tree", "summary", "list", "compact", "detail"):
             assert all(1 <= h["y"] <= len(text.splitlines()) and 1 <= h["x1"] <= h["x2"] <= width for h in nav.get("hits", [])), nav
             if not unicode:
                 assert all(ch.isascii() or ch in "한글 목표" for ch in text), text
+# CJK, emoji and joiner text measured in cells: frames stay within the pane and keep their readable parts.
+from room_view import render_graph as cjk_graph
+from panel_view import clipped
+from dashboard_projection import display_width as cell_width, fit as cell_fit
+assert cell_width("👨‍👩‍👧") == 6 and cell_width("한ᅡ") == 2 and cell_width("a️") == 1
+assert clipped("👨‍👩‍👧", 20) == "👨👩👧" and clipped("a​b", 9) == "a?b"
+for cut in range(1, 12):
+    assert cell_width(cell_fit("한글🙂平仮名é" * 3, cut)) <= cut, cut
+cjk_members = [{"participant": "m1", "role": "main", "joined": True, "model": "claude-opus-5-5", "seq": 1, "provider": "claude", "attempt": "a1"},
+               {"participant": "m2", "role": "main", "joined": True, "model": "gpt-6.1-sol", "seq": 2, "provider": "codex", "attempt": "a2"},
+               {"participant": "w1", "role": "worker", "joined": True, "model": "gpt-6-luna", "parent": "a2"}]
+cjk_texts = ["한글로 된 아주 긴 메시지 본문입니다 줄바꿈 없이 이어지는 문장 🙂🙂", "A" * 150, "平仮名と漢字のメッセージ" * 6]
+cjk_report = {"collection": {"ok": True}, "attempts": {"active_recent": [
+    {"attempt_id": a, "state": "working", "panel": {"room_id": "r", "room_participant": p, "role": r,
+                                                      "label": "한글 작업 제목이 아주 길어지는 경우 🙂 " * 2}}
+    for a, p, r in (("a1", "m1", "main"), ("a2", "m2", "main"), ("w1", "w1", "worker"))]},
+    "goal": {"text": "한국어 목표 " * 12, "source": "plan"},
+    "room": {"id": "r", "title": "한국어 방 이름 テスト", "participants": cjk_members, "message_count": 3,
+             "messages": [{"id": "n%d" % i, "sender": "m1", "recipient": "m2", "targets": ["m2"], "message_kind": "note",
+                           "ts": "2026-10-07T10:%02d:00Z" % i, "pending_for": [], "text": text}
+                          for i, text in enumerate(cjk_texts)]}}
+for columns in (40, 80):
+    for glyphs in (True, False):
+        frame = cjk_graph(cjk_report, columns, 30, unicode=glyphs, navigation={"dismissed": True}, main_attempt="a2")
+        frame_rows = frame.splitlines()
+        assert all(cell_width(row) <= columns for row in frame_rows), frame
+        assert not any("?" in row and "‍" not in row and "👨" in row for row in frame_rows), frame
+        log_rows = [row for row in frame_rows if ":00 " in row]
+        assert len(log_rows) == 3, frame
+        # The excerpt keeps at least 12 cells at 40 columns instead of the 3 left behind a full prefix.
+        assert all(cell_width(row.split(" ", 2)[-1].strip("│| ")) >= 12 for row in log_rows), frame
 # PANEL_VISUAL_TOKENS_END
 
 # Judge bands use bounded, cached artifact judgments rather than command exits.
@@ -1942,7 +1973,7 @@ assert changed_text.index("MAIN Sol 6") < changed_text.index("No known main")
 missing_model = deepcopy(tree)
 missing_model["attempts"]["active_recent"][0]["panel"].pop("model")
 missing_text = render(missing_model, "codex", 42, 34, main_attempt="att_main")
-assert "MAIN mo…" in missing_text and "Sol 6 / high / working" not in missing_text, missing_text
+assert "MAIN model unkno…" in missing_text and "Sol 6 / high / working" not in missing_text, missing_text
 assert "MAIN model unknown" in render(missing_model, "codex", 100, 34, main_attempt="att_main")
 
 # Usage is the recent artifact window, never an account total or an overlapping

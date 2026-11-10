@@ -9,7 +9,7 @@ from functools import lru_cache
 from datetime import datetime
 from itertools import chain
 
-from dashboard_projection import (ELLIPSIS, clean, count, display_width as _display_width, fit, listing, mapping, number,
+from dashboard_projection import (ELLIPSIS, INVISIBLE, clean, count, display_width as _display_width, fit, listing, mapping, number,
                                   wrap_label as wrapped)
 from panel_routing import policy, route_family
 from call_ending import LIVE_STATES, call_ending
@@ -402,7 +402,7 @@ def clipped(text, width):
 def _clipped(text, width, mark):
     # Preserve layout spaces; clean() deliberately collapses them in data labels.
     text = "".join(" " if ch in "\t\n\r" else "?" if unicodedata.category(ch)[0] == "C"
-                   else ch for ch in text[:2000] if ch not in "\ufe0e\ufe0f")
+                   else ch for ch in text[:2000] if ch not in INVISIBLE)
     if width >= 3:
         return fit(text, width)
     result = ""
@@ -411,6 +411,9 @@ def _clipped(text, width, mark):
             break
         result += char
     return result
+
+
+MIN_LABEL = 8
 
 
 def plan_tail_columns(rows, content_width, prefix_width=0, optional=(), min_gap=2):
@@ -436,6 +439,10 @@ def plan_tail_columns(rows, content_width, prefix_width=0, optional=(), min_gap=
             break
         if n in active:
             active.remove(n)
+    # A label squeezed to a few cells says nothing: shed trailing columns (never the status) first.
+    # Short ages such as "37m" stay; wordy ones ("unknown", "live") go.
+    while len(active) > 1 and widths[active[-1]] >= 6 and budget - size() - min_gap < MIN_LABEL:
+        active.pop()
     # At impossible widths, trim the rightmost metadata before the status column.
     while active and size() > budget:
         n = active[-1]
