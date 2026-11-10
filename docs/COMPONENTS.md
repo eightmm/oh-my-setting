@@ -2397,7 +2397,7 @@ document, `{"schema": 1, "kind": "oms-doctor-security", "findings": [...],
 rows and the same exit status. Each finding is `{"id", "level", "message"}`: the
 id is the provider plus the setting key (`codex.approval_policy`,
 `codex.profiles.safe.sandbox_mode`, `antigravity.enableTerminalSandbox`), the
-level is `ok`, `warn` or `unread` (an `info` row is reported as `ok`), and the
+level is `ok`, `info`, `warn` or `unread`, as in the text report, and the
 message is the text line; `changed_since` carries the baseline flag, the earlier
 check's time and the sections that moved. Nothing is printed that the text mode
 does not print. Project-level
