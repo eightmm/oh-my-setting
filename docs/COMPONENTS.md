@@ -2147,6 +2147,16 @@ ML/Slurm workflows use local-first experiment controls:
   command without its seed at that commit and diff (`--group LABEL` names it).
   `top --by-group` ranks groups by mean with n, stdev and a bootstrap 95% interval,
   and lists one-seed groups apart, since one seed supports no claim that it is better.
+- `oms run-ledger table [--metric KEY] [--format md|tsv|tex]` prints the same
+  per-group aggregates as a paste-ready table: mean ± stdev, ci95 and n, ranked by
+  the declared direction (`--min`/`--max` as in `top`). One-seed groups follow the
+  ranked ones, marked `single seed` and never bolded; the best group is bold in `md`
+  and `tex` only when another replicated group exists. Every number has four
+  significant digits, a rule the header comment line states, and `tex` escapes
+  underscores (and the other LaTeX specials) in group labels and the metric name.
+  It selects rows exactly as `top` does (same contract comparison, same exit codes
+  3 and 4) and, without `--metric`, prints one table per metric the contract
+  declares. It reads the ledger and writes nothing.
 - `oms run claims` and `oms run figure` for where a report's numbers and
   figures came from. `claims add --metric KEY --value N --run ID [--tolerance T]
   [--where paper/results.tex:42]` records that a stated number is that metric

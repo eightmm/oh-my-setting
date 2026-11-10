@@ -30,6 +30,7 @@ usage() {
 Usage: run-ledger.sh [options] -- <command...>
        run-ledger.sh list [--json] [N]
        run-ledger.sh top --metric KEY [--min|--max] [--by-group] [--mixed] [--all] [--file PATH] [N]
+       run-ledger.sh table [--metric KEY] [--format md|tsv|tex] [--min|--max] [--mixed] [--all] [--file PATH]
 
 Run a command and append a row to the experiment ledger
 (default: docs/EXPERIMENTS.jsonl). Exit code mirrors the command.
@@ -81,6 +82,14 @@ top             Rank runs by a recorded metric ("best run for val_auc"):
                 runs: n, mean, stdev and a bootstrap 95% interval. A group
                 with one seed is listed apart: one seed supports no claim
                 that it is better.
+table           Print the --by-group aggregates as a paste-ready table:
+                [--metric KEY] [--format md|tsv|tex] [--min|--max] [--all]
+                [--mixed] [--file PATH]. Same row selection as top. Per seed
+                group: mean ± stdev, ci95 and n, ranked by the declared
+                direction; one-seed groups follow, marked and never bolded.
+                Numbers carry 4 significant digits (stated in the header
+                comment line); tex escapes underscores. Without --metric,
+                one table per metric the contract declares. Read-only.
 
 Metric contract (optional, git-tracked beside the ledger):
   {"schema": 1, "metrics": {"val_auc": {"direction": "max", "unit": "",
@@ -137,7 +146,7 @@ fi
 
 MODE="run"
 case "${1:-}" in
-  list|top)
+  list|top|table)
     MODE="$1"
     shift
     ;;
@@ -324,6 +333,41 @@ for i, (v, r) in enumerate(rows[:n], 1):
         _clean(" ".join(r.get("cmd") or [])), note))
 EOF
   exit 0
+fi
+
+if [ "$MODE" = "table" ]; then
+  METRIC=""
+  DIRECTION=""
+  INCLUDE_ALL=0
+  MIXED=0
+  FORMAT="md"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --metric) [ "$#" -ge 2 ] || fail "--metric requires a key"; METRIC="$2"; shift 2 ;;
+      --format) [ "$#" -ge 2 ] || fail "--format requires md, tsv or tex"; FORMAT="$2"; shift 2 ;;
+      --min) DIRECTION="min"; shift ;;
+      --max) DIRECTION="max"; shift ;;
+      --all) INCLUDE_ALL=1; shift ;;
+      --mixed) MIXED=1; shift ;;
+      --file) [ "$#" -ge 2 ] || fail "--file requires path"; LEDGER="$2"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) fail "unknown table argument: $1" ;;
+    esac
+  done
+  case "$FORMAT" in md|tsv|tex) ;; *) fail "--format must be md, tsv or tex" ;; esac
+  LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
+  [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
+  OMS_METRIC="$METRIC" OMS_DIRECTION="$DIRECTION" OMS_ALL="$INCLUDE_ALL" OMS_MIXED="$MIXED" \
+    OMS_FORMAT="$FORMAT" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$STATE_ROOT" \
+    python3 -I -c '
+import os, sys
+sys.path.insert(0, os.environ["OMS_RL_LIB"])
+import run_ledger_table
+sys.exit(run_ledger_table.main(sys.argv[1], os.environ["OMS_RL_ROOT"], os.environ["OMS_METRIC"],
+                               os.environ["OMS_DIRECTION"], os.environ["OMS_ALL"] == "1",
+                               os.environ["OMS_MIXED"] == "1", os.environ["OMS_FORMAT"]))
+' "$LEDGER"
+  exit $?
 fi
 
 while [ "$#" -gt 0 ]; do
