@@ -1642,7 +1642,7 @@ EOF
 
 # smoke-weight: 3
 test_output_digest_keeps_failures_and_exit_code() {
-  local dir="$TMP/output-digest" out rc name raw
+  local dir="$TMP/output-digest" original_dir="$PWD" out rc name raw
   mkdir -p "$dir/repo"
   git -C "$dir/repo" init -q
   cd "$dir/repo"
@@ -1742,7 +1742,7 @@ test_output_digest_keeps_failures_and_exit_code() {
     fail "retention should keep the newest 50 captures"
   [ ! -e .oms/artifacts/output-digest/20200101T000000Z-1.log ] || fail "retention should drop the oldest capture"
   [ -e .oms/artifacts/output-digest/keep-me.txt ] || fail "retention must not touch files it does not own"
-  cd "$ROOT"
+  cd "$original_dir"
 }
 
 
@@ -21140,22 +21140,28 @@ EOF
 }
 
 test_ci_status_reports_conclusion() {
-  local d="$TMP/ci-status" out
+  local d="$TMP/ci-status" original_dir="$PWD" out sha
   mkdir -p "$d/bin"
-  # Stub gh: a failed latest run -> ci-status must exit nonzero.
-  cat > "$d/bin/gh" <<'EOF'
+  # Match a tracked fixture HEAD; the caller's checkout must not choose the verdict.
+  make_committed_repo "$d/repo"
+  git -C "$d/repo" config branch.main.remote .
+  git -C "$d/repo" config branch.main.merge refs/heads/main
+  sha="$(git -C "$d/repo" rev-parse HEAD)"
+  cd "$d/repo"
+  # Stub gh: a failed run for HEAD -> ci-status must exit nonzero.
+  cat > "$d/bin/gh" <<EOF
 #!/usr/bin/env bash
-echo '[{"status":"completed","conclusion":"failure","workflowName":"test","url":"http://x"}]'
+echo '[{"status":"completed","conclusion":"failure","workflowName":"test","headSha":"$sha","url":"http://x"}]'
 EOF
   chmod +x "$d/bin/gh"
   out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" main 2>&1)" && \
     fail "ci-status must exit nonzero on a failed run"
   contains "$out" "failure" || fail "ci-status missing conclusion: $out"
 
-  # A successful latest run -> exit 0.
-  cat > "$d/bin/gh" <<'EOF'
+  # A successful run for HEAD -> exit 0.
+  cat > "$d/bin/gh" <<EOF
 #!/usr/bin/env bash
-echo '[{"status":"completed","conclusion":"success","workflowName":"test","url":"http://x"}]'
+echo '[{"status":"completed","conclusion":"success","workflowName":"test","headSha":"$sha","url":"http://x"}]'
 EOF
   OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" main >/dev/null 2>&1 ||
     fail "ci-status should exit 0 on a successful run"
@@ -21407,6 +21413,7 @@ EOF
   rc=0
   out="$(OMS_GH_BIN="$d/bin/gh" "$ROOT/scripts/ci-status.sh" --sha abcdef01 main 2>&1)" || rc=$?
   [ "$rc" -eq 2 ] && contains "$out" "--sha is only read by triage" || fail "--sha outside triage must be refused (rc=$rc): $out"
+  cd "$original_dir"
 }
 
 test_install_hooks_writes_pre_push() {
