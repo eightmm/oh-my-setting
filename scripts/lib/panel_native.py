@@ -1421,7 +1421,7 @@ def live_main_pane(repo):
 def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None, auto_commit=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
     from terminal_panel import MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file
-    from terminal_panel import _swap_main_window, _swap_submit, launch_command, live_mains, main_history
+    from terminal_panel import _swap_main_window, launch_command, live_mains, main_history
     from terminal_panel import main_installed, native_repository, policy, provider_catalog
     from terminal_panel import resolve_session, tmux_command
     requested_model = model
@@ -1443,6 +1443,9 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         if session_repo != str(repo):
             raise ValueError("no panel main to swap")
         window, attempt, pane, member, ident = _swap_main_window(repo, session)
+        stamp = pane_stamp(pane)
+        if stamp[3] != attempt:
+            raise PaneChanged("main pane ownership changed; swap refused before input")
         if live_mains(repo, session, ident) != 1:
             raise ValueError("main liveness is unverified; swap refused")
         old = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
@@ -1470,8 +1473,21 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         old_exited = False
         exit_requested = False
         handoff_file = None
+        cleanup_attempt = attempt
+
+        def clear_swap_option(option, *, check=False):
+            # A reused pane may already belong to another main. Only this attempt's window options are ours.
+            if not re.fullmatch(r"att_[0-9a-f]{32}", cleanup_attempt):
+                return
+            owned = "#{&&:#{==:#{window_id},%s},#{==:#{@oms_panel_main_attempt},%s}}" % (window, cleanup_attempt)
+            if option == "@oms_panel_swap_attempt":
+                owned = "#{&&:%s,#{==:#{@oms_panel_swap_attempt},%s}}" % (owned, attempt)
+            clear = shlex.join(("set-option", "-w", "-u", "-t", pane, option))
+            subprocess.run(tmux_command("if-shell", "-F", "-t", pane, owned, clear),
+                           capture_output=True, check=check, timeout=3, stdin=subprocess.DEVNULL)
+
         try:
-            _swap_submit(pane, request)
+            submit_owned(pane, stamp, request)
             deadline = time.monotonic() + timeout
             handoff = None
             while time.monotonic() < deadline:
@@ -1510,19 +1526,21 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                     or room.resolve(repo, current_window[4], fresh=True) != ident
                     or live_mains(repo, session, ident) != 1):
                 raise ValueError("main window ownership changed during handoff; swap refused")
+            if auto_commit is not None:
+                auto_commit(attempt)
+            if pane_stamp(pane) != stamp:
+                raise PaneChanged("pane changed hands before release; swap refused before exit input")
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "releasing old main"),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
-            if auto_commit is not None:
-                try:
-                    auto_commit(attempt)
-                except (OSError, ValueError, subprocess.SubprocessError):
-                    subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
-                                   capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
-                    raise
             exit_requested = True  # A failed submit can still have delivered the exit request.
-            _swap_submit(pane, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
+            try:
+                submit_owned(pane, stamp, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
+            except PaneChanged:
+                exit_requested = False  # This refusal proves nothing was typed; an ordinary send failure cannot.
+                clear_swap_option("@oms_panel_swap_attempt")
+                raise
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 prior = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)
@@ -1530,8 +1548,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                     break
                 time.sleep(.25)
             else:
-                subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
-                               check=True, timeout=3, stdin=subprocess.DEVNULL)
+                clear_swap_option("@oms_panel_swap_attempt", check=True)
                 handoff_file.unlink(missing_ok=True)  # the preserved main may be swapped again
                 raise ValueError("old main did not exit; native session and panel preserved")
             old_exited = True
@@ -1554,6 +1571,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                                 if row.get("attempt_id") == current[1]), None)
                     if (new and new.get("terminal") is False and new.get("provider") == owner
                             and new.get("refs", {}).get("panel_harness") == harness):
+                        cleanup_attempt = current[1]
                         break
                 time.sleep(.25)
             else:
@@ -1569,8 +1587,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         finally:
             if not exit_requested and handoff_file is not None:
                 handoff_file.unlink(missing_ok=True)
-            subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_state"),
-                           capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+            clear_swap_option("@oms_panel_swap_state")
 
 
 def spawn_single_main(repo, provider, task=None, model=None):

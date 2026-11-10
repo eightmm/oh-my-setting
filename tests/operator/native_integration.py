@@ -491,20 +491,54 @@ with patch("panel_native.swap_main", side_effect=lambda repo, target, **kwargs: 
             assert "postponed" in str(error)
     assert postponed_messages.call_count == 2 and not postponed_claim.called
     assert postponed_messages.call_args_list[0].kwargs["message_id"] == postponed_messages.call_args_list[1].kwargs["message_id"]
+# BEGIN main-swap-pane-identity
 # Automatic swaps preserve the main when no handoff arrives below 100%; a land in flight is carried, not refused.
 import panel_native
 from contextlib import ExitStack, nullcontext
 from subprocess import CompletedProcess
 swap_attempt = "att_" + "a" * 32
+swap_other_attempt = "att_" + "c" * 32
 swap_window = ("@1", swap_attempt, "%1", "fixture-main", "fixture-room")
 swap_old = {"attempt_id": swap_attempt, "provider": "claude", "tool": "panel-main", "terminal": False,
             "state": "working", "refs": {"panel_room_participant": "fixture-main", "panel_host": "tmux",
                                            "panel_harness": "claude"}}
-for usage, land_active, ack, manual, rolled in ((97, False, False, False, False), (100, False, False, False, False),
-                                                (100, True, False, False, False), (97, True, True, False, False),
-                                                (97, False, True, False, False), (97, False, False, True, False),
-                                                (97, True, True, False, True)):
-    shown = dict(auto_reading, used=usage)
+swap_cases = [(100, False, False, True, False, stage, changed)
+              for stage in ("initial", "handoff", "exit") for changed in ("attempt", "pid", "unreadable")
+              if stage != "initial" or changed != "pid"]
+swap_cases += [(usage, land_active, ack, manual, rolled, None, None)
+             for usage, land_active, ack, manual, rolled in (
+                 (97, False, False, False, False), (100, False, False, False, False),
+                 (100, True, False, False, False), (97, True, True, False, False),
+                 (97, False, True, False, False), (97, False, False, True, False),
+                 (97, True, True, False, True))]
+swap_cases += [(100, False, False, False, False, "auto_commit", "attempt")]
+for usage, land_active, ack, manual, rolled, changed_at, changed_owner in swap_cases:
+    shown = {"used": usage, "resets_at": time.time() + 1000, "observed_at": time.time()}
+    stamp = ["%1", "4242", "0", swap_attempt, "%1"]
+    def change_pane():
+        if changed_owner == "attempt":
+            stamp[3] = swap_other_attempt
+        elif changed_owner == "pid":
+            stamp[1] = "9999"
+        else:
+            stamp.clear()
+    if changed_at == "initial":
+        change_pane()
+    def swap_run(command, **kwargs):
+        if "display-message" in command:
+            return CompletedProcess(command, 0, "\t".join(stamp), "")
+        if ((changed_at == "handoff" and command[-1] == "waiting for handoff")
+                or (changed_at == "exit" and command[-2:] == ["@oms_panel_swap_attempt", swap_attempt])):
+            change_pane()
+        return CompletedProcess(command, 0, json.dumps({"active": land_active}) if "land" in command else "", "")
+    def swap_claim(*args, **kwargs):
+        if changed_at == "auto_commit" and kwargs.get("locked"):
+            change_pane()
+        return True
+    handoff_path = temporary / "fixture-swap-handoff"
+    def write_swap_handoff(*args):
+        handoff_path.write_text("Fixture recovery handoff\n")
+        return handoff_path
     with ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, {"OMS_PANEL_SWAP_HANDOFF_SECONDS": "1" if ack else "0"}))
         stack.enter_context(patch.object(panel_native.shutil, "which", return_value="fixture"))
@@ -529,29 +563,59 @@ for usage, land_active, ack, manual, rolled in ((97, False, False, False, False)
             "fixture-room-2" if rolled else ident))
         notices = stack.enter_context(patch.object(room, "send"))
         stack.enter_context(patch.object(panel, "_swap_digest", return_value="fixture digest"))
-        handoff_written = stack.enter_context(patch.object(panel, "_swap_handoff_file", return_value=project / "fixture-handoff"))
+        handoff_written = stack.enter_context(patch.object(panel, "_swap_handoff_file", side_effect=write_swap_handoff))
         launched = stack.enter_context(patch.object(panel, "launch_command", return_value="fixture"))
-        runs = stack.enter_context(patch.object(panel_native.subprocess, "run", side_effect=lambda command, **kwargs:
-            CompletedProcess(command, 0, json.dumps({"active": land_active}) if "land" in command else "", "")))
+        runs = stack.enter_context(patch.object(panel_native.subprocess, "run", side_effect=swap_run))
         stack.enter_context(patch.object(panel_metrics, "current_weekly_reading", return_value=shown))
         stack.enter_context(patch.object(panel_metrics, "weekly_reading", return_value={}))
-        claims = stack.enter_context(patch.object(panel_watch, "_auto_claim", return_value=True))
-        typed = stack.enter_context(patch.object(panel, "_swap_submit", side_effect=[None, ValueError("fixture exit")]))
+        claims = stack.enter_context(patch.object(panel_watch, "_auto_claim", side_effect=swap_claim))
+        exit_error = (subprocess.TimeoutExpired(["tmux", "send-keys"], 3) if manual and not changed_at
+                      else ValueError("fixture exit"))
+        typed = stack.enter_context(patch.object(panel, "_swap_submit", side_effect=[None, exit_error]))
+        transferred = stack.enter_context(patch.object(room, "swap_main"))
         try:
             if manual:
                 panel_native.swap_main(project, "codex")
             else:
                 panel_watch.automatic_swap(project, "codex", swap_attempt, "claude", "a" * 32)
             assert False, "fixture should stop the swap"
-        except ValueError as error:
-            assert str(error) == ("automatic main swap postponed; handoff not received" if usage < 100 and not ack and not manual else
-                                  "fixture exit"), error
+        except (ValueError, subprocess.TimeoutExpired) as error:
+            if changed_at:
+                assert isinstance(error, panel_native.PaneChanged), (changed_at, changed_owner, error)
+            elif manual:
+                assert error is exit_error, error
+            else:
+                assert str(error) == ("automatic main swap postponed; handoff not received" if usage < 100 and not ack and not manual else
+                                      "fixture exit"), error
+        transferred.assert_not_called()
+        assert not any("respawn-pane" in " ".join(call.args[0]) for call in runs.call_args_list)
         assert claims.call_count == (1 if not manual and (usage == 100 or ack) else 0)
         assert notices.call_count == (1 if usage < 100 and not ack and not manual else 0)
         if notices.called:
             assert notices.call_args.kwargs["message_id"] == "auto-swap-postponed-" + swap_attempt
-        reached = usage == 100 or ack or manual
-        assert typed.call_count == (2 if reached else 1)
+        reached = (usage == 100 or ack or manual) and changed_at not in ("initial", "handoff")
+        expected_sends = (0 if changed_at in ("initial", "handoff") else 1) if changed_at else (2 if reached else 1)
+        assert typed.call_count == expected_sends, (changed_at, changed_owner, typed.call_args_list)
+        if expected_sends == 2:
+            assert typed.call_args.args == ("%1", "/exit"), typed.call_args
+        assert handoff_path.exists() is (reached and not changed_at), (changed_at, "handoff delivery was misclassified")
+        if changed_at == "initial":
+            assert all("display-message" in call.args[0] for call in runs.call_args_list)
+        if changed_at == "auto_commit":
+            assert not any("@oms_panel_swap_attempt" in call.args[0] for call in runs.call_args_list)
+        # Cleanup must be conditional on the verified owner even when that pane now names someone else.
+        for call in runs.call_args_list:
+            command = call.args[0]
+            if "set-option -w -u" in command[-1]:
+                assert command[1:5] == ["if-shell", "-F", "-t", "%1"], command
+                assert "#{==:#{window_id},@1}" in command[-2], command
+                assert "#{==:#{@oms_panel_main_attempt}," + swap_attempt + "}" in command[-2], command
+                if command[-1].endswith("@oms_panel_swap_attempt"):
+                    assert "#{==:#{@oms_panel_swap_attempt}," + swap_attempt + "}" in command[-2], command
+            assert not ("set-option" in command and "-u" in command), command
+        marker_cleanup = [call for call in runs.call_args_list
+                          if call.args[0][-1].endswith("set-option -w -u -t %1 @oms_panel_swap_attempt")]
+        assert bool(marker_cleanup) is (changed_at == "exit"), (changed_at, "uncertain exit marker was cleared")
         # An active land no longer refuses the swap; the replacement's prompt names it instead.
         assert sum("land" in call.args[0] for call in runs.call_args_list) == (1 if reached else 0)
         if reached:
@@ -560,6 +624,8 @@ for usage, land_active, ack, manual, rolled in ((97, False, False, False, False)
             assert launched.call_args.kwargs["room_id"] == ("fixture-room-2" if rolled else "fixture-room")
             assert handoff_written.call_args.args[1] == launched.call_args.kwargs["room_id"]
             assert ("Land in progress" in handoff_written.call_args.args[3]) == land_active
+    handoff_path.unlink(missing_ok=True)
+# END main-swap-pane-identity
 clock = [0.0]
 class StalledRead:
     pending = False

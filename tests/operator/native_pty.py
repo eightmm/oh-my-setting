@@ -164,6 +164,7 @@ if os.name == "posix":
                     patch.object(panel.shutil, "which", return_value="fixture-tmux"),
                     patch.object(panel, "main_installed", return_value=True),
                     patch.object(panel, "resolve_session", return_value=("fixture", str(project))),
+                    patch("panel_native.pane_stamp", return_value=("%1", "4242", "0", pi_attempt, "%1")),
                     patch.object(panel, "_swap_main_window", return_value=(
                         "@1", pi_attempt, "%1", "pi-owner", "pi-room")),
                     patch.object(panel, "live_mains", return_value=1),
@@ -205,10 +206,14 @@ if os.name == "posix":
                 launch.assert_called_once()
                 assert launch.call_args.args == (project, "fixture", target)
                 assert "resume" not in launch.call_args.kwargs, launch.call_args
-                respawns = [call for call in commands.call_args_list if "if-shell" in call.args[0]]
+                respawns = [call for call in commands.call_args_list
+                            if "if-shell" in call.args[0] and call.args[0][-1].startswith("respawn-pane ")]
                 assert len(respawns) == (0 if outcome == "launch_error" else 1), "swap attempted restoration"
             assert [call.args[1] for call in submit.call_args_list][1:] == ([] if outcome == "launch_error" else ["/quit"])
-            assert "@oms_panel_swap_state" in commands.call_args.args[0], "swap status was not cleared"
+            cleanup = commands.call_args.args[0]
+            assert cleanup[-1].endswith(" @oms_panel_swap_state"), "swap status was not cleared"
+            cleanup_owner = next_attempt if outcome == "started" else pi_attempt
+            assert "#{==:#{@oms_panel_main_attempt}," + cleanup_owner + "}" in cleanup[-2], cleanup
     actual_tmux = shutil.which("tmux")
     if actual_tmux:
         socket = "o" + str(os.getpid())
