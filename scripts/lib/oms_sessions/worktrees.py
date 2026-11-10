@@ -29,6 +29,14 @@ def head(repo):
     return git(repo, "rev-parse", "HEAD", limit=256).decode().strip()
 
 
+def _untracked_names(repo):
+    # The standalone checkpoint helper inherits its process environment. This
+    # entrypoint can be called from a Git hook, so use the scrubbed Git wrapper.
+    raw = git(repo, "ls-files", "--others", "--exclude-standard", "-z", "--")
+    return sorted(name for name in (os.fsdecode(item) for item in raw.split(b"\0") if item)
+                  if checkpoint_untracked.safe_name(name))
+
+
 def inspect_files(repo):
     if git(repo, "ls-files", "--", ".oms", limit=8192).strip():
         raise CoreError("forking refuses tracked .oms state; native forks do not inherit OMS authority")
@@ -44,7 +52,7 @@ def inspect_files(repo):
     if visible != invisible:
         raise CoreError("intent-to-add entries cannot be checkpointed; stage or unstage them first")
     staged, unstaged = patches(repo)
-    names = checkpoint_untracked.untracked_names(str(repo))
+    names = _untracked_names(repo)
     copied = omitted = size = 0
     for name in names:
         path = repo / name
@@ -195,7 +203,7 @@ def _changed(repo, base):
     names = {os.fsdecode(item) for item in raw.split(b"\0") if item}
     raw = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--cached", "--name-only", "-z", base, "--")
     names.update(os.fsdecode(item) for item in raw.split(b"\0") if item)
-    names.update(checkpoint_untracked.untracked_names(str(repo)))
+    names.update(_untracked_names(repo))
     if len(names) > MAX_COMPARE_PATHS:
         raise CoreError("fork comparison exceeds 5000 changed paths")
     return names

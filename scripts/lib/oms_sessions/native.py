@@ -1,6 +1,7 @@
 """Explicit interactive native actions, gated by the installed CLI's help."""
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import json
 import hashlib
@@ -10,8 +11,8 @@ import shutil
 import subprocess
 import uuid
 
-from oms_runtime.common import CoreError, sha256_bytes, utc_now
-from .common import base_record, command, git_env, plain_chain, save, script, transition
+from oms_runtime.common import CoreError, file_lock, sha256_bytes, utc_now
+from .common import base_record, command, git_env, plain_chain, save, script, state_dir, transition
 from .transcripts import discover, read_source, roots
 from .worktrees import fork_target
 
@@ -92,9 +93,11 @@ def _environment():
     # A conversation copy is not a copy of a room membership, attempt, task,
     # or publication grant. Keep native credentials, settings and restrictions.
     for key in list(environment):
-        if key.startswith(("OMS_ROOM_", "OMS_ATTEMPT_", "OMS_TASK_", "OMS_PARENT_", "OMS_WORKER_")):
+        if key.startswith(("OMS_ROOM_", "OMS_ATTEMPT_", "OMS_TASK_", "OMS_PARENT_", "OMS_WORKER_",
+                           "OMS_PANEL_", "OMS_PLAN_", "OMS_LEASE_", "OMS_APPROVAL_", "OMS_LANDING_")):
             environment.pop(key, None)
-    for key in ("OMS_AGENT", "OMS_AGENT_ATTEMPT_ID", "OMS_AGENT_TASK_ID", "OMS_PEER_ATTEMPT_ID"):
+    for key in ("OMS_AGENT", "OMS_AGENT_ATTEMPT_ID", "OMS_AGENT_TASK_ID", "OMS_PEER_ATTEMPT_ID", "OMS_STATE_REPO",
+                "OMS_EXECUTOR_ID", "OMS_HARNESS_CALL_ID", "OMS_INDEX_BASE_REPO", "DELEGATE_SOURCE_REPO"):
         environment.pop(key, None)
     return environment
 
@@ -170,11 +173,17 @@ def conversation(repo, source, *, fork=False, apply=False):
     request = plan(source, repo, fork=fork)
     if not apply:
         return request
-    row = dict(base_record(repo, "conversation"), source=source, action=request["action"],
-               conversation_status="launch_requested", files_restored=False)
-    save(repo, "conversations", row)
-    code = execute(request)
-    row.update(conversation_status="exited", native_returncode=code)
-    save(repo, "conversations", row)
+    # This claim covers cooperating OMS callers only. Managed sessions keep
+    # the panel's stronger native-owner checks, including its terminal evidence.
+    key = hashlib.sha256((source["provider"] + "\0" + source["session_id"]).encode()).hexdigest()[:32]
+    claim = (file_lock(state_dir(repo, True) / ("native-conversation-" + key), timeout_seconds=1)
+             if request["route"] == "native" else nullcontext())
+    with claim:
+        row = dict(base_record(repo, "conversation"), source=source, action=request["action"],
+                   conversation_status="launch_requested", files_restored=False)
+        save(repo, "conversations", row)
+        code = execute(request)
+        row.update(conversation_status="exited", native_returncode=code)
+        save(repo, "conversations", row)
     return dict(row, dry_run=False,
                 note="OMS did not restore files. The native interactive session can edit files after launch.")

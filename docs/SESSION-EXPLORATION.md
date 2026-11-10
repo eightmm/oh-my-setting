@@ -16,6 +16,12 @@ owner path, retaining its room-binding and live-owner checks. Ambiguous ownershi
 or managed Pi ownership is refused here; the existing room chat navigation remains
 the route to an already running terminal. Standalone native sessions use the
 capability-checked native command directly.
+Standalone applied conversation actions hold a provider/session claim for the
+duration of the native process. A concurrent OMS caller uses a one-second lock
+timeout and refuses the launch if the claim stays busy; another resume is allowed after the
+first process exits. This coordinates OMS callers only. It does not establish
+ownership of a provider process launched separately outside OMS. Managed panel
+sessions keep their existing live-owner and room-binding checks.
 
 ## Find and reopen a conversation
 
@@ -125,8 +131,9 @@ because this path cannot faithfully and safely inherit them.
 
 The new checkout receives only a local lineage pointer, not the parent's OMS
 room, leases, task records, approvals, or publication authority. Inherited OMS
-room/attempt/task environment markers are removed for the launch. Provider
-credentials, settings, and runtime restrictions remain in the environment.
+room, panel, attempt, task, plan, lease, approval and landing environment markers,
+plus inherited state-repository and executor routing, are removed for the launch.
+Provider credentials, settings, and runtime restrictions remain in the environment.
 Native history can contain old instructions; a conversation copy does not grant
 new authority to execute them.
 
@@ -183,6 +190,9 @@ saved HEAD. The command validates each scratch marker, repository root, and
 common Git directory. It compares current worktree bytes for paths changed since
 the base and bounded untracked files. Separate index and unstaged patch digests
 show when two alternatives have the same files but different staging.
+Git hook environment variables are cleared for both tracked and untracked
+discovery, so an inherited `GIT_DIR` or `GIT_WORK_TREE` cannot redirect the
+comparison to the source repository.
 
 Without `--patch`, the report contains relative names, sizes, kinds, executable
 bits, and hashes. `--patch` adds bounded unified text differences and withholds
