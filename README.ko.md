@@ -1,26 +1,24 @@
-<p align="center">
-  <img src="docs/assets/banner.svg" alt="oh-my-setting — Codex, Claude Code, Antigravity를 위한 하나의 control plane" width="100%">
-</p>
+<p align="center"><img src="docs/assets/hero.png" alt="세 코딩 agent가 저장소의 프로젝트 규칙, 상태와 리뷰를 중앙 계층에서 공유하는 모습" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20via%20WSL2-0ea5e9" alt="Linux, macOS, Windows via WSL2">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20via%20WSL2-0ea5e9" alt="Linux, macOS, WSL2의 Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="MIT license"></a>
 </p>
 
 <p align="center"><a href="README.md">English</a></p>
 
 oh-my-setting은 Codex, Claude Code, Antigravity가 프로젝트 규칙, 상태, 계획,
-근거와 인수인계를 함께 쓰도록 돕는 하나의 하네스다. **`oms`**를 실행하면
-공유 컨트롤 패널에서 진행 상황을 볼 수 있다.
+근거와 인수인계를 함께 쓰도록 돕는다. **`oms`**를 실행해 작업 현황을 살피고
+검토된 작업을 하나의 공유 하네스에서 이어 간다.
 
-<p align="center"><img src="docs/assets/panel-graph.svg" alt="목표, main agent, 위임 작업자, verifier gate, 세션 기록과 provider 사용량을 보여 주는 OMS 패널 그래프" width="100%"></p>
-
-## 설치
+## 빠른 시작
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
+
+프로젝트에서 코딩 agent를 열고 **“이 프로젝트 시작해줘.”**라고 말한다.
 
 | 호스트 | 필요한 것 |
 |---|---|
@@ -29,12 +27,12 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 | Windows via WSL2 | WSL2 안의 glibc Linux 배포판. 위 Linux 요구 사항 적용 |
 
 Python 3.11+는 관리형 런타임으로 설치하며 시스템 Python은 바꾸지 않는다.
-
 기본 `core` 프로필은 하네스와 코딩 agent 하나를 설치한다. Alpine 같은 musl
 기반 Linux는 지원하지 않는다. 프로필과 Windows 참고 사항은
 [설치 안내](docs/INSTALL.ko.md)에 있다.
 
-### 설치하면 바뀌는 것
+<details>
+<summary>설치하면 바뀌는 것</summary>
 
 - **전역 규칙.** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`,
   `~/.gemini/AGENTS.md`가 OMS 규칙을 가리키는 링크가 된다. 기존 파일은
@@ -47,6 +45,7 @@ Python 3.11+는 관리형 런타임으로 설치하며 시스템 Python은 바�
   `~/.local/share/oh-my-setting` 아래의 전용 Python을 설치한다.
 - **매일 업데이트.** 수정하지 않은 체크아웃은 매일 fast-forward된다. 끄려면
   설치 명령 끝에 `| bash -s -- --no-auto-update`를 붙인다.
+</details>
 
 ### 업데이트와 제거
 
@@ -56,22 +55,16 @@ agent에게 `oms update` 또는 `oms uninstall` 실행을 요청한다. 제거�
 
 ## 동작 방식
 
-<p align="center">
-  <img src="docs/assets/how-it-works.svg" alt="사용자는 아무 코딩 agent에게 말하고, Codex·Claude Code·Antigravity는 규칙·상태·council·위임·검증된 착지를 담은 oms 층을 공유하며 저장소에서 일한다" width="100%">
-</p>
-
-코딩 agent를 아무 디렉터리에서나 열고(빈 디렉터리, 진행 중 프로젝트, 기존
-repo) 이렇게 말한다.
-
-```text
-이 프로젝트 시작해줘.
-```
+<p align="center"><img src="docs/assets/panel-graph.svg" alt="목표, main agent, 위임 작업자, verifier gate, 세션 기록과 provider 사용량을 보여 주는 OMS 패널 그래프" width="100%"></p>
 
 빈 디렉터리는 짧은 spec 인터뷰를 거쳐 `PROJECT.md`와 템플릿을 만든다. 기존
 repo는 먼저 코드를 읽고 빈 곳만 묻는다. 진행 중 프로젝트는 상태와 다음 할
 일을 보고한다. `PROJECT.md`를 확정하면 검토한 작업, 검사, Draft PR까지 맡길
 수 있다. 생성된 작업은 스스로 승인되지 않고, merge와 release는 사용자가
 정한다.
+
+코딩 agent는 빈 디렉터리, 기존 repo, 진행 중 프로젝트의 디렉터리 어디서나
+열 수 있다.
 
 ## 이렇게 말하면 된다
 

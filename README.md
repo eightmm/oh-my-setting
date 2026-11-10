@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="docs/assets/banner.svg" alt="oh-my-setting — one control plane for Codex, Claude Code and Antigravity" width="100%">
-</p>
+<p align="center"><img src="docs/assets/hero.png" alt="Three coding agents share a central layer of project rules, state and review around a repository" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
@@ -10,17 +8,17 @@
 
 <p align="center"><a href="README.ko.md">한국어</a></p>
 
-oh-my-setting is one harness that lets Codex, Claude Code and Antigravity share
-project rules, state, plans, evidence and handoffs. Run **`oms`** to open the
-shared control panel and see the work in progress.
+oh-my-setting lets Codex, Claude Code and Antigravity share project rules, state,
+plans, evidence and handoffs. Run **`oms`** to see work in progress and keep
+reviewed work moving through one shared harness.
 
-<p align="center"><img src="docs/assets/panel-graph.svg" alt="OMS panel graph showing the goal, main agent, delegated worker, verifier gate, session events and provider quota" width="100%"></p>
-
-## Install
+## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.sh | bash
 ```
+
+Then open a coding agent in your project and say **“Start this project.”**
 
 | Host | Needs |
 |---|---|
@@ -29,12 +27,12 @@ curl -fsSL https://raw.githubusercontent.com/eightmm/oh-my-setting/main/install.
 | Windows via WSL2 | A glibc Linux distribution inside WSL2; use the Linux requirements above |
 
 OMS provisions Python 3.11+ as a managed runtime; system Python stays unchanged.
+The default `core` profile installs the harness and one coding agent. musl-based
+Linux such as Alpine is not supported. Profiles and Windows notes are in
+[docs/INSTALL.md](docs/INSTALL.md).
 
-The default `core` profile installs the harness and one coding agent.
-musl-based Linux such as Alpine is not supported. Profiles and Windows notes
-are in [docs/INSTALL.md](docs/INSTALL.md).
-
-### What the installer changes
+<details>
+<summary>What the installer changes</summary>
 
 - **Global rules.** `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md` and
   `~/.gemini/AGENTS.md` link to the OMS rules. Existing files move to
@@ -47,6 +45,7 @@ are in [docs/INSTALL.md](docs/INSTALL.md).
   `~/.local/bin`, and private Python under `~/.local/share/oh-my-setting`.
 - **Daily update.** Clean checkouts fast-forward daily. To opt out, end the
   install command with `| bash -s -- --no-auto-update`.
+</details>
 
 ### Update and uninstall
 
@@ -56,23 +55,14 @@ replaced files and leaves agent CLIs in place. See the
 
 ## How it works
 
-<p align="center">
-  <img src="docs/assets/how-it-works.svg" alt="You talk to any coding agent; Codex, Claude Code and Antigravity share one oms layer of rules, state, councils, delegation and verified landing that works on your repository" width="100%">
-</p>
+<p align="center"><img src="docs/assets/panel-graph.svg" alt="OMS panel graph showing the goal, main agent, delegated worker, verifier gate, session events and provider quota" width="100%"></p>
 
-Open your coding agent in any directory (empty, mid-project or ongoing) and
-say:
-
-```text
-Start this project.
-```
-
-An empty directory gets a short spec interview, a `PROJECT.md` and a
-template. An existing repository is inspected first and interviewed only for
-gaps. An ongoing project gets a status report and the next step. From a
-confirmed `PROJECT.md`, the agent can carry work through reviewed tasks,
-checks and a Draft PR. Generated work never approves itself, and merge and
-release stay your call.
+An empty directory gets a short spec interview, a `PROJECT.md` and a template.
+An existing repository is inspected first and interviewed only for gaps. An
+ongoing project gets a status report and the next step. From a confirmed
+`PROJECT.md`, the agent can carry work through reviewed tasks, checks and a
+Draft PR. Generated work never approves itself, and merge and release stay your
+call.
 
 ## What you can say
 
