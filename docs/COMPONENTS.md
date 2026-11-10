@@ -97,6 +97,7 @@ explains overlapping entrypoints.
 
 | Component | Purpose | Invoke | Details |
 |---|---|---|---|
+| `cite` | Keep per-paper notes, check DOI or arXiv ids, export BibTeX. | `oms cite` | [ML and HPC](#ml-and-hpc) |
 | `data-manifest` | Fingerprint dataset splits and detect drift or leakage. | `oms data-manifest` | [ML and HPC](#ml-and-hpc) |
 | `experiment-board` | Coordinate shared research studies. | `oms experiment-board` | [ML and HPC](#ml-and-hpc) |
 | `job-digest` | Summarize training or Slurm logs and jobs. | `oms job-digest` | [ML and HPC](#ml-and-hpc) |
@@ -2129,6 +2130,14 @@ ML/Slurm workflows use local-first experiment controls:
   `LOGGING.md` template) or DVCLive `plots/metrics/*.tsv`: last step, latest and
   best value, recent slope, non-finite values and time since the last record.
   The age describes the file, not whether the run is alive.
+- `oms cite add|list|verify|export --bibtex` keeps per-paper notes (id, title,
+  year, claim, locator, status) in append-only `.oms/literature.jsonl`; the last
+  row for an id wins. `verify` checks identifier syntax offline. Only
+  `verify --online` uses the network: it sends the DOI or arXiv id to Crossref or
+  the arXiv API (endpoints overridable with `OMS_CITE_CROSSREF_URL` and
+  `OMS_CITE_ARXIV_URL`) and compares title and year. A failed lookup stays
+  `unverified`. A verified id shows the reference exists and matches; it does not
+  show the recorded claim is supported. No full-text retrieval.
 
 Machine, cluster, dataset, and run details stay local unless the user explicitly
 chooses a connector or tracked summary.
