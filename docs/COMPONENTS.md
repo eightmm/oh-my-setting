@@ -88,6 +88,7 @@ explains overlapping entrypoints.
 | `report` | Preview and file a privacy-checked upstream bug or feature request. | `oms report` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `fail-ledger` | Record and inspect cross-session failures. | `oms fail-ledger` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `artifact-index` | Inspect and maintain indexed harness artifacts. | `oms artifact-index` | [Asking other agents](#asking-other-agents) |
+| `output-digest` | Run a command and print a bounded, loss-marking digest of its output; the raw output stays in a local file. | `oms output-digest` | [Command output digests](#command-output-digests) |
 | `session-handoff` | Build a compact digest from an agent session. | `oms session-handoff` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `snapshot` | Record private local context for agents. | `oms snapshot` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `gc` | Apply retention to repository-local state. | `oms gc` | [State, memory, and handoff](#state-memory-and-handoff) |
@@ -652,6 +653,34 @@ ceiling first applies lineage-aware retention and refuses only when its required
 new rows still cannot fit; salvage uses the same output ceiling. Its receipt
 references the raw quarantine, so ordinary artifact retention preserves it
 until that receipt is pruned.
+
+### Command output digests
+
+`oms output-digest -- COMMAND` runs the command, keeps its whole output
+(stdout and stderr, in order) in `.oms/artifacts/output-digest/` and prints a
+bounded digest instead of the log: the exit code, line and byte counts, the raw
+file's path and sha256, the failure lines a recogniser matched (pytest,
+unittest, smoke `FAIL:`, tracebacks, compiler and lint errors, common runtime
+failures), a head and a tail, and how many lines and bytes it left out. Its
+exit code is the command's. Output that fits `--max-bytes` (default 4000) is
+shown whole. When cutting, failure lines are spent first, then the tail, then
+the head; escape codes are stripped from the view, a line past 300 characters
+is cut with the cut counted, and a capture that ends mid-line says so. A
+failing log no recogniser matches is shown as a raw head and tail and labelled
+as such, not as a diagnosis. `--file PATH [--exit-code N]` digests an existing
+capture without running or storing anything; `--json` prints schema 1.
+
+Nothing is rewritten and no model is called: the raw file is the record, the
+digest a derived view for reading. A verifier's input and receipt stay the raw
+output, and the byte counts are measured bytes; the JSON's token figure is a
+labelled bytes/4 heuristic, not a tokenizer and not a quota or billing saving.
+The tool is opt-in: no hook rewrites a command to use it.
+
+Raw captures are mode 600 and the newest 50 are kept. If the lines to be
+shown look like they carry a secret, or the scan cannot run, they are withheld
+and only the counts, the exit code and the raw path are printed. `--no-store`
+keeps no file, and a harness child never keeps one. In run mode the tool's own
+failure is exit 125 and a bad request exit 2, before anything runs.
 
 ### Provider discovery and adapters
 

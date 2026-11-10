@@ -1495,6 +1495,111 @@ EOF
   [ "$size" -gt 1000000 ] || fail "uncapped digest should keep the long line"
 }
 
+# smoke-weight: 3
+test_output_digest_keeps_failures_and_exit_code() {
+  local dir="$TMP/output-digest" out rc name raw
+  mkdir -p "$dir/repo"
+  git -C "$dir/repo" init -q
+  cd "$dir/repo"
+
+  # Short output is shown whole, the exit code is the command's, the raw file is kept untouched.
+  out="$("$ROOT/scripts/output-digest.sh" -- sh -c 'echo hello; echo "한글 줄" >&2')" ||
+    fail "a passing command must pass through the digest"
+  contains "$out" 'output-digest: exit=0  lines=2' || fail "digest should report the exit code and line count: $out"
+  contains "$out" 'shown: all 2 line(s); nothing omitted' || fail "short output should be shown whole"
+  contains "$out" '한글 줄' || fail "stderr and non-ASCII text belong in the capture"
+  contains "$out" 'not verification evidence' || fail "the digest must say it is a derived view"
+  raw="$(printf '%s\n' "$out" | sed -n 's/^raw: \([^ ]*\)  sha256=.*/\1/p')"
+  [ -f "$raw" ] || fail "the raw capture should be kept at the path the digest names: $raw"
+  [ "$(cat "$raw")" = "$(printf 'hello\n한글 줄')" ] || fail "the raw capture must be the command's output, unchanged"
+  contains "$out" "sha256=$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$raw")" ||
+    fail "the digest should name the raw capture's sha256"
+
+  # A long failing log: the failure line, the line under it, the tail and the exit code
+  # survive a small budget; ANSI is stripped from the view; one huge line cannot eat the budget;
+  # a capture that ends mid-line says so; what was left out is counted.
+  rc=0
+  out="$("$ROOT/scripts/output-digest.sh" --max-bytes 900 -- sh -c '
+    i=0; while [ "$i" -lt 400 ]; do echo "line $i ok"; i=$((i + 1)); done
+    printf "\033[31mFAILED tests/test_a.py::test_x - AssertionError: 값이 다름\033[0m\n"
+    echo "  expected 3, got 4"
+    i=0; while [ "$i" -lt 60 ]; do echo "after $i"; i=$((i + 1)); done
+    awk "BEGIN { for (i = 0; i < 5000; i++) printf \"x\"; printf \"\\n\" }"
+    printf "partial tail"; exit 3')" || rc=$?
+  [ "$rc" -eq 3 ] || fail "the digest must exit with the command's exit code (got $rc)"
+  contains "$out" 'output-digest: exit=3  lines=464' || fail "failing digest should carry exit=3 and the line count: $out"
+  contains "$out" '401| FAILED tests/test_a.py::test_x - AssertionError: 값이 다름' ||
+    fail "the failure line must survive the budget, without escape codes: $out"
+  contains "$out" '402|   expected 3, got 4' || fail "the line under a failure should be kept"
+  contains "$out" 'failures: 1 matching line(s) (pytest=1); 1 shown' || fail "failures should be counted by recogniser"
+  contains "$out" '464| partial tail' || fail "the tail should be kept"
+  contains "$out" 'the capture ends mid-line' || fail "a partial last line should be marked"
+  contains "$out" '…[+4700 chars]' || fail "a very long line should be cut and the cut counted"
+  contains "$out" 'line(s) omitted' || fail "omitted lines should be marked in place"
+  contains "$out" '(failures+tail+head); omitted ' || fail "the digest should say what it left out"
+  case "$out" in *$'\033'*) fail "escape codes must not reach the digest" ;; esac
+  raw="$(printf '%s\n' "$out" | sed -n 's/^raw: \([^ ]*\)  sha256=.*/\1/p')"
+  grep -q "$(printf '\033')" "$raw" || fail "the raw capture keeps the escape codes"
+  [ "$(wc -l < "$raw" | tr -d ' ')" -eq 463 ] || fail "the raw capture must hold every line"
+
+  # A failing log no recogniser understands is a raw head and tail, and says so.
+  rc=0
+  out="$("$ROOT/scripts/output-digest.sh" --max-bytes 400 -- sh -c 'i=1; while [ "$i" -le 300 ]; do echo "$i"; i=$((i + 1)); done; exit 7')" || rc=$?
+  [ "$rc" -eq 7 ] || fail "an unrecognised failing log must still exit with the command's code (got $rc)"
+  contains "$out" 'no recogniser matched; the lines below are a raw head and tail, not a diagnosis' ||
+    fail "an unrecognised failure should fall back to a labelled raw view: $out"
+  contains "$out" '300| 300' || fail "the raw fallback should keep the tail"
+
+  # Lines that look like a credential are withheld; the exit code and the raw path are not.
+  name="AWS_SEC""RET_ACC""ESS_KEY"
+  rc=0
+  out="$(VALUE="abcdEFGH1234abcdEFGH1234abcdEFGH1234abcd" NAME="$name" "$ROOT/scripts/output-digest.sh" -- \
+    sh -c 'echo "export $NAME=$VALUE"; exit 1' 2>"$dir/secret.err")" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a withheld digest must keep the exit code (got $rc)"
+  contains "$out" 'shown: nothing; the lines look like they carry a secret' || fail "secret-looking lines should be withheld: $out"
+  contains "$out" 'abcdEFGH1234' && fail "the secret-looking value must not be printed"
+  contains "$out" 'raw: .oms/artifacts/output-digest/' || fail "a withheld digest still names the raw file"
+  assert_file_contains "$dir/secret.err" "the raw capture may carry a secret"
+
+  # --no-store keeps nothing; --file digests an existing capture and runs nothing; a harness child keeps none.
+  rm -rf .oms
+  out="$("$ROOT/scripts/output-digest.sh" --no-store -- echo once)" || fail "--no-store digest should succeed"
+  contains "$out" 'raw: not kept' || fail "--no-store should name no file"
+  [ ! -e .oms ] || fail "--no-store must write nothing under .oms"
+  out="$(OMS_HARNESS_CHILD=1 "$ROOT/scripts/output-digest.sh" -- echo child)" || fail "a child digest should succeed"
+  contains "$out" 'raw: not kept' || fail "a harness child keeps no capture"
+  [ ! -e .oms ] || fail "a harness child must write nothing under .oms"
+  printf 'ok 1\nFAIL: the thing broke\n' > "$dir/existing.log"
+  out="$("$ROOT/scripts/output-digest.sh" --file "$dir/existing.log" --exit-code 2 --json)" ||
+    fail "--file should digest an existing capture"
+  contains "$out" '"kind": "oms-output-digest"' || fail "--json should carry the kind"
+  contains "$out" '"exit_code": 2' || fail "--file --exit-code should be reported"
+  contains "$out" '"smoke": 1' || fail "--file should recognise the failure line"
+  contains "$out" 'not a tokenizer' || fail "the size estimate must name its method"
+  [ ! -e .oms ] || fail "--file must store nothing"
+
+  # Bad requests are refused before anything runs, and retention keeps the newest captures only.
+  if "$ROOT/scripts/output-digest.sh" --file "$dir/existing.log" -- echo no >/dev/null 2>&1; then
+    fail "--file with a command should be refused"
+  fi
+  if "$ROOT/scripts/output-digest.sh" --max-bytes 10 -- echo no >/dev/null 2>&1; then
+    fail "an out-of-range budget should be refused"
+  fi
+  mkdir -p .oms/artifacts/output-digest
+  local n=0
+  while [ "$n" -lt 55 ]; do
+    : > ".oms/artifacts/output-digest/20200101T0000$(printf '%02d' "$n")Z-1.log"
+    n=$((n + 1))
+  done
+  : > .oms/artifacts/output-digest/keep-me.txt
+  "$ROOT/scripts/output-digest.sh" -- echo newest >/dev/null || fail "digest with a full store should succeed"
+  [ "$(find .oms/artifacts/output-digest -name '20*Z-*.log' | wc -l | tr -d ' ')" -eq 50 ] ||
+    fail "retention should keep the newest 50 captures"
+  [ ! -e .oms/artifacts/output-digest/20200101T000000Z-1.log ] || fail "retention should drop the oldest capture"
+  [ -e .oms/artifacts/output-digest/keep-me.txt ] || fail "retention must not touch files it does not own"
+  cd "$ROOT"
+}
+
 
 write_fake_tsp() {
   local bin="$1"
