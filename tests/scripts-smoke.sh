@@ -17682,6 +17682,20 @@ PY
     "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
     --model claude-opus-5-5 --reasoning-effort high --prompt "Scholar web tools probe" >/dev/null
   grep -Fxq -- 'Read,Grep,Glob,Bash,WebSearch,WebFetch' "$home_dir/claude-argv" || fail 'scholar needs web tools'
+  # --no-web (OMS_PANEL_NO_WEB=1) is a researcher-only opt-in for a code-only lookup: four-tool belt.
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher OMS_PANEL_DISPATCH=1 OMS_PANEL_PURPOSE=research OMS_PANEL_NO_WEB=1 \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --model claude-haiku-5-5 --reasoning-effort low --prompt "Code-only researcher probe" >/dev/null
+  grep -Fxq -- 'Read,Grep,Glob,Bash' "$home_dir/claude-argv" ||
+    fail 'a no-web researcher must carry the four-tool belt'
+  if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher OMS_PANEL_STRATEGY=scholar OMS_PANEL_DISPATCH=1 OMS_PANEL_PURPOSE=research OMS_PANEL_NO_WEB=1 \
+    "$ROOT/scripts/agent-call.sh" --repo "$project" --artifact-dir "$artifact_dir" --to claude \
+    --model claude-opus-5-5 --reasoning-effort high --prompt "No-web scholar probe" >/dev/null 2>&1; then
+    fail 'a scholar must refuse the no-web opt-in'
+  fi
+  if "$ROOT/scripts/oms" panel --repo "$project" --dispatch scholar --no-web --prompt x --dry-run >/dev/null 2>&1; then
+    fail '--no-web must be refused for a non-researcher dispatch'
+  fi
   for spec in 'researcher high claude-haiku-5-5 research' 'researcher low claude-opus-5-5 research' 'scholar high claude-opus-5-5 invalid' 'invalid low claude-haiku-5-5 research'; do
     set -- $spec
     if HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" OMS_PANEL_ROLE=researcher OMS_PANEL_STRATEGY="$1" OMS_PANEL_DISPATCH=1 OMS_PANEL_PURPOSE="$4" \

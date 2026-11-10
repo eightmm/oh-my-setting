@@ -3139,7 +3139,11 @@ installed first (`--to codex|claude` narrows it). Current configured floors are
 dispatched may use provider web search/fetch while judging roles remain web-free. A
 researcher reads the repository and the web in one context, so repository text can leave
 the machine in a search query or fetched URL; do not dispatch researchers in a
-repository whose content must stay local. The dispatcher compares numeric versions
+repository whose content must stay local. For a pure "where is X in this repo"
+question add `--no-web`: the researcher launches with the four-tool read belt
+(`Read,Grep,Glob,Bash`; Codex `web_search="disabled"`) and no web tools. The
+default is unchanged, and `--no-web` is refused for every other role, including
+scholar. The dispatcher compares numeric versions
 within that family against the cached provider catalog and pins the newest exact ID.
 
 An omitted minor version means zero; `6.10` is newer than `6.2`. Cached discovery does

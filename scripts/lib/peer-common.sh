@@ -3610,7 +3610,8 @@ ma_provider_attempt_run() {
       # --strict-mcp-config (probed on codex 0.163.0, 2026-10-19). Researchers
       # use the supported live mode; other read seats remain web-free.
       if [ "$access" != write ]; then
-        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = researcher ]; then
+        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = researcher ] &&
+          [ "${OMS_PANEL_NO_WEB:-0}" != 1 ]; then
           cmd+=(-c 'web_search="live"')
         else
           cmd+=(-c 'web_search="disabled"')
@@ -3662,7 +3663,8 @@ ma_provider_attempt_run() {
       # reviewer's hands anyway. Researchers add web lookup tools; write
       # workers keep the default set.
       if [ "$access" != write ]; then
-        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = researcher ]; then
+        if [ "${OMS_PANEL_DISPATCH:-0}" = 1 ] && [ "${OMS_PANEL_ROLE:-}" = researcher ] &&
+          [ "${OMS_PANEL_NO_WEB:-0}" != 1 ]; then
           cmd+=(--tools "Read,Grep,Glob,Bash,WebSearch,WebFetch")
         else
           cmd+=(--tools "Read,Grep,Glob,Bash")
@@ -4941,6 +4943,9 @@ ma_run_routed_provider() {
           scholar)
             if [ "$access" != read ] || [ "${OMS_PANEL_PURPOSE:-}" != research ]; then
               echo 'error: scholars require read-only research' >&2; return 2
+            fi
+            if [ "${OMS_PANEL_NO_WEB:-0}" = 1 ]; then
+              echo 'error: scholars exist to use the web; --no-web is researcher-only' >&2; return 2
             fi ;;
           ''|researcher)
             if [ "$access" != read ] || [ "${OMS_PANEL_PURPOSE:-}" != research ] || [ "${OMS_REASONING_SELECTED:-}" != low ]; then
