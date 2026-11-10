@@ -23726,6 +23726,49 @@ print(len({json.loads(line)["group"] for line in sys.stdin}))')" = 1 ] ||
   (cd "$repo" && "$SH" top --metric loss >/dev/null 2>"$d/top-err") || rc=$?
   [ "$rc" = 2 ] || fail "top must refuse an unreadable contract (exit 2), got $rc"
   assert_file_contains "$d/top-err" "metric contract unreadable"
+
+  # Split roles are advisory: a final split's evaluations are counted, nothing is gated.
+  cat > "$repo/docs/metric-contract.json" <<'EOF'
+{"schema": 1, "metrics": {"loss": {"direction": "min", "split": "val"},
+  "test_loss": {"direction": "min", "split": "test"}},
+ "splits": {"val": {"role": "selection"}, "test": {"role": "final"}}}
+EOF
+  rm -f "$repo/docs/EXPERIMENTS.jsonl"
+  split_record() {  # METRICS-JSON then the command
+    printf '%s\n' "$1" > "$repo/m.json"
+    shift
+    (cd "$repo" && "$SH" --metrics m.json -- "$@" >/dev/null 2>"$d/record-err") ||
+      fail "recording a run with a final split failed: $(cat "$d/record-err")"
+  }
+  split_record '{"loss": 0.5}' true --seed 1
+  split_record '{"loss": 0.4, "test_loss": 0.45}' true --seed 1
+  split_record '{"loss": 0.4, "test_loss": 0.46}' true --seed 2
+  out="$(cd "$repo" && "$SH" top --metric loss 2>"$d/top-err")" || fail "top with split roles failed: $(cat "$d/top-err")"
+  assert_file_contains "$d/top-err" "2 recorded run(s) reported a metric on the final split test"
+  assert_file_contains "$d/top-err" "seed group "
+  assert_file_contains "$d/top-err" ": 2 run(s)"
+  if grep -Fq "evaluated" "$d/top-err"; then
+    fail "one variant evaluated twice is not several variants: $(cat "$d/top-err")"
+  fi
+  split_record '{"loss": 0.3, "test_loss": 0.4}' true other --seed 1
+  split_record '{"test_loss": 0.35}' true third
+  (cd "$repo" && "$SH" top --metric loss >"$d/top-out" 2>"$d/top-err") || fail "top with split roles failed"
+  assert_file_contains "$d/top-err" "4 recorded run(s) reported a metric on the final split test"
+  assert_file_contains "$d/top-err" "no seed group: 1 run(s)"
+  assert_file_contains "$d/top-err" "test split evaluated 4 times across 3 variants"
+  # Without the block the same ledger prints exactly what it printed.
+  cp "$d/top-out" "$d/top-out-roles"
+  printf '{"schema": 1, "metrics": {"loss": {"direction": "min", "split": "val"}}}\n' > "$repo/docs/metric-contract.json"
+  (cd "$repo" && "$SH" top --metric loss >"$d/top-out" 2>"$d/top-err") || fail "top without split roles failed"
+  if grep -Fq "advisory" "$d/top-err"; then
+    fail "a contract without split roles must stay silent: $(cat "$d/top-err")"
+  fi
+  cmp -s "$d/top-out" "$d/top-out-roles" || fail "split roles must not change the ranking output"
+  # A malformed block warns and ranks on.
+  printf '{"schema": 1, "metrics": {"loss": {"direction": "min", "split": "val"}}, "splits": {"test": {"role": "last"}}}\n' \
+    > "$repo/docs/metric-contract.json"
+  (cd "$repo" && "$SH" top --metric loss >/dev/null 2>"$d/top-err") || fail "a bad splits block must not fail top"
+  assert_file_contains "$d/top-err" "warning: split roles ignored"
 }
 
 test_oms_run_timeline_merges_streams() {

@@ -2135,7 +2135,14 @@ ML/Slurm workflows use local-first experiment controls:
   contracts and none is declared now, it prints "not comparable" and exits 4;
   `--mixed` ranks everything and says so. Rows written before a contract existed
   rank among themselves as before, and `list`, the duplicate warning and the other
-  ledger readers ignore the field. A run with a seed (`--seed N`, or the command's
+  ledger readers ignore the field. An optional `"splits": {"test": {"role": "final"}}`
+  block marks a split's role (`selection` or `final`); `top` then adds an advisory
+  on stderr counting the recorded runs that reported a metric measured on a `final`
+  split, per seed group where present, and says "test split evaluated N times
+  across M variants" when more than one seed group or command-at-commit did. It
+  gates nothing, changes no exit code and enters no digest, and it counts only
+  what rows recorded: it does not stop anyone from reading the split.
+  A run with a seed (`--seed N`, or the command's
   own `--seed N` / `seed=N`) records `seed` and `group`, by default a digest of the
   command without its seed at that commit and diff (`--group LABEL` names it).
   `top --by-group` ranks groups by mean with n, stdev and a bootstrap 95% interval,
