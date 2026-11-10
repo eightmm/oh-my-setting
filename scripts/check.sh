@@ -635,17 +635,18 @@ stage() {  # stage NAME COMMAND...
     cat "$log"
     [ "$rc" -eq 124 ] || rm -f "$log"
   elif [ "$rc" -ne 0 ]; then
-    # Failure output is read by an agent between edits: bounded tail in the
-    # session (the assertion that failed prints last), full log kept on disk
-    # for oms job-digest. Unbounded, one failing smoke can dump hundreds of
-    # kilobytes into the calling context.
+    # Failure output is read by an agent between edits: past output-digest's
+    # default budget the session gets its digest (failure lines, tail, exit
+    # code) and the full log stays on disk at the path the digest names.
+    # Unbounded, one failing smoke can dump hundreds of kilobytes into the
+    # calling context. The digest is a view; the log is the record.
     local log_cap log_bytes
-    log_cap=65536
-    case "$log_cap" in ''|0|*[!0-9]*) log_cap=65536 ;; esac
+    log_cap=4000
     log_bytes="$(wc -c < "$log" | tr -d ' ')"
     if [ "$log_bytes" -gt "$log_cap" ]; then
-      echo "[check: output is ${log_bytes}B; showing the last ${log_cap}B — full log: $log]"
-      tail -c "$log_cap" "$log"
+      echo "[check: output is ${log_bytes}B; digest below — full log: $log]"
+      "$ROOT/scripts/output-digest.sh" --file "$log" --exit-code "$rc" ||
+        tail -c 65536 "$log"
     else
       cat "$log"
       [ "$rc" -eq 124 ] || rm -f "$log"
