@@ -4811,13 +4811,15 @@ PY
   # seats saw and the file each one names, with no model call and no effect
   # on the verdict; what became of each is a queryable record.
   local found="$TMP/review-gate-findings" review="$ROOT/scripts/peer-review.sh" verify_name
-  local fixed_id dismissed_id
+  local fixed_id dismissed_id review_base fixed_commit unrelated_commit
   local -a where
   make_committed_repo "$found"
   printf 'one\ntwo\nthree\n' > "$found/steady.txt"
-  printf '/artifacts/\n/artifacts-fixed/\n/bin/\n/home/\n' > "$found/.gitignore"
+  printf '/artifacts*/\n/bin/\n/home/\n' > "$found/.gitignore"
   git -C "$found" add -A
   git -C "$found" commit -qm 'test: steady file'
+  review_base="$(git -C "$found" rev-parse HEAD)"
+  git -C "$found" tag -am 'test: original review base' findings-base "$review_base"
   printf 'reviewed change\n' >> "$found/file.txt"
   where=(--artifact-dir "$found/artifacts" --repo "$found")
   mkdir -p "$found/bin" "$found/home"
@@ -4877,17 +4879,132 @@ PYFIND
   [ "$rc" = 2 ] || fail "a harness child must not dismiss a finding, got $rc"
   ! "$review" findings dismiss "$dismissed_id" "${where[@]}" > /dev/null 2>&1 || fail "dismiss needs a reason"
   "$review" findings dismiss "$dismissed_id" "${where[@]}" --reason "style only" > /dev/null
-  # A passing run after the fix supplies the receipt; the same finding reported
-  # again by a later run reads open whatever was recorded before.
+  # A newer successful receipt for another change cannot verify this finding.
+  # Keep the fix commit separate from both the original base and the unrelated
+  # run's HEAD, so time, scope and commit binding are exercised independently.
+  printf 'fix detail\n' >> "$found/file.txt"
+  git -C "$found" add file.txt
+  git -C "$found" commit -qm 'test: recorded fix claim'
+  fixed_commit="$(git -C "$found" rev-parse HEAD)"
+  "$review" findings reopen "$fixed_id" "${where[@]}" --reason "record the fix commit" > /dev/null
+  "$review" findings fix "$fixed_id" "${where[@]}" --commit "${fixed_commit:0:12}" > /dev/null
+  printf 'unrelated change\n' >> "$found/steady.txt"
+  git -C "$found" add steady.txt
+  git -C "$found" commit -qm 'test: unrelated change'
+  unrelated_commit="$(git -C "$found" rev-parse HEAD)"
   write_fake_review_gate_provider "$found/bin" claude pass
-  sleep 1
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts-unrelated" \
+    --providers claude --base "$fixed_commit" --gate --verify true --prompt "Unrelated success" > "$TMP/findings-out" 2>&1 ||
+    fail "the unrelated gate should pass: $(cat "$TMP/findings-out")"
+  verify_name="$(basename "$found"/artifacts-unrelated/_verify-*.md)"
+  rc=0
+  "$review" findings verify "$fixed_id" "${where[@]}" --run "$verify_name" > "$TMP/findings-verify" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unrelated successful receipt must not verify a finding, got $rc: $(cat "$TMP/findings-verify")"
+  assert_file_contains "$TMP/findings-verify" 'verification scope'
+
+  # A passing follow-up reviews the original base through the recorded fix.
+  # A later sighting still reopens the finding whatever was recorded before.
+  git -C "$found" checkout --detach -q "$fixed_commit"
+  printf 'uncommitted verifier input\n' >> "$found/file.txt"
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts-dirty" \
+    --providers claude --base "$review_base" --gate --verify true --prompt "Dirty follow-up" > "$TMP/findings-out" 2>&1 ||
+    fail "ordinary gates must still review dirty diffs: $(cat "$TMP/findings-out")"
+  verify_name="$(basename "$found"/artifacts-dirty/_verify-*.md)"
+  rc=0
+  "$review" findings verify "$fixed_id" "${where[@]}" --run "$verify_name" > "$TMP/findings-verify" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a dirty follow-up cannot verify the recorded commit, got $rc: $(cat "$TMP/findings-verify")"
+  assert_file_contains "$TMP/findings-verify" 'clean tracked tree'
+  git -C "$found" checkout -q -- file.txt
   HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts-fixed" \
-    --providers claude --gate --verify true --prompt "After the fix" > "$TMP/findings-out" 2>&1 ||
+    --providers claude --base findings-base --gate --verify true --prompt "After the fix" > "$TMP/findings-out" 2>&1 ||
     fail "the passing follow-up gate failed: $(cat "$TMP/findings-out")"
   ! grep -q '^findings: ' "$TMP/findings-out" || fail "a run with no findings block prints no findings line"
   verify_name="$(basename "$found"/artifacts-fixed/_verify-*.md)"
+  python3 - "$found" "$review" "$fixed_id" "$fixed_commit" "$unrelated_commit" "$review_base" <<'PYFIND' || fail "finding verification accepted missing or unrelated provenance"
+import hashlib, json, runpy, subprocess, sys
+from pathlib import Path
+repo, review = Path(sys.argv[1]), Path(sys.argv[2])
+ident, fixed, unrelated, base = sys.argv[3:]
+index = repo / '.oms/artifacts/index.jsonl'
+rows = [json.loads(line) for line in index.read_text().splitlines()]
+receipt = [row for row in rows if row.get('kind') == 'review-verify'][-1]
+source = repo / receipt['source']
+assert receipt['source_sha256'] == hashlib.sha256(source.read_bytes()).hexdigest(), receipt
+scope = json.loads(source.read_text())
+assert scope['head'] == fixed and scope['base'] == base and 'file.txt' in scope['paths'] and scope['tracked_clean'] is True, scope
+original = repo / 'artifacts'
+original_scope = json.loads(next(original.glob('_scope-*.json')).read_text())
+assert scope['diff_sha256'] != original_scope['diff_sha256'], scope
+events = original / '_finding-events.jsonl'
+fixed_event = json.loads(events.read_text().splitlines()[-1])
+assert fixed_event['commit'] == fixed, fixed_event
+before = events.read_bytes()
+store = runpy.run_path(str(review.parent / 'lib/artifact-index-store.py'))
+cases = [
+    ('legacy-receipt', {}, 'no pinned review scope'),
+    ('missing-digest', {}, 'no pinned review scope'),
+    ('wrong-digest', {}, 'scope digest'),
+    ('absolute-source', {}, 'unsafe verification scope path'),
+    ('escaping-source', {}, 'unsafe verification scope path'),
+    ('missing-tree-proof', {}, 'clean tracked tree'),
+    ('wrong-base', {'base': fixed}, "finding's review base"),
+    ('wrong-path', {'paths': ['steady.txt']}, 'does not cover the cited path'),
+    ('wrong-head', {'head': unrelated}, 'recorded fix commit'),
+    ('no-diff', {'diff_included': False}, 'complete review scope'),
+]
+for name, changes, message in cases:
+    candidate = dict(receipt, event_id='evt-finding-' + name)
+    artifact = repo / 'artifacts-fixed' / ('_verify-' + name + '.md')
+    artifact.write_text('# fixture receipt\n' + name + '\n')
+    candidate.update(artifact=str(artifact.relative_to(repo)),
+                     artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest())
+    candidate['artifact_id'] = 'sha256:' + candidate['artifact_sha256']
+    altered = source.with_name('_scope-' + name + '.json')
+    altered_scope = dict(scope, **changes)
+    if name == 'missing-tree-proof':
+        altered_scope.pop('tracked_clean')
+    altered.write_text(json.dumps(altered_scope))
+    candidate.update(source=str(altered.relative_to(repo)),
+                     source_sha256=hashlib.sha256(altered.read_bytes()).hexdigest())
+    if name == 'legacy-receipt':
+        candidate.pop('source')
+        candidate.pop('source_sha256')
+    elif name == 'missing-digest':
+        candidate.pop('source_sha256')
+    elif name == 'wrong-digest':
+        candidate['source_sha256'] = '0' * 64
+    elif name == 'absolute-source':
+        candidate['source'] = str(altered)
+    elif name == 'escaping-source':
+        candidate['source'] = '../' + repo.name + '/' + candidate['source']
+    store['append_rows'](str(repo), str(index), [candidate])
+    result = subprocess.run([str(review), 'findings', 'verify', ident, '--repo', str(repo),
+                             '--artifact-dir', str(original), '--run', candidate['artifact_id']],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    assert result.returncode == 2 and message in result.stdout, (name, result.returncode, result.stdout)
+    assert events.read_bytes() == before, name
+
+# Pre-binding fix records remain queryable claims; a valid receipt cannot fill
+# in their missing commit retroactively. No historical event is rewritten.
+legacy = repo / 'artifacts-legacy'
+legacy.mkdir()
+for artifact in original.glob('_findings-*.jsonl'):
+    (legacy / artifact.name).write_bytes(artifact.read_bytes())
+for artifact in original.glob('_scope-*.json'):
+    (legacy / artifact.name).write_bytes(artifact.read_bytes())
+fixed_event.pop('commit')
+(legacy / events.name).write_text(json.dumps(fixed_event) + '\n')
+result = subprocess.run([str(review), 'findings', 'verify', ident, '--repo', str(repo),
+                         '--artifact-dir', str(legacy), '--run', receipt['artifact_id']],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+assert result.returncode == 2 and 'fix record has no commit' in result.stdout, result.stdout
+result = json.loads(subprocess.check_output([str(review), 'findings', 'list', '--json',
+                                            '--artifact-dir', str(legacy)], text=True))
+assert next(row for row in result['findings'] if row['id'] == ident)['status'] == 'fixed', result
+assert 'commit' not in json.loads((legacy / events.name).read_text())
+PYFIND
   "$review" findings verify "$fixed_id" "${where[@]}" --run "$verify_name" > "$TMP/findings-verify" ||
-    fail "a passing receipt recorded after the fix must verify: $(cat "$TMP/findings-verify")"
+    fail "a fresh receipt with matching scope and fix commit must verify: $(cat "$TMP/findings-verify")"
   "$review" findings list "${where[@]}" --json > "$TMP/findings-json"
   python3 - "$TMP/findings-json" "$fixed_id" "$dismissed_id" <<'PYFIND' || fail "finding status is not queryable: $(cat "$TMP/findings-json")"
 import json, sys
@@ -4903,7 +5020,7 @@ printf '```findings\n%s\n```\nGATE: fail\n' '{"file": "file.txt", "line": 2, "su
 EOF
   rc=0
   HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
-    --providers claude --gate --no-verify --prompt "Reported again" > "$TMP/findings-out" 2>&1 || rc=$?
+    --providers claude --base "$review_base" --gate --no-verify --prompt "Reported again" > "$TMP/findings-out" 2>&1 || rc=$?
   [ "$rc" = 1 ] || fail "the repeat gate should fail on its seat, got $rc: $(cat "$TMP/findings-out")"
   "$review" findings show "$fixed_id" "${where[@]}" > "$TMP/findings-show"
   assert_file_contains "$TMP/findings-show" "$fixed_id  open  [reported again in run"

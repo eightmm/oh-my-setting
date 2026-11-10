@@ -13,7 +13,8 @@ The lifecycle (`fix`, `verify`, `dismiss`, `reopen`) appends to
 `_finding-events.jsonl` in the same directory. Every status is a record of
 who said what, never approval or verification evidence by itself: `verify`
 only links a finding to a mechanical verify receipt the artifact index
-already holds, and refuses without one.
+already holds, with matching review scope and fix commit, and refuses
+without that provenance.
 """
 
 import argparse
@@ -21,6 +22,8 @@ import hashlib
 import json
 import os
 import re
+import runpy
+import subprocess
 import sys
 import time
 
@@ -37,6 +40,8 @@ BLOCK_CLOSE = re.compile(r"^\s*```+\s*$")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 ID_RE = re.compile(r"^f-[0-9a-f]{12}$")
 RUN_RE = re.compile(r"^[A-Za-z0-9TZ-]{1,64}$")
+COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def clean(value, limit=MAX_TEXT):
@@ -263,6 +268,68 @@ def index_rows(repo):
     return read_rows_any(os.path.join(repo, ".oms", "artifacts", "index.jsonl"))
 
 
+def commit_sha(repo, value):
+    """Pin an explicit commit SHA while recording a fix; refs are not stable claims."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{4,64}", value):
+        raise SystemExit("review findings: --commit must name an existing commit SHA")
+    result = subprocess.run(["git", "-C", repo, "rev-parse", "--verify", value.lower() + "^{commit}"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    full = result.stdout.decode("ascii", "replace").strip()
+    if result.returncode != 0 or not COMMIT_RE.fullmatch(full):
+        raise SystemExit("review findings: --commit must name an existing commit SHA in --repo")
+    return full
+
+
+def read_scope(root, path, label):
+    if (not isinstance(path, str) or not path or os.path.isabs(path) or
+            ".." in path.split("/") or "\0" in path):
+        raise SystemExit("review findings: unsafe %s scope path" % label)
+    durable = runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "durable-jsonl.py"))
+    raw = durable["read_no_follow"](root, path, "review findings: %s scope" % label, max_bytes=8 * 1024 * 1024)
+    try:
+        scope = json.loads(raw)
+    except (ValueError, UnicodeError):
+        scope = None
+    if (not isinstance(scope, dict) or scope.get("schema") != SCHEMA or scope.get("kind") != "review-scope" or
+            scope.get("diff_included") is not True or
+            not all(isinstance(scope.get(key), str) and COMMIT_RE.fullmatch(scope[key]) for key in ("base", "head")) or
+            not isinstance(scope.get("diff_sha256"), str) or not SHA256_RE.fullmatch(scope["diff_sha256"]) or
+            not isinstance(scope.get("paths"), list) or
+            not all(isinstance(path, str) and path and not os.path.isabs(path) and ".." not in path.split("/")
+                    and "\0" not in path for path in scope["paths"])):
+        raise SystemExit("review findings: verification needs a complete review scope with pinned base, HEAD and diff; "
+                         "rerun the gate with the original --base")
+    return scope, hashlib.sha256(raw).hexdigest()
+
+
+def verify_binding(args, entry, fixed, receipt):
+    source, digest = receipt.get("source"), receipt.get("source_sha256")
+    if not source or not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        raise SystemExit("review findings: that verification receipt has no pinned review scope; "
+                         "rerun peer-review --gate --verify with the original --base")
+    scope, actual_digest = read_scope(args.repo, source, "verification")
+    if actual_digest != digest:
+        raise SystemExit("review findings: verification scope digest differs from the indexed receipt; rerun the gate")
+    if scope.get("tracked_clean") is not True:
+        raise SystemExit("review findings: verification scope must record a clean tracked tree at the fix commit; rerun the gate")
+    original, _ = read_scope(args.artifact_dir, entry.get("scope"), "finding")
+    if entry.get("diff_sha256") != original["diff_sha256"]:
+        raise SystemExit("review findings: finding no longer matches its recorded review scope; rerun the review")
+    # A fix changes the diff bytes. Retain the original base and require this
+    # citation's path, rather than equating old and new diff digests.
+    if scope["base"] != original["base"]:
+        raise SystemExit("review findings: verification scope does not match the finding's review base; "
+                         "rerun the gate with --base %s" % original["base"])
+    if entry.get("file") not in scope["paths"]:
+        raise SystemExit("review findings: verification scope does not cover the cited path %s" % clean(entry.get("file"), 200))
+    if not fixed.get("commit"):
+        raise SystemExit("review findings: fix record has no commit; reopen and mark fixed with --commit SHA, then rerun the gate")
+    commit = commit_sha(args.repo, fixed["commit"])
+    if scope["head"] != commit:
+        raise SystemExit("review findings: verification scope HEAD does not match the recorded fix commit %s" % commit)
+    return commit
+
+
 def read_rows_any(path):
     rows = []
     for line in (read_text(path, 64 * 1024 * 1024) or "").splitlines():
@@ -399,7 +466,8 @@ def transition(args):
     if args.action == "fix":
         if state != "open":
             raise SystemExit("review findings: %s is %s; only an open finding can be marked fixed" % (ident, state))
-        record(args.artifact_dir, ident, "fixed", entry, note=clean(args.note or ""), commit=clean(args.commit or "", 64))
+        commit = commit_sha(args.repo, args.commit) if args.commit else ""
+        record(args.artifact_dir, ident, "fixed", entry, note=clean(args.note or ""), commit=commit)
         print("%s: fixed (a claim; `findings verify --run REF` links the mechanical receipt)" % ident)
     elif args.action == "verify":
         if state != "fixed":
@@ -419,8 +487,9 @@ def transition(args):
             raise SystemExit("review findings: that verification run failed (exit %d)" % receipt["exit"])
         if str(receipt.get("ts") or "") < fixed_at:
             raise SystemExit("review findings: that verification run predates the fix record (%s)" % fixed_at)
+        commit = verify_binding(args, entry, history[-1], receipt)
         record(args.artifact_dir, ident, "verified", entry, verify_artifact_id=clean(receipt.get("artifact_id") or "", 120),
-               verify_artifact=clean(receipt.get("artifact") or "", 400), note=clean(args.note or ""))
+               verify_artifact=clean(receipt.get("artifact") or "", 400), commit=commit, note=clean(args.note or ""))
         print("%s: verified against %s" % (ident, clean(receipt.get("artifact_id") or args.run, 120)))
     elif args.action == "dismiss":
         if os.environ.get("OMS_HARNESS_CHILD") == "1":

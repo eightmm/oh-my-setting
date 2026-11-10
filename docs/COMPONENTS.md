@@ -1565,7 +1565,19 @@ summary and the quote, so the same finding reported by a later run is the same
 row. A finding is `open` until a record says otherwise in
 `_finding-events.jsonl`: `findings fix ID` is a claim; `findings verify ID --run
 REF` requires a passing gate-verify receipt in the artifact index, named by its
-artifact id or file name and recorded after the fix; `findings dismiss ID
+artifact id or file name and recorded after the fix. Record the fix with
+`findings fix ID --commit SHA` (abbreviated SHAs are resolved when recorded),
+then rerun `peer-review --gate --base ORIGINAL_BASE --verify CMD` at that exact
+commit. The receipt pins its review-scope artifact through the index's `source`
+and `source_sha256`: the scope must use the finding's original resolved base
+and include its cited file, with `tracked_clean: true` confirming that the
+tracked working tree matched HEAD when the scope was captured. Ordinary gates
+still review dirty or candidate diffs; those receipts cannot verify a finding
+against a commit. The fixed diff can differ from the original diff.
+Missing or changed scope provenance, another base/path/HEAD, a dirty tracked
+tree, and a fix record without a commit refuse verification with exit 2. Older receipts and fix
+claims remain readable; rerun the gate for a new receipt, or reopen and record
+the fix with a commit before verifying. `findings dismiss ID
 --reason TEXT` is the owner's (refused inside a harness worker or reviewer);
 `findings reopen ID --reason TEXT` undoes any of them. A fixed or verified
 finding that a later run reports again reads `open`. Every status is a record
