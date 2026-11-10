@@ -22018,10 +22018,14 @@ case "$TRIAGE_CASE:$*" in
     [ "$TRIAGE_CASE" != nobase ] || exit 1
     echo '{"default_branch":"trunk"}' ;;
   green:"run list --branch feature"*) echo "[$(run 31 completed success aaaa111122223333)]" ;;
+  mixed:"run list --branch feature"*) echo "[$(run 32 in_progress "" aaaa111122223333),$(run 31 completed success aaaa111122223333)]" ;;
+  newer:"run list --branch feature"*) echo "[$(run 32 in_progress "" aaaa111122223333),$(run 20 completed success 9999000011112222)]" ;;
   pending:"run list --branch feature"*) echo "[$(run 32 in_progress "" aaaa111122223333)]" ;;
   *:"run list --branch feature"*)
     echo "[$(run 21 completed failure aaaa111122223333),$(run 20 completed success 9999000011112222)]" ;;
   *:"run list --branch trunk"*) echo "[$(run 10 completed failure bbbb111122223333)]" ;;
+  unsafejob:"run view 21 --json jobs")
+    printf '{"jobs":[{"name":"%s","conclusion":"failure"}]}' "$(printf '%s%s' 'gh' 'p_123456789012345678901234567890123456')" ;;
   nojobs:"run view 21 --json jobs") echo 'proxy error' ;;
   *:"run view 21 --json jobs")
     printf '%s' '{"jobs":[{"name":"lint","conclusion":"failure","steps":[{"name":"Set up","conclusion":"success"},{"name":"shellcheck","conclusion":"failure"}]},'
@@ -22030,6 +22034,12 @@ case "$TRIAGE_CASE:$*" in
     printf '%s\n' '{"name":"docs","conclusion":"success"}]}' ;;
   *:"run view 10 --json jobs")
     echo '{"jobs":[{"name":"lint","conclusion":"success"},{"name":"smoke (1/4)","conclusion":"failure"}]}' ;;
+  unsafe:"run view 21 --log-failed")
+    printf 'lint\tshellcheck\tcheck: %s FAILED\n' "$(printf '%s%s' 'gh' 'p_123456789012345678901234567890123456')"
+    printf 'smoke (1/4)\tstep\t%s\t=%s\n' "$(printf '%s' 'pass''word')" 'hunter2hunter2-fixture'
+    printf 'leaky\033[31m job\tstep\t%0200d%s%s\n' 0 'pass''word' '=hunter2hunter2-fixture' ;;
+  huge:"run view 21 --log-failed")
+    head -c 2097153 /dev/zero | tr '\000' x ;;
   slowlog:"run view 21 --log-failed") sleep 5 ;;
   *:"run view 21 --log-failed")
     i=0; while [ "$i" -lt 40 ]; do printf 'lint\tshellcheck\t2026-11-10T00:00:00.0000000Z early line %s\n' "$i"; i=$((i + 1)); done
@@ -22069,6 +22079,17 @@ EOF
     fail "triage leaked log content or control bytes: $out"
   contains "$out" "not verification evidence; nothing was re-run, retried, pushed or recorded" ||
     fail "the brief should say what it is: $out"
+  triage unsafe feature
+  [ "$rc" -eq 1 ] && ! contains "$out" 'hunter2' && ! contains "$out" '12345678901234567890' &&
+    ! contains "$out" '00000000000000000000' || fail "raw sensitive lines must be withheld: $out"
+  triage unsafejob feature
+  [ "$rc" -eq 2 ] && ! contains "$out" '12345678901234567890' || fail "sensitive metadata must be withheld: $out"
+  triage huge feature
+  [ "$rc" -eq 1 ] && contains "$out" 'log: not downloaded' || fail "oversized log must be withheld: $out"
+  triage mixed feature
+  [ "$rc" -eq 2 ] || fail "a pending run on a green SHA must be unknown: $out"
+  triage newer feature
+  [ "$rc" -eq 2 ] || fail "a newer pending SHA must not select an older green SHA: $out"
   triage green feature
   [ "$rc" -eq 0 ] && contains "$out" "ci-status triage [feature]: nothing red on aaaa11112222 (1 completed run)" ||
     fail "a green head has nothing to triage (rc=$rc): $out"
@@ -22079,7 +22100,7 @@ EOF
   [ "$rc" -eq 2 ] && contains "$out" "unknown (deadbeef has no run among the branch's newest 2)" ||
     fail "a commit without a listed run is unknown (rc=$rc): $out"
   triage pending feature
-  [ "$rc" -eq 2 ] && contains "$out" "unknown (no completed run on this branch)" ||
+  [ "$rc" -eq 2 ] && contains "$out" "has a run that has not finished" ||
     fail "an unfinished run is unknown, not green (rc=$rc): $out"
   triage down feature
   [ "$rc" -eq 2 ] && contains "$out" "unknown (run list: gh not authenticated, unreachable or unreadable)" &&

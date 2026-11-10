@@ -20,7 +20,7 @@ from . import history as project_history
 from .blast import blast_radius
 from .query import Graph
 
-CODEOWNERS_PATHS = ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS")
+CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 CODEOWNERS_MAX_BYTES = 1024 * 1024
 NOTE = "orientation only: where to look, not evidence that the change is safe, tested or approved"
 

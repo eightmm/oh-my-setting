@@ -860,6 +860,27 @@ for bad in "--task graph" "--signatures" "--signatures --task graph --max-bytes 
   [ "$bad_rc" -ne 0 ] || fail "project map $bad must be refused: $(cat "$work/bad-map.out")"
 done
 
+# Invalid impact arguments must not create or refresh graph state.
+for bad in "--commits 0" "--limit 0" "--limit 501" "--depth -1"; do
+  rm -rf "$auto/.oms"
+  bad_rc=0
+  # shellcheck disable=SC2086
+  "$OMS" graph --repo "$auto" project impact --base HEAD $bad > "$work/bad-impact.out" 2>&1 || bad_rc=$?
+  [ "$bad_rc" -ne 0 ] && [ ! -e "$auto/.oms" ] || fail "invalid impact $bad wrote state"
+done
+mkdir -p "$auto/.github" "$auto/docs"
+printf '* @github-owner\n' > "$auto/.github/CODEOWNERS"
+printf '* @root-owner\n' > "$auto/CODEOWNERS"
+printf '* @docs-owner\n' > "$auto/docs/CODEOWNERS"
+PYTHONPATH="$ROOT/scripts/lib" python3 - "$auto" <<'PYCODE'
+from pathlib import Path
+import sys
+from oms_graph.project.impact import read_codeowners, owners_for
+path, rules = read_codeowners(Path(sys.argv[1]))
+assert path == '.github/CODEOWNERS', path
+assert owners_for(rules, 'alpha.py')[0] == ['@github-owner']
+PYCODE
+
 # A delegated child may evaluate a route but never submit an execution decision.
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" exec route coding-change \

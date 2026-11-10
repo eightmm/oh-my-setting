@@ -673,9 +673,16 @@ def _project_coupling(args: argparse.Namespace, repo: Path, state: Path) -> int:
     return 0
 
 
-def _project_impact(args: argparse.Namespace, repo: Path, state: Path) -> int:
+def _validate_impact_args(args: argparse.Namespace) -> None:
     if args.commits < 1:
         raise GraphError("project impact --commits must be at least 1")
+    if args.limit < 1 or args.limit > 500:
+        raise GraphError("project impact --limit must be between 1 and 500")
+    if args.depth < 0:
+        raise GraphError("project impact --depth must be zero or greater")
+
+
+def _project_impact(args: argparse.Namespace, repo: Path, state: Path) -> int:
     graph, _ = _index(repo, state)
     brief = project_impact.impact_brief(repo, graph, base=args.base, head=args.head, limit=args.limit,
                                         depth=args.depth, commits=args.commits)
@@ -947,6 +954,8 @@ def dispatch(args: argparse.Namespace) -> int:
         repo, state = _project_state(args)
         if args.action == "map":
             _validate_map_args(args)
+        if args.action == "impact":
+            _validate_impact_args(args)
         _auto_refresh(args, repo, state)
         return PROJECT_ACTIONS[args.action](args, repo, state)
     if args.group == "exec" and args.action in EXEC_ACTIONS:

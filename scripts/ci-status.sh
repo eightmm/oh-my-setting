@@ -105,7 +105,7 @@ triage  Explain a red run for the branch's HEAD, or for --sha COMMIT on that
         when it looks sensitive), whether the same job is also red on the
         base branch, and a brief to hand to whoever fixes it. Nothing is
         re-run, retried, pushed, dispatched or recorded. Exit 0 nothing red,
-        1 a red run was triaged, 2 the run could not be read.
+        1 a red run was triaged, 2 the run is pending or could not be read.
 
 Environment:
   OMS_CI_TICK_INTERVAL  Minimum seconds between unresolved lookups (default 120).
@@ -474,7 +474,7 @@ if [ "$ACTION" = triage ]; then
   OMS_TRIAGE_GH="$GH" OMS_TRIAGE_TIMEOUT="$triage_timeout" OMS_TRIAGE_HEAD="$triage_head" \
     OMS_TRIAGE_DIR="$triage_dir" OMS_TRIAGE_COMMON="$ROOT/scripts/lib/agent-memory-common.sh" \
     python3 - "$branch" <<'PY' || triage_rc=$?
-import json, os, re, subprocess, sys
+import json, os, re, selectors, subprocess, sys, time
 
 gh = os.environ["OMS_TRIAGE_GH"]
 log_timeout = int(os.environ["OMS_TRIAGE_TIMEOUT"])
@@ -506,25 +506,72 @@ def ask(args, limit=timeout, cap=None):
                                 stderr=subprocess.DEVNULL)
     except OSError:
         return None
-    try:
-        out = proc.communicate(timeout=limit)[0]
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        return None
+    if cap is None:
+        try:
+            out = proc.communicate(timeout=limit)[0]
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None
+    else:
+        out = bytearray()
+        deadline = time.monotonic() + limit
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    proc.kill()
+                    proc.communicate()
+                    return None
+                chunk = os.read(proc.stdout.fileno(), min(65536, cap - len(out)))
+                if not chunk:
+                    break
+                out.extend(chunk)
+                if len(out) >= cap:
+                    proc.kill()
+                    proc.communicate()
+                    return None
+        try:
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None
     if proc.returncode != 0:
         return None
-    if cap is not None and len(out) > cap:
-        out = out[-cap:]  # the end of a log is where a job says why it stopped
     return out.decode("utf-8", "replace")
 
 
 def parsed(args):
     out = ask(args)
     try:
-        return json.loads(out) if out is not None else None
+        value = json.loads(out) if out is not None else None
     except (ValueError, RecursionError):
         return None
+    def strings(item):
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            for child in item.values():
+                yield from strings(child)
+        elif isinstance(item, list):
+            for child in item:
+                yield from strings(child)
+    if out:
+        path = os.path.join(work, "metadata.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(strings(value)))
+        try:
+            scan = subprocess.run(["bash", "-c", '. "$1" && agent_memory_file_sensitive_status "$2"',
+                                   "_", os.environ["OMS_TRIAGE_COMMON"], path],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=30, check=False)
+            if scan.returncode != 1:
+                unknown("CI metadata withheld by sensitive-content scan")
+        except (OSError, subprocess.SubprocessError):
+            unknown("CI metadata scan could not run")
+    return value
 
 
 def listing(args):
@@ -544,23 +591,23 @@ FIELDS = "databaseId,status,conclusion,workflowName,headSha,url"
 runs = listing(["run", "list", "--branch", branch, "--limit", "20", "--json", FIELDS])
 if runs is None:
     unknown("run list: gh not authenticated, unreachable or unreadable")
-done = [r for r in runs if r.get("status") == "completed"]
+if not head:
+    head = runs[0].get("headSha") if runs else ""
+if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{7,40}", head):
+    unknown("newest run SHA unreadable")
 def is_head(row):
-    return bool(head) and isinstance(row.get("headSha"), str) and row["headSha"].startswith(head)
+    return isinstance(row.get("headSha"), str) and row["headSha"].lower().startswith(head.lower())
 
-
-mine = [r for r in done if is_head(r)]
-if head and not mine:
-    pending = any(is_head(r) for r in runs)
-    unknown("%s has %s" % (head[:12], "a run that has not finished" if pending
-                              else "no run among the branch's newest %d" % len(runs)))
-pool = mine or done
-if not pool:
-    unknown("no completed run on this branch")
-sha = pool[0].get("headSha")
-pool = [r for r in pool if r.get("headSha") == sha]
+matching = [r for r in runs if is_head(r)]
+if not matching:
+    unknown("%s has no run among the branch's newest %d" % (head[:12], len(runs)))
+sha = matching[0].get("headSha")
+matching = [r for r in matching if r.get("headSha") == sha]
+pool = [r for r in matching if r.get("status") == "completed"]
 red = [r for r in pool if r.get("conclusion") in RED]
 if not red:
+    if any(r.get("status") != "completed" for r in matching):
+        unknown("%s has a run that has not finished" % head[:12])
     print("ci-status triage [%s]: nothing red on %s (%d completed run%s)" % (
         clean(branch), clean(sha or "?", 12), len(pool), "" if len(pool) == 1 else "s"))
     raise SystemExit(0)
@@ -626,14 +673,15 @@ if failing:
         text = STAMP.sub("", ANSI.sub("", parts[2])).rstrip()
         if not text:
             continue
-        found = re.search(r"check:\s*([A-Za-z0-9_.-]+)\s+FAILED\b", text)
-        if found:
-            checks.setdefault(parts[0].strip(), []).append(found.group(1))
-        tails.setdefault(parts[0].strip(), []).append(clean(text, LINE_CHARS))
+        tails.setdefault(parts[0].strip(), []).append(text)
 files = {}
 for index, job in enumerate(failing[:MAX_JOBS]):
     lines = tails.get(job["name"].strip(), [])[-TAIL_LINES:]
     if lines:
+        for line in lines:
+            found = re.search(r"check:\s*([A-Za-z0-9_.-]+)\s+FAILED\b", line)
+            if found:
+                checks.setdefault(job["name"].strip(), []).append(found.group(1))
         path = os.path.join(work, "job-%d.txt" % index)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n")
@@ -665,7 +713,7 @@ for index, job in enumerate(failing[:MAX_JOBS]):
              if isinstance(s, dict) and s.get("conclusion") in RED and isinstance(s.get("name"), str)]
     if steps:
         print("  failed step%s: %s" % ("" if len(steps) == 1 else "s", "; ".join(steps[:5])))
-    named = sorted(set(checks.get(name.strip(), [])))
+    named = sorted(set(checks.get(name.strip(), []))) if index in files and scanned and files[index][0] not in withheld else []
     if named:
         print("  failed checks: %s%s" % (", ".join(named[:12]),
                                          " (+%d more)" % (len(named) - 12) if len(named) > 12 else ""))
@@ -679,7 +727,7 @@ for index, job in enumerate(failing[:MAX_JOBS]):
     else:
         print("  log tail (last %d line%s):" % (len(files[index][1]), "" if len(files[index][1]) == 1 else "s"))
         for line in files[index][1]:
-            print("    | " + line)
+            print("    | " + clean(line, LINE_CHARS))
 if len(failing) > MAX_JOBS:
     print("- %d more failing job(s) not shown" % (len(failing) - MAX_JOBS))
 print("brief: fix a job marked regression candidate first; a job that is also red on base was not")
