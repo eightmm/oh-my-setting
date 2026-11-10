@@ -195,6 +195,8 @@ def main(argv=None):
                         help="append settled read-only findings from another task (repeatable; needs --brief-file)")
     parser.add_argument("--label", help="short task title for the role board")
     parser.add_argument("--alias", help="short unique room call name (1-8 letters, digits or hyphens)")
+    parser.add_argument("--no-web", action="store_true",
+                        help="researcher dispatch only: launch with the four-tool read belt and no web tools")
     parser.add_argument("--dry-run", action="store_true", help="show the launch plan without starting anything")
     args = parser.parse_args(arguments)
     workload_explicit = args.workload is not None
@@ -267,6 +269,8 @@ def main(argv=None):
         parser.error("--page must be between 1 and 1000")
     if args.alias is not None and not args.dispatch:
         parser.error("--alias requires --dispatch")
+    if args.no_web and args.dispatch != "researcher":
+        parser.error("--no-web applies to --dispatch researcher only (scholar exists to use the web)")
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions)) > 1:
@@ -625,7 +629,7 @@ def main(argv=None):
                               continue_task=args.continue_task, scopes=args.scope, alias=args.alias,
                               work_repo=None if args.continue_task and args.repo is None else execution,
                               allow_stale_base=args.allow_stale_base, from_task=args.from_task,
-                              workload_explicit=workload_explicit)
+                              workload_explicit=workload_explicit, no_web=args.no_web)
             if asked:
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)

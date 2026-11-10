@@ -1017,7 +1017,7 @@ def _refuse_scope_overlaps(found):
 def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=None,
              verify=None, task_id=None, dry_run=False, label=None, target=None, model=None, effort=None,
              main=None, continue_task=None, scopes=None, work_repo=None, member_id=None, alias=None,
-             candidate=None, allow_stale_base=False, from_task=None, workload_explicit=False):
+             candidate=None, allow_stale_base=False, from_task=None, workload_explicit=False, no_web=False):
     from terminal_panel import WRITERS, _validate_dry_run_inputs, alternate_route, child_environment, continuation, events, policy, provider_catalog, routable_route_model, routing_status, run_dispatch, safe_label, selected_route, tier_catalog
     dispatch_env = child_environment(owner, repo)
     room_id = room.resolve(repo, dispatch_env.get("OMS_ROOM_ID"))
@@ -1170,6 +1170,8 @@ def dispatch(repo, owner, role, workload, access, purpose, prompt=None, brief=No
                    "route_provenance": {"model_explicit": model_explicit, "effort_explicit": effort_explicit}}
         if candidate is not None:
             options["candidate"] = candidate
+        if no_web:
+            options["no_web"] = True
         if continuation_patch is not None:
             options["continuation_patch"] = continuation_patch
         if continue_task:
@@ -2575,7 +2577,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                  dry_run, label, route, main, resume, scopes, work_repo=None, member_id=None, fallback=None, alias=None,
                  candidate=None, continuation_patch=None, continue_call=False, resume_usage_baseline=None,
                  routing_report=None, routing_repo=None, fallback_decision=None, route_provenance=None,
-                 account_overflow=True):
+                 account_overflow=True, no_web=False):
     from terminal_panel import ENTRY, NativeShutdown, WRITERS, _dispatch_call_finished, _dispatch_capacity
     from terminal_panel import _dispatch_output_log, _dispatch_supervisor_receipt, _observe_dispatch_descendants
     from terminal_panel import _observe_dispatch_session, _prepare_dispatch_call, _print_dispatch_next_ready
@@ -2674,6 +2676,11 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
     env.pop("OMS_ATTEMPT_ID", None)
     env.update(OMS_PANEL_DISPATCH="1", OMS_PANEL_ROLE=route["kind"], OMS_PANEL_STRATEGY=route["role"],
                OMS_PANEL_PURPOSE=route["purpose"], OMS_PANEL_WORKLOAD=route["workload"])
+    # Opt-in code-only researcher: peer-common drops the web tools; never inherited from the caller's env.
+    if no_web and route["kind"] == "researcher" and route["role"] == "researcher":
+        env["OMS_PANEL_NO_WEB"] = "1"
+    else:
+        env.pop("OMS_PANEL_NO_WEB", None)
     env["OMS_PANEL_FALLBACK_DECISION"] = ("deferred" if deferred_fallback else
         "selected" if fallback else (fallback_decision or "no-eligible-alternate"))
     if fallback and not deferred_fallback:
@@ -3077,7 +3084,7 @@ def run_dispatch(repo, owner, role, access, prompt, brief, verify, task_id,
                                 candidate=candidate, continuation_patch=continuation_patch,
                                 continue_call=True, routing_report=routing_report, routing_repo=routing_repo,
                                 fallback_decision="no-eligible-alternate", route_provenance=route_provenance,
-                                account_overflow=False)
+                                account_overflow=False, no_web=no_web)
     if exit_verified:
         _print_dispatch_next_ready(repo, owner)
     return status
