@@ -69,6 +69,7 @@ MA_SAFE_PATHS=(
 # entries are the home directories those exclusions name. This is narrower than
 # the bundle list on purpose: `*credentials*` and `*.crt` there also match source
 # files and public certificates a worker has to read.
+# shellcheck disable=SC2088  # literal Claude permission-rule syntax, never expanded by the shell
 MA_SECRET_READ_DENY=(
   '**/.env*'
   '**/.envrc'
@@ -109,20 +110,20 @@ ma_claude_secret_deny_member() {
 # provider keeps its environment, since its key can have any name.
 ma_scrub_credential_env() {
   local provider="$1" name allow glob kept
-  local -a keep=()
+  local -a keep_names=()
   ma_worker_secret_guard || return 0
   case "$provider" in
-    claude) keep=('ANTHROPIC_*' 'CLAUDE_*') ;;
-    codex) keep=('OPENAI_*' 'CODEX_*' 'AZURE_OPENAI_*') ;;
-    antigravity) keep=('GEMINI_*' 'GOOGLE_*' 'ANTIGRAVITY_*') ;;
+    claude) keep_names=('ANTHROPIC_*' 'CLAUDE_*') ;;
+    codex) keep_names=('OPENAI_*' 'CODEX_*' 'AZURE_OPENAI_*') ;;
+    antigravity) keep_names=('GEMINI_*' 'GOOGLE_*' 'ANTIGRAVITY_*') ;;
     *) return 0 ;;
   esac
   allow="${OMS_WORKER_ENV_ALLOW:-}"
   allow=" ${allow//,/ } "
   # Claude Code on Bedrock or Vertex logs in with the cloud's own variables.
   if [ "$provider" = claude ]; then
-    [ -z "${CLAUDE_CODE_USE_BEDROCK:-}" ] || keep+=('AWS_*')
-    [ -z "${CLAUDE_CODE_USE_VERTEX:-}" ] || keep+=('GOOGLE_*')
+    [ -z "${CLAUDE_CODE_USE_BEDROCK:-}" ] || keep_names+=('AWS_*')
+    [ -z "${CLAUDE_CODE_USE_VERTEX:-}" ] || keep_names+=('GOOGLE_*')
   fi
   while IFS= read -r name; do
     case "$name" in
@@ -132,7 +133,7 @@ ma_scrub_credential_env() {
       *" $name "*) continue ;;
     esac
     kept=0
-    for glob in "${keep[@]}"; do
+    for glob in "${keep_names[@]}"; do
       # shellcheck disable=SC2053
       if [[ "$name" == $glob ]]; then
         kept=1
