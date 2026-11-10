@@ -199,6 +199,7 @@ approval-inbox
 artifact-index
 auto-update
 autopilot
+candidate
 change-guard
 checkpoint
 ci-status

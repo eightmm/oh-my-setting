@@ -98,6 +98,7 @@ explains overlapping entrypoints.
 
 | Component | Purpose | Invoke | Details |
 |---|---|---|---|
+| `candidate` | Keep per-candidate results from several tools and runs, each linked to its run or receipt. | `oms candidate` | [ML and HPC](#ml-and-hpc) |
 | `cite` | Keep per-paper notes, check DOI or arXiv ids, export BibTeX. | `oms cite` | [ML and HPC](#ml-and-hpc) |
 | `data-manifest` | Fingerprint dataset splits and detect drift or leakage. | `oms data-manifest` | [ML and HPC](#ml-and-hpc) |
 | `experiment-board` | Coordinate shared research studies. | `oms experiment-board` | [ML and HPC](#ml-and-hpc) |
@@ -2455,6 +2456,21 @@ ML/Slurm workflows use local-first experiment controls:
   observation. `check` recomputes the recorded hashes and exits 1 on drift. It
   installs and fetches nothing. Linking receipts from run capsules and
   `skill-forge import --license/--env` are not wired yet.
+- `oms candidate add|result|show|table` keeps results from several tools and
+  runs attached to one candidate id of your own (InChIKey, registry id; letters,
+  digits, `._:-`, never parsed) in append-only `.oms/candidates.jsonl` (schema 1,
+  written under the file lock, text fields pass the sensitive scan). `add` takes
+  labelled `--ref inchikey=...`; `--smiles` stores only its sha256 and length
+  unless `--store-structure` is given. `result` needs `--run` (a run capsule id
+  or run-ledger row id) or `--external` (an `oms external` receipt id), refuses
+  ids that do not resolve, and otherwise needs `--unlinked`, which `show` and
+  `table` mark. `show` flags a `conflict` when one tool, metric and conditions
+  have different values from different links, listing both and picking none;
+  `table` is candidates x `tool:metric` with `-` for missing, orders rows only
+  for exactly one `--metric` whose results state `--higher-is-better` or
+  `--lower-is-better`, and never averages across tools. It is bookkeeping: it
+  validates no structure or score, uses no chemistry library or network, and does
+  not edit run capsules or the run ledger (it points at them).
 
 Machine, cluster, dataset, and run details stay local unless the user explicitly
 chooses a connector or tracked summary.
