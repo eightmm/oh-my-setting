@@ -904,6 +904,18 @@ fewer than N decided tasks and says how many. Per role, a `suggest` line names t
 admit rate among shown groups; it is reported history for a person to weigh, never a
 routing decision, and nothing is applied or stored.
 
+From the same rows, `--metrics` adds `role_fold_audit` and `model_preference` (JSON keys next
+to `route_history`; `fold ...` and `model preference ...` text lines after the `route` lines).
+The fold audit lists per role attempts, decided tasks and admit rate (withheld under
+`--min-samples`), the roles from `roles/` never used in the window, and role pairs whose
+rarer member shares a task at least 80% of the time (`OMS_FOLD_CO_OCCURRENCE`, with at least
+`--min-samples` tasks). It is headed "fold candidates (reported history, not a decision)":
+fold one role at a time and keep it only if the folded version measures worse. The model
+preference puts a role's provider/model groups side by side (each with at least
+`--min-samples` decided tasks; two groups needed) with admit rate, median reported tokens
+and the best-to-worst admit-rate gap, or "no clear difference" under 15 points
+(`OMS_MODEL_GAP_NOISE`). Both thresholds are estimates.
+
 On a capable terminal the sidebar animates live-state indicators at four frames per
 second using the cached snapshot. Borders and role dividers stay still. Only changed
 rows are redrawn; resizing triggers a complete repaint. Starting, working, verifying and
