@@ -22073,6 +22073,16 @@ case "$jid" in
   3004) echo "CANCELLED by 1000|0:15|00:00:05" ;;
   3005) printf '%s\n' "COMPLETED|0:0|00:01:00" "RUNNING|0:0|00:02:00" ;;
   3006) printf '%s\n' "COMPLETED|0:0|00:01:00" "FAILED|1:0|00:02:00" ;;
+  # Rows in the fields run-reconcile asks for (JobID first). 3007 is an array;
+  # 3008 is preempted and requeued until "$0.done" exists, then its second
+  # record completes; 3009 lost its node and was not requeued.
+  3007) printf '%s\n' \
+    "3007_1|COMPLETED|0:0|00:01:00|c1|2026-01-02T03:00:00|2026-01-02T03:01:00|2026-01-02T03:02:00|billing=4,cpu=4,gres/gpu=1|gpu01" \
+    "3007_2|OUT_OF_MEMORY|0:125|00:00:30|c1|2026-01-02T03:00:00|2026-01-02T03:01:00|2026-01-02T03:01:30|billing=4,cpu=4,gres/gpu=1|gpu02" ;;
+  3008) echo "3008|PREEMPTED|0:0|00:05:00|c1|2026-01-02T04:00:00|2026-01-02T04:01:00|2026-01-02T04:06:00|cpu=8|gpu01"
+    [ ! -e "$0.done" ] ||
+      echo "3008|COMPLETED|0:0|00:07:00|c1|2026-01-02T04:06:00|2026-01-02T04:10:00|2026-01-02T04:17:00|cpu=8|gpu03" ;;
+  3009) echo "3009|NODE_FAIL|0:0|00:00:40|c1|2026-01-02T05:00:00|2026-01-02T05:01:00|Unknown||None assigned" ;;
   *) : ;;
 esac
 EOF
@@ -22080,7 +22090,10 @@ EOF
 #!/usr/bin/env bash
 jid=""; prev=""
 for a in "$@"; do [ "$prev" = "-j" ] && jid="$a"; prev="$a"; done
-case "$jid" in 3003) echo "RUNNING" ;; esac
+case "$jid" in
+  3003) echo "RUNNING" ;;
+  3008) [ -e "${0%/*}/sacct.done" ] || echo "PENDING" ;;
+esac
 EOF
   chmod +x "$bin/sacct" "$bin/squeue"
 }
@@ -22155,6 +22168,49 @@ test_run_reconcile_records_terminal_jobs() {
   ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --ledger "$d/ledger.jsonl" >/dev/null 2>&1 ) || fail "second apply failed"
   after="$(wc -l < "$d/.oms/runs/reconcile.jsonl")"
   [ "$before" = "$after" ] || fail "reconcile is not idempotent"
+
+  # sacct's own fields land on the row: cluster, times, allocation, and each
+  # array task's ending beside the aggregate.
+  local rec="$d/.oms/runs/reconcile.jsonl" sacct_only=("OMS_SACCT_CMD=$bin/sacct" "OMS_SQUEUE_CMD=$bin/squeue")
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3007 >"$d/array.out" 2>&1 ) || fail "array apply failed"
+  assert_file_contains "$rec" '"job_id": "3007", "state": "OUT_OF_MEMORY", "exit_code": "0:125"'
+  assert_file_contains "$rec" '"cluster": "c1", "submit": "2026-01-02T03:00:00", "start": "2026-01-02T03:01:00", "end": "2026-01-02T03:02:00", "alloc_tres": "billing=4,cpu=4,gres/gpu=1", "nodelist": "gpu01"'
+  assert_file_contains "$rec" '"task_states": {"COMPLETED": 1, "OUT_OF_MEMORY": 1}'
+  assert_file_contains "$rec" '{"id": "3007_2", "state": "OUT_OF_MEMORY", "exit_code": "0:125", "elapsed": "00:00:30"}'
+  ( cd "$d" && env "${sacct_only[@]}" "$SH" scan --job 3007 >"$d/array.scan" 2>&1 ) || fail "array scan failed"
+  assert_file_contains "$d/array.scan" "3007	OUT_OF_MEMORY	tasks: COMPLETED=1, OUT_OF_MEMORY=1"
+
+  # PREEMPTED with the id still queued is a requeue, not an ending: nothing is
+  # recorded until the next attempt finishes, and that row carries the count.
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3008 >"$d/requeue.out" 2>&1 ) || fail "requeued apply failed"
+  assert_file_contains "$d/requeue.out" "requeued: job 3008 (requeued after PREEMPTED, attempt 2); not recorded as finished"
+  assert_file_contains "$d/requeue.out" "0 reconciled, 1 still running/pending"
+  if grep -Fq '"job_id": "3008"' "$rec"; then
+    fail "a preempted job that was requeued must not be recorded as finished"
+  fi
+  ( cd "$d" && env "${sacct_only[@]}" "$SH" scan --job 3008 >"$d/requeue.scan" 2>&1 ) || fail "requeued scan failed"
+  assert_file_contains "$d/requeue.scan" "3008	REQUEUED	requeued after PREEMPTED, attempt 2"
+  : > "$bin/sacct.done"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3008 >"$d/requeue2.out" 2>&1 ) || fail "second-attempt apply failed"
+  assert_file_contains "$rec" '"job_id": "3008", "state": "COMPLETED", "exit_code": "0:0", "elapsed": "00:07:00"'
+  assert_file_contains "$rec" '"submit": "2026-01-02T04:00:00", "start": "2026-01-02T04:10:00", "end": "2026-01-02T04:17:00"'
+  assert_file_contains "$rec" '"nodelist": "gpu03", "attempts": 2, "requeues": 1'
+  ( cd "$d" && env "${env_pfx[@]}" OMS_RECONCILE_FILE="$rec" "$SH" list 20 >"$d/list.out" 2>&1 ) || fail "list failed"
+  assert_file_contains "$d/list.out" "job=3008  COMPLETED  exit=0:0  00:07:00  on c1  requeues=1"
+  assert_file_contains "$d/list.out" "job=3007  OUT_OF_MEMORY  exit=0:125  00:00:30  on c1  tasks=COMPLETED:1,OUT_OF_MEMORY:1"
+
+  # NODE_FAIL that left the queue is an ending; sacct's "Unknown" and "None
+  # assigned" are absent fields, not values. An earlier submission that used
+  # the same id does not hide this one.
+  printf '%s\n' '{"schema": 1, "job_id": "3009", "state": "COMPLETED", "submit": "2025-06-01T00:00:00"}' >> "$rec"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3009 >"$d/nodefail.out" 2>&1 ) || fail "node-fail apply failed"
+  assert_file_contains "$rec" '"job_id": "3009", "state": "NODE_FAIL"'
+  assert_file_contains "$rec" '"cluster": "c1", "submit": "2026-01-02T05:00:00", "start": "2026-01-02T05:01:00"}'
+  before="$(wc -l < "$rec")"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3009 >/dev/null 2>&1 &&
+    env "${env_pfx[@]}" "$SH" apply --job 3008 >/dev/null 2>&1 &&
+    env "${env_pfx[@]}" "$SH" apply --job 3007 >/dev/null 2>&1 ) || fail "repeat apply failed"
+  [ "$before" = "$(wc -l < "$rec")" ] || fail "a recorded submission must not be recorded twice"
 }
 
 test_experiment_board_lifecycle_and_duplicate_guard() {
