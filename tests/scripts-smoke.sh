@@ -25836,6 +25836,59 @@ EOF
   ( cd "$project" && OMS_GH_BIN="$bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
   [ "$(grep -c '' "$project/.oms/ci.jsonl")" -eq 1 ] || fail "identical CI result must not be re-appended"
   ( cd "$project" && "$ROOT/scripts/state.sh" ) | grep -F "## CI" > /dev/null || fail "oms state should surface CI"
+
+  # A red run's row names what failed, and the same commit turning green later
+  # is listed by `flaky` from the ledger alone: observed, never acted on.
+  local flaky="$TMP/ci-flaky" flaky_bin="$TMP/ci-flaky-bin" out="$TMP/ci-flaky.out"
+  make_committed_repo "$flaky"
+  mkdir -p "$flaky_bin"
+  cat > "$flaky_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+state="$(dirname "$0")/conclusion"
+case "$1 $2" in
+  "run list")
+    printf '[{"status":"completed","conclusion":"%s","workflowName":"test","headSha":"feedc0de5678","url":"https://x/7","databaseId":7}]\n' "$(cat "$state")" ;;
+  "run view")
+    [ ! -f "$(dirname "$0")/no-log" ] || exit 1
+    printf 'smoke (2/4)\tstep\tcheck: scripts-smoke.test_alpha FAILED (3s)\n'
+    printf 'smoke (2/4)\tstep\tplain line\n'
+    printf 'bad\x1bname\tstep\tnoise\n' ;;
+  *) echo "no pull requests found for branch" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$flaky_bin/gh"
+  printf 'failure' > "$flaky_bin/conclusion"
+  # tick's own record has no time for the log: the row lands without names.
+  ( cd "$flaky" && OMS_CI_RECORD_NAMES=0 OMS_GH_BIN="$flaky_bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
+  [ "$(grep -c '' "$flaky/.oms/ci.jsonl")" -eq 1 ] || fail "the red run should be recorded once"
+  ! grep -Fq 'failed_jobs' "$flaky/.oms/ci.jsonl" || fail "a record without the log lookup must not name jobs"
+  # An explicit record completes that row with the names, once.
+  ( cd "$flaky" && OMS_GH_BIN="$flaky_bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
+  ( cd "$flaky" && OMS_GH_BIN="$flaky_bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
+  [ "$(grep -c '' "$flaky/.oms/ci.jsonl")" -eq 2 ] || fail "the named row should be appended exactly once"
+  grep -Fq '"failed_jobs": ["smoke (2/4)"]' "$flaky/.oms/ci.jsonl" || fail "the red row should name its failing job: $(cat "$flaky/.oms/ci.jsonl")"
+  grep -Fq '"failed_checks": ["scripts-smoke.test_alpha"]' "$flaky/.oms/ci.jsonl" || fail "the red row should name its failing check"
+  ! grep -q 'plain line\|noise\|step' "$flaky/.oms/ci.jsonl" || fail "log text must not reach the ledger"
+  ( cd "$flaky" && "$ROOT/scripts/ci-status.sh" flaky main ) > "$out" || fail "flaky is advisory and exits 0"
+  assert_file_contains "$out" "0 commit(s) recorded red, then green"
+  # The same commit goes green: now it is an observation.
+  printf 'success' > "$flaky_bin/conclusion"
+  ( cd "$flaky" && OMS_GH_BIN="$flaky_bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || fail "a green run records cleanly"
+  ( cd "$flaky" && PATH="/usr/bin:/bin" "$ROOT/scripts/ci-status.sh" flaky main ) > "$out" || fail "flaky reads the ledger without gh"
+  assert_file_contains "$out" "1 commit(s) recorded red, then green without a new commit"
+  assert_file_contains "$out" "feedc0de5678"
+  assert_file_contains "$out" "smoke (2/4): 1"
+  assert_file_contains "$out" "scripts-smoke.test_alpha: 1"
+  assert_file_contains "$out" "nothing was skipped, quarantined or re-run"
+  ( cd "$flaky" && "$ROOT/scripts/ci-status.sh" flaky other-branch ) > "$out" || fail "flaky on a branch with no rows exits 0"
+  assert_file_contains "$out" "0 commit(s) recorded red"
+  # A log gh cannot list leaves the row as it always was.
+  : > "$flaky_bin/no-log"
+  printf 'failure' > "$flaky_bin/conclusion"
+  rm -f "$flaky/.oms/ci.jsonl"
+  ( cd "$flaky" && OMS_GH_BIN="$flaky_bin/gh" "$ROOT/scripts/ci-status.sh" record main >/dev/null 2>&1 ) || true
+  grep -Fq '"conclusion": "failure"' "$flaky/.oms/ci.jsonl" || fail "an unreadable failed log must not lose the CI row"
+  ! grep -Fq 'failed_jobs' "$flaky/.oms/ci.jsonl" || fail "an unreadable failed log names nothing"
 }
 
 test_delegation_liveness_in_state() {

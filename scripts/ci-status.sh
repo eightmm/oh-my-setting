@@ -12,7 +12,8 @@ set -euo pipefail
 # .oms/ci.jsonl so a later session / oms state sees "CI failed on <sha>"
 # instead of the result vanishing after the print. `tick` is the bounded,
 # fail-open session-boundary observer: it skips a completed current SHA and
-# throttles pending lookups instead of polling in the foreground. `protection`
+# throttles pending lookups instead of polling in the foreground. `flaky` reads
+# that ledger only and lists the commits recorded red and then green. `protection`
 # answers the question a quick push hook rests on: is CI's `gate` job a required
 # check on the destination branch? It only reads GitHub, runs only when asked,
 # and has three answers — a lookup that could not read a source is unknown,
@@ -39,6 +40,7 @@ while [ "$#" -gt 0 ]; do
     record|--record) ACTION="record"; shift ;;
     tick) ACTION="tick"; shift ;;
     history) ACTION="history"; shift ;;
+    flaky) ACTION="flaky"; shift ;;
     protection) ACTION="protection"; shift ;;
     triage) ACTION="triage"; shift ;;
     --limit)
@@ -64,12 +66,19 @@ Usage: ci-status.sh [status|record|tick] [branch]
        ci-status.sh history [--limit N] [branch]
        ci-status.sh protection [branch]
        ci-status.sh triage [--sha COMMIT] [branch]
+       ci-status.sh flaky [branch]
 
 status  Print the latest CI run and fail on a completed red result (default).
-record  Also append the result to .oms/ci.jsonl and Work Journal.
+record  Also append the result to .oms/ci.jsonl and Work Journal. A completed
+        red run's row also names its failing jobs and checks when gh can
+        list them (not from tick, which has no time for the log).
 tick    Fail-open bounded refresh for prompt/session boundaries. A completed
         current SHA and a recent pending lookup are local no-ops.
 history Show recent completed runs and ranked failing jobs/tests (read-only).
+flaky   List commits whose recorded CI went red and later green without a
+        new commit, with the jobs and checks the red run named. Reads
+        .oms/ci.jsonl only; an observation, not a verdict, and nothing is
+        skipped, quarantined or re-run.
 protection
         Report whether CI job 'gate' is a required check on the branch
         (default: the repository's default branch), from branch protection
@@ -176,7 +185,8 @@ try:
         stderr=stderr,
         timeout=timeout,
         check=False,
-        env=os.environ.copy(),
+        # The failed-log lookup does not fit a hook's budget; an explicit record adds the names.
+        env=dict(os.environ, OMS_CI_RECORD_NAMES="0"),
     )
 except (OSError, subprocess.TimeoutExpired):
     pass
@@ -186,6 +196,60 @@ PY
   # network I/O. The next scheduled pass can retry.
   oms_try_file_lock "$marker" ci_tick_locked || true
   exit 0
+fi
+
+if [ "$ACTION" = flaky ]; then
+  # Ledger only: no gh, no network, no write. A commit recorded red and later
+  # green is what was observed; whether the test is flaky or the first run hit
+  # a broken runner is for the reader, so nothing is skipped or quarantined.
+  state_root="$(oms_repo_root "$PWD")"
+  python3 - "${OMS_CI_LEDGER:-$state_root/.oms/ci.jsonl}" "$branch" <<'PY'
+import collections, json, sys
+ledger, branch = sys.argv[1:]
+RED = {"failure", "timed_out", "startup_failure"}
+rows = []
+try:
+    with open(ledger, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("branch") == branch and row.get("status") == "completed":
+                rows.append(row)
+except OSError:
+    print("ci-status flaky [%s]: no recorded CI results (run: oms ci-status record)" % branch)
+    raise SystemExit(0)
+red, observed = {}, []
+for row in rows:
+    sha, conclusion = row.get("sha"), row.get("conclusion")
+    if not isinstance(sha, str) or not sha:
+        continue
+    if conclusion in RED:
+        # The newest red row wins: it is the one a later record completed with names.
+        red[sha] = row
+    elif conclusion == "success" and sha in red:
+        observed.append(red.pop(sha))
+jobs, checks = collections.Counter(), collections.Counter()
+print("ci-status flaky [%s]: %d commit(s) recorded red, then green without a new commit, in %d recorded result(s)" % (
+    branch, len(observed), len(rows)))
+for row in observed:
+    failed_jobs = [n for n in (row.get("failed_jobs") or []) if isinstance(n, str)]
+    failed_checks = [n for n in (row.get("failed_checks") or []) if isinstance(n, str)]
+    jobs.update(failed_jobs)
+    checks.update(failed_checks)
+    named = failed_jobs + failed_checks
+    print("  %s  %s  %s" % (str(row.get("sha"))[:12], row.get("ts", "?"),
+                            ", ".join(named) if named else "failing names not recorded"))
+for title, counter in (("jobs", jobs), ("checks", checks)):
+    if counter:
+        print("flaky_observed %s:" % title)
+        for name, count in sorted(counter.items(), key=lambda item: (-item[1], item[0])):
+            print("  %s: %d" % (name, count))
+if observed:
+    print("observed only: a rerun can also pass because a runner recovered; nothing was skipped, quarantined or re-run")
+PY
+  exit $?
 fi
 
 if [ "$ACTION" = protection ]; then
@@ -677,7 +741,7 @@ case "$AHEAD" in *[!0-9]*) AHEAD="" ;; esac
 # HEAD's own run in the same single call rather than only the newest one.
 gh_rc=0
 json="$("$GH" run list --branch "$branch" --limit 10 \
-  --json status,conclusion,workflowName,headSha,url,attempt 2>/dev/null)" || gh_rc=$?
+  --json status,conclusion,workflowName,headSha,url,attempt,databaseId 2>/dev/null)" || gh_rc=$?
 if [ "$gh_rc" -ne 0 ]; then
   echo "ci-status: gh not authenticated or unreachable (try: gh auth login)" >&2
   exit 2
@@ -732,9 +796,9 @@ fi
 ci_rc=0
 OMS_BRANCH="$branch" OMS_JSON="$json" OMS_CI_LEDGER_OUT="$LEDGER" \
   OMS_CI_PR_JSON="$PR_JSON" OMS_CI_JOURNAL_ROW="$JOURNAL_ROW" \
-  OMS_CI_HEAD="$HEAD_SHA" OMS_CI_AHEAD="$AHEAD" \
+  OMS_CI_HEAD="$HEAD_SHA" OMS_CI_AHEAD="$AHEAD" OMS_CI_GH="$GH" \
   OMS_CI_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" python3 - <<'PY' || ci_rc=$?
-import json, os, sys
+import json, os, re, subprocess, sys
 branch = os.environ["OMS_BRANCH"]
 raw = os.environ.get("OMS_JSON", "").strip()
 head = os.environ.get("OMS_CI_HEAD", "")
@@ -807,6 +871,32 @@ if ledger and chosen:
             row["pr_number"] = pr.get("number")
             row["pr_state"] = pr.get("state")
             row["pr_url"] = pr.get("url")
+    journal = dict(row)  # the Work Journal row keeps its recorded shape
+    # A red run's row names what failed, so a later green run of the same
+    # commit can be read as "this job went red, then green" (ci-status flaky).
+    # Names only, bounded, and only when gh lists them in time; never the log.
+    if (status == "completed" and concl in ("failure", "timed_out", "startup_failure")
+            and os.environ.get("OMS_CI_RECORD_NAMES", "1") != "0" and r.get("databaseId") is not None):
+        try:
+            proc = subprocess.run([os.environ["OMS_CI_GH"], "run", "view", str(r["databaseId"]), "--log-failed"],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  universal_newlines=True, errors="replace", timeout=30, check=False)
+            text = proc.stdout if proc.returncode == 0 else ""
+        except (OSError, KeyError, subprocess.SubprocessError):
+            text = ""
+        jobs, checks = set(), set()
+        for line in text.splitlines():
+            if "\t" in line:
+                name = line.split("\t", 1)[0].strip()
+                if re.fullmatch(r"[A-Za-z0-9_. ()/,:-]{1,80}", name):
+                    jobs.add(name)
+            found = re.search(r"check:\s*([A-Za-z0-9_.-]{1,80})\s+FAILED\b", line)
+            if found:
+                checks.add(found.group(1))
+        if jobs:
+            row["failed_jobs"] = sorted(jobs)[:20]
+        if checks:
+            row["failed_checks"] = sorted(checks)[:20]
     # Dedupe: skip if the last row is the same sha with the same conclusion.
     prev = None
     if os.path.isfile(ledger):
@@ -817,13 +907,17 @@ if ledger and chosen:
                     prev = json.loads(line)
                 except Exception:
                     pass
-    if not (prev and prev.get("sha") == sha and prev.get("conclusion") == concl):
+    same = bool(prev) and prev.get("sha") == sha and prev.get("conclusion") == concl
+    # A row tick wrote without names is completed by the first record that has them.
+    named = same and bool(row.get("failed_jobs") or row.get("failed_checks")) and not (
+        prev.get("failed_jobs") or prev.get("failed_checks"))
+    if not same or named:
         with open(ledger, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     journal_row = os.environ.get("OMS_CI_JOURNAL_ROW", "")
     if journal_row and status == "completed":
         with open(journal_row, "w", encoding="utf-8", newline="\n") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(journal, ensure_ascii=False) + "\n")
 
 # Nonzero only on a completed failure for the commit in hand; in-progress and
 # queued are not failures, and neither is a red run on a superseded commit.
