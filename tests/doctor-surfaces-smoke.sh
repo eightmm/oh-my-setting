@@ -1024,7 +1024,7 @@ assert doc["schema"] == 1 and doc["kind"] == "oms-doctor-security" and doc["exit
 rows = {f["id"]: f for f in doc["findings"]}
 assert len(rows) == len(doc["findings"]), "ids must be unique"
 assert rows["claude.permissions.defaultMode"]["level"] == "warn", rows
-assert rows["claude.sandbox.enabled"]["level"] == "ok", rows  # an info row is not a warning
+assert rows["claude.sandbox.enabled"]["level"] == "info", rows  # an info row keeps its own level and is not a warning
 assert rows["codex.sandbox_mode"]["level"] == "warn", rows
 assert rows["codex.approval_policy"]["message"].startswith("codex: approval_policy is never"), rows
 assert rows["codex.profiles.safe.sandbox_mode"]["level"] == "ok", rows

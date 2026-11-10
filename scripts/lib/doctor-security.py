@@ -260,7 +260,7 @@ def drift(rows, facts, home):
 
 
 # --json levels: `info` rows state a fact that is neither a warning nor a read failure.
-JSON_LEVEL = {"ok": "ok", "info": "ok", "warn": "warn", "unknown": "unread"}
+JSON_LEVEL = {"ok": "ok", "info": "info", "warn": "warn", "unknown": "unread"}
 
 
 def main():
