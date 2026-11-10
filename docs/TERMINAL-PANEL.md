@@ -1674,6 +1674,13 @@ before continuing; older complete captures remain recorded and do not prevent us
 the new capture. Salvaged patches are never embedded inline in a prompt; continuation
 without write materialization refuses.
 
+Cache advisory (no behavior change): the continuation note also shows the native session's age
+(`session last active 4m12s ago`, from the session file mtime or the attempt's `updated_at`; `unknown`
+when neither exists) so the parent can choose resume or a fresh dispatch. When a resumed session is
+inside the warm window (`OMS_CACHE_WARM_SECONDS`, default 300, `0` disables) and the route's model or
+effort differs from the recorded one, and when `--swap-main` replaces a main active inside the window, one
+`note:` line says the provider prompt-cache prefix will be rebuilt. The action always proceeds.
+
 A timed-out write result card advises salvage first; a timed-out read keeps the
 `--continue` hint. Salvage of an attempt with nothing to recover reports
 `nothing_to_recover` and exits 0. A continued implementation needs `--access write` (the

@@ -477,6 +477,27 @@ def exercise_dispatch_exit_evidence(root, temporary, project, shared, room_owner
             round_brief, {})
         assert native is None and "no patch" in note and "no resumable session" in note
         continued.unlink()
+        # Advisory cache notes: session age shows on resume, and a model change inside the warm window is named.
+        import cache_warm
+        import time
+        recent = time.time() - 42
+        history[-1]["refs"].update(native_session="sess-warm-0001", panel_provider="codex", panel_model="old-model")
+        for window_env, expect_note in (({}, True), ({"OMS_CACHE_WARM_SECONDS": "10"}, False), ({"OMS_CACHE_WARM_SECONDS": "0"}, False)):
+            with patch.dict(os.environ, window_env), patch.object(panel, "session_stored", return_value=True), \
+                    patch.object(cache_warm, "session_mtime", return_value=recent):
+                continued, native, note = panel.continuation(project, "claude", None, "round-task",
+                    {"provider": "codex", "model": "new-model", "effort": "high"}, round_brief, {})
+            continued.unlink()
+            assert native == "sess-warm-0001" and "last active 4" in note, note
+            assert ("prompt-cache prefix will" not in note) and ("rebuilds the provider prompt-cache prefix" in note) == expect_note, note
+        with patch.object(panel, "session_stored", return_value=True), patch.object(cache_warm, "session_mtime", return_value=recent):
+            continued, native, note = panel.continuation(project, "claude", None, "round-task",
+                {"provider": "codex", "model": "old-model"}, round_brief, {})
+        continued.unlink()
+        assert native and "rebuilds" not in note, note  # same model: nothing to warn about
+        for key in ("native_session", "panel_provider", "panel_model"):
+            history[-1]["refs"].pop(key)
+        assert cache_warm.window() == 300 and cache_warm.age_phrase(None) == "last activity unknown"
         with patch.object(panel, "results", return_value={"rows": [{"calls": [{"attempt_id": "round-2", "exit": 0,
                                                                                  "patch": ".oms/artifacts/large.patch"}]}]}), \
                 patch.object(panel, "verified_patch", return_value=b"x" * panel.MAX_PROMPT):

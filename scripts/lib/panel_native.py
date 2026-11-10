@@ -1458,6 +1458,13 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         current = room.participant(state, member)
         if current["role"] != "main" or current["provider"] != old["provider"]:
             raise ValueError("current room main binding is unverified")
+        import cache_warm
+        line = cache_warm.rebuild_note(
+            "the current main session",
+            cache_warm.age_seconds(old["refs"].get("panel_harness") or old["provider"],
+                                   old["refs"].get("native_session"), old), "its model or harness")
+        if line:
+            print(line, file=sys.stderr)  # advisory; the swap proceeds
         if precondition is not None and not precondition(attempt, old):
             raise ValueError("auto swap skipped: condition changed")
         swap_event = {"kind": "main-swap", "participant": member, "provider": owner,
