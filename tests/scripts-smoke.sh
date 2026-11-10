@@ -12794,6 +12794,43 @@ assert json.load(sys.stdin)["covers"] == ["REQ-1"]
   "$ROOT/scripts/plan-from-spec.sh" --repo "$covered" --apply "$covered_proposal" \
     --expected-proposal-sha256 "$covered_sha" >/dev/null 2>&1 ||
     fail "exact covers proposal replay should succeed"
+
+  # The review says how the tasks would group side by side: a dependency waits
+  # one wave, and two tasks that may write the same paths never share one. It is
+  # a reading aid; the plan stores no wave and plan-run still runs one at a time.
+  local waved="$TMP/plan-from-spec-waves" waved_proposal waved_sha
+  make_committed_repo "$waved"
+  mkdir -p "$waved/bin" "$waved/home" "$waved/tests"
+  cp "$covered/tests/run.sh" "$waved/tests/run.sh"
+  sed 's|- Scope: src/, tests/|- Scope: src/, tests/, docs/|' "$covered/PROJECT.md" > "$waved/PROJECT.md"
+  oms_smoke_make_fake_provider_stub "$waved/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '{"tasks":['
+printf '{"id":"w1","title":"feat: core","allowed":["src/"],"verify":"bash tests/run.sh"},'
+printf '{"id":"w2","title":"docs: usage","allowed":["docs/"],"verify":"bash tests/run.sh"},'
+printf '{"id":"w3","title":"feat: flag","allowed":["src/cli.py"],"verify":"bash tests/run.sh"},'
+printf '{"id":"w4","title":"docs: flag","allowed":["docs/"],"verify":"bash tests/run.sh","depends":["w3"]}]}\n'
+EOF
+  HOME="$waved/home" NVM_DIR="$waved/home/.nvm" PATH="$waved/bin:/usr/bin:/bin" \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$waved" --to codex >"$waved/out" 2>"$waved/err" ||
+    fail "a four-task proposal should succeed: $(tail -4 "$waved/err")"
+  assert_file_contains "$waved/out" "  waves: 3, from depends and overlapping allowed paths"
+  assert_file_contains "$waved/out" "    wave 1: w1, w2"
+  assert_file_contains "$waved/out" "    wave 2: w3"
+  assert_file_contains "$waved/out" "    wave 3: w4"
+  waved_proposal="$(find "$waved/.oms/plan" -name 'proposal-*.json' | sed -n '1p')"
+  ! grep -Fq wave "$waved_proposal" || fail "wave numbers are a view; the proposal must not store them"
+  waved_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$waved_proposal")"
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$waved" --apply "$waved_proposal" \
+    --expected-proposal-sha256 "$waved_sha" >/dev/null 2>"$waved/apply-err" ||
+    fail "the four-task proposal should apply: $(tail -4 "$waved/apply-err")"
+  "$ROOT/scripts/agent-plan.sh" --repo "$waved" status --json | python3 -c '
+import json,sys
+waves = json.load(sys.stdin)["waves"]
+assert waves == {"count": 3, "tasks": {"w1": 1, "w2": 1, "w3": 2, "w4": 3}}, waves
+' || fail "plan status --json should carry the open tasks wave numbers"
+  ! grep -Fq wave "$waved/.oms/plan/tasks.json" || fail "the plan must not store wave numbers"
   # An id the spec does not carry is refused before anything is proposed.
   rc=0
   OMS_TEST_PREFIX=n OMS_TEST_COVERS=REQ-9 HOME="$covered/home" NVM_DIR="$covered/home/.nvm" \

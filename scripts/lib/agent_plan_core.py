@@ -2043,6 +2043,13 @@ if act == "status":
         closed_count = verified_count + cancelled_count
         unfinished_count = count - closed_count
         plan_raw = read_regular_bytes(path, "active plan", 1024 * 1024) if os.path.exists(path) else b""
+        # Wave numbers for the tasks still open: a reading aid, never a schedule.
+        try:
+            plan_waves = _load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "plan_waves.py"))
+            open_tasks = [t for t in ordered if completion_view(t)["state"] not in ("done", "cancelled")]
+            wave_of = plan_waves["waves"](open_tasks)
+        except Exception:
+            wave_of = {}
         print(json.dumps({
             "schema": 1, "present": os.path.exists(path),
             "plan_sha256": hashlib.sha256(plan_raw).hexdigest() if plan_raw else "",
@@ -2055,6 +2062,7 @@ if act == "status":
             "by_state": by, "actionable": claimable,
             "contract": CONTRACT_VERDICT,
             "stale": stale, "stale_review": stale_review,
+            "waves": {"count": max(wave_of.values() or [0]), "tasks": wave_of},
         }, ensure_ascii=False, sort_keys=True))
         sys.exit(0)
     if d.get("goal"): print("goal: %s" % d["goal"])

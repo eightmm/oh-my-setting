@@ -1158,6 +1158,14 @@ stderr, and never change an exit code. `covers` on a task is a plan-time
 statement, not evidence: admission coverage is still what `patch-admit --covers`
 records, and nothing forwards a task's list there yet.
 
+The proposal listing also prints `waves: N` and one `wave K: ids` line per
+wave, and `oms agent-plan status --json` carries `waves` (`count`, and `tasks`
+mapping each open task to its wave). A task's wave is one past the latest wave
+it depends on, moved later until no task already in that wave may write the
+same `allowed` paths. It shows how much of a plan is sequential before it is
+approved; neither the proposal nor the plan stores it, and `plan-run` still
+claims one ready task at a time.
+
 
 ### Discover work and review proposals
 
