@@ -3238,7 +3238,8 @@ bare = deepcopy(truth)
 bare.pop("operations")
 bare.pop("provider_status", None)
 bare_board = render(bare, "codex", 157, 40, view="tree", navigation={})
-assert bare_board.splitlines()[1] == "Claude -- │ Codex --" and "USAGE" not in bare_board, bare_board
+assert [row.split(" ")[0] for row in bare_board.splitlines()[1:4]] == ["Claude", "Codex", "Antigravity"] \
+    and "USAGE" not in bare_board, bare_board
 
 # The tree summarizes repository task states on one clickable Plan row.
 task_board = deepcopy(truth)
@@ -4017,8 +4018,8 @@ for columns, rows in ((76, 16), (100, 22), (100, 48)):
         assert len(picture.splitlines()) <= rows - int(menu) and all(display_width(line) <= columns for line in picture.splitlines())
 navigation = {}
 connected = render(tree_room, "codex", 91, 99, view="tree", navigation=navigation)
-usage_row = connected.splitlines()[1]
-assert "Claude" in usage_row and "Codex" in usage_row and connected.count("Codex --") + connected.count("Codex week") == 1, connected
+usage_row = "\n".join(connected.splitlines()[1:4])
+assert "Claude" in usage_row and "Codex" in usage_row and sum(row.startswith("Codex") for row in connected.splitlines()) == 1, connected
 assert "Third main" not in connected and "연결 근거 없는 작업" in connected and "Calls with no known main" in connected, connected
 assert "No joined worker" not in connected and "participants outside graph" not in connected
 # One root: a main with live attempt evidence, never the joined main that has none.
@@ -5504,6 +5505,142 @@ with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(hud)}):
     if os.name != "nt":
         cache.symlink_to(project / "value.txt")
         assert cached(consumer, 1000) == {}
+# The provider strip and `oms panel --usage` project one snapshot of what each provider already reported into
+# local files: no query, a missing value says why, nothing derived from tokens, never a zero for "unreported".
+import provider_usage
+from datetime import timezone
+strip_now = time.time()
+strip_hud = temporary / "strip-hud"
+strip_hud.mkdir()
+strip_codex = temporary / "strip-codex"
+strip_day = strip_codex / "sessions" / "2026" / "11" / "10"
+strip_day.mkdir(parents=True)
+strip_consumer = hashlib.sha256(b"strip-fixture").hexdigest()[:32]
+strip_main = {"participant": "strip-main", "role": "main", "provider": "claude", "state": "working",
+              "consumer": strip_consumer}
+strip_members = [
+    {"participant": "strip-main", "role": "main", "provider": "claude", "model": "claude-opus-5-5", "joined": True, "seq": 1},
+    {"participant": "strip-worker", "role": "worker", "provider": "codex", "model": "gpt-6-luna", "joined": True,
+     "seq": 2, "parent": "strip-main"},
+    {"participant": "strip-advisor", "role": "advisor", "provider": "codex", "model": "gpt-6-astra", "joined": True,
+     "seq": 3, "parent": "strip-main"}]
+
+
+def strip_board(hud_age=60, codex_age=120, weekly=41, codex_used=62, codex=True):
+    """A board report whose provider_status was collected from fixture HUD-cache and Codex-log files."""
+    resets = strip_now + 3 * 86400 + 4 * 3600 + 1800
+    (strip_hud / ("ctx-" + strip_consumer[:24] + ".json")).write_text(json.dumps({
+        "schema": 1, "used_percentage": 38, "ts": strip_now - hud_age, "cache_read_share": 80,
+        "five_hour": {"used_percentage": 23, "resets_at": strip_now + 7230},
+        "seven_day": {"used_percentage": weekly, "resets_at": resets}}))
+    log = strip_day / "rollout-strip.jsonl"
+    if codex:
+        log.write_text(json.dumps({"timestamp": datetime.fromtimestamp(strip_now - codex_age, timezone.utc).isoformat(),
+            "rate_limits": {"primary": {"used_percent": codex_used, "window_minutes": 10080, "resets_at": resets}}}) + "\n")
+    elif log.exists():
+        log.unlink()
+    board = {"repo": {"name": "strip-fixture"}, "collection": {"ok": True},
+             "room": {"id": "strip-room", "title": "Strip", "participants": strip_members, "messages": [], "call_results": {}},
+             "attempts": {"active_recent": [{"attempt_id": m["participant"], "state": "working", "panel": {
+                 "role": m["role"], "room_id": "strip-room", "room_participant": m["participant"],
+                 "parent": m.get("parent", ""), "model": m["model"]}} for m in strip_members], "recent": []},
+             "operations": {"recent": []}}
+    with patch.dict(os.environ, {"OMS_HUD_CACHE_DIR": str(strip_hud), "CODEX_HOME": str(strip_codex)}), \
+            patch("room_view.nodes", return_value=[strip_main]), patch("panel_chats.current_models", return_value={}):
+        board["provider_status"] = collect(board, now=strip_now)
+    return board
+
+
+def strip_rows(board, columns, rows, **kwargs):
+    frame = render(board, "claude", columns, rows, view="tree", **kwargs)
+    assert len(frame.splitlines()) <= rows and all(display_width(line) <= columns for line in frame.splitlines()), frame
+    return frame
+
+
+fresh_strip = strip_board()
+fresh_snapshot = provider_usage.snapshot(fresh_strip, strip_now)
+claude_usage, codex_usage, agy_usage = (fresh_snapshot["providers"][name] for name in ("claude", "codex", "antigravity"))
+assert [(w["name"], w["used"], w["resets_in"], w["source"], w["stale"], round(w["age_seconds"])) for w in claude_usage["windows"]] == [
+    ("5h", 23, "2h00m", "HUD cache", False, 60), ("weekly", 41, "3d4h", "HUD cache", False, 60)], claude_usage
+assert claude_usage["tightest"] == "weekly" and claude_usage["cache_read_share"]["percent"] == 80
+assert claude_usage["context_used"] == 38 and claude_usage["seats"] == {"live": 1, "main": 1, "workers": 0}
+assert [(w["name"], w["used"], w["source"], round(w["age_seconds"])) for w in codex_usage["windows"]] == [
+    ("weekly", 62, "Codex session log", 120)] and "weekly window" in codex_usage["windows_unreported"]["5h"]
+assert codex_usage["seats"] == {"live": 1, "main": 0, "workers": 1}, "an advisor is not a seat"
+# agy reports no quota window anywhere OMS reads; every missing value names why and none is a number.
+assert agy_usage["windows"] == [] and set(agy_usage["windows_unreported"]) == {"5h", "weekly"}
+assert all(reason == "agy reports no quota window locally" for reason in agy_usage["windows_unreported"].values())
+for provider in fresh_snapshot["providers"].values():
+    assert "unreported" in provider["tokens"]["today"], "no per-provider daily token total exists locally"
+assert "unreported" in claude_usage["account"] and "unreported" in agy_usage["account"]
+assert "unreported" in agy_usage["tokens"]["recent_7d"] and "unreported" in agy_usage["context_used"]
+assert json.loads(json.dumps(fresh_snapshot)) == fresh_snapshot
+# Frames at the four widths: one combined row on a short pane, one row per provider when wide and tall.
+expected_rows = {
+    (40, 12): "C 41% · X 62% · A —",
+    (60, 12): "C ▮▮▯▯▯ 41% 3d4h ·1 │ X ▮▮▮▯▯ 62% 3d4h ·1 │ A — ·0",
+    (80, 12): "Claude 41% 3d4h 1 live │ Codex 62% 3d4h 1 live │ agy — 0 live",
+    (120, 12): "Claude ▮▮▯▯▯ 41% 3d4h 1 live │ Codex ▮▮▮▯▯ 62% 3d4h 1 live │ agy — 0 live"}
+for (columns, rows), line in expected_rows.items():
+    frame = strip_rows(fresh_strip, columns, rows)
+    assert frame.splitlines()[1] == line, frame
+    # The MAIN card keeps its place on a 12-row pane.
+    assert any("MAIN" in row for row in frame.splitlines()), frame
+for columns in (80, 120):
+    tall = strip_rows(fresh_strip, columns, 30).splitlines()
+    assert tall[1:4] == ["Claude      ▮▮▯▯▯ weekly 41% used · resets in 3d4h · 5h 23% · 1 live",
+                         "Codex       ▮▮▮▯▯ weekly 62% used · resets in 3d4h · 1 live",
+                         "Antigravity — agy reports no quota window locally · 0 live"], tall
+ascii_row = strip_rows(fresh_strip, 60, 12, unicode=False).splitlines()[1]
+assert ascii_row == "C [##---] 41% 3d4h x1 | X [###--] 62% 3d4h x1 | A -- x0" and ascii_row.isascii(), ascii_row
+# A reading older than the freshness limit keeps its numbers (Codex) or says so (Claude's dropped HUD record).
+old_strip = strip_board(hud_age=700, codex_age=700)
+old_snapshot = provider_usage.snapshot(old_strip, strip_now)["providers"]
+assert old_snapshot["claude"]["windows"] == [] and old_snapshot["claude"]["reading"]["stale"] is True
+assert round(old_snapshot["claude"]["reading"]["age_seconds"]) == 700 and "numbers not shown" in old_snapshot[
+    "claude"]["windows_unreported"]["weekly"]
+assert old_snapshot["codex"]["windows"][0]["stale"] is True and old_snapshot["codex"]["windows"][0]["level"] is None
+assert strip_rows(old_strip, 40, 12).splitlines()[1] == "C —~ · X 62%~ · A —"
+assert strip_rows(old_strip, 80, 12).splitlines()[1] == "Claude — stale 11m 1 live │ Codex 62% stale 11m 3d4h 1 live │ agy — 0 live"
+assert "written 11m ago" in strip_rows(old_strip, 120, 30).splitlines()[1]
+# A provider with no reading at all is "unreported", not a zero.
+missing = strip_board(codex=False)
+assert strip_rows(missing, 40, 12).splitlines()[1] == "C 41% · X — · A —"
+assert "no weekly rate limit" in provider_usage.snapshot(missing, strip_now)["providers"]["codex"]["windows_unreported"]["weekly"]
+# The non-colour cue reuses the quota line and the health band: ! past OMS_QUOTA_WARN_PCT, !! at 10% left or less.
+with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": "50"}):
+    assert strip_rows(fresh_strip, 40, 12).splitlines()[1] == "C 41% · X 62%! · A —"
+    assert "weekly 62% used ! past your line" in strip_rows(fresh_strip, 100, 30)
+    assert strip_rows(old_strip, 40, 12).splitlines()[1] == "C —~ · X 62%~ · A —", "a stale reading raises no cue"
+hot = strip_board(codex_used=95)
+assert strip_rows(hot, 40, 12).splitlines()[1] == "C 41% · X 95%!! · A —"
+assert "weekly 95% used !! critical" in strip_rows(hot, 100, 30)
+# NO_COLOR and plain output are stable; colour only wraps the same text, with the provider's palette colour.
+plain = strip_rows(fresh_strip, 60, 12)
+with patch.dict(os.environ, {"NO_COLOR": "1"}):
+    assert strip_rows(fresh_strip, 60, 12, color=True) == plain
+colored = render(fresh_strip, "claude", 60, 12, view="tree", color=True)
+assert "\033[" in colored and re.sub(r"\033\[[0-9;]*m", "", colored) == plain, colored
+assert colored.splitlines()[1].startswith("\033[") and "C" in colored.splitlines()[1]
+# `oms panel --usage [--json]` prints the same snapshot and nothing else; it is a read-only operation of its own.
+usage_out = io.StringIO()
+with patch.object(panel, "read_panel", return_value=(fresh_strip, 0)), \
+        patch("panel_metrics.collect", return_value=fresh_strip["provider_status"]), \
+        patch.object(panel.sys, "stdout", usage_out):
+    assert panel.main(["--repo", str(project), "--usage", "--json"]) == 0
+usage_json = json.loads(usage_out.getvalue())
+assert usage_json["schema"] == 1 and usage_json["providers"]["claude"]["windows"][1]["name"] == "weekly", usage_json
+assert usage_json["providers"]["antigravity"]["windows_unreported"]["5h"] == "agy reports no quota window locally"
+usage_out = io.StringIO()
+with patch.object(panel, "read_panel", return_value=(fresh_strip, 0)), patch("panel_metrics.collect",
+        return_value=fresh_strip["provider_status"]), patch.object(panel.sys, "stdout", usage_out):
+    assert panel.main(["--repo", str(project), "--usage"]) == 0
+assert "  weekly  41% used; resets in 3d4h; age 1m; source HUD cache" in usage_out.getvalue(), usage_out.getvalue()
+assert "  5h      unreported (agy reports no quota window locally)" in usage_out.getvalue()
+for bad in (["--usage", "--health"], ["--usage", "--dry-run"], ["--usage", "--view", "graph"]):
+    refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), *bad],
+                             capture_output=True, text=True)
+    assert refused.returncode == 2, (bad, refused)
 with patch("panel_chats.windows", return_value={}), patch("panel_chats.native_index", side_effect=AssertionError("render scan")):
     # Earlier mains stay on record; the reading belongs to the live, then newest, one.
     reading = collect(tree_room)
@@ -5580,7 +5717,7 @@ for columns, rows in ((108, 36), (100, 28), (42, 24), (32, 28)):
     scrolled = render(boxed_room, "codex", columns, rows, view="tree", navigation=nav)
     assert scrolled.count("╭") == scrolled.count("╰") == base_boxes + int(bool(nav.get("log_box"))), scrolled
     assert any(hit["action"] == ("tab", "plan") for hit in nav["hits"]), nav
-assert "Claude W 0% left · C 100% used" in render(dict(usage_board, provider_status={"claude": {
+assert "C 100%!! · X — · A —" in render(dict(usage_board, provider_status={"claude": {
     "weekly_used": 100, "context_left": 0}}), "claude", 32, 28, view="summary")
 empty_room = dict(usage_board, room={"id": "empty", "participants": []}, attempts={"active_recent": [], "recent": []})
 # The control menu is an inbox: empty rooms onboard, failures and waits list under "Needs you", one key acts.
