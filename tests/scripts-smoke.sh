@@ -13560,6 +13560,73 @@ PY
     > "$project/exists-out" 2>&1 || rc=$?
   [ "$rc" = 2 ] || fail "an existing PROJECT.md must refuse adopt, got $rc"
   assert_file_contains "$project/exists-out" "already exists"
+  assert_file_contains "$project/exists-out" "intent.sh amend"
+
+  # Amend: the way to change the adopted contract. The candidate is bound to
+  # the contract's bytes, the replacement names what it changes, and the
+  # previous bytes are kept under their digest.
+  local amend_id amend_sha stale_id stale_sha
+  rc=0
+  "$ROOT/scripts/intent.sh" amend --repo "$project" > "$project/amend-noreason" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "amend without a reason must refuse with exit 2, got $rc"
+  cp "$project/PROJECT.md" "$project/contract-before"
+  "$ROOT/scripts/intent.sh" amend --repo "$project" --reason "add a name criterion" \
+    > "$project/amend-out" 2>&1 || fail "amend should draft a candidate: $(cat "$project/amend-out")"
+  cmp -s "$project/PROJECT.md" "$project/contract-before" || fail "amend must not touch PROJECT.md"
+  amend_id="$(sed -n 's/.*adopt --id \(amend-[A-Za-z0-9-]*\) .*/\1/p' "$project/amend-out")"
+  amend_sha="$(sed -n 's/^intent: bound to PROJECT.md sha256: //p' "$project/amend-out")"
+  [ -n "$amend_id" ] && [ -n "$amend_sha" ] || fail "amend must print the candidate id and bound digest: $(cat "$project/amend-out")"
+  assert_file_contains "$intent_dir/$amend_id.md" "- State: draft"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" > "$project/amend-nosha" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "adopting an amendment without the bound digest must refuse, got $rc"
+  assert_file_contains "$project/amend-nosha" "--expected-project-sha256"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" \
+    > "$project/amend-same" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an amendment that changes nothing must refuse, got $rc: $(cat "$project/amend-same")"
+  assert_file_contains "$project/amend-same" "does not change the contract"
+  cmp -s "$project/PROJECT.md" "$project/contract-before" || fail "a refused amendment must leave PROJECT.md alone"
+  printf '\n## Acceptance criteria\n\n- [id:REQ-1] WHEN given a name THE SYSTEM SHALL greet it\n' >> "$intent_dir/$amend_id.md"
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" \
+    > "$project/amend-adopt" 2>&1 || fail "the amendment should adopt: $(tail -5 "$project/amend-adopt")"
+  assert_file_contains "$project/amend-adopt" "ADDED REQ-1: WHEN given a name THE SYSTEM SHALL greet it"
+  assert_file_contains "$project/amend-adopt" "sections changed: Acceptance criteria"
+  assert_file_contains "$project/amend-adopt" "intent: amended PROJECT.md from $amend_id"
+  assert_file_contains "$project/PROJECT.md" "- State: confirmed"
+  assert_file_contains "$project/PROJECT.md" "[id:REQ-1]"
+  cmp -s "$intent_dir/archive/$amend_sha.md" "$project/contract-before" ||
+    fail "the previous contract must be kept byte-for-byte under its digest"
+  assert_file_contains "$intent_dir/amendments.jsonl" '"reason": "add a name criterion"'
+  assert_file_contains "$intent_dir/amendments.jsonl" "\"previous_sha256\": \"$amend_sha\""
+  assert_file_contains "$intent_dir/amendments.jsonl" '"added": ["REQ-1"]'
+  # A second amendment that rewords and drops; the contract then moves under
+  # it, so the bound digest no longer matches and nothing is replaced.
+  "$ROOT/scripts/intent.sh" amend --repo "$project" --reason "tighten the wording" \
+    > "$project/amend2-out" 2>&1 || fail "a second amend should draft: $(cat "$project/amend2-out")"
+  stale_id="$(sed -n 's/.*adopt --id \(amend-[A-Za-z0-9-]*\) .*/\1/p' "$project/amend2-out")"
+  stale_sha="$(sed -n 's/^intent: bound to PROJECT.md sha256: //p' "$project/amend2-out")"
+  sed 's/SHALL greet it/SHALL greet it by name/' "$intent_dir/$stale_id.md" > "$intent_dir/$stale_id.md.new" &&
+    mv "$intent_dir/$stale_id.md.new" "$intent_dir/$stale_id.md"
+  printf '\n<!-- edited by hand -->\n' >> "$project/PROJECT.md"
+  cp "$project/PROJECT.md" "$project/contract-moved"
+  rc=0
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$stale_id" --expected-project-sha256 "$stale_sha" \
+    > "$project/amend-stale" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an amendment bound to older bytes must refuse, got $rc"
+  assert_file_contains "$project/amend-stale" "changed since this amendment was drafted"
+  cmp -s "$project/PROJECT.md" "$project/contract-moved" || fail "a stale amendment must not replace PROJECT.md"
+  # Redrafted against the current bytes, the reworded criterion is MODIFIED.
+  "$ROOT/scripts/intent.sh" amend --repo "$project" --reason "tighten the wording" \
+    > "$project/amend3-out" 2>&1 || fail "a redrafted amend should draft: $(cat "$project/amend3-out")"
+  amend_id="$(sed -n 's/.*adopt --id \(amend-[A-Za-z0-9-]*\) .*/\1/p' "$project/amend3-out")"
+  amend_sha="$(sed -n 's/^intent: bound to PROJECT.md sha256: //p' "$project/amend3-out")"
+  sed 's/SHALL greet it/SHALL greet it by name/' "$intent_dir/$amend_id.md" > "$intent_dir/$amend_id.md.new" &&
+    mv "$intent_dir/$amend_id.md.new" "$intent_dir/$amend_id.md"
+  "$ROOT/scripts/intent.sh" adopt --repo "$project" --id "$amend_id" --expected-project-sha256 "$amend_sha" \
+    > "$project/amend3-adopt" 2>&1 || fail "the redrafted amendment should adopt: $(tail -5 "$project/amend3-adopt")"
+  assert_file_contains "$project/amend3-adopt" "MODIFIED REQ-1: WHEN given a name THE SYSTEM SHALL greet it -> WHEN given a name THE SYSTEM SHALL greet it by name"
+  [ "$(wc -l < "$intent_dir/amendments.jsonl" | tr -d ' ')" = 2 ] || fail "each adopted amendment appends one receipt"
 
   # An acceptance that reads scope-file content adopts with the floor
   # warning: legitimate as acceptance, fatal if copied into a task verify.

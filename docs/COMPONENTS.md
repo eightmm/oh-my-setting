@@ -1445,6 +1445,21 @@ all, a criterion without `[id:...]` in a list where others have one, and one ID
 on two different criteria (which the runtime envelope refuses). They never change
 an exit code.
 
+An adopted contract is changed with `oms intent amend --reason "TEXT"`: it copies
+`PROJECT.md` to a draft candidate under `.oms/intents/`, bound to the contract's current
+SHA-256, and leaves `PROJECT.md` alone. After editing the candidate, `oms intent adopt --id
+AMEND-ID --expected-project-sha256 SHA` prints the criteria `ADDED`, `MODIFIED` and
+`REMOVED` (by the ids the runtime projects) and the sections that changed, runs the adopt
+gates, and replaces `PROJECT.md` only if it still hashes to the bound digest. The previous
+bytes are kept at `.oms/intents/archive/<sha256>.md` and one receipt per amendment is
+appended to `.oms/intents/amendments.jsonl` (reason, both digests, the criterion ids).
+A candidate that changes nothing, a contract that moved since the draft, and a live
+autopilot receipt all refuse. A check that already passes is a warning for an amendment,
+not a refusal. The existing plan is not touched: adopt prints the `oms agent-plan retire`
+and `oms plan-from-spec` commands to supersede or extend it. Evidence for a removed
+criterion stops counting because its id is gone; a reworded criterion that keeps its
+`[id:...]` keeps its evidence, so re-verify it.
+
 #### Draft PR publication
 
 With `--draft-pr`, `oms draft-pr` rechecks the clean HEAD, tree, remote base, GitHub
