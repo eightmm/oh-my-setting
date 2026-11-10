@@ -126,6 +126,9 @@ test_context_manifest_inspector() {
     fail "saved context inspection failed"
 }
 
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/test_work_inspect.py" --cli ||\
+  fail "work inspection failed"
+
 test_context_manifest_inspector
 test_context_body_obeys_hard_cap
 test_capped_context_keeps_valid_utf8
