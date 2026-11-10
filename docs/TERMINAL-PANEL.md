@@ -82,6 +82,7 @@ oms panel --repo . --launch codex --model MODEL --dry-run
 oms panel --repo . --swap-main codex [--model MODEL]
 oms panel --repo . --results               # summaries first, ordinary scrollable text
 oms panel --repo . --results --task-id ID --json
+oms panel --repo . --results --task-id ID --export result.md   # the reader's text, to a new local file
 oms panel --repo . --room team --chats --json
 oms panel --repo . --room team --open-chat sol-main --chat-surface app --dry-run --json
 oms panel --repo . --council --owner codex --task-id ID --label 'Decision' --prompt 'Compare options' --dry-run
@@ -2015,6 +2016,13 @@ the list afterward. Browsing performs read-only queries; it does not dispatch, a
 patch or retry app delivery.
 
 CLI `--results --task-id ID` continues to expose the same detail directly.
+
+`--results [--task-id ID] [--participant P] --export FILE` writes what that reader prints
+(at 100 columns) to `FILE` instead of the terminal. The file must be new: an existing
+path, a symlink included, is refused with exit 2 rather than replaced, and it is created
+with mode 600. The export holds only the reader's bounded, already-masked text. No
+transcript, patch body or raw log is added, nothing is uploaded, and `--json` is not
+combined with it.
 
 ### Result delivery
 
