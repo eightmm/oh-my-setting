@@ -650,6 +650,11 @@ fi
 if "$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --blockers --since 2026-01-01 >/dev/null 2>&1; then
   fail "--since must apply to --decisions only"
 fi
+for since_args in "--grep observer --since 2026-01-01" "--blockers --since="; do
+  # shellcheck disable=SC2086
+  since_err="$(python3 "$ROOT/scripts/lib/work_journal.py" show --repo "$lifecycle_repo" $since_args 2>&1 >/dev/null || true)"
+  case "$since_err" in *'--since applies to --decisions'*) ;; *) fail "work_journal show must refuse --since outside --decisions: $since_args" ;; esac
+done
 python3 - "$ROOT/scripts/lib" "$lifecycle_repo" <<'PY'
 import datetime
 import sys

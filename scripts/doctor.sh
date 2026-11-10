@@ -220,7 +220,8 @@ export OMS_DOCTOR_PROJECT_DIR
 # pass: it leaves before any probe, lock or delegation.
 if [ "$EXTENSIONS_ONLY" = 1 ]; then
   if [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] ||
-     [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ] || [ "$SECURITY_ONLY" = 1 ]; then
+     [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ] || [ "$SECURITY_ONLY" = 1 ] ||
+     [ "$MCP_PINS_ONLY" = 1 ] || [ "$MCP_PIN_RECORD" = 1 ]; then
     echo "error: --extensions is a standalone read-only report; only --repo and --json go with it" >&2
     exit 2
   fi

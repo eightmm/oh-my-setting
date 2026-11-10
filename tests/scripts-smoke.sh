@@ -3284,6 +3284,9 @@ JSON
   if (cd "$project" && HOME="$home_dir" OMS_MCP_PIN_FILE="$pins" "$ROOT/scripts/doctor.sh" --mcp --security) >/dev/null 2>&1; then
     fail "--mcp must refuse to run with --security"
   fi
+  if (cd "$project" && HOME="$home_dir" OMS_MCP_PIN_FILE="$pins" "$ROOT/scripts/doctor.sh" --extensions --mcp) >/dev/null 2>&1; then
+    fail "--extensions must refuse to run with --mcp"
+  fi
 }
 
 # smoke-weight: 24

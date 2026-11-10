@@ -4696,15 +4696,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_show(store: JournalStore, args: argparse.Namespace) -> int:
+    if args.since is not None and not args.decisions:
+        print("error: --since applies to --decisions", file=sys.stderr)
+        return 2
     if args.grep is not None:
         import recorded_search
 
         return recorded_search.run(str(store.repo), args.grep, args.kind, args.limit, args.json)
     if args.kind or args.limit is not None:
         print("error: --kind and --limit apply only with --grep", file=sys.stderr)
-        return 2
-    if args.since and not args.decisions:
-        print("error: --since applies to --decisions", file=sys.stderr)
         return 2
     if args.decisions:
         import journal_decisions
