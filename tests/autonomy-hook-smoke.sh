@@ -1869,8 +1869,10 @@ import json, os
 print(json.dumps({"cwd": os.environ["OMS_CG_CWD"], "tool_name": "Bash",
                   "tool_input": {"command": os.environ["OMS_CG_COMMAND"]}}))
 ' > "$base/payload"
-    env -u OMS_HARNESS_CHILD -u OMS_COMMAND_GUARD "$@" bash "$hook" < "$base/payload" 2> "$base/err"
+    env -u OMS_HARNESS_CHILD -u OMS_COMMAND_GUARD XDG_STATE_HOME="$base/state" "$@" \
+      bash "$hook" < "$base/payload" 2> "$base/err"
   }
+  local audit="$base/state/oh-my-setting/command-guard.jsonl"
 
   rc=0; guard "$repo" "git reset --hard HEAD~1" || rc=$?
   [ "$rc" = 2 ] || fail "git reset --hard must be refused (rc=$rc)"
@@ -1925,6 +1927,48 @@ print(json.dumps({"cwd": os.environ["OMS_CG_CWD"], "tool_name": "Bash",
   [ "$rc" = 0 ] || fail "a harness child may reset its own worktree (rc=$rc)"
   rc=0; guard "$repo" "rm -rf ." OMS_HARNESS_CHILD=1 || rc=$?
   [ "$rc" = 2 ] || fail "a harness child still may not rm -rf . (rc=$rc)"
+
+  # Every refusal leaves one row: rule, verdict, first word and a digest of the
+  # command, never its text. A session with the guard off records what it would
+  # have refused as bypassed; an allowed command records nothing.
+  rm -f "$audit"
+  rc=0; guard "$repo" "git clean -fd private-dir-name" || rc=$?
+  [ "$rc" = 2 ] || fail "git clean -fd must be refused before the audit check (rc=$rc)"
+  guard "$repo" "git reset --hard" OMS_COMMAND_GUARD=0 || fail "a switched-off guard still exits 0"
+  guard "$repo" "ls -la" || fail "an allowed command exits 0"
+  guard "$repo" "git status" OMS_COMMAND_GUARD=0 || fail "an allowed command with the guard off exits 0"
+  [ "$(wc -l < "$audit" | tr -d ' ')" = 2 ] || fail "two refused shapes leave two rows: $(cat "$audit")"
+  python3 - "$audit" <<'PY' || fail "command guard audit rows are wrong: $(cat "$audit")"
+import hashlib, json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+first, second = rows
+assert (first["rule"], first["verdict"], first["command"]) == ("git-clean", "refused", "git"), first
+assert first["sha256"] == hashlib.sha256(b"git clean -fd private-dir-name").hexdigest(), first
+assert (second["rule"], second["verdict"]) == ("git-reset-hard", "bypassed"), second
+assert sorted(first) == ["child", "command", "rule", "schema", "sha256", "ts", "verdict"], first
+PY
+  grep -q 'private-dir-name' "$audit" && fail "the audit log must not keep the command text"
+  [ "$(python3 -c 'import os,stat,sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$audit")" = 0o600 ] ||
+    fail "the audit log is private to the user"
+  XDG_STATE_HOME="$base/state" bash "$hook" --audit > "$base/audit-out" || fail "--audit failed"
+  grep -Fq "newest 2 row(s): 1 refused, 1 bypassed" "$base/audit-out" &&
+    grep -Eq '1  refused +git-clean' "$base/audit-out" || fail "--audit summarizes by verdict and rule: $(cat "$base/audit-out")"
+  grep -q 'private-dir-name' "$base/audit-out" && fail "--audit must not print command text"
+  XDG_STATE_HOME="$base/state" bash "$hook" --audit 1 | grep -Fq "newest 1 row(s): 0 refused, 1 bypassed" ||
+    fail "--audit N reads the newest N rows"
+  rc=0; XDG_STATE_HOME="$base/state" bash "$hook" --audit many > /dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "--audit refuses a row count that is not a number (rc=$rc)"
+  XDG_STATE_HOME="$base/empty" bash "$hook" --audit | grep -Fq "nothing recorded" || fail "--audit with no log says so"
+  # The log is trimmed to its newest 1000 rows.
+  python3 -c 'import sys; open(sys.argv[1], "w").write("".join("{\"n\": %d}\n" % i for i in range(1005)))' "$audit"
+  rc=0; guard "$repo" "git stash drop" || rc=$?
+  [ "$rc" = 2 ] && [ "$(wc -l < "$audit" | tr -d ' ')" = 1000 ] && grep -q '"git-stash-drop"' "$audit" &&
+    ! grep -q '"n": 5}' "$audit" || fail "the audit log keeps its newest 1000 rows (rc=$rc, $(wc -l < "$audit") rows)"
+  # A log that cannot be written never changes the verdict.
+  rm -rf "$base/state" && : > "$base/state"
+  rc=0; guard "$repo" "git reset --hard" || rc=$?
+  [ "$rc" = 2 ] || fail "an unwritable audit log must not turn a refusal into a pass (rc=$rc)"
+  rm -f "$base/state"
 
   # Malformed payloads fail open.
   for cmd in "" "not json" "{}" '{"tool_input":{"command":["rm -rf /"]}}'; do

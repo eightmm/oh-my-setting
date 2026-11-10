@@ -43,9 +43,6 @@ case "${2:-}" in
     [ "${OMS_HARNESS_CHILD:-}" != 1 ] || exit 0
     case "${OMS_PANEL_SESSION:-}" in oms-*) ;; *) exit 0 ;; esac
     ;;
-  */command-guard-hook.sh)
-    [ "${OMS_COMMAND_GUARD:-1}" != 0 ] || exit 0
-    ;;
 esac
 case "${2:-}:${OMS_HARNESS_CHILD:-0}" in
   */skill-router.sh:1|*/turn-guard.sh:1) exit 0 ;;

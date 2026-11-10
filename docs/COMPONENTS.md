@@ -2132,6 +2132,17 @@ environment the session was started from turns the guard off, while the same
 text typed inside a command does nothing because the provider starts the hook.
 A person who means a refused command can also run it in their own shell.
 
+Every refusal leaves one row in
+`$XDG_STATE_HOME/oh-my-setting/command-guard.jsonl` (mode 600, newest 1000
+rows): the time, the rule id, the verdict, the command's first word and a
+sha256 of its text. The text itself is never written. A session started with
+`OMS_COMMAND_GUARD=0` still records, as `bypassed`, each command the guard
+would have refused, so switching it off is visible afterwards; allowed commands
+record nothing. `bash scripts/command-guard-hook.sh --audit [N]` prints the
+newest N rows (default 50) counted by verdict and rule. The log records what
+the guard saw and is not a boundary: any process of the same user, an OMS
+worker included, can write or remove the file.
+
 A guard that cannot run at all (its script or runtime is missing, it crashes or
 passes its timeout) lets the call through by default, because that is what
 Claude Code does with a failed hook. `OMS_GUARD_FAIL_CLOSED=1

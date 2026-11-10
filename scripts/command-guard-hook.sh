@@ -22,10 +22,71 @@
 # A harness child (an OMS worker in its own worktree) skips the git rules: its
 # worktree is disposable and patch-admit is the boundary for what it produced.
 # The filesystem, device and download rules hold for every session.
-
-[ "${OMS_COMMAND_GUARD:-1}" != 0 ] || exit 0
+#
+# Every refusal leaves one row in a per-user log: time, rule, verdict, the
+# command's first word and a digest of its text, never the text. A session
+# whose guard is switched off still records the commands it would have refused,
+# as `bypassed`. The log is a record of what the guard saw, not a boundary: any
+# process of the same user, a worker included, can write or remove the file.
+# `command-guard-hook.sh --audit [N]` summarizes the newest N rows.
 
 ROOT="${BASH_SOURCE[0]%/*}/.."
+AUDIT_LOG="${XDG_STATE_HOME:-${HOME:-}/.local/state}/oh-my-setting/command-guard.jsonl"
+
+if [ "${1:-}" = --audit ]; then
+  case "${2:-50}" in
+    ''|*[!0-9]*) echo "error: --audit takes a row count" >&2; exit 2 ;;
+  esac
+  [ "$#" -le 2 ] || { echo "error: --audit takes one optional row count" >&2; exit 2; }
+  exec python3 -I - "$AUDIT_LOG" "${2:-50}" <<'PY'
+import collections
+import json
+import sys
+
+path, limit = sys.argv[1], max(1, min(int(sys.argv[2]), 1000))
+rows = []
+try:
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+except OSError:
+    pass
+rows = rows[-limit:]
+if not rows:
+    print("command guard: nothing recorded")
+    raise SystemExit(0)
+
+
+def word(value, size):
+    text = "".join(ch for ch in str(value or "?") if ch.isalnum() or ch in "._:-")
+    return (text or "?")[:size]
+
+
+counts = collections.Counter((word(row.get("verdict"), 12), word(row.get("rule"), 32)) for row in rows)
+refused = sum(n for (verdict, _), n in counts.items() if verdict == "refused")
+bypassed = sum(n for (verdict, _), n in counts.items() if verdict == "bypassed")
+print("command guard: newest %d row(s): %d refused, %d bypassed (guard switched off for the session)"
+      % (len(rows), refused, bypassed))
+for (verdict, rule), n in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+    print("  %4d  %-9s %s" % (n, verdict, rule))
+print("last:")
+for row in rows[-5:]:
+    print("  %s  %-9s %-22s %s  sha256:%s" % (
+        word(row.get("ts"), 20), word(row.get("verdict"), 12), word(row.get("rule"), 32),
+        word(row.get("command"), 32), word(row.get("sha256"), 12)))
+print("rows carry no command text; any process of this user can edit the file, so read it as a record, not proof")
+PY
+fi
+
+# The guard switched off for the session still records what it would have refused.
+mode=enforce
+[ "${OMS_COMMAND_GUARD:-1}" != 0 ] || mode=bypass
+
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
@@ -43,6 +104,8 @@ fi
 
 parser=""
 read -r -d '' parser <<'PY' || true
+import datetime
+import hashlib
 import json
 import os
 import re
@@ -56,8 +119,11 @@ SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh"))
 FETCHERS = frozenset(("curl", "wget"))
 HOME_WORDS = frozenset(("~", "$HOME", "${HOME}"))
 SAFE_DEVICES = ("/dev/null", "/dev/zero", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/")
+AUDIT_ROWS = 1000
 sys.path.insert(0, sys.argv[1])
 child = sys.argv[2] == "1"
+mode = sys.argv[3]
+audit_log = sys.argv[4]
 from hook_state import direct_shell_segments
 
 
@@ -120,6 +186,8 @@ def operands(args):
     return found
 
 
+# Every rule answers (rule id, reason, safer spelling). The id is what the
+# audit log keeps; it never carries a path or an argument.
 def rm_rule(args, base):
     letters, longs = short_flags(args)
     if not (letters & {"r", "R"} or "--recursive" in longs):
@@ -130,42 +198,48 @@ def rm_rule(args, base):
     for target in operands(args):
         bare = target.rstrip("/") or "/"
         if bare in ("/", "/*") or target == "/*":
-            return ("rm -rf of the filesystem root", "name the directory you mean")
+            return ("rm-root", "rm -rf of the filesystem root", "name the directory you mean")
         if bare in HOME_WORDS or bare in ("~/*", "$HOME/*", "${HOME}/*"):
-            return ("rm -rf of the home directory", "name the directory you mean")
+            return ("rm-home", "rm -rf of the home directory", "name the directory you mean")
         if bare in (".", ".."):
-            return ("rm -rf of the current or parent directory", "name the path explicitly")
+            return ("rm-cwd", "rm -rf of the current or parent directory", "name the path explicitly")
         path = resolve(base, target)
         path = physical(path) if path else None
         if not path:
             continue
         if path == "/":
-            return ("rm -rf of the filesystem root", "name the directory you mean")
+            return ("rm-root", "rm -rf of the filesystem root", "name the directory you mean")
         if home and path == home:
-            return ("rm -rf of the home directory", "name the directory you mean")
+            return ("rm-home", "rm -rf of the home directory", "name the directory you mean")
         top = toplevel(os.path.dirname(path) if os.path.basename(path) == ".git" else path) \
             if os.path.isdir(path) else None
         if top and path == top:
-            return ("rm -rf of the whole checkout", "name the path inside it, or remove a worktree with git worktree remove")
+            return ("rm-checkout", "rm -rf of the whole checkout",
+                    "name the path inside it, or remove a worktree with git worktree remove")
         if top and path == os.path.join(top, ".git"):
-            return ("rm -rf of the repository's .git", "nothing recovers that; move it aside with mv if you mean it")
+            return ("rm-git-dir", "rm -rf of the repository's .git",
+                    "nothing recovers that; move it aside with mv if you mean it")
     return None
 
 
 def git_rule(sub, rest, base):
     letters, longs = short_flags(rest)
     if sub == "reset" and "--hard" in longs:
-        return ("git reset --hard discards uncommitted work", "git stash push -u first, or git reset --keep")
+        return ("git-reset-hard", "git reset --hard discards uncommitted work",
+                "git stash push -u first, or git reset --keep")
     if sub == "clean":
         if "n" in letters or "--dry-run" in longs:
             return None
         if ("f" in letters or "--force" in longs) and letters & {"d", "x", "X"}:
-            return ("git clean -fd/-x deletes untracked files for good", "git clean -nd to list them, then remove named paths")
+            return ("git-clean", "git clean -fd/-x deletes untracked files for good",
+                    "git clean -nd to list them, then remove named paths")
     if sub == "push":
         if "f" in letters or "--force" in longs:
-            return ("a bare force push can overwrite commits you have not seen", "git push --force-with-lease")
+            return ("git-push-force", "a bare force push can overwrite commits you have not seen",
+                    "git push --force-with-lease")
     if sub == "stash" and rest and rest[0] in ("drop", "clear"):
-        return ("git stash %s destroys stashed work" % rest[0], "git stash list and git stash show first; apply what you need")
+        return ("git-stash-drop", "git stash %s destroys stashed work" % rest[0],
+                "git stash list and git stash show first; apply what you need")
     if sub in ("checkout", "restore"):
         paths = operands(rest)
         if sub == "restore":
@@ -179,7 +253,8 @@ def git_rule(sub, rest, base):
             top = toplevel(base)
             everything = bool(top) and physical(base) == top
         if everything:
-            return ("git %s of the whole worktree discards every uncommitted change" % sub,
+            return ("git-discard-worktree",
+                    "git %s of the whole worktree discards every uncommitted change" % sub,
                     "git stash push first, or name the files")
     return None
 
@@ -194,6 +269,7 @@ def command_word(words):
 
 
 def verdict(text, cwd):
+    """(rule id, reason, safer spelling, command name, git base) for the first refused segment."""
     cur, previous = cwd, None
     piped = "|" in text
     for segment in direct_shell_segments(text):
@@ -211,18 +287,18 @@ def verdict(text, cwd):
         letters = short_flags(args)[0]
         if piped and previous in FETCHERS and name in SHELLS and "c" not in letters and \
                 ("s" in letters or not [a for a in operands(args) if a != "-"]):
-            return ("a download piped straight into a shell runs code nobody read",
-                    "save it to a file, read it, then run the file")
+            return ("download-pipe-shell", "a download piped straight into a shell runs code nobody read",
+                    "save it to a file, read it, then run the file", previous, None)
         previous = name
-        found = None
+        found, base = None, None
         if name == "rm":
             found = rm_rule(args, cur)
         elif name.startswith("mkfs"):
-            found = ("mkfs formats a filesystem", "a person runs that in their own shell")
+            found = ("mkfs", "mkfs formats a filesystem", "a person runs that in their own shell")
         elif name == "dd":
             for arg in args:
                 if arg.startswith("of=/dev/") and not arg[3:].startswith(SAFE_DEVICES):
-                    found = ("dd onto a device overwrites it", "a person runs that in their own shell")
+                    found = ("dd-device", "dd onto a device overwrites it", "a person runs that in their own shell")
         elif name in ("git", "git.exe") and not child:
             base, j = cur, 0
             while j < len(args):
@@ -238,8 +314,42 @@ def verdict(text, cwd):
             if j < len(args):
                 found = git_rule(args[j], args[j + 1:], base)
         if found:
-            return found
+            return found + (name, base)
     return None
+
+
+def record(rule, outcome, name, text):
+    """One row per refusal in the per-user log: never the command text. Best effort."""
+    try:
+        directory = os.path.dirname(audit_log)
+        if not directory or not os.path.isabs(directory):
+            return
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        row = {
+            "schema": 1,
+            "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "rule": rule,
+            "verdict": outcome,
+            "command": "".join(ch for ch in name if ch.isalnum() or ch in "._-")[:32] or "?",
+            "sha256": hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(),
+            "child": child,
+        }
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(audit_log, flags, 0o600)
+        try:
+            os.write(fd, (json.dumps(row, sort_keys=True) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+        with open(audit_log, encoding="utf-8", errors="replace") as handle:
+            lines = handle.readlines()
+        if len(lines) > AUDIT_ROWS:
+            fresh = audit_log + ".%d.tmp" % os.getpid()
+            fd = os.open(fresh, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.writelines(lines[-AUDIT_ROWS:])
+            os.replace(fresh, audit_log)
+    except (OSError, ValueError):
+        pass
 
 
 try:
@@ -250,14 +360,17 @@ try:
         cwd = os.getcwd()
     found = verdict(command, cwd) if isinstance(command, str) else None
     if found:
-        print("%s. Instead: %s." % found)
+        rule, reason, instead, name, base = found
+        record(rule, "bypassed" if mode == "bypass" else "refused", name, command)
+        if mode != "bypass":
+            print("%s. Instead: %s." % (reason, instead))
 except Exception:
     pass
 PY
 
 child=0
 [ "${OMS_HARNESS_CHILD:-}" != 1 ] || child=1
-reason="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" "$child" 2>/dev/null || true)"
+reason="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" "$child" "$mode" "$AUDIT_LOG" 2>/dev/null || true)"
 [ -n "$reason" ] || exit 0
 echo "command guard: ${reason%%$'\n'*} If a person means it, they run it in their own shell (or start the session with OMS_COMMAND_GUARD=0)." >&2
 exit 2
