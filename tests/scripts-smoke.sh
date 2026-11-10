@@ -44685,9 +44685,9 @@ test_cite_notes_verify_and_bibtex() {
   printf '{"message":{"title":["A Good Paper"],"issued":{"date-parts":[[2020,5]]}}}' > "$srv/works/10.1234/good.1"
   printf '{"message":{"title":["Real Title"],"issued":{"date-parts":[[2019]]}}}' > "$srv/works/10.1234/wrongtitle"
   printf '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Graph Nets\n for Binding</title><published>2021-01-04T00:00:00Z</published></entry></feed>' > "$srv/api"
-  python3 -m http.server 0 --bind 127.0.0.1 --directory "$srv" > "$srv.log" 2>&1 &
+  python3 -u -m http.server 0 --bind 127.0.0.1 --directory "$srv" > "$srv.log" 2>&1 &
   pid=$!
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     port="$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$srv.log" | head -n 1)"
     [ -n "$port" ] && break
     sleep 1
