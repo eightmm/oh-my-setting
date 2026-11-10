@@ -71,7 +71,28 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             # and revoke build their own state, and paying a whole-index
             # pass just to discard it doubled their cost.
             if args.evidence_action == 'show':
-                value = build_coverage(repo)
+                if args.limit is not None and not args.matrix:
+                    raise CoreError('--limit requires --matrix for evidence show')
+                if args.matrix:
+                    from .workflow_views import ViewError, evidence_matrix, limit_value
+                    try:
+                        limit = limit_value(20 if args.limit is None else args.limit)
+                        value = evidence_matrix(build_envelope(repo), limit=limit)
+                    except ViewError as exc:
+                        raise CoreError(str(exc)) from None
+                else:
+                    value = build_coverage(repo)
+            elif args.evidence_action == 'anchors':
+                from .inspection_io import ReadError, read_object, read_segments
+                from .review_anchors import validate_anchors
+                from .workflow_views import ViewError, limit_value
+                try:
+                    limit_value(args.limit)
+                    findings = read_object(repo, args.findings)
+                    diff = read_segments(repo, args.diff)['segments'][0][1]
+                    value = validate_anchors(findings, diff, args.expected_diff_sha256, limit=args.limit)
+                except (ReadError, ViewError) as exc:
+                    raise CoreError(str(exc)) from None
             elif args.evidence_action == 'unbound':
                 coverage = build_coverage(repo)
                 value = {'schema': coverage['schema'], 'unbound_evidence': coverage['unbound_evidence']}
@@ -82,8 +103,43 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             emit(value, args.pretty)
             return 0
         if args.command == 'next':
-            envelope = build_envelope(repo)
-            emit({'schema': 1, 'state_digest': envelope['state_digest'], 'actions': envelope['next_actions']}, args.pretty)
+            if (args.task is not None or args.limit is not None) and not args.explain:
+                raise CoreError('--task and --limit require --explain')
+            if args.explain:
+                from .workflow_views import ViewError, explain_next, limit_value
+                try:
+                    limit = limit_value(20 if args.limit is None else args.limit)
+                    value = explain_next(build_envelope(repo), task_id=args.task, limit=limit)
+                except ViewError as exc:
+                    raise CoreError(str(exc)) from None
+            else:
+                envelope = build_envelope(repo)
+                value = {'schema': 1, 'state_digest': envelope['state_digest'], 'actions': envelope['next_actions']}
+            emit(value, args.pretty)
+            return 0
+        if args.command == 'return-brief':
+            from .inspection_io import ReadError, read_object
+            from .return_brief import compare_envelopes
+            from .workflow_views import ViewError, limit_value
+            try:
+                limit_value(args.limit)
+                before = read_object(repo, args.before)
+                after = read_object(repo, args.against) if args.against else build_envelope(repo)
+                value = compare_envelopes(before, after, limit=args.limit)
+                value['after_source'] = 'saved-envelope' if args.against else 'live-canonical-projection'
+            except (ReadError, ViewError) as exc:
+                raise CoreError(str(exc)) from None
+            emit(value, args.pretty)
+            return 0
+        if args.command == 'output-digest':
+            from .inspection_io import ReadError
+            from .output_digest import digest_output
+            from .workflow_views import ViewError
+            try:
+                value = digest_output(repo, args.path, exit_code=args.exit_code, limit=args.limit)
+            except (ReadError, ViewError) as exc:
+                raise CoreError(str(exc)) from None
+            emit(value, args.pretty)
             return 0
         if args.command == 'failure':
             value = classify_failure(args.text, args.exit, args.code) if args.failure_action == 'classify' else failure_catalog()
