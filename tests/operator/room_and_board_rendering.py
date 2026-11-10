@@ -1596,7 +1596,8 @@ def read_page(render, batches, on_refresh=None, size=(80, 4)):
             return next(batches)
     with patch.object(panel_reader, "TerminalInput", return_value=PageInput()), \
             patch.object(panel_reader.time, "monotonic", side_effect=lambda: clock[0]), \
-            patch.object(panel_reader.shutil, "get_terminal_size", return_value=os.terminal_size(size)), \
+            patch.object(panel_reader.shutil, "get_terminal_size",
+                         side_effect=lambda: os.terminal_size(size() if callable(size) else size)), \
             patch.object(panel_reader, "tmux", return_value=subprocess.CompletedProcess([], 0, "%1\n", "")) as tmux_run, \
             patch.object(panel_reader.sys, "stdout", io.StringIO()) as output:
         assert panel_reader.page(render, "%1", on_refresh=on_refresh) == 0
@@ -1670,6 +1671,37 @@ assert hanging_wrap("  - nested " + "word " * 8, 24) == [
 assert hanging_wrap("12. " + "ab " * 10, 16)[1].startswith("    ab") and hanging_wrap("plain " * 6, 14)[1] == "plain plain"
 raw_list = panel_reader.render_view("Raw", {}, {"answer": "- " + "word " * 20}, width=30, color=False).splitlines()
 assert raw_list[3].startswith("  - word") and all(row.startswith("    word") for row in raw_list[4:]), raw_list
+# A notice row takes one body row, so a page is one row shorter and must not skip a line.
+output, unused = read_page(lambda width: "\n".join("l%d" % i for i in range(60)),
+                           iter([[("/",)], [("l",)], [("enter",)], [("pagedown",)], [("q",)]]), size=(60, 14))
+notice_frames = output.split("\033[H\033[2J")[1:]
+assert "60 matches" in notice_frames[-2] and "l6" in notice_frames[-2].split("\n") \
+    and "l7" not in notice_frames[-2].split("\n"), notice_frames[-2]
+assert "l7" in notice_frames[-1].split("\n")[4:6], notice_frames[-1]
+# After a resize without headings the reader keeps its place by text, not by row number.
+import textwrap
+resume_old, resume_new = ["alpha beta gamma", "delta"], ["alpha", "beta", "gamma", "delta"]
+assert panel_reader.resume_offset(resume_old, 1, resume_new) == 3 and panel_reader.resume_offset(resume_old, 0, resume_new) == 0
+assert panel_reader.resume_offset(["\033[1malpha\033[0m beta", "gamma"], 1, ["alpha", "beta", "gamma"]) == 2
+assert panel_reader.resume_offset(resume_old, 9, ["x"]) == 1 and panel_reader.resume_offset([], 4, []) == 0
+resize_items = ["item %d " % i + "word " * 18 for i in range(40)]
+resize_box = [(100, 14)]
+def resize_events():
+    yield [("pagedown",)]
+    yield [("pagedown",)]
+    resize_box[0] = (50, 14)
+    yield []
+    yield []
+    yield [("q",)]
+output, unused = read_page(lambda width: "\n".join(row for item in resize_items for row in textwrap.wrap(item, width)),
+                           resize_events(), size=lambda: resize_box[0])
+resize_frames = output.split("\033[H\033[2J")[1:]
+assert resize_frames[-1].split("\n")[4].startswith("item 16 ") and "/80 " in resize_frames[-1], resize_frames[-1]
+# The Summary excerpt says how many lines were cut and which existing key opens the whole answer.
+cut_call = {"answer": "\n\n".join("para %d " % i + "word " * 20 for i in range(10))}
+cut_rows = panel_reader.render_view("Summary", long_report, cut_call, width=60, color=False).splitlines()
+assert re.fullmatch(r"\[\.\.\. \d+ more lines · r opens Raw\]", cut_rows[-1]) and not cut_rows[-2].endswith("..."), cut_rows
+assert "more lines" not in panel_reader.render_view("Summary", long_report, {"answer": "short"}, width=60, color=False)
 output, unused = read_page(lambda width, view: panel_reader.render_view(view, long_report, markdown_call),
                            iter([[("tab",)], [("q",)]]), size=(80, 10))
 raw_frame = output.split("\033[H\033[2J")[-1]

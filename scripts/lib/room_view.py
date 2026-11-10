@@ -1912,6 +1912,9 @@ def aligned_message_rows(report, rows, navigation, width, unicode):
     if column < 10:
         return rows
     kind_width = min(8, max(1, column - 15)) if column >= 15 else 0
+    # Below eight cells the longest label (question, handoff, decision) would cut to `no…`: use its capital instead.
+    initial = 0 < kind_width < 8
+    kind_width = 1 if initial else kind_width
     route_width = max(0, column - 14 - kind_width) if kind_width else 0
     try:
         from panel_messages import readable_text
@@ -1940,6 +1943,7 @@ def aligned_message_rows(report, rows, navigation, width, unicode):
         prefix = text[:2] + fixed_column(text[2:7], 5) + " " + text[8] + " "
         if kind_width:
             kind = clean(message.get("message_kind"), 20) or "note"
+            kind = kind[:1].upper() if initial else kind
             prefix += fixed_column(kind, kind_width) + " " + fixed_column(route, route_width) + separator
         else:
             prefix += " " * max(0, column - display_width(prefix))
@@ -2396,7 +2400,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                   panel_hint('f_open_right') if managed and navigation.get("full_result") else panel_hint('f_full_result') if navigation.get("full_result") else "",
                   panel_hint('esc_close') if navigation.get("detail") or navigation.get("preview") and
                   navigation.get("tab_body_visible", True) else "",
-                  panel_hint('enter_chat') if kind == "chat" else panel_hint('enter_fold') if kind == "group" else "" if right else panel_hint('enter_show'),
+                  (panel_hint('enter_chat') if selected else "") if kind == "chat" else panel_hint('enter_fold') if kind == "group" else "" if right else panel_hint('enter_show'),
                   panel_hint('a_ask_advisor') if kind == "chat" else panel_hint('w_worktree') if worktree else "",
                   panel_hint('tab_next_tab') if tabs and not navigation.get("detail") else "",
                   panel_hint('space_fold') if kind == "group" or kind == "chat" and not graph else ""]
