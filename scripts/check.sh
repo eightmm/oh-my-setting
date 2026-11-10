@@ -1417,6 +1417,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage work-journal bash tests/work-journal-smoke.sh
   stage model-routing bash tests/model-routing-smoke.sh
   stage advisor-session bash tests/advisor-session-smoke.sh
+  stage sessions python3 tests/test_sessions.py
   stage debate-delta bash tests/debate-delta-smoke.sh
   stage turn-guard-fuse bash tests/turn-guard-fuse-smoke.sh
   stage windows-durable-writer bash tests/windows-durable-writer-smoke.sh
