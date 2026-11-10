@@ -195,6 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument('remainder', nargs='+')
     summarize_cmd = experiment_sub.add_parser('summarize', parents=[shared_options])
     summarize_cmd.add_argument('--id', required=True)
+    sweep_cmd = experiment_sub.add_parser(
+        'sweep', help='enumerate a hyperparameter grid as named cells; runs and submits nothing',
+        parents=[shared_options])
+    sweep_sub = sweep_cmd.add_subparsers(dest='sweep_action', required=True)
+    sweep_plan = sweep_sub.add_parser('plan', parents=[shared_options])
+    sweep_plan.add_argument('sweep', help='JSON file or literal: {"grid": {...}, "seeds": [...], "fixed": {...}}')
+    sweep_plan.add_argument('--emit', default='', choices=('', 'tsv', 'hydra-overrides', 'sbatch-array'),
+                            help='print the runs as text instead of the JSON plan')
     evaluate_cmd = experiment_sub.add_parser('evaluate', parents=[shared_options])
     evaluate_cmd.add_argument('contract')
     evaluate_cmd.add_argument('results')

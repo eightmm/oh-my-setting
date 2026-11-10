@@ -48,7 +48,7 @@ def child_action_is_read_only(args: argparse.Namespace) -> bool:
         action = getattr(args, "experiment_action", None)
         if action == "template":
             return not bool(getattr(args, "output", ""))
-        return action in ("validate", "compare", "show", "summarize", "evaluate")
+        return action in ("validate", "compare", "show", "summarize", "evaluate", "sweep")
     if command == "benchmark":
         return getattr(args, "benchmark_action", None) in ("show", "compare")
     if command == "doctor":

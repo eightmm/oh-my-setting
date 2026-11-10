@@ -50,6 +50,7 @@ class ChildRuntimePolicyTest(unittest.TestCase):
             ['experiment', 'compare', '{}', '{}'],
             ['experiment', 'show', 'experiment-id'],
             ['experiment', 'summarize', '--id', 'experiment-id'],
+            ['experiment', 'sweep', 'plan', '{}'],
             ['experiment', 'evaluate', '{}', '{}'],
             ['benchmark', 'show'],
             ['benchmark', 'compare', 'left.json', 'right.json'],
@@ -1608,6 +1609,56 @@ class RuntimeFixture(RuntimeFixtureBase):
             probe = subprocess.run(command + options + launch_args, capture_output=True, text=True)
             self.assertEqual(probe.returncode, expected, probe.stderr)
             self.assertEqual(ledger.read_bytes(), snapshot)
+        # A contract whose run budget is spent launches only with a reason.
+        capped_path = self.repo / 'experiment-capped.json'
+        atomic_write_json(capped_path, capped)
+        capped_command = command[:-1] + [str(capped_path), '--dry-run']
+        refused = subprocess.run(capped_command + launch_args, capture_output=True, text=True)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn('run budget spent: 2 of 1', refused.stderr)
+        allowed = subprocess.run(capped_command + ['--reason', 'confirming seed'] + launch_args, capture_output=True, text=True)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn('past the contract run budget (confirming seed)', allowed.stderr)
+        self.assertEqual(ledger.read_bytes(), snapshot)
+
+    def test_experiment_sweep_names_each_cell_and_only_prints(self) -> None:
+        from oms_runtime import experiment_sweep
+        spec = {'grid': {'lr': [0.001, 0.0003, 0.001], 'depth': [4, 6]}, 'seeds': [0, 1], 'fixed': {'model': 'gnn'}}
+        value = experiment_sweep.plan(spec)
+        self.assertEqual((value['cell_count'], value['run_count']), (4, 8))
+        self.assertEqual(value['repeated_values'], {'lr': [0.001]})
+        ids = [cell['cell_id'] for cell in value['cells']]
+        self.assertEqual(len(set(ids)), 4)
+        # A cell's id comes from its parameters alone: the same configuration
+        # has the same id in a differently ordered or larger plan.
+        other = experiment_sweep.plan({'grid': {'depth': [6, 4, 8], 'lr': [0.0003, 0.001]}, 'fixed': {'model': 'gnn'}})
+        self.assertTrue(set(ids) <= {cell['cell_id'] for cell in other['cells']})
+        self.assertNotEqual(set(ids), {cell['cell_id'] for cell in experiment_sweep.plan(dict(spec, fixed={'model': 'mlp'}))['cells']})
+        self.assertTrue(any('4 configurations are compared' in note for note in value['notes']))
+        self.assertTrue(any('2 seed(s) per cell' in note for note in value['notes']))
+        tsv = experiment_sweep.emit_text(value, 'tsv').splitlines()
+        self.assertEqual(tsv[0], 'index\tcell_id\tseed\tdepth\tlr\tmodel')
+        self.assertEqual(len(tsv), 9)
+        self.assertEqual(tsv[1].split('\t')[2:], ['0', '4', '0.001', 'gnn'])
+        hydra = experiment_sweep.emit_text(value, 'hydra-overrides').splitlines()
+        self.assertEqual(hydra[0], 'depth=4 lr=0.001 model=gnn seed=0')
+        array = experiment_sweep.emit_text(value, 'sbatch-array').splitlines()
+        self.assertIn('#SBATCH --array=0-7', array)
+        self.assertIn('nothing was submitted', array[0])
+        self.assertTrue(array[-1].startswith('7\tcell-'))
+        with self.assertRaisesRegex(CoreError, 'bare override'):
+            experiment_sweep.emit_text(experiment_sweep.plan({'grid': {'tag': ['a b']}}), 'hydra-overrides')
+        for bad in ({}, {'grid': {}}, {'grid': {'lr': []}}, {'grid': {'seed': [1]}}, {'grid': {'lr': [[1]]}},
+                    {'grid': {'lr': [1]}, 'fixed': {'lr': 2}}, {'grid': {'lr': [1]}, 'seeds': [1, 1]},
+                    {'grid': {'lr': [1]}, 'extra': 1}, {'grid': {name: list(range(20)) for name in 'abcd'}}):
+            with self.assertRaises(CoreError):
+                experiment_sweep.plan(bad)
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/lib/oms_core.py'), '--repo', str(self.repo),
+                               'experiment', 'sweep', 'plan', json.dumps(spec), '--emit', 'hydra-overrides'],
+                              capture_output=True, text=True, check=False)
+        self.assertEqual((done.returncode, len(done.stdout.splitlines())), (0, 8), done.stderr)
+        self.assertIn('note: repeated grid values were listed once: lr=0.001', done.stderr)
+        self.assertFalse((self.repo / '.oms' / 'experiments').exists())
 
     def test_release_failure_taxonomy_and_benchmark(self) -> None:
         stable = release.resolve(self.repo, 'stable')
