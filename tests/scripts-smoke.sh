@@ -27387,6 +27387,39 @@ test_agent_role_and_delegate_injection() {
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" --name scholar resolve)" = "$ROOT/roles/scholar.md" ] ||
     fail "agent-role should resolve scholar"
+
+  # render: every bundled role renders deterministically for both providers;
+  # access is never broader than the role (read-only unless a bundled write role).
+  local provider out1 out2 writers="builder documenter implementation-worker integrator performance-engineer refactorer"
+  for role in $(cd "$ROOT/roles" && ls ./*.md | sed 's|^\./||; s|\.md$||'); do
+    for provider in claude codex; do
+      out1="$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+        "$ROOT/scripts/agent-role.sh" --provider "$provider" --name "$role" render)" ||
+        fail "agent-role render $provider $role failed"
+      out2="$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
+        "$ROOT/scripts/agent-role.sh" --provider "$provider" --name "$role" render)"
+      [ "$out1" = "$out2" ] || fail "agent-role render $provider $role is not deterministic"
+      printf '%s\n' "$out1" | grep -Fxq "$([ "$provider" = claude ] && echo "name: oms-$role" || echo "name = \"oms-$role\"")" ||
+        fail "render $provider $role should carry the oms- name"
+      if printf ' %s ' "$writers" | grep -Fq " $role "; then
+        printf '%s\n' "$out1" | grep -Eq '^(tools: .*Edit|sandbox_mode = "workspace-write")' ||
+          fail "render $provider $role should grant write access"
+      else
+        printf '%s\n' "$out1" | grep -Eq '^(tools: .*(Edit|Write|Bash)|sandbox_mode = "workspace-write")' &&
+          fail "render $provider $role must stay read-only"
+      fi
+    done
+    printf '%s\n' "$out1" | python3 -c 'import sys,tomllib; d=tomllib.loads(sys.stdin.read()); assert d["developer_instructions"].startswith("# Strategy"), d' ||
+      fail "render codex $role should be valid TOML carrying the role text"
+  done
+  "$ROOT/scripts/agent-role.sh" --provider claude --name reviewer render | grep -Fxq 'model: claude-opus-5-5' ||
+    fail "render should take the model from the role's panel tier"
+  # A project override of a write role never gains write access.
+  mkdir -p "$empty_project/.oms/roles"
+  printf '# Role: builder\n\n## Mandate\n\nOverride.\n' > "$empty_project/.oms/roles/builder.md"
+  ( cd "$empty_project" && "$ROOT/scripts/agent-role.sh" --provider claude --name builder render ) |
+    grep -Fxq 'tools: Read, Grep, Glob' || fail "render of an override must stay read-only"
+  rm -rf "$empty_project/.oms/roles"
   ( cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" \
       --to codex --role scholar --read-only --artifact-dir "$empty_project/scholar-arts" --prompt "research" >/dev/null 2>&1 ) ||

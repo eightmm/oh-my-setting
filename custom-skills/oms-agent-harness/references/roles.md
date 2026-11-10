@@ -12,6 +12,13 @@ Standard roles: `repo-auditor`, `implementation-worker`, `test-designer`,
 native subagent brief; the parent still supplies task, paths, constraints,
 success criteria, and expected output.
 
+`oms agent-role --provider claude|codex --name NAME render` prints a native
+subagent definition (Claude `.claude/agents/` markdown, Codex `.codex/agents/`
+TOML) to stdout from the same role file: name `oms-NAME`, model and effort from
+the role's tier in `config/panel-routing.json`, read-only tools or sandbox
+unless the bundled role is a write role (overrides always render read-only).
+It writes and installs nothing; copy the output yourself if you want it.
+
 Put task-specific behavior directly in the brief; do not launch another model
 to generate instructions. Roles specialize the task, never its authority.
 Use `oms consult --to PROVIDER` for an independent read, or

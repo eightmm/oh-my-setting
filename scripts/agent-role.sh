@@ -18,6 +18,7 @@ REPO="$PWD"
 NAME=""
 SCOPE="project"
 ACTION=""
+PROVIDER=""
 
 usage() {
   cat <<'EOF'
@@ -30,6 +31,7 @@ injected into a delegated worker brief with peer-delegate.sh --role NAME.
 Options:
   --repo PATH   Repo for project-scoped roles (default: PWD, git-root anchored).
   --name NAME   Role name ([A-Za-z0-9._-]+). Required for show/path/resolve/init.
+  --provider P  claude or codex; required for render.
   --global      Use the global role store instead of the repo; resolve/show
                 fall back only to bundled roles.
   -h, --help    Show help.
@@ -41,6 +43,12 @@ Commands:
   resolve   Print the first existing role file path (repo, global, bundled);
             exit 3 if none. Used by peer-delegate.sh --role.
   init      Create a starter role file at the chosen scope if missing.
+  render    Print a provider-native subagent definition for the resolved role
+            to stdout (--provider claude: .claude/agents/<name>.md format;
+            --provider codex: .codex/agents/<name>.toml format). Name is
+            oms-<role>; model/effort come from config/panel-routing.json.
+            Read-only roles get read-only tools/sandbox; only bundled write
+            roles get edit access. Writes nothing and installs nothing.
 EOF
 }
 
@@ -66,7 +74,8 @@ while [ "$#" -gt 0 ]; do
     --name) [ "$#" -ge 2 ] || fail "--name requires a value"; NAME="$2"; shift 2 ;;
     --global) SCOPE="global"; shift ;;
     -h|--help) usage; exit 0 ;;
-    list|show|path|resolve|init) ACTION="$1"; shift ;;
+    --provider) [ "$#" -ge 2 ] || fail "--provider requires claude or codex"; PROVIDER="$2"; shift 2 ;;
+    list|show|path|resolve|init|render) ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
@@ -74,7 +83,7 @@ done
 ACTION="${ACTION:-list}"
 
 case "$ACTION" in
-  show|path|resolve|init)
+  show|path|resolve|init|render)
     [ -n "$NAME" ] || fail "$ACTION requires --name"
     case "$NAME" in
       *[!A-Za-z0-9._-]*|"") fail "--name must match [A-Za-z0-9._-]+" ;;
@@ -112,7 +121,13 @@ case "$ACTION" in
       printf '%s/%s.md\n' "$proj_dir" "$NAME"
     fi
     ;;
-  resolve|show)
+  resolve|show|render)
+    if [ "$ACTION" = render ]; then
+      case "$PROVIDER" in
+        claude|codex) ;;
+        *) fail "render requires --provider claude|codex" ;;
+      esac
+    fi
     resolved=""
     [ "$SCOPE" != global ] && [ -n "$proj_dir" ] && [ -f "$proj_dir/$NAME.md" ] && resolved="$proj_dir/$NAME.md"
     [ -z "$resolved" ] && [ -f "$glob_dir/$NAME.md" ] && resolved="$glob_dir/$NAME.md"
@@ -123,6 +138,10 @@ case "$ACTION" in
     }
     if [ "$ACTION" = "resolve" ]; then
       printf '%s\n' "$resolved"
+    elif [ "$ACTION" = "render" ]; then
+      render_args=(--provider "$PROVIDER" --role "$NAME" --file "$resolved")
+      [ "$resolved" = "$bundled_dir/$NAME.md" ] && render_args+=(--bundled)
+      python3 "$ROOT/scripts/lib/agent_role_render.py" "${render_args[@]}"
     else
       cat "$resolved"
     fi
