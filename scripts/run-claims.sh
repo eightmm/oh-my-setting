@@ -6,9 +6,10 @@ set -euo pipefail
 # `oms run claims …` and `oms run figure …`.
 #
 # Both are records plus a read-only comparison. `claims check` compares each
-# claimed number with the metric its capsule recorded; `figure verify`
-# compares file digests. Neither runs a training command, a figure script or a
-# model, and neither result is a reproduction or verification evidence.
+# claimed number with the metric its capsule recorded; both check pinned
+# capsule bytes and `figure verify` also compares output/script digests.
+# Neither runs a training command, a figure script or a model, and neither
+# result is a reproduction or verification evidence.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_LIB="$ROOT/scripts/lib"
@@ -35,21 +36,32 @@ claims add     Record that a number stated in a report (--where, e.g.
                paper/results.tex:42) is metric KEY of run ID. ID is a capsule
                id or a run id whose capsule recorded the metric; an unknown
                run or a metric the capsule did not record is refused.
+               Pins the resolved capsule id and its full byte SHA-256.
                Re-recording an --id replaces the earlier claim.
 claims check   For each claim: match, mismatch (outside --tolerance, an
                absolute difference, default 0) or missing (capsule or metric
                gone). Notes single-seed runs, failed or dirty runs, and a
                capsule that `oms run capsule verify` no longer matches
-               (stale). Exit 1 on a mismatch or missing claim; --strict also
-               on a stale one; --no-verify skips the capsule comparison.
+               (stale). Pinned capsule bytes are always checked: JSON
+               capsule_content_verifies is true for a matching digest, false
+               for changed bytes or an invalid pin, null without a pin or a
+               readable capsule. Numeric match does not verify provenance.
+               Exit 1 on a mismatch or missing claim; --strict also on stale
+               or unverified capsule content. --no-verify skips only the
+               external tree/environment comparison.
 figure record  Record the output file's and the script's sha256, the input
-               runs and, optionally, the command that made the figure. The
-               command is stored as text and never run.
+               capsule ids and byte digests and, optionally, the command
+               that made the figure. The command is text and never run.
 figure verify  current, or stale when the output or script changed or is gone
-               or an input capsule is missing; prints the recorded command
-               for a stale figure. Exit 1 when any figure is stale.
+               or an input capsule is missing, changed, or lacks a valid pin;
+               prints the recorded command for a stale figure. Exit 1 when
+               any figure is stale. Figures without input runs still compare
+               only the output and script.
 
 Records live in .oms/claims.jsonl and .oms/figures.jsonl (append-only, local).
+Capsules must be readable UTF-8 JSON of at most 8 MiB with their recorded id.
+Byte digests include formatting. Legacy records are never automatically pinned;
+re-record an id to establish a new baseline. Check/verify never rewrite records.
 Nothing here runs a command or a model, and a match is not a reproduction.
 USAGE
 }

@@ -2207,14 +2207,32 @@ ML/Slurm workflows use local-first experiment controls:
   figures came from. `claims add --metric KEY --value N --run ID [--tolerance T]
   [--where paper/results.tex:42]` records that a stated number is that metric
   of that run's capsule; an unknown run or a metric the capsule did not record
-  is refused. `claims check` reports each claim as `match`, `mismatch` (outside
-  the absolute tolerance) or `missing`, notes single-seed, failed and dirty
-  runs, and marks a claim `stale` when `run capsule verify` no longer matches
-  the tree; it exits 1 on a mismatch or missing claim, and on a stale one only
-  with `--strict`. `figure record --output FILE --script FILE [--run ID]...
-  [--command TEXT]` stores both files' sha256, the input runs and the command
-  as text; `figure verify` reports `stale` when either file changed or an
-  input capsule is gone and prints the recorded command without running it.
+  is refused. A claim pins the resolved capsule id and its full byte SHA-256
+  in `capsule_sha256`. `claims check` preserves the numeric `match`, `mismatch`
+  (outside the absolute tolerance) and `missing` statuses. Its JSON field
+  `capsule_content_verifies` is `true` when the saved digest matches, `false`
+  when capsule bytes changed or the pin is invalid, and `null` when the pin
+  was never recorded or the capsule cannot be read. Numeric agreement alone
+  does not verify provenance. Changed content and a tree that `run capsule
+  verify` no longer matches count as stale; missing pins count as unverified.
+  The check exits 1 on numeric mismatch or missing evidence; `--strict` also
+  fails on stale or unverified capsule content. `--no-verify` skips only the
+  external tree/environment comparison, retaining the byte-pin check. The
+  single-seed, failed-run and dirty-run notes remain informational.
+  `figure record --output FILE --script FILE [--run ID]... [--command TEXT]`
+  stores both files' sha256, resolved input capsule ids and their byte digests
+  in a `capsule_sha256` map, and the command as text. `figure verify` reports
+  `stale` and exits 1 when either file changed or an input capsule is missing,
+  changed, or lacks a valid pin. A legacy figure without capsule pins is
+  explicitly unverified and stale; a figure with no input runs still checks
+  only its output and script. The recorded command is printed without running it.
+  Capsule snapshots are UTF-8 JSON objects of at most 8 MiB, bound to their
+  recorded id; parsing and hashing use the same bytes. Formatting-only changes
+  also change the digest. Schema 1 gains optional fields, so older readers can
+  read new records but cannot enforce their pins. Checks never rewrite or
+  automatically backfill legacy records; re-record an id to establish a new
+  baseline. These pins compare recorded capsule bytes, not current raw datasets,
+  unrecorded plotting inputs, or proof that a command used the declared inputs.
   Records are local append-only rows in `.oms/claims.jsonl` and
   `.oms/figures.jsonl`. Nothing is re-run: a match says the report still
   agrees with what was recorded, not that the result reproduces.

@@ -23768,8 +23768,8 @@ test_oms_run_diff_compares_capsules() {
 
   # Claims tie a number a report states to the capsule that recorded it, and
   # figure records tie an image to its script and input runs. Both only read:
-  # nothing is re-run. Most checks here pass --no-verify to stay on the number
-  # comparison; the capsule comparison has its own case at the end.
+  # nothing is re-run. Most checks skip the external tree probe with
+  # --no-verify; capsule bytes are still checked against their recorded pins.
   local claims="$d/.oms/claims.jsonl" figures="$d/.oms/figures.jsonl" rc=0
   run_prov() { ( cd "$d" && OMS_RUNS_DIR="$d/.oms/runs" OMS_RUN_INDEX="$spine" "$SH" "$@" ); }
   run_prov claims add --metric auc --value 0.82 --run "$b" --where 'paper/results.tex:42' --id tab1-auc \
@@ -23823,6 +23823,141 @@ test_oms_run_diff_compares_capsules() {
   assert_file_contains "$d/fig.err" "figure fig-roc: recorded figs/roc.png from plots/roc.py (2 input run(s)); nothing was run"
   out="$(run_prov figure verify)" || fail "an untouched figure must verify: $out"
   contains "$out" "current  fig-roc  figs/roc.png  <- plots/roc.py  (2 input run(s))" || fail "figure verify line wrong: $out"
+  python3 - "$ROOT" "$d" <<'PY' || fail "claim/figure capsule snapshots lost freshness or changed records"
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root, project = map(Path, sys.argv[1:])
+claims = project / '.oms/claims.jsonl'
+figures = project / '.oms/figures.jsonl'
+spine = project / '.oms/runs/spine.jsonl'
+claim_rows = [json.loads(line) for line in claims.read_text().splitlines()]
+claim = next(row for row in reversed(claim_rows) if row['id'] == 'tab1-auc')
+figure = json.loads(figures.read_text())
+capsule = project / '.oms/runs' / claim['capsule'] / 'capsule.json'
+saved = {path: path.read_bytes() for path in (claims, figures, spine, capsule)}
+env = dict(os.environ, OMS_RUNS_DIR=str(project / '.oms/runs'), OMS_RUN_INDEX=str(spine))
+
+def run(*args, code=0, reader=True):
+    before = {path: path.read_bytes() if path.exists() else None for path in saved}
+    done = subprocess.run([str(root / 'scripts/run.sh'), *args], cwd=project, env=env,
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == code, (args, done.returncode, done.stdout, done.stderr)
+    if reader:
+        assert before == {path: path.read_bytes() if path.exists() else None for path in saved}, args
+        return json.loads(done.stdout)
+
+def check_claim(code=0, strict=False):
+    args = ['claims', 'check', 'tab1-auc', '--no-verify', '--json']
+    return run(*args, *(['--strict'] if strict else []), code=code)
+
+def write_claim(row):
+    claims.write_text(json.dumps(row) + '\n')
+
+def write_figure(row):
+    figures.write_text(json.dumps(row) + '\n')
+
+try:
+    changed = json.loads(saved[capsule])
+    changed['configs'][0]['sha256'] = 'f' * 32
+    changed['seeds'] = ['91']
+    capsule.write_text(json.dumps(changed))
+    # The old verifier passes here: same path/id/metric, different input metadata.
+    result = run('figure', 'verify', 'fig-roc', '--json', code=1)
+    assert result['figures'][0]['status'] == 'stale', result
+    assert any('input capsule changed since it was recorded' in why
+               for why in result['figures'][0]['reasons']), result
+    result = check_claim()
+    row = result['claims'][0]
+    assert row['status'] == 'match' and row['claimed'] == row['recorded'] == 0.82, result
+    assert row['capsule_content_verifies'] is False and result['stale'] == 1, result
+    check_claim(code=1, strict=True)
+
+    # Re-recording is explicit; checks never replace the earlier baseline.
+    run('claims', 'add', '--metric', 'auc', '--value', '0.82', '--run', claim['capsule'],
+        '--id', 'tab1-auc', reader=False)
+    run('figure', 'record', '--output', 'figs/roc.png', '--script', 'plots/roc.py',
+        '--run', claim['capsule'], '--id', 'fig-roc', reader=False)
+    assert check_claim()['claims'][0]['capsule_content_verifies'] is True
+    assert run('figure', 'verify', 'fig-roc', '--json')['stale'] == 0
+    claims.write_bytes(saved[claims]); figures.write_bytes(saved[figures])
+    capsule.write_bytes(saved[capsule])
+    assert claim['capsule_sha256'] == hashlib.sha256(saved[capsule]).hexdigest()
+    assert figure['capsule_sha256'][claim['capsule']] == claim['capsule_sha256']
+    assert check_claim(strict=True)['claims'][0]['capsule_content_verifies'] is True
+    assert run('figure', 'verify', 'fig-roc', '--json')['stale'] == 0
+    capsule.write_bytes(saved[capsule] + b'\n')
+    assert check_claim()['claims'][0]['capsule_content_verifies'] is False
+    run('figure', 'verify', 'fig-roc', '--json', code=1)
+    capsule.write_bytes(saved[capsule])
+
+    legacy_claim = {key: value for key, value in claim.items() if key != 'capsule_sha256'}
+    legacy_figure = {key: value for key, value in figure.items() if key != 'capsule_sha256'}
+    write_claim(legacy_claim); write_figure(legacy_figure)
+    result = check_claim()
+    assert result['claims'][0]['status'] == 'match', result
+    assert result['claims'][0]['capsule_content_verifies'] is None and result['unverified'] == 1, result
+    assert any('unverified' in note for note in result['claims'][0]['notes']), result
+    check_claim(code=1, strict=True)
+    result = run('figure', 'verify', 'fig-roc', '--json', code=1)
+    assert any('not pinned' in why for why in result['figures'][0]['reasons']), result
+
+    for bad in (None, [], 'not-a-sha256'):
+        write_claim(dict(claim, capsule_sha256=bad))
+        write_figure(dict(figure, capsule_sha256={**figure['capsule_sha256'], claim['capsule']: bad}))
+        result = check_claim(code=1, strict=True)
+        assert result['claims'][0]['capsule_content_verifies'] is False, result
+        assert result['stale'] == 1, result
+        result = run('figure', 'verify', 'fig-roc', '--json', code=1)
+        assert len(result['figures'][0]['reasons']) == 1, result
+        assert 'digest is invalid' in result['figures'][0]['reasons'][0], result
+    write_figure(dict(figure, capsule_sha256=[]))
+    run('figure', 'verify', 'fig-roc', '--json', code=1)
+    claims.write_bytes(saved[claims]); figures.write_bytes(saved[figures])
+
+    # Malformed documents, mismatched IDs, and unsafe IDs cannot resolve as the pinned capsule.
+    for raw in (b'{', b'\xff', b'[]', b'[' * 2000,
+                json.dumps(dict(changed, id='different')).encode(),
+                json.dumps(dict(changed, id='../outside')).encode()):
+        capsule.write_bytes(raw)
+        assert check_claim(code=1)['claims'][0]['status'] == 'missing'
+        run('figure', 'verify', 'fig-roc', '--json', code=1)
+    capsule.unlink()
+    # A new alias with the old capsule id must not retarget a saved record.
+    other = project / '.oms/runs' / figure['capsules'][0] / 'capsule.json'
+    spine.write_bytes(saved[spine] + (json.dumps({'run_id': claim['capsule'], 'tool': 'run-capsule',
+                                                'path': str(other)}) + '\n').encode())
+    assert check_claim(code=1)['claims'][0]['status'] == 'missing'
+    run('figure', 'verify', 'fig-roc', '--json', code=1)
+    spine.write_bytes(saved[spine])
+    capsule.write_bytes(saved[capsule] + b' ' * (8 * 1024 * 1024 + 1 - len(saved[capsule])))
+    assert check_claim(code=1)['claims'][0]['status'] == 'missing'
+    run('figure', 'verify', 'fig-roc', '--json', code=1)
+    capsule.write_bytes(saved[capsule])
+
+    literal = project / '.oms/runs/run..retry/capsule.json'
+    literal.parent.mkdir()
+    literal.write_text(json.dumps(dict(changed, id='run..retry')))
+    run('claims', 'add', '--metric', 'auc', '--value', '0.82', '--run', 'run..retry',
+        '--id', 'literal-id', reader=False)
+    assert run('claims', 'check', 'literal-id', '--no-verify', '--json')['claims'][0]['capsule_content_verifies'] is True
+
+    run('figure', 'record', '--output', 'figs/roc.png', '--script', 'plots/roc.py',
+        '--id', 'fig-no-input', reader=False)
+    assert run('figure', 'verify', 'fig-no-input', '--json')['stale'] == 0
+    no_input = json.loads(figures.read_text().splitlines()[-1])
+    no_input.pop('capsule_sha256', None)
+    write_figure(no_input)
+    assert run('figure', 'verify', 'fig-no-input', '--json')['stale'] == 0
+    assert not (project / 'figure-command-ran').exists()
+finally:
+    for path, raw in saved.items():
+        path.write_bytes(raw)
+PY
   printf 'print("plot v2")\n' > "$d/plots/roc.py"
   rc=0; out="$(run_prov figure verify)" || rc=$?
   [ "$rc" = 1 ] || fail "a figure whose script changed must exit 1"
