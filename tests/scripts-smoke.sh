@@ -14308,6 +14308,7 @@ EOF
   assert_file_contains "$capture" 'plus supporting tests/'
   assert_file_contains "$capture" 'If Decisions names References, read those repository documents before decomposing; if one does not exist, say so in the affected task title.'
   assert_file_contains "$capture" 'assignment: {"provider": "codex", "workload": "routine"}'
+  assert_file_contains "$capture" 'Decisions Rationale/invariants line or a Notes Do not'
 
   rm -f "$capture"
   HOME="$home_dir" NVM_DIR="$home_dir/.nvm" PATH="$bin_dir:/usr/bin:/bin" \

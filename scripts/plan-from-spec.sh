@@ -1205,6 +1205,8 @@ plan tasks. Ground every task in the PROJECT.md contract below; stay inside
 Scope, never touch Non-goals.
 
 Allocate by observable behavior, not by equal-sized pieces or generic phases.
+A task that would break a Decisions Rationale/invariants line or a Notes Do not
+touch path is a contract change for the parent, not a task: leave it out and say so.
 Keep a behavior and its necessary regression in the same bounded task. Separate
 independent tasks only when their writable paths are disjoint; use dependencies
 for shared interfaces and actual prerequisites. Resolve design uncertainty from
@@ -1398,6 +1400,8 @@ if [ "$COLLABORATION" = auto ]; then
   council_dir="$(mktemp -d "$PLAN_DIR/council.XXXXXX")" || fail "cannot create council artifacts"
   council_out="$council_dir/run.log"
   council_prompt="Review the following planning contract, not a patch. Do not write files or delegate.
+Check each approach against the contract's Decisions Rationale/invariants and Notes
+Do not touch, and name any it would violate.
 Compare plausible approaches, counterevidence, smallest discriminating checks,
 risks, and unresolved disagreements. Recommend bounded tasks and verification.
 Keep each answer concise. Agreement is not validation. This is a planning boundary;
