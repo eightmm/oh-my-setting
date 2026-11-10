@@ -32,6 +32,8 @@ REASON=""
 USAGE_BY=""
 SINCE=""
 UNTIL=""
+WASTE=0
+WASTE_TOP=""
 
 usage() {
   cat <<'EOF'
@@ -67,6 +69,17 @@ Commands:
                  when a group's share is under OMS_TELEMETRY_CACHE_MIN_PCT
                  (80) with >= OMS_TELEMETRY_CACHE_MIN_REQUESTS (10) usage
                  reports. Reported values only: never approval evidence.
+  --waste [--top N]
+                 telemetry: a read-only "where did tokens go to waste" view
+                 (default top 10 per category), each line naming the record to
+                 open and a share of its total: delegate tokens never admitted;
+                 delegations of one brief digest or task that all failed; a
+                 model change between consecutive hook telemetry rows of one
+                 session; hook-injected bytes per session; the largest
+                 output-digest captures. Only data already recorded is used.
+                 Reported values, never approval evidence. A category that is
+                 absent or `not recorded` means the data was not recorded,
+                 not that nothing was wasted. Not combined with --by.
   --since WHEN, --until WHEN
                  telemetry: keep only rows whose own time is in the range
                  before applying N. WHEN is YYYY-MM-DD (the whole UTC day) or
@@ -194,6 +207,15 @@ while [ "$#" -gt 0 ]; do
       esac
       shift 2
       ;;
+    --waste)
+      WASTE=1
+      shift
+      ;;
+    --top)
+      [ "$#" -ge 2 ] || fail "--top requires a number"
+      WASTE_TOP="$2"
+      shift 2
+      ;;
     --since)
       [ "$#" -ge 2 ] || fail "--since requires a date or time"
       SINCE="$2"
@@ -246,7 +268,15 @@ esac
 if [ "$ACTION" != "telemetry" ]; then
   [ -z "$USAGE_BY" ] || fail "--by is only valid with telemetry"
   [ -z "$SINCE$UNTIL" ] || fail "--since and --until are only valid with telemetry"
+  [ "$WASTE" -eq 0 ] || fail "--waste is only valid with telemetry"
 fi
+[ "$WASTE" -eq 1 ] || [ -z "$WASTE_TOP" ] || fail "--top is only valid with --waste"
+[ "$WASTE" -eq 0 ] || [ -z "$USAGE_BY" ] || fail "--waste cannot be combined with --by"
+case "$WASTE_TOP" in
+  *[!0-9]*) fail "--top must be a whole number from 1 to 100" ;;
+esac
+[ -z "$WASTE_TOP" ] || { [ "$WASTE_TOP" -ge 1 ] && [ "$WASTE_TOP" -le 100 ]; } ||
+  fail "--top must be a whole number from 1 to 100"
 if [ "$LIMIT_SET" -eq 0 ]; then
   case "$ACTION" in
     prune|telemetry) LIMIT="1000" ;;
@@ -282,6 +312,7 @@ PY
   set -- --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
   [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
   [ -z "$USAGE_BY" ] || set -- "$@" --by "$USAGE_BY"
+  [ "$WASTE" -eq 0 ] || set -- "$@" --waste --top "${WASTE_TOP:-10}"
   [ -z "$SINCE" ] || set -- "$@" --since "$SINCE"
   [ -z "$UNTIL" ] || set -- "$@" --until "$UNTIL"
   python3 "$ROOT_LIB/artifact-telemetry.py" "$@" || exit 2

@@ -508,7 +508,8 @@ def add_to_group(group: dict, repo: str, row: dict[str, object], tokens: Optiona
 
 
 def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
-              since: Optional[str] = None, until: Optional[str] = None) -> dict:
+              since: Optional[str] = None, until: Optional[str] = None,
+              waste_top: Optional[int] = None) -> dict:
     rows: list[dict[str, object]] = []
     invalid_lines = 0
     if os.path.exists(index):
@@ -537,7 +538,7 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
         and row.get("kind") in ELIGIBLE_KINDS
     ]
     resolved = resolved_events(rows)
-    admitted = admitted_digests(rows) if by == "role" else set()
+    admitted = admitted_digests(rows) if by == "role" or waste_top else set()
     exit_counts = Counter()
     verification = Counter()
     fallback = Counter()
@@ -807,6 +808,17 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
                 "cache_warn": {"min_pct": min_pct, "min_requests": min_requests},
                 "warnings": warnings,
             })
+    if waste_top:
+        from telemetry_waste import waste_report
+
+        def model_of(row: dict) -> str:
+            metrics = artifact_model_metrics(repo, row)
+            if metrics["model_attribution"] == "ambiguous":
+                return "ambiguous"
+            return metrics["served_model"] or metrics["configured_model"] or row.get("selected_model") or "unrecorded"
+
+        report["waste"] = waste_report(repo, selected, rows, admitted,
+                                       lambda row: artifact_metrics(repo, row)[2], model_of, waste_top)
     from repair_replay import repeated, valid_trace
     delegates = [row for row in selected if row.get("kind") == "delegate"]
     traces = [row["repair_replay"] for row in delegates if valid_trace(row.get("repair_replay"))]
@@ -992,6 +1004,8 @@ def main() -> int:
     parser.add_argument("--by", choices=GROUPINGS)
     parser.add_argument("--since")
     parser.add_argument("--until")
+    parser.add_argument("--waste", action="store_true")
+    parser.add_argument("--top", type=int, default=10)
     # Extract mode exists so the index writer can cache what only this module
     # knows how to read, without a second copy of the regexes drifting from it.
     parser.add_argument("--extract", help="artifact path, repo-relative")
@@ -1015,9 +1029,15 @@ def main() -> int:
     if args.limit <= 0:
         parser.error("--limit must be positive")
     repo = os.path.realpath(args.repo)
-    report = telemetry(repo, args.index, args.limit, args.by, args.since, args.until)
+    if args.waste and not 1 <= args.top <= 100:
+        parser.error("--top must be between 1 and 100")
+    report = telemetry(repo, args.index, args.limit, args.by, args.since, args.until,
+                       args.top if args.waste else None)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    elif args.waste:
+        from telemetry_waste import emit
+        emit(report["waste"])
     elif args.by:
         emit_usage_by(report)
     else:

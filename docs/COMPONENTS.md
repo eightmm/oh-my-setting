@@ -1112,6 +1112,18 @@ tokens on delegations not admitted. It warns when a share is under
 `OMS_TELEMETRY_CACHE_MIN_PCT` (80) with at least `OMS_TELEMETRY_CACHE_MIN_REQUESTS`
 (10) usage reports. These are provider-reported values: never approval or
 verification evidence, and nothing is priced from tokens.
+`oms artifact-index telemetry --waste [--top N] [--json]` is a read-only view of
+where recorded tokens went unused, from rows that already exist (no new store or
+writer field): delegate tokens whose patch no later `patch-admit`/`patch-land`
+accepted; delegations sharing a brief digest (`prompt_sha256`) or task id where
+every attempt failed; a model change between consecutive main-session hook
+telemetry rows of one session (the ledger records no effort and index rows no
+session, so effort changes are not visible); the largest hook-injected byte
+totals per session (injection ledger); and the largest `output-digest` captures
+(file sizes only). Each line names its source record and each category prints a
+share of its total. Values are reported, never approval evidence, and a category
+that is absent or `not recorded` means the data was not recorded, not that
+nothing was wasted. The last three ignore `--since`/`--until`.
 No extra run, timer, model, test omission or automatic delegation is introduced.
 Explicit repeated-failure advice bypasses replay: a different agent contributes
 to that trajectory and its cost, so single-worker evidence is not comparable.
