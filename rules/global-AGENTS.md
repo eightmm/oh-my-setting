@@ -57,11 +57,14 @@ Default: concise, scoped, evidence-driven.
 ## Context and Tools
 
 - Load relevant skills/references only; prefer local files, `rg`, shell, `git`.
+  Before re-investigating, search recorded work: `oms journal show --grep TEXT`,
+  `oms agent-memory recall QUERY`.
   Explain skill-induced pauses/questions with the exact SKILL.md link, applicable
   rule and rationale; distinguish requirements from interpretation.
   Continue unaffected authorized work.
 - Batch independent calls within combined output budgets; serialize dependencies.
-  Re-read changes.
+  Re-read changes. Wrap long output: `oms output-digest -- CMD` (keeps exit code
+  and full output in a file).
 - Read requested documents and applicable instructions/skills fully; label scoped
   investigations. Check source size, returned ranges and truncation at every tool
   layer. Page oversized sources contiguously through EOF; recover gaps or disclose
@@ -81,7 +84,9 @@ Default: concise, scoped, evidence-driven.
   no scaffolding; drop tests with behavior.
 - Run syntax, affected and required checks. Prose needs reference checks;
   agent instructions are contracts. Broaden install/permission/state coverage;
-  graph uncertainty proves no safety.
+  graph uncertainty proves no safety. Test under the lowest supported runtime
+  when it differs from the local default. Report a check passed only if it ran
+  this session.
 - Keep CI small: no speculative jobs/matrices or duplicate push/PR runs;
   expensive checks require affected-risk, release, scheduled or explicit triggers.
   Preserve required gates; record CI scope/runtime in PROJECT.md. Repeat only
@@ -111,5 +116,5 @@ Default: concise, scoped, evidence-driven.
 ## Git
 
 - Commit as `<type>: <description>` (feat, fix, refactor, docs, test, chore,
-  perf, ci). No attribution trailers. For a PR, read `git diff <base>...HEAD`
+  perf, ci). Attribution trailers (Co-Authored-By, session link) allowed. For a PR, read `git diff <base>...HEAD`
   whole, with a test plan.
