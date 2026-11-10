@@ -812,6 +812,17 @@ countdown. Only the session HUD cache supplies it: the pane footer is not parsed
 Codex has no 5-hour reading here. The window is information only; it starts no main
 swap and raises no board alert.
 
+`OMS_QUOTA_WARN_PCT=N` (1 to 99, percent used; unset or `0` is off) draws your own line
+on the reported windows. While a current 5-hour or weekly reading is at or past it the
+board carries `! Quota past your 80% line: Claude 5h 82% used, resets in 40m`, and the
+crossing counts as one attention event for `OMS_PANEL_ATTENTION_BELL` and
+`OMS_PANEL_ATTENTION_CMD` (class word `quota` in the payload, no percentage or provider
+name). A window that stays past the line warns once; it re-arms when the reading drops
+back under the line, which is what a reset does. Only a percentage the provider reported
+counts: an unreported, stale or rolled-over window says nothing, and nothing is derived
+from token counts. It is an advisory: it changes neither the health level nor any
+session, and starts no swap.
+
 A proven existing tmux pane can supply numeric fields from its last eight visible native
 footer lines. `TUI` or `HUD/TUI` labels those mirrored readings; native output may lag
 while idle and changed footer formats become unknown. The watcher performs no native

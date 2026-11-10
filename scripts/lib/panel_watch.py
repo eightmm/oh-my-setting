@@ -321,6 +321,9 @@ def attention_bell(known, report, key, stale=False):
     if stale or mapping(report.get("collection")).get("ok") is not True or mapping(report.get("room")).get("error"):
         return False, known
     current = frozenset(item["row_id"] for item in attention_items(report, False) if item["cls"] in BELL_CLASSES)
+    import panel_health
+    # An opt-in quota line the reported window just crossed rings like a new item, once per window.
+    current |= frozenset(ident for ident, unused in panel_health.quota_warnings(report))
     seeded = known is not None and known[0] == key
     return seeded and bool(current - known[1]), (key, current)
 
@@ -400,6 +403,10 @@ def attention_event(report, fresh, repo_name, now=None):
 
     ranked = attention_items(report, False)
     new = [item for item in ranked if item["row_id"] in fresh]
+    import panel_health
+    # Reported quota windows past the person's opt-in line are counted under their own class word.
+    quota = [{"cls": "quota", "row_id": ident} for ident, unused in panel_health.quota_warnings(report)]
+    new, ranked = new + [item for item in quota if item["row_id"] in fresh], ranked + quota
     return {"schema": 1, "kind": "oms-panel-attention", "repo": clean(repo_name, 80) or "",
             "new": counts(new), "waiting": counts(ranked),
             "ids": sorted(hashlib.sha256(repr(item["row_id"]).encode("utf-8")).hexdigest()[:16] for item in new)[:32],

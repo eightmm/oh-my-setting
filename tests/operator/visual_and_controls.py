@@ -334,6 +334,22 @@ ring, left = panel_watch.attention_bell(entered, guard_read, "endings")
 assert ring is False and left == known and panel_watch.attention_bell(left, ending_fixture, "endings")[0] is True
 # Another room is seeded afresh instead of ringing for everything it already holds.
 assert panel_watch.attention_bell(known, ending_fixture, "other-room") == (False, ("other-room", entered[1]))
+# An opt-in quota line rides the same event: the reported window crossing it rings once, staying past it rings
+# nothing, and dropping back under it (a reset) re-arms. The notifier payload counts it under its own class word.
+quota_far = dict(ending_fixture, provider_status={"claude": {"five_hour_used": 82, "five_hour_resets_at": 4_000_000_000,
+                                                                "source": "HUD"}})
+assert panel_watch.attention_bell(entered, quota_far, "endings") == (False, entered), "off unless the line is set"
+with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": "80"}):
+    ring, crossed = panel_watch.attention_bell(entered, quota_far, "endings")
+    assert ring is True and crossed[1] - entered[1] == {("quota", "claude", "5h")}, crossed
+    assert panel_watch.attention_bell(crossed, quota_far, "endings") == (False, crossed)
+    ring, rearmed = panel_watch.attention_bell(crossed, ending_fixture, "endings")
+    assert ring is False and rearmed == entered and panel_watch.attention_bell(rearmed, quota_far, "endings")[0] is True
+    assert panel_watch.attention_bell(crossed, dict(quota_far, collection={"ok": False}), "endings") == (False, crossed)
+    quota_event = panel_watch.attention_event(quota_far, crossed[1] - entered[1], "endings-repo", now=0)
+    assert quota_event["new"] == {"quota": 1} and quota_event["waiting"]["quota"] == 1, quota_event
+    assert "82" not in json.dumps(quota_event) and "claude" not in json.dumps(quota_event), quota_event
+assert "quota" not in panel_watch.attention_event(quota_far, set(), "endings-repo", now=0)["waiting"]
 class BellStream:
     def __init__(self, tty, broken=False):
         self.tty, self.broken, self.text = tty, broken, ""
