@@ -50,6 +50,58 @@ chmod +x "$repo/scripts/check.sh"
 git -C "$repo" add -A
 git -C "$repo" commit -qm init
 
+# BEGIN regression-proof
+printf 'fixed\n' > "$repo/src/value.txt"
+cat > "$repo/tests/regression.sh" <<'EOF'
+grep -qx fixed src/value.txt
+EOF
+git -C "$repo" add -N tests/regression.sh
+git -C "$repo" diff > "$TMP/regression.patch"
+git -C "$repo" reset -q -- tests/regression.sh
+rm "$repo/tests/regression.sh"
+git -C "$repo" checkout -q -- src/value.txt
+for regression_case in proven not-failing-before failing-after; do
+  case "$regression_case" in
+    proven) regression_cmd='bash tests/regression.sh'; expected_rc=0 ;;
+    not-failing-before) regression_cmd='true'; expected_rc=1 ;;
+    failing-after) regression_cmd='false'; expected_rc=1 ;;
+  esac
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/regression.patch" --verify true \
+    --regression-test "$regression_cmd" --report "$TMP/regression-$regression_case.md" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = "$expected_rc" ] || fail "regression $regression_case returned $rc"
+  contains "$TMP/regression-$regression_case.md" "regression-proof: $regression_case"
+done
+for regression_code in 123 124 125 126 127 128; do
+  rc=0
+  "$ADMIT" --repo "$repo" --patch "$TMP/regression.patch" --verify true \
+    --regression-test "exit $regression_code" --report "$TMP/regression-code.md" >/dev/null 2>&1 || rc=$?
+  if [ "$regression_code" = 123 ] || [ "$regression_code" = 128 ]; then
+    [ "$rc" = 1 ] || fail "ordinary failure must reject"
+    contains "$TMP/regression-code.md" 'regression-proof: failing-after'
+  else
+    [ "$rc" = 0 ] || fail "inconclusive exit $regression_code must not reject"
+    contains "$TMP/regression-code.md" 'regression-proof: inconclusive:'
+  fi
+  contains "$TMP/regression-code.md" "regression-base-exit: $regression_code"
+done
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/regression.patch" --verify true \
+  --regression-test 'kill -TERM $$' --report "$TMP/regression-signal.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "signal must be inconclusive"
+contains "$TMP/regression-signal.md" 'regression-proof: inconclusive:'
+printf 'fixed\n' > "$repo/src/value.txt"
+git -C "$repo" diff > "$TMP/no-tests.patch"
+git -C "$repo" checkout -q -- src/value.txt
+"$ADMIT" --repo "$repo" --patch "$TMP/no-tests.patch" --verify true \
+  --regression-test false --report "$TMP/no-tests.md" >/dev/null 2>&1 || fail "missing test hunks must be inconclusive"
+contains "$TMP/no-tests.md" 'regression-proof: inconclusive:'
+rc=0
+"$ADMIT" --repo "$repo" --patch "$TMP/regression.patch" --verify true \
+  --regression-test '' --report "$TMP/regression-empty.md" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 2 ] || fail "empty regression command must be rejected"
+# END regression-proof
+
 # The candidate passes only because its indirect test helper was weakened. The
 # assertion-count heuristic cannot see this, and both historical overrides are
 # present to prove they cannot disable the base verification floor.

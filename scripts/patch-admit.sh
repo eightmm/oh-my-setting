@@ -27,6 +27,8 @@ ROOT_LIB="$ROOT/scripts/lib"
 REPO="$PWD"
 PATCH=""
 VERIFY=""
+REGRESSION_TEST=""
+REGRESSION_SET=0
 VERIFY_EXPLICIT=0
 VERIFY_EXIT=""
 VERIFICATION="none"
@@ -53,6 +55,9 @@ worktree_created=0
 floor_worktree_parent=""
 floor_worktree=""
 floor_worktree_created=0
+regression_worktree_parent=""
+regression_worktree=""
+regression_worktree_created=0
 cleanup_done=0
 reference_operation=""
 reference_scope_dir=""
@@ -80,6 +85,7 @@ Options:
                  With --plan-task, defaults to and must match its stored verifier.
                  Default: scripts/check.sh fast when implemented; otherwise
                  an existing check.sh requires an explicit --verify CMD.
+  --regression-test CMD  Prove CMD fails on base with patch tests and passes on the candidate.
   --ml           Prefer the ml-smoke verification mode when auto-detecting.
   --report FILE  Write the admission report here (default: .oms/artifacts/admit/).
   --plan-task ID  Enforce plan paths plus authenticated dispatch grants for its lease.
@@ -131,6 +137,12 @@ cleanup() {
     python3 "$ROOT_LIB/landing-reference.py" finish "$reference_state" "$reference_operation" "$reference_outcome" >/dev/null 2>&1 || true
   fi
   oms_reference_stop "$reference_state" >/dev/null 2>&1 || true
+  if [ -n "$regression_worktree" ] && [ "$regression_worktree_created" = 1 ]; then
+    oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree remove --force "$regression_worktree" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$regression_worktree_parent" ]; then
+    rm -rf "$regression_worktree_parent"
+  fi
   if [ -n "$floor_worktree" ] && [ "$floor_worktree_created" = 1 ] && [ "$KEEP_WORKTREE" = 0 ]; then
     oms_with_worktree_registry_lock "$REPO" git -C "$REPO" worktree remove --force "$floor_worktree" >/dev/null 2>&1 || true
   fi
@@ -160,6 +172,7 @@ while [ "$#" -gt 0 ]; do
     --patch) [ "$#" -ge 2 ] || fail "--patch requires a file"; PATCH="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --verify) [ "$#" -ge 2 ] || fail "--verify requires a command"; VERIFY="$2"; VERIFY_EXPLICIT=1; shift 2 ;;
+    --regression-test) [ "$#" -ge 2 ] || fail "--regression-test requires a command"; [ -n "$2" ] || fail "--regression-test requires a nonempty command"; REGRESSION_TEST="$2"; REGRESSION_SET=1; shift 2 ;;
     --ml) ML=1; shift ;;
     --report) [ "$#" -ge 2 ] || fail "--report requires a path"; REPORT="$2"; shift 2 ;;
     --plan-task) [ "$#" -ge 2 ] || fail "--plan-task requires id"; PLAN_TASK="$2"; shift 2 ;;
@@ -300,7 +313,7 @@ patch_sha="$(oms_sha256_stream < "$PATCH" 2>/dev/null | cut -c1-16)"
 [ -n "$patch_sha" ] || patch_sha="nohash"
 reuse_parameters=("$VERIFY" "$ML" "$PLAN_TASK" "$ALLOW_VERIFIER_CHANGE" "$ALLOW_TEST_REDUCTION"
   "$ALLOW_FLOOR_CHANGE_REASON" "$ALLOW_RESTRUCTURE" "$ACCEPT_ENCODING_LOSS")
-if [ "$managed_input" = 1 ]; then
+if [ "$managed_input" = 1 ] && [ "$REGRESSION_SET" = 0 ]; then
   reuse_binding="$(python3 "$ROOT_LIB/landing-capture.py" binding "$reference_state" "$REPO" "${reuse_parameters[@]}")" ||
     reuse_binding=""
 fi
@@ -733,15 +746,14 @@ SURFACE_PY
       record "candidate-only" "PASS" "$candidate_only"
     fi
     # --- Gate 3b: the patch must not quietly weaken the tests ---------------
+    test_path_pattern='(^|/)(tests?|spec)/|(^|/)test_[^/]+$|[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$'
     test_reduction=""
     if [ "$ALLOW_TEST_REDUCTION" = 0 ] && command -v python3 >/dev/null 2>&1; then
-      test_reduction="$(OMS_PATCH="$PATCH" python3 - <<'PY'
+      test_reduction="$(OMS_TEST_PATH_PATTERN="$test_path_pattern" OMS_PATCH="$PATCH" python3 - <<'PY'
 import os
 import re
 
-TEST_PATH = re.compile(
-    r"(^|/)(tests?|spec)/|(^|/)test_[^/]+$|[^/]*(_test|_spec|\.test|\.spec)\.[^/.]+$"
-)
+TEST_PATH = re.compile(os.environ["OMS_TEST_PATH_PATTERN"])
 ASSERT = re.compile(
     r"\bassert|\bexpect\s*\(|\bshould\b|\bfail\b|t\.(Error|Fatal)|"
     r"\bok\s*\(|\brequire\s*\.|\bXCTAssert"
@@ -849,6 +861,96 @@ PY
       fi
       prefix_index=$((prefix_index + 1))
     done
+    if [ "$REGRESSION_SET" = 1 ]; then
+      regression_result="inconclusive: setup failed"
+      regression_base_exit="not-run"
+      regression_candidate_exit="not-run"
+      regression_base_digest="unavailable"
+      regression_candidate_digest="unavailable"
+      regression_base_out=""
+      regression_candidate_out=""
+      if [ "$preverify_failed" = 1 ] || [ "$prefix_failed" = 1 ]; then
+        regression_result="inconclusive: earlier gate failed"
+      elif regression_worktree_parent="$(mktemp -d "${TMPDIR:-/tmp}/oh-my-setting-regression.XXXXXX")"; then
+        regression_worktree="$regression_worktree_parent/wt"
+        oms_harness_mark_tmpdir "$regression_worktree_parent" "$REPO" "$regression_worktree"
+        if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+          oms_with_worktree_registry_lock "$REPO" git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+          -C "$REPO" worktree add --quiet --detach "$regression_worktree" "$base_full_sha" >/dev/null 2>&1; then
+          regression_worktree_created=1
+          oms_seed_local_agent_files "$REPO" "$regression_worktree"
+          if OMS_TEST_PATH_PATTERN="$test_path_pattern" OMS_REGRESSION_PATCH="$PATCH" \
+            OMS_REGRESSION_DIR="$regression_worktree_parent" OMS_REGRESSION_REPO="$regression_worktree" \
+            python3 - <<'PY_REGRESSION'
+import os, re, subprocess
+from pathlib import Path
+root = os.environ["OMS_REGRESSION_REPO"]
+tmp = Path(os.environ["OMS_REGRESSION_DIR"])
+env = os.environ.copy()
+env.update(GIT_INDEX_FILE=str(tmp / "index"), GIT_CONFIG_GLOBAL="/dev/null",
+           GIT_CONFIG_SYSTEM="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+def git(*args):
+    return subprocess.check_output(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", root, *args], env=env, stderr=subprocess.DEVNULL)
+git("read-tree", "HEAD")
+git("apply", "--cached", "--binary", os.environ["OMS_REGRESSION_PATCH"])
+(tmp / "candidate-digest").write_bytes(git("write-tree"))
+paths = git("diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD").split(b"\0")
+pattern = re.compile(os.environ["OMS_TEST_PATH_PATTERN"])
+paths = [os.fsdecode(p) for p in paths if p and pattern.search(os.fsdecode(p))]
+if not paths:
+    raise SystemExit(1)
+patch = git("diff", "--cached", "--binary", "--no-renames", "HEAD", "--", *(":(literal)" + p for p in paths))
+(tmp / "tests.patch").write_bytes(patch)
+git("read-tree", "HEAD")
+git("apply", "--cached", "--binary", str(tmp / "tests.patch"))
+(tmp / "base-digest").write_bytes(git("write-tree"))
+PY_REGRESSION
+          then
+            regression_base_digest="$(cat "$regression_worktree_parent/base-digest")"
+            regression_candidate_digest="$(cat "$regression_worktree_parent/candidate-digest")"
+            if GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+              git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C "$regression_worktree" apply --binary "$regression_worktree_parent/tests.patch" >/dev/null 2>&1; then
+              regression_run() {
+                local regression_dir="$1" regression_status="$2"
+                cd "$regression_dir" || return 125
+                OMS_PEER_VERIFY_TIMEOUT="${OMS_PEER_VERIFY_TIMEOUT:-20m}" run_verify_with_timeout \
+                  python3 -c 'import subprocess,sys
+r = subprocess.run(["bash", "-c", sys.argv[1]])
+with open(sys.argv[2], "w") as f:
+    f.write("signal" if r.returncode < 0 else "exit")
+sys.exit(128 - r.returncode if r.returncode < 0 else r.returncode)' \
+                  "$REGRESSION_TEST" "$regression_status"
+              }
+              regression_base_exit=0
+              regression_base_out="$(regression_run "$regression_worktree" "$regression_worktree_parent/base-status" 2>&1 | tail -n 20)" || regression_base_exit=$?
+              regression_candidate_exit=0
+              regression_candidate_out="$(regression_run "$worktree" "$regression_worktree_parent/candidate-status" 2>&1 | tail -n 20)" || regression_candidate_exit=$?
+              regression_base_kind="$(cat "$regression_worktree_parent/base-status" 2>/dev/null || :)"
+              regression_candidate_kind="$(cat "$regression_worktree_parent/candidate-status" 2>/dev/null || :)"
+              if [ "$regression_base_kind" != exit ] || [ "$regression_candidate_kind" != exit ] ||
+                { [ "$regression_base_exit" -ge 124 ] && [ "$regression_base_exit" -le 127 ]; } ||
+                { [ "$regression_candidate_exit" -ge 124 ] && [ "$regression_candidate_exit" -le 127 ]; }; then
+                regression_result="inconclusive: command did not exit normally"
+              elif [ "$regression_candidate_exit" -ne 0 ]; then
+                regression_result="failing-after"
+              elif [ "$regression_base_exit" -eq 0 ]; then
+                regression_result="not-failing-before"
+              else
+                regression_result="proven"
+              fi
+            fi
+          else
+            regression_result="inconclusive: cannot construct test-only base"
+          fi
+        fi
+      fi
+      case "$regression_result" in
+        proven) record "regression" "PASS" "$regression_result" ;;
+        failing-after|not-failing-before) record "regression" "FAIL" "$regression_result" ;;
+        *) record "regression" "SKIP" "$regression_result" ;;
+      esac
+    fi
+
     if [ -n "$VERIFY" ]; then
       if [ "$preverify_failed" = 1 ]; then
         record "verify" "SKIP" "pre-verification policy or integrity gate failed"
@@ -1113,6 +1215,14 @@ mkdir -p "$(dirname "$REPORT")"
     printf -- '- floor_change_reason: %s\n' "$ALLOW_FLOOR_CHANGE_REASON"
     printf -- '- floor_change_used: %s\n' "$FLOOR_CHANGE_USED"
   fi
+  if [ "$REGRESSION_SET" = 1 ]; then
+    printf -- '- regression-proof: %s\n' "${regression_result:-inconclusive: patch did not apply}"
+    printf -- '- regression-command: %s\n' "$REGRESSION_TEST"
+    printf -- '- regression-base-digest: %s\n' "${regression_base_digest:-unavailable}"
+    printf -- '- regression-candidate-digest: %s\n' "${regression_candidate_digest:-unavailable}"
+    printf -- '- regression-base-exit: %s\n' "${regression_base_exit:-not-run}"
+    printf -- '- regression-candidate-exit: %s\n' "${regression_candidate_exit:-not-run}"
+  fi
   [ -z "$COVERS" ] || printf -- '- covers:%s\n' "$COVERS"
   printf -- '- checked: %s\n\n' "$ts"
   printf '## Ladder\n\n'
@@ -1125,6 +1235,10 @@ mkdir -p "$(dirname "$REPORT")"
     printf '%s\n' "$changed_files" | while IFS= read -r f; do
       [ -n "$f" ] && printf -- '- %s\n' "$f"
     done
+  fi
+  if [ "$REGRESSION_SET" = 1 ]; then
+    printf '\n## Regression base output (tail)\n\n```\n%s\n```\n' "${regression_base_out:-}"
+    printf '\n## Regression candidate output (tail)\n\n```\n%s\n```\n' "${regression_candidate_out:-}"
   fi
   if [ -n "$verify_out" ]; then
     printf '\n## Verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$verify_out" | tail -n 40)"
