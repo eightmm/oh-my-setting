@@ -1785,11 +1785,26 @@ if [ "$DISCOVER" -eq 1 ]; then
   echo "plan-from-spec: evidence packet: $discovery_evidence (sha256: $packet_digest)"
   echo "plan-from-spec: candidate report: $candidate_report (sha256: $report_digest)"
 fi
-python3 - "$proposal" "$ALLOW_VERIFIER_CHANGE" <<'PY'
+python3 - "$proposal" "$ALLOW_VERIFIER_CHANGE" "$ROOT/scripts/lib" <<'PY'
 import json, re, sys
 
+sys.dont_write_bytecode = True
 allow_verifier_change = sys.argv[2] == "1"
-for t in json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]:
+proposed = json.load(open(sys.argv[1], encoding="utf-8"))["tasks"]
+# How the tasks would group if anything ran side by side: a reading aid for the
+# person approving the list. plan-run still claims one ready task at a time.
+try:
+    sys.path.insert(0, sys.argv[3])
+    import plan_waves
+    grouped = plan_waves.summary(proposed)
+except Exception:
+    grouped = []
+if grouped:
+    print("  waves: %d, from depends and overlapping allowed paths (a reading aid; plan-run still runs one task at a time)"
+          % len(grouped))
+    for number, names in enumerate(grouped, 1):
+        print("    wave %d: %s" % (number, ", ".join(names)))
+for t in proposed:
     deps = ",".join(t.get("depends") or []) or "-"
     print("  %-14s %s  [allowed: %s] [verify: %s] [depends: %s]" % (
         t["id"], t["title"], ",".join(t["allowed"]), t["verify"], deps))
