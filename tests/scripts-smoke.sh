@@ -33364,6 +33364,23 @@ test_repo_state_reports_the_project_harness() {
   contains "$out" 'Project harness: none' ||
     fail "a repo with no harness should say so: $out"
 
+  # Provider-native memory beside .oms/memory: one advisory line, only when one
+  # exists, never in --json or for a harness child.
+  local memhome="$TMP/state-memsources-home"
+  mkdir -p "$memhome"
+  contains "$(HOME="$memhome" CODEX_HOME="" "$ROOT/scripts/state.sh" --repo "$project")" 'memory sources:' &&
+    fail "state must print no memory-sources line when none exist"
+  mkdir -p "$memhome/.codex/memories" "$project/.claude/agent-memory/x"
+  printf 'a\n' > "$memhome/.codex/memories/a.md"
+  out="$(HOME="$memhome" CODEX_HOME="" "$ROOT/scripts/state.sh" --repo "$project")"
+  contains "$out" 'memory sources: 2 provider-native location(s) present besides .oms/memory (oms agent-memory sources)' ||
+    fail "state should count provider-native memory locations: $out"
+  out="$(HOME="$memhome" CODEX_HOME="" OMS_HARNESS_CHILD=1 "$ROOT/scripts/state.sh" --repo "$project")"
+  contains "$out" 'memory sources:' && fail "a harness child must see no memory-sources line"
+  out="$(HOME="$memhome" CODEX_HOME="" "$ROOT/scripts/state.sh" --repo "$project" --json)"
+  contains "$out" 'memory sources:' && fail "--json must not carry the advisory line"
+  rm -rf "$project/.claude" "$memhome"
+
   "$ROOT/scripts/apply-project-template.sh" general "$project" >/dev/null
   out="$("$ROOT/scripts/state.sh" --repo "$project")"
   contains "$out" 'rules: general' ||
