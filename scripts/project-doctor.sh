@@ -476,6 +476,24 @@ if has_block "$agents_file" "ml" || has_block "$claude_file" "ml"; then
     if [ -n "$big_tracked" ]; then
       warn "tracked files over 10MB (data/checkpoints belong outside git): $big_tracked"
     fi
+
+    # Notebook hygiene (read-only): stored outputs and out-of-order runs in
+    # tracked notebooks. Silent when no notebook is tracked; never rewrites one.
+    nb_list=()
+    while IFS= read -r -d '' p; do
+      [ -f "$PROJECT_DIR/$p" ] && [ ! -L "$PROJECT_DIR/$p" ] || continue
+      nb_list+=("$PROJECT_DIR/$p")
+      [ "${#nb_list[@]}" -lt 50 ] || break
+    done < <(git -C "$PROJECT_DIR" ls-files -z -- '*.ipynb' 2>/dev/null || true)
+    if [ "${#nb_list[@]}" -gt 0 ] && command -v python3 >/dev/null 2>&1; then
+      while IFS=$'\t' read -r nb_level nb_msg; do
+        nb_msg="${nb_msg//"$PROJECT_DIR"\//}"
+        case "$nb_level" in
+          warn) warn "$nb_msg" ;;
+          ok) ok "$nb_msg" ;;
+        esac
+      done < <(python3 "$ROOT/scripts/lib/notebook_hygiene.py" "${nb_list[@]}" 2>/dev/null || true)
+    fi
   fi
 fi
 

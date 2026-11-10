@@ -497,6 +497,11 @@ oms project-doctor .
 oms project-private --check
 ```
 
+In a git project, `project-doctor` also reads each tracked `.ipynb` (at most 50,
+plain JSON, read-only) and warns when it stores 1 KiB or more of cell outputs or
+its `execution_count` values do not increase in file order. It never strips or
+rewrites a notebook.
+
 `oms project-doctor --contract .` is a separate read-only look at what the contract
 points at: every `Required check files` entry, `Decisions` `References` path and relative
 Markdown link in `PROJECT.md` must exist, and a plan task's `covers` must name a criterion
