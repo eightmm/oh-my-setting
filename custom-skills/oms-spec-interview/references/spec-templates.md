@@ -78,6 +78,10 @@ repo-relative regular non-symlink file that defines the verifier under
 `make test`, or `pytest` allow automatic verifier discovery; the harness still
 enforces the verifier floor when the explicit file list is empty.
 
+When a decision needs its alternatives, interface or risks written down, an
+optional [design note](design-note.md) holds them and `Decisions` points at it
+with a `- References:` line. It is never a required step.
+
 For routine or non-project work, keep necessary decisions and verification in
 the existing task context; no separate spec is required. Ask only about
 unresolved material choices or missing authority.
