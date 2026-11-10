@@ -404,7 +404,7 @@ selected_main = render(selected_main_tree, "codex", 100, 40, view="tree",
                        navigation={"selected": ("result", layout_main)})
 assert "tokens unreported" not in selected_main, selected_main
 assert len(set(map(len, band_tags))) > 1, (band_tags, band_rows)
-assert all(row.rstrip().endswith(age) for row, age in zip(band_rows, ("37m", "4m", "<1m", "12m"))), band_rows
+assert all(row.rstrip().endswith(age) for row, age in zip(band_rows, ("37m", "4m", "12m", "<1m"))), band_rows
 
 # Every collapsed call group shares its tail columns, including narrow fallbacks.
 tail_fixture = deepcopy(layout_tree)
@@ -579,7 +579,10 @@ for columns, rows, menu in ((34, 50, False), (56, 50, False), (76, 16, False), (
             continue
         tree_rows = [hit for hit in geometry_nav["hits"] if hit.get("tree")]
         drawn_calls = [hit["action"][1] for hit in tree_rows if "more " not in geometry_lines[hit["y"] - 1]]
-        assert "builder" in drawn_calls and drawn_calls[-1] == "builder", (geometry_picture, drawn_calls)
+        # The worker waiting for approval leads its running siblings.
+        assert "builder" in drawn_calls and drawn_calls.index("builder") < min(
+            [drawn_calls.index(ident) for ident in ("explorer", "researcher") if ident in drawn_calls],
+            default=len(drawn_calls)), (geometry_picture, drawn_calls)
         for ident in drawn_calls:
             edge = next(hit for hit in tree_rows if hit["action"] == ("result", ident))
             row = geometry_lines[edge["y"] - 1]
@@ -6985,6 +6988,42 @@ for rows in (None, "malformed", {}, [], [None, ""]):
     with patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((76, 20))):
         frame_text, _, _ = panel.frame_view(bg_root, "codex", dict(room_view, background=rows), menu=False)
     assert "Autopilot:" not in frame_text and len(frame_text.splitlines()) <= 20, frame_text
+
+# Row clarity: a mixed board lists calls needing the owner first, counts what it draws, and hints when nothing is live.
+def row_fixture(specs):
+    members = [dict(room_view["room"]["participants"][0])]
+    attempts = []
+    results = {}
+    for index, (name, state, minutes) in enumerate(specs):
+        members.append({"participant": name, "role": "worker", "provider": "codex", "model": "gpt-6-luna",
+                        "label": "Task " + name, "parent": members[0]["participant"], "joined": True,
+                        "seq": index + 10, "joined_at": minutes_ago(minutes + 30)})
+        attempts.append({"attempt_id": name, "state": state, "task_id": "t-" + name, "updated_at": minutes_ago(minutes),
+                         "panel": {"role": "worker", "room_id": shared, "room_participant": name,
+                                   "parent": members[0]["participant"], "model": "gpt-6-luna"}})
+        if state in {"done", "failed"}:
+            results[name] = {"exit": 0 if state == "done" else 1, "ts": minutes_ago(minutes)}
+    board = deepcopy(room_view)
+    board["room"].update(participants=members, call_results=results)
+    board["attempts"] = {"active_recent": [a for a in attempts if a["state"] not in {"done", "failed"}],
+                         "recent": [a for a in attempts if a["state"] in {"done", "failed"}]}
+    return board
+
+mixed = row_fixture([("run-a", "working", 4), ("run-b", "working", 90), ("ask-a", "waiting_approval", 12),
+                     ("bad-a", "failed", 50), ("fin-a", "done", 9), ("fin-b", "done", 130)])
+for view_name in ("tree", "graph"):
+    frame_text = render(mixed, "claude", 100, 40, view=view_name, navigation={})
+    # The call waiting on the owner leads the running calls; failed ones follow them (settled order is pinned elsewhere).
+    assert frame_text.index("Task ask-a") < min(frame_text.index("Task run-a"), frame_text.index("Task run-b")), \
+        (view_name, frame_text)
+    assert "Task fin-a" not in frame_text and "Task fin-b" not in frame_text, frame_text
+tree_text = render(mixed, "claude", 100, 40, view="tree", navigation={})
+assert "Activity · 1 main · 4 calls · 2 past" in tree_text, tree_text
+all_done = row_fixture([("fin-a", "done", 9), ("fin-b", "done", 130)])
+assert "No active calls · 2 finished, see Past" in render(all_done, "claude", 80, 30, view="tree", navigation={})
+assert "No calls yet" in render(row_fixture([]), "claude", 80, 30, view="tree", navigation={})
+settled_colored = render(mixed, "claude", 100, 40, view="tree", color=True, navigation={"tab": "past"})
+assert "\033[90mWORKER Luna 6" in settled_colored and "\033[32mWORKER Luna 6" not in settled_colored.split("Past")[-1], settled_colored
 
 # END room rendering integration
 

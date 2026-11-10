@@ -2449,8 +2449,11 @@ main reviewed a result instead of showing internal fields.
 
  Quiet output does not prove that the model stopped. Clicking the main's
 card opens its proven original conversation. Calls with no known main are counted on one
-warning row (`t` lists them in the tree). Within advisors and within workers, attention states sort
-first.
+warning row (`t` lists them in the tree). Within advisors and within workers, calls waiting on the
+person (needs approval, needs input, awaiting decision) sort first, then running, then failed. The
+Activity heading counts the calls the board draws and adds `N past` for the settled ones in the Past
+tab; with none drawn, a dim row says `No active calls` or `No calls yet`. Past rows dim the call
+name and keep the state tag's color.
 
 ### Single-main and recovery guards
 
