@@ -4439,7 +4439,7 @@ assert row.get("task_id") == "known-task" and row["review"]["seats"][0]["round"]
 PY
 }
 
-# smoke-weight: 12
+# smoke-weight: 30
 test_peer_review_gate_records_typed_outcome() {
   local project="$TMP/review-gate-typed"
   local artifact_dir="$project/artifacts"
@@ -4682,6 +4682,54 @@ EOF
   assert_file_contains "$TMP/findings-rules" '3 finding(s): Generated file'
   assert_file_contains "$TMP/findings-rules" 'by hand'
   cmp -s "$found/PROJECT.md" <(git -C "$found" show HEAD:PROJECT.md) || fail "a suggestion must never write a rule"
+
+  # --security-audit asks one more provider only when the change touches the
+  # risk paths patch-admit advises on, and prints that seat's own verdict. It
+  # is advisory: fail and incomplete are recorded and the gate does not move.
+  write_fake_review_gate_provider "$found/bin" claude pass
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --no-verify --security-audit codex --prompt "No risk" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "a passing gate with nothing to audit should pass, got $rc: $(cat "$TMP/findings-out")"
+  assert_file_contains "$TMP/findings-out" 'security: skipped (no risk paths in this change)'
+  printf 'mode=strict\n' > "$found/app_settings.cfg"
+  git -C "$found" add app_settings.cfg
+  git -C "$found" commit -qm 'test: a settings file'
+  printf 'mode=open\n' > "$found/app_settings.cfg"
+  cat > "$found/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat > "$(dirname "$0")/security-prompt"
+printf 'app_settings.cfg:1 opens the mode to everyone\nSECURITY: fail\n'
+EOF
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --no-verify --security-audit codex --prompt "Risk audit" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "a failing security audit is advisory and must not move the gate, got $rc: $(cat "$TMP/findings-out")"
+  assert_file_contains "$TMP/findings-out" 'security: fail (codex; advisory, the GATE verdict is unchanged)'
+  assert_file_contains "$found/bin/security-prompt" 'SECURITY-AUDITOR-STRATEGY'
+  assert_file_contains "$found/bin/security-prompt" '"app_settings.cfg"'
+  assert_file_contains "$found/bin/security-prompt" '+mode=open'
+  python3 - "$found/.oms/artifacts/index.jsonl" <<'PYSEC' || fail "the security verdict was not recorded as its own row"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+audit = [row for row in rows if row.get("kind") == "review-security"]
+assert audit and audit[-1].get("exit") == 1 and audit[-1].get("provider") == "codex", audit
+outcome = [row for row in rows if row.get("kind") == "review-outcome"][-1]
+assert outcome.get("exit") == 0, outcome
+PYSEC
+  # An answer without the verdict line is incomplete, never a pass.
+  cat > "$found/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'looks fine to me\n'
+EOF
+  rc=0
+  HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --gate --no-verify --security-audit codex --prompt "Risk audit two" > "$TMP/findings-out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "an incomplete security audit must not move the gate, got $rc"
+  assert_file_contains "$TMP/findings-out" 'security: incomplete (codex; advisory'
+  ! HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
+    --providers claude --security-audit codex --prompt "No gate" > "$TMP/findings-out" 2>&1 || fail "--security-audit without --gate must be refused"
 }
 
 test_prompt_takers_refuse_a_mistyped_option() {
