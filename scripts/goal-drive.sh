@@ -74,6 +74,12 @@ mismatch between the admitted patch and the working tree. Every terminal
 writes a reason row to .oms/plan/progress.jsonl and a fail-ledger entry when
 it parked; a later run whose acceptance passes resolves those park rows.
 
+Each goal-cycle/autopilot-cycle row also carries mechanical facts against the
+previous cycle (head_changed, tree_changed, accept_changed, tasks_closed,
+receipts_new) and stalled_cycles: consecutive cycles whose tree did not change
+and that closed no task. Above OMS_GOAL_DRIVE_STALL_THRESHOLD (default 2) the
+output suggests a re-plan; it never parks or retries by itself.
+
   --campaign FILE  Initialize or resume a problem campaign and run its waves.
   --dry-run        Validate and print the normalized campaign without writing.
   --status         Read the campaign ledger without changing it.
@@ -2119,12 +2125,19 @@ PY
 fi
 goal_reserve_cycle() {  # TASK [LEASE]
   OMS_GD_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_GD_CONTRACT="$CONTRACT_ID" \
-    OMS_GD_RUN="$RUN_ID" OMS_GD_CYCLE="$CYCLE" python3 - "$1" "${2:-}" <<'PY' | progress_append || return $?
+    OMS_GD_RUN="$RUN_ID" OMS_GD_CYCLE="$CYCLE" OMS_GD_FACTS="${PROGRESS_FACTS:-}" \
+    python3 - "$1" "${2:-}" <<'PY' | progress_append || return $?
 import json, os, sys
 owner = os.environ["OMS_GD_CONTRACT"]
-print(json.dumps({"schema": 1, "kind": "autopilot-cycle" if owner else "goal-cycle",
+row = {"schema": 1, "kind": "autopilot-cycle" if owner else "goal-cycle",
     "ts": os.environ["OMS_GD_TS"], "contract_id": owner, "run_id": os.environ["OMS_GD_RUN"],
-    "cycle": int(os.environ["OMS_GD_CYCLE"]), "task_id": sys.argv[1], "lease_id": sys.argv[2]}))
+    "cycle": int(os.environ["OMS_GD_CYCLE"]), "task_id": sys.argv[1], "lease_id": sys.argv[2]}
+try:
+    facts = json.loads(os.environ["OMS_GD_FACTS"] or "{}")
+except ValueError:
+    facts = {}
+row.update(facts if isinstance(facts, dict) else {})
+print(json.dumps(row))
 PY
   RUN_ATTEMPTS=$((${RUN_ATTEMPTS:-0} + 1))
   if [ -n "$CONTRACT_ID" ]; then
@@ -2288,6 +2301,11 @@ dirty="$(git_status_porcelain)"
 
 prev_tree=""
 prev_accept_out=""
+prev_head=""
+prev_closed=0
+prev_receipts=0
+stalled_cycles=0
+PROGRESS_FACTS=""
 while :; do
   CYCLE=$((CYCLE + 1))
   guard_git_authority
@@ -2362,6 +2380,29 @@ print(found)
   if [ "$tree" = "$prev_tree" ] && [ "$accept_digest" = "$prev_accept_out" ]; then
     park "stuck" "same tree and same failing acceptance twice; get an outside read: oms advise"
   fi
+  # Advisory progress facts for the cycle row (no model, no new store): what
+  # changed since the previous cycle began, and how many cycles in a row changed
+  # nothing. Exceeding the threshold only suggests a re-plan; the park above
+  # stays the only stop.
+  cur_head="$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo none)"
+  cur_closed="$("$ROOT/scripts/agent-plan.sh" --repo "$REPO" status --json 2>/dev/null | \
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("closed_count", 0))' 2>/dev/null | tr -d '\r')"
+  cur_receipts=0
+  if [ -f "$STATE_REPO/.oms/artifacts/index.jsonl" ]; then
+    cur_receipts="$(wc -l < "$STATE_REPO/.oms/artifacts/index.jsonl" | tr -d ' \r')"
+  fi
+  stall_threshold="${OMS_GOAL_DRIVE_STALL_THRESHOLD:-2}"
+  case "$stall_threshold" in *[!0-9]*|"") stall_threshold=2 ;; esac
+  progress_out=()
+  mapfile -t progress_out < <(python3 "$ROOT/scripts/lib/goal_progress.py" "$CYCLE" "$stalled_cycles" \
+    "$stall_threshold" "$cur_head" "$tree" "$accept_digest" "${cur_closed:-0}" "${cur_receipts:-0}" \
+    "$prev_head" "$prev_tree" "$prev_accept_out" "$prev_closed" "$prev_receipts" 2>/dev/null)
+  if [ "${#progress_out[@]}" -ge 3 ]; then
+    stalled_cycles="${progress_out[0]}"
+    PROGRESS_FACTS="${progress_out[2]}"
+    [ -z "${progress_out[1]}" ] || echo "${progress_out[1]}"
+  fi
+  prev_head="$cur_head"; prev_closed="${cur_closed:-0}"; prev_receipts="${cur_receipts:-0}"
   prev_tree="$tree"; prev_accept_out="$accept_digest"
 
   head_before="$(git -C "$REPO" rev-parse HEAD)"
