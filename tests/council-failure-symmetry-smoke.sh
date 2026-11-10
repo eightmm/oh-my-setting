@@ -157,6 +157,16 @@ PY
     fail "the dead seat's partial output must not ride the synthesis"
   fi
 
+  # 5b. Agreement tally: claude and agy print the same Verdict line, the dead
+  #     seat is not counted, and the section says it is a tally, not a decision.
+  grep -Fq '## Agreement tally' "$synth" || fail "the synthesis needs an agreement tally: $(cat "$synth")"
+  grep -Fq 'not a decision' "$synth" || fail "the tally must say it is not a decision"
+  grep -Eq '^- 2 seat\(s\) \[claude, antigravity\]: `verdict: the seat bookkeeping' "$synth" ||
+    fail "two matching verdict lines should tally as one group of 2: $(cat "$synth")"
+  if grep -E '^- .*codex.*`verdict' "$synth" | grep -q .; then
+    fail "the dead seat must not be tallied"
+  fi
+
   # 6. A provider that hangs every time has to accumulate onto one fingerprint,
   #    or the advise threshold never sees a chronically dead seat.
   rc="$(run_council "$project" "$bin_dir" seatfail2 "$project/out2" "$project/err2")"

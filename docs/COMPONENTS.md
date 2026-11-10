@@ -770,6 +770,12 @@ output contract. Failed and byte-budget-omitted seats remain labelled; the
 their existing behavior without this panel-only flag. `--rounds` requires
 `--council`, including an explicit `--rounds 1`.
 
+Every `oms peer-ask` synthesis carries an `## Agreement tally`: seats that
+answered, grouped by the first `Verdict:`, `Recommendation:` or `Answer:` line of
+their final answer (lowercased, whitespace collapsed, 80 bytes), or `(no verdict
+line)`. It counts identical lines mechanically, is labelled "not a decision", and
+involves no model call; matching text is not agreement on substance.
+
 
 ### Provider output and evidence
 
