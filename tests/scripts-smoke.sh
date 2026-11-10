@@ -27888,6 +27888,7 @@ def tree(edit):
     shutil.copytree(root / "roles", work / "roles")
     (work / "scripts/lib").mkdir(parents=True)
     shutil.copy(root / "scripts/lib/peer-common.sh", work / "scripts/lib/peer-common.sh")
+    shutil.copy(root / "config/panel-routing.json", work / "config/panel-routing.json")
     data = json.loads((root / "config/role-contracts.json").read_text())
     edit(data["roles"], work)
     (work / "config/role-contracts.json").write_text(json.dumps(data))
@@ -27930,6 +27931,32 @@ except OSError:
     pass
 else:
     raise AssertionError("an unreadable contract should raise")
+# Routing alignment: every role file has a routing entry or a documented alias.
+def routing_tree(edit, aliases=None):
+    shutil.rmtree(work, ignore_errors=True)
+    (work / "config").mkdir(parents=True)
+    shutil.copytree(root / "roles", work / "roles")
+    (work / "scripts/lib").mkdir(parents=True)
+    shutil.copy(root / "scripts/lib/peer-common.sh", work / "scripts/lib/peer-common.sh")
+    shutil.copy(root / "config/role-contracts.json", work / "config/role-contracts.json")
+    data = json.loads((root / "config/panel-routing.json").read_text())
+    edit(data["roles"], work)
+    (work / "config/panel-routing.json").write_text(json.dumps(data))
+    return role_contracts.check(work, writers={"builder"}, kinds={}, aliases=aliases)
+
+def expect_routing(edit, needle, aliases=None):
+    errors = routing_tree(edit, aliases)
+    assert any(needle in e for e in errors), (needle, errors)
+
+assert routing_tree(lambda r, w: None) == []
+expect_routing(lambda r, w: r.pop("critic"), "role file without routing entry or alias: critic")
+expect_routing(lambda r, w: r.update(ghost={"tier": "light"}), "routing entry without role file or alias: ghost")
+expect_routing(lambda r, w: None, "role file without routing entry or alias: test-designer",
+               aliases={k: v for k, v in role_contracts.ROUTING_ALIASES.items() if k != "test-designer"})
+expect_routing(lambda r, w: r.update({"test-designer": {"tier": "deep"}}), "alias also has a routing entry: test-designer")
+expect_routing(lambda r, w: r.pop("advisor"), "targets a key missing from routing roles: advisor")
+expect_routing(lambda r, w: None, "routing alias without role file: ghost",
+               aliases=dict(role_contracts.ROUTING_ALIASES, ghost="worker"))
 PY
 
   # Prompt-cache stability: render the same bundled-role prefix in two repos
