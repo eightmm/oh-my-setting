@@ -1007,6 +1007,18 @@ pattern list with no model, so it misses most corrections and sometimes keeps a
 sentence that was not one. It is off by default because it stores a fragment of
 what the person typed; it runs only in a repository that already has `.oms`,
 never for a harness child, and holds at most 200 undecided rows.
+
+A note can be scoped to the paths it is about: `oms agent-memory append --paths
+'src/data/**,*.yaml' --text …` records up to eight repository-relative globs
+(`**` crosses directories, `*` and `?` stay inside one) in the note's metadata.
+`recall --target PATH[,PATH]` names the paths being worked on: a note scoped to
+a matching path ranks ahead of everything else, a note scoped elsewhere is left
+out, and unscoped notes follow in their usual order. A scoped note stays out of
+`summary.md` and out of the recall injected into provider context, unless the
+caller names the work's paths in `OMS_MEMORY_TARGET_PATHS`; nothing in OMS sets
+that variable yet, so today scoped notes reach a session through `recall
+--target` and plain `recall`/`search`, which still find them. Project memory
+only; the index needs no rebuild, because the scope is read from the log.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.

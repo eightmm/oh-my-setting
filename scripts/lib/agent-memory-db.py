@@ -64,6 +64,7 @@ class Entry:
     source_blob_oid: str = ""
     supersedes: str = ""
     retires: str = ""
+    paths: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ def make_entry(
         source_blob_oid=metadata.get("source_blob_oid", ""),
         supersedes=metadata.get("supersedes", ""),
         retires=metadata.get("retires", ""),
+        paths=metadata.get("paths", ""),
     )
 
 
@@ -1017,6 +1019,65 @@ def filter_memory_state(entries, status, include):
     return [row for row in entries if row[5] != "retirement" and (include or str(row[0]) not in status)]
 
 
+def path_scope_globs(text: str) -> list[str]:
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def path_scope_regex(glob: str) -> "re.Pattern[str]":
+    """Repository-relative glob: `**` crosses directories, `*` and `?` stay inside one."""
+    out, i = [], 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif glob.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    return re.compile("".join(out) + r"(?:/.*)?\Z")
+
+
+def path_scope_map(shared: str) -> dict[str, list[str]]:
+    """Path scopes live in the Markdown log, like citations: the index needs no migration."""
+    return {
+        entry.event_id: path_scope_globs(entry.paths)
+        for entry in parse_shared(stable_snapshot(shared).text)
+        if path_scope_globs(entry.paths)
+    }
+
+
+def apply_path_scope(entries, scopes, targets, drop_unmatched):
+    """Order and filter recalled rows by the paths a note was scoped to.
+
+    With targets: a scoped note that matches one moves ahead of everything
+    else in its recalled order, one that matches none is dropped. Without
+    targets a scoped note is kept as recalled, or dropped when the caller is
+    building context for work whose paths it does not know.
+    """
+    if not scopes:
+        return list(entries)
+    targets = [target.strip().lstrip("./") for target in targets if target.strip()]
+    matched, rest = [], []
+    for row in entries:
+        globs = scopes.get(str(row[0]))
+        if not globs:
+            rest.append(row)
+        elif targets:
+            if any(path_scope_regex(glob).match(target) for glob in globs for target in targets):
+                matched.append(row)
+        elif not drop_unmatched:
+            rest.append(row)
+    return matched + rest
+
+
 def source_citation_map(shared: str) -> dict[str, dict[str, object]]:
     """Read citation provenance from the canonical Markdown source.
 
@@ -1393,6 +1454,8 @@ def main() -> int:
     parser.add_argument("--target", default="")
     parser.add_argument("--operation", default="")
     parser.add_argument("--view", default="")
+    parser.add_argument("--target-path", default="")
+    parser.add_argument("--scoped", choices=("keep", "drop"), default="keep")
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("--limit must not be negative")
@@ -1421,7 +1484,7 @@ def main() -> int:
                     print(entry.rendered)
         elif args.view == "summary":
             for entry in notes:
-                if active(entry) and not entry.source_path and entry.body.strip():
+                if active(entry) and not entry.source_path and not entry.paths and entry.body.strip():
                     line = " ".join(entry.body.splitlines()[0].split())
                     if len(line) > 240:
                         line = line[:240] + "..."
@@ -1464,6 +1527,9 @@ def main() -> int:
             entries = filter_memory_state(entries, status, args.include_superseded)
             entries, validation = filter_cited_entries(
                 entries, citations, args.repo, args.include_stale
+            )
+            entries = apply_path_scope(
+                entries, path_scope_map(args.shared), args.target_path.split(","), args.scoped == "drop"
             )
             entries = entries[: args.limit]
             touch_access(db, entries)

@@ -11,7 +11,7 @@ oms_memory_prev="" oms_memory_at=0
 for oms_memory_arg in "$@"; do
   oms_memory_at=$((oms_memory_at + 1))
   case "$oms_memory_prev" in
-    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--from|--select|--kind|--accept|--retire|--reject)
+    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--paths|--target|--from|--select|--kind|--accept|--retire|--reject)
       oms_memory_prev=""; continue ;;
   esac
   case "$oms_memory_arg" in
@@ -43,10 +43,33 @@ AS_JSON=0
 JSON_ARGS=()
 SOURCE_FILE=""
 SOURCE_LINE=""
+NOTE_PATHS=""
+TARGET_PATH=""
 INCLUDE_STALE=0
 INCLUDE_SUPERSEDED=0
 TARGET_ID=""
 REASON=""
+
+# Normalize a comma-separated list of repository-relative globs or paths; a
+# value that could name something outside the repository is refused.
+oms_memory_path_list() {
+  local raw="$1" part out="" count=0
+  local -a parts=()
+  IFS=, read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    part="${part#"${part%%[![:space:]]*}"}"; part="${part%"${part##*[![:space:]]}"}"
+    part="${part#./}"
+    [ -n "$part" ] || continue
+    case "$part" in
+      /*|*..*|*[!A-Za-z0-9._*?/-]*) return 1 ;;
+    esac
+    [ "${#part}" -le 120 ] || return 1
+    count=$((count + 1))
+    out="${out:+$out,}$part"
+  done
+  [ "$count" -ge 1 ] && [ "$count" -le 8 ] || return 1
+  printf '%s\n' "$out"
+}
 
 usage() {
   cat <<'EOF'
@@ -86,6 +109,14 @@ Options:
                     Cited notes stay out of compact provider context and are
                     revalidated whenever they are searched or recalled.
   --source-line N   append: 1-based line paired with --source-file.
+  --paths GLOB[,GLOB]
+                    append: scope the note to repository-relative paths (`**`
+                    crosses directories). A scoped note stays out of the
+                    compact summary and out of injected recall unless the work's
+                    paths match; plain recall and search still find it.
+  --target PATH[,PATH]
+                    recall: the paths being worked on. Notes scoped to a
+                    matching path rank first; notes scoped elsewhere are left out.
   --id ID           supersede/retire: target event_id from search/recall JSON.
   --reason TEXT     retire: reason for retirement.
   --include-superseded search/recall: include superseded and retired notes, marked.
@@ -187,6 +218,11 @@ while [ "$#" -gt 0 ]; do
       SOURCE_LINE="$2"
       shift 2
       ;;
+    --paths|--target)
+      [ "$#" -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
+      if [ "$1" = --paths ]; then NOTE_PATHS="$2"; else TARGET_PATH="$2"; fi
+      shift 2
+      ;;
     --id)
       [ "$#" -ge 2 ] || { echo "error: --id requires a value" >&2; exit 2; }
       TARGET_ID="$2"; shift 2 ;;
@@ -244,6 +280,21 @@ if [ -n "$SOURCE_FILE" ] || [ -n "$SOURCE_LINE" ]; then
     echo "error: source citations require project memory" >&2
     exit 2
   }
+fi
+if [ -n "$NOTE_PATHS" ]; then
+  [ "$ACTION" = append ] && [ "$SCOPE" = project ] && [ "$MEMORY_FILE_EXPLICIT" -eq 0 ] || {
+    echo "error: --paths applies only to append on project memory" >&2; exit 2; }
+  NOTE_PATHS="$(oms_memory_path_list "$NOTE_PATHS")" || {
+    echo "error: --paths takes up to 8 repository-relative globs of [A-Za-z0-9._*?/-], no leading / and no .." >&2; exit 2; }
+  export OMS_MEMORY_NOTE_PATHS="$NOTE_PATHS"
+else
+  unset OMS_MEMORY_NOTE_PATHS
+fi
+if [ -n "$TARGET_PATH" ]; then
+  [ "$ACTION" = recall ] || { echo "error: --target applies only to recall" >&2; exit 2; }
+  TARGET_PATH="$(oms_memory_path_list "$TARGET_PATH")" || {
+    echo "error: --target takes up to 8 repository-relative paths of [A-Za-z0-9._*?/-], no leading / and no .." >&2; exit 2; }
+  JSON_ARGS+=(--target-path "$TARGET_PATH")
 fi
 case "$ACTION" in
   supersede|retire) [ -n "$TARGET_ID" ] || { echo "error: $ACTION requires --id" >&2; exit 2; } ;;
