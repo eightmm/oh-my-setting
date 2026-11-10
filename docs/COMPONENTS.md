@@ -1234,6 +1234,30 @@ caller names the work's paths in `OMS_MEMORY_TARGET_PATHS`; nothing in OMS sets
 that variable yet, so today scoped notes reach a session through `recall
 --target` and plain `recall`/`search`, which still find them. Project memory
 only; the index needs no rebuild, because the scope is read from the log.
+
+Project memory is clone-local, so a note leaves its clone only on request.
+`oms agent-memory promote --id EVENT --global` copies one active note into
+global memory: a dry run unless `--apply`, parent only, refused when the text
+still looks sensitive or machine-specific after home paths are normalized, and
+written once (the copy cites the event ID, never the repository or its path).
+`oms agent-memory graduate --id EVENT --to AGENTS.md|PROJECT.md` prints a diff
+of the note as one bullet (under `## Decisions` in `PROJECT.md`) and never
+writes; the edit goes through ordinary review, after which the note is retired
+with `retire --id EVENT --reason graduated`. `oms agent-memory recall
+--all-repos QUERY` ranks the query in every repository registered with `oms
+tick`: each derived index is read as last synchronized, nothing is rebuilt, no
+recall receipt is written, and a clone with no index is counted, not built.
+`--limit` is per repository (default 5, at most 20); the first 30 registered
+repositories and 50 hits are read, and a harness child is refused.
+
+Explicit project `recall` also points at session handoff digests. The head of
+each digest still under `.oms/handoffs/` (newest 200, first 8 KiB, machine
+header lines left out) is matched at recall time, and up to three matches are
+listed after the notes as `handoff digest: <first line of the original
+request>` with `open: oms session-handoff show NAME`. Only that pointer is
+printed, never the digest body; a line the secret scan flags is withheld with
+its pointer kept. Nothing is indexed, so a digest `oms gc` removed stops
+matching, and the recall injected into provider context carries no pointer.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
