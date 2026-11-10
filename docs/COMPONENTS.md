@@ -1314,6 +1314,20 @@ and nothing is refused. To split a task that reads as too large, ask for a new
 proposal with narrower scopes (`--allowed`, `--id-prefix`) before applying, or
 `oms agent-plan cancel` the task and apply a replacement proposal.
 
+A contract with several goals can order them in an optional `## Roadmap` section
+of `PROJECT.md`, one milestone per line with the criterion ids it bundles:
+`- [ ] M1: greet by name (REQ-1, REQ-2)`. `oms plan-from-spec --roadmap` lists
+the milestones, warns about ids the contract does not carry and names the next
+unchecked one; `--milestone M1` asks the planner only for the work that
+milestone's criteria need and reports coverage against those criteria alone. A
+milestone that is unknown, lists no ids or names an id the contract lacks is
+refused before any provider is asked. The Roadmap is a reading order, not
+authority: a checkbox is the document's own claim and is never read as evidence,
+no backlog store exists besides the section, and the proposal does not record its
+milestone, so `--apply` reports coverage against the whole contract again. The
+record that a milestone's plan closed is its `oms agent-plan retire` receipt;
+ticking the box is the owner's edit (`oms intent amend`).
+
 
 ### Discover work and review proposals
 

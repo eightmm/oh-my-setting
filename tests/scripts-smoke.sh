@@ -13000,6 +13000,49 @@ waves = json.load(sys.stdin)["waves"]
 assert waves == {"count": 3, "tasks": {"w1": 1, "w2": 1, "w3": 2, "w4": 3}}, waves
 ' || fail "plan status --json should carry the open tasks wave numbers"
   ! grep -Fq wave "$waved/.oms/plan/tasks.json" || fail "the plan must not store wave numbers"
+
+  # An optional Roadmap orders the criteria into milestones. --roadmap lists
+  # them, --milestone asks the planner for one bundle and reports coverage
+  # against that bundle only; a bad milestone is refused before any provider runs.
+  local road="$TMP/plan-from-spec-roadmap"
+  make_committed_repo "$road"
+  mkdir -p "$road/bin" "$road/home" "$road/tests"
+  cp "$covered/tests/run.sh" "$road/tests/run.sh"
+  cp "$covered/bin/codex" "$road/bin/codex"
+  cp "$covered/PROJECT.md" "$road/PROJECT.md"
+  if "$ROOT/scripts/plan-from-spec.sh" --repo "$road" --roadmap > "$road/list" 2>&1; then
+    fail "--roadmap without a Roadmap section should exit 1"
+  fi
+  assert_file_contains "$road/list" "roadmap: PROJECT.md has no '## Roadmap' items"
+  printf '%s\n' '' '## Roadmap' '' '- [x] M0: skeleton (REQ-1)' '- [ ] M1: greet by name (REQ-2)' \
+    '- [ ] M2: later (REQ-9)' '- [ ] M3: unlisted' >> "$road/PROJECT.md"
+  "$ROOT/scripts/plan-from-spec.sh" --repo "$road" --roadmap > "$road/list" || fail "--roadmap should list milestones"
+  assert_file_contains "$road/list" "roadmap: 4 milestone(s); a checkbox is the document's own claim, not evidence"
+  assert_file_contains "$road/list" "  [x] M0: skeleton  (REQ-1)"
+  assert_file_contains "$road/list" "      warning: not a criterion id in this contract: REQ-9"
+  assert_file_contains "$road/list" "next unchecked: M1  ->  oms plan-from-spec --milestone M1"
+  [ ! -e "$road/.oms" ] || fail "--roadmap must not create state"
+  local bad
+  for bad in M9 M2 M3; do
+    if HOME="$road/home" NVM_DIR="$road/home/.nvm" PATH="$road/bin:/usr/bin:/bin" \
+        "$ROOT/scripts/plan-from-spec.sh" --repo "$road" --to codex --milestone "$bad" >/dev/null 2>"$road/err"; then
+      fail "--milestone $bad should be refused"
+    fi
+    [ ! -e "$road/home/planner-prompt" ] || fail "a refused milestone must not reach the planner ($bad)"
+  done
+  assert_file_contains "$road/err" "milestone M3 lists no criterion ids"
+  HOME="$road/home" NVM_DIR="$road/home/.nvm" PATH="$road/bin:/usr/bin:/bin" OMS_TEST_COVERS=REQ-2 \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$road" --to codex --milestone M1 >"$road/out" 2>"$road/err" ||
+    fail "a milestone proposal should succeed: $(tail -4 "$road/err")"
+  assert_file_contains "$road/home/planner-prompt" "Milestone for this decomposition: M1 — greet by name"
+  assert_file_contains "$road/home/planner-prompt" "- REQ-2 | WHEN given a name THE SYSTEM SHALL print it"
+  ! grep -Fq 'no task covers' "$road/err" ||
+    fail "a milestone proposal answers for its own criteria only: $(cat "$road/err")"
+  rm -f "$road/home/planner-prompt"
+  HOME="$road/home" NVM_DIR="$road/home/.nvm" PATH="$road/bin:/usr/bin:/bin" OMS_TEST_COVERS=REQ-1 OMS_TEST_PREFIX=m \
+    "$ROOT/scripts/plan-from-spec.sh" --repo "$road" --to codex --milestone M1 >"$road/out" 2>"$road/err" ||
+    fail "a milestone proposal that misses its criterion still succeeds: $(tail -4 "$road/err")"
+  assert_file_contains "$road/err" "warning: coverage: no task covers REQ-2"
   # An id the spec does not carry is refused before anything is proposed.
   rc=0
   OMS_TEST_PREFIX=n OMS_TEST_COVERS=REQ-9 HOME="$covered/home" NVM_DIR="$covered/home/.nvm" \
