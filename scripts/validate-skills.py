@@ -70,6 +70,60 @@ def frontmatter(text: str) -> dict[str, str]:
     return values
 
 
+def marketplace_errors(root: Path, entries: list) -> list[str]:
+    """The static Claude Code marketplace manifest must offer exactly the enabled custom skills.
+
+    `.claude-plugin/marketplace.json` is a hand-kept file nothing installs or registers; it lets a setup
+    that loads skills only from plugins add this repository as a marketplace. A checkout without it is
+    fine. With it, a skill added to or dropped from skills.manifest.json must show up here too, every
+    listed path must hold a SKILL.md, and the plugin text must say the skills need the oms command.
+    """
+    path = root / ".claude-plugin" / "marketplace.json"
+    if not path.is_file():
+        return []
+    where = ".claude-plugin/marketplace.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"invalid {where}: {exc}"]
+    plugins = doc.get("plugins") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or not doc.get("name") or not isinstance(doc.get("owner"), dict) \
+            or not isinstance(plugins, list):
+        return [f"invalid {where}: name, owner and plugins are required"]
+    found: list[str] = []
+    offered: set[str] = set()
+    for plugin in plugins:
+        if not isinstance(plugin, dict) or not isinstance(plugin.get("skills"), list):
+            continue
+        name = str(plugin.get("name", ""))
+        source = plugin.get("source")
+        if not isinstance(source, str) or not source.startswith("./") or ".." in source.split("/"):
+            found.append(f"{where}: plugin {name} must use a relative ./ source inside this repository")
+            continue
+        if plugin.get("strict") is not False:
+            found.append(f"{where}: plugin {name} lists skills without a plugin.json, so it needs \"strict\": false")
+        if "oms" not in str(plugin.get("description", "")):
+            found.append(f"{where}: plugin {name} must say its skills need the oms command")
+        for item in plugin["skills"]:
+            if not isinstance(item, str) or not item.startswith("./") or ".." in item.split("/"):
+                found.append(f"{where}: plugin {name} has an unsafe skill path: {item}")
+                continue
+            relative = (Path(source) / item).as_posix()
+            if not (root / relative / "SKILL.md").is_file():
+                found.append(f"{where}: plugin {name} lists a path with no SKILL.md: {relative}")
+            offered.add(relative)
+    expected = {
+        str(entry.get("source", "")).strip()
+        for entry in entries
+        if entry.get("enabled", True) and str(entry.get("source", "")).startswith("custom-skills/")
+    }
+    for source in sorted(expected - offered):
+        found.append(f"{where}: enabled skill is not offered by any plugin: {source}")
+    for source in sorted(offered - expected):
+        found.append(f"{where}: offers a skill skills.manifest.json does not enable: {source}")
+    return found
+
+
 def main() -> int:
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
     manifest_path = root / "skills.manifest.json"
@@ -197,6 +251,8 @@ def main() -> int:
             if "default_prompt:" not in yaml_text or f"${name}" not in yaml_text:
                 errors.append(f"invalid agent metadata: {source}/agents/openai.yaml")
         print(f"ok: {name} -> {source}")
+
+    errors.extend(marketplace_errors(root, entries))
 
     for error in errors:
         print(error)
