@@ -12,6 +12,19 @@ ROOT = Path(__file__).resolve().parents[2]
 FIELDS = {"read_only", "writes", "returns", "may_delegate"}
 WRITES = {"none", "scratch", "assigned-paths", "assigned-docs", "integration-paths"}
 READ_ONLY_WRITES = {"none", "scratch"}
+# Role files with no entry of their own in config/panel-routing.json `roles`: the panel never
+# allocates them by name, so they take the tier of the routing key they dispatch through
+# (custom-skills/oms-agent-harness/references/roles.md, "Panel front door"; for the worker
+# profiles panel_routing.command picks the file by purpose). A routing key with no role file
+# is allowed only as the target of one of these aliases.
+ROUTING_ALIASES = {
+    "analysis-worker": "worker",
+    "implementation-worker": "worker",
+    "patch-reviewer": "reviewer",
+    "repo-auditor": "researcher",
+    "test-designer": "advisor",
+    "decision-advisor": "advisor",
+}
 
 
 def routing_tables(root):
@@ -24,7 +37,34 @@ def routing_tables(root):
     return set(panel_routing.WRITERS), dict(panel_routing.KINDS)
 
 
-def check(root=ROOT, writers=None, kinds=None):
+def routing_names(root):
+    """Role names keyed in config/panel-routing.json, or None when the file is unreadable."""
+    try:
+        roles = json.loads((root / "config/panel-routing.json").read_text(encoding="utf-8"))["roles"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return set(roles) if isinstance(roles, dict) else None
+
+
+def check_routing(files, routing, aliases):
+    errors = []
+    for name in sorted(set(files) - routing):
+        if name not in aliases:
+            errors.append(f"role file without routing entry or alias: {name}")
+    for name, target in sorted(aliases.items()):
+        if name not in files:
+            errors.append(f"routing alias without role file: {name}")
+        if name in routing:
+            errors.append(f"routing alias also has a routing entry: {name}")
+        if target not in routing:
+            errors.append(f"routing alias {name} targets a key missing from routing roles: {target}")
+    for name in sorted(routing - set(files)):
+        if name not in set(aliases.values()):
+            errors.append(f"routing entry without role file or alias: {name}")
+    return errors
+
+
+def check(root=ROOT, writers=None, kinds=None, aliases=None):
     root = Path(root)
     errors = []
     try:
@@ -42,6 +82,11 @@ def check(root=ROOT, writers=None, kinds=None):
         errors.append(f"role file without contract entry: {name}")
     for name in sorted(set(contracts) - set(files)):
         errors.append(f"contract entry without role file: {name}")
+    routing = routing_names(root)
+    if routing is None:
+        errors.append("panel-routing.json roles unreadable")
+    else:
+        errors += check_routing(files, routing, ROUTING_ALIASES if aliases is None else aliases)
     for name, entry in sorted(contracts.items()):
         if not isinstance(entry, dict) or set(entry) != FIELDS:
             errors.append(f"{name}: fields must be exactly {sorted(FIELDS)}")

@@ -949,7 +949,11 @@ subagents remain outside the shell router.
 `config/panel-routing.json`. Nothing enforces it at runtime yet. `python3
 scripts/lib/role_contracts.py` lints it (every role has an entry and vice versa, valid
 enums, read-only roles absent from the panel `WRITERS`) and runs inside the
-role-injection invariant.
+role-injection invariant. It also requires every role file to have an entry in
+`config/panel-routing.json` `roles` or an entry in the `ROUTING_ALIASES` table of
+`role_contracts.py` (for example `implementation-worker` and `analysis-worker` dispatch
+through the `worker` key, which has no file of its own; `test-designer` and
+`decision-advisor` through `advisor`). Aliased roles take the tier of their target key.
 
 ### Collaboration visibility
 
