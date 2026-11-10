@@ -1136,9 +1136,79 @@ assert doc["changed_since"]["baseline"] is False, doc  # the text run just befor
   fi
 }
 
+# `doctor --sandbox` reports host sandbox facts from files under a test-only
+# root prefix and warns when a provider sandbox setting cannot take effect. It
+# starts no process unless --probe is given.
+test_sandbox_report_states_facts_and_cross_checks_settings() {
+  local home="$TMP/sandbox" root="$TMP/sandbox/root" out
+  mkdir -p "$home/.claude" "$home/bin" "$root/proc/sys/kernel" "$root/proc/sys/user" "$root/proc/self" "$root/sys/kernel/security"
+  printf '#!/bin/sh\ntouch "%s/bwrap-ran"\necho "bwrap: setting up uid map: Permission denied" >&2\nexit 1\n' "$home" > "$home/bin/bwrap"
+  chmod +x "$home/bin/bwrap"
+  printf '31000\n' > "$root/proc/sys/user/max_user_namespaces"
+  printf '1\n' > "$root/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+  printf 'lockdown,capability,yama\n' > "$root/sys/kernel/security/lsm"
+  printf 'Name:\tx\nSeccomp:\t2\n' > "$root/proc/self/status"
+  printf '6.8.0-test\n' > "$root/proc/sys/kernel/osrelease"
+  printf '%s\n' '{"sandbox":{"enabled":true}}' > "$home/.claude/settings.json"
+  sandbox() {
+    HOME="$home" PATH="${SB_PATH:-$home/bin:/usr/bin:/bin}" OMS_SANDBOX_ROOT="$root" OMS_SANDBOX_OS="${SB_OS:-Linux}" \
+      bash "$ROOT/scripts/doctor.sh" --sandbox "$@" 2>&1
+  }
+
+  out="$(sandbox)" || fail "--sandbox must exit 0: $out"
+  local row
+  for row in \
+    "available: bwrap: found at $home/bin/bwrap (not executed)" \
+    "restricted: apparmor_restrict_userns: value is 1 [/proc/sys/kernel/apparmor_restrict_unprivileged_userns]" \
+    "unavailable: landlock: not listed in the LSM list; kernel 6.8.0-test; ABI unknown" \
+    "available: seccomp: Seccomp: 2" \
+    "warn: claude: sandbox.enabled is on but the sandbox helper is unusable here (apparmor_restrict_userns is restricted)"; do
+    contains "$out" "$row" || fail "--sandbox should report: $row
+$out"
+  done
+  [ ! -e "$home/bwrap-ran" ] || fail "--sandbox must not run bwrap without --probe"
+
+  # Restriction off, Landlock listed, no bwrap: the warning is about the missing helper.
+  printf '0\n' > "$root/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+  printf 'landlock,yama\n' > "$root/sys/kernel/security/lsm"
+  out="$(SB_PATH="/usr/bin:/bin" sandbox)" || fail "$out"
+  contains "$out" "unavailable: bwrap: not on PATH" || fail "missing bwrap: $out"
+  contains "$out" "available: landlock: listed in the LSM list" || fail "landlock listed: $out"
+  contains "$out" "warn: claude: sandbox.enabled is on but the sandbox helper is unusable here (bwrap is not on PATH)" ||
+    fail "a missing bwrap should warn for Claude: $out"
+  out="$(sandbox)"
+  case "$out" in *"warn: claude"*) fail "a usable helper must not warn: $out" ;; esac
+
+  # --probe is the only thing that runs bwrap, and a failure is a state, not an error.
+  out="$(sandbox --probe)" || fail "a failing probe must not change the exit status: $out"
+  contains "$out" "unavailable: probe: fails: bwrap: setting up uid map: Permission denied" || fail "probe failure: $out"
+  [ -e "$home/bwrap-ran" ] || fail "--probe should run bwrap"
+  contains "$out" "warn: claude: sandbox.enabled is on but the sandbox helper is unusable here (the --probe run failed)" ||
+    fail "a failed probe should warn: $out"
+
+  # macOS and other systems.
+  out="$(SB_OS=Darwin sandbox)" || fail "$out"
+  contains "$out" "unavailable: sandbox-exec: not on PATH" || fail "Darwin without sandbox-exec: $out"
+  out="$(SB_OS=Plan9 sandbox)" || fail "$out"
+  contains "$out" "unavailable: os: unsupported operating system: Plan9" || fail "other OS: $out"
+
+  out="$(sandbox --json)" || fail "$out"
+  python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["schema"]==1 and d["kind"]=="oms-doctor-sandbox" and d["items"]' "$out" ||
+    fail "--json should be schema 1 kind oms-doctor-sandbox: $out"
+
+  # Usage errors exit 2.
+  local code=0
+  HOME="$home" bash "$ROOT/scripts/doctor.sh" --probe >/dev/null 2>&1 || code=$?
+  [ "$code" = 2 ] || fail "--probe without --sandbox must exit 2, got $code"
+  code=0
+  HOME="$home" bash "$ROOT/scripts/doctor.sh" --sandbox --security >/dev/null 2>&1 || code=$?
+  [ "$code" = 2 ] || fail "--sandbox --security must exit 2, got $code"
+}
+
 test_print_expected_emits_the_registration_list
 test_install_converges_owned_rows_only
 test_security_report_names_risky_posture_read_only
+test_sandbox_report_states_facts_and_cross_checks_settings
 test_install_quotes_a_root_with_spaces
 test_registration_drift_fails_both_doctor_modes
 test_surfaces_expect_commands_at_the_install_owner

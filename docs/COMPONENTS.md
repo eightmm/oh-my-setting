@@ -2508,6 +2508,25 @@ settings, managed policy and command-line flags are not read, so the report
 describes the user-level starting point, not the effective posture of a given
 session.
 
+`oms doctor --sandbox [--probe] [--json]` is a standalone read-only report of whether this
+host could sandbox at all; OMS sandboxes nothing itself. On Linux it reads whether `bwrap` is
+on `PATH`, `/proc/sys/kernel/unprivileged_userns_clone`, `/proc/sys/user/max_user_namespaces`,
+the AppArmor `apparmor_restrict_unprivileged_userns` switch, whether `landlock` is in
+`/sys/kernel/security/lsm` (the kernel release is shown; the Landlock ABI is always `unknown`
+because reading it needs a syscall) and the `Seccomp:` line of `/proc/self/status`; on macOS
+whether `sandbox-exec` is on `PATH`; other systems are reported as unsupported. Each item is
+`available`, `unavailable`, `restricted` or `unknown` with the file or command it came from, and
+a missing kernel switch counts as no restriction. It then reuses the `--security` settings reader
+and prints a `warn:` when Claude `sandbox.enabled`, a Codex `sandbox_mode` other than
+`danger-full-access`, or Antigravity `enableTerminalSandbox` is on while the mechanism it is
+documented to use is unusable here (Claude needs `bwrap` with user namespaces allowed; Codex and
+Antigravity pass with `bwrap` or Landlock; macOS needs `sandbox-exec`). A fact is not a guarantee:
+`--probe` is the only option that starts a process, and only on Linux with `bwrap` present. It runs
+`bwrap --ro-bind / / --unshare-all --die-with-parent true` once with a 5 second timeout and prints
+`works` or `fails: <first stderr line>`. Without `--probe` nothing is executed. No setting is
+changed, nothing is installed and nothing is contacted. The exit status is 0 for any finding and 2
+for bad usage; `--json` is schema 1, kind `oms-doctor-sandbox`.
+
 `oms doctor --extensions [--repo PATH] [--json]` is a standalone read-only inventory of
 what else the provider CLIs load: MCP servers from Claude Code's user, local and project
 configuration, Codex's `config.toml` and Antigravity's settings and plugin
