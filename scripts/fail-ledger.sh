@@ -81,10 +81,28 @@ rewrite the ledger; gc.sh carries the same predicate, so retired rows are
 compacted away on the normal retention schedule.
 
 Never records sensitive-looking commands/summaries (blocked, like memory).
+--next and --how get the same scan: a credential-looking note is refused
+(exit 3, the error names the flag) and nothing is written. show withholds an
+already-stored note that fails the scan; stored rows are never rewritten.
 EOF
 }
 
 fail() { echo "error: $*" >&2; exit 2; }
+
+# --next and --how are stored as given and printed back by show, so they pass
+# the scan the command and summary pass. Nothing is written for a refused note.
+refuse_secret_note() {  # FLAG VALUE
+  local flag="$1" value="$2" note_scan
+  [ -n "$value" ] || return 0
+  note_scan="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n' "$value" > "$note_scan"
+  if agent_memory_file_has_secret_content "$note_scan"; then
+    rm -f "$note_scan"
+    echo "fail-ledger: refused; $flag looks like a credential; nothing was recorded" >&2
+    exit 3
+  fi
+  rm -f "$note_scan"
+}
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
@@ -270,6 +288,7 @@ EOF
       exit 3
     fi
     rm -f "$scan"
+    refuse_secret_note --next "$NEXT"
     fp="$(fingerprint_of "$CMD")"
     mkdir -p "$(dirname "$LEDGER")"
     agent_memory_ensure_oms_ignore_for_path "$LEDGER" 2>/dev/null || true
@@ -426,6 +445,7 @@ PY
     [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
     grep -Fq "\"fingerprint\": \"$FINGERPRINT\"" "$LEDGER" ||
       fail "unknown fingerprint: $FINGERPRINT (see: fail-ledger list)"
+    refuse_secret_note --how "$HOW"
     mkdir -p "$(dirname "$LEDGER")"
     row_tmp="$(mktemp)" || fail "mktemp failed"
     OMS_SCHEMA="$SCHEMA" OMS_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)" OMS_AGENT_L="$(oms_detect_agent)" \
@@ -455,6 +475,7 @@ PY
     fi
     OMS_UNRESOLVED="$UNRESOLVED_ONLY" OMS_JSON="$AS_JSON" OMS_LIMIT="$LIMIT" \
       OMS_SHOW="$([ "$ACTION" = show ] && printf '%s' "$FINGERPRINT")" \
+      OMS_MEMORY_COMMON="$ROOT_LIB/agent-memory-common.sh" \
       OMS_HEAD="$(git -c core.fsmonitor=false -C "$STATE_ROOT" rev-parse HEAD 2>/dev/null || printf unborn)" \
       python3 -X utf8 -I -B - "$LEDGER" <<'PY'
 import calendar, json, os, sys, time
@@ -641,6 +662,24 @@ if show_fp:
         sys.stderr.write("fail-ledger: unknown fingerprint: %s (see: oms fail-ledger list --unresolved)\n" % show_fp)
         sys.exit(1)
     r = rows[0]
+    # Rows stored before the write path scanned --next/--how may hold a
+    # credential; show withholds a note the shared scanner flags or cannot judge.
+    import subprocess, tempfile
+    def note_flagged(value):
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8") as handle:
+                handle.write(value + "\n")
+                handle.flush()
+                done = subprocess.run(
+                    ["bash", "-c", '. "$1" && agent_memory_file_has_secret_content "$2"',
+                     "scan", os.environ["OMS_MEMORY_COMMON"], handle.name],
+                    capture_output=True, check=False, timeout=30, stdin=subprocess.DEVNULL)
+            return done.returncode == 0
+        except Exception:
+            return True
+    for key in ("next", "how"):
+        if isinstance(r.get(key), str) and r[key] and note_flagged(r[key]):
+            r[key] = "(withheld: looks like a credential)"
     if as_json:
         print(json.dumps({"schema": 1, "failure": r, "invalid_rows": invalid}, ensure_ascii=False))
     else:
