@@ -22340,6 +22340,34 @@ print(len({json.loads(line)["group"] for line in sys.stdin}))')" = 1 ] ||
     fail "a one-seed group must be listed apart: $out"
   printf '%s\n' "$out" | sed -n '3p' | grep -F "loss=0.9  n=1  group=other  seed=7" > /dev/null || fail "single-seed row: $out"
 
+  # `table` prints the same aggregates paste-ready: ranked, single seeds marked and never bold.
+  out="$(cd "$repo" && "$SH" table --metric loss 2>"$d/top-err")" || fail "table failed: $(cat "$d/top-err")"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F "4 significant digits" > /dev/null || fail "table header should state the digit rule: $out"
+  printf '%s\n' "$out" | grep -F "| 1 | " | grep -F "0.4000 ± 0.1414 | [" | grep -F "| 2 |" > /dev/null ||
+    fail "table should print mean ± stdev, ci95 and n of the two-seed group: $out"
+  printf '%s\n' "$out" | grep -F "| - | other | 0.9000 | - | 1 | single seed |" > /dev/null || fail "table single-seed row: $out"
+  mkdir -p "$d/tbl"
+  for spec in 'a_b 1 1' 'a_b 2 3' 'c_d 1 5' 'c_d 2 7' 'solo_x 1 0.5'; do
+    set -- $spec
+    printf '{"ts":"2026-01-01T00:00:00Z","git_sha":"a","dirty":0,"exit":0,"cmd":["t"],"group":"%s","seed":%s,"metrics":{"loss":%s}}\n' \
+      "$1" "$2" "$3" >> "$d/tbl/L.jsonl"
+  done
+  out="$("$SH" table --metric loss --min --file "$d/tbl/L.jsonl")" || fail "table --min failed"
+  printf '%s\n' "$out" | grep -F "| 1 | a_b | **2.000 ± 1.414** |" > /dev/null || fail "table should rank and bold the best group: $out"
+  printf '%s\n' "$out" | grep -F "| 2 | c_d | 6.000 ± 1.414 |" > /dev/null || fail "table second group: $out"
+  printf '%s\n' "$out" | grep -F "| - | solo_x | 0.5000 | - | 1 | single seed |" > /dev/null || fail "a one-seed group is marked, not bold: $out"
+  out="$("$SH" table --metric loss --max --format tsv --file "$d/tbl/L.jsonl")"
+  printf '%s\n' "$out" | sed -n '3p' | grep -F "$(printf '1\tc_d\t6.000 ± 1.414')" > /dev/null || fail "tsv with --max: $out"
+  out="$("$SH" table --metric loss --min --format tex --file "$d/tbl/L.jsonl")"
+  printf '%s\n' "$out" | grep -F 'a\_b' | grep -F '\textbf{$2.000 \pm 1.414$}' > /dev/null || fail "tex should escape underscores: $out"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F "% loss:" > /dev/null || fail "tex header comment: $out"
+  rc=0
+  "$SH" table --metric loss --format html --file "$d/tbl/L.jsonl" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "an unknown table format must exit 2, got $rc"
+  rc=0
+  "$SH" table --metric nope --file "$d/tbl/L.jsonl" >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "table on a missing metric exits 3 like top, got $rc"
+
   # Changing what the number means makes the earlier runs not comparable.
   printf 'print(2)\n' > "$repo/eval.py"
   rc=0
