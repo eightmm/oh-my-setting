@@ -33,6 +33,10 @@ POLICY=""
 TIME_COLUMN=""
 DERIVE_CMD=""
 DERIVE_SCRIPT=""
+SPLIT_RATIONALE=""
+declare -a SOURCES=()
+declare -a SOURCE_DIGESTS=()
+declare -a ENTITY_KINDS=()
 SCAN_FILE=""
 cleanup_done=0
 
@@ -76,6 +80,18 @@ create options:
                      text; never run here).
   --derive-script FILE  The script that computed them; its sha256 is recorded
                      and `check` warns when the file changed or is gone.
+  --source NAME=REF  A named upstream source and a free-text reference
+                     (accession, release tag, URL, DOI, internal label), e.g.
+                     --source pdbbind=v2020. Repeatable. Stored as given;
+                     nothing is fetched or validated. A REF that looks like a
+                     credential or carries URL userinfo is refused.
+  --source-digest NAME=SHA256  The sha256 you computed for that source's
+                     archive (64 hex characters; format-checked only).
+  --split-rationale TEXT  One line: why this policy and these keys fit the
+                     claim, e.g. "cold by protein family: test families unseen".
+  --entity-kind COLUMN=KIND  What an entity/key column identifies: protein,
+                     ligand, complex, pocket, assay or other. Repeatable. A
+                     label only; `leakage` uses it to say "cold by protein".
   --note TEXT        Free-text note.
   (default: each non-empty line is one ID.)
 
@@ -274,6 +290,77 @@ else:
 PY
 }
 
+# One free-text provenance field: one bounded printable line, no credential
+# shape, no URL userinfo. The text is never echoed back in the refusal.
+check_provenance_text() {
+  local what="$1" text="$2" max="$3"
+  case "$text" in *$'\n'*|*$'\r'*) fail "$what must be a single line" ;; esac
+  [[ "$text" != *[[:cntrl:]]* ]] || fail "$what must not contain control characters"
+  [ -n "${text//[[:space:]]/}" ] || fail "$what must not be empty"
+  [ "${#text}" -le "$max" ] || fail "$what is longer than $max characters"
+  if [[ "$text" =~ [A-Za-z][A-Za-z0-9+.-]*://[^/[:space:]]*@ ]]; then
+    fail "$what contains URL userinfo (user@host); remove the credentials"
+  fi
+  SCAN_FILE="$(mktemp)" || fail "mktemp failed"
+  printf '%s\n' "$text" > "$SCAN_FILE"
+  if agent_memory_file_has_secret_content "$SCAN_FILE"; then
+    fail "$what looks like a credential; refusing to record it"
+  fi
+  rm -f "$SCAN_FILE"
+  SCAN_FILE=""
+}
+
+# --source / --source-digest / --split-rationale / --entity-kind: validated
+# before anything is written. Nothing is fetched or parsed.
+validate_provenance() {
+  local item name ref digest col kind known seen
+  local -a seen_names=() seen_cols=()
+  for item in "${SOURCES[@]:-}"; do
+    [ -n "$item" ] || continue
+    name="${item%%=*}"; ref="${item#*=}"
+    [ "$name" != "$item" ] || fail "bad --source (want NAME=REF): $item"
+    case "$name" in
+      ""|*[!A-Za-z0-9._-]*) fail "--source NAME must match [A-Za-z0-9._-]+" ;;
+    esac
+    for known in "${seen_names[@]:-}"; do
+      [ "$known" != "$name" ] || fail "--source $name given twice"
+    done
+    seen_names+=("$name")
+    check_provenance_text "--source $name REF" "$ref" 200
+  done
+  for item in "${SOURCE_DIGESTS[@]:-}"; do
+    [ -n "$item" ] || continue
+    name="${item%%=*}"; digest="${item#*=}"
+    [ "$name" != "$item" ] || fail "bad --source-digest (want NAME=SHA256): $item"
+    seen=0
+    for known in "${seen_names[@]:-}"; do
+      [ "$known" != "$name" ] || seen=1
+    done
+    [ "$seen" = 1 ] || fail "--source-digest $name has no matching --source $name"
+    [[ "$digest" =~ ^[0-9A-Fa-f]{64}$ ]] || fail "--source-digest $name must be 64 hex characters (sha256)"
+  done
+  [ -z "$SPLIT_RATIONALE" ] || check_provenance_text "--split-rationale" "$SPLIT_RATIONALE" 240
+  for item in "${ENTITY_KINDS[@]:-}"; do
+    [ -n "$item" ] || continue
+    col="${item%%=*}"; kind="${item#*=}"
+    [ "$col" != "$item" ] && [ -n "$col" ] || fail "bad --entity-kind (want COLUMN=KIND): $item"
+    case "$kind" in
+      protein|ligand|complex|pocket|assay|other) ;;
+      *) fail "--entity-kind KIND must be one of: protein, ligand, complex, pocket, assay, other" ;;
+    esac
+    seen=0
+    for known in "${KEY_COLUMNS[@]:-}"; do
+      [ "$known" != "$col" ] || seen=1
+    done
+    [ -z "$ID_COLUMN" ] || [ "$ID_COLUMN" != "$col" ] || seen=1
+    [ "$seen" = 1 ] || fail "--entity-kind column $col is not an --entity-column, --key-column or --id-column"
+    for known in "${seen_cols[@]:-}"; do
+      [ "$known" != "$col" ] || fail "--entity-kind $col given twice"
+    done
+    seen_cols+=("$col")
+  done
+}
+
 cmd_create() {
   parse_common_args "$@"
   [ -n "$NAME" ] || fail "create requires --name"
@@ -304,6 +391,7 @@ cmd_create() {
     done
     [ "$seen" = 1 ] || KEY_COLUMNS+=("$entity")
   done
+  validate_provenance
   # Every column looked up by header name is validated in every split below.
   local -a header_columns=()
   [ "${#KEY_COLUMNS[@]}" -eq 0 ] || header_columns=("${KEY_COLUMNS[@]}")
@@ -358,6 +446,8 @@ PY
   [ "${#ENTITY_COLUMNS[@]}" -gt 0 ] && entities_nl="$(printf '%s\n' "${ENTITY_COLUMNS[@]}")"
   OMS_SPLITS="$splits_json" OMS_KEYS="$keys_nl" OMS_ENTITIES="$entities_nl" OMS_POLICY="$POLICY" \
   OMS_TIME_COLUMN="$TIME_COLUMN" OMS_DERIVE_CMD="$DERIVE_CMD" OMS_DERIVE_SCRIPT="$DERIVE_SCRIPT" \
+  OMS_SOURCES="$(printf '%s\n' "${SOURCES[@]:-}")" OMS_SOURCE_DIGESTS="$(printf '%s\n' "${SOURCE_DIGESTS[@]:-}")" \
+  OMS_RATIONALE="$SPLIT_RATIONALE" OMS_ENTITY_KINDS="$(printf '%s\n' "${ENTITY_KINDS[@]:-}")" \
     python3 - "$SCHEMA" "$NAME" "$ts" "$NOTE" "$ID_COLUMN" "$ID_INDEX" > "$tmp" <<'PY'
 import hashlib, json, os, sys
 a = sys.argv[1:]
@@ -394,6 +484,30 @@ if env("OMS_DERIVE_SCRIPT"):
     derive["script_sha256"] = digest.hexdigest()
 if derive:
     manifest["derive"] = derive
+# Optional provenance, all free text or labels as given (validated by the
+# caller): upstream sources, why this split, what each key column identifies.
+digests = {}
+for line in env("OMS_SOURCE_DIGESTS", "").splitlines():
+    if "=" in line:
+        digests[line.split("=", 1)[0]] = line.split("=", 1)[1].lower()
+sources = []
+for line in env("OMS_SOURCES", "").splitlines():
+    if "=" in line:
+        name, ref = line.split("=", 1)
+        row = {"name": name, "ref": " ".join(ref.split())}
+        if name in digests:
+            row["sha256"] = digests[name]
+        sources.append(row)
+if sources:
+    manifest["sources"] = sources
+if env("OMS_RATIONALE"):
+    manifest["split_rationale"] = " ".join(env("OMS_RATIONALE").split())
+kinds = {}
+for line in env("OMS_ENTITY_KINDS", "").splitlines():
+    if "=" in line:
+        kinds[line.split("=", 1)[0]] = line.split("=", 1)[1]
+if kinds:
+    manifest["entity_kinds"] = kinds
 print(json.dumps(manifest, ensure_ascii=False, indent=2))
 PY
   SCAN_FILE="$tmp"
@@ -495,6 +609,17 @@ if isinstance(derive, dict) and derive.get("script"):
                   "recompute the keys and recreate the manifest" % path)
         else:
             print("ok    derive: key script unchanged")
+# Declared provenance is printed as recorded; nothing here is fetched or
+# re-verified, so it never changes the exit code.
+m = json.load(open(os.environ["OMS_MANIFEST"]))
+for src in m.get("sources") or []:
+    if isinstance(src, dict):
+        print("info  source %s: %s%s" % (src.get("name"), src.get("ref"),
+              " (sha256 %s, as declared)" % src["sha256"] if src.get("sha256") else ""))
+if m.get("split_rationale"):
+    print("info  split rationale: %s" % m["split_rationale"])
+if isinstance(m.get("entity_kinds"), dict) and m["entity_kinds"]:
+    print("info  entity kinds: %s" % ", ".join("%s=%s" % kv for kv in sorted(m["entity_kinds"].items())))
 PY
   [ "$drift" = 0 ] || exit 1
 }
@@ -731,6 +856,22 @@ if policy == "time":
             else:
                 print("ok[time:%s]      %s -> %s: every %s row is later" % (column, early, late, late))
 
+kinds = m.get("entity_kinds") if isinstance(m.get("entity_kinds"), dict) else {}
+rationale = m.get("split_rationale") if isinstance(m.get("split_rationale"), str) else ""
+if policy in ("cold", "scaffold"):
+    # Labels only: what the entity (cold) or group (scaffold) columns identify.
+    columns = entities if policy == "cold" else keys
+    labelled = []
+    for column in columns:
+        if isinstance(kinds.get(column), str) and kinds[column] and kinds[column] not in labelled:
+            labelled.append(kinds[column])
+    if not labelled:
+        print("WARN    policy %s has no --entity-kind recorded; the report cannot say what crosses splits" % policy)
+    if not rationale:
+        print("WARN    policy %s has no --split-rationale recorded; the claim it supports is not stated" % policy)
+    if labelled:
+        policy = "%s by %s" % (policy, "+".join(labelled))
+
 if policy:
     checked = ["ID overlap"]
     if keys:
@@ -738,6 +879,8 @@ if policy:
     if policy == "time":
         checked.append("time order on " + (m.get("time_column") or ""))
     print("policy: %s (checked: %s)" % (policy, "; ".join(checked)))
+    if rationale:
+        print("rationale: %s" % rationale)
 else:
     print("policy: none declared (checked: ID overlap%s)" % ("; key overlap on " + ", ".join(keys) if keys else ""))
 print("note: exact matches only; similar compounds, homologous sequences and other near-duplicates were not compared")
@@ -804,6 +947,10 @@ parse_common_args() {
       --entity-column) [ "$#" -ge 2 ] || fail "--entity-column requires a name"; ENTITY_COLUMNS+=("$2"); shift 2 ;;
       --derive-cmd) [ "$#" -ge 2 ] || fail "--derive-cmd requires text"; DERIVE_CMD="$2"; shift 2 ;;
       --derive-script) [ "$#" -ge 2 ] || fail "--derive-script requires a file"; DERIVE_SCRIPT="$2"; shift 2 ;;
+      --source) [ "$#" -ge 2 ] || fail "--source requires NAME=REF"; SOURCES+=("$2"); shift 2 ;;
+      --source-digest) [ "$#" -ge 2 ] || fail "--source-digest requires NAME=SHA256"; SOURCE_DIGESTS+=("$2"); shift 2 ;;
+      --split-rationale) [ "$#" -ge 2 ] || fail "--split-rationale requires text"; SPLIT_RATIONALE="$2"; shift 2 ;;
+      --entity-kind) [ "$#" -ge 2 ] || fail "--entity-kind requires COLUMN=KIND"; ENTITY_KINDS+=("$2"); shift 2 ;;
       --note) [ "$#" -ge 2 ] || fail "--note requires text"; NOTE="$2"; shift 2 ;;
       --show-examples) SHOW_EXAMPLES=1; shift ;;
       *) fail "unknown argument: $1" ;;

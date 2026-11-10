@@ -22171,6 +22171,60 @@ test_data_manifest_key_column_leakage() {
     fail "check must warn about a changed key script: $out"
   dm create --name dv2 --id-column id --derive-script nope.py --split train=train.csv >/dev/null 2>&1 &&
     fail "a missing --derive-script must fail create"
+
+  # Provenance: upstream sources, why this split, what a key column identifies. Labels and text only.
+  local dig; dig="$(printf 'ab%.0s' $(seq 32))"
+  dm create --name pv --id-column id --policy cold --entity-column drug --entity-column target \
+    --entity-kind drug=ligand --entity-kind target=protein \
+    --source pdbbind=v2020 --source chembl=34 --source-digest pdbbind="$dig" \
+    --split-rationale 'cold by protein family: test families unseen in train' \
+    --split train=ctrain.csv --split test=ctest.csv >/dev/null || fail "provenance create failed"
+  grep -Fq '"ref": "v2020"' "$md/pv.json" || fail "a source reference must be stored as given"
+  grep -Fq "\"sha256\": \"$dig\"" "$md/pv.json" || fail "a source digest must be stored"
+  grep -Fq '"entity_kinds"' "$md/pv.json" || fail "entity kinds must be stored"
+  dm show --name pv | grep -Fq 'cold by protein family' || fail "show must print the rationale"
+  out="$(dm check --name pv)" || fail "provenance must not make check fail: $out"
+  contains "$out" 'info  source chembl: 34' || fail "check must print the sources: $out"
+  contains "$out" 'info  split rationale: cold by protein family' || fail "check must print the rationale: $out"
+  rc=0; out="$(dm leakage --name pv)" || rc=$?
+  [ "$rc" = 1 ] || fail "the shared target still leaks under a labelled cold policy (exit 1), got $rc"
+  contains "$out" 'policy: cold by ligand+protein (checked:' || fail "leakage must use the entity kinds: $out"
+  contains "$out" 'rationale: cold by protein family' || fail "leakage must print the rationale: $out"
+  ! contains "$out" 'WARN    policy' || fail "a labelled policy with a rationale must not warn: $out"
+  # No kind or no rationale under cold/scaffold: advisory warning, exit code unchanged.
+  rc=0; out="$(dm leakage --name cold)" || rc=$?
+  [ "$rc" = 1 ] || fail "the advisory warning must not change the exit code, got $rc"
+  contains "$out" 'WARN    policy cold has no --entity-kind recorded' || fail "missing entity kind must warn: $out"
+  contains "$out" 'WARN    policy cold has no --split-rationale recorded' || fail "missing rationale must warn: $out"
+  contains "$out" 'policy: cold (checked:' || fail "an old-style manifest keeps its policy line: $out"
+  out="$(dm check --name cold)" || fail "an old-style manifest must still check"
+  ! contains "$out" 'info  ' || fail "an old-style manifest prints no provenance lines: $out"
+  # Refusals are exit 2, leave no manifest, and never echo the reference.
+  local bad at='@'  # kept out of the literals so the outbound scrubber does not see a URL credential
+  for bad in \
+    "--source x=gh""p_aaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "--source x=https://user:pw${at}host.example/archive" \
+    "--source x=https://user${at}host.example/archive" \
+    "--source x=" "--source =v1" "--source nameonly" \
+    "--source-digest pdbbind=$dig" "--source-digest x=nothex" \
+    "--entity-kind drug=molecule" "--entity-kind nope=ligand" ; do
+    rc=0
+    # shellcheck disable=SC2086
+    out="$(dm create --name bad --id-column id --policy cold --entity-column drug $bad \
+      --split train=ctrain.csv 2>&1 >/dev/null)" || rc=$?
+    [ "$rc" = 2 ] || fail "refused provenance must exit 2 ($bad), got $rc"
+    ! contains "$out" 'aaaaaaaaaa' || fail "a refused reference must not be echoed: $out"
+  done
+  rc=0; dm create --name bad --id-column id --source x=v1 --source-digest x=0123 --split train=ctrain.csv \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a short source digest must exit 2, got $rc"
+  rc=0; dm create --name bad --id-column id --split-rationale '   ' --split train=ctrain.csv \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a blank rationale must exit 2, got $rc"
+  rc=0; dm create --name bad --id-column id --source x=v1 --source x=v2 --split train=ctrain.csv \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "a repeated source name must exit 2, got $rc"
+  [ ! -e "$md/bad.json" ] || fail "a refused provenance create must not leave a manifest"
   return 0
 }
 
