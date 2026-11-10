@@ -31,6 +31,7 @@ FAILURE_CODE=""
 FINGERPRINT=""
 HOW=""
 UNRESOLVED_ONLY=0
+STALLS=0
 AS_JSON=0
 LIMIT=0
 IGNORE_STATE=0
@@ -43,6 +44,7 @@ Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summ
        fail-ledger.sh [--repo PATH] check  --cmd CMD [--ignore-state]
        fail-ledger.sh [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]
        fail-ledger.sh [--repo PATH] list   [--unresolved] [--json] [--limit N]
+       fail-ledger.sh [--repo PATH] list   --stalls [--json]
        fail-ledger.sh [--repo PATH] show   --fingerprint FP [--json]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
@@ -69,6 +71,11 @@ list     One line per fingerprint (count, last exit, resolved); --unresolved
          shows only still-failing ones, --json emits a schema-1 JSON object,
          --limit N keeps the N most recently active fingerprints and says
          how many older ones were omitted.
+         --stalls instead reports loops in the recent ledger and goal-drive
+         progress events (same failure 3x, two commands alternating 6x,
+         goal-drive runs ending the same way at the same HEAD 3x), advisory
+         only; thresholds: OMS_STALL_WINDOW/_ERROR_REPEAT/_ALTERNATE/
+         _NO_EVIDENCE/_MAX_AGE (0 disables a rule).
 show     Print one fingerprint's full current row (state, count, exit, kind,
          last ts, cmd, summary, next, how); exit 1 for an unknown fingerprint.
 
@@ -207,6 +214,7 @@ while [ "$#" -gt 0 ]; do
     --how) [ "$#" -ge 2 ] || fail "--how requires text"; HOW="$2"; shift 2 ;;
     --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; REPO="$2"; shift 2 ;;
     --unresolved) UNRESOLVED_ONLY=1; shift ;;
+    --stalls) STALLS=1; shift ;;
     --json) AS_JSON=1; shift ;;
     --limit)
       [ "$#" -ge 2 ] || fail "--limit requires a count"
@@ -223,6 +231,8 @@ ACTION="${ACTION:-list}"
 [ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || [ "$ACTION" = "show" ] || fail "--json is only supported by list and show"
 [ "$LIMIT" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--limit is only supported by list"
 [ "$ACTION" != "show" ] || [ -n "$FINGERPRINT" ] || fail "show requires --fingerprint"
+[ "$STALLS" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--stalls is only supported by list"
+[ "$STALLS" -eq 0 ] || { [ "$UNRESOLVED_ONLY" -eq 0 ] && [ "$LIMIT" -eq 0 ]; } || fail "--stalls does not combine with --unresolved or --limit"
 [ "$IGNORE_STATE" -eq 0 ] || [ "$ACTION" = "check" ] || fail "--ignore-state is only supported by check"
 case "$KIND" in
   cmd|hook|verify|plan-run|delegate|patch-land) ;;
@@ -463,6 +473,15 @@ PY
     echo "fail-ledger: resolved $FINGERPRINT" >&2
     ;;
   list|show)
+    if [ "$STALLS" -eq 1 ]; then
+      # Read-only and advisory: always exit 0; the lib refuses symlinked files.
+      stall_args=()
+      [ "$AS_JSON" -eq 0 ] || stall_args+=(--json)
+      python3 -I -B "$ROOT_LIB/stall_detect.py" --ledger "$LEDGER" \
+        --progress "$LEDGER_ROOT/.oms/plan/progress.jsonl" \
+        ${stall_args[@]+"${stall_args[@]}"}
+      exit 0
+    fi
     [ ! -L "$LEDGER" ] || fail "failure ledger must be a regular non-symlink file"
     if [ ! -f "$LEDGER" ]; then
       [ "$ACTION" != "show" ] || fail "unknown fingerprint: $FINGERPRINT (no ledger at $LEDGER)"

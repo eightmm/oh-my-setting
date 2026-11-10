@@ -1232,6 +1232,18 @@ Project state lives under ignored `.oms/` paths:
 attention. `oms fail-ledger list`, `oms artifact-index unresolved`, and
 `oms thread list` expose the underlying records. Writers are append-oriented;
 use migration and GC commands instead of editing JSONL by hand.
+`oms fail-ledger list --stalls [--json]` is a read-only loop check over the
+newest events (default window 20) of the failure ledger and the goal-drive
+progress log: the same failure 3 times in a row, two commands alternating for 6
+events, or goal-drive runs ending on the same reason at the same HEAD 3 times
+(no new evidence). Timestamps, pids, temp paths and long numbers are ignored when
+comparing. It prints the finding and a suggested next step (re-plan, raise effort
+or tier, ask the human), always exits 0, and never stops, retries or parks
+anything. Tune with `OMS_STALL_WINDOW`, `OMS_STALL_ERROR_REPEAT`,
+`OMS_STALL_ALTERNATE`, `OMS_STALL_NO_EVIDENCE` and `OMS_STALL_MAX_AGE` (seconds,
+default 86400); `0` disables a rule or the age cutoff. The ledger records
+failures and the pass that resolves one, not every command, so "same action,
+same successful result" repeats cannot be seen there.
 `oms agent-memory recall` and `search` also cover the failure ledger. An open
 failure carries its recorded next step (`record --next`), and the newest failure
 of a resolved fingerprint carries how it was fixed (`resolve --how`), each as one
