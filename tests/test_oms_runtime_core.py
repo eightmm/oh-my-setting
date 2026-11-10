@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import runpy
@@ -10,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from oms_graph.project import build, context as graph_context
-from oms_runtime import capsule, context, evidence, experiment, failures, profiles, projection, release
+from oms_runtime import capsule, context, context_phases, evidence, experiment, failures, profiles, projection, release
 from oms_runtime.benchmark import _artifact_tokens, _context_modes, _context_rows, _model_table, compare, snapshot as benchmark_snapshot
 from oms_runtime.cli_parser import build_parser
 from oms_runtime.common import CoreError, append_jsonl, atomic_write_bytes, atomic_write_json, canonical_json, file_lock, git_head, parse_path_list, read_json, read_jsonl, sensitive_text, sha256_bytes, sha256_file, sha256_text
@@ -568,6 +569,43 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(manifest['targets'], ['scripts/sample.py'])
         self.assertTrue((self.repo / manifest['manifest_path']).is_file())
         self.assertTrue((self.repo / manifest['bundle_path']).is_file())
+
+        # The phase is a rule, not a label: the table in config/ decides it and the manifest names that table.
+        def plan(phase, **table):
+            if table:
+                with patch.object(context_phases, 'load_rules', return_value=table):
+                    return context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=32768, phase=phase)
+            return context.plan_context(self.repo, targets=['scripts/sample.py'], max_bytes=32768, phase=phase)
+
+        def ranks(result):
+            return {item['path']: (item['priority'], position) for position, item in enumerate(result['selected'])}
+
+        table_digest = hashlib.sha256((ROOT / 'config' / 'context-phases.json').read_bytes()).hexdigest()
+        baseline = plan('implementation')
+        self.assertEqual(baseline['phase_rules_sha256'], table_digest)
+        # implementation is the unchanged baseline: an all-empty table selects the same sources in the same order.
+        empty = {'sha256': '0' * 64, 'phases': {name: {} for name in context_phases.PHASES}}
+        untouched = plan('verification', **empty)
+        self.assertEqual([(i['path'], i['priority'], i['bytes_selected']) for i in untouched['selected']],
+                         [(i['path'], i['priority'], i['bytes_selected']) for i in baseline['selected']])
+        self.assertEqual(baseline['max_nonrequired_source_bytes'], 32768 // 3)
+        verification = plan('verification')
+        before, after = ranks(baseline), ranks(verification)
+        self.assertGreater(after['tests/test_sample.py'][0], before['tests/test_sample.py'][0])
+        self.assertLessEqual(after['tests/test_sample.py'][0], context_phases.PRIORITY_CEILING)
+        self.assertLess(after['tests/test_sample.py'][1], after['scripts/caller.py'][1])
+        self.assertEqual(after['scripts/sample.py'], before['scripts/sample.py'])  # a target is never moved
+        self.assertEqual(plan('orientation')['max_nonrequired_source_bytes'], 32768 // 6)
+        # A table that is not exactly what the reader expects is refused, never half applied.
+        broken = self.repo / 'phases.json'
+        for text in ('{"schema": 1, "phases": {}}',
+                     json.dumps({'schema': 1, 'phases': dict({n: {} for n in context_phases.PHASES},
+                                                             review={'priority': {'direct-target': 5}})}),
+                     json.dumps({'schema': 1, 'phases': dict({n: {} for n in context_phases.PHASES},
+                                                             review={'nonrequired_divisor': 1})})):
+            broken.write_text(text, encoding='utf-8')
+            with self.assertRaises(CoreError):
+                context_phases.load_rules(broken)
 
     def test_context_preserves_project_contract_completeness(self) -> None:
         project = self.repo / 'PROJECT.md'

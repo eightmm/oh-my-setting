@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "note": "oms runtime context --phase: deterministic composition rules. priority moves a candidate class by a delta (never above direct targets, required context or the project contract); nonrequired_divisor caps one non-required source at budget/N. implementation is the unchanged baseline. A manifest records this file's sha256.",
+  "phases": {
+    "implementation": {},
+    "orientation": {
+      "nonrequired_divisor": 6,
+      "priority": {"memory-summary": 30, "work-journal": 30}
+    },
+    "verification": {
+      "priority": {"related-test": 40}
+    },
+    "review": {
+      "priority": {"related-test": 20, "explicit": 9}
+    },
+    "research": {
+      "nonrequired_divisor": 2,
+      "priority": {"explicit": 9, "memory-summary": 20}
+    }
+  }
+}
