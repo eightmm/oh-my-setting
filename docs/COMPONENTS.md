@@ -1678,6 +1678,21 @@ ML/Slurm workflows use local-first experiment controls:
   `oms run diff` shows a `data:NAME` line; neither re-reads the split files, so
   `oms data-manifest check --name NAME` remains the drift check. Manifests
   store no check or leakage verdict, so the capsule records none.
+- `oms run-ledger top` ranks under a metric contract when one exists. An optional,
+  git-tracked `metric-contract.json` beside the ledger declares per metric its
+  `direction` (`max` or `min`), `unit`, `split`, `aggregation`, `eval_command` and
+  `eval_code` paths. Each finished row then records those fields and a digest that
+  also covers the eval code's contents; `top` takes the declared direction and ranks
+  only runs recorded under today's contract for that metric, counting the rest on
+  stderr with the fields that differ. When none qualifies, or rows carry different
+  contracts and none is declared now, it prints "not comparable" and exits 4;
+  `--mixed` ranks everything and says so. Rows written before a contract existed
+  rank among themselves as before, and `list`, the duplicate warning and the other
+  ledger readers ignore the field. A run with a seed (`--seed N`, or the command's
+  own `--seed N` / `seed=N`) records `seed` and `group`, by default a digest of the
+  command without its seed at that commit and diff (`--group LABEL` names it).
+  `top --by-group` ranks groups by mean with n, stdev and a bootstrap 95% interval,
+  and lists one-seed groups apart, since one seed supports no claim that it is better.
 - `oms runtime experiment` for comparable seed-, metric-, and invariant-bound
   studies; `oms runtime experiment launch` pre-registers a single command
   through the same run ledger (replacing `research-runner`).

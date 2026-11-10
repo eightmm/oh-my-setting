@@ -21,13 +21,15 @@ LEDGER=""
 NOTE=""
 METRICS_FILE=""
 REASON=""
+SEED=""
+GROUP=""
 GATE="${OMS_RUN_LEDGER_GATE:-1}"
 
 usage() {
   cat <<'EOF'
 Usage: run-ledger.sh [options] -- <command...>
        run-ledger.sh list [--json] [N]
-       run-ledger.sh top --metric KEY [--min|--max] [--all] [--file PATH] [N]
+       run-ledger.sh top --metric KEY [--min|--max] [--by-group] [--mixed] [--all] [--file PATH] [N]
 
 Run a command and append a row to the experiment ledger
 (default: docs/EXPERIMENTS.jsonl). Exit code mirrors the command.
@@ -52,6 +54,11 @@ Options:
                   applicable gate is an UNSAFE override: it requires --reason
                   and the skip is recorded in the ledger row.
   --reason TEXT   Justification for an unsafe gate skip. Recorded in the row.
+  --seed N        The run's seed. Default: the command's own --seed N or
+                  seed=N. A run with a seed also records its group.
+  --group LABEL   Name the group this seed replicates. Default: a digest of
+                  the command without its seed at this commit and diff, so
+                  runs differing only by seed share one group.
   -h, --help      Show this help.
 
 list [--json] [N]  Show the last N ledger rows (default 10); --json emits a
@@ -60,6 +67,24 @@ top             Rank runs by a recorded metric ("best run for val_auc"):
                 rows with a finite numeric metrics[KEY], sorted --max
                 (default; use --min for losses), top N (default 10).
                 Failed runs (exit != 0) are excluded unless --all.
+                With a metric contract (metric-contract.json beside the
+                ledger) the declared direction is the default, and only runs
+                recorded under today's contract for KEY are ranked; the rest
+                are counted on stderr with the fields that differ. When no
+                run qualifies, or rows carry different contracts and none
+                is declared now, top prints "not comparable" and exits 4.
+                --mixed ranks every row regardless and says so.
+                --by-group ranks seed groups by their mean instead of single
+                runs: n, mean, stdev and a bootstrap 95% interval. A group
+                with one seed is listed apart: one seed supports no claim
+                that it is better.
+
+Metric contract (optional, git-tracked beside the ledger):
+  {"schema": 1, "metrics": {"val_auc": {"direction": "max", "unit": "",
+   "split": "val", "aggregation": "mean over folds",
+   "eval_command": "python eval.py", "eval_code": ["eval.py"]}}}
+Each finished row records, per declared metric, those fields and a digest
+that also covers the eval_code files' contents. Rows without it keep working.
 
 Each row records its gate decision: "passed", "skipped" (with reason),
 "recorded" (command is the check itself, or already ran), or "none"
@@ -152,8 +177,10 @@ fi
 
 if [ "$MODE" = "top" ]; then
   METRIC=""
-  DIRECTION="max"
+  DIRECTION=""
   INCLUDE_ALL=0
+  BY_GROUP=0
+  MIXED=0
   N=10
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -161,6 +188,8 @@ if [ "$MODE" = "top" ]; then
       --min) DIRECTION="min"; shift ;;
       --max) DIRECTION="max"; shift ;;
       --all) INCLUDE_ALL=1; shift ;;
+      --by-group) BY_GROUP=1; shift ;;
+      --mixed) MIXED=1; shift ;;
       --file) [ "$#" -ge 2 ] || fail "--file requires path"; LEDGER="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *[!0-9]*) fail "unknown top argument: $1" ;;
@@ -172,10 +201,24 @@ if [ "$MODE" = "top" ]; then
   LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
   OMS_METRIC="$METRIC" OMS_DIRECTION="$DIRECTION" OMS_N="$N" OMS_ALL="$INCLUDE_ALL" \
+    OMS_BY_GROUP="$BY_GROUP" OMS_MIXED="$MIXED" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$STATE_ROOT" \
     python3 - "$LEDGER" <<'EOF'
 import json, math, os, sys
+sys.path.insert(0, os.environ["OMS_RL_LIB"])
+import run_ledger_metrics as contract_lib
 metric = os.environ["OMS_METRIC"]
 direction = os.environ["OMS_DIRECTION"]
+mixed = os.environ["OMS_MIXED"] == "1"
+try:
+    declared = contract_lib.load_contract(contract_lib.contract_path(sys.argv[1])).get(metric)
+except contract_lib.ContractError as error:
+    sys.stderr.write("error: metric contract unreadable (%s); fix it or move it aside\n" % error)
+    sys.exit(2)
+current = contract_lib.metric_record(declared, os.environ["OMS_RL_ROOT"]) if declared else None
+if declared and direction and direction != declared["direction"]:
+    sys.stderr.write("warning: the metric contract declares %s for %s; ranking --%s as asked\n"
+                     % (declared["direction"], metric, direction))
+direction = direction or (declared["direction"] if declared else "max")
 n = int(os.environ["OMS_N"])
 include_all = os.environ["OMS_ALL"] == "1"
 rows = []
@@ -197,7 +240,38 @@ if not rows:
     hint = "" if include_all else " and exit==0 (use --all to include failed runs)"
     sys.stderr.write("top: no ledger rows with a finite numeric metric %r%s\n" % (metric, hint))
     sys.exit(3)
+if mixed:
+    if current is not None or len({contract_lib.row_digest(r, metric) for _, r in rows}) > 1:
+        sys.stderr.write("warning: --mixed ranks runs measured under different metric contracts together\n")
+else:
+    rows, left = contract_lib.comparable(rows, metric, current)
+    detail = "; ".join("%d run(s): %s" % (count, reason) for reason, count in sorted(left.items()))
+    if not rows:
+        sys.stderr.write("top: not comparable: %s runs do not share one metric contract (%s); "
+                         "--mixed ranks them anyway\n" % (metric, detail))
+        sys.exit(4)
+    if left:
+        sys.stderr.write("top: left out as not comparable under today's contract for %s: %s\n" % (metric, detail))
 rows.sort(key=lambda x: x[0], reverse=(direction == "max"))
+if os.environ["OMS_BY_GROUP"] == "1":
+    groups, loose = contract_lib.group_summaries(rows, metric)
+    if not groups:
+        sys.stderr.write("top: --by-group found no run with a seed and group for %s "
+                         "(record with --seed N, or a command carrying --seed N)\n" % metric)
+        sys.exit(3)
+    groups.sort(key=lambda g: g[2], reverse=(direction == "max"))
+    replicated = [g for g in groups if g[1] > 1]
+    for i, (group, count, mean, stdev, ci, seeds) in enumerate(replicated[:n], 1):
+        print("%2d  %s mean=%.6g  stdev=%.6g  ci95=[%.6g, %.6g]  n=%d  group=%s  seeds=%s" % (
+            i, metric, mean, stdev, ci[0], ci[1], count, group[:60], ",".join(str(s) for s in seeds)))
+    single = [g for g in groups if g[1] == 1]
+    if single:
+        print("single seed (no claim that one is better):")
+        for group, count, mean, stdev, ci, seeds in single[:n]:
+            print("    %s=%.6g  n=1  group=%s  seed=%s" % (metric, mean, group[:60], seeds[0]))
+    if loose:
+        sys.stderr.write("top: %d run(s) without a seed are not grouped\n" % loose)
+    sys.exit(0)
 def _clean(x):
     s = str(x).replace("\n", " ").replace("\r", " ").replace("\t", " ")
     return s[:60]
@@ -236,6 +310,19 @@ while [ "$#" -gt 0 ]; do
     --reason)
       [ "$#" -ge 2 ] || fail "--reason requires text"
       REASON="$2"
+      shift 2
+      ;;
+    --seed)
+      [ "$#" -ge 2 ] || fail "--seed requires an integer"
+      case "$2" in ""|*[!0-9-]*|?*-*|-) fail "--seed requires an integer" ;; esac
+      SEED="$2"
+      shift 2
+      ;;
+    --group)
+      [ "$#" -ge 2 ] || fail "--group requires a label"
+      case "$2" in ""|*[!A-Za-z0-9._-]*) fail "--group label must match [A-Za-z0-9._-]+" ;; esac
+      [ "${#2}" -le 60 ] || fail "--group label is at most 60 characters"
+      GROUP="$2"
       shift 2
       ;;
     -h|--help)
@@ -399,7 +486,8 @@ run_ledger_write_row() {
   local row_status="$1" row_duration="$2"
   shift 2
   OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON="$REASON" \
-    OMS_LEDGER_RUN_ID="$effective_run_id" \
+    OMS_LEDGER_RUN_ID="$effective_run_id" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$STATE_ROOT" \
+    OMS_RL_LEDGER="$LEDGER" OMS_RL_SEED="$SEED" OMS_RL_GROUP="$GROUP" \
     python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "$slurm_job_id" \
     "$row_status" "$row_duration" "$NOTE" "$row_id" "$@" <<'EOF' > "$row_tmp"
 import json, os, re, sys
@@ -430,6 +518,20 @@ if row["gate"] == "skipped" and reason:
 mj = os.environ.get("OMS_METRICS_JSON", "")
 if mj:
     row["metrics"] = json.loads(mj)
+# Additive: what the metric contract said at this run, and which seed group it replicates.
+sys.path.insert(0, os.environ["OMS_RL_LIB"])
+import run_ledger_metrics as contract_lib
+seed, group = contract_lib.seed_and_group(row["cmd"], row["git_sha"], row["dirty_hash"],
+                                          os.environ.get("OMS_RL_SEED", ""), os.environ.get("OMS_RL_GROUP", ""))
+if seed is not None:
+    row["seed"] = seed
+if group:
+    row["group"] = group
+if row["exit"] is not None:
+    recorded = contract_lib.row_contract(os.environ["OMS_RL_LEDGER"], os.environ["OMS_RL_ROOT"],
+                                         lambda text: sys.stderr.write(text + "\n"))
+    if recorded:
+        row["metric_contract"] = recorded
 research_file = os.environ.get("OMS_RESEARCH_METADATA_FILE", "")
 if research_file:
     try:
