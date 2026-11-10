@@ -24398,6 +24398,9 @@ on_disk = {
     for path in (root / "custom-skills").glob("*/SKILL.md")
 }
 assert on_disk == expected, (sorted(on_disk - expected), sorted(expected - on_disk))
+slurm_skill = (root / "custom-skills" / "oms-slurm" / "SKILL.md").read_text(encoding="utf-8")
+assert "sshare -U" in slurm_skill and "sprio" in slurm_skill, "oms-slurm must point at live fair-share reads"
+assert "never in the reference" in slurm_skill, "fair-share must stay out of the snapshot"
 
 owners = {}
 duplicates = []

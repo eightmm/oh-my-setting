@@ -20,7 +20,11 @@ Static cluster facts live in the private reference, not in repeated probes.
    `--check` when the cluster changed). Never commit it.
 2. Probe live state only for what the reference cannot know: `squeue` for the
    current queue, `sacct` for finished jobs. Do not re-run `sinfo` topology
-   scans when the reference already answers the question.
+   scans when the reference already answers the question. Fair-share changes
+   by the minute, so it is never in the reference: when queue wait matters,
+   read it live with `sshare -U` (your usage and fair-share factor) and
+   `sprio -u "$USER"` (pending-job priority parts). Both are read-only; flags
+   and columns vary by site, so check `man` before relying on a column.
 3. Confirm partition, account, resources, time limit, output paths, and
    checkpoint plan against `PROJECT.md` before submitting.
 
