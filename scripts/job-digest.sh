@@ -22,6 +22,7 @@ PATTERNS='Traceback|ERROR|Error:|error:|OOM|[Oo]ut of memory|CUDA|NCCL|NaN|nan l
 WAIT=0
 WAIT_TIMEOUT=""
 MAX_BYTES=""
+METRICS=""
 PENDING=0
 POLL_SECONDS="$(oms_poll_int_or_default "${OMS_JOB_DIGEST_POLL:-30}" 30)"
 [ "$POLL_SECONDS" -ge 1 ] || POLL_SECONDS=1
@@ -30,6 +31,7 @@ usage() {
   cat <<'EOF'
 Usage: job-digest.sh <logfile>
        job-digest.sh <slurm-job-id> [logfile]
+       job-digest.sh --metrics FILE [logfile | slurm-job-id [logfile]]
 
 Emit a compact markdown digest of a training/Slurm run: sacct summary (job id
 mode), error-pattern hits, the last Python traceback, and the log tail.
@@ -45,6 +47,13 @@ Options:
                 never cancelled or resubmitted. Default: wait without limit.
   --max-bytes N Cap the digest at N bytes (>= 512) of whole lines and say what
                 was omitted. Default: no cap.
+  --metrics FILE
+                Add a metrics section from FILE: JSONL records
+                {"step","name","value","ts"} (see LOGGING.md) or DVCLive
+                plots/metrics .tsv (a file or a directory of them). Shows the
+                last step, latest and best value, recent slope, non-finite
+                values and the time since the last record. A read of the file
+                only; no process is watched. Can be used without a log.
   -h, --help    Show this help.
 
 Leaving the queue is not success: confirm State/ExitCode and required outputs.
@@ -90,6 +99,11 @@ while [ "$#" -gt 0 ]; do
       [ "$MAX_BYTES" -ge 512 ] || fail "--max-bytes must be at least 512"
       shift 2
       ;;
+    --metrics)
+      [ "$#" -ge 2 ] || fail "--metrics requires a file or directory"
+      METRICS="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -101,15 +115,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ "${#ARGS[@]}" -ge 1 ] || {
+[ "${#ARGS[@]}" -ge 1 ] || [ -n "$METRICS" ] || {
   usage >&2
   exit 2
 }
 [ "${#ARGS[@]}" -le 2 ] || fail "too many arguments"
+if [ -n "$METRICS" ]; then
+  [ -e "$METRICS" ] || fail "metrics file not found: $METRICS"
+  command -v python3 >/dev/null 2>&1 || fail "--metrics needs python3"
+fi
 
 JOB_ID=""
 LOG_FILE=""
-if [ -f "${ARGS[0]}" ]; then
+if [ "${#ARGS[@]}" -eq 0 ]; then
+  :
+elif [ -f "${ARGS[0]}" ]; then
   [ "${#ARGS[@]}" -eq 1 ] || fail "too many arguments"
   LOG_FILE="${ARGS[0]}"
 elif printf '%s' "${ARGS[0]}" | grep -E '^[0-9]+(_[0-9]+)?$' > /dev/null; then
@@ -283,6 +303,12 @@ emit_digest() {
     printf '\n## Tail\n\n```\n'
     tail -n "$TAIL_LINES" "$LOG_FILE"
     printf '```\n'
+  fi
+
+  if [ -n "$METRICS" ]; then
+    printf '\n'
+    python3 -I "$ROOT/scripts/lib/job_metrics.py" "$METRICS" ||
+      printf 'Metrics section failed; read the file directly.\n'
   fi
 }
 

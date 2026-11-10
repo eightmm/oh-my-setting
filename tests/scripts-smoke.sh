@@ -1457,6 +1457,37 @@ EOF
   [ "$(cat "$dir/poll")" -ge 5 ] || fail "wait loop must retry non-job errors and stop only on invalid-job-id"
   assert_file_contains "$dir/werr" "poll 1s"
   assert_file_contains "$dir/sleep.log" "1"
+
+  # --metrics: JSONL and DVCLive tsv, stdlib only, no log required.
+  local now old
+  now="$(date +%s)"
+  old=$((now - 7200))
+  {
+    printf '{"step": 1, "name": "train/loss", "value": 2.0, "ts": %s}\n' "$old"
+    printf '{"step": 2, "name": "train/loss", "value": 1.5, "ts": %s}\n' "$old"
+    printf '{"step": 3, "name": "train/loss", "value": 1.0, "ts": %s}\n' "$old"
+    printf '{"step": 4, "name": "train/loss", "value": "nan", "ts": %s}\n' "$old"
+    printf '{"step": 4, "name": "val/acc", "value": 0.7, "ts": %s}\n' "$old"
+    printf 'not json\n'
+  } > "$dir/metrics.jsonl"
+  out="$("$ROOT/scripts/job-digest.sh" --metrics "$dir/metrics.jsonl")" ||
+    fail "metrics-only digest should succeed"
+  contains "$out" '## Metrics' || fail "metrics section missing"
+  contains "$out" '| train/loss | 4 | 4 | nan | 1 @3 (min) | -0.5 | 1, first @4 |' ||
+    fail "loss row wrong: $out"
+  contains "$out" '| val/acc | 1 | 4 | 0.7 | 0.7 @4 (max) |' || fail "acc row wrong: $out"
+  contains "$out" '1 record(s) skipped' || fail "malformed line not counted"
+  contains "$out" '2.0h ago' || fail "last record age missing: $out"
+  mkdir -p "$dir/dvc/plots/metrics"
+  printf 'timestamp\tstep\tloss\n%s\t0\t3.0\n%s\t1\t2.5\n' "$now" "$now" > "$dir/dvc/plots/metrics/loss.tsv"
+  out="$("$ROOT/scripts/job-digest.sh" --metrics "$dir/dvc" "$dir/run.log")" ||
+    fail "dvclive digest should succeed"
+  contains "$out" '| loss | 2 | 1 | 2.5 | 2.5 @1 (min) |' || fail "tsv row wrong: $out"
+  contains "$out" '## Tail' || fail "log sections should remain with --metrics"
+  if "$ROOT/scripts/job-digest.sh" --metrics "$dir/none" >/dev/null 2>"$dir/merr"; then
+    fail "missing metrics file should fail"
+  fi
+  assert_file_contains "$dir/merr" 'metrics file not found'
 }
 
 test_job_digest_wait_budget_and_byte_cap() {

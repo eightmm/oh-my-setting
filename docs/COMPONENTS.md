@@ -2124,6 +2124,11 @@ ML/Slurm workflows use local-first experiment controls:
   present, both `squeue` and `sacct` use the remaining observation budget, with
   a one-second kill grace. Expired budgets skip accounting. Without GNU `timeout`
   (BSD/macOS), scheduler calls cannot be preempted; only sleeps are bounded.
+  `oms job-digest --metrics FILE [log]` adds a read-only metrics section from a
+  JSONL file of `{step, name, value, ts}` records (convention in the
+  `LOGGING.md` template) or DVCLive `plots/metrics/*.tsv`: last step, latest and
+  best value, recent slope, non-finite values and time since the last record.
+  The age describes the file, not whether the run is alive.
 
 Machine, cluster, dataset, and run details stay local unless the user explicitly
 chooses a connector or tracked summary.
