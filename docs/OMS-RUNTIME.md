@@ -124,6 +124,27 @@ This supports the default stale threshold; a shorter explicit threshold can
 still expire live work. Closing the scope stops the monitor with bounded waits;
 unknown identity or shutdown keeps unresolved evidence and returns failure.
 
+The active goal has an explicit lifecycle that `agent-task status --json`
+reports read-only under `lifecycle` as `{state, evidence}`. States:
+`pursuing`, `paused`, `achieved`, `unmet`, `budget-limited`, `unknown`.
+`achieved` requires `status: verified` and a fresh verification (the stored
+Verify command passed on the current tree); a Verification note an agent wrote,
+a stale pass or an edited status line stays `pursuing`. When the repo has a
+plan, its latest unresolved `goal-drive` park (no passing acceptance row after
+it) refines a non-achieved goal: `cycles-exhausted`, `tasks-exhausted` and
+`replan-budget-used` are `budget-limited`; `stuck` and the `acceptance-*`
+reasons are `unmet`; every other park is `paused` for the parent. The
+evidence names the record, the rule, the last verify exit code and the park
+reason. No new pause verb, budget or continuation exists.
+A goal still being pursued is not replaced silently: `init --goal`, `update
+--goal` or `rotate` with a different goal is refused while the packet is
+`active` and not TTL-stale. A parent passes `--replace-goal REASON`, and the
+new packet's Decisions records the replaced task id and the reason. A verified,
+closed or stale packet needs no override. A harness child
+(`OMS_HARNESS_CHILD=1` or a delegate depth above 0) cannot run `init`,
+`rotate`, `update --goal`, `verify` or `--replace-goal`. `agent-plan init`
+keeps its existing replace-and-archive behaviour.
+
 For prompt retries, `agent-task append --dedupe-key HASH` binds a 64-character
 lowercase hexadecimal key to the original note digest. The note and receipt
 publish together in one atomic packet replacement. An exact replay preserves

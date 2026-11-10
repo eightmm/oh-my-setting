@@ -893,9 +893,12 @@ def auto_task_record(payload: dict[str, Any], prompt: str, route: dict[str, Any]
             )
             if rotate:
                 goal = explicit_goal or f"Respond to user request: {excerpt}"
+                # The user's own prompt is the person-side consent that
+                # agent-task asks for before replacing an active goal.
+                consent = ["--replace-goal", "explicit goal in user prompt"] if explicit_goal else []
                 rc = run_agent_task(
                     repo,
-                    ["rotate", "--goal", goal, "--source-session", source_session,
+                    ["rotate", "--goal", goal, *consent, "--source-session", source_session,
                      "--next", "Respond to the latest user request."],
                 )
                 if rc != 0:

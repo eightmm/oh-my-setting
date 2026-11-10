@@ -111,7 +111,7 @@ for _ in $(seq 1 100); do [ -e "$race_barrier/started" ] && break; sleep 0.1; do
   kill "$verify_pid" 2>/dev/null || true
   fail "verify never reached its barrier"
 }
-"$task" --repo "$race_repo" rotate --goal successor >/dev/null
+"$task" --repo "$race_repo" rotate --goal successor --replace-goal "test rotates an active packet" >/dev/null
 second_id="$(awk '$1=="-" && $2=="task_id:" {print $3; exit}' "$race_repo/.oms/task/current.md")"
 [ -n "$second_id" ] && [ "$second_id" != "$first_id" ] || fail "rotate did not mint a new task"
 : > "$race_barrier/release"
