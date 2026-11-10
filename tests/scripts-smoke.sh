@@ -4933,6 +4933,47 @@ assert seats == {"claude": "pass", "antigravity": "fail"}, seats
 assert "gate_verify_exit" in review, review
 PY
     fail "review-outcome row is not typed: $(tail -c 2000 "$project/.oms/artifacts/index.jsonl")"
+  ! grep -q 'lint (advisory' "$project/out" || fail "a well-formed seat answer must print no lint line"
+  python3 - "$project/.oms/artifacts/index.jsonl" <<'PY' || fail "a clean seat must carry no result_lint"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+seats = [s for r in rows if r.get("kind") == "review-outcome" for s in r["review"]["seats"]]
+assert seats and not any("result_lint" in s for s in seats), seats
+PY
+
+  # Advisory seat-answer lint: untrackable prose findings and a pass that
+  # contradicts its own block are warned and recorded per seat, and the gate
+  # verdict stays what the seat said.
+  local lint_project="$TMP/review-gate-seat-lint"
+  make_committed_repo "$lint_project"
+  mkdir -p "$lint_project/bin" "$lint_project/home"
+  cat > "$lint_project/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'Findings:\n- the parser drops a line\nRecommendation:\nproceed\nGATE: pass\n'
+EOF
+  cat > "$lint_project/bin/agy" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'Findings:\n```findings\n'
+printf '%s\n' '{"file": "file.txt", "line": 1, "severity": "blocking", "summary": "broken"}'
+printf '```\nGATE: pass\n'
+EOF
+  chmod +x "$lint_project/bin/claude" "$lint_project/bin/agy"
+  wrap_agy_stub "$lint_project/bin/agy"
+  rc=0
+  HOME="$lint_project/home" PATH="$lint_project/bin:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$lint_project" --artifact-dir "$lint_project/artifacts" --providers claude,antigravity \
+    --no-diff --gate --prompt "Seat lint" >"$lint_project/out" 2>&1 || rc=$?
+  [ "$rc" = 0 ] || fail "seat lint must not change a passing gate, got $rc: $(cat "$lint_project/out")"
+  assert_file_contains "$lint_project/out" 'lint (advisory, not evidence): findings-not-trackable,finding-without-pointer'
+  assert_file_contains "$lint_project/out" 'lint (advisory, not evidence): pass-with-blocking'
+  python3 - "$lint_project/.oms/artifacts/index.jsonl" <<'PY' || fail "seat lint is not recorded on the review-outcome seats"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if l.strip()]
+seats = {s["provider"]: s.get("result_lint") for r in rows if r.get("kind") == "review-outcome" for s in r["review"]["seats"]}
+assert seats == {"claude": ["findings-not-trackable", "finding-without-pointer"], "antigravity": ["pass-with-blocking"]}, seats
+PY
 
   # The gate verify budget defaults to 20m; an explicit environment value wins.
   write_fake_review_gate_provider "$bin_dir" claude pass

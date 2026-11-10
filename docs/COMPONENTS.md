@@ -1246,6 +1246,16 @@ records the codes as `result_lint` on the delegate row of the artifact index.
 The lint checks shape only: a clean result is never verification evidence, and
 no `result_lint` field means clean or not linted.
 
+The same lint reads each gate seat's final answer in `peer-review` (`delegation_lint.py
+review`) and adds only what the gate does not already check: prose findings with no
+fenced `findings` block (`findings-not-trackable`, plus `finding-without-pointer` when an
+item has no `path:line`), a `GATE: pass` beside a blocking finding in the block
+(`pass-with-blocking`), and an answer over 6000 bytes with no summary or recommendation
+line (`long-answer-no-summary`). The GATE and SECURITY lines, answer quality and block
+validation keep their own checks. Warnings print as one `lint (advisory, not evidence)`
+line under the seat's verdict and are recorded as `result_lint` on that seat in the
+`review-outcome` row; they never change a verdict.
+
 ```bash
 oms peer-delegate --to codex --prompt "Implement the bounded change."
 oms patch-admit --patch path/to/change.patch  # optional read-only preview
