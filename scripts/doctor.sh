@@ -129,7 +129,8 @@ data: no provider command runs and nothing a file names is executed. Rows are
 findings (ok, warn, info, unknown) and never change the exit status; a file
 that cannot be read is unknown, not ok. The report records a fingerprint of
 its own findings under the user state directory and says which section
-changed since the last check; it changes no provider file.
+changed since the last check; it changes no provider file. With --json it
+prints one oms-doctor-security document (schema 1) with the same findings.
 
 --extensions is a standalone read-only inventory of the MCP servers and
 native plugins each provider CLI is configured with, user-level and for the
@@ -254,8 +255,11 @@ if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } && [ "$REPAIR" = 1 ]; t
   exit 2
 fi
 if { [ "$REPORT_JSON" = 1 ] || [ "$REPORT_PLAN" = 1 ]; } &&
-   { [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ] ||
-     [ "$SECURITY_ONLY" = 1 ]; }; then
+   { [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ]; }; then
+  echo "error: structured doctor reports cannot wrap a standalone report mode" >&2
+  exit 2
+fi
+if [ "$REPORT_PLAN" = 1 ] && [ "$SECURITY_ONLY" = 1 ]; then
   echo "error: structured doctor reports cannot wrap a standalone report mode" >&2
   exit 2
 fi
@@ -277,6 +281,9 @@ if [ "$SECURITY_ONLY" = 1 ]; then
     echo "error: --security needs python3" >&2
     exit 2
   }
+  if [ "$REPORT_JSON" = 1 ]; then
+    exec python3 -I "$ROOT/scripts/lib/doctor-security.py" --json
+  fi
   exec python3 -I "$ROOT/scripts/lib/doctor-security.py"
 fi
 
