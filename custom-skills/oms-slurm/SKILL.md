@@ -33,6 +33,8 @@ Static cluster facts live in the private reference, not in repeated probes.
 - Never run long, GPU, or high-CPU work on login nodes — submit it.
 - Job scripts start in `$SLURM_SUBMIT_DIR`, fail fast (`set -euo pipefail`),
   and write job-specific logs.
+- When a retry or resume could submit twice, use `oms slurm-submit -- sbatch ... SCRIPT`:
+  a repeat of the same request exits 3 instead of resubmitting.
 - Long or expensive runs go through `oms run-ledger` (pre-flight gate, one
   JSONL row per run) so parallel sessions see them.
 
