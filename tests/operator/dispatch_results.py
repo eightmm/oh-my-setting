@@ -240,6 +240,39 @@ def exercise_continued_stage_rollup(repo):
                     patch.object(panel.sys, "stdout", output):
                 assert panel.main(["--repo", str(repo), "--results", "--task-id", task, "--json"]) == 0
             assert json.loads(output.getvalue())["rows"][0] == row, output.getvalue()
+            # --export writes what the reader prints to a new private local file, and never replaces one.
+            exported, shown, said = repo / "results-export.md", io.StringIO(), io.StringIO()
+            with patch.object(saved, "_records", return_value=([previous, current], [failed])), \
+                    patch.object(saved, "_worker_owns", return_value=["value.txt"]), \
+                    patch.object(panel, "resolve_call_alias", return_value=task), \
+                    patch.object(panel.shutil, "get_terminal_size", return_value=os.terminal_size((100, 40))):
+                with patch.object(panel.sys, "stdout", shown):
+                    assert panel.main(["--repo", str(repo), "--results", "--task-id", task]) == 0
+                with patch.object(panel.sys, "stdout", said):
+                    assert panel.main(["--repo", str(repo), "--results", "--task-id", task, "--export", str(exported)]) == 0
+                assert exported.read_text(encoding="utf-8") == shown.getvalue() and task in shown.getvalue(), exported.read_text()
+                assert said.getvalue() == "panel: wrote %d line(s) to %s\n" % (shown.getvalue().count("\n"), exported), said.getvalue()
+                assert os.name == "nt" or (exported.stat().st_mode & 0o777) == 0o600, oct(exported.stat().st_mode)
+                refused = io.StringIO()
+                with patch.object(panel.sys, "stderr", refused), patch.object(panel.sys, "stdout", io.StringIO()):
+                    assert panel.main(["--repo", str(repo), "--results", "--task-id", task, "--export", str(exported)]) == 2
+                    linked = repo / "results-link.md"
+                    if os.name != "nt":
+                        linked.symlink_to(repo / "results-elsewhere.md")
+                        assert panel.main(["--repo", str(repo), "--results", "--export", str(linked)]) == 2
+                        assert not (repo / "results-elsewhere.md").exists()
+                        linked.unlink()
+                assert "refuses to replace" in refused.getvalue() and exported.read_text(encoding="utf-8") == shown.getvalue()
+                for wrong in (["--results", "--json", "--export", str(repo / "x.md")], ["--export", str(repo / "x.md")]):
+                    with patch.object(panel.sys, "stderr", io.StringIO()):
+                        try:
+                            panel.main(["--repo", str(repo)] + wrong)
+                        except SystemExit as stop:
+                            assert stop.code == 2, wrong
+                        else:
+                            raise AssertionError(wrong)
+                assert not (repo / "x.md").exists()
+            exported.unlink()
             for old_scope, new_scope in ((["a.txt"], ["b.txt"]), ([], ["value.txt"]),
                                          (["value.txt"], []), (["../bad"], ["../bad"]),
                                          (["value.txt"], [0])):

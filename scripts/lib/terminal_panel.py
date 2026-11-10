@@ -144,6 +144,8 @@ def main(argv=None):
     parser.add_argument("--lenses", help="--council only: 2..12 unique comma-separated names [a-z0-9-]+, 1..32 characters each; one blind seat each")
     parser.add_argument("--thread", help="council thread ID; a fresh thread prefix with --lenses")
     parser.add_argument("--results", action="store_true", help="read bounded durable task results")
+    parser.add_argument("--export", metavar="FILE",
+                        help="--results only: write what the reader shows to a new local file instead of the terminal")
     parser.add_argument("--salvage", metavar="TASK_ID", help="capture a stopped worker's kept worktree for owner review")
     parser.add_argument("--mail", metavar="PARTICIPANT", help="read messages addressed to one main in --room")
     parser.add_argument("--participant", help="--results of one room call (with --task-id, one council seat)")
@@ -302,6 +304,8 @@ def main(argv=None):
         parser.error("--verify requires --dispatch, --accept or --finalize")
     if args.task_id and not (args.dispatch or args.council or args.results or args.finalize or args.retry_delivery):
         parser.error("--task-id requires a task operation")
+    if args.export and (not args.results or args.json):
+        parser.error("--export requires --results and takes no --json")
     if args.main and not args.dispatch:
         parser.error("--main requires --dispatch")
     if args.allow_stale_base and not args.continue_task:
@@ -551,6 +555,9 @@ def main(argv=None):
                 return read
 
             board = os.environ.get(panel_reader.BOARD, "")
+            if args.export:
+                import panel_export
+                return panel_export.write(args.export, reader(panel_export.WIDTH))
             if args.json:
                 print(json.dumps(report(), ensure_ascii=False, indent=2))
             elif panel_reader.PANE.fullmatch(board) and sys.stdin.isatty() and sys.stdout.isatty():
