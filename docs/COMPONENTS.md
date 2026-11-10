@@ -1245,6 +1245,35 @@ digest and paths; external parent recovery patches are explicitly not covered.
 The parent must obtain a separate or combined review of those exact patches
 before declaring the whole request complete. Campaign scope remains immutable.
 
+#### Review findings
+
+A gate prompt asks each seat to also list what it found in one fenced `findings`
+block, one JSON object per line (`file`, `line`, `severity` of `blocking` or
+`advisory`, `summary`, optional `quote`). After the verdicts, the gate reads those
+blocks from seats that reached a verdict and checks every citation against the
+diff the seats were shown and the file it names: `in-diff` (an added line),
+`context` (an unchanged line inside a hunk), `outside-scope` (anywhere else),
+`anchor-not-found` (no such file or line, or the quote is not within three
+lines of it) and `unclassified` when no diff was attached. Rows go to
+`_findings-RUN.jsonl` beside the review-scope artifact with its diff digest; a
+malformed line, an absolute path or one that leaves the repository is counted
+as rejected. No model is called and the gate verdict stays the seats' `GATE:`
+lines and the mechanical verify: an `anchor-not-found` citation is flagged as
+not usable as blocking evidence, nothing more.
+
+`oms peer-review findings list [--status open|fixed|verified|dismissed] [--json]`
+and `findings show ID` read them back. An ID is derived from the path, the
+summary and the quote, so the same finding reported by a later run is the same
+row. A finding is `open` until a record says otherwise in
+`_finding-events.jsonl`: `findings fix ID` is a claim; `findings verify ID --run
+REF` requires a passing gate-verify receipt in the artifact index, named by its
+artifact id or file name and recorded after the fix; `findings dismiss ID
+--reason TEXT` is the owner's (refused inside a harness worker or reviewer);
+`findings reopen ID --reason TEXT` undoes any of them. A fixed or verified
+finding that a later run reports again reads `open`. Every status is a record
+of what was said, never approval or verification evidence, and a refused
+action exits 2.
+
 ### Acceptance freshness and reuse
 
 Acceptance stays fresh by default. An explicit `- Acceptance reuse: same-run`
