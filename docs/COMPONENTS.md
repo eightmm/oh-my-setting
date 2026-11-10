@@ -941,6 +941,10 @@ Attached review/repair findings use bounded, sanitized reference quotes: local
 paths are masked and sensitive lines redacted without rewriting the original
 evidence. Long reviews keep their opening findings; unterminated final lines
 remain readable. The operator brief still passes the strict outbound guard.
+Quoted provider output also has invisible Unicode (tag characters, bidi
+controls, zero-width characters) replaced by visible `<U+XXXX>` markers
+(`scripts/lib/hidden_text.py`). This is a marker, not a defence: it does not
+claim to catch every hiding technique.
 
 Explicit `--verify` and plan-task checks win. Otherwise writes default only to
 an implemented `scripts/check.sh fast`; ML project detection does not select a

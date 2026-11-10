@@ -22977,6 +22977,29 @@ test_debate_prompt_sanitizes_sensitive_quoted_lines() {
   fi
 }
 
+test_debate_prompt_marks_hidden_unicode_in_quoted_output() {
+  local out
+  out="$(
+    . "$ROOT/scripts/lib/oms-common.sh"
+    . "$ROOT/scripts/lib/agent-memory-common.sh"
+    . "$ROOT/scripts/lib/agent-task-common.sh"
+    . "$ROOT/scripts/lib/peer-common.sh"
+    printf 'plain \xc3\xa9 text\nzero\xe2\x80\x8bwidth bidi\xe2\x80\xaeflip tag\xf3\xa0\x80\xa1x\n' |
+      ma_sanitize_quoted_output
+  )"
+  case "$out" in
+    *'zero<U+200B>width'*'bidi<U+202E>flip'*'tag<U+E0021>x'*) ;;
+    *) fail "hidden unicode was not marked: $out" ;;
+  esac
+  case "$out" in
+    *$'\xe2\x80\x8b'*|*$'\xe2\x80\xae'*|*$'\xf3\xa0\x80\xa1'*) fail "invisible characters survived: $out" ;;
+  esac
+  case "$out" in
+    *$'plain \xc3\xa9 text'*) ;;
+    *) fail "ordinary non-ASCII text was altered: $out" ;;
+  esac
+}
+
 test_oms_run_spine_links_and_joins() {
   local d="$TMP/oms-run-spine"
   local index="$d/.oms/runs/spine.jsonl"
