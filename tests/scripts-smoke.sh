@@ -22087,6 +22087,30 @@ PY
   contains "$data_out" "current=(missing)" || fail "a removed manifest should read as missing: $data_out"
   data_out="$(cd "$proj" && OMS_RUNS_DIR="$runs" "$ROOT/scripts/run-capsule.sh" reproduce "$data_id")"
   contains "$data_out" "# data at capture: ds manifest " || fail "reproduce should name the data manifest: $data_out"
+  # No policy declared: the row has no policy key. A capture without --data prints one advisory line and still succeeds.
+  ( cd "$proj" && OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/data-manifest.sh" create --name ds \
+    --split train=train.txt --split val=val.txt >/dev/null 2>&1 ) || fail "manifest recreate failed"
+  data_id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --data ds --no-ledger -- true 2>/dev/null)"
+  [ "$(python3 -c 'import json,sys;print("policy" in json.load(open(sys.argv[1]))["data"][0])' "$runs/$data_id/capsule.json")" = False ] ||
+    fail "a manifest without a policy must not add a policy key"
+  ( cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --no-ledger -- true >/dev/null 2>"$proj/hint.err" ) || fail "the data hint must never fail a capture"
+  assert_file_contains "$proj/hint.err" "capsule: data manifests exist (ds) but no --data was given; add --data NAME"
+  [ "$(grep -c 'data manifests exist' "$proj/hint.err")" = 1 ] || fail "the data hint should be one line: $(cat "$proj/hint.err")"
+  ( cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --data ds --no-ledger -- true >/dev/null 2>"$proj/hint.err" )
+  ! grep -q "data manifests exist" "$proj/hint.err" || fail "no hint when --data is given: $(cat "$proj/hint.err")"
+  ( cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$proj/no-manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --no-ledger -- true >/dev/null 2>"$proj/hint.err" )
+  ! grep -q "data manifests exist" "$proj/hint.err" || fail "no hint when the repo has no manifest: $(cat "$proj/hint.err")"
+  # A declared policy is recorded on the data row.
+  ( cd "$proj" && OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/data-manifest.sh" create --name pol --policy random \
+    --split train=train.txt --split val=val.txt >/dev/null 2>&1 ) || fail "policy manifest create failed"
+  data_id="$(cd "$proj" && OMS_RUNS_DIR="$runs" OMS_MANIFEST_DIR="$manifests" "$ROOT/scripts/run-capsule.sh" run \
+    --data pol --no-ledger -- true 2>/dev/null)"
+  [ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["data"][0].get("policy"))' "$runs/$data_id/capsule.json")" = random ] ||
+    fail "the declared policy should be recorded on the data row"
 }
 
 test_run_capsule_propagates_exit_and_runs_once() {
@@ -23481,7 +23505,7 @@ test_oms_run_diff_compares_capsules() {
     "$cap" run --seed 1 --metrics mA.json --config hp.json --config hp.ini --data ds --no-ledger -- true >/dev/null 2>&1 ) ||
     fail "run A failed"
   printf 'c\n' >> "$d/train.txt"
-  ( cd "$d" && "$ROOT/scripts/data-manifest.sh" create --name ds --split train=train.txt >/dev/null 2>&1 ) ||
+  ( cd "$d" && "$ROOT/scripts/data-manifest.sh" create --name ds --policy random --split train=train.txt >/dev/null 2>&1 ) ||
     fail "manifest update failed"
   printf '{"lr": 0.0003, "model": {"depth": 6, "act": "relu"}, "tags": ["a"], "warmup": 100}\n' > "$d/hp.json"
   printf 'lr=0.0003\n' > "$d/hp.ini"
@@ -23496,8 +23520,8 @@ test_oms_run_diff_compares_capsules() {
   contains "$out" "seeds" || fail "diff missing seeds line"
   printf '%s\n' "$out" | grep -E '^modules +!=  \(none\)  \|  cuda/12\.1$' > /dev/null || fail "diff missing the modules line"
   printf '%s\n' "$out" | grep -E '^host +== ' > /dev/null || fail "diff missing the host line"
-  printf '%s\n' "$out" | grep -E '^data:ds +!=  [0-9a-f]{12} \(train=2\)  \|  [0-9a-f]{12} \(train=3\)$' > /dev/null ||
-    fail "diff missing the changed data manifest: $out"
+  printf '%s\n' "$out" | grep -E '^data:ds +!=  [0-9a-f]{12} \(train=2\)  \|  [0-9a-f]{12} \(train=3\) policy=random$' > /dev/null ||
+    fail "diff missing the changed data manifest or its policy: $out"
   printf '%s\n' "$out" | grep -E '^data:extra +!=  -  \|  [0-9a-f]{12} \(train=2\)$' > /dev/null ||
     fail "diff missing the manifest only one run named: $out"
   # Config differences are named key by key; an unchanged key is not listed.
