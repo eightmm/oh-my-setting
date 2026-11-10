@@ -2219,7 +2219,20 @@ ML/Slurm workflows use local-first experiment controls:
   or ISO-8601 dates; list splits oldest first). An ID repeated inside one split
   is a warning. `--derive-cmd` and `--derive-script` record the command and the
   script digest behind the key columns; `check` warns when that script changed
-  or is gone. OMS never runs the chemistry or the clustering, and every
+  or is gone. Provenance is recorded as text and never fetched or verified:
+  `--source NAME=REF` (repeatable; accession, release tag, URL, DOI or an
+  internal label; a REF that looks like a credential or carries URL userinfo is
+  refused) with an optional format-checked `--source-digest NAME=SHA256` you
+  computed yourself, `--split-rationale TEXT` (one line on why this policy and
+  these keys fit the claim) and `--entity-kind COLUMN=KIND`
+  (`protein|ligand|complex|pocket|assay|other`, a label on an entity or key
+  column). `show` and `check` print them, and `leakage` reports "policy: cold
+  by protein" and warns, without changing its exit code, when a `cold` or
+  `scaffold` policy has no kind or no rationale. The fields are additive
+  (schema stays 3) and `check`/`leakage` ignore unknown fields, but the run
+  capsule's `--data` fingerprint covers the whole manifest apart from `ts` and
+  `note`, so a manifest recreated with provenance fingerprints differently.
+  OMS never runs the chemistry or the clustering, and every
   `leakage` report ends by saying it compared exact matches only: analogs,
   homologs and other near-duplicates need the project's similarity tooling.
 - An opt-in project skill for molecular data,

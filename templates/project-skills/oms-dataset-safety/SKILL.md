@@ -11,7 +11,8 @@ project. The manifest check is cheap; run it first.
 1. **Register before first use**: `oms data-manifest` records a dataset or
    split by IDs and declared group keys — no raw rows are stored. Declare
    the group key that actually defines contamination (protein family,
-   patient, source document), not just the row ID.
+   patient, source document), not just the row ID. Record where the data
+   came from and why it was split that way (`--source`, `--split-rationale`).
 2. **Check before training**: `oms data-manifest check --name <manifest>`
    then `oms data-manifest leakage --name <manifest>` whenever registered
    splits exist. A run that starts before the leakage check passes is a
