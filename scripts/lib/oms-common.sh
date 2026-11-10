@@ -4069,6 +4069,91 @@ PY
 # shellcheck disable=SC2034  # read by peer-delegate.sh after a failed snapshot
 OMS_WG_SNAPSHOT_ERROR=""
 # shellcheck disable=SC2034
+# Fingerprints of the user-level files that decide what the next session runs:
+# provider settings, shell start files and git config. One "digest<TAB>label"
+# line each; labels are fixed names, never contents. A provider CLI may update
+# its own settings in normal operation, so a difference here is only ever a
+# warning. ~/.claude.json is left out: it is a state file the CLI rewrites on
+# every run. Nothing in these files is parsed or executed.
+oms_user_config_fingerprint() {  # OUTPUT
+  local out="$1"
+  python3 -I - "$out" <<'OMS_USER_CONFIG_PY' 2>/dev/null
+import hashlib, os, sys
+
+home = os.path.expanduser("~")
+claude, codex = os.path.join(home, ".claude"), os.path.join(home, ".codex")
+agy = os.path.join(home, ".gemini", "antigravity-cli", "settings.json")
+FILES = [("claude settings.json", os.path.join(claude, "settings.json")),
+         ("codex config.toml", os.path.join(codex, "config.toml")),
+         ("antigravity settings.json", agy)]
+TREES = [("codex rules/", os.path.join(codex, "rules"))]
+# A session pointed elsewhere by its environment reads those files too.
+for variable, label, leaf in (("CLAUDE_CONFIG_DIR", "claude settings.json", "settings.json"),
+                              ("CODEX_HOME", "codex config.toml", "config.toml")):
+    base = os.environ.get(variable)
+    if base and os.path.realpath(base) != os.path.realpath(claude if leaf == "settings.json" else codex):
+        FILES.append(("%s (%s)" % (label, variable), os.path.join(base, leaf)))
+        if variable == "CODEX_HOME":
+            TREES.append(("codex rules/ (CODEX_HOME)", os.path.join(base, "rules")))
+other = os.environ.get("OMS_ANTIGRAVITY_SETTINGS")
+if other and os.path.realpath(other) != os.path.realpath(agy):
+    FILES.append(("antigravity settings.json (OMS_ANTIGRAVITY_SETTINGS)", other))
+FILES += [("~/" + name, os.path.join(home, name)) for name in (
+    ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zshenv", ".zprofile", ".gitconfig", ".config/git/config")]
+LIMIT = 4 * 1024 * 1024
+
+
+def digest(path):
+    try:
+        info = os.stat(path)
+    except OSError:
+        return "absent"
+    if not os.path.isfile(path):
+        return "not-a-file"
+    if info.st_size > LIMIT:
+        return "large:%d:%d" % (info.st_size, info.st_mtime_ns)
+    try:
+        with open(path, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+def tree(path):
+    """A rules directory: names and bytes of its regular files, bounded."""
+    if not os.path.isdir(path):
+        return "absent"
+    acc, seen = hashlib.sha256(), 0
+    for base, dirs, names in os.walk(path):
+        dirs.sort()
+        for name in sorted(names):
+            seen += 1
+            if seen > 500:
+                return "large:%d" % seen
+            full = os.path.join(base, name)
+            acc.update(os.path.relpath(full, path).encode("utf-8", "replace") + b"\0" + digest(full).encode() + b"\n")
+    return acc.hexdigest()
+
+
+rows = ["%s\t%s" % (digest(path), label) for label, path in FILES]
+rows += ["%s\t%s" % (tree(path), label) for label, path in TREES]
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write("\n".join(rows) + "\n")
+OMS_USER_CONFIG_PY
+}
+
+# Labels whose fingerprint differs between two oms_user_config_fingerprint
+# files, comma-separated; empty when nothing changed or either file is missing.
+oms_user_config_changed() {  # BEFORE AFTER
+  local before="$1" after="$2" line label found=""
+  [ -s "$before" ] && [ -s "$after" ] || return 0
+  while IFS= read -r line; do
+    label="${line#*$'\t'}"
+    grep -Fxq -- "$line" "$before" || found="${found:+$found, }$label"
+  done < "$after"
+  printf '%s' "$found"
+}
+
 oms_worker_surface_snapshot() {
   local repo="$1"
   local dir="$2"

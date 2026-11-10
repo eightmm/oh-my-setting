@@ -35708,6 +35708,32 @@ test_worker_guard_sees_planted_and_ignored_files() {
     fail "replacing a file inside an ignored directory should fail a strict run"
   contains "$result" 'outside its worktree: files' ||
     fail "an ignored-tree replacement should be named: $result"
+
+  # User-level settings and start files decide what the next session runs. A
+  # change to one during the run is reported by name only and never fails the
+  # run, strict or not: a provider CLI may update its own settings.
+  local conf="$TMP/guard-user-config" conf_artifact
+  make_guard_repo "$conf"
+  mkdir -p "$conf-home/.codex"
+  printf 'model = "kept"\n' > "$conf-home/.codex/config.toml"
+  printf 'marker-value-7c1\n' > "$conf-home/.gitconfig.sample"
+  result="$(run_guarded_worker "$conf" 'true' allow)"
+  [ "${result%%	*}" = 0 ] || fail "a quiet run should pass: $result"
+  if contains "$result" 'user-level configuration changed'; then
+    fail "untouched user configuration must not be reported: $result"
+  fi
+  result="$(OMS_WORKER_GUARD_STRICT=1 run_guarded_worker "$conf" \
+    "printf 'planted-body-7c1\n' >> $conf-home/.codex/config.toml; printf 'planted-body-7c1\n' > $conf-home/.zshrc" allow)"
+  [ "${result%%	*}" = 0 ] || fail "a user configuration change must stay a warning, strict included: $result"
+  contains "$result" 'warning: user-level configuration changed during this run: codex config.toml, ~/.zshrc;' ||
+    fail "the changed user configuration files should be named: $result"
+  if contains "$result" 'planted-body-7c1'; then
+    fail "the warning must carry file names, never contents: $result"
+  fi
+  conf_artifact="$(printf '%s\n' "${result#*	}" | sed -n 's/^artifact: //p' | sed -n '1p')"
+  assert_file_contains "$conf_artifact" '## User-level configuration changed during the run'
+  assert_file_contains "$conf_artifact" '- files: codex config.toml, ~/.zshrc'
+  ! grep -q 'planted-body-7c1' "$conf_artifact" || fail "the artifact must not carry configuration contents"
 }
 
 test_worker_guard_reports_a_sibling_remote_ref_change_as_soft() {
