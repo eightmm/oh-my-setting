@@ -6150,6 +6150,42 @@ ma_run_debate_rounds() {
   done
 }
 
+# Mechanical agreement tally for the synthesis: seats are grouped by the first
+# Verdict:/Recommendation:/Answer: line of their final answer (lowercased,
+# whitespace collapsed, cut at 80 bytes). It is a count of identical lines, not
+# a judgement; no model reads it and it never decides anything.
+ma_agreement_tally() {
+  local i line key keys="" label labels count
+  for i in "${!artifacts[@]}"; do
+    [ "${seat_exit[i]:-0}" = 0 ] && [ -z "${seat_quality[i]:-}" ] || continue
+    line="$(extract_output "${last_arts[i]}" 2>/dev/null | LC_ALL=C awk '
+      { l = $0; sub(/^[ \t>*#-]+/, "", l); low = tolower(l) }
+      want != "" && l !~ /^[ \t]*$/ { print want " " l; exit }
+      low ~ /^(verdict|recommendation|answer)[ \t*]*:/ {
+        sub(/^[^:]*:[ \t*]*/, "", l); name = low; sub(/[ \t*]*:.*/, "", name)
+        if (l ~ /^[ \t]*$/) { want = name ":"; next }
+        print name ": " l; exit
+      }')"
+    if [ -z "$line" ]; then
+      key="(no verdict line)"
+    else
+      key="$(printf '%s\n' "$line" | tr '[:upper:]' '[:lower:]' | tr -s ' \t' ' ' | LC_ALL=C tr -cd '[:print:]' | cut -c1-80 | ma_sanitize_quoted_output | tr '\n' ' ')"
+    fi
+    label="$(ma_council_seat_label "$i" "${provider_names[i]%:optional}")"
+    keys="${keys}${key}"$'\t'"${label}"$'\n'
+  done
+  [ -n "$keys" ] || return 0
+  printf '## Agreement tally\n\n'
+  printf 'Mechanical tally of identical verdict lines, not a decision: matching text is not agreement on substance and differing text is not proof of disagreement.\n\n'
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    labels="$(printf '%s' "$keys" | awk -F'\t' -v k="$key" '$1 == k { printf "%s%s", (n++ ? ", " : ""), $2 }')"
+    count="$(printf '%s' "$keys" | awk -F'\t' -v k="$key" '$1 == k { n++ } END { print n + 0 }')"
+    printf -- '- %s seat(s) [%s]: `%s`\n' "$count" "$labels" "$key"
+  done < <(printf '%s' "$keys" | cut -f1 | awk '!seen[$0]++')
+  printf '\n'
+}
+
 ma_write_synthesis() {
   local synth_file="$1"
   local i quote_count=0 quote_budget prompt_budget prompt_size available rendered quote floor quoted=0 quote_limit pointer
@@ -6207,7 +6243,9 @@ ma_write_synthesis() {
       printf -- '- debate stopped early: no seat changed position after round %s\n' \
         "$debate_stable_round"
     fi
-    printf '\n## Prompt\n\n'
+    printf '\n'
+    ma_agreement_tally
+    printf '## Prompt\n\n'
     printf '```\n'
     # Head-keep at the quote budget: the operator's question sits at the top,
     # and the diff below it already rode every seat's round-1 call — embedding
