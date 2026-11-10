@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sys
+import subprocess
 
 
 def tail_lines(path: Path, limit: int, max_bytes: int | None = None) -> tuple[list[str], bool]:
@@ -70,6 +71,70 @@ def artifact_sections_stream(handle, *, require_exit: bool = True) -> tuple[str,
     handle.seek(completed_start)
     body = handle.read(completed_end - completed_start).decode("utf-8", errors="replace")
     return "\n".join(body.splitlines()).strip(), exit_code
+
+
+def evidence_check(answer: str, repo: Path, revision: str) -> str:
+    """Check optional JSONL quotations against the worker's pinned Git tree."""
+    counts = dict.fromkeys(('matched', 'mismatch', 'missing-path', 'out-of-range', 'invalid', 'omitted'), 0)
+    cache: dict[str, bytes | None] = {}
+    in_block = found = False
+    entries = 0
+    for line in answer.splitlines():
+        if not in_block:
+            if line == '```oms-evidence':
+                in_block = found = True
+            continue
+        if line == '```':
+            in_block = False
+            continue
+        entries += 1
+        if entries > 200:
+            counts['omitted'] += 1
+            continue
+        try:
+            item = json.loads(line)
+            path, start, end, quote = (item[k] for k in ('path', 'start', 'end', 'quote'))
+            if (not isinstance(path, str) or not path or path.startswith('/') or
+                    any(part in ('', '.', '..') for part in path.split('/')) or
+                    '\x00' in path or type(start) is not int or type(end) is not int or
+                    start < 1 or end < start or not isinstance(quote, str) or
+                    not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', revision)):
+                raise ValueError('invalid evidence')
+            if path not in cache:
+                spec = revision + ':' + path
+                def git(*args):
+                    return subprocess.run(['git', '-C', str(repo), *args], stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, check=False)
+                kind = git('cat-file', '-t', spec)
+                if kind.returncode or kind.stdout.strip() != b'blob':
+                    cache[path] = None
+                else:
+                    size = git('cat-file', '-s', spec)
+                    if size.returncode or not size.stdout.strip().isdigit() or int(size.stdout) > 2 * 1024 * 1024:
+                        raise ValueError('source exceeds limit')
+                    result = git('show', spec)
+                    if result.returncode or len(result.stdout) > 2 * 1024 * 1024:
+                        raise ValueError('source unavailable')
+                    cache[path] = result.stdout
+            raw = cache[path]
+            if raw is None:
+                status = 'missing-path'
+            else:
+                lines = raw.split(b'\n')
+                if lines[-1] == b'':
+                    lines.pop()
+                if end > len(lines):
+                    status = 'out-of-range'
+                else:
+                    status = 'matched' if b'\n'.join(lines[start-1:end]) == quote.encode('utf-8') else 'mismatch'
+            counts[status] += 1
+        except (ValueError, TypeError, KeyError, OSError, UnicodeError):
+            counts['invalid'] += 1
+    if in_block:
+        counts['invalid'] += 1
+    if not found:
+        return ''
+    return '## Evidence check\n\n' + '\n'.join('- %s: %s' % item for item in counts.items()) + '\n'
 
 
 def final_attempt_output(path: Path) -> str | None:
@@ -326,6 +391,12 @@ def debate_excerpt(answer: str, limit: int) -> str:
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) == 5 and sys.argv[1] == "--evidence-check":
+            answer, _ = artifact_sections(Path(sys.argv[2]))
+            report = evidence_check(answer, Path(sys.argv[3]), sys.argv[4])
+            if report:
+                print("\n" + report, end="")
+            raise SystemExit(0)
         if len(sys.argv) == 5 and sys.argv[1] == "--stage-context":
             stage_context(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
             raise SystemExit(0)

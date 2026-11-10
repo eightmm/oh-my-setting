@@ -2087,6 +2087,45 @@ class RuntimeFixture(RuntimeFixtureBase):
         row['total_tokens'] = 150
         self.assertEqual(_artifact_tokens(row), 150)
 
+    def test_peer_artifact_evidence_checks_snapshot_and_limits(self) -> None:
+        from peer_artifacts import evidence_check
+        source = self.repo / 'evidence-source.txt'
+        source.write_text('first\nsecond\n', encoding='utf-8')
+        large = self.repo / 'large-source.txt'
+        large.write_bytes(b'x' * (2 * 1024 * 1024 + 1))
+        boundary = self.repo / 'boundary-source.txt'
+        boundary.write_bytes(b'x' * (2 * 1024 * 1024))
+        subprocess.run(['git', '-C', str(self.repo), 'add', source.name, large.name, boundary.name], check=True)
+        subprocess.run(['git', '-C', str(self.repo), 'commit', '-qm', 'evidence'], check=True)
+        rev = subprocess.check_output(['git', '-C', str(self.repo), 'rev-parse', 'HEAD'], text=True).strip()
+        source.write_text('changed\n', encoding='utf-8')
+        def row(path='evidence-source.txt', start=1, end=2, quote='first\nsecond'):
+            return json.dumps(dict(path=path, start=start, end=end, quote=quote))
+        def block(rows):
+            return '```oms-evidence\n' + '\n'.join(rows) + '\n```'
+        report = evidence_check(block([row(), row(quote='wrong'), row(path='missing'),
+            row(start=3, end=3), row(start=0), row(path='../bad'), '{']), self.repo, rev)
+        for status, count in [('matched', 1), ('mismatch', 1), ('missing-path', 1),
+                              ('out-of-range', 1), ('invalid', 3), ('omitted', 0)]:
+            self.assertIn(f'{status}: {count}', report)
+        self.assertEqual(evidence_check('no block', self.repo, rev), '')
+        self.assertIn('invalid: 1', evidence_check(block(['']), self.repo, rev))
+        self.assertIn('matched: 200', evidence_check(block([row()] * 200), self.repo, rev))
+        self.assertIn('omitted: 1', evidence_check(block([row()] * 201), self.repo, rev))
+        self.assertIn('invalid: 1', evidence_check(block([row()]), self.repo, 'bad'))
+        self.assertIn('invalid: 1', evidence_check('```oms-evidence\n' + row(), self.repo, rev))
+        self.assertIn('invalid: 1', evidence_check(block([row(path=large.name)]), self.repo, rev))
+        self.assertIn('matched: 1', evidence_check(block([row(path=boundary.name, end=1,
+            quote='x' * (2 * 1024 * 1024))]), self.repo, rev))
+        artifact = self.repo / 'result.md'
+        artifact.write_text('## Prompt\n\n' + block([row(quote='wrong')]) +
+                            '\n## Output\n\n' + block([row()]) + '\n## Exit\n\n0\n')
+        result = subprocess.run([sys.executable, str(ROOT / 'scripts/lib/peer_artifacts.py'),
+                                 '--evidence-check', str(artifact), str(self.repo), rev],
+                                text=True, capture_output=True, check=True)
+        self.assertIn('matched: 1', result.stdout)
+        self.assertIn('mismatch: 0', result.stdout)
+
     def test_artifact_model_metrics_refuse_multi_model_attribution(self) -> None:
         artifact = self.repo / '.oms' / 'artifacts' / 'multi-model.md'
         artifact.parent.mkdir(parents=True, exist_ok=True)

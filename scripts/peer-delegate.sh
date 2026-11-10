@@ -1236,6 +1236,9 @@ fi
   ma_write_harness_context "$delegate_worktree_repo" "$INCLUDE_MEMORY" "$INCLUDE_TASK" "$INCLUDE_ML_CONTEXT" \
     "$memory_query" "${memory_scope_args[@]}"
   ma_write_thread_context "$REPO" "$THREAD_ID"
+  if [ "$WORKER_ACCESS" = read ]; then
+    printf '%s\n\n' 'Optional exact quotations: include a fenced oms-evidence block with one JSON object per line containing path (repository-relative), start and end (1-based inclusive), and quote (the exact lines joined with newline). The dispatcher checks up to 200 entries against the committed snapshot; report other sources normally.'
+  fi
   if [ -n "$role_file" ]; then
     printf '## Role\n\n'
     cat "$role_file"
@@ -3252,6 +3255,11 @@ if [ "$no_change" = 1 ] && [ "$ALLOW_NO_CHANGE" != 1 ]; then
   result_exit=6
 fi
 printf '\n\n## Exit\n\n%s\n' "$result_exit" >> "$artifact"
+if [ "$WORKER_ACCESS" = read ]; then
+  python3 "$(ma_scripts_dir)/lib/peer_artifacts.py" --evidence-check \
+    "$artifact" "$DELEGATE_SOURCE_REPO" "$repair_replay_base" >> "$artifact" ||
+    echo "warning: evidence check unavailable" >&2
+fi
 if [ "${keep_investigation_scratch:-0}" = 1 ]; then
   printf "\n- scratch kept for owner inspection: %s/tmp\n" "$worktree_parent" >> "$artifact"
 fi
