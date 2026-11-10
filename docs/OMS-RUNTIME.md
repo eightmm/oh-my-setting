@@ -768,6 +768,20 @@ A contract fixes:
   null` and where to look (`oms run-reconcile usage --experiment ID`), because
   nothing here counts them yet.
 
+`oms runtime experiment sweep plan FILE` enumerates a hyperparameter grid
+without running or submitting anything. The file is
+`{"grid": {"lr": [0.001, 0.0003], "depth": [4, 6]}, "seeds": [0, 1, 2],
+"fixed": {"model": "gnn"}}`. Each combination is one cell whose id
+(`cell-<12 hex>`) is derived from its parameters alone, so the same
+configuration keeps its id across plans; a value listed twice on an axis is
+reported and counted once. `--emit tsv`, `--emit hydra-overrides` or `--emit
+sbatch-array` prints the runs (cell x seed) as text for a job script, the last
+with a `#SBATCH --array` line and one `INDEX<TAB>CELL_ID<TAB>OVERRIDES` row per
+task. The plan notes that the best of N configurations is expected to look
+better than it is and that few seeds leave differences inside noise. It is an
+enumeration only: there is no search, no pruning, and the two-arm contract and
+its verdict are unchanged. Limits: 16 parameters, 5,000 cells, 20,000 runs.
+
 A run refuses a pre-existing metrics file by default so stale output cannot be
 silently attributed to a new command. `--allow-existing-metrics` is explicit and
 still requires the file fingerprint to change. Summaries are `supported`,
