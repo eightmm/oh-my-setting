@@ -2396,6 +2396,24 @@ assert room.records(project, closed_room)[-1]["room_event"] == {"kind": "closed"
 closed_rows = room.records(project, closed_room)
 room.close(project, closed_room, "creator")
 assert room.records(project, closed_room) == closed_rows, "close is idempotent"
+
+# BEGIN closed-selected-room
+def test_closed_selected_room_refuses_attachment():
+    selected_room = room.create(project, "closed-selected-panel", "Closed panel room", creator="creator")
+    room.close(project, selected_room, "creator")
+    before = room.records(project, selected_room)
+    error = io.StringIO()
+    with patch.dict(os.environ, {"OMS_ROOM_ID": ""}), patch.object(panel.sys, "stderr", error), \
+            patch.object(panel, "interactive", side_effect=AssertionError("panel attached")):
+        assert panel.main(["--repo", str(project), "--room", selected_room]) != 0
+        assert not os.environ["OMS_ROOM_ID"]
+    assert ("selected room %s is closed; start a fresh room with oms room new; "
+            "read retained evidence with oms room show --id %s --exact" %
+            (selected_room, selected_room)) in error.getvalue()
+    assert room.records(project, selected_room) == before
+
+test_closed_selected_room_refuses_attachment()
+# END closed-selected-room
 for operation in (lambda: room.join(project, closed_room, "late", "codex"),
                   lambda: room.send(project, closed_room, "close-writer", "close-reader", "Late mail")):
     try:

@@ -498,7 +498,8 @@ def main(argv=None):
         if args.room:
             room.identifier(args.room, "room")
             if room.status(repo, args.room)["closed"] and not (args.chats or args.open_chat or args.health or args.sessions or args.usage):
-                raise ValueError("selected room is closed")
+                raise ValueError("selected room %s is closed; start a fresh room with oms room new; "
+                                 "read retained evidence with oms room show --id %s --exact" % (args.room, args.room))
             os.environ["OMS_ROOM_ID"] = args.room
         if args.sessions:
             import session_status
