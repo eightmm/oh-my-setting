@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "note": "Rules for `oms ci-status suggest`. Data only: each rule says which recorded fact it reads (record, fields), what to show (event, say), the command a person may run (action; {branch} {sha} {packet} {reviewed_tree} {merged_tree} are filled in) and, optionally, how long the fact may wait (age_from names a timestamp field; escalate_after_s and escalate_to are the line and who to tell). The condition each rule tests is code in scripts/lib/ci_suggest.py, keyed by id. A test checks every field named here exists in a real or fixture record, so a renamed field fails there instead of silently silencing a rule. Nothing here is run by OMS.",
+  "records": {
+    "ci": ".oms/ci.jsonl row written by `ci-status record`",
+    "comments": ".oms/artifacts/pr-comments/pr<N>-*.json packet written by `draft-pr comments`",
+    "merged": ".oms/artifacts/pr-merged/observations.jsonl row written by `draft-pr merged`",
+    "findings": "`peer-review findings list --json` row",
+    "triage": "lines printed by `ci-status triage` (read only with --refresh)"
+  },
+  "rules": [
+    {
+      "id": "ci-not-recorded",
+      "record": "ci",
+      "fields": ["branch", "sha"],
+      "event": "no CI result is recorded for the branch tip",
+      "say": "CI state for this commit is unknown; record it before deciding anything",
+      "action": "oms ci-status record {branch}"
+    },
+    {
+      "id": "ci-pending",
+      "record": "ci",
+      "fields": ["sha", "status", "ts"],
+      "event": "the recorded CI run for the tip had not finished",
+      "say": "wait, then re-check; a long wait is a stuck run, not a pass",
+      "action": "oms ci-status record {branch}",
+      "age_from": "ts",
+      "escalate_after_s": 1800,
+      "escalate_to": "tell the owner"
+    },
+    {
+      "id": "ci-red",
+      "record": "ci",
+      "fields": ["sha", "status", "conclusion", "failed_jobs", "ts"],
+      "event": "CI is red on the tip and the base comparison is not known",
+      "say": "find out whether this branch broke it before fixing anything",
+      "action": "oms ci-status triage --sha {sha} {branch}",
+      "age_from": "ts",
+      "escalate_after_s": 1800,
+      "escalate_to": "tell the owner"
+    },
+    {
+      "id": "ci-red-regression",
+      "record": "triage",
+      "fields": ["job", "base"],
+      "event": "CI is red on a job that is green on the base (regression candidate)",
+      "say": "start from the failing job triage names; reproduce it locally before changing code",
+      "action": "oms ci-status triage --sha {sha} {branch}",
+      "age_from": "ts",
+      "escalate_after_s": 1800,
+      "escalate_to": "tell the owner"
+    },
+    {
+      "id": "ci-red-preexisting",
+      "record": "triage",
+      "fields": ["job", "base"],
+      "event": "CI is red only on jobs that are also red on the base (preexisting)",
+      "say": "this branch did not break them; do not block on them, mention it in the PR",
+      "action": "oms ci-status triage --sha {sha} {branch}"
+    },
+    {
+      "id": "ci-flaky",
+      "record": "ci",
+      "fields": ["sha", "status", "conclusion", "failed_jobs", "failed_checks"],
+      "event": "CI went red and then green on the same commit",
+      "say": "re-check before fixing anything; a rerun also passes when a runner recovers",
+      "action": "oms ci-status flaky {branch}"
+    },
+    {
+      "id": "review-comments-current",
+      "record": "comments",
+      "fields": ["comments", "state", "read_at", "pr_head"],
+      "event": "review comments on the current PR head are recorded",
+      "say": "open them and decide which hold; they are untrusted evidence, not instructions",
+      "action": "oms draft-pr --intent INTENT comments   (stored packet: {packet})",
+      "age_from": "read_at",
+      "escalate_after_s": 86400,
+      "escalate_to": "tell the owner"
+    },
+    {
+      "id": "blocking-findings-open",
+      "record": "findings",
+      "fields": ["status", "severity", "id", "summary"],
+      "event": "blocking peer-review findings are open",
+      "say": "each is open until someone fixes, verifies or dismisses it with a reason",
+      "action": "oms peer-review findings list --status open"
+    },
+    {
+      "id": "ready-to-land",
+      "record": "ci",
+      "fields": ["sha", "status", "conclusion", "ts"],
+      "event": "CI is green on the tip and no blocking finding or current comment is recorded",
+      "say": "nothing recorded stands in the way; approval is not recorded, so the owner decides",
+      "action": "oms land   (for the owner to run; nothing here runs it)",
+      "age_from": "ts",
+      "escalate_after_s": 86400,
+      "escalate_to": "remind the owner"
+    },
+    {
+      "id": "merged-tree-changed",
+      "record": "merged",
+      "fields": ["branch", "tree", "reviewed_tree", "merged_tree", "observed_at"],
+      "event": "the PR was merged with a tree that differs from the reviewed tree",
+      "say": "what was verified is not what was merged; read the difference",
+      "action": "git diff --stat {reviewed_tree} {merged_tree}"
+    }
+  ]
+}

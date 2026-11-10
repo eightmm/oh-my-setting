@@ -2637,6 +2637,26 @@ later green without a new commit, with those names counted. It is an observation
 rerun also passes when a runner recovers, and nothing is skipped, quarantined or
 re-run on its strength.
 
+`oms ci-status suggest [--json] [--refresh] [branch]` answers "what do the records say
+should happen next" for a branch, and only suggests. It reads `.oms/ci.jsonl`, the newest
+PR comment packet for the PR number the CI row recorded, the `draft-pr merged`
+observation for the branch and the open blocking peer-review findings, and prints per
+matched event the evidence (which record, when), a command for a person to run and, for
+rules that have one, `waiting 42m, over the 30m line: tell the owner`. The rules are data
+in `config/ci-suggestions.json` (each names the record fields it reads; a test checks
+they exist); the condition each tests is code in `scripts/lib/ci_suggest.py`. Rules cover
+no CI recorded for the tip, a pending run, red CI (a regression candidate or only jobs
+also red on the base, which needs `--refresh`; otherwise the base comparison is
+`unknown`), red then green on one commit (re-check, not a fix), current review
+comments, open blocking findings, a merge whose tree changed after review, and green CI
+with nothing open, which prints `oms land` as text for the owner. A fact that is not
+recorded reads `unknown`, never a guess; approval is not recorded, so "ready" means only
+that nothing recorded stands in the way. Without `--refresh` there is no network;
+`--refresh` runs only the read-only `triage` lookups. Nothing is sent to an agent,
+retried, merged or recorded, and no command printed here is run by OMS. Exit 0 with
+suggestions, 1 when nothing is recorded, 2 for usage. `--json` prints schema 1, kind
+`oms-ci-suggest`.
+
 Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
