@@ -443,6 +443,17 @@ out="$(OMS_TICK_RETIRE=0 "$TICK" run --repo "$r")"
 printf '%s' "$out" | grep >/dev/null 'tasks_closed=0' || fail "retirement opt-out must keep tasks: $out"
 [ -f "$r/.oms/task/current.md" ] || fail "retirement opt-out must keep tasks"
 "$TICK" run | grep "swept $a" > /dev/null || fail "run without --repo must use the registry"
+# Status names how much of today's wake allowance a repo spent, only once its ledger holds a wake.
+"$TICK" status | grep -F 'wakes today' > /dev/null && fail "status must not print a wake line for a repo that never woke"
+python3 - "$a/.oms/tick/last.json" <<'PY'
+import json, sys, time
+path = sys.argv[1]
+row = json.load(open(path))
+row["wakes"] = [{"day": time.strftime("%Y-%m-%d", time.gmtime()), "main": "call-x", "key": "k", "outcome": "woke"}]
+json.dump(row, open(path, "w"))
+PY
+"$TICK" status | grep -F '  wakes today (UTC): 1 of 6 spent (1 main prompt(s)); tokens, cost and wall time: not recorded' > /dev/null ||
+  fail "status must summarize today's wake ledger: $("$TICK" status)"
 "$TICK" run --repo "$b" --dry-run | grep "would sweep $b" > /dev/null || fail "dry-run must not sweep"
 [ ! -f "$b/.oms/tick/last.json" ] || fail "dry-run must not write a receipt"
 set +e
@@ -609,6 +620,16 @@ with main() as typed:
     assert wake().startswith("woke ") and typed.call_count == 2 and len(wakes()) == 6
     seed(6, "2000-01-01")
     assert wake().startswith("woke ") and typed.call_count == 3 and len(wakes()) == 1
+    # The status summary counts what the ledger says was spent today: a skipped wake and another day's
+    # wakes spend nothing, and what the ledger never recorded is named, not printed as zero.
+    summary = panel_interaction.wake_summary(
+        [{"day": day, "main": member, "key": "a", "outcome": "woke"},
+         {"day": day, "main": "autopilot", "key": "b", "outcome": "resumed"},
+         {"day": day, "main": member, "key": "c", "outcome": "skipped", "reason": "holds text"},
+         {"day": "2000-01-01", "main": member, "key": "d", "outcome": "woke"}], day)
+    assert summary == ("wakes today (UTC): 2 of 6 spent (1 main prompt(s), 1 autopilot resume(s)); 1 skipped; "
+                       "tokens, cost and wall time: not recorded"), summary
+    assert panel_interaction.wake_summary([], day).startswith("wakes today (UTC): 0 of 6 spent;"), "empty ledger"
     # The input line: only a provably empty one is typed into; any other pane is skipped, recorded, never entered.
     for name, text in EMPTY.items():
         seed(0)

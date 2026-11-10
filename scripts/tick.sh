@@ -113,6 +113,17 @@ raise SystemExit(panel_interaction.wake_cli(sys.argv[2:]))
 PY
 }
 
+wake_summary() {  # RECEIPT -> "  wakes today …" when the tick ever woke or resumed anything; never fails status
+  local line
+  line="$(python3 - "$ROOT/scripts/lib" "$1" <<'PY' 2>/dev/null || true
+import sys
+sys.path.insert(0, sys.argv[1])
+import panel_interaction
+raise SystemExit(panel_interaction.wake_summary_cli(sys.argv[2:]))
+PY
+)"
+  [ -z "$line" ] || printf '  %s\n' "$line"
+}
 registered() { [ -f "$REGISTRY" ] && grep -Fxq "$1" "$REGISTRY"; }
 register_repo() {
   local root; root="$(repo_root "$1")"
@@ -564,6 +575,7 @@ status_tick() {
     [ -n "$root" ] || continue
     if [ -f "$root/.oms/tick/last.json" ]; then
       printf '%s  last: %s\n' "$root" "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["ran_at"], "journal_rc=%s threads_closed=%d tasks_closed=%d plans_retired=%d artifacts_resolved=%d artifacts_superseded=%d failures_retired=%d" % (r["journal_rc"], len(r["threads_closed"]), int(r.get("tasks_closed", 0)), int(r.get("plans_retired", 0)), int(r.get("artifacts_resolved", 0)), int(r.get("artifacts_superseded", 0)), int(r.get("failures_retired", 0))))' "$root/.oms/tick/last.json" 2>/dev/null | tr -d '\r' || echo '?')"
+      wake_summary "$root/.oms/tick/last.json"
     else printf '%s  never swept\n' "$root"; fi
   done < "$REGISTRY"
 }
