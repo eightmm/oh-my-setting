@@ -858,6 +858,18 @@ metadata instead of a broken partial JSON value; `map_summary()` returns counts 
 kind and language, top hubs, and module groups. Analytics
 (`analytics.py`) are stdlib: evidence degrees and structural assurance.
 
+Ranked search (`ranked.py`): `oms graph project search --ranked "WORDS"`
+reads the query as words, not a literal, and ranks the blocks about them.
+Each indexed line belongs to its innermost symbol, or to its file when none
+encloses it; that block is one document, scored with BM25 (k1 1.2, b 0.75)
+over bodies, comments and identifiers split as `find` splits them. A row
+carries the block id, score, the query words it matched and the one line
+with the most of them. It is stdlib arithmetic computed per call: no
+embedding, no model call and nothing stored. Stale files, notebooks and
+secret-shaped previews are handled as in `search`. It is not wired into
+`context` ranking; use the recall benchmark's `--snapshot`/`--compare`
+before making it a default.
+
 Symbol view (`symbol.py`): `oms graph project symbol NAME [--limit 1..500]
 [--json]` answers "where is it and who uses it" in one read and keeps three
 zones apart. `extracted` holds the definitions (path, line, signature) plus
@@ -991,6 +1003,7 @@ oms graph project map    [--json] [--html-fragment ABS|--ui-model] [--limit 1..2
 oms graph project find   QUERY [--kind KIND] [--limit N]
 oms graph project api    PATH [--limit 1..2000]
 oms graph project search TEXT [--limit 1..500]
+oms graph project search --ranked "WORDS..." [--limit 1..500] [--json]   # BM25 over symbol blocks; words, not a literal
 oms graph project symbol NAME [--limit 1..500] [--json]   # definitions, extracted callers/tests, inferred edges, text-only matches
 oms graph project neighbors NODE [--relation R] [--direction in|out|both]
 oms graph project trace  NODE [--direction in|out] [--depth N]
