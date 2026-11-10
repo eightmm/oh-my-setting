@@ -11,6 +11,7 @@ STRICT=0
 CONTRACT=0
 BUDGET=0
 BUDGET_JSON=0
+PROMPTS=0
 TEAM=0
 PROJECT_DIR_SET=0
 
@@ -18,6 +19,7 @@ usage() {
   cat <<'EOF'
 Usage: project-doctor.sh [--strict] [--contract] [project_dir]
        project-doctor.sh --budget [--json] [--strict] [project_dir]
+       project-doctor.sh --prompts [--json] [--strict] [source_dir]
        project-doctor.sh --team [project_dir]
 
 Verify that all agent-facing files in a project give every agent the same
@@ -50,6 +52,13 @@ nothing runs and no model is called. Findings are warnings (--strict fails on
 them). OMS_RULES_MAX_LINES (default 200) and OMS_RULES_MAX_TOTAL_BYTES
 (default 32768) set the limits; --json prints the same report as data.
 
+--prompts audits the prompt text OMS ships (rules/, roles/, templates/*AGENTS.md,
+prompts/, skill SKILL.md; source_dir defaults to this installation): words and
+bytes per file, whether the install code injects it every session, on demand or
+unknown, phrases from config/prompt-audit-patterns.txt, sentences repeated across
+always-injected files, and the always-injected words per provider. Advisory, like
+--budget; --json prints data, --strict fails on findings.
+
 --team is a standalone report-only check of the tracked baseline file
 .oms-team.json (min_oms_version, capabilities, digests) against this
 installation. It prints the exact command for each unmet item and runs none;
@@ -62,6 +71,7 @@ while [ "$#" -gt 0 ]; do
     --strict) STRICT=1 ;;
     --contract) CONTRACT=1 ;;
     --budget) BUDGET=1 ;;
+    --prompts) PROMPTS=1 ;;
     --json) BUDGET_JSON=1 ;;
     --team) TEAM=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -81,8 +91,16 @@ done
 }
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
-[ $((BUDGET + CONTRACT + TEAM)) -le 1 ] || { echo "error: --budget, --contract and --team are separate reports; run one at a time" >&2; exit 2; }
-[ "$BUDGET_JSON" = 0 ] || [ "$BUDGET" = 1 ] || { echo "error: --json is only for --budget" >&2; exit 2; }
+[ $((BUDGET + PROMPTS + CONTRACT + TEAM)) -le 1 ] || { echo "error: --budget, --prompts, --contract and --team are separate reports; run one at a time" >&2; exit 2; }
+[ "$BUDGET_JSON" = 0 ] || [ $((BUDGET + PROMPTS)) = 1 ] || { echo "error: --json is only for --budget or --prompts" >&2; exit 2; }
+if [ "$PROMPTS" = 1 ]; then
+  [ "$PROJECT_DIR_SET" = 1 ] || PROJECT_DIR="$ROOT"
+  prompt_args=("$PROJECT_DIR")
+  [ "$BUDGET_JSON" = 0 ] || prompt_args+=(--json)
+  [ "$STRICT" = 0 ] || prompt_args+=(--strict)
+  command -v python3 >/dev/null 2>&1 || { echo "error: --prompts needs python3" >&2; exit 2; }
+  exec python3 -I "$ROOT/scripts/lib/prompt-audit.py" "${prompt_args[@]}"
+fi
 if [ "$BUDGET" = 1 ]; then
   budget_args=("$PROJECT_DIR")
   [ "$BUDGET_JSON" = 0 ] || budget_args+=(--json)
