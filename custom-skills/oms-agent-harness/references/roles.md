@@ -48,6 +48,9 @@ lookup and cited summaries. It uses the light tier's newest configured/catalog
 Haiku or Luna at low effort, pinned to its exact model ID. No write scopes, implementation, review
 gate, continuation or automatic model escalation are permitted. Catalog discovery
 does not prove live access or authorize spending; the main retains all decisions.
+Use it as the cheap scout: it returns at most 8 `path:line — one line` findings, a
+summary of at most 120 words and a `Not found / not checked:` line, so file
+bodies stay out of the main's context.
 
 A panel `scholar` is read-only and uses the deep tier at high effort for multi-source literature research with verified citations. Use `--workload frontier` for the hardest surveys.
 
