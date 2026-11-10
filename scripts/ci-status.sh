@@ -16,7 +16,9 @@ set -euo pipefail
 # answers the question a quick push hook rests on: is CI's `gate` job a required
 # check on the destination branch? It only reads GitHub, runs only when asked,
 # and has three answers — a lookup that could not read a source is unknown,
-# never absent and never a pass.
+# never absent and never a pass. `triage` reads why HEAD's run is red: the
+# failing jobs, a bounded scanned tail of each one's log, and whether the same
+# job is also red on the base branch. It prints a brief and changes nothing.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
@@ -30,6 +32,7 @@ GH="${OMS_GH_BIN:-gh}"
 ACTION="status"
 branch=""
 limit=20
+triage_sha=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     status) ACTION="status"; shift ;;
@@ -37,6 +40,7 @@ while [ "$#" -gt 0 ]; do
     tick) ACTION="tick"; shift ;;
     history) ACTION="history"; shift ;;
     protection) ACTION="protection"; shift ;;
+    triage) ACTION="triage"; shift ;;
     --limit)
       [ "$#" -ge 2 ] || { echo "error: --limit needs a positive integer" >&2; exit 2; }
       limit="$2"
@@ -44,11 +48,22 @@ while [ "$#" -gt 0 ]; do
       [ "$limit" -gt 0 ] || { echo "error: --limit must be a positive integer" >&2; exit 2; }
       shift 2
       ;;
+    --sha)
+      [ "$#" -ge 2 ] || { echo "error: --sha needs a commit id" >&2; exit 2; }
+      triage_sha="$2"
+      case "$triage_sha" in
+        *[!0-9a-fA-F]*|"") echo "error: --sha must be 7 to 40 hexadecimal characters" >&2; exit 2 ;;
+      esac
+      [ "${#triage_sha}" -ge 7 ] && [ "${#triage_sha}" -le 40 ] ||
+        { echo "error: --sha must be 7 to 40 hexadecimal characters" >&2; exit 2; }
+      shift 2
+      ;;
     -h|--help)
       cat <<'EOF'
 Usage: ci-status.sh [status|record|tick] [branch]
        ci-status.sh history [--limit N] [branch]
        ci-status.sh protection [branch]
+       ci-status.sh triage [--sha COMMIT] [branch]
 
 status  Print the latest CI run and fail on a completed red result (default).
 record  Also append the result to .oms/ci.jsonl and Work Journal.
@@ -61,6 +76,13 @@ protection
         and active rulesets (read-only GET requests; nothing is changed).
         Exit 0 proven, 1 absent, 2 unknown: a source that could not be read
         (no gh, no permission, timeout) is unknown, never absent or a pass.
+triage  Explain a red run for the branch's HEAD, or for --sha COMMIT on that
+        branch (read-only): the failing
+        jobs and steps, a bounded tail of each failing job's log (withheld
+        when it looks sensitive), whether the same job is also red on the
+        base branch, and a brief to hand to whoever fixes it. Nothing is
+        re-run, retried, pushed, dispatched or recorded. Exit 0 nothing red,
+        1 a red run was triaged, 2 the run could not be read.
 
 Environment:
   OMS_CI_TICK_INTERVAL  Minimum seconds between unresolved lookups (default 120).
@@ -68,6 +90,8 @@ Environment:
   OMS_CI_PROTECTION_TIMEOUT
                         Seconds each protection lookup may take, 1..120
                         (default 10).
+  OMS_CI_TRIAGE_TIMEOUT Seconds the failed-log download may take, 1..300
+                        (default 60); each other triage lookup gets at most 20.
 EOF
       exit 0
       ;;
@@ -78,6 +102,10 @@ EOF
       ;;
   esac
 done
+if [ -n "$triage_sha" ] && [ "$ACTION" != triage ]; then
+  echo "error: --sha is only read by triage" >&2
+  exit 2
+fi
 # `protection` asks about the destination, so its default is the repository's
 # default branch (looked up below), not the checkout's.
 if [ -z "$branch" ] && [ "$ACTION" != protection ]; then
@@ -334,6 +362,240 @@ elif verdict == "unknown":
 raise SystemExit(code)
 PY
   exit $?
+fi
+
+if [ "$ACTION" = triage ]; then
+  # Like history and protection: no ledger, no journal, only reads of GitHub.
+  if ! command -v "$GH" >/dev/null 2>&1; then
+    echo "ci-status triage: unknown (gh CLI not installed)"
+    exit 2
+  fi
+  triage_timeout="${OMS_CI_TRIAGE_TIMEOUT:-60}"
+  case "$triage_timeout" in ""|*[!0-9]*) triage_timeout=60 ;; esac
+  [ "$triage_timeout" -ge 1 ] && [ "$triage_timeout" -le 300 ] || triage_timeout=60
+  triage_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  [ "$branch" = "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" ] || triage_head=""
+  [ -z "$triage_sha" ] || triage_head="$(printf '%s' "$triage_sha" | tr 'A-F' 'a-f')"
+  triage_dir="$(mktemp -d)" || exit 2
+  trap 'rm -rf "$triage_dir"' EXIT
+  triage_rc=0
+  OMS_TRIAGE_GH="$GH" OMS_TRIAGE_TIMEOUT="$triage_timeout" OMS_TRIAGE_HEAD="$triage_head" \
+    OMS_TRIAGE_DIR="$triage_dir" OMS_TRIAGE_COMMON="$ROOT/scripts/lib/agent-memory-common.sh" \
+    python3 - "$branch" <<'PY' || triage_rc=$?
+import json, os, re, subprocess, sys
+
+gh = os.environ["OMS_TRIAGE_GH"]
+log_timeout = int(os.environ["OMS_TRIAGE_TIMEOUT"])
+timeout = min(log_timeout, 20)
+head = os.environ.get("OMS_TRIAGE_HEAD", "")
+work = os.environ["OMS_TRIAGE_DIR"]
+branch = sys.argv[1]
+RED = ("failure", "timed_out", "cancelled", "startup_failure")
+MAX_JOBS, TAIL_LINES, LINE_CHARS, LOG_BYTES = 6, 25, 200, 2 * 1024 * 1024
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+STAMP = re.compile(r"^﻿?\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?")
+
+
+def clean(value, limit=120):
+    text = "".join(ch if ch.isprintable() else "?" for ch in str(value))
+    return text[:limit]
+
+
+def unknown(reason):
+    print("ci-status triage [%s]: unknown (%s)" % (clean(branch), reason))
+    print("  unknown is not a pass: nothing here shows the run is green")
+    raise SystemExit(2)
+
+
+def ask(args, limit=timeout, cap=None):
+    """stdout of one read-only gh call, or None. Nothing gh wrote to stderr is kept."""
+    try:
+        proc = subprocess.Popen([gh] + args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    try:
+        out = proc.communicate(timeout=limit)[0]
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None
+    if proc.returncode != 0:
+        return None
+    if cap is not None and len(out) > cap:
+        out = out[-cap:]  # the end of a log is where a job says why it stopped
+    return out.decode("utf-8", "replace")
+
+
+def parsed(args):
+    out = ask(args)
+    try:
+        return json.loads(out) if out is not None else None
+    except (ValueError, RecursionError):
+        return None
+
+
+def listing(args):
+    rows = parsed(args)
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
+def jobs_of(run_id):
+    body = parsed(["run", "view", str(run_id), "--json", "jobs"])
+    jobs = body.get("jobs") if isinstance(body, dict) else None
+    if not isinstance(jobs, list):
+        return None
+    return [j for j in jobs if isinstance(j, dict) and isinstance(j.get("name"), str)]
+
+
+FIELDS = "databaseId,status,conclusion,workflowName,headSha,url"
+runs = listing(["run", "list", "--branch", branch, "--limit", "20", "--json", FIELDS])
+if runs is None:
+    unknown("run list: gh not authenticated, unreachable or unreadable")
+done = [r for r in runs if r.get("status") == "completed"]
+def is_head(row):
+    return bool(head) and isinstance(row.get("headSha"), str) and row["headSha"].startswith(head)
+
+
+mine = [r for r in done if is_head(r)]
+if head and not mine:
+    pending = any(is_head(r) for r in runs)
+    unknown("%s has %s" % (head[:12], "a run that has not finished" if pending
+                              else "no run among the branch's newest %d" % len(runs)))
+pool = mine or done
+if not pool:
+    unknown("no completed run on this branch")
+sha = pool[0].get("headSha")
+pool = [r for r in pool if r.get("headSha") == sha]
+red = [r for r in pool if r.get("conclusion") in RED]
+if not red:
+    print("ci-status triage [%s]: nothing red on %s (%d completed run%s)" % (
+        clean(branch), clean(sha or "?", 12), len(pool), "" if len(pool) == 1 else "s"))
+    raise SystemExit(0)
+run = red[0]
+run_id = run.get("databaseId")
+if type(run_id) is not int:
+    unknown("run id unreadable")
+jobs = jobs_of(run_id)
+if jobs is None:
+    unknown("job list unreadable")
+failing = [j for j in jobs if j.get("conclusion") in RED]
+
+# The base: the default branch, or for the default branch itself the newest earlier commit's run.
+base_note, base_jobs = None, None
+repo = parsed(["api", "--method", "GET", "repos/{owner}/{repo}"])
+default = repo.get("default_branch") if isinstance(repo, dict) else None
+if not isinstance(default, str) or not default:
+    base_note = "base branch unreadable"
+else:
+    if default == branch:
+        # The base of the default branch is its own previous commit: the rows listed after this run.
+        rows = runs[runs.index(run) + 1:]
+    else:
+        rows = listing(["run", "list", "--branch", default, "--limit", "20", "--json", FIELDS])
+    base = None
+    for row in rows or []:
+        if (row.get("status") == "completed" and row.get("headSha") != sha
+                and row.get("workflowName") == run.get("workflowName")):
+            base = row
+            break
+    if rows is None:
+        base_note = "base runs unreadable"
+    elif base is None or type(base.get("databaseId")) is not int:
+        base_note = "no completed %s run on %s to compare" % (
+            clean(run.get("workflowName") or "workflow", 40), clean(default, 40))
+    else:
+        listed = jobs_of(base["databaseId"])
+        if listed is None:
+            base_note = "base job list unreadable"
+        else:
+            base_jobs = {j["name"]: j.get("conclusion") for j in listed}
+            base_note = "%s %s" % (clean(default, 40), clean(base.get("headSha") or "?", 12))
+
+
+def against_base(name):
+    if base_jobs is None:
+        return "unknown"
+    if name not in base_jobs:
+        return "unknown (job not in the base run)"
+    return "also red on base (preexisting)" if base_jobs[name] in RED else "green on base (regression candidate)"
+
+
+# Failed-step log tails, one file per job, scanned before a byte is printed.
+tails, checks = {}, {}
+log_state = "none"
+if failing:
+    log = ask(["run", "view", str(run_id), "--log-failed"], limit=log_timeout, cap=LOG_BYTES)
+    log_state = "read" if log is not None else "unread"
+    for line in (log or "").splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        text = STAMP.sub("", ANSI.sub("", parts[2])).rstrip()
+        if not text:
+            continue
+        found = re.search(r"check:\s*([A-Za-z0-9_.-]+)\s+FAILED\b", text)
+        if found:
+            checks.setdefault(parts[0].strip(), []).append(found.group(1))
+        tails.setdefault(parts[0].strip(), []).append(clean(text, LINE_CHARS))
+files = {}
+for index, job in enumerate(failing[:MAX_JOBS]):
+    lines = tails.get(job["name"].strip(), [])[-TAIL_LINES:]
+    if lines:
+        path = os.path.join(work, "job-%d.txt" % index)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        files[index] = (path, lines)
+withheld, scanned = set(), not files
+if files:
+    script = ('. "$1" || exit 3; shift; for f in "$@"; do '
+              'if agent_memory_file_has_sensitive_content "$f"; then printf "%s\\n" "$f"; fi; done')
+    try:
+        scan = subprocess.run(["bash", "-c", script, "_", os.environ["OMS_TRIAGE_COMMON"]]
+                              + [path for path, _ in files.values()], stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True,
+                              timeout=30, check=False)
+        scanned = scan.returncode == 0
+        withheld = set(scan.stdout.split("\n"))
+    except (OSError, subprocess.SubprocessError):
+        scanned = False
+
+print("ci-status triage [%s]: %s on %s: %d failing job%s%s  %s" % (
+    clean(branch), clean(run.get("conclusion")), clean(sha or "?", 12), len(failing),
+    "" if len(failing) == 1 else "s",
+    "" if failing else " listed (the run failed before or outside its jobs)", clean(run.get("url") or "", 200)))
+print("  compared with: %s" % (base_note if base_jobs is not None else "unknown (%s)" % base_note))
+for index, job in enumerate(failing[:MAX_JOBS]):
+    name = job["name"]
+    print("- job: %s" % clean(name))
+    print("  base: %s" % against_base(name))
+    steps = [clean(s.get("name"), 80) for s in (job.get("steps") if isinstance(job.get("steps"), list) else [])
+             if isinstance(s, dict) and s.get("conclusion") in RED and isinstance(s.get("name"), str)]
+    if steps:
+        print("  failed step%s: %s" % ("" if len(steps) == 1 else "s", "; ".join(steps[:5])))
+    named = sorted(set(checks.get(name.strip(), [])))
+    if named:
+        print("  failed checks: %s%s" % (", ".join(named[:12]),
+                                         " (+%d more)" % (len(named) - 12) if len(named) > 12 else ""))
+    if index not in files:
+        print("  log: %s" % ("not downloaded (gh could not read it in time)" if log_state == "unread"
+                             else "no failed-step lines for this job"))
+    elif not scanned:
+        print("  log: withheld (the sensitive-content scan could not run)")
+    elif files[index][0] in withheld:
+        print("  log: withheld (sensitive-looking content)")
+    else:
+        print("  log tail (last %d line%s):" % (len(files[index][1]), "" if len(files[index][1]) == 1 else "s"))
+        for line in files[index][1]:
+            print("    | " + line)
+if len(failing) > MAX_JOBS:
+    print("- %d more failing job(s) not shown" % (len(failing) - MAX_JOBS))
+print("brief: fix a job marked regression candidate first; a job that is also red on base was not")
+print("  broken by this branch. Reproduce the failed check locally before changing code. This is an")
+print("  observation of CI, not verification evidence; nothing was re-run, retried, pushed or recorded.")
+raise SystemExit(1)
+PY
+  exit "$triage_rc"
 fi
 
 if [ "$ACTION" = history ]; then
