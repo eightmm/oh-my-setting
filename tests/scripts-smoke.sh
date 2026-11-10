@@ -21769,6 +21769,89 @@ EOF
   "$SH" top --metric nope --file "$ledger" >/dev/null 2>"$d/err" || rc=$?
   [ "$rc" = "3" ] || fail "a missing metric should exit 3, got $rc"
   assert_file_contains "$d/err" "no ledger rows"
+
+  # A metric contract beside the ledger: each finished row records what it said,
+  # top takes its direction, and only runs measured under today's contract rank.
+  local repo="$d/repo" row
+  mkdir -p "$repo/docs"
+  git -C "$repo" init -q
+  printf 'print(1)\n' > "$repo/eval.py"
+  cat > "$repo/docs/metric-contract.json" <<'EOF'
+{"schema": 1, "metrics": {"loss": {"direction": "min", "unit": "nats", "split": "val",
+  "aggregation": "mean", "eval_command": "python eval.py", "eval_code": ["eval.py"]}}}
+EOF
+  ledger_record() {  # LOSS then ledger options and the command
+    local value="$1"
+    shift
+    printf '{"loss": %s}\n' "$value" > "$repo/m.json"
+    (cd "$repo" && "$SH" --metrics m.json "$@" >/dev/null 2>"$d/record-err") ||
+      fail "recording a run under a metric contract failed: $(cat "$d/record-err")"
+  }
+  # An old row: same metric name, no contract recorded.
+  printf '%s\n' '{"ts":"2026-01-01T00:00:00Z","git_sha":"aaa1111","dirty":0,"dirty_hash":"","slurm_job_id":"","exit":0,"duration_s":1,"note":"","cmd":["old"],"metrics":{"loss":0.01}}' \
+    > "$repo/docs/EXPERIMENTS.jsonl"
+  ledger_record 0.50 -- true --seed 1
+  ledger_record 0.30 -- true --seed 2
+  ledger_record 0.90 --seed 7 --group other -- true
+  row="$(sed -n '2p' "$repo/docs/EXPERIMENTS.jsonl")"
+  printf '%s' "$row" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
+entry = row["metric_contract"]["loss"]
+assert entry["direction"] == "min" and entry["split"] == "val" and entry["unit"] == "nats", entry
+assert len(entry["digest"]) == 64 and len(entry["eval_sha256"]) == 64, entry
+assert "eval_command" not in entry, entry
+assert row["seed"] == 1 and len(row["group"]) == 12, row
+' || fail "a finished row should record the metric contract, its seed and its group: $row"
+  [ "$(sed -n '2p;3p' "$repo/docs/EXPERIMENTS.jsonl" | python3 -c '
+import json, sys
+print(len({json.loads(line)["group"] for line in sys.stdin}))')" = 1 ] ||
+    fail "runs that differ only by seed should share one group"
+  out="$(cd "$repo" && "$SH" top --metric loss 2>"$d/top-err")" || fail "top under a contract failed: $(cat "$d/top-err")"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F "loss=0.3" > /dev/null ||
+    fail "top should take the contract's direction (min) without a flag: $out"
+  if contains "$out" "loss=0.01"; then
+    fail "a run with no recorded contract must not rank beside contract runs: $out"
+  fi
+  assert_file_contains "$d/top-err" "left out as not comparable under today's contract for loss: 1 run(s): no contract recorded"
+  out="$(cd "$repo" && "$SH" top --metric loss --max 2>"$d/top-err")"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F "loss=0.9" > /dev/null || fail "an explicit --max still wins: $out"
+  assert_file_contains "$d/top-err" "the metric contract declares min for loss"
+  out="$(cd "$repo" && "$SH" top --metric loss --mixed 2>"$d/top-err")"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F "loss=0.01" > /dev/null || fail "--mixed ranks every row: $out"
+  assert_file_contains "$d/top-err" "--mixed ranks runs measured under different metric contracts together"
+
+  # Seed groups rank by mean; a single seed is listed apart and claims nothing.
+  out="$(cd "$repo" && "$SH" top --metric loss --by-group 2>"$d/top-err")" || fail "--by-group failed: $(cat "$d/top-err")"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F " 1  loss mean=0.4  stdev=0.141421  ci95=[" > /dev/null ||
+    fail "--by-group should print the mean, stdev and interval of the two-seed group: $out"
+  printf '%s\n' "$out" | sed -n '1p' | grep -F "n=2" | grep -F "seeds=1,2" > /dev/null || fail "--by-group should name n and seeds: $out"
+  printf '%s\n' "$out" | sed -n '2p' | grep -F "single seed (no claim that one is better):" > /dev/null ||
+    fail "a one-seed group must be listed apart: $out"
+  printf '%s\n' "$out" | sed -n '3p' | grep -F "loss=0.9  n=1  group=other  seed=7" > /dev/null || fail "single-seed row: $out"
+
+  # Changing what the number means makes the earlier runs not comparable.
+  printf 'print(2)\n' > "$repo/eval.py"
+  rc=0
+  (cd "$repo" && "$SH" top --metric loss >/dev/null 2>"$d/top-err") || rc=$?
+  [ "$rc" = 4 ] || fail "runs measured by different eval code must not rank (exit 4), got $rc"
+  assert_file_contains "$d/top-err" "top: not comparable: loss runs do not share one metric contract"
+  assert_file_contains "$d/top-err" "3 run(s): eval_sha256"
+  ledger_record 0.20 -- true --seed 1
+  out="$(cd "$repo" && "$SH" top --metric loss 2>/dev/null)"
+  [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "only the run under the new eval code should rank: $out"
+
+  # A broken contract never blocks a run, and never silently ranks.
+  printf '{"schema": 1, "metrics": {"loss": {"direction": "up"}}}\n' > "$repo/docs/metric-contract.json"
+  ledger_record 0.10 -- true
+  assert_file_contains "$d/record-err" "ledger: metric contract ignored"
+  if tail -n 1 "$repo/docs/EXPERIMENTS.jsonl" | grep -q metric_contract; then
+    fail "a broken contract must not be recorded"
+  fi
+  rc=0
+  (cd "$repo" && "$SH" top --metric loss >/dev/null 2>"$d/top-err") || rc=$?
+  [ "$rc" = 2 ] || fail "top must refuse an unreadable contract (exit 2), got $rc"
+  assert_file_contains "$d/top-err" "metric contract unreadable"
 }
 
 test_oms_run_timeline_merges_streams() {
