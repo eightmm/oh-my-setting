@@ -596,6 +596,31 @@ grep -Fq '"kind": "acceptance"' "$repo/.oms/plan/progress.jsonl" ||
   fail "acceptance rows missing from progress.jsonl"
 grep -Fq '"reason": "acceptance-pass"' "$repo/.oms/plan/progress.jsonl" ||
   fail "terminal done row missing from progress.jsonl"
+# Cycle rows carry mechanical progress facts: cycle 1 is the baseline, cycle 2
+# saw g1 land (tree changed, one task closed) so it is not stalled.
+python3 - "$repo/.oms/plan/progress.jsonl" <<'PY' || fail "goal-cycle rows lack progress facts"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1], encoding="utf-8") if '"goal-cycle"' in l]
+rows = rows[-2:]
+assert len(rows) == 2, rows
+first, second = rows
+for row in rows:
+    assert row["stalled_cycles"] == 0 and "receipts_new" in row, row
+assert first["tree_changed"] is False and first["tasks_closed"] == 0, first
+assert second["tree_changed"] is True and second["head_changed"] is True, second
+assert second["tasks_closed"] == 1, second
+PY
+# Stall counter: unchanged tree and no closed task count; past the threshold
+# the lib suggests a re-plan, at or below it stays quiet.
+gp="$ROOT/scripts/lib/goal_progress.py"
+stall_out="$(python3 "$gp" 4 2 2 h t a1 3 5 h t a0 3 5)"
+[ "$(printf '%s\n' "$stall_out" | sed -n 1p)" = 3 ] || fail "stalled count should reach 3"
+printf '%s\n' "$stall_out" | sed -n 2p | grep -Fq 'consider a re-plan' ||
+  fail "stalled past the threshold should suggest a re-plan"
+quiet_out="$(python3 "$gp" 3 1 2 h t a1 3 5 h t a0 3 5)"
+[ -z "$(printf '%s\n' "$quiet_out" | sed -n 2p)" ] || fail "stall at the threshold must stay quiet"
+reset_out="$(python3 "$gp" 4 5 2 h t2 a1 4 5 h t a0 3 5)"
+[ "$(printf '%s\n' "$reset_out" | sed -n 1p)" = 0 ] || fail "a changed tree should reset the stall count"
 
 # A dirty tree refuses up front: driving over someone's live edits is the
 # split-brain incident this driver exists to prevent.
