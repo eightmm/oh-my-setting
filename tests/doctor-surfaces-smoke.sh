@@ -419,6 +419,42 @@ PY
     *"note: claude guard PreToolUse -> command-guard-hook.sh is registered fail-open"*) ;;
     *) printf '%s\n' "$out"; fail "the default doctor should note the fail-open command guard" ;;
   esac
+  # A guard whose helper is gone lets calls through with a stderr line; the
+  # doctor says so read-only. Healthy: silent. Copy of scripts/ owning the
+  # receipt with hook_state.py removed: named.
+  case "$out" in
+    *"cannot evaluate commands"*) printf '%s\n' "$out"; fail "a complete install must not warn that guards cannot evaluate" ;;
+  esac
+  mkdir -p "$home/gcopy"
+  cp -R "$ROOT/scripts" "$home/gcopy/scripts"
+  [ ! -f "$ROOT/VERSION" ] || cp "$ROOT/VERSION" "$home/gcopy/VERSION"
+  rm -f "$home/gcopy/scripts/lib/hook_state.py"
+  OMS_T_ROOT="$ROOT" python3 - "$home" "$home/gcopy" <<'PY'
+import json, os, sys
+
+home, copy = sys.argv[1:]
+receipt = os.path.join(home, ".config", "oh-my-setting", "install.json")
+row = json.load(open(receipt, encoding="utf-8"))
+row["source_root"] = copy
+json.dump(row, open(receipt, "w", encoding="utf-8"))
+PY
+  out="$(HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_CLAUDE_SETTINGS="$home/.claude/settings.json" \
+    OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" OMS_DOCTOR_PROJECT_DIR="$home/repo" \
+    OH_MY_SETTING_MODEL_DOCTOR=0 OH_MY_SETTING_CODEX_PLUGIN=0 \
+    bash "$home/gcopy/scripts/doctor.sh" 2>&1 || true)"
+  case "$out" in
+    *"claude guards cannot evaluate commands (missing: hook_state.py)"*) ;;
+    *) printf '%s\n' "$out" | grep -i "guard\|claude hook" >&2; fail "doctor should name the missing guard helper" ;;
+  esac
+  OMS_T_ROOT="$ROOT" python3 - "$home" "$ROOT" <<'PY'
+import json, os, sys
+
+home, root = sys.argv[1:]
+receipt = os.path.join(home, ".config", "oh-my-setting", "install.json")
+row = json.load(open(receipt, encoding="utf-8"))
+row["source_root"] = root
+json.dump(row, open(receipt, "w", encoding="utf-8"))
+PY
   # Opting in writes onFailure only when the installed claude validates the
   # field: a claude that says nothing about a bad value leaves the row as it was.
   mkdir -p "$home/probe-bin"

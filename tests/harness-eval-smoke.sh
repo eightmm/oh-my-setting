@@ -48,10 +48,10 @@ SCENARIOS=(
 # lands the scenario starts passing and the suite reports `unexpected-pass`:
 # delete the case line here.
 xfail_branch() {
+  # Empty: the owner ruled fail-open with one stderr diagnostic, and the
+  # hook-*-python-absent, -payload and -lib-missing scenarios assert it.
   case "$1" in
-    hook-command-guard-python-absent|hook-move-guard-python-absent) printf '%s\n' owner-decision:silent-failopen-no-python ;;
-    hook-command-guard-payload|hook-move-guard-payload) printf '%s\n' owner-decision:silent-failopen-truncated-payload ;;
-    hook-command-guard-lib-missing|hook-move-guard-lib-missing) printf '%s\n' owner-decision:silent-failopen-missing-helper ;;
+    "") ;;
   esac
 }
 
@@ -439,6 +439,18 @@ print(json.dumps({"cwd": os.environ["OMS_P_CWD"], "tool_name": "Bash",
     fi
   }
 
+  # The owner's ruling: fail open (exit 0, nothing on stdout) with exactly one
+  # stderr line naming the guard and the reason.
+  expect_diagnostic() {  # HOOK REASON_FRAGMENT
+    local prefix="command guard: cannot evaluate"
+    [ "$1" != move-guard ] || prefix="git move guard: cannot evaluate"
+    [ "$H_RC" = 0 ] && [ ! -s "$TMP/h.out" ] ||
+      violated "$1 ($2) must still allow the command with exit 0 and no stdout (rc=$H_RC)"
+    [ "$(wc -l < "$TMP/h.err" | tr -d ' ')" = 1 ] && [[ "$(cat "$TMP/h.err")" == "$prefix"* ]] &&
+      [[ "$(cat "$TMP/h.err")" == *"$2"* ]] ||
+      violated "$1 diagnostic is not one line '$prefix ($2...' : $(head -c 200 "$TMP/h.err")"
+  }
+
   finish_degraded() {  # HOOK
     local joined="" item
     for item in "${SILENT[@]}"; do joined="${joined:+$joined | }$item"; done
@@ -540,6 +552,7 @@ print(json.dumps({"cwd": os.environ["OMS_P_CWD"], "tool_name": "Bash",
     XENV=(PATH="$(nopython_path)")
     run_guard "$hook" "$TMP/refuse.json" "$BASH" "$script"
     observe "$hook" python-absent 1
+    expect_diagnostic "$hook" "python3 not found"
     finish_degraded "$hook"
   }
 
@@ -588,6 +601,7 @@ data = open(sys.argv[1], encoding="utf-8").read()
 open(sys.argv[2], "w", encoding="utf-8").write(data[:-2])' "$TMP/refuse.json" "$TMP/cut-tail.json"
     run_guard "$hook" "$TMP/cut-tail.json" "$BASH" "$script"
     observe "$hook" payload-truncated 1
+    expect_diagnostic "$hook" "not valid JSON"
     # Cut inside the command: not a command it could judge, recorded for the matrix only.
     python3 -c '
 import sys
@@ -609,10 +623,12 @@ open(sys.argv[2], "w", encoding="utf-8").write(data[:data.index("\"command\"") +
     guard_baseline "$hook" "$TMP/withlib/scripts/$name"   # control: the copied layout still refuses
     run_guard "$hook" "$TMP/refuse.json" "$BASH" "$TMP/nolib/scripts/$name"
     observe "$hook" lib-missing 1
+    expect_diagnostic "$hook" "library is missing"
     if [ "$hook" = move-guard ]; then
       rm -f "$TMP/withlib/scripts/lib/canonical-sync.sh"
       run_guard "$hook" "$TMP/refuse.json" "$BASH" "$TMP/withlib/scripts/$name"
       observe "$hook" helper-sh-missing 1
+      expect_diagnostic "$hook" "canonical-sync.sh missing"
     fi
     finish_degraded "$hook"
   }

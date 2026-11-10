@@ -630,9 +630,21 @@ def record(rule, outcome, name, text):
         pass
 
 
+# Exit 3: the payload is not JSON, so the guard cannot tell what was asked. Exit
+# 4: judging the command failed. The shell caller turns either into one stderr
+# line; the command is still allowed. A payload without tool_input.command (a
+# tool that is not Bash) is none of the guard's business and stays silent.
 try:
     doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(3)
+if not isinstance(doc, dict):
+    sys.exit(3)
+try:
     command = doc["tool_input"]["command"]
+except (KeyError, TypeError):
+    sys.exit(0)
+try:
     cwd = doc.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         cwd = os.getcwd()
@@ -645,13 +657,26 @@ try:
             if rule in CHECKPOINTED:
                 print(checkpoint(rule, base))
 except Exception:
-    pass
+    sys.exit(4)
 PY
 
 child=0
 [ "${OMS_HARNESS_CHILD:-}" != 1 ] || child=1
+# Fail open, never silently: one stderr line says the command went unjudged.
+# Shell builtins only, so it works when python3 or the helper library is gone.
+guard_unevaluated() {
+  printf 'command guard: cannot evaluate this command (%s); allowing it unchecked.\n' "$1" >&2
+}
+command -v python3 >/dev/null 2>&1 || { guard_unevaluated "python3 not found"; exit 0; }
+rc=0
 reason="$(printf '%s' "$payload" | python3 -I -c "$parser" "$ROOT/scripts/lib" "$child" "$mode" "$AUDIT_LOG" \
-  "$ROOT/scripts/checkpoint.sh" 2>/dev/null || true)"
+  "$ROOT/scripts/checkpoint.sh" 2>/dev/null)" || rc=$?
+case "$rc" in
+  0) ;;
+  3) guard_unevaluated "hook payload is not valid JSON"; exit 0 ;;
+  4) guard_unevaluated "internal error while judging it"; exit 0 ;;
+  *) guard_unevaluated "python helper failed to run or its library is missing"; exit 0 ;;
+esac
 [ -n "$reason" ] || exit 0
 saved=""
 case "$reason" in
