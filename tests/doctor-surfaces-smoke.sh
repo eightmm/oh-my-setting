@@ -1011,6 +1011,30 @@ $out"
   # The same posture again is unchanged; a safer one clears its rows.
   out="$(security)"
   contains "$out" "ok: unchanged since " || fail "an unchanged posture should say so: $out"
+
+  # --json carries the same findings with stable ids, the same exit status, and
+  # nothing the text mode does not print.
+  local json
+  json="$(HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+    bash "$ROOT/scripts/doctor.sh" --security --json 2>/dev/null)" || fail "--security --json must exit like the text mode: $json"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+assert doc["schema"] == 1 and doc["kind"] == "oms-doctor-security" and doc["exit"] == 0, doc
+rows = {f["id"]: f for f in doc["findings"]}
+assert len(rows) == len(doc["findings"]), "ids must be unique"
+assert rows["claude.permissions.defaultMode"]["level"] == "warn", rows
+assert rows["claude.sandbox.enabled"]["level"] == "ok", rows  # an info row is not a warning
+assert rows["codex.sandbox_mode"]["level"] == "warn", rows
+assert rows["codex.approval_policy"]["message"].startswith("codex: approval_policy is never"), rows
+assert rows["codex.profiles.safe.sandbox_mode"]["level"] == "ok", rows
+assert rows["antigravity.enableTerminalSandbox"]["level"] == "warn", rows
+assert rows["security.drift"]["message"].startswith("unchanged since "), rows
+assert doc["changed_since"]["baseline"] is False and doc["changed_since"]["changed"] == [], doc
+assert doc["warnings"] == sum(f["level"] == "warn" for f in doc["findings"]) and doc["unread"] == 0, doc
+assert "touch" not in json.dumps(doc), "a settings value must not be echoed beyond the text rows"
+' || fail "--security --json findings are wrong: $json"
+  [ ! -e "$home/executed" ] || fail "--security --json must not run anything a settings file names"
   printf '%s\n' '{"permissions":{"defaultMode":"default","allow":["Read"]},"sandbox":{"enabled":true,"excludedCommands":["docker"]}}' \
     > "$home/.claude/settings.json"
   out="$(security)"
@@ -1025,6 +1049,16 @@ $out"
   out="$(security)" || fail "an unreadable settings file must not fail the report: $out"
   contains "$out" "unknown: claude: settings.json not valid JSON; posture not read" || fail "invalid JSON is unknown: $out"
   contains "$out" "1 unread" || fail "the summary should count the unread file: $out"
+  json="$(HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+    bash "$ROOT/scripts/doctor.sh" --security --json 2>/dev/null)" || fail "unread settings must not fail --json: $json"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+rows = {f["id"]: f for f in doc["findings"]}
+assert rows["claude.settings.json"]["level"] == "unread" and doc["unread"] == 1, doc
+assert doc["changed_since"]["baseline"] is False, doc  # the text run just before recorded this state
+' || fail "an unreadable file must be level unread in --json: $json"
+  case "$json" in *$'\033'*) fail "--json must not carry an escape either" ;; esac
   case "$out" in *$'\033'*) fail "a settings value must not carry an escape to the terminal" ;; esac
 
   # A harness child may read the report but records nothing.
@@ -1037,8 +1071,11 @@ $out"
     fail "--security --repair must be refused"
   fi
   contains "$out" "standalone read-only report" || fail "the refusal should say why: $out"
-  if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --json 2>&1)"; then
-    fail "--security --json must be refused"
+  if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --json --repair 2>&1)"; then
+    fail "--security --json --repair must be refused"
+  fi
+  if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --remediation-plan 2>&1)"; then
+    fail "--security --remediation-plan must be refused"
   fi
 }
 

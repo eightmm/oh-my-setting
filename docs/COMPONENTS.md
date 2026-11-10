@@ -1831,7 +1831,16 @@ command and executes nothing a file names. Rows are `ok`, `warn`, `info` or
 `unknown`; a file that cannot be read is `unknown`, never `ok`, and no row
 changes the exit status. A fingerprint of the findings is kept under
 `$XDG_STATE_HOME/oh-my-setting/doctor-security.json` (mode 600) so the next run
-can say which section changed; no provider file is touched. Project-level
+can say which section changed; no provider file is touched. `--json` prints one
+document, `{"schema": 1, "kind": "oms-doctor-security", "findings": [...],
+"changed_since": {...}, "warnings": N, "unread": N, "exit": 0}`, with the same
+rows and the same exit status. Each finding is `{"id", "level", "message"}`: the
+id is the provider plus the setting key (`codex.approval_policy`,
+`codex.profiles.safe.sandbox_mode`, `antigravity.enableTerminalSandbox`), the
+level is `ok`, `warn` or `unread` (an `info` row is reported as `ok`), and the
+message is the text line; `changed_since` carries the baseline flag, the earlier
+check's time and the sections that moved. Nothing is printed that the text mode
+does not print. Project-level
 settings, managed policy and command-line flags are not read, so the report
 describes the user-level starting point, not the effective posture of a given
 session.
