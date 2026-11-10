@@ -23128,6 +23128,19 @@ test_data_manifest_check_and_leakage() {
   out="$( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" leakage --name leak 2>&1 )" && \
     fail "leakage should exit nonzero on overlap"
   contains "$out" "LEAKAGE" || fail "leakage output missing LEAKAGE marker"
+  dm() { ( cd "$d" && OMS_MANIFEST_DIR="$md" "$SH" "$@" ); }
+  # Time values must be complete, valid and comparable on the same timeline.
+  printf 'id,t\na,2020-01-01T10:00:00+00:00\n' > "$d/n1.csv"
+  printf 'id,t\nb,2020-01-01T11:00:00+02:00\n' > "$d/n2.csv"
+  dm create --name dates --id-column id --policy time --time-column t --split a=n1.csv --split b=n2.csv >/dev/null || fail "date create failed"
+  rc=0; dm leakage --name dates >"$d/dates.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "offset timestamps must compare in UTC"
+  for value in '2020-02-30' '2020-01-01T11:00:00' ''; do
+    printf 'id,t\nb,%s\n' "$value" > "$d/n2.csv"
+    rc=0; dm leakage --name dates >"$d/dates.out" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid, mixed or missing timestamp must fail closed: $value"
+    if [ -z "$value" ]; then assert_file_contains "$d/dates.out" '1 row(s)'; fi
+  done
 }
 
 test_data_manifest_csv_column() {
@@ -23562,6 +23575,13 @@ EOF
   assert_file_contains "$lint/bad.out" "warn: requeue: QOS high preempts by REQUEUE but the script does not ask for --requeue"
   assert_file_contains "$lint/bad.out" "warn: signal: QOS high requeues, and the script has neither --signal nor a trap"
   assert_file_contains "$lint/bad.out" "warn: maxwall: --time 3-00:00:00 is longer than QOS high MaxWall 2-00:00:00"
+  for wall in 0 UNLIMITED INFINITE; do
+    printf '%s\n' '#!/bin/bash' "#SBATCH --time=$wall" '#SBATCH --qos=normal' 'true' > "$lint/unlimited.sh"
+    printf '%s\n' '## QOS' 'Name|PreemptMode|MaxWall' 'normal|CANCEL|01:00:00' > "$lint/finite.md"
+    rc=0; "$LINT" "$lint/unlimited.sh" --snapshot "$lint/finite.md" > "$lint/unlimited.out" 2>&1 || rc=$?
+    [ "$rc" = 1 ] || fail "unlimited time must warn against finite MaxWall: $wall"
+    assert_file_contains "$lint/unlimited.out" 'warn: maxwall:'
+  done
   # A trap in the batch shell never fires unless the signal is sent to it (B:).
   printf '%s\n' '#!/bin/bash' '#SBATCH --time=30' '#SBATCH --requeue' '#SBATCH --signal=USR1@60' \
     '#SBATCH --array=0-9%2' '#SBATCH --output=logs/%A.out' "trap 'true' USR1" 'srun true' > "$lint/step.sh"
@@ -23578,6 +23598,30 @@ EOF
   "$LINT" "$lint/job.sh" --snapshot "$out" > "$lint/job.out" 2>&1 ||
     fail "the job template should lint clean: $(cat "$lint/job.out")"
   assert_file_contains "$lint/job.out" "0 warning(s)"
+  # Two traps must not let the batch shell exit before its child checkpoints.
+  cat > "$bin/srun" <<'EOF'
+#!/usr/bin/env bash
+trap ': > "$SIGNAL_DIR/first"' USR1
+trap ': > "$SIGNAL_DIR/second"' TERM
+: > "$SIGNAL_DIR/ready"
+while [ ! -e "$SIGNAL_DIR/release" ]; do sleep 0.05; done
+EOF
+  chmod +x "$bin/srun"
+  SIGNAL_DIR="$lint" PATH="$bin:$PATH" SLURM_SUBMIT_DIR="$lint" bash "$lint/job.sh" >"$lint/signals.out" 2>&1 &
+  local signal_pid=$! deadline=$((SECONDS + ${OMS_TEST_CALL_TIMEOUT:-120}))
+  while [ ! -e "$lint/ready" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.05; done
+  [ -e "$lint/ready" ] || fail "template child did not start"
+  kill -USR1 "$signal_pid"
+  while [ ! -e "$lint/first" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.05; done
+  [ -e "$lint/first" ] || fail "first signal was not forwarded"
+  kill -TERM "$signal_pid"
+  while [ ! -e "$lint/second" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.05; done
+  [ -e "$lint/second" ] || fail "second signal was not forwarded"
+  local still_running=0
+  kill -0 "$signal_pid" 2>/dev/null && still_running=1
+  : > "$lint/release"
+  [ "$still_running" = 1 ] || fail "template exited before checkpoint completed"
+  wait "$signal_pid" || fail "template did not propagate child success"
   # A QOS that does not requeue gets no requeue warning, and says why.
   printf '%s\n' '#!/bin/bash' '#SBATCH --time=10' '#SBATCH --qos=normal' 'true' > "$lint/plain.sh"
   printf '%s\n' '## QOS' '' 'Name|PreemptMode|MaxWall' 'normal|CANCEL|01:00:00' > "$lint/snap.md"
@@ -23636,9 +23680,10 @@ case "$jid" in
   3007) printf '%s\n' \
     "3007_1|COMPLETED|0:0|00:01:00|c1|2026-01-02T03:00:00|2026-01-02T03:01:00|2026-01-02T03:02:00|billing=4,cpu=4,gres/gpu=1|gpu01" \
     "3007_2|OUT_OF_MEMORY|0:125|00:00:30|c1|2026-01-02T03:00:00|2026-01-02T03:01:00|2026-01-02T03:01:30|billing=4,cpu=4,gres/gpu=1|gpu02" ;;
-  3008) echo "3008|PREEMPTED|0:0|00:05:00|c1|2026-01-02T04:00:00|2026-01-02T04:01:00|2026-01-02T04:06:00|cpu=8|gpu01"
+  3008) echo "3008|PREEMPTED|0:0|00:05:00|c1|2026-01-02T04:00:00|2026-01-02T04:01:00|2026-01-02T04:06:00|cpu=8|gpu01||||train|0"
     [ ! -e "$0.done" ] ||
-      echo "3008|COMPLETED|0:0|00:07:00|c1|2026-01-02T04:06:00|2026-01-02T04:10:00|2026-01-02T04:17:00|cpu=8|gpu03" ;;
+      echo "3008|COMPLETED|0:0|00:07:00|c1|2026-01-02T04:06:00|2026-01-02T04:10:00|2026-01-02T04:17:00|cpu=8|gpu03||||train|1" ;;
+  3010) printf '%s\n' "3010|COMPLETED|0:0|00:01:00|c1|2026-01-01T00:00:00||||||||old|0" "3010|FAILED|1:0|00:01:00|c1|2026-01-02T00:00:00||||||||new|0" ;;
   3009) echo "3009|NODE_FAIL|0:0|00:00:40|c1|2026-01-02T05:00:00|2026-01-02T05:01:00|Unknown||None assigned" ;;
   # 3010 carries the limit and CPU fields too: two GPUs for 30 minutes of a
   # one-hour limit, 16 CPUs that did four CPU-hours of work.
@@ -23758,6 +23803,11 @@ test_run_reconcile_records_terminal_jobs() {
   ( cd "$d" && env "${env_pfx[@]}" OMS_RECONCILE_FILE="$rec" "$SH" list 20 >"$d/list.out" 2>&1 ) || fail "list failed"
   assert_file_contains "$d/list.out" "job=3008  COMPLETED  exit=0:0  00:07:00  on c1  requeues=1"
   assert_file_contains "$d/list.out" "job=3007  OUT_OF_MEMORY  exit=0:125  00:00:30  on c1  tasks=COMPLETED:1,OUT_OF_MEMORY:1"
+
+  printf '%s\n' '{"schema": 1, "job_id": "3010", "state": "COMPLETED", "submit": "2026-01-01T00:00:00"}' >> "$rec"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3010 >"$d/reused.out" 2>&1 ) || fail "reused id apply failed"
+  assert_file_contains "$rec" '"job_id": "3010", "state": "FAILED"'
+  assert_file_contains "$rec" '"submit": "2026-01-02T00:00:00"'
 
   # NODE_FAIL that left the queue is an ending; sacct's "Unknown" and "None
   # assigned" are absent fields, not values. An earlier submission that used

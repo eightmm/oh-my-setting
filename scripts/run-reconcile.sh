@@ -102,7 +102,8 @@ MAX_TASK_ROWS=200
 #
 # sacct is asked for the allocation rows (-X) of every record of the id (-D:
 # a requeued job keeps its id and gains a record), in the parsable2 fields
-# JobID,State,ExitCode,Elapsed,Cluster,Submit,Start,End,AllocTRES,NodeList. An
+# JobID,State,ExitCode,Elapsed,Cluster,Submit,Start,End,AllocTRES,NodeList,
+# Timelimit,AllocCPUS,TotalCPU,JobName,Restarts. An
 # array or hetjob returns one element per task: each element answers with its
 # newest record, any non-terminal element keeps the job pending, else the first
 # failure wins. sacct prints "CANCELLED by <uid>", so only the first word is
@@ -120,7 +121,7 @@ jid, sacct, squeue = sys.argv[1:4]
 terminal = set(os.environ["OMS_Q_TERMINAL"].split())
 requeue = set(os.environ["OMS_Q_REQUEUE"].split())
 limit = int(os.environ["OMS_Q_MAX"])
-FIELDS = "JobID,State,ExitCode,Elapsed,Cluster,Submit,Start,End,AllocTRES,NodeList,Timelimit,AllocCPUS,TotalCPU"
+FIELDS = "JobID,State,ExitCode,Elapsed,Cluster,Submit,Start,End,AllocTRES,NodeList,Timelimit,AllocCPUS,TotalCPU,JobName,Restarts"
 sys.path.insert(0, os.environ["OMS_Q_LIB"])
 from run_usage import consumed
 
@@ -152,6 +153,10 @@ for index, line in enumerate(lines([sacct, "-X", "-D", "-j", jid, "--format=" + 
     if ident not in elements:
         elements[ident] = []
         order.append(ident)
+    # A zero restart count starts a fresh submission, even when the id was reused.
+    # Older accounting outputs lacking the count retain their previous behavior.
+    if len(cells) > 13 and cells[13].strip() == "0" and elements[ident]:
+        elements[ident] = []
     elements[ident].append({
         "id": ident, "state": state, "exit_code": cells[1], "elapsed": cells[2], "cluster": known(cells[3]),
         "submit": known(cells[4]), "start": known(cells[5]), "end": known(cells[6]),
@@ -248,7 +253,7 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         r = json.loads(line)
     except Exception:
         continue
-    if str(r.get("job_id")) == target and (not submit or not r.get("submit") or r.get("submit") == submit):
+    if str(r.get("job_id")) == target and (not submit or r.get("submit") == submit):
         sys.exit(0)
 sys.exit(1)
 PY

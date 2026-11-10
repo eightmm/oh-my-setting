@@ -52,10 +52,11 @@ srun TODO-python train.py --checkpoint-dir "$CKPT_DIR" ${resume:+--resume "$resu
 child=$!
 
 # A trapped signal interrupts wait; wait again so the checkpoint can finish.
-status=0
-wait "$child" || status=$?
-if kill -0 "$child" 2>/dev/null; then
+while :; do
   status=0
   wait "$child" || status=$?
-fi
+  if [ "$status" -le 128 ] || ! kill -0 "$child" 2>/dev/null; then
+    break
+  fi
+done
 exit "$status"

@@ -73,7 +73,8 @@ create options:
                                  every row of a later split must be later than
                                  every row of an earlier one
   --time-column NAME CSV/TSV header column holding a number or an ISO-8601
-                     date (YYYY-MM-DD...) for --policy time.
+                     date for --policy time; values must be present and use
+                     consistently naive or timezone-aware timestamps.
   --entity-column NAME  CSV/TSV header column for --policy cold. Repeatable;
                      also recorded and checked like a --key-column.
   --derive-cmd TEXT  The command that computed the key columns (recorded as
@@ -758,6 +759,7 @@ PY
   local policy_found=0
   OMS_MANIFEST="$p" OMS_SHOW="$SHOW_EXAMPLES" python3 <<'PY' || policy_found=$?
 import csv, json, os, re, sys
+from datetime import datetime, timezone
 
 m = json.load(open(os.environ["OMS_MANIFEST"]))
 show = os.environ.get("OMS_SHOW") == "1"
@@ -823,7 +825,7 @@ if policy == "time":
         raw = [r[ci].strip() if len(r) > ci else "" for r in rows[1:]]
         empty = sum(1 for v in raw if not v)
         if empty:
-            print("WARN    %s: %d row(s) have no %s value and were not ordered" % (label, empty, column))
+            stop("%s: %d row(s) have no %s value" % (label, empty, column))
         raw = [v for v in raw if v]
         if not raw:
             stop("split %s has no %s values to order" % (label, column))
@@ -837,10 +839,16 @@ if policy == "time":
     flat = [v for vals in values.values() for v in vals]
     if all(number(v) is not None for v in flat):
         ordered = {label: [number(v) for v in vals] for label, vals in values.items()}
-    elif all(re.match(r"\d{4}-\d{2}-\d{2}", v) for v in flat):
-        ordered = values  # ISO-8601 sorts as text
     else:
-        stop("time column %r must hold numbers or ISO-8601 dates (YYYY-MM-DD...) throughout" % column)
+        try:
+            ordered = {label: [datetime.fromisoformat(v) for v in vals] for label, vals in values.items()}
+        except ValueError:
+            stop("time column %r must hold numbers or valid ISO-8601 dates throughout" % column)
+        aware = {v.utcoffset() is not None for vals in ordered.values() for v in vals}
+        if len(aware) > 1:
+            stop("time column %r mixes naive and timezone-aware timestamps" % column)
+        if True in aware:
+            ordered = {label: [v.astimezone(timezone.utc) for v in vals] for label, vals in ordered.items()}
     labels = [label for label, _ in splits]
     for i in range(len(labels)):
         for j in range(i + 1, len(labels)):
@@ -852,7 +860,7 @@ if policy == "time":
                 print("LEAKAGE[time:%s] %s -> %s: %d row(s) of %s are not later than the newest %s row"
                       % (column, early, late, behind, late, early))
                 if show:
-                    print("    newest %s: %s; oldest %s: %s" % (early, newest, late, min(ordered[late])))
+                    print("    newest %s: %s; oldest %s: %s" % (early, str(newest).removesuffix(" 00:00:00"), late, str(min(ordered[late])).removesuffix(" 00:00:00")))
             else:
                 print("ok[time:%s]      %s -> %s: every %s row is later" % (column, early, late, late))
 

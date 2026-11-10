@@ -383,7 +383,8 @@ else:
     else:
         notes.append("preemption: QOS %s PreemptMode is %s; no requeue check applies" % (qos, mode or "not set"))
     limit, asked = seconds(row.get("MaxWall")), seconds(options.get("time"))
-    if limit is not None and asked is not None and asked > limit:
+    unlimited = (options.get("time") or "").strip().upper() in ("0", "UNLIMITED", "INFINITE", "-1")
+    if limit not in (None, 0) and ((asked is not None and asked > limit) or unlimited):
         warnings.append(("maxwall", "--time %s is longer than QOS %s MaxWall %s" % (options["time"], qos, row["MaxWall"])))
 
 print("slurm-lint: %s: %d warning(s); static check, nothing was submitted or run" % (script, len(warnings)))
