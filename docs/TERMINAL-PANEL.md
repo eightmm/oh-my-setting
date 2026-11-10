@@ -770,6 +770,20 @@ the newest land pushed but did not install.
 
 They are recorded evidence, not process liveness; a failing source drops only its row.
 
+A work health line sits under the goal box on boards 16 or more rows high: `▶ running 2 · ⏸ waiting on
+you 1 · oldest 25m · ✗ failed 1 · ✓ done 3 · plan 6/9 tasks · ! 2 unresolved · CI ✓ passed 3h ago · ctx 73%
+used`. It is assembled from records the board already holds: current (not yet settled) calls by state, the
+Attention queue's `needs you` count with its oldest wait, plan progress, the actionable count of `oms
+fail-ledger list --unresolved`, the newest `.oms/ci.jsonl` row for the branch and the live main's context
+reading. A segment appears only when its source is recorded and has something to say (zero counts drop;
+`waiting on you` takes the attention colour), and every segment carries a glyph or word besides colour
+(ASCII: `> running`, `! waiting`, `x failed`, `+ done`). From 100 columns and 24 rows a line that does not fit
+splits in two; below 80 columns the words shorten, below 50 they shorten again, and whole segments drop
+lowest priority first (done, context, plan, unresolved, CI, running, failed; waiting on you last). A room with
+nothing recorded shows no line. The two ledgers are read on the 5-second collection only, and only when
+their file changed. The CI part is an observation of the last recorded run, not a verification of this
+checkout, and the line shows no quota or tokens.
+
 Activity is organized under the window's sole live MAIN: ADVISORS / REVIEWERS / WORKERS,
 followed by each call and its task title. Main rows can show `? N open` questions and
 `cN%` context used. When room history contains earlier mains, they fold to their status

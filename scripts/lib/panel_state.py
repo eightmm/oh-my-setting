@@ -914,6 +914,8 @@ def read_panel(repo, provider, view, attention_only):
     state["capacity_alerts"] = panel_health.alerts(state)
     import panel_attention_read
     state["attention_read"] = panel_attention_read.load(repo, selected_room)
+    import panel_work_health
+    state["work_health"] = panel_work_health.collect(repo, state)
     return state, status, provider, main_attempt, density, filtered, selected_room
 
 
