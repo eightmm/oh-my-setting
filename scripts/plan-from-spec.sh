@@ -27,6 +27,8 @@ ALLOWED_ENVELOPE=""
 EXPECTED_PROPOSAL_SHA=""
 ALLOW_VERIFIER_CHANGE=0
 SCOPE_ONLY=0
+MILESTONE=""
+ROADMAP_ONLY=0
 MODEL=""
 FALLBACK_MODEL=""
 REASONING_EFFORT=auto
@@ -78,6 +80,14 @@ for review — nothing touches the task board until --apply.
   --apply FILE    Append a reviewed proposal's tasks to the plan. Creates the
                   plan (goal + acceptance from PROJECT.md) when absent; an
                   existing plan and its acceptance command are never replaced.
+  --roadmap       Read-only: list PROJECT.md's optional `## Roadmap`
+                  milestones (`- [ ] M1: title (REQ-1, REQ-2)`) and the next
+                  unchecked one. A checkbox is the document's claim, not
+                  evidence. Exits 1 when the contract has no Roadmap.
+  --milestone ID  Propose mode only: ask the planner for the work that one
+                  Roadmap milestone's criteria need, and report coverage
+                  against those criteria only. The milestone must list
+                  criterion ids the contract carries.
   --discover      Collect bounded work evidence and propose candidates first.
                   Propose mode only; apply still requires an owner digest.
                   A contract with acceptance criteria adds a spec-gap lens:
@@ -130,6 +140,10 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--validate-spec requires a spec file"
       VALIDATE_SPEC="$2"; shift 2 ;;
     --scope-only) SCOPE_ONLY=1; shift ;;
+    --roadmap) ROADMAP_ONLY=1; shift ;;
+    --milestone)
+      [ "$#" -ge 2 ] || fail "--milestone requires a Roadmap id"
+      MILESTONE="$2"; shift 2 ;;
     --expected-proposal-sha256)
       [ "$#" -ge 2 ] || fail "--expected-proposal-sha256 requires a digest"
       EXPECTED_PROPOSAL_SHA="$2"; shift 2 ;;
@@ -793,8 +807,8 @@ PY
 # the runtime's Markdown helpers so the ids are the ones the envelope projects.
 # Never changes an exit code; an unreadable spec or proposal prints nothing.
 proposal_coverage_notes() {  # PROPOSAL
-  python3 - "$1" "$SPEC" "$ROOT/scripts/lib" <<'PY' || true
-import json, sys, unicodedata
+  OMS_PFS_MILESTONE_IDS="${MILESTONE_IDS:-}" python3 - "$1" "$SPEC" "$ROOT/scripts/lib" <<'PY' || true
+import json, os, sys, unicodedata
 
 sys.dont_write_bytecode = True
 proposal, spec, lib = sys.argv[1:]
@@ -819,6 +833,10 @@ for raw in bullet_items(section_text(body, ["acceptance", "done", "success", "co
     criterion_id = stable_criterion_id("project", raw)
     if criterion_id not in [item[0] for item in criteria]:
         criteria.append((criterion_id, strip_criterion_marker(normalized_line(raw))))
+# A proposal asked for one Roadmap milestone answers for that milestone's criteria only.
+wanted = set(os.environ.get("OMS_PFS_MILESTONE_IDS", "").split())
+if wanted:
+    criteria = [item for item in criteria if item[0] in wanted]
 if not criteria:
     sys.exit(0)
 covered = set()
@@ -956,6 +974,20 @@ if [ "$SCOPE_ONLY" -eq 1 ]; then
   [ -f "$SPEC" ] || fail "no PROJECT.md in $REPO"
   spec_field Scope
   exit 0
+fi
+
+if [ "$ROADMAP_ONLY" -eq 1 ]; then
+  [ -z "$MILESTONE$APPLY_FILE$VALIDATE_SPEC" ] && [ "$DISCOVER" -eq 0 ] ||
+    fail "--roadmap only lists milestones; it takes no --milestone, --apply, --validate-spec or --discover"
+  [ -f "$SPEC" ] || fail "no PROJECT.md in $REPO"
+  exec python3 "$ROOT/scripts/lib/spec_roadmap.py" list "$SPEC"
+fi
+MILESTONE_IDS=""
+if [ -n "$MILESTONE" ]; then
+  [ -z "$APPLY_FILE$VALIDATE_SPEC" ] || fail "--milestone is for proposing; it cannot be used with --apply or --validate-spec"
+  [ -f "$SPEC" ] || fail "no PROJECT.md in $REPO"
+  # Unknown milestone, no ids, or ids the contract does not carry: refuse before any provider is asked.
+  MILESTONE_IDS="$(python3 "$ROOT/scripts/lib/spec_roadmap.py" ids "$SPEC" "$MILESTONE")" || exit 2
 fi
 
 if [ -n "$APPLY_FILE" ]; then
@@ -1143,6 +1175,13 @@ if rows:
 CRITERIA
 }
 
+# The one Roadmap milestone this decomposition is for, with its criteria. Empty
+# (and the prompt unchanged) without --milestone.
+spec_milestone_block() {
+  [ -n "$MILESTONE" ] || return 0
+  python3 "$ROOT/scripts/lib/spec_roadmap.py" block "$SPEC" "$MILESTONE" || true
+}
+
 # Every acceptance criterion the runtime projects, one per line, for discovery's
 # spec-gap lens. Unlike spec_criteria_block this includes wording-derived ids:
 # the lens only has to name a criterion back, not keep the id across edits.
@@ -1184,7 +1223,7 @@ $(spec_section Verification)
 Interface and Data:
 $(spec_section 'Interface and Data')
 Decisions:
-$(spec_section Decisions)$(spec_criteria_block)
+$(spec_section Decisions)$(spec_criteria_block)$(spec_milestone_block)
 If Decisions names References, read those repository documents before decomposing; if one does not exist, say so in the affected task title.
 Existing plan (id | state | title | scope):
 $plan_context
