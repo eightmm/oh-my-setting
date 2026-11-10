@@ -1083,6 +1083,12 @@ def session_log(report, width, rows, unicode=True, navigation=None):
         except ValueError:
             stamp = "unknown"
         left = stamp + " " + actor + " "
+        # Narrow panes: drop the date, then shorten the actor, so the excerpt keeps room to read.
+        if width - 6 - display_width(left) < 20:
+            clock = stamp.split(" ")[-1]
+            left = next((c for c in (clock + " " + actor + " ", clock + " [" + role.lower() + "] ")
+                         if width - 6 - display_width(c) >= 20), clock + " ")
+            actor = left[len(clock) + 1:].strip() or "\x00"  # "" would match at column 0 when painted
         result_tag = judgment_tag(member, report, unicode, execution_tag(member, unicode))
         outcome = (result_tag if result_handoff(room, message) and call_ending(member) else
                    "[" + clean(message["outcome"], 30) + "]" if message.get("outcome") else "")

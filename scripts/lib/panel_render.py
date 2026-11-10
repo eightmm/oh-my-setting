@@ -64,10 +64,17 @@ def room_listing(rooms, current, width, now=None, live_participants=None):
                                                        clean(shared.get("successor", ""), 128), title)
             lines.append(clipped(line, width))
             continue
-        line = "%s %s %s / %s / %s / %d unread / last %s / %s" % (
-            marker, index, clean(shared.get("id", ""), 128), title,
+        from panel_view import display_width
+        head = "%s %s %s / %s" % (marker, index, clean(shared.get("id", ""), 128), title)
+        tail = " / %s / %d unread / last %s / %s" % (
             "main live" if main_live else "no live main", unread, age, state)
-        lines.append(clipped(line, width))
+        # A long Korean id or title is clipped; the live/unread/age/state tail stays readable.
+        # Ordinary ids and titles that fit keep the old clip of the whole line.
+        room = width - 4 - display_width(tail)
+        if display_width(head) > (width - 4) // 2 and room >= 12:
+            lines.append(clipped(head, room) + tail)
+        else:
+            lines.append(clipped(head + tail, width))
     if width >= 20:
         return [box_edge("OMS · Rooms", width)] + [box_row(line, width) for line in lines] + [
             box_edge("", width, kind="bottom")]

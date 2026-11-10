@@ -28,6 +28,10 @@ PLAN_READER = _load("plan-retire.py")["bounded_regular"]
 SCHEMA = 1
 MAX_ROWS = 8
 MAX_LABEL = 160
+# Variation selectors and the emoji joiner take no cell of their own and terminals disagree on how a
+# joined sequence is drawn, so labels drop them: every emoji of a sequence keeps its own measured
+# width. Other format characters (zero-width space, bidi marks) stay visible as "?".
+INVISIBLE = "︎️‍"
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 COVERAGE_NOTE = "OMS-managed records only; native provider subagents are not observed"
 FALLBACK_REASONS = {"capacity", "capacity-no-fallback", "capacity-dirty-worktree",
@@ -45,7 +49,7 @@ def clean(value, limit=MAX_LABEL):
         return None
     text = "".join(" " if ch in "\t\n\r" or unicodedata.category(ch)[0] == "Z"
                    else "?" if unicodedata.category(ch)[0] == "C" else ch
-                   for ch in str(value) if ch not in "\ufe0e\ufe0f")
+                   for ch in str(value) if ch not in INVISIBLE)
     text = " ".join(text.split())
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
@@ -428,7 +432,8 @@ def build(directory, repo_name, repo_path="", now=None):
 
 
 def char_width(ch):
-    if unicodedata.category(ch) in ("Mn", "Me") or "\u1160" <= ch <= "\u11ff":
+    if (unicodedata.category(ch) in ("Mn", "Me") or "\u1160" <= ch <= "\u11ff" or ch in INVISIBLE
+            or "\ud7b0" <= ch <= "\ud7ff"):
         return 0
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
 
