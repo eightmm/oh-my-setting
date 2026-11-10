@@ -40,6 +40,8 @@ REPAIR=0
 SURFACES=0
 TOOL_LOCK_ONLY=0
 SECURITY_ONLY=0
+SANDBOX_ONLY=0
+SANDBOX_PROBE=0
 EXTENSIONS_ONLY=0
 MCP_PINS_ONLY=0
 MCP_PIN_RECORD=0
@@ -77,6 +79,7 @@ usage() {
 Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--repair] [--surfaces] [--tool-lock] [--contract]
                  [--security]
+       doctor.sh --sandbox [--probe] [--json]
                  [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
        doctor.sh --extensions [--repo PATH] [--json]
@@ -131,6 +134,12 @@ that cannot be read is unknown, not ok. The report records a fingerprint of
 its own findings under the user state directory and says which section
 changed since the last check; it changes no provider file.
 
+--sandbox is a standalone read-only report of whether this host could sandbox
+(bwrap, user-namespace switches, AppArmor restriction, Landlock, seccomp; on
+macOS sandbox-exec) and warns when a provider sandbox setting found by
+--security cannot take effect here. --probe, Linux only, runs one bwrap
+smoke command; nothing else starts a process.
+
 --extensions is a standalone read-only inventory of the MCP servers and
 native plugins each provider CLI is configured with, user-level and for the
 --repo project: name, transport, scope and the command's base name or the
@@ -176,6 +185,8 @@ while [ "$#" -gt 0 ]; do
     --surfaces) SURFACES=1; FORWARD_ARGS+=(--surfaces); shift ;;
     --tool-lock) TOOL_LOCK_ONLY=1; FORWARD_ARGS+=(--tool-lock); shift ;;
     --security) SECURITY_ONLY=1; shift ;;
+    --sandbox) SANDBOX_ONLY=1; shift ;;
+    --probe) SANDBOX_PROBE=1; shift ;;
     --contract)
       # The cross-CLI conformance fixture (loader parity, MCP registration
       # parity, fail-open hook no-ops) is slower than a health pass and runs
@@ -215,6 +226,22 @@ if ! REPORT_REPO="$(cd "$REPORT_REPO" 2>/dev/null && pwd -P)"; then
 fi
 OMS_DOCTOR_PROJECT_DIR="$REPORT_REPO"
 export OMS_DOCTOR_PROJECT_DIR
+
+# --sandbox is a standalone read-only report of host sandbox facts; --probe is
+# its only process-starting option.
+if [ "$SANDBOX_ONLY" = 1 ] || [ "$SANDBOX_PROBE" = 1 ]; then
+  if [ "$SANDBOX_ONLY" = 0 ] || [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] ||
+     [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ] || [ "$SECURITY_ONLY" = 1 ] ||
+     [ "$EXTENSIONS_ONLY" = 1 ] || [ "$MCP_PINS_ONLY" = 1 ] || [ "$MCP_PIN_RECORD" = 1 ]; then
+    echo "error: --sandbox is a standalone read-only report; only --probe and --json go with it" >&2
+    exit 2
+  fi
+  command -v python3 >/dev/null 2>&1 || { echo "error: --sandbox needs python3" >&2; exit 2; }
+  sandbox_args=()
+  [ "$REPORT_JSON" = 0 ] || sandbox_args+=(--json)
+  [ "$SANDBOX_PROBE" = 0 ] || sandbox_args+=(--probe)
+  exec python3 -I "$ROOT/scripts/lib/doctor-sandbox.py" "${sandbox_args[@]}"
+fi
 
 # --extensions is its own read-only report and shares no state with a health
 # pass: it leaves before any probe, lock or delegation.
