@@ -209,6 +209,37 @@ def _wake_ledger(repo, day):
     return receipt, [row for row in wakes if row["day"] == day]
 
 
+def wake_summary(wakes, day):
+    """One line for `oms tick status`: how much of today's wake allowance the tick spent, and on what.
+
+    Counts come from the ledger the wake itself writes; a skipped wake spends nothing. The ledger records
+    no token count, cost or wall time for a wake, so the line says so instead of printing a zero."""
+    today = [row for row in wakes if isinstance(row, dict) and row.get("day") == day]
+    spent = [row for row in today if row.get("outcome") != "skipped"]
+    resumed = sum(row.get("outcome") == "resumed" for row in spent)
+    parts = []
+    if len(spent) - resumed:
+        parts.append("%d main prompt(s)" % (len(spent) - resumed))
+    if resumed:
+        parts.append("%d autopilot resume(s)" % resumed)
+    skipped = len(today) - len(spent)
+    return "wakes today (UTC): %d of %d spent%s%s; tokens, cost and wall time: not recorded" % (
+        len(spent), WAKE_DAILY_LIMIT, " (%s)" % ", ".join(parts) if parts else "",
+        "; %d skipped" % skipped if skipped else "")
+
+
+def wake_summary_cli(argv):
+    """`oms tick status` helper: RECEIPT -> the summary line, or nothing when no wake was ever recorded."""
+    try:
+        wakes = read_tick_receipt(argv[0])[1]
+    except LedgerRefused as error:
+        print("wakes today (UTC): unknown (%s)" % error)
+        return 0
+    if wakes:
+        print(wake_summary(wakes, time.strftime("%Y-%m-%d", time.gmtime())))
+    return 0
+
+
 def _record_wake(repo, receipt, wakes):
     import tempfile
     directory = Path(repo) / ".oms" / "tick"
