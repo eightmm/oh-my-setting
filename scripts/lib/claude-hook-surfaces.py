@@ -81,15 +81,17 @@ def is_oms_root(candidate, roots):
 
 def _dead_launcher(command, root, roots):
     """True for the managed launcher form whose checkout is no longer an OMS
-    checkout: gone, a dangling symlink, or a leftover directory without the
-    source markers."""
+    checkout and whose launcher cannot run: gone, a dangling symlink, or a
+    leftover directory without python-entry.sh. A launcher that still exists
+    may belong to another project, so it is never claimed here."""
     try:
         argv = shlex.split(command)
     except ValueError:
         return False
     return (len(argv) == 4 and argv[0] == "bash" and argv[2] == "bash"
             and _norm(argv[1]) == root + "/scripts/lib/python-entry.sh"
-            and not is_oms_root(root, roots))
+            and not is_oms_root(root, roots)
+            and not os.path.exists(root + "/scripts/lib/python-entry.sh"))
 
 
 def owned_script(hook, roots):

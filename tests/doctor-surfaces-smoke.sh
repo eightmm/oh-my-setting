@@ -564,6 +564,25 @@ hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
 commands = [h["command"] for e in hooks["PreCompact"] for h in e["hooks"]]
 assert "bash %s/elsewhere/scripts/precompact-handoff.sh" % sys.argv[2] in commands, commands
 PY
+  # A live launcher-form row from another project without OMS markers is not
+  # dead: install and removal leave it alone.
+  mkdir -p "$home/foreign/scripts/lib"
+  : > "$home/foreign/scripts/lib/python-entry.sh"
+  : > "$home/foreign/scripts/command-guard-hook.sh"
+  python3 - "$cfg" "$home/foreign" <<'PY'
+import json, shlex, sys
+d = json.load(open(sys.argv[1])); foreign = sys.argv[2]
+d["hooks"].setdefault("PreToolUse", []).append({"matcher": "Bash", "hooks": [{"type": "command", "command": " ".join(
+    shlex.quote(a) for a in ("bash", foreign + "/scripts/lib/python-entry.sh", "bash", foreign + "/scripts/command-guard-hook.sh"))}]})
+json.dump(d, open(sys.argv[1], "w"))
+PY
+  run_install "$home" >/dev/null || fail "install should succeed beside a foreign launcher row"
+  grep -q "$home/foreign/scripts/command-guard-hook.sh" "$cfg" || fail "install must keep a live foreign launcher row"
+  cp "$cfg" "$home/foreign-settings.json"
+  HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" OMS_LOCK_DIR="$home/.locks" \
+    bash "$ROOT/scripts/install-claude-hooks.sh" --remove --settings "$home/foreign-settings.json" >/dev/null 2>&1 ||
+    fail "--remove should succeed beside a foreign launcher row"
+  grep -q "$home/foreign/scripts/command-guard-hook.sh" "$home/foreign-settings.json" || fail "--remove must keep a live foreign launcher row"
 }
 
 test_surfaces_expect_commands_at_the_install_owner() {
