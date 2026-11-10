@@ -1285,6 +1285,17 @@ kept and reads `unconfirmed`. A label is one more reader's opinion on a
 citation: the GATE verdict, the exit code and the finding's status do not move,
 and a failed confirm call is a warning. It is off unless asked for.
 
+A repository says what its reviews treat as blocking with one item in
+PROJECT.md's Verification section: `- Review rules: TEXT`, with indented
+continuation lines (at most 2,000 bytes). Every review prompt carries it, read
+from the review's base commit (`--base REF`, the candidate base, else `HEAD`)
+and never from the working copy, so a change cannot rewrite the rules it is
+reviewed by; when the working copy's rules differ, the run says which copy is
+in force. The rules add to the seat instructions and override none of them.
+`oms peer-review findings suggest-rules` lists dismissal reasons the owner gave
+for three or more findings. It is a suggestion only: the owner adds a rule to
+PROJECT.md by hand, and nothing writes one.
+
 ### Acceptance freshness and reuse
 
 Acceptance stays fresh by default. An explicit `- Acceptance reuse: same-run`

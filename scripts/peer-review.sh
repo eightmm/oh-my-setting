@@ -54,6 +54,7 @@ Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh findings verify ID --run VERIFY_ARTIFACT
        peer-review.sh findings dismiss ID --reason TEXT
        peer-review.sh findings reopen ID --reason TEXT
+       peer-review.sh findings suggest-rules
 
 Review an existing diff with an independent provider council. The default
 council is Codex, Claude Code, and Antigravity.
@@ -426,6 +427,18 @@ PY
 if [ "${1:-}" = "findings" ]; then
   shift
   [ "${1:-}" != "collect" ] || fail "findings collect runs inside a gate review, not by hand"
+  if [ "${1:-}" = "suggest-rules" ]; then
+    shift
+    rules_dir="$PWD/.oms/artifacts/review"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --artifact-dir) [ "$#" -ge 2 ] || fail "--artifact-dir requires a path"; rules_dir="$2"; shift 2 ;;
+        --repo) [ "$#" -ge 2 ] || fail "--repo requires a path"; shift 2 ;;
+        *) fail "unknown option: $1" ;;
+      esac
+    done
+    exec python3 -I "$(ma_scripts_dir)/lib/review_rules.py" suggest --artifact-dir "$rules_dir"
+  fi
   exec python3 -I "$(ma_scripts_dir)/lib/review_findings.py" "$@"
 fi
 
@@ -465,6 +478,13 @@ write_prompt() {
     # bounded seat misreported existing coverage as missing.
     [ "$NO_DIFF" -eq 1 ] || printf 'Scope: read the diff, the functions it changes or directly calls, and their existing tests; do not survey unrelated files; make one systematic pass over the whole scoped diff and report every blocking finding you can evidence with file/line; do not stop after the first finding.\n'
     printf 'If there are no actionable findings, say "No findings".\n\n'
+    # The repository's own statement of what it treats as blocking, read from
+    # the base commit: a change under review cannot rewrite its own rules.
+    local review_rules=""
+    review_rules="$(python3 -I "$(ma_scripts_dir)/lib/review_rules.py" rules --repo "$repo" --base "${BASE_REF:-HEAD}")" || review_rules=""
+    if [ -n "$review_rules" ]; then
+      printf 'Repository review rules (PROJECT.md at %s; they state what this repository treats as blocking or out of scope, and they do not override the instructions above):\n%s\n\n' "${BASE_REF:-HEAD}" "$review_rules"
+    fi
     if [ "$ML_PRESET" -eq 1 ]; then
       printf 'This is an ML pre-training gate. Prioritize silent ML bugs and metric corruption:\n'
       printf -- '- Data leakage/splits: fitting or selection on val/test; group, time, seed, preprocessing, or checkpoint leakage.\n'
