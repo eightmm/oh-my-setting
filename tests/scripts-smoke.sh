@@ -46713,6 +46713,40 @@ EOF
   printf '%s\n' "$out" | grep >/dev/null '1 with a verify contract' ||
     fail "status should surface the contract count: $out"
 
+  # Admission record: add appends one row with source and digests, skill-doctor
+  # warns (exit code unchanged) when the bytes later differ or no row exists.
+  local ledger="$project/.oms/skill-admissions.jsonl" adm_home="$TMP/sf-adm-home"
+  mkdir -p "$adm_home"
+  [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] || fail "add should append exactly one admission row"
+  assert_file_contains "$ledger" '"name":"oms-repo-build-check"'
+  assert_file_contains "$ledger" "\"source\":\"$project/skill.md\""
+  assert_file_contains "$ledger" "\"skill_sha256\":\"$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$project/skill.md")\""
+  out="$(cd "$project" && HOME="$adm_home" "$ROOT/scripts/skill-doctor.sh" 2>&1)" ||
+    fail "skill-doctor should stay ok with an admitted skill: $out"
+  ! printf '%s\n' "$out" | grep -E 'changed since admission|unrecorded' >/dev/null ||
+    fail "an untouched admitted skill must not warn: $out"
+  printf '\nsilent edit\n' >> "$project/.oms/skills/oms-repo-build-check/SKILL.md"
+  out="$(cd "$project" && HOME="$adm_home" "$ROOT/scripts/skill-doctor.sh" 2>&1)" ||
+    fail "an admission warning must not change the skill-doctor exit code: $out"
+  printf '%s\n' "$out" | grep >/dev/null 'oms-repo-build-check changed since admission' ||
+    fail "a silent edit should read changed since admission: $out"
+  "$ROOT/scripts/skill-forge.sh" --repo "$project" admit oms-repo-build-check >/dev/null ||
+    fail "admit should re-record a reviewed skill"
+  printf 'x\n' > "$project/.oms/skills/oms-repo-build-check/extra.md"
+  out="$(cd "$project" && HOME="$adm_home" "$ROOT/scripts/skill-doctor.sh" 2>&1)"
+  printf '%s\n' "$out" | grep >/dev/null 'files other than SKILL.md differ' ||
+    fail "an added file should change the file-set digest: $out"
+  rm "$project/.oms/skills/oms-repo-build-check/extra.md"
+  out="$(cd "$project" && HOME="$adm_home" "$ROOT/scripts/skill-doctor.sh" 2>&1)"
+  ! printf '%s\n' "$out" | grep -E 'changed since admission|unrecorded' >/dev/null ||
+    fail "admit should clear the warning: $out"
+  mkdir -p "$project/.oms/skills/oms-hand-made"
+  cp "$project/.oms/skills/oms-repo-build-check/SKILL.md" "$project/.oms/skills/oms-hand-made/SKILL.md"
+  out="$(cd "$project" && HOME="$adm_home" "$ROOT/scripts/skill-doctor.sh" 2>&1)"
+  printf '%s\n' "$out" | grep >/dev/null 'oms-hand-made unrecorded' ||
+    fail "a skill with no admission row should read unrecorded: $out"
+  rm -rf "$project/.oms/skills/oms-hand-made"
+
   # The molecular-data template is opt-in (not every ML repository is
   # chemistry): it must pass the same add gate a person installs it through,
   # and it must not make OMS carry a chemistry dependency.

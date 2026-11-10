@@ -651,6 +651,13 @@ external bundle management nor evaluation is required for a local edit.
 `oms skill-forge status` gives kind-specific recovery guidance for skills that
 differ from same-name OMS templates; local replacement warns that local edits
 will be lost, while imported updates remain explicit.
+`oms skill-forge add` also appends one admission row to
+`.oms/skill-admissions.jsonl` (skill name, source as given, SKILL.md digest,
+file-set digest, admitting git user, time). `oms skill-forge admit NAME` records a
+reviewed edit again. `oms skill-doctor` warns `changed since admission` or
+`unrecorded` for local skills in the current repo; it never changes the exit
+code. Imported bundles keep their own digest pin in
+`.oms/skill-store/NAME/lock.json` and are not repeated in this ledger.
 `oms skill-forge` remains the single project-skill authority. Local authored
 skills live under `.oms/skills`; explicitly imported bundles first pass a bounded,
 no-follow preview and then live as content-addressed immutable revisions under
