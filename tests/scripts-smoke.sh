@@ -26721,6 +26721,14 @@ test_agent_role_and_delegate_injection() {
     fail "agent-role list should include bundled repo-auditor"
   printf '%s' "$roles" | grep -Fx researcher > /dev/null ||
     fail "agent-role list should include bundled researcher"
+  # The cheap explorer is researcher, not a 21st role: its return contract is
+  # pointer lines, a bounded summary and an explicit not-checked line.
+  assert_file_contains "$ROOT/roles/researcher.md" 'at most 8 findings as `path:line'
+  assert_file_contains "$ROOT/roles/researcher.md" 'at most 120 words'
+  assert_file_contains "$ROOT/roles/researcher.md" 'Not found / not checked:'
+  assert_file_contains "$ROOT/roles/researcher.md" 'Stop once the question is answered.'
+  [ "$(printf '%s\n' "$roles" | grep -c .)" -le 20 ] ||
+    fail "bundled role count grew past 20; justify a new role or extend an existing one"
   [ "$(cd "$empty_project" && OH_MY_SETTING_ROLES_DIR="$TMP/no-global-roles" \
     "$ROOT/scripts/agent-role.sh" --name decision-advisor resolve)" = "$ROOT/roles/decision-advisor.md" ] ||
     fail "agent-role should fall back to bundled roles"
