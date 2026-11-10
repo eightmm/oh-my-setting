@@ -5,6 +5,25 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/lib/agent-memory-common.sh
 . "$ROOT/scripts/lib/agent-memory-common.sh"
 
+# import and review are a separate reader/writer over the same log: the first
+# action word (never an option's value) hands the whole command line to it.
+oms_memory_prev="" oms_memory_at=0
+for oms_memory_arg in "$@"; do
+  oms_memory_at=$((oms_memory_at + 1))
+  case "$oms_memory_prev" in
+    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--from|--select|--kind|--accept|--retire|--reject)
+      oms_memory_prev=""; continue ;;
+  esac
+  case "$oms_memory_arg" in
+    import|review)
+      exec python3 -X utf8 "$ROOT/scripts/lib/agent_memory_review.py" "$oms_memory_arg" \
+        "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
+    -*) oms_memory_prev="$oms_memory_arg" ;;
+    *) break ;;
+  esac
+done
+unset oms_memory_prev oms_memory_arg oms_memory_at
+
 # OMS_STATE_REPO: set by peer-delegate.sh for worktree workers so they
 # read the primary repo's shared state instead of the throwaway checkout's.
 REPO="${OMS_STATE_REPO:-$PWD}"
@@ -93,6 +112,15 @@ Commands:
   health            Diagnose source/index consistency without creating,
                     synchronizing, repairing, or otherwise changing either.
   rebuild           Recreate the derived database from the Markdown sources.
+  import --from serena|PATH [--apply --select N,N|--all] [--json]
+                    List candidate lines from Markdown memory written elsewhere
+                    (a file, a directory, or .serena/memories); dry run unless
+                    --apply, which appends the chosen ones as kind=imported.
+  review [--kind task-close|distill|imported|correction] [--json]
+         [--accept ID | --retire ID --reason TEXT | --reject ID]
+                    List notes that reached shared memory unread (task-close
+                    promotions, journal distillation, imports) and captured
+                    corrections; accept or turn one down. Project memory only.
 EOF
 }
 

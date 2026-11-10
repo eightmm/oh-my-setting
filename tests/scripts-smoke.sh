@@ -17438,6 +17438,70 @@ test_agent_task_close_promotes_memory() {
   assert_file_contains "$project/.oms/memory/shared.md" "Closed task: Ship the dataloader fix"
   assert_file_contains "$project/.oms/memory/shared.md" "next: Run gpu smoke"
   assert_not_exists "$project/.oms/task/current.md"
+
+  # The promotion reached shared memory unread, so review lists it; a note a
+  # person appended does not wait. Accepting is one append-only receipt.
+  local memory="$ROOT/scripts/agent-memory.sh" ident before
+  (cd "$project" && "$memory" append --text "Hand-written note about the loader" >/dev/null)
+  (cd "$project" && "$memory" review > out-review)
+  assert_file_contains "$project/out-review" "memory review: 1 waiting"
+  assert_file_contains "$project/out-review" "task-close"
+  ! grep -q "Hand-written note" "$project/out-review" || fail "a person's own note must not wait for review"
+  ident="$(cd "$project" && "$memory" review --json |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["pending"][0]["id"])')"
+  if (cd "$project" && OMS_HARNESS_CHILD=1 "$memory" review --accept "$ident" >/dev/null 2>&1); then
+    fail "a harness child must not decide a memory review"
+  fi
+  before="$(cksum < "$project/.oms/memory/shared.md")"
+  (cd "$project" && "$memory" review --accept "$ident" > out-accept)
+  assert_file_contains "$project/out-accept" "memory: accepted $ident"
+  [ "$before" = "$(cksum < "$project/.oms/memory/shared.md")" ] || fail "accepting must not touch the memory log"
+  assert_file_contains "$project/.oms/memory/reviews.jsonl" "\"decision\": \"accepted\""
+  (cd "$project" && "$memory" review > out-review)
+  assert_file_contains "$project/out-review" "memory review: nothing waiting"
+  if (cd "$project" && "$memory" review --accept "$ident" >/dev/null 2>&1); then
+    fail "a decided note must not be accepted twice"
+  fi
+
+  # import: a dry run lists candidates with where they came from and writes
+  # nothing; a line memory already holds is a duplicate, a credential-looking
+  # line is withheld unprinted, fenced code and headings are not notes.
+  mkdir -p "$project/.serena/memories"
+  {
+    printf '%s\n' '# Conventions' '- Hand-written note about the loader' '- short'
+    printf '%s\n' '```' '- a fenced line that is long enough to count' '```'
+    printf '%s\n' 'The split loader must read the manifest digest first.'
+    printf '%s%s\n' '- api_key = sk-abcdefghijklmnop' 'qrstuvwxyz0123456789'
+  } > "$project/.serena/memories/conventions.md"
+  before="$(cksum < "$project/.oms/memory/shared.md")"
+  (cd "$project" && "$memory" import --from serena > out-import)
+  assert_file_contains "$project/out-import" "3 candidate(s) in 1 file(s); dry run, nothing written"
+  assert_file_contains "$project/out-import" "duplicate .serena/memories/conventions.md:2"
+  assert_file_contains "$project/out-import" "new       .serena/memories/conventions.md:7"
+  assert_file_contains "$project/out-import" "withheld  .serena/memories/conventions.md:8"
+  ! grep -q 'sk-abcdefghij\|fenced line' "$project/out-import" || fail "import must not print withheld or fenced lines"
+  [ "$before" = "$(cksum < "$project/.oms/memory/shared.md")" ] || fail "an import dry run must not write"
+  if (cd "$project" && "$memory" import --from serena --apply --select 1 >/dev/null 2>&1); then
+    fail "a duplicate candidate must not be imported"
+  fi
+  if (cd "$project" && "$memory" import --from claude >/dev/null 2>&1); then
+    fail "import must not guess where a provider keeps its memory"
+  fi
+  (cd "$project" && "$memory" import --from serena --apply --select 2 > out-import)
+  assert_file_contains "$project/out-import" "memory: imported 1 note(s) as kind=imported"
+  assert_file_contains "$project/.oms/memory/shared.md" "kind: imported"
+  assert_file_contains "$project/.oms/memory/shared.md" "imported from: .serena/memories/conventions.md#L7 sha256:"
+  (cd "$project" && "$memory" import --from serena > out-import)
+  assert_file_contains "$project/out-import" "duplicate .serena/memories/conventions.md:7"
+  # The imported note waits for review, and turning it down is a retirement.
+  ident="$(cd "$project" && "$memory" review --kind imported --json |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["pending"][0]["id"])')"
+  (cd "$project" && "$memory" review --retire "$ident" --reason "not ours" >/dev/null)
+  (cd "$project" && "$memory" review > out-review)
+  assert_file_contains "$project/out-review" "memory review: nothing waiting"
+  if (cd "$project" && "$memory" search "manifest digest first" >/dev/null 2>&1); then
+    fail "a note turned down in review must leave default search"
+  fi
 }
 
 
