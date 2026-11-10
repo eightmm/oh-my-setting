@@ -181,6 +181,299 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   metadata-bound proof that binds each link target; a tree with nested Git
   data (including linked objects, refs or HEAD) or special files is kept.
 
+- Read Codex's other rate-limit window into the usage snapshot and strip. (PR #184)
+- Guards that cannot evaluate a command still allow it but print one stderr
+  diagnostic. (PR #183)
+- Panel work-health line gains a stalls segment and reaches the graph view,
+  control menu and --health. (PR #182)
+- Fail the role-contract lint when a role file has no routing entry or
+  documented alias. (PR #181)
+- Panel reader keeps its place across resizes, pages without skipping, and
+  Summary says what was cut. (PR #180)
+- Lint peer-review seat answers for untrackable findings, verdict
+  contradiction and missing summary. (PR #179)
+- Peer-review findings rules reports per-rule fixed/dismissed counts with a
+  demote? suggestion. (PR #177)
+- Redact secret-tier lines from output-digest captures before they are stored. (PR #176)
+- Record who admitted a local project skill, from where, with which digests,
+  and warn in skill-doctor when it later differs. (PR #175)
+- Oms panel --dispatch researcher --no-web launches a code-only read belt. (PR #174)
+- Artifact-index telemetry --by effort and an effort column under --by role. (PR #172)
+- Draw a per-provider usage strip on the board and add oms panel --usage. (PR #171)
+- Oms panel board shows one work-health line from records it already keeps. (PR #170)
+- Render panel key hints from tables and drop hints whole at narrow widths. (PR #169)
+- Panel long views show reading position, hang list wraps, and mark cut text. (PR #166)
+- Panel colour follows terminal capability and keeps dim text readable on
+  light themes. (PR #165)
+- Report role fold candidates and per-role model preference in panel
+  --metrics. (PR #163)
+- Opt-in council --until-agreement debates to a mechanical agreement or a hard
+  cap. (PR #162)
+- Record mechanical progress facts and a stall counter on goal-drive cycle
+  rows. (PR #161)
+- Advise on prompt-cache warmth when continuing or swapping a live session. (PR #160)
+- Artifact-index telemetry --waste lists unadmitted, repeated-failed, model-switch,
+  injected and stored-output waste from recorded data. (PR #159)
+- Report outcome history per role, provider, model and effort in panel
+  --metrics. (PR #157)
+- Bundled read-only roles launch with read access in `peer-delegate` when no
+  access flag is given; `OMS_DELEGATE_ROLE_WRITE=1` keeps the write default. (PR #156)
+- Delegate prints the same brief one effort step higher when its verify check
+  fails. (PR #155)
+- Fail-ledger suggests the advisor on an unresolved conflict or a critical-path
+  change. (PR #154)
+- Record out-of-scope finding dispositions; `--require-dispositions` or
+  `OMS_REVIEW_REQUIRE_DISPOSITIONS=1` makes an incomplete reviewer pass exit 2
+  when earlier findings remain open. (PR #153)
+- Agent-task --decision takes reason/rejected; session-handoff carries newest
+  decisions within a byte cap. (PR #152)
+- Peer-ask synthesis carries a mechanical agreement tally of verdict lines. (PR #151)
+- Oms panel --recommend maps task kind, risk and size to a tier and effort
+  with an escalation hint. (PR #150)
+- Peer-delegate --dry-run prints an advisory inline/researcher/worker verdict
+  from facts. (PR #149)
+- Report each role's tool belt and lint read-only roles against write tools. (PR #148)
+- Add read-only agent-role render for provider-native subagent definitions. (PR #147)
+- Fill the handoff digest's plan, decisions, changed files and last failure
+  from recorded state. (PR #146)
+- Peer-delegate prints one stderr quota hint from the target provider's last
+  reported window. (PR #145)
+- Analysis-worker returns a reproduction or failure class; critic reviews plan
+  text only. (PR #144)
+- Peer-review advise prints a review depth from risk paths, contract files and
+  size. (PR #143)
+- Lint delegation briefs and returned results mechanically in peer-delegate. (PR #142)
+- Invariants fail when injected prompt prefixes hold per-render values. (PR #141)
+- Artifact-index telemetry --by role adds cache-read share and cost per
+  admitted result. (PR #140)
+- Fail-ledger list --stalls reports advisory loops in recorded failures and
+  goal-drive endings. (PR #139)
+- Project-doctor --prompts audits shipped prompt text for size, injection
+  class and repeated or over-emphasised wording. (PR #138)
+- Add a machine-readable role contract with a lint tied to the role files and
+  panel routing. (PR #137)
+- Give the researcher role a pointer-only return contract instead of a new
+  scout role. (PR #136)
+- The command guard refuses repeated unbundled remote copies and points to one
+  bundled transfer.
+- Record which attempt produced each landed commit. (PR #135)
+- Add source-aware attachments and editable room input queues. (PR #134)
+- Add offline artifact comparisons and source-bound feedback. (PR #133)
+- Add hook-conformance scenarios for the registered guards. (PR #132)
+- Add immutable study execution and evaluation workflows. (PR #131)
+- Add reusable recipes and workspace workflows. (PR #130)
+- Agent-task status --json reports a normalized goal lifecycle and refuses
+  silent goal replacement. (PR #129)
+- Add scoped native session exploration and code forks.
+- Oms candidate keeps results from several tools attached to one candidate id. (PR #127)
+- Detect repeated Slurm submissions with a request key recorded before sbatch. (PR #126)
+- Ci-status suggest maps recorded CI, review and merge facts to suggested next
+  commands. (PR #125)
+- Add oms panel --sessions, a normalized machine-readable status list per
+  session. (PR #124)
+- Session-handoff prompt drafts an editable next-session prompt from recorded
+  task, plan, journal and finding state. (PR #123)
+- Peer-review --since-last reviews only commits added since the last completed
+  review, advisory only. (PR #122)
+- Add agent-plan ready --json and add --discovered-from with a discovered
+  listing. (PR #121)
+- Oms doctor --sandbox reports host sandbox facts and warns when a provider
+  sandbox setting cannot take effect. (PR #120)
+- Oms lease records advisory, expiring intent to edit paths. (PR #119)
+- Attention items have a per-room read state that quiets the bell and notifier;
+  refreshed rooms retain their read state before hold-state filtering. (PR #111)
+- Install-hooks --quick names the protection probe and --check-protection
+  gates on it. (PR #92)
+- Recall memory for delegated task paths. (PR #117)
+- Oms doctor --providers shows what OMS supports per provider and function
+  from one checked table. (PR #114)
+- Add a five-scenario harness evaluation suite driven by fake providers. (PR #113)
+- Data-manifest records where the data came from and why it was split that
+  way. (PR #106)
+- ML projects get a resume smoke that checks an interrupted run continues
+  exactly like an uninterrupted one. (PR #105)
+- An experiment run reserves its share of the contract run budget before it
+  starts, so concurrent starts cannot all pass. (PR #104)
+- Oms run checkpoints reports run directories that pile up checkpoint files.
+- ML templates make the training defaults concrete (fixed checkpoint names,
+  validation interval, 3 seeds, test split). (PR #101)
+- ML templates state the default checkpoint policy (latest + best, atomic
+  writes, selection on validation).
+- The graph view marks a call that just appeared or changed state with the
+  same short-lived mark as the tree.
+- Oms state notes provider-native memory locations that exist beside
+  .oms/memory. (PR #96)
+- `oms doctor --security --json` prints the findings as one structured document,
+  preserving info-level findings. (PR #94)
+- Artifact-index telemetry leaves resumed-session running totals out of the
+  per-route token sums. (PR #93)
+- Fail-ledger refuses credential-looking --next/--how notes and show withholds
+  stored ones.
+- Run capsule hints at --data when manifests exist and records the manifest's
+  split policy. (PR #90)
+- Run-ledger table prints per-seed-group aggregates paste-ready. (PR #89)
+- Run-ledger top counts runs that touched a final split. (PR #88)
+- Link capsule inputs to ledger replication. (PR #87)
+- Draft intents from pinned source snapshots. (PR #86)
+- Land notes prints a release-notes skeleton for a commit range from subjects
+  and land receipts. (PR #81)
+- Draft-pr comments and merged read a published PR's review comments and merge
+  outcome without writing to GitHub.
+- A passing autopilot review names the writer and reviewer model families, in
+  a line draft-pr accepts.
+- Tick status says how many of today's wakes a repo spent and on what.
+- Add doctor --mcp pins for MCP server launch shapes. (PR #79)
+- Add slurm-lint --preview to show a job script's GPU request against the
+  snapshot's limits. (PR #84)
+- Experiment sweep plan names each cell of a hyperparameter grid and prints
+  the runs for a job script. (PR #75)
+- An opt-in project skill lists the molecular data checks to run before
+  training or reporting.
+- An experiment contract can carry a run budget that summarize reports and a
+  further run needs a reason to pass.
+- Experiment-board finish records a verdict and a tagged claim lists the
+  finished experiments that share a tag.
+- Run-reconcile records what a job consumed and usage sums it per experiment.
+- A project note can be promoted to global memory or previewed for a checked-in
+  document, and recall reads registered clones and points at handoff
+  digests.
+- Journal show --decisions lists recorded decisions and journal resolve
+  records a blocker as resolved.
+- Add report-only team baseline check to project-doctor. (PR #78)
+- Add content-free install fingerprint and compare to oms status.
+- Oms external records version, hash, license, env lock and egress of external
+  tools.
+- Oms cite keeps per-paper notes and checks DOI and arXiv ids.
+- Job-digest --metrics summarizes step, best, slope and NaN from a metrics
+  file.
+- PROJECT.md can order its criteria in a Roadmap and plan-from-spec can plan
+  one milestone. (PR #76)
+- A plan proposal says how much of the repository each task's scope covers.
+- Agent-plan retro counts what the current plan took more than one try to do.
+- Checkpoint create --untracked keeps untracked files, and the command guard
+  saves the work before refusing to discard it. (PR #80)
+- The command guard records each refusal, and each command a switched-off
+  session would have been refused, without the command text.
+- A memory note can be scoped to paths and recall --target ranks the notes for
+  the paths being worked on.
+- OMS_LESSON_CAPTURE queues a correction-shaped sentence of a prompt for
+  memory review.
+- Agent-memory review lists notes that reached shared memory unread and import
+  brings in Markdown memory written elsewhere.
+- Point the oms-slurm skill at read-only sshare and sprio for live fair-share. (PR #83)
+- Make project-doctor report stored outputs and out-of-order runs in tracked
+  notebooks.
+- Mark invisible Unicode in quoted provider output with visible U+XXXX tokens. (PR #82)
+- Add oms graph project unreferenced to list symbols with no incoming edge. (PR #77)
+- Make planner and council prompts check proposals against contract
+  invariants.
+- Oms deps show prints the version of a third-party package a project pins and
+  has installed.
+- Graph project search --ranked ranks the symbol blocks a multi-word query is
+  about.
+- Runtime context --phase composes the pack from a rule table in config/ and
+  the manifest names that table.
+- The graph recall benchmark keeps a content-free snapshot and compares two of
+  them.
+- Skill-doctor totals the OMS text every session carries before a task.
+- Graph project symbol shows one symbol's definitions, extracted callers and
+  tests, inferred edges and unlinked text matches in separate zones.
+- The repository is a Claude Code plugin marketplace that offers the enabled
+  OMS skills. (PR #71)
+- Skill-doctor reports what the installed skill descriptions cost each CLI's
+  listing.
+- A skill bundle preview lists where to read before importing: scripts, run
+  instructions, hidden text, URLs and requested tools.
+- Skill-forge outdated asks each imported git bundle's remote whether its
+  recorded ref moved.
+- `oms doctor --extensions` lists configured MCP servers and plugins without
+  running them; it refuses `--mcp`. (PR #56)
+- Project-doctor --budget reports the instruction files each provider always
+  loads and what they cost.
+- Oms slurm-lint checks a job script's preemption handling against the
+  snapshot and prints a requeue-safe template. (PR #49)
+- Run-reconcile records where and when a job ran, each array task's ending and
+  requeues, and waits out a requeued job.
+- A plan proposal and plan status show which wave each task falls in. (PR #64)
+- Intent draft --kind asks for a bugfix or quick contract shape.
+- Discovery gains a spec-gap lens that reports acceptance criteria no source
+  implements.
+- The spec-interview skill carries an optional design-note form that Decisions
+  can reference.
+- The planning council is asked for contradictions, missing situations and
+  unverifiable criteria before it compares approaches.
+- Intent amend changes an adopted contract with a reason, a criteria delta and
+  the previous bytes kept. (PR #53)
+- Project-doctor --contract checks that what PROJECT.md points at exists and
+  lists each criterion's evidence.
+- A plan proposal task can name the criteria it covers and the review lists
+  the ones no task does.
+- Peer-review --gate --security-audit records a separate security verdict when
+  the change touches risk paths. (PR #66)
+- Reviews carry PROJECT.md's Review rules from the base commit, and findings
+  suggest-rules lists repeated dismissal reasons.
+- Peer-review --gate --confirm puts single-seat blocking findings to a second
+  provider for a label each.
+- Ci-status record names a red run's failing jobs and checks, and flaky lists
+  commits recorded red then green.
+- Gate reviews record where each reported finding points and what became of
+  it. (PR #47)
+- OMS_GUARD_FAIL_CLOSED registers the command guard with Claude Code's
+  onFailure block after proving the CLI validates it. (PR #63)
+- The Claude Code pre-tool command guard is on by default and refuses one-step
+  destructive commands with a safer spelling. `OMS_COMMAND_GUARD=0` opts out; the
+  hook schema advances to 11. (PR #40)
+- `oms panel --results --page N` pages past the latest 20 retained tasks, keeps
+  the first-page footer unchanged, and points to the Work Journal beyond retained
+  rows. (PR #73)
+- `oms panel --results --export` writes the reader's text to a new local file. (PR #69)
+- Health lists the share of the main's last request input read from the prompt
+  cache.
+- `OMS_QUOTA_WARN_PCT` warns once when a reported quota window passes the
+  person's own line.
+- `oms run claims` and `oms run figure` record which run a reported number or
+  figure came from. (PR #62)
+- `install.sh --plan` and `oms update --plan` list what a run would change and
+  write nothing. (PR #61)
+- `oms output-digest` runs a command and prints a bounded digest that marks what
+  it left out and keeps its newest 50 captures itself; the `oms gc` orphan-file
+  sweep leaves that store alone. (PR #60, PR #95)
+- Render readable context inspection reports. (PR #46)
+- Hooks record how many bytes they injected, context-inspect sums them and one
+  transcript's tool results, and the resume block says so after a
+  compaction. (PR #58)
+- Add work evidence and return briefs. (PR #55)
+- `oms journal show --grep` searches recorded work and says where each hit
+  opens; it refuses `--since` with `--grep`. (PR #57)
+- Agent-memory redact removes recorded text under a tombstone and sources
+  lists what each provider keeps. (PR #54)
+- Project impact gives one orientation brief for a Git range: tests,
+  dependents, co-change partners left out and CODEOWNERS. (PR #52)
+- Project map --signatures prints the files ranked for a task as extracted
+  signatures inside a byte budget.
+- Ci-status triage explains a red run with its failing jobs, a scanned log
+  tail and the base comparison. (PR #51)
+- Doctor --security reports the permission and sandbox posture of the provider
+  CLIs.
+- A delegated run warns by name when a provider setting, shell start file or
+  git config changed under it.
+- OMS_WORKER_SECRET_GUARD denies a Claude worker's Read tool the secret paths
+  and starts provider children without the owner's credential variables.
+- Data-manifest records the split policy and leakage checks that policy's
+  invariant. (PR #50)
+- Run-ledger top ranks under a metric contract and by seed group. (PR #44)
+- Run capsule --data links a run to its data manifest's fingerprint. (PR #39)
+- Run capsules store a JSON or YAML config flattened and run diff names the
+  keys that differ.
+- Artifact-index telemetry groups reported usage by day, model, provider or
+  task within a date range. (PR #42)
+- The board marks a call that just appeared or changed state for about three
+  seconds. (PR #43)
+- `OMS_PANEL_ATTENTION_OSC` writes a terminal notification when attention newly
+  waits. (PR #41)
+- The usage line and health screen draw a five-cell bar beside each reported
+  quota percentage. (PR #38)
+
 ### Changed
 
 - A needs-judgment notice names its type: a second blocking review is a design
@@ -349,6 +642,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   why, before its error line.
 - `patch-admit` keeps the verify floor when a verify selects only tests the
   patch itself adds, including mixed pytest and node targets.
+
+- Add an advisory-verbs table to the harness runtime-core reference. (PR #173)
+- Map remaining OMS integration work. (PR #110)
+- README opens with a generated hero image, a quick start and folded installer
+  details.
+- Point skills at the newer OMS verbs so agents reach for them.
+- Add Python 3.11 and scrubber-fixture rules to repo AGENTS.md. (PR #100)
+- Allow attribution trailers; name digest and recall verbs in global rules.
+- Failing-stage output goes through `oms output-digest` instead of a 64 KiB tail.
+  (PR #158)
 
 ### Changed
 
@@ -943,6 +1246,24 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - `oms patch-land --patch` resolves a repository-relative path against the state repository when it does not exist from the
   current directory, so the panel's `Next step: oms patch-land --repo R --patch .oms/...` hint works from any directory.
 - The next action for a timed-out panel worker no longer mentions a revision-round cap and owner override that do not exist.
+
+- Keep panel rows readable at 40 columns with CJK, emoji and joiner text. (PR #168)
+- Draw board rows so waits on the owner lead, counts match, and empty boards
+  hint. (PR #167)
+- Repaint only differing rows in one write when the panel frame grows or
+  shrinks. (PR #164)
+- The handoff digest lists stamped decisions once, in the capped decision log.
+- Preserve independent session ownership and repository scope. (PR #128)
+- Pin research claims to capsule snapshots. (PR #116)
+- Guard main swap input ownership. (PR #115)
+- The idle-main wake types only into the pane owner it verified and records a
+  refused send as a skip. (PR #112)
+- Bind evidence to full criterion statements. (PR #109)
+- Bind findings to verified review scope. (PR #107)
+- Residue cleanup removes a crashed write run's disposable tmp after proving
+  its ignored files.
+- `oms recall --all-repos` reads query words that follow the flag under Python 3.11. (PR #68)
+- Compare context selection policy digests. (PR #85)
 
 ### Removed
 
