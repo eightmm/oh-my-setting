@@ -28347,6 +28347,49 @@ test_skill_router_skips_system_prompts() {
   out="$(printf '{"prompt":"커밋해줘","session_id":"k"}' |
     TMPDIR="$d" OMS_SKILL_ROUTER_OFF=1 bash "$ROOT/scripts/skill-router.sh")"
   [ -z "$out" ] || fail "OMS_SKILL_ROUTER_OFF=1 must silence the router"
+
+  # Correction capture is opt-in, silent, and only for an adopted repository.
+  local pending="$project/.oms/memory/pending.jsonl" correction
+  correction='{"prompt":"No, use ruff instead of flake8. Keep the rest.","session_id":"c1","cwd":"%s"}'
+  # shellcheck disable=SC2059  # the fixture is the format
+  printf "$correction" "$project" | TMPDIR="$d" OMS_LESSON_CAPTURE=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_not_exists "$project/.oms"
+  mkdir -p "$project/.oms"
+  # shellcheck disable=SC2059
+  printf "$correction" "$project" | TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_not_exists "$pending"
+  # shellcheck disable=SC2059
+  printf "$correction" "$project" | TMPDIR="$d" OMS_LESSON_CAPTURE=1 OMS_HARNESS_CHILD=1 \
+    bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_not_exists "$pending"
+  for p in 'Please summarize the README for me.' '<task-notification>no, use x instead</task-notification>'; do
+    printf '{"prompt":"%s","session_id":"c2","cwd":"%s"}' "$p" "$project" |
+      TMPDIR="$d" OMS_LESSON_CAPTURE=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  done
+  assert_not_exists "$pending"
+  printf '{"prompt":"No, the key is api_key = sk-abcdefghijklmnop%s","session_id":"c3","cwd":"%s"}' \
+    'qrstuvwxyz0123456789' "$project" |
+    TMPDIR="$d" OMS_LESSON_CAPTURE=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
+  assert_not_exists "$pending"
+  for _ in 1 2; do
+    # shellcheck disable=SC2059
+    out="$(printf "$correction" "$project" | TMPDIR="$d" OMS_LESSON_CAPTURE=1 OMS_SKILL_ROUTER_OFF=1 \
+      bash "$ROOT/scripts/skill-router.sh")"
+    [ -z "$out" ] || fail "correction capture must print nothing"
+  done
+  [ "$(wc -l < "$pending" | tr -d ' ')" = 1 ] || fail "one correction is queued once: $(cat "$pending")"
+  assert_file_contains "$pending" "No, use ruff instead of flake8."
+  ! grep -q "Keep the rest" "$pending" || fail "capture keeps one sentence, not the prompt"
+  assert_not_exists "$project/.oms/memory/shared.md"
+  # Only review promotes it; rejecting keeps it out for good.
+  (cd "$project" && "$ROOT/scripts/agent-memory.sh" review > "$d/review")
+  assert_file_contains "$d/review" "correction"
+  correction="$(sed -n 's/.*"id": "\(pend-[0-9a-f]*\)".*/\1/p' "$pending")"
+  (cd "$project" && "$ROOT/scripts/agent-memory.sh" review --accept "$correction" >/dev/null)
+  assert_file_contains "$project/.oms/memory/shared.md" "No, use ruff instead of flake8."
+  assert_file_contains "$project/.oms/memory/shared.md" "kind: lesson"
+  (cd "$project" && "$ROOT/scripts/agent-memory.sh" review > "$d/review")
+  assert_file_contains "$d/review" "memory review: nothing waiting"
 }
 
 ctx_cache_digest() {
