@@ -24,6 +24,7 @@ DIFF_BUDGET=""
 VERIFY_LEVEL=""
 SKIP_VERIFY_REASON=""
 CLOSE_REASON=""
+REPLACE_REASON=""
 LAST_FAILURE=""
 VERIFICATION_NOTE=""
 HYPOTHESIS=""
@@ -61,6 +62,11 @@ Options:
   --verify-level L  init/update: set Loop State verification_level.
   --reason TEXT     close: close a task whose verification is missing or stale,
                     recording why. Required for that case.
+  --replace-goal REASON
+                    init/rotate/update: parent-only consent to replace the goal
+                    of a task that is still being pursued. Without it a
+                    different goal is refused; with it the Decisions section of
+                    the new packet records the replaced task id and REASON.
   --skip-verify-run REASON
                     verify: do not run the stored command and record why.
                     The task remains active and is not marked verified.
@@ -84,7 +90,9 @@ Commands:
   init              Create the task file if missing and apply provided fields.
   show              Print task file if it exists. Default.
   context           Print provider context view.
-  status            Print task lifecycle metadata (--json for machines).
+  status            Print task lifecycle metadata (--json for machines; the
+                    JSON carries `lifecycle`: pursuing|paused|achieved|unmet|
+                    budget-limited|unknown plus its evidence, read-only).
   update            Apply section updates.
   append            Append --text/--stdin to Current State.
   verify            Mark the current task verified; --verification may record
@@ -159,6 +167,11 @@ while [ "$#" -gt 0 ]; do
     --reason)
       [ "$#" -ge 2 ] || { echo "error: --reason requires text" >&2; exit 2; }
       CLOSE_REASON="$2"
+      shift 2
+      ;;
+    --replace-goal)
+      [ "$#" -ge 2 ] || { echo "error: --replace-goal requires reason" >&2; exit 2; }
+      REPLACE_REASON="$2"
       shift 2
       ;;
     --skip-verify-run)
@@ -279,6 +292,63 @@ if [ -n "$SOURCE_SESSION" ] && ! printf '%s\n' "$SOURCE_SESSION" | grep -E '^[0-
   exit 2
 fi
 export OMS_AGENT_TASK_SOURCE_SESSION="$SOURCE_SESSION"
+
+# A goal is replaced only on purpose. A harness child can neither create or
+# replace the goal nor mark it verified; a parent replaces a goal that is
+# still being pursued only with --replace-goal REASON, which leaves the
+# replaced task id and the reason in the new packet. A verified, closed or
+# TTL-stale packet is not being pursued, so it is replaced as before.
+REPLACED_NOTE=""
+goal_guard() {
+  local child=0 existing status id new_goal
+  if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] || [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" != 0 ]; then
+    child=1
+  fi
+  if [ -n "$REPLACE_REASON" ]; then
+    case "$ACTION" in
+      init|rotate|update) ;;
+      *) echo "error: --replace-goal applies to init, rotate and update only" >&2; exit 2 ;;
+    esac
+    [ "$child" = 0 ] || { echo "error: --replace-goal is parent-only; a harness child cannot replace a goal" >&2; exit 2; }
+    case "$REPLACE_REASON" in
+      *$'\n'*|*$'\r'*) echo "error: --replace-goal requires a single-line reason" >&2; exit 2 ;;
+    esac
+  fi
+  if [ "$child" = 1 ]; then
+    case "$ACTION" in
+      init|rotate|verify) echo "error: $ACTION is parent-only; a harness child cannot create, replace or verify the goal" >&2; exit 2 ;;
+      update) [ -z "$GOAL" ] || { echo "error: update --goal is parent-only; a harness child cannot replace the goal" >&2; exit 2; } ;;
+    esac
+  fi
+  case "$ACTION" in init|rotate|update) ;; *) return 0 ;; esac
+  [ -s "$TASK_FILE" ] || return 0
+  existing="$(awk '/^## Goal$/{f=1;next} /^## /{f=0} f&&NF' "$TASK_FILE")"
+  [ -n "$existing" ] || return 0
+  if [ "$ACTION" != rotate ]; then
+    [ -n "$GOAL" ] || return 0
+    new_goal="$(printf '%s\n' "$GOAL" | awk 'NF')"
+    [ "$new_goal" != "$existing" ] || return 0
+  fi
+  id="$(agent_task_metadata_value "$TASK_FILE" task_id 2>/dev/null || echo legacy)"
+  status="$(agent_task_metadata_value "$TASK_FILE" status 2>/dev/null || echo active)"
+  if [ "$status" = active ] && ! agent_task_is_stale "$TASK_FILE" && [ -z "$REPLACE_REASON" ]; then
+    echo "error: refusing to replace the goal of active task $id: $(printf '%s' "$existing" | head -n 1 | cut -c1-80)" >&2
+    echo "finish it ('agent-task verify', then 'close'), or a parent can replace it with --replace-goal REASON" >&2
+    exit 2
+  fi
+  [ -z "$REPLACE_REASON" ] || {
+    REPLACED_NOTE="goal replaced ($ACTION): previous task_id=$id; reason: $REPLACE_REASON"
+    # An in-place update leaves no archive holding the old text.
+    [ "$ACTION" != update ] ||
+      REPLACED_NOTE="$REPLACED_NOTE (was: $(printf '%s' "$existing" | head -n 1 | cut -c1-120))"
+  }
+}
+goal_guard
+
+record_goal_replacement() {
+  [ -n "$REPLACED_NOTE" ] || return 0
+  append_if_set "## Decisions" "$REPLACED_NOTE"
+}
 
 # Lazily created: read-only actions (path, show, context) must not depend
 # on a writable TMPDIR. Library temp files land here too once created.
@@ -415,6 +485,7 @@ case "$ACTION" in
   init)
     ensure_tmpdir
     command_packet_batch
+    record_goal_replacement || { echo "error: goal was replaced but the replacement note was not recorded" >&2; exit 3; }
     journal_explicit_task_update
     echo "task: initialized $TASK_FILE"
     ;;
@@ -449,6 +520,11 @@ case "$ACTION" in
     fi
     task_verification="$(agent_task_verification_state "$TASK_FILE" "$REPO")"
     if [ "$AS_JSON" -eq 1 ]; then
+      # Read-only: plan evidence is looked up only beside a standard packet.
+      task_plan_dir="$(dirname "$(dirname "$TASK_FILE")")/plan"
+      OMS_AT_LIFECYCLE="$(python3 -X utf8 -I -B "$ROOT/scripts/lib/goal_lifecycle.py" \
+        "$TASK_FILE" "$task_plan_dir/tasks.json" "$task_plan_dir/progress.jsonl" \
+        "$task_verification" 2>/dev/null || echo '{"state": "unknown", "evidence": {"rule": "lifecycle-unavailable"}}')" \
       OMS_AT_ID="$task_id" OMS_AT_STATUS="$task_status" OMS_AT_SOURCE="$task_source" \
       OMS_AT_ACTIVITY="$task_activity" OMS_AT_CLOSED="$task_closed" \
       OMS_AT_STALE="$task_stale" OMS_AT_VERIFICATION="$task_verification" python3 -X utf8 -I -B -c '
@@ -462,6 +538,7 @@ print(json.dumps({
     "closed_at": os.environ["OMS_AT_CLOSED"] or None,
     "stale": os.environ["OMS_AT_STALE"] == "yes",
     "verification": os.environ["OMS_AT_VERIFICATION"],
+    "lifecycle": json.loads(os.environ["OMS_AT_LIFECYCLE"]),
 }, ensure_ascii=False))'
       exit 0
     fi
@@ -474,6 +551,7 @@ print(json.dumps({
   update)
     ensure_tmpdir
     command_packet_batch
+    record_goal_replacement || { echo "error: goal was replaced but the replacement note was not recorded" >&2; exit 3; }
     journal_explicit_task_update
     echo "task: updated $TASK_FILE"
     ;;
@@ -609,6 +687,7 @@ print(json.dumps({
   rotate)
     ensure_tmpdir
     command_packet_batch
+    record_goal_replacement || { echo "error: goal was replaced but the replacement note was not recorded" >&2; exit 3; }
     journal_explicit_task_update
     echo "task: initialized $TASK_FILE"
     ;;

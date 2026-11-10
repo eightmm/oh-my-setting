@@ -32915,7 +32915,7 @@ PY
   (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --next "changed next action" >/dev/null)
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
   contains "$out" 'same task, recheck changed state' || fail "changed packet was treated as current"
-  (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --goal "$(python3 -c 'print("긴목표" * 2000)')" >/dev/null)
+  (cd "$repo" && "$ROOT/scripts/agent-task.sh" update --goal "$(python3 -c 'print("긴목표" * 2000)')" --replace-goal "bounded-display fixture" >/dev/null)
   out="$(printf '{"cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")"
   [ "$(printf '%s' "$out" | wc -c)" -le 4096 ] || fail "resume byte budget exceeded"
   contains "$out" 'resume truncated' || fail "resume truncation was hidden"
@@ -35219,6 +35219,54 @@ import json, sys
 d = json.load(sys.stdin)
 assert d["verification"] == "stale", d
 ' || fail "status --json should carry verification freshness"
+
+  # Normalized goal lifecycle: `achieved` only from a fresh passing verify.
+  # An agent's own claim, a stale pass and a hand-edited status are `pursuing`.
+  lifecycle_of() {
+    ( cd "$project" && "$ROOT/scripts/agent-task.sh" status --json ) | python3 -c '
+import json, sys
+l = json.load(sys.stdin)["lifecycle"]
+print(l["state"], l["evidence"]["rule"], l["evidence"].get("budget_limit") or "-")'
+  }
+  [ "$(lifecycle_of)" = "pursuing not-verified-fresh -" ] ||
+    fail "a stale pass must be pursuing: $(lifecycle_of)"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" update \
+    --verification "everything passes, the goal is achieved" >/dev/null )
+  [ "$(lifecycle_of)" = "pursuing not-verified-fresh -" ] ||
+    fail "the agent's own claim must stay pursuing: $(lifecycle_of)"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  [ "$(lifecycle_of)" = "achieved verified-fresh -" ] ||
+    fail "a fresh passing verify must be achieved: $(lifecycle_of)"
+  printf 'moved\n' >> "$project/file.txt"
+  [ "$(lifecycle_of)" = "pursuing not-verified-fresh -" ] ||
+    fail "a verify the tree moved past must not stay achieved: $(lifecycle_of)"
+
+  # goal-drive parks map onto the lifecycle: budget reasons are budget-limited,
+  # judged-failure reasons are unmet, any other stop for the parent is paused,
+  # and a later passing acceptance row resolves the park.
+  mkdir -p "$project/.oms/plan"
+  printf '{"goal":"g","tasks":{"t1":{"id":"t1"}}}\n' > "$project/.oms/plan/tasks.json"
+  park_with() {
+    printf '%s\n' \
+      '{"kind":"goal-cycle","task_id":"t1","run_id":"r1"}' \
+      "{\"kind\":\"terminal\",\"run_id\":\"r1\",\"cycle\":3,\"status\":\"park\",\"reason\":\"$1\"}" \
+      > "$project/.oms/plan/progress.jsonl"
+  }
+  park_with cycles-exhausted
+  [ "$(lifecycle_of)" = "budget-limited park:cycles-exhausted cycles-exhausted" ] ||
+    fail "cycles-exhausted must be budget-limited: $(lifecycle_of)"
+  park_with stuck
+  [ "$(lifecycle_of)" = "unmet park:stuck -" ] || fail "stuck must be unmet: $(lifecycle_of)"
+  park_with head-moved
+  [ "$(lifecycle_of)" = "paused park:head-moved -" ] || fail "a parent-needed park must be paused: $(lifecycle_of)"
+  printf '%s\n' '{"kind":"acceptance","status":"pass","run_id":"r1"}' >> "$project/.oms/plan/progress.jsonl"
+  [ "$(lifecycle_of)" = "pursuing not-verified-fresh -" ] ||
+    fail "a later passing acceptance must resolve the park: $(lifecycle_of)"
+  # A park never makes a verified task less achieved.
+  park_with cycles-exhausted
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" verify >/dev/null )
+  [ "$(lifecycle_of)" = "achieved verified-fresh -" ] ||
+    fail "a fresh verify outranks a park: $(lifecycle_of)"
 }
 
 # smoke-weight: 10
@@ -35257,6 +35305,45 @@ test_task_close_refuses_a_false_green() {
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "exploration only" >/dev/null )
   ( cd "$project" && "$ROOT/scripts/agent-task.sh" close >/dev/null ) ||
     fail "a task without a verify contract should still close"
+
+  # A goal still being pursued is not silently replaced, by init, rotate or
+  # update; a parent may pass --replace-goal REASON, and the new packet then
+  # names the replaced task id and the reason. A harness child never can.
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "keep me" --verify "true" >/dev/null )
+  first_id="$(awk '$1 == "-" && $2 == "task_id:" { print $3; exit }' "$project/.oms/task/current.md")"
+  for attempt in "init --goal other" "rotate --goal other" "rotate" "update --goal other"; do
+    # shellcheck disable=SC2086
+    if out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" $attempt 2>&1 )"; then
+      fail "'$attempt' replaced an active goal"
+    fi
+    contains "$out" 'refusing to replace the goal of active task' ||
+      fail "'$attempt' refusal lacks the message: $out"
+  done
+  grep -Fqx 'keep me' "$project/.oms/task/current.md" || fail "a refused replacement changed the goal"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "keep me" >/dev/null ) ||
+    fail "re-stating the same goal is not a replacement"
+  first_id="$(awk '$1 == "-" && $2 == "task_id:" { print $3; exit }' "$project/.oms/task/current.md")"
+  for child_env in "OMS_HARNESS_CHILD=1" "OMS_HARNESS_DELEGATE_DEPTH=1"; do
+    for attempt in "init --goal other --replace-goal why" "rotate --replace-goal why" \
+      "update --goal other" "verify" "init"; do
+      # shellcheck disable=SC2086
+      if ( cd "$project" && env "$child_env" "$ROOT/scripts/agent-task.sh" $attempt >/dev/null 2>&1 ); then
+        fail "a harness child ($child_env) ran '$attempt'"
+      fi
+    done
+  done
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" rotate --goal "replacement" \
+    --replace-goal "owner changed the plan" >/dev/null ) ||
+    fail "--replace-goal should let a parent replace the goal"
+  second_id="$(awk '$1 == "-" && $2 == "task_id:" { print $3; exit }' "$project/.oms/task/current.md")"
+  [ "$second_id" != "$first_id" ] || fail "rotate kept the task id"
+  assert_file_contains "$project/.oms/task/current.md" "previous task_id=$first_id; reason: owner changed the plan"
+  ls "$project/.oms/task/archive/$first_id"-*.md >/dev/null || fail "the replaced packet was not archived"
+  # A verified goal is not being pursued, so a new one needs no override.
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" update --verify true >/dev/null &&
+    "$ROOT/scripts/agent-task.sh" verify >/dev/null &&
+    "$ROOT/scripts/agent-task.sh" init --goal "after achieved" >/dev/null ) ||
+    fail "a verified goal should be replaceable without an override"
 }
 
 test_repo_state_flags_ci_recorded_for_another_commit() {
