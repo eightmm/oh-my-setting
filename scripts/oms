@@ -213,6 +213,7 @@ deps
 doctor
 draft-pr
 experiment-board
+external
 fail-ledger
 gc
 goal-drive
