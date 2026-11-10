@@ -912,6 +912,8 @@ def read_panel(repo, provider, view, attention_only):
     state["dead_mains"] = panel_release.dead_mains(repo, _tick=tick)
     import panel_health
     state["capacity_alerts"] = panel_health.alerts(state)
+    import panel_attention_read
+    state["attention_read"] = panel_attention_read.load(repo, selected_room)
     return state, status, provider, main_attempt, density, filtered, selected_room
 
 

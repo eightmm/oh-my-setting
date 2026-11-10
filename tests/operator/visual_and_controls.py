@@ -367,9 +367,10 @@ assert panel_watch.ring_bell(piped_bell) is False and piped_bell.text == ""
 assert panel_watch.ring_bell(broken_bell) is False and panel_watch.ring_bell(object()) is False
 # The watcher rings only with OMS_PANEL_ATTENTION_BELL=1 and, in a managed panel, only from the main window's
 # board; the clock is artificial, so two reads cost no real refresh wait.
-def bell_watch(bell, managed=False, main_watch="", command=None, notified=None, osc=None, noticed=None):
+def bell_watch(bell, managed=False, main_watch="", command=None, notified=None, osc=None, noticed=None, read=None):
     bell_clock = itertools.count(0, 10)
-    reads = [(report, 0, "codex", None, "graph", False, "endings") for report in (guard_read, ending_fixture, ending_fixture)]
+    reads = [(dict(report, attention_read=read) if read else report, 0, "codex", None, "graph", False, "endings")
+             for report in (guard_read, ending_fixture, ending_fixture)]
     environment = {"OMS_PANEL_ATTENTION_BELL": bell, "OMS_PANEL_ATTENTION_CMD": command, "OMS_PANEL_ATTENTION_OSC": osc,
                    "TMUX": "", "TMUX_PANE": "%1"}
     with patch.dict(os.environ, {key: value for key, value in environment.items() if value is not None}), \
@@ -430,6 +431,67 @@ for osc_ignored in ("", "1", "8", "osc9", "9 "):
 assert bell_watch(None, noticed=notices) == 0 and bell_watch("1", noticed=notices) == 1 and notices == []
 assert bell_watch(None, managed=True, osc="9", noticed=notices) == 0 and notices == []
 assert bell_watch("1", managed=True, main_watch="1", command="notify", osc="9", noticed=notices) == 1 and len(notices) == 1
+# Read state: a row the person read stays quiet across a restart, a class change makes it unread and ringing again,
+# the file holds hashed row ids only, and nothing but the counts line and a dim style shows it.
+import panel_attention_read
+import panel_view
+from room_view import attention_body, attention_read_event
+read_repo, read_room = temporary / "read-repo", "endings"
+read_repo.mkdir()
+guard_item = next(item for item in ending_queue if item["cls"] == "guard_stop")
+guard_key = panel_attention_read.row_key(guard_item["row_id"])
+assert all(item["unread"] for item in ending_queue) and panel_attention_read.load(read_repo, read_room) == {}
+saved = panel_attention_read.mark(read_repo, read_room, ending_fixture, [(guard_item["row_id"], "guard_stop")], now=1000)
+assert saved == {guard_key: "guard_stop"} and panel_attention_read.load(read_repo, read_room) == saved
+assert panel_attention_read.load(read_repo, "other-room") == {}
+read_text = (read_repo / ".oms" / "artifacts" / "panel-attention-read.json").read_text()
+assert set(json.loads(read_text)) == {"schema", "rooms"} and json.loads(read_text)["rooms"] == {read_room: {guard_key: ["guard_stop", 1000]}}, read_text
+for item in ending_queue:
+    assert not any(str(value) in read_text for value in (item.get("who"), item.get("what"), item.get("task")) if value), (item, read_text)
+    assert not any(str(part) in read_text for part in item["row_id"][1:] if isinstance(part, str)), (item["row_id"], read_text)
+read_fixture = dict(ending_fixture, attention_read=saved)
+assert [item["unread"] for item in attention_items(read_fixture)].count(False) == 1
+assert [item for item in attention_items(read_fixture) if not item["unread"]][0]["row_id"] == guard_item["row_id"]
+assert panel_view.attention_header(attention_items(ending_fixture), 200, True).startswith("Attention 7 ")
+assert panel_view.attention_header(attention_items(read_fixture), 200, True).startswith("Attention 6 new / 7 waiting")
+assert panel_view.attention_header(attention_items(read_fixture), 12, False) == "Attn 6/7"
+assert panel_view.attention_summary(read_fixture) == panel_view.attention_summary(ending_fixture), "the tmux counts stay totals"
+# Restart: the first read only seeds; the read row coming back later rings nothing, an unread one does.
+ring, seeded = panel_watch.attention_bell(None, read_fixture, "endings")
+assert ring is False and seeded == known
+assert panel_watch.attention_bell(seeded, dict(guard_read, attention_read=saved), "endings") == (False, seeded)
+assert panel_watch.attention_bell(seeded, read_fixture, "endings") == (False, seeded)
+assert bell_watch("1") == 1 and bell_watch("1", read=saved) == 0
+notifications = []
+assert bell_watch(None, command="notify", notified=notifications, read=saved) == 0 and notifications == []
+# A class change makes the row unread again, so it rings.
+changed = dict(ending_fixture, attention_read={guard_key: "failed"})
+assert next(item for item in attention_items(changed) if item["row_id"] == guard_item["row_id"])["unread"] is True
+assert panel_watch.attention_bell(seeded, changed, "endings")[0] is True and bell_watch("1", read={guard_key: "failed"}) == 1
+# Opening a row, or r, requests the mark; l selects the newest unread row; the watcher records it.
+read_nav = {"tab": "needs"}
+attention_body(attention_items(read_fixture), 120, 30, read_nav, True)
+assert read_nav["needs_classes"] == {item["row_id"]: item["cls"] for item in ending_queue}
+assert read_nav["needs_latest"] != guard_item["row_id"] and read_nav["needs_latest"] in read_nav["needs_keys"], read_nav
+read_nav.update(surface="graph", visible_tabs=["needs"], box={"y1": 1, "y2": 9})
+assert panel.tab_event(("l",), read_nav) and read_nav["needs_pick"] == read_nav["needs_latest"]
+assert read_nav["selected"] == read_nav["needs_ids"][read_nav["needs_keys"].index(read_nav["needs_latest"])]
+assert panel.tab_event(("enter",), read_nav) and read_nav["read_request"] == {read_nav["needs_latest"]: read_nav["needs_classes"][read_nav["needs_latest"]]}, read_nav
+assert panel.tab_event(("r",), read_nav) and read_nav["read_request"] == read_nav["needs_classes"]
+everything = panel_attention_read.mark(read_repo, read_room, ending_fixture, list(read_nav["read_request"].items()), now=2000)
+assert len(everything) == len(ending_queue) and all(not item["unread"] for item in attention_items(dict(ending_fixture, attention_read=everything)))
+assert panel_view.attention_header(attention_items(dict(ending_fixture, attention_read=everything)), 200, True).startswith("Attention 0 new / 7 waiting")
+assert attention_read_event(("l",), dict(read_nav, needs_latest=None)) and len(attention_items(dict(ending_fixture, attention_read=everything))) == 7, "reading hides nothing"
+with patch.object(panel_attention_read, "MAX_IDS", 2):
+    assert len(panel_attention_read.mark(read_repo, read_room, ending_fixture, list(read_nav["read_request"].items()), now=3000)) == 2
+# Rows the report no longer holds are dropped, and an unfinished read or a changed class marks nothing.
+pruned = panel_attention_read.mark(read_repo, read_room, guard_read, [], now=4000)
+assert set(pruned) <= {panel_attention_read.row_key(item["row_id"]) for item in attention_items(guard_read)} and guard_key not in pruned, pruned
+assert panel_attention_read.mark(read_repo, read_room, dict(ending_fixture, collection={"ok": False}), [(guard_item["row_id"], "guard_stop")]) is None
+assert panel_attention_read.mark(read_repo, read_room, ending_fixture, [(guard_item["row_id"], "failed")]) == pruned
+# A damaged file reads as nothing read, never as an error.
+(read_repo / ".oms" / "artifacts" / "panel-attention-read.json").write_text("{not json")
+assert panel_attention_read.load(read_repo, read_room) == {}
 # The text is the repository name, counts and class words: nothing an item says, and nothing that ends the sequence.
 assert panel_watch.attention_notice(sent) == (
     "oms endings-repo", "1 new (1 guard stop), %d waiting" % len(ending_queue)), panel_watch.attention_notice(sent)
