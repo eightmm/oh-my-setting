@@ -30,6 +30,7 @@ import time
 SCHEMA = 1
 MAX_FINDINGS_PER_SEAT = 50
 MAX_TEXT = 500
+MAX_RULE = 80
 QUOTE_WINDOW = 3
 SEVERITIES = ("blocking", "advisory")
 ANCHORS = ("in-diff", "context", "outside-scope", "anchor-not-found", "unclassified")
@@ -116,7 +117,12 @@ def valid_finding(row):
     if quote is not None and not isinstance(quote, str):
         return None
     quote = clean(quote) if quote else ""
-    return {"file": path, "line": line, "severity": severity, "summary": clean(summary), "quote": quote}
+    item = {"file": path, "line": line, "severity": severity, "summary": clean(summary), "quote": quote}
+    # Optional label of the repository review rule the seat applied; a bad value is dropped, not the finding.
+    rule = clean(row.get("rule"), MAX_RULE) if isinstance(row.get("rule"), str) else ""
+    if rule:
+        item["rule"] = rule
+    return item
 
 
 def diff_lines(text):

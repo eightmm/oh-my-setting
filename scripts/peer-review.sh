@@ -61,6 +61,7 @@ Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh findings dismiss ID --reason TEXT
        peer-review.sh findings reopen ID --reason TEXT
        peer-review.sh findings suggest-rules
+       peer-review.sh findings rules [--json] [--min-samples N]
        peer-review.sh advise [--json] [--repo PATH] [--base REF]
 
 Review an existing diff with an independent provider council. The default
@@ -209,7 +210,7 @@ The final line must contain only that exact GATE text, with no punctuation or fo
 Use GATE: pass only if this change is ready to proceed with no blocking findings.
 Use GATE: fail if any blocking bug, regression, unclear contract, or unsafe operation remains.
 Do not put any text after the final GATE line.
-If you report findings, also list them before the CONFIDENCE line in one fenced block opened by a line reading ```findings, one JSON object per line: {"file": "repo-relative path", "line": 12, "severity": "blocking" or "advisory", "summary": "one sentence", "quote": "exact text of the cited line"}. Omit the block when there is nothing to report.
+If you report findings, also list them before the CONFIDENCE line in one fenced block opened by a line reading ```findings, one JSON object per line: {"file": "repo-relative path", "line": 12, "severity": "blocking" or "advisory", "summary": "one sentence", "quote": "exact text of the cited line", "rule": "optional: short label of the repository review rule you applied"}. Omit the block when there is nothing to report.
 EOF
 }
 
@@ -469,6 +470,10 @@ if [ "${1:-}" = "findings" ]; then
       esac
     done
     exec python3 -I "$(ma_scripts_dir)/lib/review_rules.py" suggest --artifact-dir "$rules_dir"
+  fi
+  if [ "${1:-}" = "rules" ]; then
+    shift
+    exec python3 -I "$(ma_scripts_dir)/lib/review_rules.py" signals "$@"
   fi
   exec python3 -I "$(ma_scripts_dir)/lib/review_findings.py" "$@"
 fi

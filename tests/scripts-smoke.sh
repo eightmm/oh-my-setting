@@ -4964,7 +4964,7 @@ cat >/dev/null
 printf 'Findings:\nsee the block\n```findings\n'
 printf '%s\n' '{"file": "file.txt", "line": 2, "severity": "blocking", "summary": "The appended line is wrong", "quote": "reviewed change"}'
 printf '%s\n' '{"file": "file.txt", "line": 1, "summary": "Base line looks odd"}'
-printf '%s\n' '{"file": "steady.txt", "line": 2, "severity": "advisory", "summary": "Unrelated nit"}'
+printf '%s\n' '{"file": "steady.txt", "line": 2, "severity": "advisory", "summary": "Unrelated nit", "rule": "style-nits"}'
 printf '%s\n' '{"file": "file.txt", "line": 2, "summary": "Cites text that is not there", "quote": "no such text"}'
 printf '%s\n' '{"file": "missing.txt", "line": 1, "summary": "Cites a file that does not exist"}'
 printf '%s\n' '{"file": "../outside.txt", "line": 1, "summary": "escapes the repository"}'
@@ -4991,6 +4991,7 @@ rows = [json.loads(line) for path in glob.glob(sys.argv[1] + "/_findings-*.jsonl
 scope = json.load(open(glob.glob(sys.argv[1] + "/_scope-*.json")[0], encoding="utf-8"))
 assert len(rows) == 5 and all(row["diff_sha256"] == scope["diff_sha256"] and row["id"].startswith("f-") for row in rows), rows
 assert {row["anchor"]: row["quote_found"] for row in rows if row["quote"]} == {"in-diff": True, "anchor-not-found": False}, rows
+assert [row["rule"] for row in rows if "rule" in row] == ["style-nits"], rows
 PYFIND
   # fixed is a claim; verified needs a passing verify receipt recorded after it.
   fixed_id="$(awk '/in-diff/{print $1}' "$TMP/findings-list")"
@@ -5238,6 +5239,52 @@ EOF
   assert_file_contains "$TMP/findings-rules" '3 finding(s): Generated file'
   assert_file_contains "$TMP/findings-rules" 'by hand'
   cmp -s "$found/PROJECT.md" <(git -C "$found" show HEAD:PROJECT.md) || fail "a suggestion must never write a rule"
+
+  # findings rules: per rule label, what became of the findings that named it.
+  # demote? needs enough decided findings and a high dismissed share; read-only.
+  mkdir -p "$TMP/signals"
+  python3 - "$TMP/signals" <<'PYFIND'
+import json, sys
+d = sys.argv[1]
+rows, events = [], []
+def finding(n, rule):
+    ident = "f-%012x" % n
+    row = {"schema": 1, "kind": "review-finding", "id": ident, "run": "r1", "ts": "2026-01-01T00:00:00Z",
+           "file": "a.txt", "line": 1, "severity": "blocking", "summary": "s%d" % n, "quote": ""}
+    if rule:
+        row["rule"] = rule
+    rows.append(row)
+    return ident
+def event(ident, state):
+    events.append({"schema": 1, "kind": "review-finding-event", "id": ident, "state": state, "ts": "2026-01-02T00:00:00Z",
+                   "runs": ["r1"], "reason": "x"})
+for n in range(1, 7):
+    event(finding(n, "noisy"), "dismissed" if n < 6 else "fixed")
+for n in range(7, 9):
+    event(finding(n, "small"), "dismissed")
+for n in range(9, 13):
+    event(finding(n, "useful"), "fixed" if n < 12 else "dismissed")
+finding(13, "useful"); finding(14, "")
+open(d + "/_findings-r1.jsonl", "w").write("".join(json.dumps(r) + "\n" for r in rows))
+open(d + "/_finding-events.jsonl", "w").write("".join(json.dumps(r) + "\n" for r in events))
+PYFIND
+  before="$(cksum "$TMP"/signals/*)"
+  "$review" findings rules --artifact-dir "$TMP/signals" --json > "$TMP/findings-signals"
+  python3 - "$TMP/findings-signals" <<'PYFIND' || fail "findings rules report is wrong: $(cat "$TMP/findings-signals")"
+import json, sys
+out = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = {row["rule"]: row for row in out["rules"]}
+assert out["unlabelled"] == 1 and out["min_samples"] == 5, out
+assert rows["noisy"] == {"rule": "noisy", "raised": 6, "fixed": 1, "dismissed": 5, "open": 0,
+                         "dismiss_rate": 0.83, "suggestion": "demote?"}, rows
+assert rows["small"]["suggestion"] == "keep" and rows["small"]["dismiss_rate"] == 1.0, rows
+assert rows["useful"]["raised"] == 5 and rows["useful"]["open"] == 1 and rows["useful"]["suggestion"] == "keep", rows
+PYFIND
+  "$review" findings rules --artifact-dir "$TMP/signals" --min-samples 2 > "$TMP/findings-signals"
+  assert_file_contains "$TMP/findings-signals" 'small '
+  grep -q 'small .*demote?' "$TMP/findings-signals" || fail "a lower --min-samples must let a small rule be flagged"
+  assert_file_contains "$TMP/findings-signals" 'no rule is edited or disabled'
+  [ "$before" = "$(cksum "$TMP"/signals/*)" ] || fail "findings rules must be read-only"
 
   # --security-audit asks one more provider only when the change touches the
   # risk paths patch-admit advises on, and prints that seat's own verdict. It
