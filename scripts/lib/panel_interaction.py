@@ -167,30 +167,38 @@ class LedgerRefused(ValueError):
 TICK_RECEIPT_MAX = 1024 * 1024
 
 
+def _read_kept(path, limit, label):
+    """Bytes of a tick-owned file, or None only when it is missing; anything untrusted raises LedgerRefused."""
+    import stat
+    try:
+        named = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise LedgerRefused("%s cannot be inspected" % label) from error
+    if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+        raise LedgerRefused("%s is a symlink, a hard link or not a regular file" % label)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            raw = handle.read(limit + 1)
+    except OSError as error:
+        raise LedgerRefused("%s is unreadable" % label) from error
+    if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or opened.st_nlink != 1
+            or len(raw) > limit):
+        raise LedgerRefused("%s changed while read or is too large" % label)
+    return raw
+
+
 def read_tick_receipt(path):
     """(receipt, wakes) of a tick receipt; the one check both the wake and `oms tick run` apply before writing it.
 
     Only a missing file is empty history. An empty, symlinked, hard-linked, non-regular, oversized or malformed
     receipt raises LedgerRefused, and its file must be kept as found so the wake's cap and dedupe never reset."""
-    import stat
-    try:
-        named = os.lstat(path)
-    except FileNotFoundError:
+    raw = _read_kept(path, TICK_RECEIPT_MAX, "tick receipt")
+    if raw is None:
         return {}, []
-    except OSError as error:
-        raise LedgerRefused("tick receipt cannot be inspected") from error
-    if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
-        raise LedgerRefused("tick receipt is a symlink, a hard link or not a regular file")
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        with os.fdopen(fd, "rb") as handle:
-            opened = os.fstat(handle.fileno())
-            raw = handle.read(TICK_RECEIPT_MAX + 1)
-    except OSError as error:
-        raise LedgerRefused("tick receipt is unreadable") from error
-    if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) or opened.st_nlink != 1
-            or len(raw) > TICK_RECEIPT_MAX):
-        raise LedgerRefused("tick receipt changed while read or is too large")
     try:
         receipt = json.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as error:
@@ -263,6 +271,296 @@ _RESUME_AFTER = {
 }
 
 
+# Durable cadence for an approved autopilot contract: append-only events in .oms/tick/schedules.jsonl. A due schedule only
+# makes its contract eligible for resume_autopilot, which keeps every authority check and the shared wake budget.
+SCHEDULE_FILE = "schedules.jsonl"
+SCHEDULE_MAX = 4 * 1024 * 1024
+SCHEDULE_MAX_HOURS = 8760
+_SCHEDULE_EVENTS = {"create", "pause", "resume", "cancel", "fired", "skipped"}
+_OWNER_ID = re.compile(r"owner_[0-9a-f]{32}\Z")
+
+
+def _utc(seconds):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+def _parse_utc(text):
+    import calendar
+    for form in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ", "%Y-%m-%d"):
+        try:
+            return calendar.timegm(time.strptime(text, form))
+        except (TypeError, ValueError):
+            pass
+    raise ValueError("not a UTC date or time")
+
+
+class ScheduleRefused(LedgerRefused):
+    """The schedule log cannot be trusted or extended; it is left as found and every resume refuses."""
+
+
+_APPROVED_STAGES = ("approved", "driving", "reviewing", "publishing")
+
+
+def _approved_run(rules, row):
+    """The receipt's continuation is an approved `run --proposal FILE --expected-proposal-sha256 SHA`."""
+    argv, proposal = rules["option_args"](row), row["proposal"]
+    return (argv[:2] == ["oms", "autopilot"] and bool(proposal["path"])
+            and argv[-5:] == ["run", "--proposal", proposal["path"], "--expected-proposal-sha256", proposal["sha256"]])
+
+
+def _schedule_path(repo):
+    return Path(repo) / ".oms" / "tick" / SCHEDULE_FILE
+
+
+def read_schedules(repo):
+    """contract -> the schedule its events leave (the latest create; a cancel retires it). Only a missing file is
+    empty; an unterminated, malformed or untrusted log raises LedgerRefused and is kept as found."""
+    try:
+        raw = _read_kept(str(_schedule_path(repo)), SCHEDULE_MAX, "schedule log")
+    except LedgerRefused as error:
+        raise ScheduleRefused(str(error)) from error
+    states = {}
+    if raw is None:
+        return states
+    if not raw.endswith(b"\n"):
+        raise ScheduleRefused("schedule log is empty or its last event is unterminated")
+    try:
+        for line in raw.decode("utf-8").splitlines():
+            event = json.loads(line)
+            kind, contract = event["event"], event["contract"]
+            if (event.get("schema") != 1 or kind not in _SCHEDULE_EVENTS or not isinstance(contract, str)
+                    or not _OWNER_ID.fullmatch(contract)):
+                raise ValueError(line)
+            at = _parse_utc(event["at"])
+            if kind == "create":
+                every = event["every_hours"]
+                if (type(every) is not int or not 1 <= every <= SCHEDULE_MAX_HOURS
+                        or not re.fullmatch(r"[0-9a-f]{64}", event["digest"])):
+                    raise ValueError(line)
+                states[contract] = {"contract": contract, "digest": event["digest"], "every": every,
+                                    "anchor": _parse_utc(event["anchor"]), "created": at, "paused": False,
+                                    "until": None if event.get("until") is None else _parse_utc(event["until"]),
+                                    "floor": None, "last_run": None, "suspended": False, "cancelled": False}
+                states[contract]["floor"] = states[contract]["anchor"]
+                continue
+            state = states.get(contract)
+            if state is None or state["cancelled"]:
+                raise ValueError(line)
+            if kind in ("pause", "resume"):
+                state["paused"] = kind == "pause"
+            elif kind == "cancel":
+                state["cancelled"] = True
+            else:
+                if kind == "skipped" and not isinstance(event["reason"], str):
+                    raise ValueError(line)
+                if kind == "fired" or event.get("occurrence") is not None:
+                    occurrence = _parse_utc(event["occurrence"])
+                    state["floor"] = max(state["floor"], occurrence)
+                if kind == "fired":
+                    state["last_run"] = (at, occurrence)
+                elif event["reason"] == "digest-changed":
+                    state["suspended"] = True
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError, UnicodeDecodeError) as error:
+        raise ScheduleRefused("schedule log is malformed") from error
+    return states
+
+
+def schedules_pending(repo, now=None):
+    """Whether the tick must consult the schedule path: a live (uncancelled, unexpired) schedule, or a log that
+    cannot be trusted and so must refuse. A valid log holding only cancelled or expired schedules is no schedule."""
+    now = int(time.time() if now is None else now)
+    try:
+        states = read_schedules(repo)
+    except ScheduleRefused:
+        return True
+    return any(not state["cancelled"] and (state["until"] is None or now < state["until"]) for state in states.values())
+
+
+def _append_schedule(repo, event):
+    """One fsynced line; a kill mid-write leaves an unterminated line that every later read refuses (fail closed)."""
+    import stat
+    path = _schedule_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = (json.dumps(dict(event, schema=1), sort_keys=True, separators=(",", ":")) + "\n").encode()
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ScheduleRefused("schedule log is a hard link or not a regular file")
+        if opened.st_size + len(line) > SCHEDULE_MAX:
+            raise ScheduleRefused("schedule log would exceed %d bytes; nothing was appended" % SCHEDULE_MAX)
+        os.write(fd, line)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def contract_digest(rules, row):
+    """SHA-256 of the receipt's frozen fields: ordinary progress (stage, branch, proposal) never changes it."""
+    import hashlib
+    view = json.dumps(rules["immutable_view"](row), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(view.encode("utf-8")).hexdigest()
+
+
+def schedule_occurrence(state, now):
+    """(due occurrence or None, next occurrence or None): missed occurrences coalesce into the latest due one."""
+    step, anchor, now = state["every"] * 3600, state["anchor"], int(now)
+    latest = anchor + ((now - anchor) // step) * step if now >= anchor + step else None
+    if state["until"] is not None and now >= state["until"]:
+        return None, None
+    if latest is not None and latest > state["floor"]:
+        return latest, latest
+    following = (latest if latest is not None else anchor) + step
+    return None, None if state["until"] is not None and following >= state["until"] else following
+
+
+def schedule_view(state, now, digest=None, current=None):
+    """The state word --list and the resume share: suspended, expired, paused, inactive or active."""
+    if state["suspended"] or (current == state["contract"] and digest != state["digest"]):
+        return "suspended"
+    if state["until"] is not None and int(now) >= state["until"]:
+        return "expired"
+    if state["paused"]:
+        return "paused"
+    return "active" if current == state["contract"] else "inactive"
+
+
+def _current_contract(repo):
+    """(rules, row, owner, digest) of the checkout's approved receipt; raises when it does not load."""
+    import runpy
+    rules = runpy.run_path(str(Path(__file__).with_name("autopilot-receipt.py")))
+    receipt_path = Path(repo) / ".oms" / "plan" / "autopilot-run.json"
+    try:
+        rules["validate_receipt_location"](receipt_path, os.path.realpath(repo))
+        row = rules["load_receipt"](receipt_path)[0]
+    except (OSError, rules["ReceiptError"]) as error:
+        raise ValueError("autopilot receipt unavailable (%s)" % _one_line(error)[:120]) from error
+    return rules, row, row.get("owner_id", ""), contract_digest(rules, row)
+
+
+def schedule_cli(argv, now=None):
+    """`oms tick schedule`: create, pause, resume, cancel or list cadence events for an approved autopilot contract."""
+    import argparse
+    from terminal_panel import _lock
+    parser = argparse.ArgumentParser(prog="oms tick schedule", description=(
+        "Resume an approved autopilot contract every HOURS (whole hours >= 1) through the tick's resume path. "
+        "Missed occurrences coalesce into one run; a paused schedule resumes with that one coalesced run."))
+    parser.add_argument("--repo", default=".")
+    parser.add_argument("--contract", help="the receipt's owner id (oms autopilot --repo . status)")
+    parser.add_argument("--every", metavar="HOURS")
+    parser.add_argument("--until", metavar="DATE", help="UTC YYYY-MM-DD[THH:MM[:SS]Z]; no occurrence runs at or after it")
+    action = parser.add_mutually_exclusive_group()
+    for name in ("pause", "resume", "cancel", "list"):
+        action.add_argument("--" + name, dest="action", action="store_const", const=name)
+    args = parser.parse_args(argv)
+    now = int(time.time() if now is None else now)
+    act = args.action or ("create" if args.every is not None else None)
+    if act is None:
+        parser.error("give --every HOURS, --pause, --resume, --cancel or --list")
+    if act == "list" and (args.contract or args.every or args.until):
+        parser.error("--list takes only --repo")
+    if act in ("pause", "resume", "cancel") and (args.every is not None or args.until is not None):
+        parser.error("--%s takes only --contract and --repo" % act)
+    if act != "list" and not (args.contract and _OWNER_ID.fullmatch(args.contract)):
+        parser.error("--contract must be the receipt's owner id (owner_ plus 32 hex digits)")
+    every = until = None
+    if act == "create":
+        if not re.fullmatch(r"[0-9]{1,5}", args.every) or not 1 <= int(args.every) <= SCHEDULE_MAX_HOURS:
+            parser.error("--every must be whole hours from 1 to %d" % SCHEDULE_MAX_HOURS)
+        every = int(args.every)
+        if args.until is not None:
+            try:
+                until = _parse_utc(args.until)
+            except ValueError:
+                parser.error("--until must be UTC YYYY-MM-DD, YYYY-MM-DDTHH:MMZ or YYYY-MM-DDTHH:MM:SSZ")
+    found = subprocess.run(["git", "-C", args.repo, "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                           check=False, stdin=subprocess.DEVNULL)
+    repo = Path(os.path.realpath(found.stdout.strip() if found.returncode == 0 else args.repo))
+    if not (repo / ".oms").is_dir():
+        print("error: not an adopted repo (no .oms): %s" % repo, file=sys.stderr)
+        return 2
+    if act != "list" and os.environ.get("OMS_HARNESS_CHILD") == "1":
+        print("error: a harness child cannot schedule parent-owned autopilot runs; return the request to the parent agent",
+              file=sys.stderr)
+        return 2
+    try:
+        if act == "list":
+            return _schedule_list(repo, now)
+        with _lock(repo, "panel-main-start", timeout=5):
+            return _schedule_change(repo, act, args.contract, every, until, now)
+    except (LedgerRefused, ValueError, OSError) as error:
+        print("error: %s" % _one_line(error)[:240], file=sys.stderr)
+        return 1
+
+
+def _schedule_change(repo, act, contract, every, until, now):
+    state = read_schedules(repo).get(contract)
+    live = state if state and not state["cancelled"] else None
+    at = _utc(now)
+    if act == "create":
+        rules, row, owner, digest = _current_contract(repo)
+        if owner != contract:
+            raise ValueError("%s is not this checkout's autopilot contract (the receipt's owner id is %s)"
+                             % (contract, owner or "empty"))
+        if row["stage"] not in _APPROVED_STAGES or not _approved_run(rules, row):
+            raise ValueError("autopilot contract at stage %s is not an approved `run --proposal FILE "
+                             "--expected-proposal-sha256 SHA` continuation" % row["stage"])
+        if live:
+            raise ValueError("%s already has a schedule; cancel it first" % contract)
+        if until is not None and until <= now:
+            raise ValueError("--until %s is not in the future" % _utc(until))
+        anchor = now - now % 3600
+        event = {"event": "create", "contract": contract, "digest": digest, "every_hours": every,
+                 "anchor": _utc(anchor), "until": None if until is None else _utc(until), "at": at}
+        _append_schedule(repo, event)
+        first = schedule_occurrence(read_schedules(repo)[contract], now)[1]
+        print("scheduled %s every %dh; next due %s%s" % (contract, every, _utc(first) if first else "none",
+                                                          "; until %s" % event["until"] if until is not None else ""))
+        return 0
+    if live is None:
+        raise ValueError("%s has no schedule" % contract)
+    if act in ("pause", "resume") and not live["suspended"]:
+        try:
+            owner, digest = _current_contract(repo)[2:]
+        except ValueError:  # no loadable receipt: nothing to compare; every fire compares again first
+            owner = digest = None
+        if schedule_view(live, now, digest, owner) == "suspended":
+            _append_schedule(repo, {"event": "skipped", "contract": contract, "reason": "digest-changed",
+                                    "digest": digest, "at": at})
+            live["suspended"] = True
+    if act == "resume" and live["suspended"]:
+        raise ValueError("%s is suspended because its contract digest changed; review the contract, then cancel and "
+                         "schedule it again" % contract)
+    if (act == "pause") == live["paused"] and act != "cancel":
+        print("%s already %s" % (contract, "paused" if live["paused"] else "running"))
+        return 0
+    _append_schedule(repo, {"event": act, "contract": contract, "at": at})
+    print("%s %s" % ({"pause": "paused", "resume": "resumed", "cancel": "cancelled"}[act], contract))
+    return 0
+
+
+def _schedule_list(repo, now):
+    states = {key: value for key, value in read_schedules(repo).items() if not value["cancelled"]}
+    if not states:
+        print("no schedules")
+        return 0
+    try:
+        owner, digest = _current_contract(repo)[2:]
+    except ValueError:
+        owner = digest = None
+    for contract in sorted(states):
+        state = states[contract]
+        due, following = schedule_occurrence(state, now)
+        view = schedule_view(state, now, digest, owner)
+        nxt = "none" if following is None or view in ("suspended", "expired") else _utc(following) + (
+            " (due now)" if due is not None else "")
+        last = "never" if state["last_run"] is None else "%s (occurrence %s)" % (
+            _utc(state["last_run"][0]), _utc(state["last_run"][1]))
+        print("%s  every %dh  state %s  next due %s  last run %s  expires %s" % (
+            contract, state["every"], view, nxt, last, "never" if state["until"] is None else _utc(state["until"])))
+    return 0
+
+
 def _live_main_blocker(repo):
     """"" only when no panel main is live; otherwise why one may be. Unverified liveness counts as live.
 
@@ -301,13 +599,17 @@ def _spawn_continuation(argv, log, cwd):
         os.close(fd)
 
 
-def resume_autopilot(repo, dry_run=False, now=None, once=None):
+def resume_autopilot(repo, dry_run=False, now=None, once=None, scheduled_only=False):
     """No live panel main: run the receipt's own `autopilot run` continuation headlessly, once; returns a status line.
 
     Only a contract the user already approved resumes: the receipt must load, pass the digest gate every resume passes
     (reenter_judgment: not done, proposal-review or parked, no living claimant) and print a run continuation carrying
     its approved proposal digest. Nothing is created, applied or overridden. The launch is recorded in the wake ledger
-    (one pool of WAKE_DAILY_LIMIT per UTC day) before the spawn; ONCE is claimed so a tick run starts at most one."""
+    (one pool of WAKE_DAILY_LIMIT per UTC day) before the spawn; ONCE is claimed so a tick run starts at most one.
+
+    A schedule for the receipt's owner id (read_schedules) replaces the per-day receipt dedup: only its due occurrence
+    resumes, recorded as `fired` before the ledger row; a paused, expired or suspended one resumes nothing.
+    SCHEDULED_ONLY (the tick without OMS_TICK_WAKE) resumes nothing a schedule does not make due."""
     import hashlib
     import runpy
     import shlex
@@ -323,6 +625,7 @@ def resume_autopilot(repo, dry_run=False, now=None, once=None):
 
     def attempt():
         ledger, wakes = _wake_ledger(repo, day)
+        schedules = read_schedules(repo)  # an untrusted log refuses whatever the receipt says
         blocker = _live_main_blocker(repo)
         if blocker:
             return skip("a panel main may be live (%s)" % blocker, "it exits or its termination is proven")
@@ -339,41 +642,86 @@ def resume_autopilot(repo, dry_run=False, now=None, once=None):
         except (OSError, ValueError, KeyError, TypeError, rules["ReceiptError"]) as error:
             return skip("autopilot receipt invalid (%s)" % _one_line(error)[:120], status + " or it is abandoned and re-proposed")
         stage, digest = row["stage"], rules["digest"](payload)
+        contract = row.get("owner_id", "")
+        plan = schedules.get(contract) if contract else None
+        plan = None if plan is None or plan["cancelled"] else plan
+        if plan is not None:
+            bound = contract_digest(rules, row)
+            if schedule_view(plan, now, bound, contract) == "suspended":  # recorded before any stage or claimant skip
+                if not dry_run and not plan["suspended"]:
+                    _append_schedule(repo, {"event": "skipped", "contract": contract, "reason": "digest-changed",
+                                            "digest": bound, "at": _utc(now)})
+                return skip("schedule for %s suspended: the contract digest changed since it was scheduled" % contract,
+                            "the user reviews the contract, then `oms tick schedule --cancel` and schedules it again")
         if refusal:
             diagnostic = row.get("diagnostic") if stage == "parked" else None
             reason = refusal + ("; next step: %s (%s)" % (_one_line(diagnostic.get("reason")), _one_line(diagnostic.get("reason_code")))
                                 if isinstance(diagnostic, dict) else "")
             return skip("autopilot %s: %s" % (stage, reason),
                         _RESUME_AFTER.get(stage, status + " and no live session holds the run"))
-        argv, proposal = rules["option_args"](row), row["proposal"]
-        if (argv[:2] != ["oms", "autopilot"]
-                or argv[-5:] != ["run", "--proposal", proposal["path"], "--expected-proposal-sha256", proposal["sha256"]]):
+        argv = rules["option_args"](row)
+        if not _approved_run(rules, row):
             return skip("autopilot continuation at stage %s is not an approved `run`" % stage,
                         "the parent approves a proposal with `oms autopilot run --proposal FILE --expected-proposal-sha256 SHA`")
         spent = [w for w in wakes if w.get("outcome") != "skipped"]
-        key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
-        if any(w["main"] == RESUME_SUBJECT and w.get("key") == key for w in spent):
-            return skip("autopilot already resumed today at this receipt state", "the receipt changes or the UTC day rolls over")
-        if len(spent) >= WAKE_DAILY_LIMIT:
-            return skip("%d wakes already spent today" % len(spent), "the UTC day rolls over")
+        occurrence = None
+        if plan is None and scheduled_only:
+            return skip("no schedule binds contract %s" % (contract or "(no owner id)"),
+                        "`oms tick schedule --contract ID --every HOURS` binds one")
+        if plan is None:
+            key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
+            if any(w["main"] == RESUME_SUBJECT and w.get("key") == key for w in spent):
+                return skip("autopilot already resumed today at this receipt state", "the receipt changes or the UTC day rolls over")
+            if len(spent) >= WAKE_DAILY_LIMIT:
+                return skip("%d wakes already spent today" % len(spent), "the UTC day rolls over")
+        else:
+            view = schedule_view(plan, now, bound, contract)
+            occurrence, following = schedule_occurrence(plan, now)
+            named = "schedule for %s" % contract
+            if view == "expired":
+                return skip("%s expired at %s" % (named, _utc(plan["until"])),
+                            "`oms tick schedule --cancel` or a new schedule after it")
+            if view == "paused":
+                return skip("%s paused" % named, "`oms tick schedule --resume --contract %s`" % contract)
+            if occurrence is None:
+                return skip("%s not due" % named, "the next occurrence is due at %s" % (
+                    _utc(following) if following else "never (the schedule expires first)"))
+            key = hashlib.sha256("\0".join((RESUME_SUBJECT, contract, _utc(occurrence))).encode()).hexdigest()[:16]
+
+            def budget(why):
+                if not dry_run:  # an exhausted budget consumes the occurrence: it is never queued
+                    _append_schedule(repo, {"event": "skipped", "contract": contract, "reason": "budget",
+                                            "detail": why, "occurrence": _utc(occurrence), "at": _utc(now)})
+                return skip("%s occurrence %s skipped: %s" % (named, _utc(occurrence), why),
+                            "the next occurrence%s finds budget" % (" at " + _utc(occurrence + plan["every"] * 3600)))
+            if len(spent) >= WAKE_DAILY_LIMIT:
+                return budget("%d wakes already spent today" % len(spent))
         command = ["bash", str(Path(__file__).resolve().parents[1] / "autopilot.sh")] + argv[2:]
         shown = " ".join(shlex.quote(part) for part in argv)
+        scheduled = "" if occurrence is None else "schedule occurrence %s, " % _utc(occurrence)
         if dry_run:
-            return "would resume autopilot (stage %s, receipt %s): %s" % (stage, digest[:12], shown)
+            return "would resume autopilot (%sstage %s, receipt %s): %s" % (scheduled, stage, digest[:12], shown)
         try:
             if once:
                 os.close(os.open(once, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         except FileExistsError:
+            if occurrence is not None:
+                return budget("this tick run already resumed one autopilot")
             return skip("this tick run already resumed one autopilot", "the next tick run")
         except OSError as error:
             return skip("cannot claim this tick run's resume marker (%s)" % _one_line(error)[:80], "the marker is writable")
         log = repo / ".oms" / "tick" / ("autopilot-%s.log" % digest[:12])
-        _record_wake(repo, ledger, wakes + [{"day": day, "main": RESUME_SUBJECT, "key": key, "outcome": "resumed",
-                                             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-                                             "stage": stage, "receipt": digest}])
+        wake = {"day": day, "main": RESUME_SUBJECT, "key": key, "outcome": "resumed",
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "stage": stage, "receipt": digest}
+        if occurrence is not None:
+            # The fired event is the dedup evidence, written first: a kill before the spawn loses a run, never doubles one.
+            _append_schedule(repo, {"event": "fired", "contract": contract, "occurrence": _utc(occurrence),
+                                    "receipt": digest, "stage": stage, "at": _utc(now)})
+            wake["schedule"] = _utc(occurrence)
+        _record_wake(repo, ledger, wakes + [wake])
         pid = _spawn_continuation(command, str(log), state_repo)
-        return "resumed autopilot (stage %s, receipt %s, pid %d, output %s): %s" % (
-            stage, digest[:12], pid, log.relative_to(repo), shown)
+        return "resumed autopilot (%sstage %s, receipt %s, pid %d, output %s): %s" % (
+            scheduled, stage, digest[:12], pid, log.relative_to(repo), shown)
 
     try:
         if dry_run:
@@ -381,6 +729,9 @@ def resume_autopilot(repo, dry_run=False, now=None, once=None):
         # Main start takes this lock too, so no main can start between the liveness proof and the spawn.
         with _lock(repo, "panel-main-start", timeout=.1):
             return attempt()
+    except ScheduleRefused as error:
+        return ("refused: %s; .oms/tick/schedules.jsonl is kept as found: inspect it, then repair or move it "
+                "aside (moving it drops its pauses and cancels)" % error)
     except LedgerRefused as error:
         return ("refused: %s; .oms/tick/last.json is kept as found: inspect it, then move it aside to reset "
                 "today's wake ledger" % error)
@@ -459,18 +810,22 @@ def wake_main(repo, dry_run=False, now=None, once=None):
 
 
 def wake_cli(argv):
-    """`oms tick` entry: REPO [--dry-run] [--once MARKER]; prints one status line."""
-    repo, rest, dry, once = argv[:1], argv[1:], False, None
-    while rest and rest[0] in ("--dry-run", "--once"):
+    """`oms tick` entry: REPO [--dry-run] [--scheduled] [--once MARKER]; prints one status line.
+
+    --scheduled is the tick without OMS_TICK_WAKE: only a due schedule resumes, and no main is typed into."""
+    repo, rest, dry, once, scheduled = argv[:1], argv[1:], False, None, False
+    while rest and rest[0] in ("--dry-run", "--once", "--scheduled"):
         if rest[0] == "--once":
             once, rest = (rest[1] if len(rest) > 1 else None), rest[2:]
         else:
-            dry, rest = True, rest[1:]
+            dry, scheduled = dry or rest[0] == "--dry-run", scheduled or rest[0] == "--scheduled"
+            rest = rest[1:]
     if len(repo) != 1 or rest or (argv.count("--once") and not once):
-        print("usage: wake REPO [--dry-run] [--once MARKER]", file=sys.stderr)
+        print("usage: wake REPO [--dry-run] [--scheduled] [--once MARKER]", file=sys.stderr)
         return 2
     try:
-        print(wake_main(repo[0], dry_run=dry, once=once))
+        print(resume_autopilot(repo[0], dry, once=once, scheduled_only=True) if scheduled
+              else wake_main(repo[0], dry_run=dry, once=once))
     except (OSError, subprocess.SubprocessError) as error:
         print("skipped: " + _one_line(error)[:200])
     return 0

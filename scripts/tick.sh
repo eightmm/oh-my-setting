@@ -33,6 +33,9 @@ Usage: tick.sh run [--repo PATH ...] [--dry-run]
        tick.sh install [--method auto|systemd|cron] [--dry-run]
        tick.sh uninstall [--dry-run]
        tick.sh status
+       tick.sh schedule --contract ID --every HOURS [--until DATE] [--repo PATH]
+       tick.sh schedule --pause|--resume|--cancel --contract ID [--repo PATH]
+       tick.sh schedule --list [--repo PATH]
 
 run        Sweep the given repos, or every registered one: journal and CI sync,
            attempt reconcile, stale thread/task close, plan and failure
@@ -49,6 +52,15 @@ register   Add a repo (default: PWD, git-root anchored) to the registry;
            install registers PWD when it is an adopted repo.
 install    Register the hourly trigger; uninstall removes only a unit this
            checkout owns.
+schedule   Resume the approved autopilot contract ID (its receipt owner id) every
+           HOURS (whole hours >= 1) through the same resume path, authority checks
+           and wake budget as OMS_TICK_WAKE, which the schedule does not need.
+           Occurrences start on the UTC hour of creation; missed ones (also while
+           paused) coalesce into one run, a spent budget skips one, and at most
+           one run per contract is live. A changed contract digest suspends it
+           until cancelled and scheduled again. Events append to
+           .oms/tick/schedules.jsonl; --list shows next due (UTC), state, last
+           run and expiry. --until DATE: UTC YYYY-MM-DD[THH:MM[:SS]Z], exclusive.
 Environment:
   OMS_TICK_REGISTRY            registry file (default: config dir/tick-repos.txt)
   OMS_TICK_THREAD_IDLE_DAYS    close open threads idle at least this long (7)
@@ -90,6 +102,7 @@ METHOD=auto
 MODE="${1:-}"; [ "$#" -eq 0 ] || shift
 REPOS=()
 case "$MODE" in run|refresh-catalogs|register|unregister|install|uninstall|status) ;; -h|--help|"") usage; exit 0 ;;
+  schedule) SCHEDULE_ARGS=("$@"); set -- ;;
   *) echo "error: unknown mode: $MODE" >&2; usage >&2; exit 2 ;; esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -124,6 +137,26 @@ PY
 )"
   [ -z "$line" ] || printf '  %s\n' "$line"
 }
+schedule_cli() {  # the schedule log's own lock, contract binding and output
+  python3 - "$ROOT/scripts/lib" "$@" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import panel_interaction
+raise SystemExit(panel_interaction.schedule_cli(sys.argv[2:]))
+PY
+}
+has_schedules() {  # ROOT -> a live schedule, or a log that must refuse; only cancelled/expired ones are none
+  local rc=0
+  [ -e "$1/.oms/tick/schedules.jsonl" ] || [ -L "$1/.oms/tick/schedules.jsonl" ] || return 1
+  python3 - "$ROOT/scripts/lib" "$1" <<'PY' || rc=$?
+import sys
+sys.path.insert(0, sys.argv[1])
+import panel_interaction
+raise SystemExit(0 if panel_interaction.schedules_pending(sys.argv[2]) else 3)
+PY
+  [ "$rc" != 3 ]  # any other failure takes the schedule path, whose own read refuses
+}
+
 registered() { [ -f "$REGISTRY" ] && grep -Fxq "$1" "$REGISTRY"; }
 register_repo() {
   local root; root="$(repo_root "$1")"
@@ -298,7 +331,8 @@ sweep_repo() (
   [ -d "$root/.oms" ] || { echo "skip $root: no .oms"; exit 0; }
   if [ "$DRY_RUN" = 1 ]; then
     echo "would sweep $root"
-    [ "${OMS_TICK_WAKE:-0}" != 1 ] || echo "wake $root: $(wake_main "$root" --dry-run 2>&1 | tail -n 1)"
+    if [ "${OMS_TICK_WAKE:-0}" = 1 ]; then echo "wake $root: $(wake_main "$root" --dry-run 2>&1 | tail -n 1)"
+    elif has_schedules "$root"; then echo "schedule $root: $(wake_main "$root" --scheduled --dry-run 2>&1 | tail -n 1)"; fi
     exit 0
   fi
   if ! oms_hold_file_lock "$root/.oms/tick/last.json" 8; then
@@ -421,6 +455,10 @@ except (OSError, ValueError, KeyError, TypeError):
     wake_note="$(wake_main "$root" --once "$RESUME_MARK" 2>&1 | tail -n 1)" || true  # a failed wake never stops the receipt
     case "$wake_note" in "woke "*|"resumed "*) wake=1 ;; *) wake=0 ;; esac
     echo "wake $root: ${wake_note:-no status}"
+  elif has_schedules "$root"; then  # a schedule is its own opt-in: the resume path only, never a typed wake
+    wake_note="$(wake_main "$root" --scheduled --once "$RESUME_MARK" 2>&1 | tail -n 1)" || true
+    case "$wake_note" in "resumed "*) wake=1 ;; *) wake=0 ;; esac
+    echo "schedule $root: ${wake_note:-no status}"
   fi
   mkdir -p "$root/.oms/tick"
   python3 - "$ROOT/scripts/lib" "$root/.oms/tick/last.json" "$journal" "$reconcile" "$gc" "$tasks_closed" "$plans_retired" "$plan_retire_rc" "$artifacts_resolved" "$artifact_resolve_rc" "$artifacts_superseded" "$artifact_supersede_rc" "$failures_retired" "$wake" "${closed[@]}" <<'PY'
@@ -472,18 +510,19 @@ EOF_NAMES
 RESUME_MARK=/dev/null/resume  # one headless autopilot resume per run: its first claimant creates this file
 RUN_SCRATCH=""
 run_tick() {
-  local root
-  if [ "${OMS_TICK_WAKE:-0}" = 1 ] && [ "$DRY_RUN" != 1 ] && RUN_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/oms-tick-run.XXXXXX" 2>/dev/null)"; then
-    RESUME_MARK="$RUN_SCRATCH/resume"
-    trap 'rm -rf -- "$RUN_SCRATCH"' EXIT
-  else
-    RUN_SCRATCH=""
-  fi
+  local root resumes="${OMS_TICK_WAKE:-0}"
   if [ "$DRY_RUN" = 1 ]; then dry_run_catalogs; else oms_capability_refresh_stale_catalogs; fi
   if [ "${#REPOS[@]}" -eq 0 ] && [ -f "$REGISTRY" ]; then
     while IFS= read -r root; do [ -n "$root" ] && REPOS+=("$root"); done < "$REGISTRY"
   fi
   [ "${#REPOS[@]}" -gt 0 ] || { echo "nothing registered: oms tick register --repo PATH"; return 0; }
+  for root in "${REPOS[@]}"; do [ ! -d "$root" ] || ! has_schedules "$(repo_root "$root")" || resumes=1; done
+  if [ "$resumes" = 1 ] && [ "$DRY_RUN" != 1 ] && RUN_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/oms-tick-run.XXXXXX" 2>/dev/null)"; then
+    RESUME_MARK="$RUN_SCRATCH/resume"
+    trap 'rm -rf -- "$RUN_SCRATCH"' EXIT
+  else
+    RUN_SCRATCH=""
+  fi
   for root in "${REPOS[@]}"; do
     [ -d "$root" ] || { echo "skip $root: missing"; continue; }
     sweep_repo "$(repo_root "$root")"
@@ -590,4 +629,5 @@ case "$MODE" in
   install) install_tick ;;
   uninstall) uninstall_tick ;;
   status) status_tick ;;
+  schedule) schedule_cli "${SCHEDULE_ARGS[@]}" ;;
 esac

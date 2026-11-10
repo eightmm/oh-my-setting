@@ -784,7 +784,7 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def build(lib, repo, stage, text="spec\n", diagnostic=None, state=None):
+def build(lib, repo, stage, text="spec\n", diagnostic=None, state=None, **fields):
     repo = Path(repo)  # the execution checkout; STATE holds the receipt and plan (a scratch worktree runs from its parent)
     state = Path(state or repo)
     rules = runpy.run_path(os.path.join(lib, "autopilot-receipt.py"))
@@ -819,6 +819,7 @@ def build(lib, repo, stage, text="spec\n", diagnostic=None, state=None):
         branch=branch, owner_id="", updated="2026-11-09T00:00:00Z", diagnostic_phase=diag.get("phase", ""),
         diagnostic_reason_code=diag.get("code", ""), diagnostic_reason=diag.get("reason", ""),
         diagnostic_semantic_verdict="unknown", diagnostic_evidence_path="")
+    vars(args).update(fields)  # owner_id, or a frozen field a digest-change case alters
     row = rules["row_from_args"](args)
     (plan / "autopilot-run.json").write_bytes((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode())
     return rules, row
@@ -1005,7 +1006,7 @@ printf '%s' "$out" | grep >/dev/null "^wake $rs: would resume autopilot (stage d
   fail "a dry-run tick must show the approved continuation: $out"
 [ ! -e "$rs/.oms/tick" ] || fail "a dry-run resume must write nothing"
 out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$rs")"
-printf '%s' "$out" | grep >/dev/null '^wake ' && fail "the resume must be off unless OMS_TICK_WAKE=1: $out"
+printf '%s' "$out" | grep >/dev/null -E '^(wake|schedule) ' && fail "the resume must be off unless OMS_TICK_WAKE=1 or a schedule exists: $out"
 rs_stage parked
 mkdir -p "$TMP/tickrun"
 out="$(PATH="$TMP/wake-bin:$PATH" TMPDIR="$TMP/tickrun" OMS_TICK_WAKE=1 "$TICK" run --repo "$rs")"
@@ -1013,6 +1014,255 @@ printf '%s' "$out" | grep >/dev/null "^wake $rs: skipped: autopilot parked: .*ne
   printf '%s' "$out" | grep >/dev/null 'wake=0' || fail "a parked contract must stay parked with its reason: $out"
 [ -z "$(find "$rs/.oms/tick" -name 'autopilot-*.log' 2>/dev/null)" ] && [ -z "$(ls "$TMP/tickrun")" ] ||
   fail "a skipped resume leaves no log, and the run scratch is removed"
+
+# --- schedules: a durable cadence for the approved contract, through the same resume path -----------------
+# A fixed clock (now=) drives due, not-due, paused, expired, suspended, coalesced and budget-exhausted cases.
+rm -rf "$rs/.oms/tick"
+PATH="$TMP/wake-bin:$PATH" OMS_ROOT="$ROOT" python3 - "$rs" "$TMP" <<'PY' || fail "scheduled autopilot resume decisions are wrong"
+import calendar, contextlib, io, json, os, sys, time
+from pathlib import Path
+from unittest.mock import patch
+sys.path[:0] = [os.environ["OMS_ROOT"] + "/scripts/lib", sys.argv[2]]
+import panel_interaction as pi, resume_fx
+repo, tmp, lib = Path(sys.argv[1]), Path(sys.argv[2]), os.environ["OMS_ROOT"] + "/scripts/lib"
+owner, other = "owner_" + "a" * 32, "owner_" + "b" * 32
+log, ledger = repo / ".oms" / "tick" / "schedules.jsonl", repo / ".oms" / "tick" / "last.json"
+T = lambda text: calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%MZ"))
+count = [0]
+def marker():
+    count[0] += 1
+    return str(tmp / ("sched-marker-%d" % count[0]))
+def cli(*argv, at="2026-11-09T21:10Z"):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        try:
+            rc = pi.schedule_cli(["--repo", str(repo)] + list(argv), now=T(at))
+        except SystemExit as error:
+            rc = error.code
+    return rc, out.getvalue()
+def tick(at, once=None, **kw):
+    kw.setdefault("scheduled_only", True)
+    return pi.resume_autopilot(repo, now=T(at), once=once or marker(), **kw)
+def events(kind):
+    return [row for row in map(json.loads, log.read_text().splitlines()) if row["event"] == kind]
+def seed(spent, day="2026-11-10"):
+    ledger.write_text(json.dumps({"schema": 1, "wakes": [
+        {"day": day, "main": "call-other", "key": "k%d" % n, "outcome": "woke"} for n in range(spent)]}))
+def listing(at):
+    rc, out = cli("--list", at=at)
+    assert rc == 0, out
+    return out
+rules, row = resume_fx.build(lib, repo, "driving", owner_id=owner)
+# Malformed or out-of-range input exits 2 and writes nothing; whole hours 1..8760 only.
+for argv in (["--contract", owner, "--every", bad] for bad in ("0", "-1", "1.5", "", "abc", "8761", "123456")):
+    assert cli(*argv)[0] == 2, argv
+for argv in (["--contract", "owner_xyz", "--every", "2"], ["--every", "2"], [], ["--list", "--contract", owner],
+             ["--pause", "--every", "2", "--contract", owner], ["--pause", "--cancel", "--contract", owner],
+             ["--contract", owner, "--every", "2", "--until", "2026/12/01"]):
+    assert cli(*argv)[0] == 2, argv
+assert not log.exists()
+# Only this checkout's contract binds, never at a past or present expiry, and not from a harness child.
+rc, out = cli("--contract", other, "--every", "2")
+assert rc == 1 and "is not this checkout's autopilot contract" in out, out
+for until in ("2026-11-09", "2026-11-09T21:10Z"):
+    rc, out = cli("--contract", owner, "--every", "2", "--until", until)
+    assert rc == 1 and "is not in the future" in out, (until, out)
+with patch.dict(os.environ, {"OMS_HARNESS_CHILD": "1"}):
+    assert cli("--contract", owner, "--every", "2")[0] == 2 and cli("--list")[0] == 0
+assert not log.exists() and listing("2026-11-09T21:10Z") == "no schedules\n"
+assert cli("--pause", "--contract", owner) == (1, "error: %s has no schedule\n" % owner)
+# Only an approved `run --proposal` continuation binds: not a proposal in review, nor a park (approved or not).
+wall = {"phase": "driving", "code": "wall-kill", "reason": "inspect the wall"}
+for name, fields in (("proposal-review", {}), ("parked", {}), ("parked", {"proposal": "", "proposal_sha256": ""})):
+    resume_fx.build(lib, repo, name, diagnostic=wall, owner_id=owner, **fields)
+    rc, out = cli("--contract", owner, "--every", "2")
+    assert rc == 1 and "is not an approved `run --proposal FILE --expected-proposal-sha256 SHA`" in out, (name, fields, out)
+rules, row = resume_fx.build(lib, repo, "driving", owner_id=owner)
+assert not log.exists()
+# The limit itself is accepted; one live schedule per contract; cancel retires it so a new one can bind.
+assert cli("--contract", owner, "--every", "8760") == (0, "scheduled %s every 8760h; next due 2027-11-09T21:00:00Z\n" % owner)
+rc, out = cli("--contract", owner, "--every", "2")
+assert rc == 1 and "already has a schedule; cancel it first" in out, out
+assert cli("--cancel", "--contract", owner) == (0, "cancelled %s\n" % owner)
+assert cli("--cancel", "--contract", owner)[0] == 1
+assert cli("--contract", owner, "--every", "2") == (0, "scheduled %s every 2h; next due 2026-11-09T23:00:00Z\n" % owner)
+create = events("create")[-1]
+assert create["digest"] == pi.contract_digest(rules, row) and create["anchor"] == "2026-11-09T21:00:00Z", create
+
+with patch.object(pi, "_spawn_continuation", return_value=4242) as spawn:
+    # Not due: nothing spawns, and the schedule governs the unscheduled wake too (no per-receipt resume).
+    for only in (True, False):
+        status = tick("2026-11-09T21:40Z", scheduled_only=only)
+        assert status == ("skipped: schedule for %s not due; resumes when the next occurrence is due at "
+                          "2026-11-09T23:00:00Z" % owner), status
+    assert spawn.call_count == 0
+    # Due: one resume of the receipt's own continuation, its occurrence fired before the shared ledger row.
+    status = tick("2026-11-09T23:05Z")
+    assert status.startswith("resumed autopilot (schedule occurrence 2026-11-09T23:00:00Z, stage driving"), status
+    assert spawn.call_count == 1 and spawn.call_args[0][0][2:] == rules["option_args"](row)[2:]
+    wakes = json.loads(ledger.read_text())["wakes"]
+    assert [(w["main"], w["day"], w["schedule"]) for w in wakes] == [("autopilot", "2026-11-09", "2026-11-09T23:00:00Z")]
+    assert "not due" in tick("2026-11-09T23:50Z") and spawn.call_count == 1
+    # Missed occurrences across UTC midnight (01:00, 03:00, 05:00) coalesce into one run at the latest.
+    status = tick("2026-11-10T05:20Z")
+    assert status.startswith("resumed autopilot (schedule occurrence 2026-11-10T05:00:00Z"), status
+    assert "not due" in tick("2026-11-10T05:40Z") and spawn.call_count == 2
+    assert [e["occurrence"] for e in events("fired")] == ["2026-11-09T23:00:00Z", "2026-11-10T05:00:00Z"]
+    assert json.loads(ledger.read_text())["wakes"][-1]["day"] == "2026-11-10"
+    assert listing("2026-11-10T05:40Z") == ("%s  every 2h  state active  next due 2026-11-10T07:00:00Z  last run "
+                                            "2026-11-10T05:20:00Z (occurrence 2026-11-10T05:00:00Z)  expires never\n" % owner)
+    # Paused: nothing runs; resuming coalesces what elapsed into one run; a live claimant still holds it off.
+    assert cli("--pause", "--contract", owner, at="2026-11-10T05:50Z") == (0, "paused %s\n" % owner)
+    assert cli("--pause", "--contract", owner, at="2026-11-10T05:51Z") == (0, "%s already paused\n" % owner)
+    for at in ("2026-11-10T07:10Z", "2026-11-10T09:10Z"):
+        assert tick(at) == "skipped: schedule for %s paused; resumes when `oms tick schedule --resume --contract %s`" % (owner, owner)
+    assert " state paused  next due 2026-11-10T09:00:00Z (due now) " in listing("2026-11-10T09:10Z")
+    assert cli("--resume", "--contract", owner, at="2026-11-10T09:15Z") == (0, "resumed %s\n" % owner)
+    claims = repo / ".oms" / "plan" / "autopilot-reentries.jsonl"
+    claims.write_text(json.dumps({"schema": 1, "kind": "autopilot-drive-claim", "spec_sha256": row["spec_sha256"],
+                                  "branch": row["branch"], "owner_id": owner, "claim_pid": os.getpid(),
+                                  "updated": "2026-11-09T00:00:00Z"}) + "\n")
+    assert "already held by a live session" in tick("2026-11-10T09:20Z") and spawn.call_count == 2
+    claims.unlink()
+    assert tick("2026-11-10T09:20Z").startswith("resumed autopilot (schedule occurrence 2026-11-10T09:00:00Z")
+    assert spawn.call_count == 3 and len(events("fired")) == 3
+    # Budget: the shared daily pool spent skips the occurrence (recorded, never queued); five spent leave one.
+    seed(6)
+    status = tick("2026-11-10T11:05Z")
+    assert "occurrence 2026-11-10T11:00:00Z skipped: 6 wakes already spent today" in status and spawn.call_count == 3, status
+    assert [(e["reason"], e["occurrence"]) for e in events("skipped")] == [("budget", "2026-11-10T11:00:00Z")]
+    seed(0)
+    assert "not due" in tick("2026-11-10T11:30Z") and spawn.call_count == 3
+    seed(5)
+    assert tick("2026-11-10T13:05Z").startswith("resumed ") and spawn.call_count == 4
+    # The one-resume-per-run limit is the same budget: a claimed run marker skips and consumes the occurrence.
+    seed(0)
+    taken = marker(); open(taken, "w").close()
+    assert "skipped: this tick run already resumed one autopilot" in tick("2026-11-10T15:05Z", once=taken)
+    assert spawn.call_count == 4 and events("skipped")[-1]["occurrence"] == "2026-11-10T15:00:00Z"
+    # Dry run: what would run, with no event, marker, ledger row or spawn.
+    before, dry_marker = log.read_text(), marker()
+    status = tick("2026-11-10T17:05Z", once=dry_marker, dry_run=True)
+    assert status.startswith("would resume autopilot (schedule occurrence 2026-11-10T17:00:00Z"), status
+    assert log.read_text() == before and not os.path.exists(dry_marker) and spawn.call_count == 4
+    # A changed frozen field suspends the schedule once, sticky even if it changes back; resume refuses re-approval.
+    resume_fx.build(lib, repo, "driving", owner_id=owner, max_cycles=4)
+    for unused in range(2):
+        status = tick("2026-11-10T17:10Z")
+        assert status.startswith("skipped: schedule for %s suspended: the contract digest changed" % owner), status
+    assert [e["reason"] for e in events("skipped")].count("digest-changed") == 1 and spawn.call_count == 4
+    rc, out = cli("--resume", "--contract", owner, at="2026-11-10T17:15Z")
+    assert rc == 1 and "suspended because its contract digest changed" in out, out
+    resume_fx.build(lib, repo, "driving", owner_id=owner)
+    assert "suspended" in tick("2026-11-10T17:20Z") and " state suspended  next due none " in listing("2026-11-10T17:20Z")
+    # Cancelled: the scheduled tick resumes nothing, and the opt-in wake is back to its unscheduled rules.
+    assert cli("--cancel", "--contract", owner, at="2026-11-10T17:25Z")[0] == 0
+    assert tick("2026-11-10T17:30Z").startswith("skipped: no schedule binds contract %s" % owner)
+    assert tick("2026-11-10T17:30Z", scheduled_only=False).startswith("resumed autopilot (stage driving") and spawn.call_count == 5
+    assert not pi.schedules_pending(repo, T("2026-11-10T17:30Z")), "a log of cancelled schedules is no schedule"
+    changed = lambda: [e["reason"] for e in events("skipped")].count("digest-changed")
+    # A frozen field changing while paused: --resume compares the live digest, records the sticky suspension, refuses.
+    assert cli("--contract", owner, "--every", "2", at="2026-11-10T17:31Z")[0] == 0
+    assert cli("--pause", "--contract", owner, at="2026-11-10T17:31Z")[0] == 0 and pi.schedules_pending(repo, T("2026-11-10T17:31Z"))
+    resume_fx.build(lib, repo, "driving", owner_id=owner, max_cycles=4)
+    seen = changed()
+    for unused in range(2):
+        rc, out = cli("--resume", "--contract", owner, at="2026-11-10T17:32Z")
+        assert rc == 1 and "suspended because its contract digest changed" in out and changed() == seen + 1, out
+    resume_fx.build(lib, repo, "driving", owner_id=owner)
+    assert cli("--resume", "--contract", owner, at="2026-11-10T17:33Z")[0] == 1 and changed() == seen + 1
+    assert cli("--cancel", "--contract", owner, at="2026-11-10T17:33Z")[0] == 0
+    # --pause records it too; and a tick records it before a parked receipt's own skip.
+    assert cli("--contract", owner, "--every", "2", at="2026-11-10T17:33Z")[0] == 0
+    resume_fx.build(lib, repo, "driving", owner_id=owner, max_cycles=4)
+    assert cli("--pause", "--contract", owner, at="2026-11-10T17:34Z") == (0, "paused %s\n" % owner) and changed() == seen + 2
+    resume_fx.build(lib, repo, "driving", owner_id=owner)
+    assert cli("--cancel", "--contract", owner, at="2026-11-10T17:34Z")[0] == 0
+    assert cli("--contract", owner, "--every", "2", at="2026-11-10T17:34Z")[0] == 0
+    resume_fx.build(lib, repo, "parked", diagnostic=wall, owner_id=owner, max_cycles=4)
+    status = tick("2026-11-10T17:34Z")
+    assert status.startswith("skipped: schedule for %s suspended" % owner) and changed() == seen + 3, status
+    resume_fx.build(lib, repo, "driving", owner_id=owner)
+    assert cli("--cancel", "--contract", owner, at="2026-11-10T17:34Z")[0] == 0 and spawn.call_count == 5
+    # Expiry is exclusive: an occurrence before it runs, none at or after it; --list shows the end.
+    assert cli("--contract", owner, "--every", "1", "--until", "2026-11-10T20:00Z", at="2026-11-10T17:35Z")[1] == (
+        "scheduled %s every 1h; next due 2026-11-10T18:00:00Z; until 2026-11-10T20:00:00Z\n" % owner)
+    assert tick("2026-11-10T19:05Z").startswith("resumed autopilot (schedule occurrence 2026-11-10T19:00:00Z")
+    assert listing("2026-11-10T19:30Z").endswith(" state active  next due none  last run 2026-11-10T19:05:00Z "
+                                                 "(occurrence 2026-11-10T19:00:00Z)  expires 2026-11-10T20:00:00Z\n")
+    for at in ("2026-11-10T20:00Z", "2026-11-11T08:00Z"):
+        assert tick(at).startswith("skipped: schedule for %s expired at 2026-11-10T20:00:00Z" % owner), at
+    assert " state expired " in listing("2026-11-10T20:00Z") and spawn.call_count == 6
+    assert pi.schedules_pending(repo, T("2026-11-10T19:59Z")) and not pi.schedules_pending(repo, T("2026-11-10T20:00Z"))
+    # Another contract's receipt is not bound by this schedule; --list says so.
+    resume_fx.build(lib, repo, "driving", owner_id=other)
+    assert tick("2026-11-11T09:00Z").startswith("skipped: no schedule binds contract %s" % other)
+    assert " state inactive " in listing("2026-11-10T19:30Z") and spawn.call_count == 6
+    # An unterminated, malformed or linked log refuses every scheduled and unscheduled resume, kept as found.
+    good = log.read_text()
+    for bad in ("", good[:-1], good + "{\n", good + json.dumps({"schema": 1, "event": "create", "contract": other,
+                "digest": "0" * 64, "every_hours": 0, "anchor": "2026-11-10T00:00:00Z", "at": "2026-11-10T00:00:00Z"}) + "\n"):
+        log.write_text(bad)
+        for only in (True, False):
+            status = tick("2026-11-11T10:00Z", scheduled_only=only)
+            assert status.startswith("refused: schedule log ") and "kept as found" in status, status
+        assert log.read_text() == bad and cli("--list")[0] == 1 and pi.schedules_pending(repo)
+    # The size cap: a log at the limit reads, one byte over refuses and is kept.
+    with patch.object(pi, "SCHEDULE_MAX", len(good.encode())):
+        log.write_text(good)
+        assert cli("--list")[0] == 0
+        log.write_text(good + "\n")
+        assert "too large" in tick("2026-11-11T10:00Z") and log.read_text() == good + "\n"
+    # An append past the cap is refused before it writes; one ending exactly at the cap lands.
+    line = json.dumps({"at": "2026-11-11T10:00:00Z", "contract": owner, "event": "pause", "schema": 1},
+                      sort_keys=True, separators=(",", ":")) + "\n"
+    log.write_text(good)
+    with patch.object(pi, "SCHEDULE_MAX", len(good) + len(line) - 1):
+        rc, out = cli("--pause", "--contract", owner, at="2026-11-11T10:00Z")
+        assert rc == 1 and "would exceed" in out and log.read_text() == good, out
+    with patch.object(pi, "SCHEDULE_MAX", len(good) + len(line)):
+        assert cli("--pause", "--contract", owner, at="2026-11-11T10:00Z")[0] == 0 and log.read_text() == good + line
+    # A corrupted log refuses whatever the receipt is: parked, done, or without an owner id.
+    log.write_text(good + "{\n")
+    for name, fields in (("parked", {"owner_id": owner}), ("done", {"owner_id": owner}), ("driving", {})):
+        resume_fx.build(lib, repo, name, diagnostic=wall, **fields)
+        for only in (True, False):
+            status = tick("2026-11-11T10:00Z", scheduled_only=only)
+            assert status.startswith("refused: schedule log is malformed") and "kept as found" in status, (name, status)
+    assert log.read_text() == good + "{\n"
+    log.unlink(); (log.parent / "elsewhere.jsonl").write_text(good); log.symlink_to("elsewhere.jsonl")
+    assert tick("2026-11-11T10:00Z").startswith("refused: schedule log is a symlink") and log.is_symlink()
+    assert spawn.call_count == 6
+PY
+# Through the tick: a schedule needs no OMS_TICK_WAKE; it reports its decision and resumes nothing early.
+rm -rf "$rs/.oms/tick"
+OMS_ROOT="$ROOT" python3 -c 'import os, sys; sys.path[:0] = [sys.argv[1], os.environ["OMS_ROOT"] + "/scripts/lib"]; import resume_fx; resume_fx.build(os.environ["OMS_ROOT"] + "/scripts/lib", sys.argv[2], "driving", owner_id="owner_" + "c" * 32)' "$TMP" "$rs"
+sc=owner_cccccccccccccccccccccccccccccccc
+out="$("$TICK" schedule --repo "$rs" --contract "$sc" --every 24)" && [ "${out#scheduled "$sc" every 24h; next due }" != "$out" ] ||
+  fail "tick schedule must bind the approved contract: $out"
+rc=0; "$TICK" schedule --repo "$rs" --contract "$sc" --every 0 2>/dev/null || rc=$?
+[ "$rc" -eq 2 ] || fail "a zero interval must exit 2, got $rc"
+out="$("$TICK" schedule --list --repo "$rs")"
+printf '%s' "$out" | grep >/dev/null -E "^$sc  every 24h  state active  next due [0-9T:-]+Z  last run never  expires never$" ||
+  fail "tick schedule --list must show the schedule: $out"
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$rs" --dry-run)"
+printf '%s' "$out" | grep >/dev/null "^schedule $rs: skipped: schedule for $sc not due; resumes when the next occurrence is due at " ||
+  fail "a dry-run tick must show the schedule decision: $out"
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$rs")"
+printf '%s' "$out" | grep >/dev/null "^schedule $rs: skipped: schedule for $sc not due" && printf '%s' "$out" | grep >/dev/null 'wake=0' &&
+  ! printf '%s' "$out" | grep >/dev/null '^wake ' || fail "a scheduled tick must take only the resume path: $out"
+[ -z "$(find "$rs/.oms/tick" -name 'autopilot-*.log')" ] || fail "a schedule that is not due must spawn nothing"
+"$TICK" schedule --repo "$rs" --cancel --contract "$sc" >/dev/null || fail "tick schedule --cancel must succeed"
+# Only cancelled schedules left: the tick is exactly the unscheduled one; a corrupted log still takes the refusal path.
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$rs")"
+! printf '%s' "$out" | grep >/dev/null -E '^(schedule|wake) ' && printf '%s' "$out" | grep >/dev/null 'wake=skipped' &&
+  [ "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["wake"])' "$rs/.oms/tick/last.json")" = skipped ] ||
+  fail "a log of cancelled schedules must leave the wake skipped: $out"
+printf '{\n' >> "$rs/.oms/tick/schedules.jsonl"
+out="$(PATH="$TMP/wake-bin:$PATH" "$TICK" run --repo "$rs")"
+printf '%s' "$out" | grep >/dev/null "^schedule $rs: refused: schedule log is malformed" ||
+  fail "a corrupted schedule log must refuse through the tick: $out"
+rm -rf "$rs/.oms/tick"
 
 # --- install / status / uninstall through the stub --------------------------
 ci_repo="$TMP/ci-owner"; make_committed_repo "$ci_repo"
