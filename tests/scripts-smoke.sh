@@ -21756,6 +21756,82 @@ PY
   fi
 }
 
+test_session_handoff_prompt_from_records() {
+  local cwd="$TMP/sh-prompt-proj" SH="$ROOT/scripts/session-handoff.sh"
+  local out vector="AK""IAIOSFODNN7EXAMPLE" tid
+
+  make_committed_repo "$cwd"
+  # Empty repo: works with nothing recorded and says so instead of omitting.
+  out="$("$SH" prompt --cwd "$cwd")" || fail "prompt must work with no task or plan"
+  printf '%s\n' "$out" | grep -q 'task goal: not recorded (no active task)' || fail "no-task prompt lost its not-recorded goal"
+  printf '%s\n' "$out" | grep -q '^truncated: no$' || fail "prompt must always carry a truncated line"
+  printf '%s\n' "$out" | grep -q 'previous handoff: not recorded' || fail "missing handoff must print not recorded"
+
+  "$ROOT/scripts/agent-task.sh" --repo "$cwd" init --goal "ship the feature" --verify true \
+    --next "write the docs" >/dev/null
+  "$ROOT/scripts/agent-task.sh" --repo "$cwd" update --done "criterion one" --decision "use sqlite" \
+    --verification "ran unit tests: ok" >/dev/null
+  tid="$("$ROOT/scripts/agent-task.sh" --repo "$cwd" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')"
+  "$ROOT/scripts/agent-plan.sh" --repo "$cwd" init --goal "plan goal" --accept true >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$cwd" add --id t1 --title first >/dev/null
+  "$ROOT/scripts/agent-plan.sh" --repo "$cwd" add --id t2 --title second --depends t1 >/dev/null
+  mkdir -p "$cwd/.oms/artifacts/review" "$cwd/.oms/handoffs"
+  printf 'x\n' > "$cwd/.oms/handoffs/claude-prev-20261110.md"
+  python3 - "$cwd/.oms/artifacts/review/_findings-RUN1.jsonl" "$vector" <<'PY'
+import json, sys
+rows = [
+    {"schema": 1, "kind": "review-finding", "id": "f-aaaaaaaaaaaa", "run": "RUN1", "ts": "2026-11-10T00:00:00Z",
+     "severity": "advisory", "file": "a.txt", "line": 1, "summary": "style nit", "anchor": "in-diff", "seat": "codex"},
+    {"schema": 1, "kind": "review-finding", "id": "f-bbbbbbbbbbbb", "run": "RUN1", "ts": "2026-11-10T00:00:00Z",
+     "severity": "blocking", "file": "b.txt", "line": 2, "summary": "wrong bound", "anchor": "in-diff", "seat": "codex"},
+    {"schema": 1, "kind": "review-finding", "id": "f-cccccccccccc", "run": "RUN1", "ts": "2026-11-10T00:00:00Z",
+     "severity": "blocking", "file": "c.txt", "line": 3, "summary": "leaks " + sys.argv[2], "anchor": "in-diff", "seat": "codex"},
+]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    for row in rows:
+        fh.write(json.dumps(row) + "\n")
+PY
+
+  out="$("$SH" prompt --cwd "$cwd")" || fail "prompt failed on a populated repo"
+  local section
+  for section in Goal State Decisions 'Open findings' 'Verified / Not verified' 'Next step' Pointers; do
+    printf '%s\n' "$out" | grep -q "^## $section\$" || fail "prompt lost section: $section"
+  done
+  printf '%s\n' "$out" | grep -qF "task goal: ship the feature [src: task $tid]" || fail "goal needs the task id"
+  printf '%s\n' "$out" | grep -q 'criteria ids: criterion-' || fail "goal needs criteria ids"
+  printf '%s\n' "$out" | grep -q 'blocked t2: second -- dependencies-unfinished; waits on t1\[ready\] \[src: task t2\]' ||
+    fail "blocked plan task needs its reason and source"
+  printf '%s\n' "$out" | grep -q 'use sqlite \[src: wj_' || fail "decision needs its journal event id"
+  printf '%s\n' "$out" | grep -qF -- '- blocking b.txt:2 -- wrong bound [src: f-bbbbbbbbbbbb]' || fail "blocking finding line missing"
+  [ "$(printf '%s\n' "$out" | grep -n 'f-bbbbbbbbbbbb\]' | cut -d: -f1)" -lt "$(printf '%s\n' "$out" | grep -n 'f-aaaaaaaaaaaa\]' | cut -d: -f1)" ] ||
+    fail "blocking findings must come before advisory ones"
+  printf '%s\n' "$out" | grep -q 'recorded: .*ran unit tests: ok \[src: task '"$tid"' verification ' || fail "verification record missing"
+  printf '%s\n' "$out" | grep -q 'task gate: none' || fail "an unverified task must not read as verified"
+  printf '%s\n' "$out" | grep -q 'NOT verified plan-task-t1 ' || fail "unverified criteria must be listed"
+  printf '%s\n' "$out" | grep -qF -- "- write the docs [src: task $tid]" || fail "next step missing"
+  printf '%s\n' "$out" | grep -qF 'oms session-handoff show claude-prev-20261110.md' || fail "previous handoff pointer missing"
+  printf '%s\n' "$out" | grep -q 'f-cccccccccccc\]' || fail "withheld line must keep its source id"
+  printf '%s\n' "$out" | grep -q 'withheld: this line matched the sensitive-content scan' || fail "flagged line must be withheld"
+  printf '%s\n' "$out" | grep -q 'withheld: 1 line(s)' || fail "withheld count line missing"
+  printf '%s\n' "$out" | grep -qF "$vector" && fail "scan let a credential-shaped value through"
+
+  # Byte bound: never above the cap, and the cut is named.
+  out="$("$SH" prompt --cwd "$cwd" --max-bytes 900)" || fail "bounded prompt failed"
+  [ "$(printf '%s\n' "$out" | wc -c)" -le 900 ] || fail "prompt exceeded --max-bytes"
+  printf '%s\n' "$out" | grep -q '^truncated: [0-9]* line(s) omitted' || fail "bounded prompt must name the cut"
+  "$SH" prompt --cwd "$cwd" --max-bytes 10 >/dev/null 2>&1 && fail "--max-bytes below the floor must be refused"
+
+  # --output refuses to overwrite.
+  "$SH" prompt --cwd "$cwd" --output "$TMP/sh-prompt-out.md" >/dev/null || fail "--output must write a new file"
+  grep -q '^## Next step$' "$TMP/sh-prompt-out.md" || fail "--output file lacks the prompt"
+  if "$SH" prompt --cwd "$cwd" --output "$TMP/sh-prompt-out.md" >/dev/null 2>&1; then
+    fail "--output must refuse to overwrite"
+  fi
+  # Read-only: nothing under .oms/task or plan changed shape.
+  git -C "$cwd" status --porcelain | grep -q . && fail "prompt must not touch tracked files"
+  return 0
+}
+
 test_session_handoff_codex_digest() {
   local home="$TMP/sh-codex-home"
   local cwd="/proj/codex-app"

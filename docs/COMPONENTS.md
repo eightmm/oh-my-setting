@@ -1258,6 +1258,27 @@ request>` with `open: oms session-handoff show NAME`. Only that pointer is
 printed, never the digest body; a line the secret scan flags is withheld with
 its pointer kept. Nothing is indexed, so a digest `oms gc` removed stops
 matching, and the recall injected into provider context carries no pointer.
+
+`oms session-handoff prompt [--cwd PATH] [--max-bytes N] [--output NEW_FILE]`
+prints an editable next-session prompt for a person to review and paste into a
+fresh session of any provider, instead of relying on a provider's lossy
+compaction. It is a deterministic template over records OMS already holds (no
+model call, no OMS state written, nothing re-run or approved): Goal (task and
+plan goal, criteria ids), State (plan tasks done / ready / blocked with the
+`runtime next --explain` reasons), Decisions (journal, newest first), Open
+findings (blocking first), Verified / Not verified (the task's recorded
+verification lines and gate state, and `runtime evidence matrix` criterion
+status), Next step (the task's `Next Step`, else "not recorded"; none is
+invented) and Pointers (the `oms` commands that open each source, plus the
+newest handoff digest). Every line ends with `[src: ID]`; a source with nothing
+recorded prints "not recorded" and a reader that failed prints "unavailable".
+Lines pass the shared secret scan and a flagged one is replaced by a
+"withheld" notice that keeps its source id. Output is held to `--max-bytes`
+(512-65536, default 4096) and a `truncated:` line always names what was cut.
+`--output` creates a new file and refuses to overwrite one. It complements the
+transcript-based `capture` digest, which holds the conversation rather than the
+recorded work state, and `oms runtime brief`, which compares two saved
+snapshots.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
