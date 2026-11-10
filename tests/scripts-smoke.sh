@@ -16034,6 +16034,74 @@ assert g["reviewer"]["cache_read_share"] == 0.6667 and g["reviewer"]["admitted"]
 assert g["reviewer"]["tokens_per_admitted"] == 1400 and g["reviewer"]["not_admitted_tokens"] == 400, g
 assert g["builder"]["not_admitted_results"] == 1 and g["unknown"]["cache_read_share"] == 1.0, g
 ' || fail "role JSON should carry share, admission and warnings"
+  # --waste reads only what is recorded: delegate rows, the hook ledger and the
+  # output-digest captures. Each category names its source and its share; one
+  # with no source says `not recorded` instead of reading as no waste.
+  local waste="$project/waste" waste_out waste_before waste_after
+  mkdir -p "$waste/.oms/artifacts/output-digest" "$waste/.oms/hooks"
+  git -C "$waste" init -q
+  cat > "$waste/.oms/artifacts/index.jsonl" <<EOF
+{"schema":1,"event_id":"w1","ts":"2026-07-01T00:00:01Z","kind":"delegate","provider":"codex","exit":1,"role":"reviewer","tokens":1000,"prompt_sha256":"$dig_a","patch_sha256":"$dig_b","selected_model":"gpt-x"}
+{"schema":1,"event_id":"w2","ts":"2026-07-01T00:00:02Z","kind":"delegate","provider":"codex","exit":0,"verify_exit":3,"role":"reviewer","tokens":500,"prompt_sha256":"$dig_a","selected_model":"gpt-x"}
+{"schema":1,"event_id":"w3","ts":"2026-07-01T00:00:03Z","kind":"delegate","provider":"claude","exit":0,"role":"builder","tokens":300,"prompt_sha256":"$dig_b","patch_sha256":"$dig_a"}
+{"schema":1,"event_id":"w4","ts":"2026-07-01T00:00:04Z","kind":"delegate","provider":"claude","exit":0,"role":"builder","tokens":200,"prompt_sha256":"$dig_b"}
+{"schema":1,"event_id":"w5","ts":"2026-07-01T00:00:05Z","kind":"patch-admit","provider":"local","exit":0,"patch_sha256":"$dig_a"}
+EOF
+  cat > "$waste/.oms/hooks/events.jsonl" <<'EOF'
+{"action":"telemetry","session":"s1","model":"model-a","ts":"2026-07-01T01:00:00Z"}
+{"action":"telemetry","session":"s1","model":"model-b","ts":"2026-07-01T01:01:00Z","cache_creation_tokens":700}
+{"action":"telemetry","session":"s1","model":"model-c","ts":"2026-07-01T01:02:00Z","subagent_type":"worker"}
+{"action":"telemetry","session":"s1","model":"model-b","ts":"2026-07-01T01:03:00Z"}
+{"action":"telemetry","session":"s2","model":"model-a","ts":"2026-07-01T01:04:00Z"}
+{"action":"injection","session":"s1","status":"route","bytes":300,"lines":3}
+{"action":"injection","session":"s1","status":"guard","bytes":200,"lines":2}
+{"action":"injection","session":"s2","status":"route","bytes":100,"lines":1}
+EOF
+  head -c 10 /dev/zero | tr '\0' x > "$waste/.oms/artifacts/output-digest/20260701T000000Z-1.log"
+  head -c 30 /dev/zero | tr '\0' x > "$waste/.oms/artifacts/output-digest/20260701T000001Z-2.log"
+  waste_before="$(find "$waste/.oms" -type f -print | LC_ALL=C sort | while IFS= read -r file; do cksum "$file"; done)"
+  waste_out="$("$ROOT/scripts/artifact-index.sh" --repo "$waste" telemetry --waste --top 1)" ||
+    fail "telemetry --waste should run: $waste_out"
+  waste_after="$(find "$waste/.oms" -type f -print | LC_ALL=C sort | while IFS= read -r file; do cksum "$file"; done)"
+  [ "$waste_before" = "$waste_after" ] || fail "telemetry --waste must not write anything"
+  contains "$waste_out" '1 unadmitted delegate tokens: 1700 of 2000 reported delegate tokens over 3 row(s) -- share 85.0%' ||
+    fail "unadmitted share missing: $waste_out"
+  printf '%s\n' "$waste_out" | grep -Eq '^  1000 tokens  role=reviewer provider=codex model=gpt-x  source=w1$' ||
+    fail "the largest unadmitted row must name role, provider, model and source: $waste_out"
+  contains "$waste_out" '2 repeated failed delegations: 1500 of 2000 reported delegate tokens in 1 group(s) -- share 75.0%' ||
+    fail "a brief whose every attempt failed (exit or verification) must be listed once: $waste_out"
+  contains "$waste_out" 'sources=w1,w2' || fail "repeat group must name its rows: $waste_out"
+  contains "$waste_out" '3 model switches within a session: 1 of 2 transitions -- share 50.0%' ||
+    fail "a subagent row must not count as a model switch: $waste_out"
+  contains "$waste_out" 'model-a -> model-b  cache-creation=700  source=.oms/hooks/events.jsonl session=s1' ||
+    fail "model switch must name its ledger source: $waste_out"
+  contains "$waste_out" '4 hook-injected bytes by session: 500 of 600 bytes in the top session(s), 2 session(s) in all' ||
+    fail "top injection session share missing: $waste_out"
+  contains "$waste_out" '5 largest stored outputs: 30 of 40 bytes' ||
+    fail "stored output share missing: $waste_out"
+  contains "$waste_out" 'source=.oms/artifacts/output-digest/20260701T000001Z-2.log' ||
+    fail "stored output must name its file: $waste_out"
+  contains "$waste_out" 'never approval or verification evidence' && contains "$waste_out" 'not that nothing was wasted' ||
+    fail "waste view must say what absence means: $waste_out"
+  "$ROOT/scripts/artifact-index.sh" --repo "$waste" --json telemetry --waste | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["waste"]["categories"]
+assert c["unadmitted_delegate_tokens"]["tokens"] == 1700 and len(c["unadmitted_delegate_tokens"]["items"]) == 3, c
+assert c["repeated_failed_delegations"]["items"][0]["attempts"] == 2, c
+assert c["model_switches"]["switches"] == 1 and c["stored_output_bytes"]["files"] == 2, c
+' || fail "waste JSON should carry every category"
+  waste_out="$("$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --waste)" ||
+    fail "telemetry --waste without ledgers should run: $waste_out"
+  contains "$waste_out" '3 model switches within a session: not recorded (no hook event ledger)' ||
+    fail "a missing ledger must read as not recorded: $waste_out"
+  contains "$waste_out" '5 largest stored outputs: not recorded (no output-digest capture directory)' ||
+    fail "missing captures must read as not recorded: $waste_out"
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --waste --by day >/dev/null 2>&1 ||
+    fail "--waste must not combine with --by"
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --top 3 >/dev/null 2>&1 ||
+    fail "--top needs --waste"
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --waste --top 0 >/dev/null 2>&1 ||
+    fail "--top must be positive"
   # The writer records the role on delegate rows only.
   local wrote="$project/roles-write"
   mkdir -p "$wrote"
