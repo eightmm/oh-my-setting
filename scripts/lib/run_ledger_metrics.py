@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import stat
 import statistics
 import unicodedata
 
@@ -71,16 +72,32 @@ def load_contract(path):
 
 
 def _file_digest(root, relative):
-    path = os.path.join(root, relative)
+    root = os.path.realpath(root)
+    path = os.path.realpath(os.path.join(root, relative))
     try:
-        if os.path.getsize(path) > MAX_CODE_BYTES:
-            return "too-large"
-        digest = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 16), b""):
+        if os.path.commonpath((root, path)) != root:
+            return "missing"
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                return "missing"
+            if info.st_size > MAX_CODE_BYTES:
+                digest = hashlib.sha256()
+                digest.update(handle.read(1 << 16))
+                handle.seek(-min(info.st_size, 1 << 16), os.SEEK_END)
+                digest.update(handle.read(1 << 16))
+                return "sample:%d:%s" % (info.st_size, digest.hexdigest())
+            digest = hashlib.sha256()
+            remaining = MAX_CODE_BYTES
+            while remaining:
+                block = handle.read(min(1 << 16, remaining))
+                if not block:
+                    break
                 digest.update(block)
-        return digest.hexdigest()
-    except OSError:
+                remaining -= len(block)
+            return digest.hexdigest()
+    except (OSError, ValueError):
         return "missing"
 
 

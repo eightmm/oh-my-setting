@@ -25181,6 +25181,57 @@ print(len({json.loads(line)["group"] for line in sys.stdin}))')" = 1 ] ||
   out="$(cd "$repo" && "$SH" top --metric loss 2>/dev/null)"
   [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" = 1 ] || fail "only the run under the new eval code should rank: $out"
 
+  # Repeated seeds use the last ledger row, independent of ranking direction.
+  ledger_record 0.80 --seed 1 --group rerun -- true
+  ledger_record 0.20 --seed 1 --group rerun -- true
+  ledger_record 0.40 --seed 2 --group rerun -- true
+  out="$(cd "$repo" && "$SH" top --metric loss --by-group 2>/dev/null)"
+  contains "$out" "loss mean=0.3" || fail "latest seed rerun must win: $out"
+
+  # The contract root follows the ledger, including when invoked elsewhere.
+  out="$(cd "$d" && "$SH" top --metric loss --file "$repo/docs/EXPERIMENTS.jsonl" 2>/dev/null)" ||
+    fail "external --file should use the ledger repository"
+  (cd "$d" && "$SH" --file "$repo/docs/EXPERIMENTS.jsonl" --metrics "$repo/m.json" -- true >/dev/null 2>"$d/record-err") ||
+    fail "external --file recording failed"
+  out="$(cd "$repo" && "$SH" top --metric loss 2>"$d/top-err")" || fail "external row should share the contract"
+  python3 - "$repo/docs/EXPERIMENTS.jsonl" <<'PYTEST' || fail "external row used the wrong eval root"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert rows[-1]["metric_contract"]["loss"]["digest"] == rows[-2]["metric_contract"]["loss"]["digest"]
+PYTEST
+
+  # File digests reject escapes and special files and distinguish large files.
+  python3 - "$ROOT/scripts/lib" "$repo" "$d" <<'PYTEST' || fail "eval code digest safety"
+import os, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import run_ledger_metrics as m
+root, outside = sys.argv[2:]
+with open(os.path.join(outside, "outside"), "wb") as f:
+    f.write(b"outside")
+os.symlink(os.path.join(outside, "outside"), os.path.join(root, "escape"))
+assert m._file_digest(root, "escape") == "missing"
+os.mkfifo(os.path.join(root, "pipe"))
+os.symlink("pipe", os.path.join(root, "pipe-link"))
+probe = "import sys; sys.path.insert(0, sys.argv[1]); import run_ledger_metrics as m; print(m._file_digest(sys.argv[2], 'pipe-link'))"
+result = subprocess.run([sys.executable, "-c", probe, sys.argv[1], root], capture_output=True, text=True, timeout=int(os.environ.get("OMS_TEST_CALL_TIMEOUT", "120")))
+assert result.returncode == 0 and result.stdout.strip() == "missing", result
+assert m._file_digest(root, "absent") == "missing"
+path = os.path.join(root, "large")
+with open(path, "wb") as f:
+    pass
+assert len(m._file_digest(root, "large")) == 64
+with open(path, "wb") as f:
+    f.write(b"a" * m.MAX_CODE_BYTES)
+assert len(m._file_digest(root, "large")) == 64
+with open(path, "wb") as f:
+    f.write(b"a" * (m.MAX_CODE_BYTES + 1))
+first = m._file_digest(root, "large")
+with open(path, "r+b") as f:
+    f.seek(-1, 2)
+    f.write(b"b")
+assert m._file_digest(root, "large") != first
+PYTEST
+
   # A broken contract never blocks a run, and never silently ranks.
   printf '{"schema": 1, "metrics": {"loss": {"direction": "up"}}}\n' > "$repo/docs/metric-contract.json"
   ledger_record 0.10 -- true

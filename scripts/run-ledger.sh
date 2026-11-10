@@ -96,7 +96,9 @@ Metric contract (optional, git-tracked beside the ledger):
    "split": "val", "aggregation": "mean over folds",
    "eval_command": "python eval.py", "eval_code": ["eval.py"]}}}
 Each finished row records, per declared metric, those fields and a digest
-that also covers the eval_code files' contents. Rows without it keep working.
+that covers eval_code contents (large files use size and a prefix/suffix sample).
+Paths resolve within the ledger's repository; non-regular files are ignored.
+Rows without a contract keep working.
 An optional "splits": {"test": {"role": "final"}, "val": {"role": "selection"}}
 block marks a split's role. `top` then adds an advisory on stderr: how many
 recorded runs reported a metric measured on a final split (per seed group
@@ -231,8 +233,9 @@ if [ "$MODE" = "top" ]; then
   [ "$N" -gt 0 ] || fail "N must be a positive integer"
   LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
+  CONTRACT_ROOT="$(oms_repo_root "$(dirname "$LEDGER")")"
   OMS_METRIC="$METRIC" OMS_DIRECTION="$DIRECTION" OMS_N="$N" OMS_ALL="$INCLUDE_ALL" \
-    OMS_BY_GROUP="$BY_GROUP" OMS_MIXED="$MIXED" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$STATE_ROOT" \
+    OMS_BY_GROUP="$BY_GROUP" OMS_MIXED="$MIXED" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$CONTRACT_ROOT" \
     python3 - "$LEDGER" <<'EOF'
 import json, math, os, sys
 sys.path.insert(0, os.environ["OMS_RL_LIB"])
@@ -430,6 +433,7 @@ done
 
 LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
 mkdir -p "$(dirname "$LEDGER")"
+CONTRACT_ROOT="$(oms_repo_root "$(dirname "$LEDGER")")"
 
 git_sha="none"
 dirty=0
@@ -570,7 +574,7 @@ run_ledger_write_row() {
   local row_status="$1" row_duration="$2"
   shift 2
   OMS_METRICS_JSON="$METRICS_JSON" OMS_GATE_STATUS="$GATE_STATUS" OMS_GATE_REASON="$REASON" \
-    OMS_LEDGER_RUN_ID="$effective_run_id" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$STATE_ROOT" \
+    OMS_LEDGER_RUN_ID="$effective_run_id" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$CONTRACT_ROOT" \
     OMS_RL_LEDGER="$LEDGER" OMS_RL_SEED="$SEED" OMS_RL_GROUP="$GROUP" \
     python3 - "$ts" "$git_sha" "$dirty" "$dirty_hash" "$slurm_job_id" \
     "$row_status" "$row_duration" "$NOTE" "$row_id" "$@" <<'EOF' > "$row_tmp"
