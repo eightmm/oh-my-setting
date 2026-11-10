@@ -837,6 +837,7 @@ run_provider() {
 }
 ma_run_debate_rounds
 [ "$debate_stop_reason" = agreed ] || fail "agreement in round 3 must stop as agreed (got: $debate_stop_reason)"
+# shellcheck disable=SC2154 # set by ma_run_debate_rounds
 [ "$debate_rounds_run" -eq 2 ] || fail "rounds run must be 2 (got: $debate_rounds_run)"
 [ -f "$ARTIFACT_DIR/codex-stable-$timestamp-r3.md" ] || fail 'the agreeing round must have run'
 if ls "$ARTIFACT_DIR"/*-r4.md >/dev/null 2>&1; then fail 'no round may run after agreement'; fi

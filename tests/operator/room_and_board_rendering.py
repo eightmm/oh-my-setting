@@ -7321,7 +7321,10 @@ all_done = row_fixture([("fin-a", "done", 9), ("fin-b", "done", 130)])
 assert "No active calls · 2 finished, see Past" in render(all_done, "claude", 80, 30, view="tree", navigation={})
 assert "No calls yet" in render(row_fixture([]), "claude", 80, 30, view="tree", navigation={})
 settled_colored = render(mixed, "claude", 100, 40, view="tree", color=True, navigation={"tab": "past"})
-assert "\033[90mWORKER Luna 6" in settled_colored and "\033[32mWORKER Luna 6" not in settled_colored.split("Past")[-1], settled_colored
+# Settled rows draw in the dim token at whatever depth the terminal offers, never a role colour.
+from panel_view import tint as settled_tint
+settled_codes = re.findall(r"\033\[([0-9;]*)mWORKER Luna 6", settled_colored.split("Past")[-1])
+assert settled_codes and set(settled_codes) == {settled_tint("x", "dim", True).split("x")[0][2:-1]}, settled_colored
 
 # END room rendering integration
 

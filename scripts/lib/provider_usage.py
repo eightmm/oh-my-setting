@@ -13,7 +13,7 @@ from dashboard_projection import clean, display_width, mapping, number
 from panel_metrics import READING_FRESH_SECONDS, five_hour, percent, quota_bar
 
 SCHEMA = 1
-# name, long name, strip name, one-letter name, palette token. The panel has no per-provider token: Claude
+# name, long name, strip name, one-letter name, palette style. The panel has no colour per provider: Claude
 # takes the warm main colour, Codex the counsel blue and Antigravity the lavender judge colour.
 PROVIDERS = (("claude", "Claude", "Claude", "C", "main"),
              ("codex", "Codex", "Codex", "X", "counsel"),
@@ -190,11 +190,11 @@ def _seat_count(provider):
 
 def _segment(provider, key, mode, unicode, now):
     """Pieces [(text, token)] of one provider at one detail level."""
-    short, letter, token = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
+    short, letter, tone = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
     tight = _tightest(provider)
     dash = "—" if unicode else "--"
     terse = mode in {"short_bars", "short", "minimal"}
-    pieces = [(letter if terse else short, token)]
+    pieces = [(letter if terse else short, tone)]
     if tight is None:
         pieces.append((" " + dash, "dim"))
         if provider["reading"]["stale"]:
