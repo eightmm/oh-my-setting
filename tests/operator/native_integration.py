@@ -500,10 +500,27 @@ swap_window = ("@1", swap_attempt, "%1", "fixture-main", "fixture-room")
 swap_old = {"attempt_id": swap_attempt, "provider": "claude", "tool": "panel-main", "terminal": False,
             "state": "working", "refs": {"panel_room_participant": "fixture-main", "panel_host": "tmux",
                                            "panel_harness": "claude"}}
-for usage, land_active, ack, manual, rolled in ((97, False, False, False, False), (100, False, False, False, False),
+for usage, land_active, ack, manual, rolled, *drift in ((97, False, False, False, False), (100, False, False, False, False),
                                                 (100, True, False, False, False), (97, True, True, False, False),
                                                 (97, False, True, False, False), (97, False, False, True, False),
-                                                (97, True, True, False, True)):
+                                                (97, True, True, False, True),
+                                                # Pane ownership drift: the swap refuses and types nothing further.
+                                                (100, False, True, True, False, "request"),
+                                                (100, False, True, True, False, "handoff"),
+                                                (100, False, True, True, False, "exit"),
+                                                (100, False, True, True, False, "unreadable"),
+                                                (100, False, True, True, False, "unreadable_exit")):
+    drift = drift[0] if drift else None
+    owner_reads = [0]
+    def tmux_answer(command, **kwargs):
+        if "display-message" in command:  # reads: 0 stamp, 1 before request, 2 before release, 3 before /exit
+            n, owner_reads[0] = owner_reads[0], owner_reads[0] + 1
+            first_bad = {"request": 1, "handoff": 2, "exit": 3, "unreadable": 0, "unreadable_exit": 3}.get(drift, 99)
+            if n >= first_bad:
+                return CompletedProcess(command, 1, "", "") if drift.startswith("unreadable") else \
+                    CompletedProcess(command, 0, "%%1\t9999\t0\t%s\t%%1" % swap_attempt, "")
+            return CompletedProcess(command, 0, "%%1\t4242\t0\t%s\t%%1" % swap_attempt, "")
+        return CompletedProcess(command, 0, json.dumps({"active": land_active}) if "land" in command else "", "")
     shown = dict(auto_reading, used=usage)
     with ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, {"OMS_PANEL_SWAP_HANDOFF_SECONDS": "1" if ack else "0"}))
@@ -531,8 +548,8 @@ for usage, land_active, ack, manual, rolled in ((97, False, False, False, False)
         stack.enter_context(patch.object(panel, "_swap_digest", return_value="fixture digest"))
         handoff_written = stack.enter_context(patch.object(panel, "_swap_handoff_file", return_value=project / "fixture-handoff"))
         launched = stack.enter_context(patch.object(panel, "launch_command", return_value="fixture"))
-        runs = stack.enter_context(patch.object(panel_native.subprocess, "run", side_effect=lambda command, **kwargs:
-            CompletedProcess(command, 0, json.dumps({"active": land_active}) if "land" in command else "", "")))
+        runs = stack.enter_context(patch.object(panel_native.subprocess, "run", side_effect=tmux_answer))
+        transferred = stack.enter_context(patch.object(room, "swap_main"))
         stack.enter_context(patch.object(panel_metrics, "current_weekly_reading", return_value=shown))
         stack.enter_context(patch.object(panel_metrics, "weekly_reading", return_value={}))
         claims = stack.enter_context(patch.object(panel_watch, "_auto_claim", return_value=True))
@@ -544,6 +561,18 @@ for usage, land_active, ack, manual, rolled in ((97, False, False, False, False)
                 panel_watch.automatic_swap(project, "codex", swap_attempt, "claude", "a" * 32)
             assert False, "fixture should stop the swap"
         except ValueError as error:
+            if drift:
+                assert isinstance(error, panel_native.PaneChanged), error
+                sent = [call.args[1] for call in typed.call_args_list]
+                assert len(sent) == (0 if drift in ("request", "unreadable") else 1), (drift, sent)
+                assert all(text.startswith("Please hand off") for text in sent), sent  # never /exit
+                assert not transferred.called, drift  # only the command text was prepared
+                commands = [call.args[0] for call in runs.call_args_list]
+                released = [c for c in commands if "@oms_panel_swap_attempt" in c]
+                assert any("releasing old main" in c for c in commands) == (drift in ("exit", "unreadable_exit")), drift
+                # An /exit refused after the marker was written clears the marker; earlier refusals never write it.
+                assert [("-u" in c) for c in released] == ([False, True] if drift in ("exit", "unreadable_exit") else []), (drift, released)
+                continue
             assert str(error) == ("automatic main swap postponed; handoff not received" if usage < 100 and not ack and not manual else
                                   "fixture exit"), error
         assert claims.call_count == (1 if not manual and (usage == 100 or ack) else 0)

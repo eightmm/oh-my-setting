@@ -1421,7 +1421,7 @@ def live_main_pane(repo):
 def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None, auto_commit=None):
     """Ask for a handoff, let the native CLI exit, then reuse its proven pane and participant."""
     from terminal_panel import MAIN_HARNESSES, _lock, _main_window, _swap_digest, _swap_handoff_file
-    from terminal_panel import _swap_main_window, _swap_submit, launch_command, live_mains, main_history
+    from terminal_panel import _swap_main_window, launch_command, live_mains, main_history
     from terminal_panel import main_installed, native_repository, policy, provider_catalog
     from terminal_panel import resolve_session, tmux_command
     requested_model = model
@@ -1460,6 +1460,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         swap_event = {"kind": "main-swap", "participant": member, "provider": owner,
                       "model": model, "attempt": attempt, "harness": harness}
         room.validate_main_swap(repo, dict(state, id=ident), swap_event, old, released=False)
+        stamp = pane_stamp(pane)  # the owner this swap means to replace; both sends re-read it before typing
         nonce = "swap-" + uuid.uuid4().hex
         request = ("Please hand off the current goal before a panel main swap. At a safe point, send one "
                    "bounded room handoff (max 3000 bytes) covering goal, decisions, in-flight worker/task IDs, "
@@ -1471,7 +1472,7 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
         exit_requested = False
         handoff_file = None
         try:
-            _swap_submit(pane, request)
+            submit_owned(pane, stamp, request)
             deadline = time.monotonic() + timeout
             handoff = None
             while time.monotonic() < deadline:
@@ -1510,6 +1511,8 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                     or room.resolve(repo, current_window[4], fresh=True) != ident
                     or live_mains(repo, session, ident) != 1):
                 raise ValueError("main window ownership changed during handoff; swap refused")
+            if pane_stamp(pane) != stamp:  # refuse before the swap marker or the auto-swap claim is written
+                raise PaneChanged("pane changed hands during handoff; old main left running")
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_state", "releasing old main"),
                            check=True, timeout=3, stdin=subprocess.DEVNULL)
             subprocess.run(tmux_command("set-option", "-w", "-t", pane, "@oms_panel_swap_attempt", attempt),
@@ -1522,7 +1525,13 @@ def swap_main(repo, harness, model=None, *, precondition=None, auto_handoff=None
                                    capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
                     raise
             exit_requested = True  # A failed submit can still have delivered the exit request.
-            _swap_submit(pane, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
+            try:
+                submit_owned(pane, stamp, "/quit" if old["refs"].get("panel_harness") == "pi" else "/exit")
+            except PaneChanged:
+                exit_requested = False  # nothing was typed: the preserved main may be swapped again
+                subprocess.run(tmux_command("set-option", "-w", "-u", "-t", pane, "@oms_panel_swap_attempt"),
+                               capture_output=True, check=False, timeout=3, stdin=subprocess.DEVNULL)
+                raise
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 prior = next((r for r in main_history(repo, ident) if r.get("attempt_id") == attempt), None)

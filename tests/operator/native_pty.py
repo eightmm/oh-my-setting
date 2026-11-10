@@ -153,7 +153,8 @@ if os.name == "posix":
             return clock[0]
         with ExitStack() as swap_patches:
             commands = swap_patches.enter_context(patch.object(panel.subprocess, "run",
-                return_value=subprocess.CompletedProcess([], 0, '{"active":false}', "")))
+                side_effect=lambda command, **kwargs: subprocess.CompletedProcess(command, 0,
+                    "%%1\t4242\t0\t%s\t%%1" % pi_attempt if "display-message" in command else '{"active":false}', "")))
             transfer = swap_patches.enter_context(patch.object(panel.room, "swap_main", return_value={"room": "pi-room"}))
             submit = swap_patches.enter_context(patch.object(panel, "_swap_submit",
                 side_effect=lambda pane, text: pi_exit_requested.append(text) if text == "/quit" else None))

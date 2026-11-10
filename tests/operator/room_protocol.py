@@ -1756,6 +1756,7 @@ for preflight_failure in (None, "target", "command", "interrupt", "room", "windo
             room_check.side_effect = [swap_state, ValueError("room status unavailable")]
         swap_process = contexts.enter_context(patch.object(panel.subprocess, "run",
             return_value=subprocess.CompletedProcess([], 0, '{"active":false}', "")))
+        contexts.enter_context(patch.object(panel_native, "pane_stamp", return_value=("%1", "4242", "0", swap_attempt, "%1")))
         if preflight_failure == "tmux":
             def fail_release_option(command, **kwargs):
                 if "@oms_panel_swap_attempt" in command:
