@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "size_buckets": {"small": {"max_lines": 30, "max_files": 3}, "medium": {"max_lines": 300, "max_files": 15}},
+  "rules": [
+    {"kind": ["explore", "summarize"], "size": ["small", "medium"], "tier": "light", "effort": "low",
+     "reason": "read-only work with a checkable answer: start cheap, raise effort only for the runs that fail"},
+    {"kind": ["explore", "summarize"], "tier": "light", "effort": "medium",
+     "reason": "large read-only input: more effort before a bigger model"},
+    {"kind": ["mechanical-edit"], "risk": ["low", "medium"], "size": ["small", "medium"], "tier": "light", "effort": "low",
+     "reason": "the tests or a diff check verify it: run low, re-run only the failures higher"},
+    {"kind": ["implement", "mechanical-edit", "debug"], "risk": ["high"], "tier": "deep", "effort": "high",
+     "reason": "the change touches a risk path: a wrong edit costs more than the model"},
+    {"kind": ["review"], "risk": ["low"], "size": ["small"], "tier": "routine", "effort": "medium",
+     "reason": "small low-risk change: a routine review is enough"},
+    {"kind": ["review"], "tier": "deep", "effort": "high",
+     "reason": "review judges other work: keep it at the deep tier"},
+    {"kind": ["design"], "tier": "deep", "effort": "high",
+     "reason": "design choices are hard to verify mechanically"},
+    {"kind": ["debug"], "size": ["small"], "tier": "routine", "effort": "medium",
+     "reason": "small bounded bug"},
+    {"kind": ["debug"], "tier": "deep", "effort": "medium",
+     "reason": "a wide failure surface needs the deeper tier before more effort"},
+    {"kind": ["implement"], "size": ["small"], "tier": "routine", "effort": "medium",
+     "reason": "small implementation with a verifier"},
+    {"kind": ["implement"], "size": ["medium"], "tier": "routine", "effort": "high",
+     "reason": "medium implementation: raise effort before the tier"},
+    {"kind": ["implement"], "tier": "deep", "effort": "high",
+     "reason": "large implementation"},
+    {"default": true, "tier": "routine", "effort": "medium",
+     "reason": "no rule matched (for example a large mechanical edit): routine tier at medium effort"}
+  ]
+}

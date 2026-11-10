@@ -583,6 +583,47 @@ for ran, provider in (("codex", "claude"), ("claude", "codex")):
         assert panel.main(["--repo", str(project), "--routes", "--room", "routes-room"]) == 0
     view = json.loads(out.getvalue())
     assert view["chosen"]["builder"]["provider"] == provider, (ran, view["chosen"]["builder"])
+# BEGIN route-rule-table
+import route_rules
+rule_table = route_rules.load()
+assert route_rules.lint(rule_table) == []
+for broken, needle in (
+        (dict(rule_table, rules=rule_table["rules"][:-1]), "missing default"),
+        (dict(rule_table, rules=[dict(rule_table["rules"][-1], extra=1)] + rule_table["rules"]), "unknown keys"),
+        (dict(rule_table, rules=[rule_table["rules"][-1]] + rule_table["rules"]), "default row must be last"),
+        (dict(rule_table, rules=[{"kind": ["design"], "tier": "deep", "effort": "high", "reason": "a"}] * 2
+              + rule_table["rules"][-1:]), "unreachable"),
+        (dict(rule_table, rules=[dict(rule_table["rules"][0], tier="frontier")] + rule_table["rules"][1:]), "tier must be")):
+    assert any(needle in problem for problem in route_rules.lint(broken)), (needle, route_rules.lint(broken))
+recommended = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--recommend", "implement",
+                               "--risk", "low", "--size", "small", "--json"]))
+assert (recommended["tier"], recommended["effort"], recommended["executes"]) == ("routine", "medium", False), recommended
+text = call(["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--recommend", "mechanical-edit",
+             "--risk", "low", "--size", "small", "--failed", "2", "--reasoning-effort", "high"])
+assert "tier light, effort low" in text and "explicit effort=high is kept" in text and "(suggestion)" in text, text
+assert route_rules.escalate("light", "low", 1) is None
+assert route_rules.escalate("light", "low", 2)["effort"] == "medium"
+assert route_rules.escalate("light", "high", 2) == {"tier": "routine", "effort": "high", "step": "tier"}
+assert route_rules.escalate("deep", "high", 5)["step"] == "ceiling"
+assert route_rules.size_bucket(rule_table, 31, 1) == "medium" and route_rules.size_bucket(rule_table, 5, 16) == "large"
+diffrepo = temporary / "route-diff"
+(diffrepo / "docs").mkdir(parents=True)
+(diffrepo / "hooks").mkdir()
+git_env = ["git", "-C", str(diffrepo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+subprocess.run(["git", "init", "-q", str(diffrepo)], check=True)
+(diffrepo / "docs/a.md").write_text("one\n")
+subprocess.run(git_env + ["add", "-A"], check=True)
+subprocess.run(git_env + ["commit", "-qm", "base"], check=True)
+(diffrepo / "docs/a.md").write_text("one\ntwo\n")
+subprocess.run(git_env + ["commit", "-qam", "docs"], check=True)
+(diffrepo / "hooks/x.sh").write_text("echo hi\n")
+subprocess.run(git_env + ["add", "-A"], check=True)
+subprocess.run(git_env + ["commit", "-qm", "hook"], check=True)
+docs_only = route_rules.inspect_range(diffrepo, "HEAD~2..HEAD~1", rule_table)
+assert (docs_only["risk"], docs_only["size"], docs_only["files"]) == ("low", "small", 1), docs_only
+hook = route_rules.inspect_range(diffrepo, "HEAD~1..HEAD", rule_table)
+assert hook["risk"] == "high", hook
+# END route-rule-table
 from panel_view import PURPOSE_NAMES
 assert set(routes["roles"]) <= set(PURPOSE_NAMES), "every role strategy needs a board label"
 assert PURPOSE_NAMES["scholar"] == "Literature research"
