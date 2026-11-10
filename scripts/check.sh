@@ -1440,6 +1440,7 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage platform-portability bash tests/platform-portability-smoke.sh
   stage council-failure-symmetry bash tests/council-failure-symmetry-smoke.sh
   stage supervisor bash tests/supervisor-smoke.sh
+  stage recipes python3 tests/test_recipes.py
   stage bsd-portability bash tests/bsd-portability-smoke.sh
   stage install-profile bash tests/install-profile-smoke.sh
   # Five end-to-end scenarios (~1-2 min); sits in CI lane 3 (position 63), whose predicted sum is lowest after lane 1.

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "kind": "workset",
+  "id": "oms-shared-feature",
+  "title": "Shared recipe integration",
+  "spec": {"repo": "control-plane", "path": "docs/RECIPES.md"},
+  "repos": [
+    {"id": "control-plane", "path": ".", "tasks": ["recipe-integration"]},
+    {"id": "companion", "path": "../companion", "tasks": ["recipe-consumer"]}
+  ]
+}

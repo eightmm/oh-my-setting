@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kind": "workspace",
+  "id": "oms-local-workspace",
+  "description": "Explicit local setup and an optional HTTP companion using Python's standard library.",
+  "inputs": {"message": {"type": "string", "default": "workspace ready"}},
+  "environment": {"WORKSPACE_MESSAGE": {"value": "${input.message}"}},
+  "ports": {"http": 43123},
+  "commands": {
+    "prepare": {
+      "argv": ["python3", "-c", "import os,pathlib; pathlib.Path('workspace-ready.txt').write_text(os.environ['WORKSPACE_MESSAGE'])"],
+      "timeout_seconds": 10
+    },
+    "http": {
+      "argv": ["python3", "-m", "http.server", "${port.http}", "--bind", "127.0.0.1"],
+      "timeout_seconds": 30
+    },
+    "probe": {
+      "argv": ["python3", "-c", "import pathlib,sys,urllib.request; response=urllib.request.urlopen('http://127.0.0.1:'+sys.argv[1]+'/workspace-ready.txt',timeout=3); pathlib.Path('http-response.txt').write_bytes(response.read())", "${port.http}"],
+      "timeout_seconds": 10
+    }
+  },
+  "setup": [{"id": "prepare", "command": "prepare", "outputs": [{"path": "workspace-ready.txt", "min_bytes": 1}]}],
+  "actions": {
+    "inspect": {"steps": [{"id": "probe", "command": "probe", "outputs": [{"path": "http-response.txt", "min_bytes": 1}]}]}
+  },
+  "companions": {"http": {"command": "http", "ready_port": "http", "startup_seconds": 5}}
+}

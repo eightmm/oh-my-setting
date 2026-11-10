@@ -242,6 +242,7 @@ plan-run
 project-doctor
 project-private
 provider-permissions
+recipe
 remove-project-template
 report
 room
