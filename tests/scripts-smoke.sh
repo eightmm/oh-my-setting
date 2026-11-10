@@ -26842,6 +26842,38 @@ PY
     --to codex --plan-task t1 --artifact-dir "$project/plan-arts" >/dev/null 2>&1 ) ||
     fail "plan-task with role should succeed"
   assert_one_artifact_contains "$project/plan-arts" 'codex-*.md' 'STRICT-API-REVIEWER'
+
+  # The descriptive role contract covers every bundled role and agrees with panel routing.
+  python3 "$ROOT/scripts/lib/role_contracts.py" >/dev/null || fail "role contracts should lint clean"
+  python3 -I - "$ROOT" "$TMP/role-contract-fixture" <<'PY' || fail "role contract lint should reject drift"
+import json, shutil, sys
+from pathlib import Path
+root, work = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(root / "scripts/lib"))
+import role_contracts
+
+def tree(edit):
+    shutil.rmtree(work, ignore_errors=True)
+    (work / "config").mkdir(parents=True)
+    shutil.copytree(root / "roles", work / "roles")
+    data = json.loads((root / "config/role-contracts.json").read_text())
+    edit(data["roles"], work)
+    (work / "config/role-contracts.json").write_text(json.dumps(data))
+    return role_contracts.check(work, writers={"builder"}, kinds={})
+
+def expect(edit, needle):
+    errors = tree(edit)
+    assert any(needle in e for e in errors), (needle, errors)
+
+assert tree(lambda r, w: None) == []
+expect(lambda r, w: r.pop("critic"), "without contract entry: critic")
+expect(lambda r, w: r.update(ghost=dict(r["critic"])), "without role file: ghost")
+expect(lambda r, w: r["critic"].update(writes="everything"), "critic: writes must be one of")
+expect(lambda r, w: r["critic"].update(may_delegate=True), "may_delegate must be false")
+expect(lambda r, w: r["critic"].update(writes="assigned-paths"), "contradicts")
+expect(lambda r, w: r["verifier"].update(returns=["no such line"]), "not present in the role file")
+expect(lambda r, w: r["builder"].update(read_only=True, writes="none"), "listed as a writer")
+PY
 }
 
 test_global_rules_stay_compact_and_route_workflows() {
