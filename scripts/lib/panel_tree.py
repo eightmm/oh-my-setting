@@ -389,6 +389,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             room_left -= display_width(part)
         head.append({"text": "".join(part for part, _ in legend_spans), "spans": legend_spans})
     head += [{"text": clipped(text, width), "style": style, "action": ("tab", "plan")} for text, style in banner]
+    import panel_work_health
+    head += [{"text": clipped(text, width), "spans": spans} for text, spans in
+             panel_work_health.lines(report, ranked, width, height, unicode, mains[0] if mains else None)]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
     head += needs_strip(report, width, unicode, ranked=ranked)
     pinned = len(head)

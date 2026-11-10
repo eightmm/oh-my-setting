@@ -4956,6 +4956,66 @@ assert needs_strip(queue, 127, True, ranked=ranked) == strip
 # The compact board repeats no ranked-item previews; Attention owns the full queue.
 queue_screen = graph_text.render_graph(queue, 127, 40, navigation={"dismissed": True})
 assert sum(line.startswith("Attention 11") for line in queue_screen.splitlines()) == 1, queue_screen
+# The work health line: only recorded sources, whole segments, one row (two from 100 columns), never wider than the frame.
+import panel_work_health
+from panel_view import display_width as health_width
+health = deepcopy(queue)
+health["work_health"] = {"unresolved": 2, "ci": {"status": "completed", "conclusion": "failure", "ts": minutes_ago(180)}}
+health["plan"] = {"present": True, "goal": "Ship", "task_count": 9, "by_state": {"done": 6, "running": 2, "ready": 1}, "tasks": []}
+health["awaiting_admission"] = ["reviewer", "researcher"]
+health_ranked = attention_items(health)
+health_main = next(m for m in projected_nodes(health) if m.get("role") == "main")
+health["provider_status"] = {health_main["provider"]: {"participant": health_main["participant"], "context_left": 27}}
+shape = {}
+for columns in (40, 60, 80, 120):
+    for glyphs in (True, False):
+        found = panel_work_health.lines(health, health_ranked, columns, 30, glyphs, health_main)
+        assert 1 <= len(found) <= (2 if columns >= 100 else 1), (columns, found)
+        for text, spans in found:
+            assert health_width(text) <= columns and text == "".join(part for part, unused in spans), (columns, text)
+        shape[columns, glyphs] = [text for text, unused in found]
+assert shape[120, True] == ["▶ running 1 · ⏸ waiting on you 3 · oldest 50m · ✗ failed 4 · ✓ done 2",
+                            "plan 6/9 tasks · ! 2 unresolved · CI ✗ failed 3h ago · ctx 73% used"], shape[120, True]
+assert shape[120, False][0].startswith("> running") and "/ ! waiting on you 3 / oldest 50m" in shape[120, False][0], shape[120, False]
+assert shape[60, True] == ["▶ run 1 · ⏸ waiting 3 · 50m · ✗ fail 4 · CI ✗ 3h"], shape[60, True]
+assert shape[40, True] == ["▶1 ⏸3 50m ✗4 plan 6/9 ! 2 open CI✗3h"], shape[40, True]
+assert shape[40, False] == ["run 1 you 3 50m fail 4 ! 2 open CIx3h"], shape[40, False]
+# Lowest priority goes first, whole: done, context, plan, unresolved, CI; waiting on you and failed stay last.
+kept = {columns: panel_work_health.lines(health, health_ranked, columns, 30, True, health_main) for columns in range(14, 60)}
+assert all(len(rows) == 1 for rows in kept.values()) and all("⏸" in rows[0][0] for rows in kept.values() if rows), kept
+assert "ctx" not in shape[60, True][0] and "done" not in shape[60, True][0] and "plan" in shape[40, True][0]
+# The same line sits in the board head with the board's own rows around it.
+for columns, rows_high in ((40, 30), (60, 30), (80, 30), (120, 30)):
+    picture = render(health, "claude", columns, rows_high, view="tree").splitlines()
+    assert sum("⏸" in line and "✗" in line for line in picture[:8]) >= 1, picture[:8]
+    assert all(health_width(line) <= columns for line in picture), picture
+# Nothing recorded: no row, not a row of zeros. A source that is absent drops only its own segment.
+nothing = deepcopy(calm)
+nothing["plan"] = {}
+assert panel_work_health.lines(nothing, attention_items(nothing), 120, 30, True) == []
+assert "▶ 0" not in render(nothing, "claude", 120, 30, view="tree") and "✓ 0" not in render(nothing, "claude", 120, 30, view="tree")
+only_ci = dict(nothing, work_health={"unresolved": 0, "ci": {"status": "in_progress", "ts": minutes_ago(1)}})
+assert [text for text, unused in panel_work_health.lines(only_ci, [], 80, 30, True)] == ["CI ⟳ running"]
+assert panel_work_health.lines(health, health_ranked, 120, 15, True, health_main) == []
+# NO_COLOR and plain output carry the same text as the colored frame, and the line keeps its glyph or word cue.
+plain_head = [line for line in render(health, "claude", 80, 30, view="tree").splitlines() if "waiting on you" in line][:1]
+with patch.dict(os.environ, {"NO_COLOR": "1"}):
+    assert [line for line in render(health, "claude", 80, 30, view="tree", color=True).splitlines()
+            if "waiting on you" in line][:1] == plain_head and "\033" not in plain_head[0], plain_head
+assert "\033" in render(health, "claude", 80, 30, view="tree", color=True)
+# Collection reads the two ledgers once per change: the ledger verb counts the open failures; the CI row comes from the tail.
+with tempfile.TemporaryDirectory() as health_dir:
+    ledger = Path(health_dir) / "ci.jsonl"
+    ledger.write_text("".join(json.dumps({"ts": "2026-11-0%dT00:00:00Z" % n, "branch": branch, "status": "completed",
+                                          "conclusion": result}) + "\n" for n, branch, result in
+                              ((1, "main", "success"), (2, "oms/x", "failure"), (3, "main", "failure"))) + "torn", encoding="utf-8")
+    with patch.dict(os.environ, {"OMS_CI_LEDGER": str(ledger), "OMS_FAIL_LEDGER": str(Path(health_dir) / "none.jsonl")}):
+        panel_work_health._seen.clear()
+        assert panel_work_health.collect(health_dir, {"repo": {"branch": "oms/x"}}) == {
+            "ci": {"status": "completed", "conclusion": "failure", "ts": "2026-11-02T00:00:00Z"}, "unresolved": None}
+        assert panel_work_health.collect(health_dir)["ci"]["ts"] == "2026-11-03T00:00:00Z"
+        with patch.object(panel_work_health, "_ci_row", side_effect=AssertionError("re-read unchanged ledger")):
+            assert panel_work_health.collect(health_dir)["ci"]["ts"] == "2026-11-03T00:00:00Z"
 # Repeated reviews collapse under their task and expand through the existing Past input path.
 review_group = [dict(review_member, participant="review-%s" % n, task_id="same-task") for n in range(3)]
 review_group_nav = {"tab": "past"}
