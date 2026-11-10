@@ -34,6 +34,8 @@ RESULT=""
 NEXT=""
 JOB=""
 REASON=""
+VERDICT=""
+TAGS=""
 FORCE=0
 TOUCH_APPEND=0
 SHOW_ALL=0
@@ -45,10 +47,10 @@ cleanup_done=0
 
 usage() {
   cat <<'EOF'
-Usage: experiment-board.sh claim  --hypothesis TEXT [--id ID] [--baseline TEXT] [--owner NAME] [--force]
+Usage: experiment-board.sh claim  --hypothesis TEXT [--id ID] [--baseline TEXT] [--tags A,B] [--owner NAME] [--force]
        experiment-board.sh start  --id ID [--job JOBID]
        experiment-board.sh touch  --id ID
-       experiment-board.sh finish --id ID [--result TEXT] [--next TEXT]
+       experiment-board.sh finish --id ID [--result TEXT] [--next TEXT] [--verdict V] [--tags A,B]
        experiment-board.sh abort  --id ID [--reason TEXT]
        experiment-board.sh list   [--all] [--stale] [--owner NAME] [--json]
        experiment-board.sh show   --id ID
@@ -63,7 +65,15 @@ start   Mark an experiment running, optionally attaching a Slurm/queue job id.
 touch   Heartbeat a claimed/running experiment: re-stamp its timestamp so a
         live owner's claim is not treated as stale/reclaimable mid-run.
 finish  Mark done with an optional result summary and next-step decision.
+        --verdict supported|not_supported|inconclusive|aborted records how the
+        hypothesis came out, so a negative result is found again.
 abort   Mark aborted with an optional reason.
+
+--tags  Comma-separated labels ([a-z0-9._-], at most 8) on claim or finish. A
+        claim that carries tags first lists the finished experiments sharing
+        one (exact tag match, nothing fuzzy) with their verdict and result, on
+        stderr; it informs and never refuses. An experiment with the same id
+        that already ended is listed whether or not it has tags.
 list    Show active experiments (claimed/running); --all includes finished.
         Claims older than the TTL are tagged STALE (reclaimable); --stale
         shows only those, --owner NAME filters by claim owner, --json emits
@@ -101,6 +111,26 @@ trap 'cleanup_signal 143' TERM
 slugify() {
   printf '%s' "${1,,}" | tr -cs '[:alnum:]' '-' \
     | sed 's/^-//;s/-$//;s/--*/-/g' | cut -c1-40
+}
+
+# Tags compare by exact match, so they are held to one spelling: lower case,
+# [a-z0-9._-], no duplicates, at most 8.
+normalize_tags() {
+  local raw="${1,,}" label out="" count=0
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$raw"
+  for label in "${parts[@]}"; do
+    label="${label#"${label%%[![:space:]]*}"}"
+    label="${label%"${label##*[![:space:]]}"}"
+    [ -n "$label" ] || continue
+    case "$label" in *[!a-z0-9._-]*) return 1 ;; esac
+    [ "${#label}" -le 40 ] || return 1
+    case ",$out," in *",$label,"*) continue ;; esac
+    out="${out:+$out,}$label"
+    count=$((count + 1))
+  done
+  [ "$count" -ge 1 ] && [ "$count" -le 8 ] || return 1
+  printf '%s\n' "$out"
 }
 
 board_append() {
@@ -185,6 +215,7 @@ append_event() {
   agent_memory_ensure_oms_ignore_for_path "$(dirname "$BOARD")" 2>/dev/null || true
   row_tmp="$(mktemp)" || fail "mktemp failed"
   OMS_HYP="$HYPOTHESIS" OMS_BASE="$BASELINE" OMS_RESULT="$RESULT" OMS_NEXT="$NEXT" \
+  OMS_VERDICT="$VERDICT" OMS_TAGS="$TAGS" \
   python3 - "$SCHEMA" "$ID" "$status" "$ts" "$AGENT_LABEL" "$JOB" "$REASON" \
     > "$row_tmp" <<'PY'
 import json, os, sys
@@ -193,10 +224,13 @@ e = {"schema": int(a[0]), "id": a[1], "status": a[2], "ts": a[3], "owner": a[4]}
 if a[5]: e["job"] = a[5]
 if a[6]: e["reason"] = a[6]
 for key, env in (("hypothesis","OMS_HYP"),("baseline","OMS_BASE"),
-                 ("result","OMS_RESULT"),("next","OMS_NEXT")):
+                 ("result","OMS_RESULT"),("next","OMS_NEXT"),("verdict","OMS_VERDICT")):
     v = os.environ.get(env, "")
     if v:
         e[key] = v
+labels = [t for t in os.environ.get("OMS_TAGS", "").split(",") if t]
+if labels:
+    e["tags"] = labels
 print(json.dumps(e, ensure_ascii=False))
 PY
   SCAN_FILE="$row_tmp"
@@ -230,12 +264,68 @@ PY
   rm -f "$row_tmp"
 }
 
+# Before a claim: the finished experiments that share one of its tags, or its
+# id, with how they came out. Exact matches only; it informs on stderr and
+# never refuses, so a deliberate repeat stays possible.
+prior_outcomes() {
+  [ -f "$BOARD" ] || return 0
+  OMS_ID="$ID" OMS_TAGS="$TAGS" python3 - "$BOARD" >&2 <<'PY' || true
+import json, os, sys
+target = os.environ["OMS_ID"]
+wanted = set(t for t in os.environ.get("OMS_TAGS", "").split(",") if t)
+cur, order = {}, []
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        e = json.loads(line)
+    except Exception:
+        continue
+    i = e.get("id") if isinstance(e, dict) else None
+    if not isinstance(i, str) or not i:
+        continue
+    if i not in cur:
+        cur[i] = {"tags": []}
+        order.append(i)
+    row = cur[i]
+    for key in ("status", "verdict", "result", "reason", "ts"):
+        if e.get(key):
+            row[key] = e[key]
+    if e.get("status") == "claimed":
+        row.pop("verdict", None)  # a reclaim starts the question again
+    for label in e.get("tags") or []:
+        if isinstance(label, str) and label not in row["tags"]:
+            row["tags"].append(label)
+hits = []
+for i in order:
+    row = cur[i]
+    if row.get("status") not in ("done", "finished", "aborted"):
+        continue
+    shared = sorted(wanted & set(row["tags"]))
+    if i != target and not shared:
+        continue
+    hits.append((i, row, shared))
+if hits:
+    print("experiment-board: %d finished experiment(s) share this claim's %s:" % (
+        len(hits), "tags or id" if wanted else "id"))
+    for i, row, shared in hits[-10:]:
+        verdict = row.get("verdict") or ("aborted" if row.get("status") == "aborted" else "no verdict recorded")
+        note = (row.get("result") or row.get("reason") or "")[:160]
+        print("  %s  %s%s%s" % (i, verdict, "  [%s]" % ",".join(shared) if shared else "  [same id]",
+                                "  " + note if note else ""))
+    if len(hits) > 10:
+        print("  ... %d earlier one(s) not shown" % (len(hits) - 10))
+    if any((row.get("verdict") == "not_supported") for _, row, _ in hits):
+        print("  a not_supported result is a recorded outcome, not a ban: say what is different this time")
+PY
+}
+
 cmd_claim() {
   parse_args "$@"
   [ -n "$HYPOTHESIS" ] || fail "claim requires --hypothesis"
   [ -n "$ID" ] || ID="$(slugify "$HYPOTHESIS")"
   [ -n "$ID" ] || fail "could not derive an id; pass --id"
+  [ -z "$VERDICT" ] || fail "--verdict belongs to finish"
 
+  prior_outcomes
   append_event claimed
   echo "claimed: $ID (owner $AGENT_LABEL)" >&2
   printf '%s\n' "$ID"
@@ -277,7 +367,7 @@ cmd_finish() {
   [ -n "$ID" ] || fail "finish requires --id"
   require_active
   append_event "done"
-  echo "done: $ID" >&2
+  echo "done: $ID${VERDICT:+ ($VERDICT)}" >&2
 }
 
 cmd_abort() {
@@ -388,9 +478,11 @@ for line in open(board, encoding="utf-8", errors="replace"):
         continue
     found = True
     extra = ""
-    for k in ("job", "result", "next", "reason", "hypothesis", "baseline"):
+    for k in ("job", "verdict", "result", "next", "reason", "hypothesis", "baseline"):
         if e.get(k):
             extra += "  %s=%s" % (k, e[k])
+    if isinstance(e.get("tags"), list) and e["tags"]:
+        extra += "  tags=%s" % ",".join(str(t) for t in e["tags"])
     print("%s  %-8s owner=%s%s" % (e.get("ts"), e.get("status"), e.get("owner"), extra))
 if not found:
     sys.stderr.write("no such experiment: %s\n" % target)
@@ -408,6 +500,19 @@ parse_args() {
       --next) [ "$#" -ge 2 ] || fail "--next requires text"; NEXT="$2"; shift 2 ;;
       --job) [ "$#" -ge 2 ] || fail "--job requires an id"; JOB="$2"; shift 2 ;;
       --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; REASON="$2"; shift 2 ;;
+      --verdict)
+        [ "$#" -ge 2 ] || fail "--verdict requires a value"
+        [ "$SUB" = "finish" ] || fail "--verdict is only supported by finish"
+        case "$2" in
+          supported|not_supported|inconclusive|aborted) VERDICT="$2" ;;
+          *) fail "--verdict must be supported, not_supported, inconclusive or aborted" ;;
+        esac
+        shift 2 ;;
+      --tags)
+        [ "$#" -ge 2 ] || fail "--tags requires a comma-separated list"
+        case "$SUB" in claim|finish) ;; *) fail "--tags is only supported by claim and finish" ;; esac
+        TAGS="$(normalize_tags "$2")" || fail "--tags takes at most 8 labels of [a-z0-9._-], comma-separated"
+        shift 2 ;;
       --owner) [ "$#" -ge 2 ] || fail "--owner requires a name"; AGENT_LABEL="$2"; OWNER_FILTER="$2"; shift 2 ;;
       --force) FORCE=1; shift ;;
       --all) SHOW_ALL=1; shift ;;
