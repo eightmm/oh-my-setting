@@ -32,8 +32,6 @@ SCENARIOS=(
 # reports `unexpected-pass`: delete the case line here.
 xfail_branch() {
   case "$1" in
-    criterion-change-invalidates-evidence) printf '%s\n' oms/criterion-evidence-freshness-20261110 ;;
-    unrelated-verification-no-resolve) printf '%s\n' oms/review-receipt-binding-20261110 ;;
   esac
 }
 
