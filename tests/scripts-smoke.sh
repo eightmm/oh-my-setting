@@ -22947,6 +22947,107 @@ test_experiment_board_claim_is_atomic() {
   [ "$lines" = 1 ] || fail "atomic claim should append one event, got $lines"
 }
 
+# Beside the experiment-board coordination tests: advisory file leases.
+# smoke-weight: 10
+test_lease_is_advisory_visible_intent_with_expiry() {
+  local project="$TMP/lease-repo" lease="$ROOT/scripts/lease.sh" store out id i rc before
+  local -a pids=()
+  make_committed_repo "$project"
+  mkdir -p "$project/src/sub" "$TMP/lease-outside"
+  store="$project/.oms/leases.jsonl"
+  (
+    cd "$project"
+    export OMS_ATTEMPT_ID=worker-a
+    out="$("$lease" add 'src/*.py' --ttl 10m --reason refactor 2>/dev/null)" || fail "add failed"
+    contains "$out" 'paths src/*.py' || fail "add should echo the repo-relative glob: $out"
+
+    # Another holder: exclusive lease of a worker is reported with holder, reason, time left.
+    export OMS_ATTEMPT_ID=worker-b
+    out="$("$lease" check src/x.py)" && fail "a path under another holder's exclusive lease must exit 1"
+    contains "$out" 'by worker-a' || fail "check must name the holder: $out"
+    contains "$out" '"refactor"' || fail "check must name the reason: $out"
+    contains "$out" 'm left' || fail "check must show time left: $out"
+    "$lease" check lib/x.md >/dev/null || fail "a path outside the glob's static prefix must be free"
+    "$lease" check README.md >/dev/null || fail "an unrelated literal path must be free"
+    # Glob versus a deeper literal is not decided exactly, so it is reported.
+    if "$lease" check src/sub/x.md >/dev/null; then fail "a conservative overlap must be reported held"; fi
+    # Undecidable (glob without a static prefix against a literal) counts as overlap.
+    if "$lease" check '*.md' >/dev/null; then fail "an undecidable overlap must be reported held"; fi
+    if "$lease" check src/a.py src/sub/ >/dev/null; then fail "one held path among several must exit 1"; fi
+    out="$("$lease" add src/x.py 2>&1 >/dev/null)" || fail "add must warn, not refuse"
+    contains "$out" 'warning: overlaps' || fail "overlapping add must warn: $out"
+
+    # The holder is never blocked by its own lease.
+    export OMS_ATTEMPT_ID=worker-a
+    "$lease" check src/y.py >/dev/null || fail "own lease must not conflict"
+
+    # Shared leases do not conflict with each other; an exclusive ask still sees them.
+    export OMS_ATTEMPT_ID=worker-c
+    "$lease" add docs/guide.md --shared >/dev/null 2>&1 || fail "shared add failed"
+    export OMS_ATTEMPT_ID=worker-d
+    out="$("$lease" add docs/guide.md --shared 2>&1)" || fail "second shared add failed"
+    contains "$out" 'warning' && fail "two shared leases must not conflict: $out"
+    out="$("$lease" add docs/guide.md 2>&1)" || fail "exclusive add over shared failed"
+    contains "$out" 'warning: overlaps' || fail "exclusive over shared must warn: $out"
+
+    # Usage and boundary errors exit 2.
+    rc=0; "$lease" check >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "check without paths is a usage error, got $rc"
+    rc=0; "$lease" add --ttl 9h x >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "ttl above 8h must be refused, got $rc"
+    rc=0; "$lease" add --ttl 30s x >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "ttl below 1m must be refused, got $rc"
+    rc=0; "$lease" add "$TMP/lease-outside/f" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "an absolute path outside the repository must be refused, got $rc"
+    rc=0; "$lease" add ../escape >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "a .. escape must be refused, got $rc"
+    ln -s "$TMP/lease-outside" link
+    rc=0; "$lease" add link/f >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "a symlink leading outside must be refused, got $rc"
+
+    # --staged
+    export OMS_ATTEMPT_ID=worker-b
+    printf 'x\n' > src/staged.py
+    printf 'y\n' > other.txt
+    git add other.txt
+    "$lease" check --staged >/dev/null || fail "staged path outside any lease must be free"
+    git add src/staged.py
+    out="$("$lease" check --staged)" && fail "a staged path under another holder's lease must exit 1"
+    contains "$out" 'src/staged.py' || fail "staged conflict must name the path: $out"
+    export OMS_ATTEMPT_ID=worker-a
+    "$lease" check --staged >/dev/null || fail "the holder's own staged path is free"
+  ) || return 1
+
+  # Expiry is computed on read: an already-expired row is listed as expired and no longer conflicts.
+  printf '%s\n' '{"expires":"2020-01-01T00:30:00Z","holder":"ghost","id":"l-old00001","op":"add","paths":["gone/*"],"reason":"","schema":1,"shared":false,"ts":"2020-01-01T00:00:00Z"}' >> "$store"
+  mkdir -p "$project/gone"
+  out="$(cd "$project" && "$lease" list)"
+  contains "$out" 'l-old00001 expired' || fail "an expired lease must be listed as expired: $out"
+  (cd "$project" && OMS_ATTEMPT_ID=worker-b "$lease" check gone/f >/dev/null) || fail "an expired lease must not conflict"
+  grep -Fq l-old00001 "$store" || fail "expiry must not delete rows"
+
+  # Release: by id (holder only) and --mine; released leases drop out of list but stay in the file.
+  id="$(cd "$project" && OMS_ATTEMPT_ID=worker-a "$lease" list --json | python3 -c 'import json,sys; print([l["id"] for l in json.load(sys.stdin) if l["holder"]=="worker-a"][0])')"
+  rc=0; (cd "$project" && OMS_ATTEMPT_ID=worker-b "$lease" release "$id" >/dev/null 2>&1) || rc=$?
+  [ "$rc" = 1 ] || fail "releasing another holder's live lease must exit 1, got $rc"
+  (cd "$project" && OMS_ATTEMPT_ID=worker-a "$lease" release --mine >/dev/null) || fail "release --mine failed"
+  out="$(cd "$project" && "$lease" list)"
+  contains "$out" "$id" && fail "a released lease must leave the list: $out"
+  (cd "$project" && OMS_ATTEMPT_ID=worker-b "$lease" check src/x.py >/dev/null) || fail "released lease must free the path"
+  grep -Fq '"op": "release"' "$store" || grep -Fq '"op":"release"' "$store" || fail "release must append a row"
+
+  # Concurrent adds append whole rows only.
+  before="$(wc -l < "$store" | tr -d ' ')"
+  for i in $(seq 1 12); do
+    (cd "$project" && OMS_ATTEMPT_ID="racer-$i" "$lease" add "race/$i.txt" --shared >/dev/null 2>&1) &
+    pids+=("$!")
+  done
+  for i in "${pids[@]}"; do wait "$i" || fail "concurrent add failed"; done
+  [ "$(wc -l < "$store" | tr -d ' ')" = "$((before + 12))" ] || fail "concurrent adds must each append one row"
+  python3 -c 'import json,sys; [json.loads(l) for l in open(sys.argv[1])]' "$store" ||
+    fail "concurrent adds corrupted the lease file"
+}
+
 # Build a repo with a base commit and a patch of `branch` vs main on file.txt.
 make_patch_repo() {
   local repo="$1"

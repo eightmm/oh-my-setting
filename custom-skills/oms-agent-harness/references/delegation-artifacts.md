@@ -339,7 +339,8 @@ Use the shared `OMS_ROOM_REPO` for plan and result records from scratch worktree
 Before shared-file edits, `oms room scope --owns PATH` declares scope; write
 dispatches take `--scope PATH`. Write dispatches refuse scopes overlapping another main or any call’s writer until its result is delivered or read by its parent; omitted scope uses plan paths or the repository, and a continuation waits for room result delivery. File scopes do
 not isolate public contracts: name consumers in the brief, test the public
-entry point and order consumer tasks with `--depends`.
+entry point and order consumer tasks with `--depends`. For an ad-hoc edit
+outside any plan task, `oms lease add PATH` / `oms lease check PATH` give advisory, expiring intent.
 
 For an authorized landing, `oms scratch-worktree add --repo .` starts detached;
 create a local nontracking branch with `git checkout --no-track -b oms/<task>`,

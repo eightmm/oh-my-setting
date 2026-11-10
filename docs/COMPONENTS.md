@@ -45,6 +45,7 @@ explains overlapping entrypoints.
 | `dashboard` | Read a terminal view of OMS collaboration state. | `oms dashboard` | [Panel and collaboration](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
 | `inbox` | Prioritize attention from shared state. | `oms inbox` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `room` | Share task-scoped messages and room snapshots. | `oms room` | [Work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
+| `lease` | Declare time-limited, advisory intent to edit paths. | `oms lease` | [Delegating writes](#delegating-writes) |
 | `thread` | Read and deliver shared conversation turns. | `oms thread` | [Asking other agents](#asking-other-agents) |
 | `consult` | Ask one peer or continue a peer thread. | `oms consult` | [Asking other agents](#asking-other-agents) |
 | `peer-ask` | Ask a provider council and save each answer. | `oms peer-ask` | [Asking other agents](#asking-other-agents) |
@@ -961,6 +962,23 @@ Choose `oms consult` (or the lower-level `agent-call`) for a read and
 `oms peer-delegate` for a patch. The `agent-run` wrapper and keyword mode
 classifier were removed. Task-aware calls/delegates record outcomes directly;
 existing artifact and task history is preserved.
+
+Delegated work already has overlap detection (plan waves, `oms room scope`
+and write-dispatch refusal). `oms lease` covers what those do not: an ad-hoc
+edit by any session outside a plan task or room. `oms lease add PATH_OR_GLOB...
+[--ttl 30m] [--reason TEXT] [--shared]` appends an advisory row to
+`.oms/leases.jsonl` (quote globs; paths resolve from the current directory and
+must stay inside the repository; TTL 1m to 8h). `list [--json]` shows active and
+`expired` leases (expiry is computed on read; nothing is deleted or killed) and
+`release ID|--mine` appends a release row. `check PATH...` or `check --staged`
+(for a person's own pre-commit hook) names the holder, reason and time left and
+exits 1 when an exclusive lease held by someone else covers a path, 0 when free, 2
+on usage errors. The holder is `OMS_ATTEMPT_ID`, else `OMS_ROOM_PARTICIPANT`,
+else `unknown-session` (such sessions cannot be told apart and count as one
+holder). Overlap is conservative: a glob against a deeper or glob-led path
+counts as overlapping, shared leases do not conflict with each other, and `add`
+warns about an overlap but still records it. No hook calls `check`; run it
+before editing a shared path.
 
 A write delegation:
 

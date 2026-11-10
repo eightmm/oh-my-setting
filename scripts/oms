@@ -226,6 +226,7 @@ intent
 job-digest
 journal
 land
+lease
 model-doctor
 models
 output-digest
@@ -289,6 +290,7 @@ peer-review
 patch-admit
 patch-land
 land
+lease
 # Maintenance and removal
 report
 doctor
