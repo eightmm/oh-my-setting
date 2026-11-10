@@ -58,6 +58,10 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
         if os.environ.get('OMS_HARNESS_CHILD') == '1' and not child_action_is_read_only(args):
             raise CoreError(CHILD_RUNTIME_ERROR)
         repo = repo_root(args.repo)
+        from .work_cli import dispatch as dispatch_work_view
+        work_status = dispatch_work_view(args, repo, build_envelope, emit)
+        if work_status is not None:
+            return work_status
         if args.command == 'envelope':
             value = build_envelope(repo)
             if args.action == 'write':
