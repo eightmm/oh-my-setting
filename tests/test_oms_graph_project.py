@@ -18,7 +18,8 @@ from oms_graph.errors import GraphError
 from oms_graph import render
 from oms_graph.project.build import build, check, ensure, load_graph
 from oms_graph.project.context import context_pack, select_context
-from oms_graph.project.benchmark import history_cases, run as benchmark_run
+from oms_graph.project.benchmark import (compare as benchmark_compare, history_cases, load_snapshot,
+                                         run as benchmark_run, snapshot as benchmark_snapshot)
 from oms_graph.project.query import Graph
 from oms_graph.project.symbol import symbol_view, view_text
 from oms_graph.project import analytics, history
@@ -137,6 +138,28 @@ class ProjectGraphTest(unittest.TestCase):
         self.assertEqual(result["metrics"]["hit_at_8"], 1)
         self.assertGreater(result["metrics"]["median_pack_bytes"], 0)
         self.assertFalse((self.repo / ".oms").exists())
+        # The snapshot is what a before/after comparison keeps: ids and counts, no task text and no path.
+        kept = benchmark_snapshot(result)
+        self.assertEqual(kept["cases"], [{"commit": fix, "gold": 1, "hits": 1, "recall_at_8": 1.0,
+                                          "pack_bytes": result["rows"][0]["pack_bytes"]}])
+        text = json.dumps(kept)
+        self.assertNotIn("recover lease", text)
+        self.assertNotIn("needle.py", text)
+        worse = json.loads(text)
+        worse["cases"][0]["hits"], worse["metrics"]["recall_at_8"] = 0, 0
+        report = benchmark_compare(kept, worse)
+        self.assertTrue(report["comparable"])
+        self.assertEqual((report["regressed"], report["improved"]), ([fix], []))
+        self.assertEqual(report["metrics"]["recall_at_8"]["delta"], -1)
+        other = json.loads(text)
+        other["cases"][0]["commit"] = "0" * 40
+        self.assertFalse(benchmark_compare(kept, other)["comparable"])
+        saved = Path(self.temp.name) / "left.json"
+        saved.write_text(text, encoding="utf-8")
+        self.assertEqual(load_snapshot(saved), kept)
+        saved.write_text(json.dumps(result), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_snapshot(saved)  # the full result carries content and is not a snapshot
 
     def test_context_ranks_quoted_errors_and_diversifies_before_truncation(self) -> None:
         self.write("a_hub.py", "\n".join("def needle_guard_%d(): pass" % n for n in range(60)))

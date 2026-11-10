@@ -2,6 +2,9 @@
 
 Current retrieval runs over each fix's parent tree, never the fixed source.
 The 60-commit corpus is intentionally outside the default test lane.
+`--snapshot FILE` keeps a content-free result (commit ids and counts) and
+`--compare LEFT RIGHT` judges two of them, so a retrieval change carries a
+before/after number instead of an impression.
 """
 
 from __future__ import annotations
@@ -127,18 +130,80 @@ def run(repo: Path, *, count: int = 60, revision: str = "HEAD", cache: Path) -> 
             "metrics": summarize(rows), "rows": rows}
 
 
+SNAPSHOT_KIND = "oms-graph-recall-snapshot"
+
+
+def snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
+    """A run reduced to what a before/after comparison needs, with no content.
+
+    Commit ids and counts only: no task text, no path, no pack. Two snapshots
+    of the same revision and case count cover the same cases, so a retrieval
+    change can be judged case by case.
+    """
+    return {"schema": 1, "kind": SNAPSHOT_KIND, "revision": result["revision"],
+            "definition": result["definition"], "metrics": dict(result["metrics"]),
+            "cases": [{"commit": row["commit"], "gold": len(row["gold"]), "hits": len(row["hits"]),
+                       "recall_at_8": row["recall_at_8"], "pack_bytes": row["pack_bytes"]}
+                      for row in result["rows"]]}
+
+
+def load_snapshot(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError("unreadable recall snapshot %s: %s" % (path, exc))
+    if not isinstance(value, dict) or value.get("kind") != SNAPSHOT_KIND or value.get("schema") != 1 \
+            or not isinstance(value.get("cases"), list) or not isinstance(value.get("metrics"), dict):
+        raise ValueError("not a recall snapshot: %s" % path)
+    return value
+
+
+def compare(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+    """Right minus left. Comparable only when both cover exactly the same fix commits."""
+    before = {row["commit"]: row for row in left["cases"]}
+    after = {row["commit"]: row for row in right["cases"]}
+    shared = sorted(set(before) & set(after))
+    comparable = set(before) == set(after) and left.get("definition") == right.get("definition")
+    improved = [commit for commit in shared if after[commit]["hits"] > before[commit]["hits"]]
+    regressed = [commit for commit in shared if after[commit]["hits"] < before[commit]["hits"]]
+    keys = sorted(set(left["metrics"]) & set(right["metrics"]))
+    return {"schema": 1, "kind": "oms-graph-recall-compare", "comparable": comparable,
+            "reason": "" if comparable else "the snapshots cover different fix commits or use different definitions",
+            "cases": {"left": len(before), "right": len(after), "shared": len(shared)},
+            "metrics": {key: {"left": left["metrics"][key], "right": right["metrics"][key],
+                              "delta": right["metrics"][key] - left["metrics"][key]} for key in keys},
+            "improved": improved, "regressed": regressed}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--count", type=int, default=60)
     parser.add_argument("--revision", default="HEAD")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, help="full result with task text and paths (local use)")
+    parser.add_argument("--snapshot", type=Path, help="content-free result: commit ids and counts only")
+    parser.add_argument("--compare", nargs=2, type=Path, metavar=("LEFT", "RIGHT"),
+                        help="compare two --snapshot files and run nothing; exits 1 on a regression or when not comparable")
     args = parser.parse_args()
+    if args.compare:
+        if args.output or args.snapshot:
+            parser.error("--compare runs nothing and takes no --output or --snapshot")
+        try:
+            report = compare(load_snapshot(args.compare[0]), load_snapshot(args.compare[1]))
+        except ValueError as exc:
+            parser.error(str(exc))
+        print(json.dumps(report, sort_keys=True))
+        raise SystemExit(0 if report["comparable"] and not report["regressed"] else 1)
     if args.count < 1:
         parser.error("--count must be positive")
+    if not args.output and not args.snapshot:
+        parser.error("one of --output or --snapshot is required")
     with tempfile.TemporaryDirectory(prefix="oms-context-benchmark-cache.") as temporary:
         result = run(args.repo.resolve(), count=args.count, revision=args.revision, cache=Path(temporary))
-    args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if args.output:
+        args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if args.snapshot:
+        args.snapshot.write_text(json.dumps(snapshot(result), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result["metrics"], sort_keys=True))
 
 

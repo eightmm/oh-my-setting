@@ -101,6 +101,11 @@ temporary directories; the default graph tests run only a tiny fixture:
 PYTHONPATH=scripts/lib python3 -m oms_graph.project.benchmark --repo . --output /tmp/oms-context-recall.json
 ```
 
+Before changing retrieval, keep `--snapshot before.json` (commit ids and
+counts only, no task text or paths); afterwards `--compare before.json
+after.json` prints metric deltas and the fix commits that improved or
+regressed, and exits 1 on a regression or when the two cover different cases.
+
 ## Work from the graph in an agent UI
 
 In a compatible Codex client, call `oms_project_graph_render` with the current
