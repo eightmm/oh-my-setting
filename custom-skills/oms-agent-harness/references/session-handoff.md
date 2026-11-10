@@ -21,7 +21,12 @@ regardless of the floor.
 
 New digests put the active task snapshot before historical conversation, naming
 the task ID, HEAD, packet digest and verification observation time. The assistant
-summary remains an unverified claim. Resume prefers the current task over a
+summary remains an unverified claim and now follows a `Recorded state` block,
+read in fixed order from `.oms` and git: plan status (`plan/tasks.json`), the
+last three task-packet decisions, changed files (`git status`, sorted, `.oms/`
+omitted) and the newest actionable fail-ledger row. The block is held to 1536
+bytes; an empty source says "not recorded", a failed reader "unavailable".
+Open questions have no recorded source, so none is invented. Resume prefers the current task over a
 newer unrelated digest, labels changed/unbound snapshots, and sends a pointer
 instead of the transcript. Source and verification must still be rechecked.
 The entire resume block is bounded to 4 KiB,
