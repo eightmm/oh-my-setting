@@ -2168,7 +2168,10 @@ ended_action = room_view.action(next(m for m in room_view.nodes(ended) if m.get(
 for draw, row_action in ((lambda nav, **kw: render_tree(ended, 100, 30, navigation=nav, **kw), ended_action),
                          # The flat list draws live calls only, so there the new running call is the marked row.
                          (lambda nav, **kw: render(running, "codex", 100, 30, view="compact", navigation=nav, **kw),
-                          ("result", "att_run"))):
+                          ("result", "att_run")),
+                         # The graph view marks the same call in the selection marker's cell of its band rows.
+                         (lambda nav, **kw: render(running, "codex", 100, 30, view="graph", navigation=nav, **kw),
+                          room_view.action(next(m for m in room_view.nodes(running) if m.get("participant") == "call-run")))):
     plain = draw({}).split("\n")
     marked_text = draw({"changed": frozenset({"call-run", "att_run"})}).split("\n")
     differing = [(a, b) for a, b in zip(plain, marked_text) if a != b]
@@ -2177,7 +2180,9 @@ for draw, row_action in ((lambda nav, **kw: render_tree(ended, 100, 30, navigati
     assert "Live call" in before and "✦ " in after and "✦" not in before, differing
     assert after.replace("✦ ", "  ", 1) == before, differing
     ascii_text = draw({"changed": frozenset({"call-run", "att_run"})}, unicode=False)
-    assert sum(line.lstrip(" |").startswith("* ") and "Live call" in line for line in ascii_text.split("\n")) == 1, ascii_text
+    # The graph draws the connector ("+- " or "`- ") before the marker cell.
+    assert sum((line.lstrip(" |").startswith("* ") or "- * " in line) and "Live call" in line
+               for line in ascii_text.split("\n")) == 1, ascii_text
     colored = draw({"changed": frozenset({"call-run", "att_run"})}, color=True)
     assert "✦" in colored and len(colored.split("\n")) == len(plain)
     chosen = draw({"changed": frozenset({"call-run", "att_run"}), "selected": row_action})
