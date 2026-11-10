@@ -447,6 +447,106 @@ PY
   if bash "$ROOT/scripts/agent-memory.sh" --repo "$partial_repo" search "unfinished replacement" >/dev/null 2>&1; then fail "partial record indexed"; fi
 }
 
+test_memory_redaction_and_native_sources() {
+  local repo="$TMP/memory-redact" am="$ROOT/scripts/agent-memory.sh" note pin link out before file home
+  make_repo "$repo"
+  bash "$am" --repo "$repo" append --text "keep heron fact" >/dev/null
+  printf 'magpie line one\nmagpie line two\n' | bash "$am" --repo "$repo" append --stdin >/dev/null
+  bash "$am" --repo "$repo" pin --text "wagtail pinned fact" >/dev/null
+  note="$(bash "$am" --repo "$repo" search --json "magpie line one" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  pin="$(bash "$am" --repo "$repo" search --json "wagtail pinned fact" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$am" --repo "$repo" recall "magpie" >/dev/null   # leaves an access receipt in the index
+
+  # Dry run by default: it names the entry, never its text, and changes nothing.
+  before="$(cksum < "$repo/.oms/memory/shared.md")"
+  out="$(bash "$am" --repo "$repo" redact --id "$note" 2>&1)" || fail "redact dry run failed: $out"
+  [[ "$out" == *"would redact shared note ($note,"* && "$out" == *"dry run; nothing changed"* ]] || fail "dry run did not name the entry: $out"
+  [[ "$out" != *magpie* ]] || fail "dry run printed the text it would remove"
+  [ "$before" = "$(cksum < "$repo/.oms/memory/shared.md")" ] || fail "dry run changed the source log"
+  bash "$am" --repo "$repo" search "magpie line one" >/dev/null || fail "dry run hid the entry"
+
+  # Refusals change nothing: a worker, an unknown ID, a malformed ID, --apply elsewhere.
+  if OMS_HARNESS_CHILD=1 bash "$am" --repo "$repo" redact --id "$note" --apply >/dev/null 2>&1; then fail "a harness child redacted memory"; fi
+  if bash "$am" --repo "$repo" redact --id mem-unknown --apply >/dev/null 2>&1; then fail "unknown ID redacted"; fi
+  if bash "$am" --repo "$repo" redact --id 'bad id' --apply >/dev/null 2>&1; then fail "malformed ID accepted"; fi
+  if bash "$am" --repo "$repo" redact --apply >/dev/null 2>&1; then fail "redact without --id accepted"; fi
+  if bash "$am" --repo "$repo" search --apply heron >/dev/null 2>&1; then fail "--apply accepted outside redact"; fi
+  [ "$before" = "$(cksum < "$repo/.oms/memory/shared.md")" ] || fail "a refused redact changed the source log"
+
+  out="$(bash "$am" --repo "$repo" redact --id "$note" --apply 2>&1)" || fail "redact failed: $out"
+  [[ "$out" == *"redacted shared note ($note,"* && "$out" == *"31 bytes removed from shared.md"* ]] || fail "redact did not report what it removed: $out"
+  [[ "$out" != *magpie* ]] || fail "redact printed the removed text"
+  out="$(bash "$am" --repo "$repo" redact --id "$pin" --apply 2>&1)" || fail "pin redact failed: $out"
+  [[ "$out" != *wagtail* ]] || fail "pin redact printed the removed text"
+  # The bytes are gone from the readable store and from every derived copy, journals included.
+  for file in "$repo"/.oms/memory/* "$repo"/.oms/memory/.[!.]*; do
+    [ -f "$file" ] || continue
+    ! LC_ALL=C grep -aq -e magpie -e wagtail "$file" || fail "removed text survives in ${file##*/}"
+  done
+  [ ! -e "$repo/.oms/memory/memory.sqlite3-wal" ] || ! LC_ALL=C grep -aq magpie "$repo/.oms/memory/memory.sqlite3-wal" || fail "removed text survives in the journal"
+  # The ID, time and author stay under a fixed tombstone; the neighbours are untouched.
+  grep -Fq "event_id: $note" "$repo/.oms/memory/shared.md" || fail "redaction dropped the entry's ID"
+  grep -Eq '^\[redacted [0-9TZ:-]+ by [A-Za-z0-9._-]+: text removed with `oms agent-memory redact`; 31 bytes\]$' "$repo/.oms/memory/shared.md" || fail "tombstone missing"
+  grep -Eq '^- [0-9TZ:-]+ \[[^]]+\] \[redacted .*; [0-9]+ bytes\]$' "$repo/.oms/memory/pins.md" || fail "pin tombstone missing"
+  bash "$am" --repo "$repo" search "keep heron fact" >/dev/null || fail "redaction damaged a neighbouring note"
+  if bash "$am" --repo "$repo" search "magpie" >/dev/null 2>&1; then fail "redacted text still searchable"; fi
+  if bash "$am" --repo "$repo" recall "wagtail" >/dev/null 2>&1; then fail "redacted pin still recalled"; fi
+  # A tombstone is not a memory: default search, recall and context leave it out; the audit view marks it.
+  if bash "$am" --repo "$repo" search "redacted" >/dev/null 2>&1; then fail "tombstone returned as a note"; fi
+  out="$(bash "$am" --repo "$repo" context)"
+  [[ "$out" == *"keep heron fact"* && "$out" != *redacted* ]] || fail "tombstone injected into context: $out"
+  bash "$am" --repo "$repo" search --include-superseded --json "redacted" | grep -F '"status": "redacted"' >/dev/null || fail "redaction marker missing"
+  bash "$am" --repo "$repo" health >/dev/null || fail "memory unhealthy after redaction"
+  # Idempotent, and a redacted note is no longer a target for supersede.
+  before="$(cksum < "$repo/.oms/memory/shared.md")"
+  out="$(bash "$am" --repo "$repo" redact --id "$note" --apply 2>&1)" || fail "second redact failed"
+  [[ "$out" == *"already redacted"* ]] || fail "second redact did not say so: $out"
+  [ "$before" = "$(cksum < "$repo/.oms/memory/shared.md")" ] || fail "second redact rewrote the log"
+  if bash "$am" --repo "$repo" supersede --id "$note" --text "replacement" >/dev/null 2>&1; then fail "redacted note superseded"; fi
+
+  # A linked record keeps its link: redacting a replacement leaves the original superseded.
+  bash "$am" --repo "$repo" append --text "siskin original" >/dev/null
+  note="$(bash "$am" --repo "$repo" search --json "siskin original" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$am" --repo "$repo" supersede --id "$note" --text "siskin replacement" >/dev/null
+  link="$(bash "$am" --repo "$repo" search --json "siskin replacement" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  bash "$am" --repo "$repo" redact --id "$link" --apply >/dev/null || fail "linked record redact failed"
+  ! grep -Fq "siskin replacement" "$repo/.oms/memory/shared.md" || fail "linked record text survives"
+  if bash "$am" --repo "$repo" search "siskin original" >/dev/null 2>&1; then fail "redacting a replacement revived the note it superseded"; fi
+  bash "$am" --repo "$repo" search --include-superseded --json "siskin original" | grep -F '"status": "superseded"' >/dev/null || fail "redaction broke the supersession link"
+
+  # sources: names, sizes and counts of what each provider keeps; no file is opened.
+  home="$TMP/memory-sources-home"
+  mkdir -p "$home/.claude/rules" "$home/.claude/projects/$(printf '%s' "$(cd "$repo" && pwd -P)" | tr -c 'A-Za-z0-9' '-')/memory" \
+    "$home/.codex/memories" "$repo/.claude/agent-memory/reviewer"
+  printf 'finch-marker global rules\n' > "$home/.claude/CLAUDE.md"
+  printf 'finch-marker index\n' > "$home/.claude/projects/$(printf '%s' "$(cd "$repo" && pwd -P)" | tr -c 'A-Za-z0-9' '-')/memory/MEMORY.md"
+  printf 'finch-marker a\n' > "$home/.codex/memories/a.md"
+  printf 'finch-marker b\n' > "$home/.codex/memories/b.md"
+  printf 'finch-marker agent\n' > "$repo/.claude/agent-memory/reviewer/MEMORY.md"
+  printf 'finch-marker project\n' > "$repo/AGENTS.md"
+  chmod 000 "$home/.codex/memories/a.md"   # unreadable: sizes come from stat, not from reading
+  before="$(find "$repo" "$home" -newer "$repo/AGENTS.md" | wc -l)"
+  out="$(HOME="$home" CODEX_HOME="" bash "$am" --repo "$repo" sources)" || fail "sources failed"
+  chmod 600 "$home/.codex/memories/a.md"
+  [[ "$out" == *"names, sizes and counts only"* ]] || fail "sources header missing: $out"
+  [[ "$out" == *"~/.claude/CLAUDE.md"* && "$out" == *"auto-memory"* && "$out" == *"subagent-memory"*".claude/agent-memory/"* ]] || fail "sources missed Claude files: $out"
+  [[ "$out" == *"~/.codex/memories/"*"2 file(s)"* && "$out" == *"AGENTS.md"* && "$out" == *".oms/memory/"* ]] || fail "sources missed Codex or OMS files: $out"
+  [[ "$out" != *finch-marker* && "$out" != *"$home"* ]] || fail "sources printed file contents or the home path"
+  [ "$before" = "$(find "$repo" "$home" -newer "$repo/AGENTS.md" | wc -l)" ] || fail "sources wrote something"
+  HOME="$home" CODEX_HOME="" bash "$am" --repo "$repo" sources --json | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+assert report["schema"] == 1 and report["contents_read"] is False, report
+roles = {(row["provider"], row["role"]) for row in report["sources"]}
+assert {("claude", "auto-memory"), ("codex", "memories"), ("oms", "memory")} <= roles, roles
+codex = next(row for row in report["sources"] if row["role"] == "memories")
+assert codex["files"] == 2 and codex["bytes"] == 30, codex
+assert all(set(row) <= {"provider", "role", "path", "kind", "bytes", "files", "modified", "link", "capped"}
+           for row in report["sources"]), report
+' || fail "sources --json shape"
+  if bash "$am" --global sources >/dev/null 2>&1; then fail "sources accepted --global"; fi
+}
+
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
   local repo="$TMP/checkpoint"
   local created checkpoint_id before_dry
@@ -2949,6 +3049,7 @@ test_inbox_fix_safe_reports_ci_refresh_only_when_ledger_changed
 test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_memory_supersession_and_retirement
+test_memory_redaction_and_native_sources
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
 test_checkpoint_restores_from_unstaged_only_with_stale_stat
 
