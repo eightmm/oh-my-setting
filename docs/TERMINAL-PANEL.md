@@ -3136,6 +3136,27 @@ readings are stale. Context bands reuse the existing `OMS_CTX_WARN_PCT` (15% lef
 `OMS_CTX_URGENT_PCT` (8% left) settings and existing hook handoff/compaction flow.
 The health screen makes no model calls and changes no native permissions.
 
+`oms panel --repo . --sessions [--room ID] [--json]` prints one normalized status per
+recorded session or call, for notifiers and outside scripts. Text mode is one line each:
+`ID PROVIDER/ROLE STATE waiting=WHO raw=RAW since=TS source=SRC [stale]`. `--json` is
+schema 1, kind `oms-sessions`: top-level `stale`, `stale_reason` and `sessions`, each row
+carrying `id` (the attempt id, else the room participant), `attempt`, `participant`,
+`provider`, `role`, `state` (`working | waiting | blocked | done | failed | unknown`),
+`waiting_for` (`input | approval | review | owner | none | unknown`), `raw_state` (the OMS
+state it came from), `since`, `since_basis`, `source` and `stale`. The view is a projection
+of the board's own report with one mapping table (`STATE_MAP` in
+`scripts/lib/session_status.py`); a raw state without a row reads `unknown`. `quiet`,
+`presence unknown` and `orphaned` stay `unknown` (the evidence does not say), `idle` is
+`waiting` for `none`, and `cancelled` is `done`; use `raw_state` to tell them apart.
+`since` is set only where a record gives it (a main's native activity, or the end of a
+finished call, whose `since_basis` says `ended` or `last event`); a running call has no
+state-change time recorded, so it reads null. `stale` is true when the read was held, the
+refresh failed or the attempts source was unreadable; an empty `sessions` with a true
+top-level `stale` means unknown, not none. Exit status follows the board's snapshot. It
+calls no provider CLI and no model; provider-native inputs such as `claude agents --json`
+are a named but unimplemented extension point in the mapping table's docstring.
+Observation is not approval or verification evidence.
+
 Clearing the panel display does not free model context or subscription quota.
 Use native compaction or an explicit handoff for context, and the native quota
 reset for exhausted usage. Room acknowledgement keeps message evidence; new

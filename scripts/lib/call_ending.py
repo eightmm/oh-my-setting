@@ -1,13 +1,15 @@
 """Classify terminal call evidence shared by board and Results projections."""
 
 LIVE_STATES = {"starting", "working", "running", "verifying", "live marker"}
+# Open but not live: no ending is recorded for these (session_status.py maps both sets).
+OPEN_STATES = {"queued", "idle", "manual", "quiet", "blocked", "review", "waiting_input", "waiting_approval", "presence unknown"}
 
 
 def call_ending(call):
     """Classify recorded terminal evidence without changing the lifecycle state."""
     state, code = call.get("state"), call.get("exit")
     # A call in review awaits its owner's decision; its exit is evidence for that decision, not an ending.
-    if state in LIVE_STATES or state in {"queued", "idle", "manual", "quiet", "blocked", "review", "waiting_input", "waiting_approval", "presence unknown"}:
+    if state in LIVE_STATES or state in OPEN_STATES:
         return None
     reason = call.get("reason_code")
     if call.get("guard") or reason == "worker_authority_violation":
