@@ -431,6 +431,14 @@ def prepare_bundle(source: str, reference: str, subdir: str) -> Tuple[PreparedSo
         "provenance": dict(prepared.provenance),
         "entries": entries,
     }
+    try:
+        # Where a person should read before importing. A list of places, never a verdict, and never a gate:
+        # a summary that cannot be built is reported as unavailable and the preview goes on.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import skill_risk
+        report["risk_summary"] = skill_risk.summarize(entries)
+    except Exception:
+        report["risk_summary"] = {"schema": 1, "note": "unavailable: the review-point summary could not be built"}
     return prepared, report
 
 

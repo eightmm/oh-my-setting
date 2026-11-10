@@ -552,6 +552,15 @@ oms skill-forge update --source PATH_OR_GIT --expected-current-sha256 OLD --expe
 oms skill-forge rollback oms-NAME --to SHA --expected-current-sha256 CURRENT --apply
 ```
 
+A preview (and an unapplied import or update) carries a `risk_summary`: where
+a person should read before applying. It lists, by path and line, the bundle's
+scripts, sentences that tell an agent to fetch or run something, hidden
+Unicode, HTML comments in prose, the hosts of external URLs and the
+`allowed-tools` the skill asks for. It reports locations and counts only,
+never the flagged text, runs no bundle file and calls no model. It is not a
+verdict: an empty list does not mean the bundle is safe, and what import
+refuses is unchanged.
+
 `oms skill-forge outdated [--json]` asks whether an imported git bundle's
 upstream moved. For each lock receipt with a git source it runs `git ls-remote`
 on the recorded ref and compares the answer with the revision the import
