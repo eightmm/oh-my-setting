@@ -33,6 +33,7 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
         navigation["activity_snapshot"] = {"repo": root, "calls": {}}
     sep = " · " if unicode else " / "
     selected = navigation.get("selected")
+    changed = navigation.get("changed") or ()
     collapsed = navigation.get("collapsed", set())
     room = mapping(report.get("room"))
     if height <= int(menu):
@@ -163,8 +164,13 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             if context:
                 identity += sep + "ctx %s%% used" % context[0]
         gutter = glyph("selected", unicode) + " " if action and selected == action else "  "
+        moved = gutter == "  " and (call.get("participant") in changed or call.get("attempt") in changed)
+        if moved:
+            # The selection marker's own two columns: a just-changed row never shifts the layout.
+            gutter = glyph("changed", unicode) + " "
         style = band_style(call.get("role"), purpose(call))
-        text, spans = format_tail_row([(gutter, "text"), (connector, style)], (identity, style), values, tail_plan)
+        text, spans = format_tail_row([(gutter, "alert" if moved else "text"), (connector, style)],
+                                      (identity, style), values, tail_plan)
         add(text, None, action, fold)
         rows[-1]["spans"] = spans
         rows[-1]["identity"] = action == selected

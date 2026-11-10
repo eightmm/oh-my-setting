@@ -325,6 +325,48 @@ def attention_bell(known, report, key, stale=False):
     return seeded and bool(current - known[1]), (key, current)
 
 
+CHANGED_ROW_SECONDS = 3
+
+
+def changed_rows(known, report, key, stale=False):
+    """(row ids, known) for one snapshot: the room members that are new or whose state moved since the last read.
+
+    `known` is None or (key, {row id: state}) from the previous completed read of the same room `key`. The first
+    read of a room only seeds it, so a board start, restart or room switch marks nothing; a failed, held or
+    unreadable read forgets what it knew, so the read after it seeds again instead of marking everything that
+    moved while the board could not see. A member answers to its participant and its attempt id, the two ids
+    the board's rows carry. Display-only: nothing here reaches ordering, counts, the bell or the notifier."""
+    from dashboard_projection import mapping
+    import room_view
+    if stale or mapping(report.get("collection")).get("ok") is not True or mapping(report.get("room")).get("error"):
+        return frozenset(), None
+    current = {}
+    for member in room_view.nodes(report):
+        for ident in (member.get("participant"), member.get("attempt")):
+            if isinstance(ident, str) and ident:
+                current[ident] = member.get("state")
+    if known is None or known[0] != key:
+        return frozenset(), (key, current)
+    return frozenset(ident for ident, state in current.items() if known[1].get(ident) != state), (key, current)
+
+
+def mark_changed(navigation, marked, fresh, now):
+    """Keep `marked` ({row id: expiry}) current and publish the live ids to the renderer; True when the set shown
+    changed, so the caller repaints once when a mark runs out even though no snapshot arrived."""
+    for ident in fresh:
+        marked[ident] = now + CHANGED_ROW_SECONDS
+    for ident in [ident for ident, expiry in marked.items() if expiry <= now]:
+        del marked[ident]
+    live = frozenset(marked)
+    if live == navigation.get("changed", frozenset()):
+        return False
+    if live:
+        navigation["changed"] = live
+    else:
+        navigation.pop("changed", None)
+    return True
+
+
 def ring_bell(stream=None):
     """One BEL on the board's own terminal; tmux flags the window and applies the person's bell-action."""
     stream = sys.stdout if stream is None else stream
@@ -552,6 +594,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             size = None
             held = {}
             belled = None
+            moved, marked = None, {}
             next_focus, splits, modes = 0, SplitSync(), PanelModeSync()
             while True:
                 collected = False
@@ -598,6 +641,13 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     pending_cancel = navigation.get("cancel_pending")
                     navigation = refreshed_navigation(navigation, state, managed_session() and session_option(BOTTOM_OPTION),
                                                      close_call=close_call)
+                    if motion:
+                        # A row that just moved is marked for a few seconds; reduced motion shows none.
+                        seeded = moved
+                        fresh, moved = changed_rows(moved, board, selected_room, bool(notice))
+                        if moved is None or seeded is None or seeded[0] != moved[0]:
+                            marked.clear()  # another room's marks, or ones a blind read can no longer vouch for
+                        mark_changed(navigation, marked, fresh, time.monotonic())
                     if pending_cancel and not navigation.get("cancel_pending"):
                         _clear_cancel_option(pending_cancel.get("window_id"))
                     if navigation.get("cancel_pending"):
@@ -1032,6 +1082,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             previews.start(lambda target=target, state=state:
                                            read_evidence(repo, target, state))
                     if expire_notice(navigation, time.monotonic()):
+                        size = redraw()
+                    if marked and mark_changed(navigation, marked, (), time.monotonic()):
                         size = redraw()
                     if motion and time.monotonic() >= next_frame:
                         next_frame = time.monotonic() + .25

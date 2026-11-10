@@ -2062,6 +2062,82 @@ assert marker_frames >= 5, marker_frames
 still_frames, still_authority = idle_ticks(quiet, density="tree")
 moved_frames, moved_authority = idle_ticks(quiet, keys=[("down",)], density="tree")
 assert still_authority == 1 and moved_authority == 2 and moved_frames > still_frames, (moved_frames, moved_authority)
+# A row that is new or whose state moved since the previous read is marked for a few seconds. The first read of a
+# room only seeds, a re-read marks nothing, and a member answers to both ids the board's rows carry.
+marks, seen = panel_watch.changed_rows(None, quiet, "r")
+assert marks == frozenset() and seen[0] == "r" and seen[1]["m1"] == seen[1]["att_main"], seen
+assert panel_watch.changed_rows(seen, quiet, "r") == (frozenset(), seen)
+marks, seen_running = panel_watch.changed_rows(seen, running, "r")
+assert marks == {"call-run", "att_run"}, marks
+ended = deepcopy(running)
+ended["attempts"]["recent"].append(dict(ended["attempts"]["active_recent"].pop(), state="failed"))
+marks, seen_ended = panel_watch.changed_rows(seen_running, ended, "r")
+assert marks == {"call-run", "att_run"}, marks
+# Another room seeds afresh, and a failed, unreadable or held read forgets what it knew: the read after it must
+# not mark everything that moved while the board could not see.
+assert panel_watch.changed_rows(seen, running, "other-room")[0] == frozenset()
+for unread, held_frame in (({"collection": {"ok": False}}, False), (dict(running, collection={}), False),
+                           (dict(running, room={"id": "r", "error": "room unreadable"}), False), (running, True)):
+    assert panel_watch.changed_rows(seen, unread, "r", held_frame) == (frozenset(), None)
+assert panel_watch.changed_rows(None, running, "r")[0] == frozenset()
+# The marks end by themselves: the published set changes once when they are set and once when they run out.
+mark_nav, mark_clock = {}, {}
+assert panel_watch.mark_changed(mark_nav, mark_clock, {"call-run"}, 10.0) and mark_nav["changed"] == {"call-run"}
+assert not panel_watch.mark_changed(mark_nav, mark_clock, (), 12.75) and mark_nav["changed"] == {"call-run"}
+assert panel_watch.mark_changed(mark_nav, mark_clock, (), 10.0 + panel_watch.CHANGED_ROW_SECONDS)
+assert "changed" not in mark_nav and not mark_clock and not panel_watch.mark_changed(mark_nav, mark_clock, (), 99.0)
+# The mark takes the selection marker's two columns, so no row moves or changes width when it appears or ends;
+# a selected row keeps its own marker; without color the glyph alone carries it.
+import room_view
+ended_action = room_view.action(next(m for m in room_view.nodes(ended) if m.get("participant") == "call-run"))
+for draw, row_action in ((lambda nav, **kw: render_tree(ended, 100, 30, navigation=nav, **kw), ended_action),
+                         # The flat list draws live calls only, so there the new running call is the marked row.
+                         (lambda nav, **kw: render(running, "codex", 100, 30, view="compact", navigation=nav, **kw),
+                          ("result", "att_run"))):
+    plain = draw({}).split("\n")
+    marked_text = draw({"changed": frozenset({"call-run", "att_run"})}).split("\n")
+    differing = [(a, b) for a, b in zip(plain, marked_text) if a != b]
+    assert len(plain) == len(marked_text) and len(differing) == 1, differing
+    before, after = differing[0]
+    assert "Live call" in before and "✦ " in after and "✦" not in before, differing
+    assert after.replace("✦ ", "  ", 1) == before, differing
+    ascii_text = draw({"changed": frozenset({"call-run", "att_run"})}, unicode=False)
+    assert sum(line.lstrip(" |").startswith("* ") and "Live call" in line for line in ascii_text.split("\n")) == 1, ascii_text
+    colored = draw({"changed": frozenset({"call-run", "att_run"})}, color=True)
+    assert "✦" in colored and len(colored.split("\n")) == len(plain)
+    chosen = draw({"changed": frozenset({"call-run", "att_run"}), "selected": row_action})
+    assert "✦" not in chosen and chosen != "\n".join(marked_text), chosen
+# In the watcher: nothing is marked on the first read, the row that moved is marked on the next one, the mark costs
+# exactly one repaint when it runs out, and an idle board is idle again afterwards. Reduced motion marks nothing.
+def marked_ticks(boards, static=False):
+    clock, reads, output = [0.0], list(boards), io.StringIO()
+    class TickInput(ResponsiveInput):
+        def __init__(self, *args, **kwargs):
+            pass
+        def wait(self, seconds):
+            clock[0] += .25
+            return [("q",)] if clock[0] >= 14 else []
+    def read(*args, **kwargs):
+        return (reads.pop(0) if len(reads) > 1 else reads[0], 0, "codex", "att_main", "tree", False, "")
+    with patch.object(panel, "BackgroundRead", ImmediateRead), \
+            patch.object(panel, "read_panel", side_effect=read), \
+            patch.object(panel, "managed_session", return_value=False), \
+            patch.object(panel, "terminal_style", return_value=(True, False, True)), \
+            patch.object(panel.sys, "stdout", output), \
+            patch.object(panel.os, "get_terminal_size", return_value=os.terminal_size((100, 40))), \
+            patch.object(panel.time, "monotonic", side_effect=lambda: clock[0]), \
+            patch.object(panel, "_cancel_watch_authority", return_value=True), \
+            patch.object(panel, "frame_view", wraps=panel.frame_view) as drawn, \
+            patch.dict(os.environ, {"OMS_PANEL_NO_ANIMATION": "1" if static else "0"}), \
+            patch("panel_input.TerminalInput", TickInput):
+        assert panel.watch(Path("."), "codex") == 0
+    return drawn.call_count, output.getvalue()
+unmoved_frames, unmoved_output = marked_ticks([quiet, quiet])
+assert "✦" not in unmoved_output, unmoved_output
+ended_frames, ended_output = marked_ticks([quiet, ended])
+assert ended_output.count("✦") == 1 and ended_frames == unmoved_frames + 1, (ended_frames, unmoved_frames, ended_output.count("✦"))
+assert "✦" not in marked_ticks([ended, ended])[1]
+assert "✦" not in marked_ticks([quiet, ended], static=True)[1]
 # A blocked state read must not block view keys or quitting the terminal.
 import threading
 import time
