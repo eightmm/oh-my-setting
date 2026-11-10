@@ -37,6 +37,8 @@ Static cluster facts live in the private reference, not in repeated probes.
 - `oms job-digest <log>` distills a job log to agent-sized context instead of
   pasting raw logs.
 - `oms run-reconcile` reconciles finished Slurm jobs against the run ledger.
+- `oms slurm-lint SCRIPT` statically checks a job script's time, logs, array
+  limit and preemption handling; `--template` prints a requeue-safe start.
 - Waiting on a job? Make one bounded call, not repeated `squeue` turns:
   `oms job-digest <id> [log] --wait --wait-timeout 540 --max-bytes 16384`
   polls inside the shell. Keep the budget under the host's tool-call timeout,

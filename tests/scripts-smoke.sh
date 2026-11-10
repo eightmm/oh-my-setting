@@ -22057,6 +22057,53 @@ EOF
   assert_file_contains "$out" '- CPU default: DefCpuPerGPU=8'
   assert_file_contains "$out" '- Memory default: DefMemPerCPU=8192, DefMemPerGPU=65536'
   assert_file_contains "$out" '- Time default: 01:00:00'
+
+  # slurm-lint reads that snapshot's QOS table: the default QOS "high" preempts
+  # by REQUEUE with a two-day MaxWall. It reads the script and never runs it.
+  local lint="$d/lint" LINT="$ROOT/scripts/slurm-lint.sh" rc
+  mkdir -p "$lint"
+  printf '%s\n' '#!/bin/bash' '#SBATCH -o run.log' '#SBATCH --array=0-9' '#SBATCH -t 3-00:00:00' \
+    ': > "'"$lint"'/executed"' '#SBATCH --requeue' > "$lint/bad.sh"
+  rc=0
+  "$LINT" "$lint/bad.sh" --snapshot "$out" > "$lint/bad.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "slurm-lint must exit 1 on warnings (got $rc): $(cat "$lint/bad.out")"
+  [ ! -e "$lint/executed" ] || fail "slurm-lint must not run the script"
+  assert_file_contains "$lint/bad.out" "5 warning(s); static check, nothing was submitted or run"
+  assert_file_contains "$lint/bad.out" "warn: log: --output run.log is not job-specific"
+  assert_file_contains "$lint/bad.out" "warn: array: --array 0-9 has no concurrency limit"
+  # A directive after the first command is a comment to sbatch, so --requeue was not asked for.
+  assert_file_contains "$lint/bad.out" "warn: requeue: QOS high preempts by REQUEUE but the script does not ask for --requeue"
+  assert_file_contains "$lint/bad.out" "warn: signal: QOS high requeues, and the script has neither --signal nor a trap"
+  assert_file_contains "$lint/bad.out" "warn: maxwall: --time 3-00:00:00 is longer than QOS high MaxWall 2-00:00:00"
+  # A trap in the batch shell never fires unless the signal is sent to it (B:).
+  printf '%s\n' '#!/bin/bash' '#SBATCH --time=30' '#SBATCH --requeue' '#SBATCH --signal=USR1@60' \
+    '#SBATCH --array=0-9%2' '#SBATCH --output=logs/%A.out' "trap 'true' USR1" 'srun true' > "$lint/step.sh"
+  rc=0
+  "$LINT" "$lint/step.sh" --snapshot "$out" > "$lint/step.out" 2>&1 || rc=$?
+  [ "$rc" = 1 ] || fail "slurm-lint should warn about a step-only signal (got $rc)"
+  assert_file_contains "$lint/step.out" "warn: signal: --signal=USR1@60 reaches the job steps only"
+  assert_file_contains "$lint/step.out" "warn: log: --output logs/%A.out is shared by every array task: add %a"
+  assert_file_contains "$lint/step.out" "2 warning(s)"
+  # The template it prints is clean against a requeueing QOS once the time is filled in.
+  "$LINT" --template | sed 's/TODO-D-HH:MM:SS/1-00:00:00/' > "$lint/job.sh"
+  cmp -s <("$LINT" --template) "$ROOT/templates/slurm-job.sh" || fail "--template must print templates/slurm-job.sh"
+  bash -n "$lint/job.sh" || fail "the job template must parse"
+  "$LINT" "$lint/job.sh" --snapshot "$out" > "$lint/job.out" 2>&1 ||
+    fail "the job template should lint clean: $(cat "$lint/job.out")"
+  assert_file_contains "$lint/job.out" "0 warning(s)"
+  # A QOS that does not requeue gets no requeue warning, and says why.
+  printf '%s\n' '#!/bin/bash' '#SBATCH --time=10' '#SBATCH --qos=normal' 'true' > "$lint/plain.sh"
+  printf '%s\n' '## QOS' '' 'Name|PreemptMode|MaxWall' 'normal|CANCEL|01:00:00' > "$lint/snap.md"
+  "$LINT" "$lint/plain.sh" --snapshot "$lint/snap.md" > "$lint/plain.out" 2>&1 || fail "a non-requeue QOS should lint clean"
+  assert_file_contains "$lint/plain.out" "note: preemption: QOS normal PreemptMode is CANCEL; no requeue check applies"
+  # No snapshot, or a QOS it does not list, is unknown: said so, never a pass on preemption.
+  "$LINT" "$lint/plain.sh" --snapshot "$lint/missing.md" > "$lint/unknown.out" 2>&1 || fail "lint without a snapshot failed"
+  assert_file_contains "$lint/unknown.out" "note: preemption: unknown (no cluster snapshot; run: oms snapshot --cluster)"
+  "$LINT" "$lint/plain.sh" --snapshot "$out" > "$lint/unlisted.out" 2>&1 || fail "lint with an unlisted QOS failed"
+  assert_file_contains "$lint/unlisted.out" "note: preemption: unknown (QOS normal is not in the snapshot)"
+  rc=0
+  "$LINT" "$lint/absent.sh" > /dev/null 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "slurm-lint must exit 2 for an unreadable script (got $rc)"
 }
 
 # Stub sacct/squeue: terminal states for given ids, RUNNING otherwise.
