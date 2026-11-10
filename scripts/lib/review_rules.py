@@ -13,6 +13,7 @@ nothing here writes a rule.
 """
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -24,6 +25,8 @@ import review_findings as base  # noqa: E402
 MAX_RULES_BYTES = 2000
 MAX_FILE = 1024 * 1024
 REPEAT = 3
+MIN_SAMPLES = 5
+DEMOTE_RATE = 0.7
 SECTION = re.compile(r"(?ms)^## Verification[ \t]*\n(.*?)(?=^## |\Z)")
 ITEM = re.compile(r"(?m)^- Review rules:[ \t]*([^\r\n]*)((?:\r?\n[ \t]+[^\r\n]*)*)")
 
@@ -101,15 +104,61 @@ def suggest(args):
     return 0
 
 
+def signals(args):
+    """Per rule label: what became of the findings that named it. Read-only; nothing is edited or disabled."""
+    findings, events = base.load(args.artifact_dir)
+    table, unlabelled = {}, 0
+    for ident, entry in findings.items():
+        label = entry.get("rule")
+        if not isinstance(label, str) or not label:
+            unlabelled += 1
+            continue
+        state, _ = base.status(entry, events.get(ident, []))
+        row = table.setdefault(label, {"rule": label, "raised": 0, "fixed": 0, "dismissed": 0, "open": 0})
+        row["raised"] += 1
+        row["fixed" if state in ("fixed", "verified") else state] += 1
+    rows = []
+    for row in table.values():
+        decided = row["fixed"] + row["dismissed"]
+        row["dismiss_rate"] = round(row["dismissed"] / decided, 2) if decided else None
+        row["suggestion"] = ("demote?" if decided >= args.min_samples and row["dismissed"] / decided > DEMOTE_RATE
+                             else "keep")
+        rows.append(row)
+    rows.sort(key=lambda row: (-row["raised"], row["rule"]))
+    if args.json:
+        print(json.dumps({"schema": base.SCHEMA, "min_samples": args.min_samples, "demote_rate": DEMOTE_RATE,
+                          "unlabelled": unlabelled, "rules": rows}, ensure_ascii=False, sort_keys=True))
+        return 0
+    if not rows:
+        print("review rules: no finding names a rule (%d unlabelled); seats add an optional \"rule\" label" % unlabelled)
+        return 0
+    print("%-24s %6s %6s %9s %5s %8s  suggestion" % ("rule", "raised", "fixed", "dismissed", "open", "dismiss"))
+    for row in rows:
+        rate = "-" if row["dismiss_rate"] is None else "%d%%" % round(row["dismiss_rate"] * 100)
+        print("%-24s %6d %6d %9d %5d %8s  %s" % (row["rule"][:24], row["raised"], row["fixed"], row["dismissed"],
+                                                  row["open"], rate, row["suggestion"]))
+    print("%d finding(s) carry no rule label. demote? = dismissed share of decided findings above %d%% with at "
+          "least %d decided; a suggestion only, no rule is edited or disabled" % (unlabelled, DEMOTE_RATE * 100,
+                                                                                    args.min_samples))
+    return 0
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="review_rules.py")
     sub = parser.add_subparsers(dest="action", required=True)
+    one = sub.add_parser("signals")
+    one.add_argument("--artifact-dir", default=os.path.join(os.getcwd(), ".oms", "artifacts", "review"))
+    one.add_argument("--repo", default="")
+    one.add_argument("--json", action="store_true")
+    one.add_argument("--min-samples", type=int, default=MIN_SAMPLES)
     one = sub.add_parser("rules")
     one.add_argument("--repo", required=True)
     one.add_argument("--base", default="HEAD")
     one = sub.add_parser("suggest")
     one.add_argument("--artifact-dir", required=True)
     args = parser.parse_args(argv)
+    if args.action == "signals":
+        return signals(args)
     return rules(args) if args.action == "rules" else suggest(args)
 
 

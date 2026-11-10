@@ -1944,6 +1944,19 @@ in force. The rules add to the seat instructions and override none of them.
 for three or more findings. It is a suggestion only: the owner adds a rule to
 PROJECT.md by hand, and nothing writes one.
 
+A finding may carry one optional `rule` label (at most 80 characters) in the
+findings block: the repository review rule the seat applied. Rules are free
+text without ids, so the label is the seat's own short name for it; a missing or
+non-string label is dropped and the finding is kept. `oms peer-review findings
+rules [--json] [--min-samples N]` reads the recorded findings and their events
+and prints, per label, findings raised, fixed (fixed or verified), dismissed
+and still open, the dismissed share of decided findings, and `demote?` when
+that share exceeds 70% with at least N decided findings (default 5), else
+`keep`. Findings without a label are only counted. Read-only and advisory: it
+never edits, disables or demotes a rule, and a dismissal stays a record, not
+evidence that the rule is wrong. There is no lens id: peer-review has no lenses
+(panel council lenses are a separate path that records no findings).
+
 `oms peer-review --gate --security-audit PROVIDER` turns patch-admit's
 `security: ADVISE` into a recorded reading. When the reviewed change touches
 the same risk paths (hooks, installers, permissions, settings, workflows,
