@@ -22,10 +22,10 @@ Default: concise, scoped, evidence-driven.
 - For differing interfaces, name both and your choice; proceed within authority
   unless hard to reverse.
 - Preserve unrelated work; report failures, bound retries, continue safe work.
-- Create project files only inside the working project: no sibling/parent
-  directories or project copies (isolate with `oms scratch-worktree`); on servers,
-  the same `~` path, code moved only via git. Temporary files go to session
-  scratch or TMPDIR; delete after use.
+- Create files only inside the project: no sibling/parent directories or copies
+  (isolate with `oms scratch-worktree`); servers: same `~` path, code via git,
+  data in one bundled transfer, never per-file `scp`. Temporary files: session
+  scratch or TMPDIR, deleted after use.
 - Trace code; choose the first sufficient option: no change, existing code,
   stdlib, portable native feature, declared dependency, smallest correct implementation.
 - Minimal never means incomplete: preserve requirements, trust-boundary

@@ -4,7 +4,9 @@
 - Before heavy work, confirm partition/account/resources/time, outputs, and
   checkpoints from `PROJECT.md` or the private cluster snapshot.
 - Use `sbatch` for batch jobs and allocated `srun` interactively.
-- Job scripts enter `$SLURM_SUBMIT_DIR`, fail fast, and write job-specific logs.
+- Job scripts enter `$SLURM_SUBMIT_DIR`, fail fast, write one log per job, and
+  keep shared-filesystem I/O to few large files; unpack many-file inputs on
+  node-local scratch.
 - Preemptible jobs save `latest` on SIGTERM and at the checkpoint interval,
   request `--requeue` where the cluster preempts by requeue, and resume from
   `latest`.

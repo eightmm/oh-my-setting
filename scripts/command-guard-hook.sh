@@ -104,7 +104,7 @@ if [[ "$payload" =~ $command_re ]]; then
   command_text="${BASH_REMATCH[1]}"
   case "$command_text" in
     *'\u'*) ;;
-    *rm*|*git*|*mkfs*|*dd*|*curl*|*wget*) ;;
+    *rm*|*git*|*mkfs*|*dd*|*curl*|*wget*|*scp*|*sftp*|*rsync*) ;;
     *) exit 0 ;;
   esac
 fi
@@ -112,12 +112,17 @@ fi
 parser=""
 read -r -d '' parser <<'PY' || true
 import datetime
+import fcntl
 import hashlib
 import json
 import os
 import re
+import signal
+import stat
 import subprocess
 import sys
+import time
+from urllib.parse import urlsplit
 
 OPTION_VALUE = frozenset(("-c", "--git-dir", "--work-tree", "--namespace",
                           "--super-prefix", "--config-env"))
@@ -316,6 +321,231 @@ def command_word(words):
     return i
 
 
+TRANSFER = ("transfer", "repeated remote copies should be bundled",
+            "rsync -a --files-from=LIST SRC host:DST or tar -cf - FILES | ssh host 'tar -xf - -C DST'")
+
+
+REMOTE = re.compile(r"^(?:(?P<user>[^/@:]+)@)?(?P<host>\[[^]]+\]|[^/:]+):")
+# Per tool: (letters taking a value, boolean letters). A letter or long option
+# outside these makes the shape uncertain, and the rule then leaves it alone.
+TRANSFER_OPTIONS = {"scp": ("PiFoSJclD", "346ABCOpqRrTv"),
+                    "sftp": ("bBFiJloPRSDcs", "46aCfNpqrv"),
+                    "rsync": ("efTM", "aAbcdgHhikLlopqrtuvWxXz")}
+RSYNC_VALUES = frozenset((
+    "--rsh", "--port", "--files-from", "--exclude", "--include", "--exclude-from",
+    "--include-from", "--filter", "--bwlimit", "--timeout", "--log-file", "--compare-dest",
+    "--link-dest", "--copy-dest", "--rsync-path", "--chmod", "--chown", "--copy-as",
+    "--usermap", "--groupmap", "--stop-at", "--out-format", "--iconv", "--address",
+    "--partial-dir", "--temp-dir", "--backup-dir", "--suffix", "--max-size", "--min-size"))
+RSYNC_FLAGS = frozenset(("--archive", "--recursive", "--verbose", "--compress", "--quiet",
+                         "--partial", "--progress", "--delete", "--checksum", "--update"))
+SHELL_KEYWORDS = frozenset(("do", "then", "else", "elif", "if", "{", "!"))
+XARGS_VALUES = frozenset(("--arg-file", "--delimiter", "--max-args", "--max-procs",
+                          "--max-chars", "--process-slot-var"))
+XARGS_FLAGS = frozenset(("--null", "--eof", "--replace", "--max-lines", "--interactive",
+                         "--no-run-if-empty", "--verbose", "--show-limits", "--exit", "--open-tty"))
+
+
+def remote_host(endpoint):
+    if endpoint.startswith(("scp://", "rsync://")):
+        try:
+            host = urlsplit(endpoint).hostname
+            return host if host and literal(host) else None
+        except ValueError:
+            return None
+    match = REMOTE.match(endpoint)
+    if not match:
+        return None
+    host = match.group("host")
+    if not match.group("user") and len(host) == 1:
+        return None  # `C:foo` is a drive path
+    host = host.strip("[]")
+    return host if literal(host) else None
+
+
+def literal_path(endpoint):
+    """Whether the path part of an endpoint names exactly one file."""
+    if endpoint.startswith(("scp://", "rsync://")):
+        return False  # percent escapes can spell a glob
+    match = REMOTE.match(endpoint)
+    if match and remote_host(endpoint):
+        endpoint = endpoint[match.end():]
+        if any(ch.isspace() for ch in endpoint):
+            return False  # the remote shell splits it into several names
+    return literal(endpoint) and "{" not in endpoint  # brace expansion names several
+
+
+def transfer_command(name, args):
+    """(host, single) for a remote copy; None when it is local or its shape is uncertain.
+
+    Only `scp` without -r and with one literal source is a single-file copy: it
+    cannot copy a directory, so no filesystem lookup is needed. rsync and sftp
+    batches count toward the in-command rule but never toward history.
+    """
+    if name not in TRANSFER_OPTIONS:
+        return None
+    values, booleans = TRANSFER_OPTIONS[name]
+    endpoints, letters, i, plain = [], set(), 0, False
+    while i < len(args):
+        arg = args[i]
+        if not plain and arg == "--":
+            plain = True
+        elif not plain and arg.startswith("--"):
+            option, sep, _ = arg.partition("=")
+            if name == "rsync" and option in RSYNC_VALUES:
+                i += 0 if sep else 1
+            elif name != "rsync" or option not in RSYNC_FLAGS or sep:
+                return None
+        elif not plain and arg.startswith("-") and arg != "-":
+            for j, letter in enumerate(arg[1:]):
+                if letter not in values and letter not in booleans:
+                    return None
+                letters.add(letter)
+                if letter in values:
+                    i += 1 if j == len(arg) - 2 else 0
+                    break
+        else:
+            endpoints.append(arg)
+        i += 1
+    if i > len(args) or "D" in letters:
+        return None  # a value option without its value; -D talks to a local server
+    if name == "sftp":
+        return ("sftp", False) if "b" in letters and endpoints else None
+    hosts = [host for host in map(remote_host, endpoints) if host]
+    if not hosts or len(endpoints) < 2:
+        return None  # local, or an rsync listing
+    single = name == "scp" and "r" not in letters and len(endpoints) == 2 and literal_path(endpoints[0])
+    return hosts[-1], single
+
+
+def xargs_command(words, i):
+    """Index of the command xargs runs, or None when an option is not understood."""
+    while i < len(words) and words[i].startswith("-"):
+        option = words[i]
+        i += 1
+        if option == "--":
+            break
+        if option.startswith("--"):
+            name, sep, _ = option.partition("=")
+            if name in XARGS_VALUES:
+                i += 0 if sep else 1
+            elif name not in XARGS_FLAGS:
+                return None
+            continue
+        for j, letter in enumerate(option[1:]):
+            if letter in "adEILnPs":
+                i += 1 if j == len(option) - 2 else 0
+                break
+            if letter in "eil":
+                break  # optional value, attached only
+            if letter not in "0prtxo":
+                return None
+    return i
+
+
+def transfer_history(session, host):
+    if not isinstance(session, str) or not session:
+        return False
+    directory = os.path.dirname(audit_log)
+    if not directory or not os.path.isabs(directory):
+        return False
+
+    def expired(signum, frame):
+        raise TimeoutError()
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, 1.0)
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        path = os.path.join(directory, "command-guard-transfer.state")
+        flags = os.O_RDWR | os.O_CREAT | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return False
+        with os.fdopen(fd, "r+", encoding="ascii") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            now = int(time.time())
+            key = hashlib.sha256((session + "\0" + host.lower()).encode("utf-8", "surrogatepass")).hexdigest()
+            rows = []
+            for line in handle.read(100000).splitlines():
+                parts = line.split()
+                if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0]) and parts[1].isdigit():
+                    stamp = int(parts[1])
+                    if 0 <= now - stamp <= 600:
+                        rows.append((parts[0], stamp))
+            repeated = any(k == key for k, _ in rows)
+            if not repeated:
+                rows.append((key, now))
+            handle.seek(0)
+            handle.truncate()
+            handle.writelines("%s %d\n" % row for row in rows[-1000:])
+            return repeated
+    except (OSError, ValueError, UnicodeError, TimeoutError):
+        return False
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def transfer_rule(text, session):
+    if re.search(r"\(\s*\)|(?:^|[\s;&|])function\s", text):
+        return None  # a function body runs only when called
+    if "=(" in text:
+        return None  # array contents are words, not commands
+    # `else`, `elif`, `||` and `case` arms are alternatives: two copies there need not both run.
+    copies, depth, alternatives = [], 0, "||" in text or bool(re.search(r"(?:^|[\s;])case\s", text))
+    guarded = "&&" in text  # a copy behind `&&` or `if` may never run
+
+    for segment in direct_shell_segments(text):
+        words, skip = [], False
+        for word, is_op in segment:
+            if is_op:
+                skip = True  # a redirection operator and its target are not arguments
+            elif skip:
+                skip = False
+            else:
+                words.append(word)
+        i = command_word(words)
+        while i < len(words) and words[i] in SHELL_KEYWORDS:
+            alternatives = alternatives or words[i] in ("else", "elif")
+            guarded = guarded or words[i] == "if"
+            i += 1 + command_word(words[i + 1:])
+        if i >= len(words):
+            continue
+        if any(word.startswith("-") for word in words[:i]):
+            continue  # a wrapper option may take a value (`sudo -u NAME`)
+        name = os.path.basename(words[i])
+        if name == "done":
+            depth = max(0, depth - 1)
+            continue
+        if name in ("for", "while", "until"):
+            depth += 1
+            continue
+        repeated = depth > 0
+        if name == "find":
+            positions = [j for j in range(i + 1, len(words)) if words[j] in ("-exec", "-execdir")]
+            if not positions:
+                continue
+            i, repeated = positions[0] + 1, True
+        elif name == "xargs":
+            i, repeated = xargs_command(words, i + 1), True
+            if i is None:
+                continue
+        if i >= len(words):
+            continue
+        name = os.path.basename(words[i])
+        copy = transfer_command(name, words[i + 1:])
+        if copy:
+            copies.append((name, copy, repeated))
+    if copies and (any(item[2] for item in copies) or (len(copies) >= 2 and not alternatives)):
+        return TRANSFER + (copies[0][0], None)
+    # A conditional copy may never run, so it does not enter history either.
+    if len(copies) == 1 and not alternatives and not guarded and copies[0][1][1] and transfer_history(session, copies[0][1][0]):
+        return TRANSFER + (copies[0][0], None)
+    return None
+
+
 def verdict(text, cwd):
     """(rule id, reason, safer spelling, command name, git base) for the first refused segment."""
     cur, previous = cwd, None
@@ -406,7 +636,7 @@ try:
     cwd = doc.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         cwd = os.getcwd()
-    found = verdict(command, cwd) if isinstance(command, str) else None
+    found = (verdict(command, cwd) or transfer_rule(command, doc.get("session_id") or doc.get("sessionId"))) if isinstance(command, str) else None
     if found:
         rule, reason, instead, name, base = found
         record(rule, "bypassed" if mode == "bypass" else "refused", name, command)

@@ -1857,7 +1857,7 @@ test_command_guard_denies_destructive_commands() {
   local hook="$ROOT/scripts/command-guard-hook.sh"
   local base="$TMP/command-guard" repo rc cmd
   repo="$base/repo"
-  mkdir -p "$repo/build" "$repo/sub"
+  mkdir -p "$repo/build" "$repo/sub" "$repo/dir"
   git init -q "$repo"
 
   # guard CWD COMMAND [env...] -> hook status; stderr in $base/err.
@@ -1867,6 +1867,7 @@ test_command_guard_denies_destructive_commands() {
     OMS_CG_CWD="$cwd" OMS_CG_COMMAND="$command" python3 -c '
 import json, os
 print(json.dumps({"cwd": os.environ["OMS_CG_CWD"], "tool_name": "Bash",
+                  "session_id": os.environ.get("OMS_CG_SESSION", ""),
                   "tool_input": {"command": os.environ["OMS_CG_COMMAND"]}}))
 ' > "$base/payload"
     env -u OMS_HARNESS_CHILD -u OMS_COMMAND_GUARD XDG_STATE_HOME="$base/state" "$@" \
@@ -1895,6 +1896,146 @@ print(json.dumps({"cwd": os.environ["OMS_CG_CWD"], "tool_name": "Bash",
     rc=0; guard "$repo" "$cmd" || rc=$?
     [ "$rc" = 2 ] || fail "'$cmd' must be refused (rc=$rc)"
   done
+
+  # Transfer state is keyed by session and host, never by file path.
+  export OMS_CG_SESSION=transfer-one
+  for cmd in "scp a host:x; scp b host:y" 'for f in a b; do scp "$f" host:x; done' \
+    "find . -exec scp {} host:x ;" "xargs scp file host:x" \
+    "sftp -b list host; rsync a host:x"; do
+    rc=0; guard "$repo" "$cmd" OMS_HARNESS_CHILD=1 || rc=$?
+    [ "$rc" = 2 ] && grep -Fq "rsync -a --files-from=LIST SRC host:DST" "$base/err" &&
+      grep -Fq "tar -cf - FILES | ssh host 'tar -xf - -C DST'" "$base/err" ||
+      fail "repeated transfer must be refused: $cmd (rc=$rc)"
+  done
+  guard "$repo" "scp first host:x" || fail "first single transfer passes"
+  rc=0; guard "$repo" "scp second host:y" || rc=$?
+  [ "$rc" = 2 ] || fail "second transfer to same host is refused"
+  guard "$repo" "scp second other:y" || fail "different host passes"
+  OMS_CG_SESSION=transfer-two guard "$repo" "scp second host:y" || fail "different session passes"
+  for cmd in "scp a b host:x" "scp -r dir host:x" "rsync -a dir host:x" "cp a b" "scp a b"; do
+    guard "$repo" "$cmd" || fail "bundled or local copy passes: $cmd"
+  done
+  guard "$repo" "rsync -a file host:x" || fail "rsync never enters single-file history"
+  rc=0; guard "$repo" "scp host:a ." || rc=$?
+  [ "$rc" = 2 ] || fail "pulls share host history"
+  guard "$repo" "scp host:a ." OMS_COMMAND_GUARD=0 || fail "switch bypasses transfer refusal"
+  grep -q '"rule": "transfer".*"verdict": "bypassed"' "$audit" || fail "bypassed transfer is audited"
+  local transfer_state="$base/state/oh-my-setting/command-guard-transfer.state"
+  python3 - "$transfer_state" <<'PYTEST' || fail "transfer state must contain only digests and timestamps"
+import re, sys
+rows = open(sys.argv[1], encoding="ascii").read().splitlines()
+assert rows and all(re.fullmatch(r"[0-9a-f]{64} [0-9]+", row) for row in rows)
+PYTEST
+  # Loop scope, actual executable positions, option values and endpoint forms.
+  for cmd in 'for f in a b; do sudo env X=1 command scp "$f" host:x; done' \
+    'while true; do command scp a host:x; done' \
+    'rsync -a dir/ host:x; rsync -a dir/ host:y' \
+    'for x in a b; do for y in a b; do echo "$y"; done; scp file host:x; done' \
+    'for f in a b; do if true; then scp "$f" host:x; fi; done' \
+    'sftp -qb list host; scp a host:x' 'sftp -b list user@[2001:db8::1]; scp a host:x' \
+    'rsync -ve "ssh -p 22" a opt-host:x; rsync -a --chown root:root b opt-host:y'; do
+    rc=0; guard "$repo" "$cmd" || rc=$?
+    [ "$rc" = 2 ] || fail "repeated transfer shape must be refused: $cmd"
+  done
+  for cmd in 'for f in a b; do echo "$f"; done; scp a afterloop:x' \
+    'for f in a b; do echo "$f"; done; rsync -a dir/ afterloop:x' \
+    'xargs echo scp host:x' 'find . -name scp -exec cp {} host:backup \;' \
+    'rsync -a --files-from=LIST SRC host:DST' 'scp a C:foo' \
+    'xargs --process-slot-var scp echo host:x' 'for p in 1 2; do rsync host:incoming/; done' \
+    'for b in x y; do sftp -D /usr/lib/openssh/sftp-server -b "$b" localhost; done' \
+    'upload() { scp first host:x; scp second host:y; }; printf defined' \
+    'for f in a b; do sudo -u rsync cp "$f" host:backup; done' \
+    'if test -f r.tar; then scp r.tar alt:in/; else scp d.tar alt:in/; fi' \
+    'scp a.tar alt3:in/ || scp a.tar alt4:in/' 'if false; then scp unused alt5:x; else scp b.tar alt6:y; fi' \
+    'scp first alt5:z' \
+    'if false; then scp unused alt7:x; fi' 'scp first alt7:z' \
+    'false && scp unused alt8:x' 'scp first alt8:z' \
+    'upload=(scp archive.tar alt9:in/); scp archive.tar alt9:in/' 'scp first alt9:z' \
+    'for d in a b; do rsync -a --chown root:root "$d/" build/; done'; do
+    OMS_CG_SESSION=scope-case guard "$repo" "$cmd" || fail "non-repeated shape passes: $cmd"
+  done
+  for cmd in 'scp -iIDENTITY -oMode=yes -P2222 a opt-host:x' \
+    'scp -qP 2222 a opt-host:x' 'scp -qi IDENTITY a opt-host:x' \
+    'scp a opt-host:x > output' 'scp a opt-host:x 2>/dev/null'; do
+    OMS_CG_SESSION=options-case guard "$repo" "$cmd" || fail "first option form passes: $cmd"
+    rc=0; OMS_CG_SESSION=options-case guard "$repo" 'scp b opt-host:y' || rc=$?
+    [ "$rc" = 2 ] || fail "option or redirection must preserve host and single source: $cmd"
+    : > "$transfer_state"
+  done
+  for cmd in 'scp a user@[2001:db8::1]:x' 'scp a scp://user@[2001:db8::1]:22/x'; do
+    OMS_CG_SESSION=endpoint-case guard "$repo" "$cmd" || fail "first endpoint passes: $cmd"
+    rc=0; OMS_CG_SESSION=endpoint-case guard "$repo" 'scp b user@[2001:db8::1]:y' || rc=$?
+    [ "$rc" = 2 ] || fail "endpoint must resolve same IPv6 host: $cmd"
+    : > "$transfer_state"
+  done
+  OMS_CG_SESSION=pull-ipv6 guard "$repo" 'scp user@[2001:db8::1]:a .' || fail "first IPv6 pull passes"
+  rc=0; OMS_CG_SESSION=pull-ipv6 guard "$repo" 'scp user@[2001:db8::1]:b .' || rc=$?
+  [ "$rc" = 2 ] || fail "IPv6 pull uses host history"
+  : > "$transfer_state"
+  for cmd in 'scp *.txt uncertain:x' 'scp $files uncertain:x' \
+    'sftp -b BATCH uncertain > output' 'rsync --unknown value file uncertain:x' \
+    "scp 'uncertain:file[12].txt' ." 'rsync -an file uncertain:x' 'rsync -a uncertain:dir .' \
+    'scp -X a uncertain:x' 'scp {a,b}.txt uncertain:incoming/' 'scp scp://uncertain/%2A.txt .' \
+    "scp -O 'uncertain:a.txt b.txt' ."; do
+    OMS_CG_SESSION=uncertain-case guard "$repo" "$cmd" || fail "uncertain shape passes: $cmd"
+    [ ! -s "$transfer_state" ] || fail "uncertain shape must not record history: $cmd"
+  done
+  mkdir -p "$repo/sub/nested" "$HOME/transfer-dir"
+  guard "$repo" 'cd sub; rsync -a nested dirhost:x' || fail "cd directory copy passes"
+  guard "$repo" 'pushd sub; rsync -a nested dirhost:x' || fail "pushd directory copy passes"
+  guard "$repo" 'rsync -a ~/transfer-dir dirhost:x' || fail "home directory copy passes"
+  [ ! -s "$transfer_state" ] || fail "directory transfers do not record history"
+  python3 - "$transfer_state" <<'PYTEST'
+import os, sys
+os.unlink(sys.argv[1])
+os.mkfifo(sys.argv[1])
+PYTEST
+  python3 - "$hook" "$base/state" "$repo" <<'PYTEST' || fail "FIFO history must fail open promptly"
+import json, os, subprocess, sys
+payload = json.dumps({"cwd": sys.argv[3], "session_id": "fifo", "tool_input": {"command": "scp a fifo-host:x"}})
+env = dict(os.environ, XDG_STATE_HOME=sys.argv[2])
+result = subprocess.run(["bash", sys.argv[1]], input=payload, text=True, env=env, timeout=3)
+assert result.returncode == 0, result.returncode
+PYTEST
+  python3 - "$transfer_state" <<'PYTEST'
+import os, sys
+os.unlink(sys.argv[1])
+PYTEST
+  python3 - "$hook" "$base/state/oh-my-setting/command-guard.jsonl" "$repo" "$ROOT/scripts/lib" <<'PYTEST' || fail "slow history must fail open within deadline"
+import json, pathlib, subprocess, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+parser = source.split("read -r -d '' parser <<'PY' || true\n", 1)[1].split("\nPY\n", 1)[0]
+needle = '        os.makedirs(directory, mode=0o700, exist_ok=True)\n        path = '
+assert parser.count(needle) == 1, "slow-history probe no longer matches the parser"
+parser = parser.replace(needle, '        time.sleep(2)\n' + needle)
+payload = json.dumps({"cwd": sys.argv[3], "session_id": "slow", "tool_input": {"command": "scp a slow-host:x"}})
+result = subprocess.run([sys.executable, "-I", "-c", parser, sys.argv[4], "0", "enforce", sys.argv[2], ""],
+                        input=payload, text=True, capture_output=True, timeout=3)
+assert result.returncode == 0 and not result.stdout, result
+PYTEST
+
+  # Empty, malformed, stale, and full state remain bounded and fail open safely.
+  : > "$transfer_state"
+  guard "$repo" "scp a fresh:x" || fail "empty state permits first transfer"
+  printf 'bad row\n' > "$transfer_state"
+  guard "$repo" "scp a fresh:x" || fail "malformed state permits first transfer"
+  python3 - "$transfer_state" <<'PYTEST'
+import hashlib, sys, time
+key = hashlib.sha256(b"transfer-one\0fresh").hexdigest()
+with open(sys.argv[1], "w", encoding="ascii") as out:
+    out.write("%s %d\n" % (key, int(time.time()) - 601))
+    out.write("%s 0\n" % ("0" * 64))
+PYTEST
+  guard "$repo" "scp a fresh:x" || fail "expired state permits a new transfer"
+  python3 - "$transfer_state" <<'PYTEST'
+import sys, time
+with open(sys.argv[1], "w", encoding="ascii") as out:
+    for i in range(1000):
+        out.write("%064x %d\n" % (i, int(time.time())))
+PYTEST
+  guard "$repo" "scp a limit:x" || fail "full state permits a new host"
+  [ "$(wc -l < "$transfer_state" | tr -d ' ')" = 1000 ] || fail "transfer state stays bounded"
+  unset OMS_CG_SESSION
 
   # Text inside the command is not the session environment: none of these
   # spellings turns the guard off.

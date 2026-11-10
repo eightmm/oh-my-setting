@@ -2529,7 +2529,14 @@ or a machine in one step, prints the reason and names the safer spelling:
 - `git reset --hard`, `git clean -fd`/`-x`, a bare `git push --force`/`-f`
   (`--force-with-lease` passes), `git stash drop`/`clear`, and
   `git checkout -- .`/`git restore .` at the top level;
-- `mkfs*`, `dd of=/dev/...`, and `curl`/`wget` piped into a shell.
+- `mkfs*`, `dd of=/dev/...`, and `curl`/`wget` piped into a shell;
+- two remote copies (`scp`, `rsync`, `sftp -b`) in one command, one inside a
+  loop, `xargs` or `find -exec`, and a second single-file `scp` to the same
+  host within ten minutes in a session. Bundle with `rsync -a` and a file list
+  or a `tar` stream over `ssh`. History stores only session/host digests and
+  timestamps in `command-guard-transfer.state` beside the audit log (at most
+  1000 recent rows). An option it does not know, a glob or variable source, a
+  missing session, contention or a one-second I/O deadline leaves the copy alone.
 
 It is a seatbelt against accidents, not a sandbox. It reads the command text
 only and fails open: a payload it cannot parse, a command spelled through a

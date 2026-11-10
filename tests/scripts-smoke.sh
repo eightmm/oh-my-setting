@@ -27312,7 +27312,7 @@ test_project_policy_templates_stay_compact() {
     case "$file" in
       project-general-AGENTS.md) limit=120 ;;
       project-ml-AGENTS.md) limit=440 ;;
-      project-slurm-AGENTS.md) limit=115 ;;
+      project-slurm-AGENTS.md) limit=130 ;;
     esac
     words="$(wc -w < "$ROOT/templates/$file" | tr -d ' ')"
     [ "$words" -le "$limit" ] || fail "$file exceeds $limit words (got $words)"
