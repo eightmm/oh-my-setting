@@ -28,6 +28,7 @@ INCLUDE_STALE=0
 INCLUDE_SUPERSEDED=0
 TARGET_ID=""
 REASON=""
+APPLY=0
 
 usage() {
   cat <<'EOF'
@@ -61,13 +62,15 @@ Options:
   --limit N         Limit search/recall results. Search is unlimited by default;
                     recall defaults to 20.
   --json            search/recall: emit JSONL with provenance metadata;
-                    health: emit one schema-1 diagnostic object.
+                    health: emit one schema-1 diagnostic object;
+                    sources: emit one schema-1 inventory object.
   --source-file PATH
                     append: cite a tracked file from the current project HEAD.
                     Cited notes stay out of compact provider context and are
                     revalidated whenever they are searched or recalled.
   --source-line N   append: 1-based line paired with --source-file.
-  --id ID           supersede/retire: target event_id from search/recall JSON.
+  --id ID           supersede/retire/redact: target event_id from search/recall JSON.
+  --apply           redact: remove the text. Without it redact only reports.
   --reason TEXT     retire: reason for retirement.
   --include-superseded search/recall: include superseded and retired notes, marked.
   --include-stale   search/recall: include cited notes whose source can no
@@ -84,6 +87,16 @@ Commands:
   pin               Append a short note to pins.md.
   supersede         Append a replacement note linked to --id.
   retire            Append a retirement record linked to --id.
+  redact            Remove the text of the entry --id from shared.md or pins.md
+                    and leave a fixed tombstone under its ID, then drop and
+                    rebuild summary.md and the index. The one declared
+                    exception to append-only, for text that should never have
+                    been recorded. Dry run unless --apply; parent only.
+                    Copies elsewhere (provider transcripts, handoffs, backups)
+                    are not touched.
+  sources           List the instruction and memory files each provider CLI
+                    keeps for this repository: names, sizes, counts and times
+                    only. No file is opened and nothing is written.
   compact           Regenerate summary.md from source memory.
   search PATTERN    Print memory + pins entries matching PATTERN (case-
                     insensitive substring over header and body) from SQLite;
@@ -165,13 +178,15 @@ while [ "$#" -gt 0 ]; do
     --reason)
       [ "$#" -ge 2 ] || { echo "error: --reason requires text" >&2; exit 2; }
       REASON="$2"; shift 2 ;;
+    --apply)
+      APPLY=1; shift ;;
     --include-superseded)
       INCLUDE_SUPERSEDED=1; shift ;;
     --include-stale)
       INCLUDE_STALE=1
       shift
       ;;
-    path|db-path|show|context|init|append|pin|supersede|retire|compact|search|recall|health|rebuild)
+    path|db-path|show|context|init|append|pin|supersede|retire|redact|sources|compact|search|recall|health|rebuild)
       ACTION="$1"
       shift
       ;;
@@ -218,9 +233,11 @@ if [ -n "$SOURCE_FILE" ] || [ -n "$SOURCE_LINE" ]; then
   }
 fi
 case "$ACTION" in
-  supersede|retire) [ -n "$TARGET_ID" ] || { echo "error: $ACTION requires --id" >&2; exit 2; } ;;
-  *) [ -z "$TARGET_ID" ] && [ -z "$REASON" ] || { echo "error: --id/--reason apply only to supersede or retire" >&2; exit 2; } ;;
+  supersede|retire|redact) [ -n "$TARGET_ID" ] || { echo "error: $ACTION requires --id" >&2; exit 2; } ;;
+  *) [ -z "$TARGET_ID" ] && [ -z "$REASON" ] || { echo "error: --id/--reason apply only to supersede, retire or redact" >&2; exit 2; } ;;
 esac
+if [ "$ACTION" = redact ] && [ -n "$REASON" ]; then echo "error: --reason applies only to retire" >&2; exit 2; fi
+if [ "$APPLY" -eq 1 ] && [ "$ACTION" != redact ]; then echo "error: --apply applies only to redact" >&2; exit 2; fi
 if [ "$ACTION" = supersede ] && [ -n "$REASON" ]; then echo "error: --reason applies only to retire" >&2; exit 2; fi
 if [ "$INCLUDE_SUPERSEDED" -eq 1 ]; then
   case "$ACTION" in search|recall) JSON_ARGS+=(--include-superseded) ;; *) echo "error: --include-superseded applies only to search or recall" >&2; exit 2 ;; esac
@@ -233,8 +250,8 @@ if [ "$INCLUDE_STALE" -eq 1 ]; then
 fi
 if [ "$AS_JSON" -eq 1 ]; then
   case "$ACTION" in
-    search|recall|health) JSON_ARGS+=(--json) ;;
-    *) echo "error: --json applies only to search, recall, or health" >&2; exit 2 ;;
+    search|recall|health|sources) JSON_ARGS+=(--json) ;;
+    *) echo "error: --json applies only to search, recall, health, or sources" >&2; exit 2 ;;
   esac
 fi
 if [ "${OMS_HARNESS_CHILD:-0}" = 1 ] &&
@@ -350,6 +367,21 @@ case "$ACTION" in
       agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file" note "" "" "$TARGET_ID" supersedes
     fi
     echo "memory: $ACTION recorded in $MEMORY_FILE"
+    ;;
+  redact)
+    if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
+      echo "error: only the parent session may redact memory; return the request to the parent agent" >&2
+      exit 2
+    fi
+    ensure_tmpdir
+    agent_memory_redact "$MEMORY_FILE" "$SCOPE" "$AGENT" "$TARGET_ID" "$APPLY"
+    ;;
+  sources)
+    [ "$SCOPE" = project ] && [ "$MEMORY_FILE_EXPLICIT" -eq 0 ] || {
+      echo "error: sources reports one repository; use --repo, not --global or --file" >&2
+      exit 2
+    }
+    python3 "$ROOT/scripts/lib/agent_memory_sources.py" --repo "$REPO" "${JSON_ARGS[@]}"
     ;;
   pin)
     ensure_tmpdir

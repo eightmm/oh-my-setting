@@ -222,7 +222,7 @@ agent_memory_db_command() {
     repo_args=(--repo "$repo")
   fi
   case "$command_name" in
-    validate|context) ;;
+    validate|context|redact) ;;
     *) agent_memory_ensure_oms_ignore_for_path "$db_file" ;;
   esac
   python3 "$AGENT_MEMORY_DB_HELPER" "$command_name" \
@@ -1179,6 +1179,58 @@ agent_memory_append_file() {
   # into a failure (refresh prints its own warning).
   agent_memory_refresh_summary "$memory_file" "$scope" || true
   agent_memory_sync_db_best_effort "$memory_file"
+}
+
+# Remove the text of one recorded entry and leave a fixed tombstone under its
+# ID: the one declared exception to append-only, for text that should never
+# have been recorded. Both source logs are locked for the rewrite; afterwards
+# every derived copy (summary.md, the SQLite index and its journals) is dropped
+# and rebuilt so the text is not left behind in them. Nothing here prints or
+# stores the removed text or a digest of it.
+agent_memory_redact_locked() {
+  agent_memory_db_command "$1" redact --target "$2" --agent "$3" --apply
+}
+
+agent_memory_redact_pins_locked() {
+  oms_with_file_lock "$(agent_memory_pins_file "$1")" agent_memory_redact_locked "$@"
+}
+
+agent_memory_redact() {
+  local memory_file="$1"
+  local scope="$2"
+  local agent="$3"
+  local target="$4"
+  local apply="$5"
+  local db_file candidate rc=0
+
+  case "$target" in ""|*[!A-Za-z0-9._:-]*) echo "error: invalid memory ID" >&2; return 2 ;; esac
+  if [ "$apply" != 1 ]; then
+    # A dry run takes no lock and writes nothing.
+    agent_memory_db_command "$memory_file" redact --target "$target" --agent "$agent" || rc=$?
+    [ "$rc" -ne 3 ] || rc=0
+    return "$rc"
+  fi
+  oms_with_file_lock "$memory_file" agent_memory_redact_pins_locked \
+    "$memory_file" "$target" "$agent" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) return 0 ;;
+    *) return "$rc" ;;
+  esac
+  # Derived copies still hold the text: drop them before rebuilding.
+  rm -f "$(agent_memory_summary_file "$memory_file")"
+  db_file="$(agent_memory_db_file "$memory_file")"
+  for candidate in "$db_file" "$db_file-journal" "$db_file-wal" "$db_file-shm"; do
+    rm -f "$candidate"
+  done
+  agent_memory_refresh_summary "$memory_file" "$scope" ||
+    echo "warning: summary.md was removed and could not be regenerated; run: oms agent-memory compact" >&2
+  if ! agent_memory_db_command "$memory_file" rebuild; then
+    echo "error: the text was removed from the source log but the index was not rebuilt; run: oms agent-memory rebuild" >&2
+    return 1
+  fi
+  echo "memory: summary.md and the index were rebuilt without it"
+  echo "memory: copies outside the memory store (provider transcripts, handoffs, backups, disk blocks) are not touched"
 }
 
 agent_memory_pin_file_unlocked() {

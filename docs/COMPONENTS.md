@@ -1001,6 +1001,26 @@ passes the secret scanner in its original form before normalization and indexing
 a flagged note, or any note when the scan cannot run, is left out while the failure itself still recalls. An index
 built earlier gains them when the ledger next changes or on `oms agent-memory
 rebuild`.
+`oms agent-memory redact --id EVENT` is the one declared exception to the
+append-only memory logs, for text that should never have been recorded. Without
+`--apply` it only names the entry. With it, the entry's text in `shared.md` or
+`pins.md` is replaced by a fixed tombstone that keeps the ID, time and author
+and states how many bytes were removed; `summary.md`, the SQLite index and its
+journals are deleted and rebuilt. Neither the text nor a digest of it is
+printed or stored. A redacted entry leaves default search, recall and context
+like a retired one and shows as `redacted` under `--include-superseded`. Only
+the parent session may redact; failure-ledger rows are not covered, and copies
+outside the memory store (provider transcripts, handoffs, backups, the disk
+blocks the old file used) are not touched. Run it while no delegated worker is
+active: the worker guard reads a rewritten log as a broken append-only contract. `supersede` and `retire` remain the
+way to correct a note that is merely wrong.
+`oms agent-memory sources [--json]` lists what each provider CLI keeps for the
+repository beside OMS memory: the Claude and Codex instruction files, Claude's
+project auto-memory and subagent-memory directories, Codex memories and the
+Antigravity global rules, each with its size, file count and modification time.
+It reads no file, writes nothing, and does not report whether a provider has its
+memory turned on; the Claude auto-memory location is derived from the repository
+path rather than confirmed by the CLI.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.

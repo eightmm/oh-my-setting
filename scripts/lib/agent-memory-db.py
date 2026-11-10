@@ -154,8 +154,15 @@ def parse_metadata_line(line: str, metadata: dict[str, str]) -> None:
         metadata[key.strip()] = value.strip()
 
 
-def parse_shared(text: str) -> list[Entry]:
+# The body of a redacted entry. The ID, time and author stay; the text is gone.
+REDACTED_RE = re.compile(r"^\[redacted \S+ by \S+: text removed with `oms agent-memory redact`; \d+ bytes\]$")
+
+
+def parse_shared(text: str, spans: Optional[list] = None) -> list[Entry]:
+    """`spans`, when given, receives one (header line index, end line index) per entry returned."""
     entries: list[Entry] = []
+    header_index = -1
+    line_index = 0
     occurred_at = ""
     agent = ""
     body_lines: list[str] = []
@@ -167,6 +174,11 @@ def parse_shared(text: str) -> list[Entry]:
         nonlocal occurred_at, agent, body_lines, entry_metadata
         if not occurred_at:
             return
+        if spans is not None and not (
+            entry_metadata.get("link_complete") == "required"
+            and [line for line in body_lines if line.strip()][-1:] != ["<!-- oms-memory-link-complete -->"]
+        ):
+            spans.append((header_index, line_index))
         if entry_metadata.get("link_complete") == "required":
             while body_lines and not body_lines[-1].strip():
                 body_lines.pop()
@@ -197,7 +209,7 @@ def parse_shared(text: str) -> list[Entry]:
         body_lines = []
         entry_metadata = {}
 
-    for line in text.splitlines():
+    for line_index, line in enumerate(text.splitlines()):
         if line.strip() == METADATA_START:
             finish()
             metadata_block = {}
@@ -212,6 +224,7 @@ def parse_shared(text: str) -> list[Entry]:
         match = HEADER_RE.match(line)
         if match:
             finish()
+            header_index = line_index
             occurred_at = match.group(1)
             agent = match.group(2)
             body_lines = []
@@ -219,15 +232,16 @@ def parse_shared(text: str) -> list[Entry]:
             pending_metadata = {}
         elif occurred_at:
             body_lines.append(line)
+    line_index = len(text.splitlines())
     finish()
     return entries
 
 
-def parse_pins(text: str) -> list[Entry]:
+def parse_pins(text: str, spans: Optional[list] = None) -> list[Entry]:
     entries: list[Entry] = []
     pending_metadata: dict[str, str] = {}
     metadata_block: Optional[dict[str, str]] = None
-    for line in text.splitlines():
+    for line_index, line in enumerate(text.splitlines()):
         if line.strip() == METADATA_START:
             metadata_block = {}
             continue
@@ -241,6 +255,8 @@ def parse_pins(text: str) -> list[Entry]:
         match = PIN_RE.match(line)
         if not match:
             continue
+        if spans is not None:
+            spans.append((line_index, line_index + 1))
         entries.append(
             make_entry(
                 "pins",
@@ -1005,6 +1021,9 @@ def memory_state(shared: str, pins: str):
     notes = parse_shared(stable_snapshot(shared).text)
     pinned = parse_pins(stable_snapshot(pins).text)
     status = {}
+    for entry in notes + pinned:
+        if REDACTED_RE.fullmatch(entry.body.strip()):
+            status[entry.event_id] = {"status": "redacted", "by": ""}
     for entry in notes:
         if EVENT_ID_RE.fullmatch(entry.supersedes):
             status[entry.supersedes] = {"status": "superseded", "by": entry.event_id}
@@ -1373,10 +1392,78 @@ def rebuild_database(path: str, shared: str, pins: str, failures: str = "") -> N
     os.replace(temporary, path)
 
 
+def redact_entry(shared: str, pins: str, target: str, agent: str, apply: bool) -> int:
+    """Replace one entry's text with a fixed tombstone; the caller holds both source locks.
+
+    Returns 0 when the entry was redacted (or would be, on a dry run), 3 when it already is.
+    Nothing printed, written or raised here carries the removed text or a digest of it: a
+    digest of a short credential is a way to guess it."""
+    found = []
+    for source, path, parse in (("shared", shared, parse_shared), ("pins", pins, parse_pins)):
+        if not os.path.exists(path):
+            continue
+        raw = Path(path).read_bytes()
+        # surrogateescape keeps every byte this does not replace exactly as it was.
+        text = raw.decode("utf-8", errors="surrogateescape")
+        spans: list = []
+        entries = parse(text, spans)
+        if len(entries) != len(spans):
+            raise RuntimeError("memory source could not be mapped to its lines; nothing was changed")
+        for entry, span in zip(entries, spans):
+            if entry.event_id == target:
+                found.append((source, path, text, entry, span))
+    if not EVENT_ID_RE.fullmatch(target) or len(found) != 1:
+        raise RuntimeError("unknown or ambiguous memory ID")
+    source, path, text, entry, (start, end) = found[0]
+    label = "%s %s (%s, %s %s)" % (source, entry.kind, target, entry.occurred_at, entry.agent)
+    if REDACTED_RE.fullmatch(entry.body.strip()):
+        print("memory: already redacted: %s" % label)
+        return 3
+    removed = len(entry.body.encode("utf-8", errors="surrogateescape"))
+    lines = text.splitlines(keepends=True)
+    if not apply:
+        print("memory: would redact %s: %d bytes" % (label, removed))
+        print("memory: dry run; nothing changed. Re-run with --apply to remove the text.")
+        return 0
+    author = re.sub(r"[^A-Za-z0-9._-]", "", agent) or "unknown"
+    tombstone = "[redacted %s by %s: text removed with `oms agent-memory redact`; %d bytes]" % (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), author, removed)
+    if source == "pins":
+        match = PIN_RE.match(lines[start].rstrip("\r\n"))
+        replacement = ["- %s [%s] %s\n" % (match.group(1), match.group(2), tombstone)]
+        body_start = start
+    else:
+        replacement = ["\n", tombstone + "\n", "\n"]
+        if entry.supersedes or entry.retires:
+            replacement += ["<!-- oms-memory-link-complete -->\n"]
+        if end < len(lines):
+            replacement += ["\n"]
+        body_start = start + 1
+    data = "".join(lines[:body_start] + replacement + lines[end:]).encode("utf-8", errors="surrogateescape")
+    mode = os.stat(path).st_mode & 0o777
+    temporary = os.path.join(os.path.dirname(path), ".oms-replace.redact.%d" % os.getpid())
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    print("memory: redacted %s: %d bytes removed from %s" % (label, removed, os.path.basename(path)))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", choices=("sync", "search", "recall", "health", "rebuild", "validate", "context")
+        "command", choices=("sync", "search", "recall", "health", "rebuild", "validate", "context", "redact")
     )
     parser.add_argument("--db", required=True)
     parser.add_argument("--shared", required=True)
@@ -1393,6 +1480,7 @@ def main() -> int:
     parser.add_argument("--target", default="")
     parser.add_argument("--operation", default="")
     parser.add_argument("--view", default="")
+    parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     if args.limit < 0:
         parser.error("--limit must not be negative")
@@ -1401,6 +1489,8 @@ def main() -> int:
     if args.command in ("search", "recall") and not args.query:
         parser.error("--query is required")
 
+    if args.command == "redact":
+        return redact_entry(args.shared, args.pins, args.target, args.agent, args.apply)
     if args.command in ("validate", "context"):
         notes, pinned, status = memory_state(args.shared, args.pins)
         if args.command == "validate":
@@ -1408,7 +1498,7 @@ def main() -> int:
             if not EVENT_ID_RE.fullmatch(args.target) or len(targets) != 1:
                 raise RuntimeError("unknown or ambiguous memory ID")
             if args.target in status:
-                raise RuntimeError("memory note is already superseded or retired")
+                raise RuntimeError("memory note is already superseded, retired or redacted")
             return 0
         active = lambda entry: entry.event_id not in status and entry.kind != "retirement"
         if args.view == "full":
