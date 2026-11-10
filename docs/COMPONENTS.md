@@ -1084,6 +1084,9 @@ tokens on delegations not admitted. It warns when a share is under
 `OMS_TELEMETRY_CACHE_MIN_PCT` (80) with at least `OMS_TELEMETRY_CACHE_MIN_REQUESTS`
 (10) usage reports. These are provider-reported values: never approval or
 verification evidence, and nothing is priced from tokens.
+`--by effort` groups by the reasoning effort a row recorded (`selected_reasoning_effort`,
+else `reasoning_effort`; rows without one are `unrecorded`, never defaulted), and
+`--by role` adds an `effort` column (calls per effort) once any row recorded one.
 No extra run, timer, model, test omission or automatic delegation is introduced.
 Explicit repeated-failure advice bypasses replay: a different agent contributes
 to that trajectory and its cost, so single-worker evidence is not comparable.

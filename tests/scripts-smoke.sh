@@ -16323,6 +16323,26 @@ import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 assert [r.get("role") for r in rows] == ["reviewer", None], rows
 PY
+  # Effort: the writer already records selected_reasoning_effort on delegate rows
+  # (omitted when unknown); --by effort and a role column read it, never guess.
+  local efforts="$project/efforts"
+  mkdir -p "$efforts/.oms/artifacts"
+  git -C "$efforts" init -q
+  cat > "$efforts/.oms/artifacts/index.jsonl" <<EOF
+{"schema":1,"event_id":"e1","ts":"2026-07-01T00:00:01Z","kind":"delegate","provider":"codex","exit":0,"role":"reviewer","tokens":100,"selected_reasoning_effort":"high"}
+{"schema":1,"event_id":"e2","ts":"2026-07-01T00:00:02Z","kind":"delegate","provider":"codex","exit":0,"role":"reviewer","tokens":40,"reasoning_effort":"low"}
+{"schema":1,"event_id":"e3","ts":"2026-07-01T00:00:03Z","kind":"delegate","provider":"claude","exit":0,"role":"builder","tokens":10}
+EOF
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$efforts" telemetry --by effort)" ||
+    fail "telemetry --by effort should run: $by"
+  printf '%s\n' "$by" | grep -Eq '^high +1 +100 ' || fail "effort high group: $by"
+  printf '%s\n' "$by" | grep -Eq '^low +1 +40 ' || fail "resolved effort stands in when selected is absent: $by"
+  printf '%s\n' "$by" | grep -Eq '^unrecorded +1 +10 ' || fail "a row without effort is unrecorded: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$efforts" telemetry --by role)"
+  printf '%s\n' "$by" | grep -Eq '^reviewer +high:1 low:1 +2 +140 ' || fail "role view carries efforts: $by"
+  printf '%s\n' "$by" | grep -Eq '^builder +unrecorded:1 +1 +10 ' || fail "role without effort is unrecorded: $by"
+  by="$("$ROOT/scripts/artifact-index.sh" --repo "$roles" telemetry --by role)"
+  ! contains "$by" 'effort' || fail "no effort column when no row recorded one: $by"
   ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --by team >/dev/null 2>&1 ||
     fail "an unknown grouping must be refused"
   ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --since yesterday >/dev/null 2>&1 ||
