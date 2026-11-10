@@ -8,11 +8,12 @@ PROJECT_DIR="$PWD"
 FAILED=0
 WARNED=0
 STRICT=0
+CONTRACT=0
 PROJECT_DIR_SET=0
 
 usage() {
   cat <<'EOF'
-Usage: project-doctor.sh [--strict] [project_dir]
+Usage: project-doctor.sh [--strict] [--contract] [project_dir]
 
 Verify that all agent-facing files in a project give every agent the same
 view. Checks:
@@ -28,12 +29,19 @@ view. Checks:
 
 Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks. --strict
 also makes warnings fail, for CI or release gates.
+
+--contract runs one read-only check instead of the list above: does everything
+PROJECT.md points at exist (Required check files, Decisions References,
+relative Markdown links, the criteria plan tasks say they cover), and what
+evidence each acceptance criterion has. A missing target is a warning; an
+unproven criterion is a note. Nothing is written and no model is called.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
+    --contract) CONTRACT=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -68,6 +76,26 @@ note() {
 ok() {
   echo "ok: $*"
 }
+
+if [ "$CONTRACT" = 1 ]; then
+  command -v python3 >/dev/null 2>&1 || { echo "error: --contract needs python3" >&2; exit 2; }
+  contract_report="$(python3 "$ROOT/scripts/lib/contract-check.py" "$PROJECT_DIR" "$ROOT/scripts/lib")" || {
+    echo "error: the contract check could not run" >&2
+    exit 2
+  }
+  [ -z "$contract_report" ] || printf '%s\n' "$contract_report"
+  case "$contract_report" in
+    warn:*|*$'\n'warn:*)
+      if [ "$STRICT" = 1 ]; then
+        echo "project-doctor: contract failed (strict warnings)"
+        exit 1
+      fi
+      echo "project-doctor: contract ok (with warnings)"
+      ;;
+    *) echo "project-doctor: contract ok" ;;
+  esac
+  exit 0
+fi
 
 has_block() {
   local file="$1"

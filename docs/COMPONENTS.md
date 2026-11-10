@@ -487,6 +487,14 @@ oms project-doctor .
 oms project-private --check
 ```
 
+`oms project-doctor --contract .` is a separate read-only look at what the contract
+points at: every `Required check files` entry, `Decisions` `References` path and relative
+Markdown link in `PROJECT.md` must exist, and a plan task's `covers` must name a criterion
+the spec still carries. A missing target is a `warn:` (a failure only with `--strict`).
+Each acceptance criterion is then listed with its current evidence status and the plan
+tasks that cover it, as `note:` lines: an unproven criterion is unfinished work, not drift.
+Nothing is written and no model is called.
+
 Council and panel workers need no `PROJECT.md`; autopilot needs a confirmed
 `PROJECT.md`; goal-drive needs an agent-plan with verify commands and a clean tree. `oms
 init` suggests verification from existing repository files (check.sh, pytest, npm, make,
