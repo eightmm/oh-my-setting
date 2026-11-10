@@ -389,7 +389,8 @@ def native_activity(repo: str) -> dict:
     }
 
 
-GROUPINGS = ("day", "model", "provider", "task", "role")
+GROUPINGS = ("day", "model", "provider", "task", "role", "effort")
+EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 USAGE_KEYS = ("input_tokens", "cache_read_tokens", "output_tokens")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -462,8 +463,22 @@ def in_range(row: dict[str, object], since, until, until_is_day: bool) -> bool:
     return True
 
 
+def effort_label(row: dict[str, object]) -> str:
+    """The effort the attempt ran with, as the writer recorded it; never a guess.
+
+    selected_reasoning_effort is what ran (after any fallback); reasoning_effort
+    is the resolved request and only stands in when the selected one is absent.
+    """
+    for key in ("selected_reasoning_effort", "reasoning_effort"):
+        if row.get(key) in EFFORTS:
+            return row[key]
+    return "unrecorded"
+
+
 def group_label(repo: str, row: dict[str, object], by: str) -> str:
     """The recorded value the row is grouped under; never a guess."""
+    if by == "effort":
+        return effort_label(row)
     if by == "day":
         stamp = parse_timestamp(row.get("ts"))
         return stamp.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d") if stamp else "undated"
@@ -681,9 +696,12 @@ def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
                 groups[label] = empty_group(label)
                 if by == "role":
                     groups[label].update({"cache_denominator": 0, "admitted": 0,
-                                          "not_admitted_results": 0, "not_admitted_tokens": 0})
+                                          "not_admitted_results": 0, "not_admitted_tokens": 0,
+                                          "efforts": {}})
             add_to_group(groups[label], repo, row, tokens, detail)
             if by == "role":
+                efforts = groups[label]["efforts"]
+                efforts[effort_label(row)] = efforts.get(effort_label(row), 0) + 1
                 add_role_stats(groups[label], row, tokens, detail, admitted)
 
     first_ts = selected[0].get("ts", "") if selected else ""
@@ -963,8 +981,15 @@ def emit_usage_by(report: dict) -> None:
     by_role = block["by"] == "role"
     if by_role:
         head += ("cache%", "admitted", "tok/admit", "unadmitted-tok")
-    table = [head] + [(
-        group["group"], str(group["calls"]),
+    # Effort is a second column only once some row recorded it; old indexes
+    # keep the exact table they had.
+    with_effort = by_role and any(
+        key != "unrecorded" for group in block["groups"] for key in group["efforts"])
+    if with_effort:
+        head = head[:1] + ("effort",) + head[1:]
+    table = [head] + [(group["group"],) + (
+        (" ".join("%s:%d" % item for item in sorted(group["efforts"].items())),) if with_effort else ()
+    ) + (str(group["calls"]),
         reported(group["provider_reported_tokens"], group["token_reports"], group["calls"]),
         reported(group["input_tokens"], group["usage_reports"], group["calls"]),
         reported(group["cache_read_tokens"], group["usage_reports"], group["calls"]),

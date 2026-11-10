@@ -58,7 +58,7 @@ Commands:
                  over the retained window (default 1000). This does not infer
                  semantic task success.
   --by KEY       telemetry: group routed operations by day, model, provider,
-                 task or role and print calls, provider-reported tokens,
+                 task, role or effort and print calls, provider-reported tokens,
                  complete input/cached/output reports and provider-reported
                  cost per group. `-` means no call reported the value, `N+?`
                  that only some did; nothing is priced from tokens. Days are
@@ -68,7 +68,10 @@ Commands:
                  result and tokens on delegations not admitted, and warns
                  when a group's share is under OMS_TELEMETRY_CACHE_MIN_PCT
                  (80) with >= OMS_TELEMETRY_CACHE_MIN_REQUESTS (10) usage
-                 reports. Reported values only: never approval evidence.
+                 reports. `--by effort` groups by the reasoning effort the row recorded
+                 (`unrecorded` when it did not; never defaulted), and `--by
+                 role` adds an effort column once any row recorded one.
+                 Reported values only: never approval evidence.
   --waste [--top N]
                  telemetry: a read-only "where did tokens go to waste" view
                  (default top 10 per category), each line naming the record to
@@ -200,10 +203,10 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --by)
-      [ "$#" -ge 2 ] || fail "--by requires day, model, provider, task or role"
+      [ "$#" -ge 2 ] || fail "--by requires day, model, provider, task, role or effort"
       case "$2" in
-        day|model|provider|task|role) USAGE_BY="$2" ;;
-        *) fail "--by must be day, model, provider, task or role" ;;
+        day|model|provider|task|role|effort) USAGE_BY="$2" ;;
+        *) fail "--by must be day, model, provider, task, role or effort" ;;
       esac
       shift 2
       ;;

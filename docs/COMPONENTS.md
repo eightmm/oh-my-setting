@@ -1124,6 +1124,9 @@ tokens on delegations not admitted. It warns when a share is under
 `OMS_TELEMETRY_CACHE_MIN_PCT` (80) with at least `OMS_TELEMETRY_CACHE_MIN_REQUESTS`
 (10) usage reports. These are provider-reported values: never approval or
 verification evidence, and nothing is priced from tokens.
+`--by effort` groups by the reasoning effort a row recorded (`selected_reasoning_effort`,
+else `reasoning_effort`; rows without one are `unrecorded`, never defaulted), and
+`--by role` adds an `effort` column (calls per effort) once any row recorded one.
 `oms artifact-index telemetry --waste [--top N] [--json]` is a read-only view of
 where recorded tokens went unused, from rows that already exist (no new store or
 writer field): delegate tokens whose patch no later `patch-admit`/`patch-land`
