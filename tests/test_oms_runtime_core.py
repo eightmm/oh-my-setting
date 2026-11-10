@@ -1596,6 +1596,37 @@ class RuntimeFixture(RuntimeFixtureBase):
         ledger_by_op = {row['operation_id']: row['id'] for row in ledger_rows}
         for row in runtime_rows:
             self.assertEqual(row['ledger_id'], ledger_by_op[row['run_id']])
+        self.assertNotIn('budget', summary)
+        self.assertNotIn('budget', loaded)
+
+        # An optional budget is part of the contract (and its digest). Runs are
+        # counted from the run index; one past the limit needs a recorded
+        # reason, and the limits nothing counts yet say so instead of zero.
+        capped = dict(contract, budget={'runs': 1, 'gpu_hours': 4, 'final_evals': 2})
+        registered_capped = experiment.register(self.repo, capped, 'exp-capped')
+        self.assertNotEqual(registered_capped['contract_digest'], registered['contract_digest'])
+        metrics = self.repo / 'metrics-capped.json'
+        command = [sys.executable, '-c', "import json; json.dump({'score': 1.0, 'memory': 10.0}, open(%r,'w'))" % metrics.name]
+        before = experiment.summarize(self.repo, 'exp-capped')['budget']
+        self.assertEqual(before['runs'], {'limit': 1, 'used': 0, 'remaining': 1, 'exceeded': False})
+        self.assertIsNone(before['gpu_hours']['used'])
+        self.assertIsNone(before['final_evals']['used'])
+        _, rc = experiment.record_run(self.repo, 'exp-capped', 'baseline', 0, metrics, command, timeout_seconds=10)
+        self.assertEqual(rc, 0)
+        rows_before = len(read_jsonl(self.repo / '.oms' / 'experiments' / 'runs.jsonl'))
+        with self.assertRaisesRegex(CoreError, 'run budget spent: 1 of 1'):
+            experiment.record_run(self.repo, 'exp-capped', 'treatment', 0, metrics, command, timeout_seconds=10,
+                                  allow_existing_metrics=True)
+        self.assertEqual(len(read_jsonl(self.repo / '.oms' / 'experiments' / 'runs.jsonl')), rows_before)
+        command = [sys.executable, '-c', "import json; json.dump({'score': 1.2, 'memory': 10.3}, open(%r,'w'))" % metrics.name]
+        row, rc = experiment.record_run(self.repo, 'exp-capped', 'treatment', 0, metrics, command, timeout_seconds=10,
+                                        allow_existing_metrics=True, budget_reason='  rerun after a node  failure ')
+        self.assertEqual((rc, row['budget_override_reason']), (0, 'rerun after a node failure'))
+        after = experiment.summarize(self.repo, 'exp-capped')['budget']['runs']
+        self.assertEqual((after['used'], after['remaining'], after['exceeded']), (2, 0, True))
+        for bad in ({'runs': 0}, {'runs': True}, {'gpu_hours': -1}, {'tokens': 5}, {}, 'many'):
+            with self.assertRaises(CoreError):
+                experiment.validate(dict(contract, budget=bad))
 
         # Single-command registration uses the same validated contract and ledger.
         contract_path = self.repo / 'experiment.json'
