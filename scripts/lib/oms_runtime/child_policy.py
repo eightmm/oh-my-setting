@@ -25,7 +25,9 @@ def child_action_is_read_only(args: argparse.Namespace) -> bool:
     if command == "failure":
         return getattr(args, "failure_action", None) in ("classify", "catalog")
     if command == "context-inspect":
-        return True
+        # Saved manifests and the injection ledger are repository state; a
+        # transcript is the owner's session file outside it.
+        return getattr(args, "session", None) is None
     if command == "context":
         return False
     if command == "profile":

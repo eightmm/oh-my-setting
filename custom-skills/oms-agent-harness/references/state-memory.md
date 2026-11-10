@@ -46,6 +46,8 @@ last 15 minutes; a clean `SessionEnd` retires that neighbor immediately. Heed
 that warning before any dirty-tree `git add`. Treat the resume block as the
 entry point; follow its pointers
 (`oms session-handoff show`, `oms fail-ledger list`) before re-deriving state.
+After a compaction the same block is re-read from state and gains one line
+saying so; `oms runtime context-inspect --injections` sums what hooks injected.
 Shared memory is not in that block by default. `OMS_RESUME_MEMORY=1` appends one
 section of at most 1200 bytes: the three newest pins, then up to three notes
 from shared memory ranked for the active task's goal, one line each with its

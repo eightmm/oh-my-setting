@@ -150,17 +150,25 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()
 
 
+_PAYLOAD: list[tuple[dict[str, Any], str]] = []
+
+
 def load_payload() -> tuple[dict[str, Any], str]:
+    # Read once: stdin is gone after the first read, and the injection ledger
+    # needs the same payload after the subcommand that consumed it.
+    if _PAYLOAD:
+        return _PAYLOAD[0]
     raw = os.environ.get("OMS_HOOK_PAYLOAD")
     if raw is None:
         raw = sys.stdin.read()
     try:
         payload = json.loads(raw or "{}")
     except Exception:
-        return {}, raw or ""
+        payload = {}
     if not isinstance(payload, dict):
-        return {}, raw or ""
-    return payload, raw or ""
+        payload = {}
+    _PAYLOAD.append((payload, raw or ""))
+    return _PAYLOAD[0]
 
 
 def payload_cwd(payload: dict[str, Any]) -> str:
@@ -3112,6 +3120,52 @@ def cmd_relay_hint(_: argparse.Namespace) -> int:
     return 0
 
 
+# Injection ledger: what OMS itself put into a session's context, as numbers.
+# Each subcommand below prints text the provider hands to the model; the row
+# keeps the byte and line counts and which hook it was, never the text.
+INJECTION_KINDS = {"route": "prompt", "relay-hint": "session-start", "panel-hook": "panel", "guard": "turn-guard"}
+INJECTION_MAX_BYTES = 1 << 20
+
+
+class _CountingStdout:
+    """Pass writes through and count what went out as UTF-8."""
+
+    def __init__(self, stream: Any) -> None:
+        self.stream, self.bytes, self.lines = stream, 0, 0
+
+    def write(self, text: str) -> int:
+        self.bytes += len(text.encode("utf-8", errors="replace"))
+        self.lines += text.count("\n")
+        return self.stream.write(text)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
+
+def record_injection(kind: str, size: int, lines: int) -> None:
+    """One content-free row per hook call that printed something; never raises."""
+    with contextlib.suppress(Exception):
+        kind = bounded_name(kind, 40)
+        if not kind or not 0 < size <= INJECTION_MAX_BYTES:
+            return
+        payload, _ = load_payload()
+        repo = hook_repo(payload)
+        # A hint in a repository that has no OMS state must not be what creates it.
+        if repo is None or not (repo / ".oms").is_dir():
+            return
+        source = payload.get("source")
+        append_event(repo, payload, action="injection", status=kind, bytes=int(size),
+                     lines=max(0, min(int(lines), INJECTION_MAX_BYTES)),
+                     source=bounded_name(source, 20) or None if isinstance(source, str) else None)
+
+
+def cmd_injected(args: argparse.Namespace) -> int:
+    """The ledger entry for a shell hook that assembled its own output (the resume block)."""
+    if not is_harness_child():
+        record_injection(args.kind, args.bytes, args.lines)
+    return 0
+
+
 def session_budget_enabled() -> bool:
     return any(env_int(name, 0) > 0 for name in (
         "OMS_SESSION_BUDGET_TURNS", "OMS_SESSION_BUDGET_HOURS"))
@@ -3196,10 +3250,28 @@ def main() -> int:
     compact.add_argument("--apply", action="store_true")
     compact.set_defaults(func=cmd_compact_events)
     sub.add_parser("relay").set_defaults(func=cmd_relay)
-    sub.add_parser("relay-hint").set_defaults(func=cmd_relay_hint)
+    hint = sub.add_parser("relay-hint")
+    # The resume hook folds this output into its own block and records the block once.
+    hint.add_argument("--nested", action="store_true")
+    hint.set_defaults(func=cmd_relay_hint)
     sub.add_parser("panel-hook").set_defaults(func=cmd_panel_hook)
+    injected = sub.add_parser("injected")
+    injected.add_argument("--kind", required=True)
+    injected.add_argument("--bytes", required=True, type=int)
+    injected.add_argument("--lines", type=int, default=0)
+    injected.set_defaults(func=cmd_injected)
     args = parser.parse_args()
-    return int(args.func(args))
+    kind = INJECTION_KINDS.get(args.cmd)
+    if kind is None or getattr(args, "nested", False):
+        return int(args.func(args))
+    counter = _CountingStdout(sys.stdout)
+    sys.stdout = counter
+    try:
+        return int(args.func(args))
+    finally:
+        sys.stdout = counter.stream
+        if not is_harness_child():
+            record_injection(kind, counter.bytes, counter.lines)
 
 
 if __name__ == "__main__":

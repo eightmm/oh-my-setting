@@ -28292,6 +28292,18 @@ test_skill_router_matches_and_dedupes() {
   [ -f "$project/.oms/hooks/events.jsonl" ] || fail "router should write hook events"
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"action": "skill_hint"'
   assert_file_contains "$project/.oms/hooks/events.jsonl" '"workflow": "task"'
+  # Injection ledger: the hint that reached the model is recorded as a size, not as text.
+  python3 - "$project/.oms/hooks/events.jsonl" "$(printf '%s\n' "$out" | wc -c | tr -d '[:space:]')" <<'PYLEDGER' ||
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+rows = [row for row in rows if row.get("action") == "injection"]
+assert len(rows) == 1, rows
+row = rows[0]
+assert row["status"] == "prompt" and row["bytes"] == int(sys.argv[2]) and row["lines"] == 1, row
+assert set(row) <= {"schema", "ts", "agent", "hook", "session", "turn_id", "cwd_hash",
+                    "action", "status", "bytes", "lines"}, row
+PYLEDGER
+    fail "the router's printed hint must leave one content-free injection row"
   # A later turn in the same session may need the skill reminder again.
   out="$(printf '{"prompt":"oh-my-setting 업데이트 해줘 한 번 더","session_id":"r1","turn_id":"t2","cwd":"%s"}' "$project" |
     TMPDIR="$d" bash "$ROOT/scripts/skill-router.sh")"
@@ -29728,6 +29740,54 @@ test_resume_hook_prints_bounded_resume_block() {
     fail "resume hook must leave graph work to an explicit reader: $out"
   fi
   [ "$(printf '%s\n' "$out" | wc -l)" -le 15 ] || fail "resume block exceeds its line budget"
+  # Injection ledger: the block is recorded once as byte and line counts, with
+  # none of its text, and the relay hint folded into it is not counted twice.
+  resume_injection_rows() {  # EVENTS -> "status bytes lines source" per injection row
+    python3 - "$1" <<'PYROWS'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    row = json.loads(line)
+    if row.get("action") == "injection":
+        print(row["status"], row["bytes"], row["lines"], row.get("source", "-"))
+PYROWS
+  }
+  [ "$(resume_injection_rows "$repo/.oms/hooks/events.jsonl")" = \
+    "resume $(printf '%s\n' "$out" | wc -c | tr -d '[:space:]') $(printf '%s\n' "$out" | wc -l | tr -d '[:space:]') -" ] ||
+    fail "the resume block must leave exactly one injection row with its size: $(resume_injection_rows "$repo/.oms/hooks/events.jsonl")"
+  if grep -F -e 'Ship the resume surface' -e 'wire hooks.json' "$repo/.oms/hooks/events.jsonl" >/dev/null; then
+    fail "the injection ledger must not carry the injected text"
+  fi
+  # Compaction survival: a SessionStart with source=compact re-reads the same
+  # state lines and adds one routing line; a startup does not, and the whole
+  # block stays far below the size at which a provider swaps hook output for a
+  # file pointer.
+  local compacted started
+  compacted="$(printf '{"session_id":"me","cwd":"%s","hook_event_name":"SessionStart","source":"compact"}' "$repo" |
+    "$ROOT/scripts/resume-hook.sh")" || fail "resume hook must exit 0 after a compaction"
+  started="$(printf '{"session_id":"me","cwd":"%s","hook_event_name":"SessionStart","source":"startup"}' "$repo" |
+    "$ROOT/scripts/resume-hook.sh")" || fail "resume hook must exit 0 on startup"
+  [ "$(printf '%s\n' "$compacted" | grep -c '^- after compaction: ')" = 1 ] ||
+    fail "a compaction SessionStart must carry the routing line once: $compacted"
+  contains "$compacted" '/oms-<skill>' || fail "the compaction line must say how OMS skills are invoked"
+  if contains "$started" 'after compaction'; then fail "a startup must not claim a compaction: $started"; fi
+  [ "$started" = "$out" ] || fail "a startup block must equal the block for a payload without a source"
+  [ "$(printf '%s\n' "$compacted" | grep -v '^- after compaction: ')" = "$out" ] ||
+    fail "a compaction must re-read the same state lines as a startup"
+  [ "$(printf '%s\n' "$compacted" | wc -c)" -lt 4200 ] || fail "the compaction block left its byte cap"
+  [ "$(resume_injection_rows "$repo/.oms/hooks/events.jsonl" | sed -n '2p' | cut -d' ' -f1,4)" = "resume compact" ] ||
+    fail "the ledger must name the SessionStart source: $(resume_injection_rows "$repo/.oms/hooks/events.jsonl")"
+  # A repository with nothing to resume stays silent after a compaction, and leaves no row.
+  make_committed_repo "$TMP/resume-hook-empty"
+  mkdir -p "$TMP/resume-hook-empty/.oms"
+  [ -z "$(printf '{"session_id":"me","cwd":"%s","hook_event_name":"SessionStart","source":"compact"}' \
+    "$TMP/resume-hook-empty" | "$ROOT/scripts/resume-hook.sh")" ] || fail "nothing to resume must stay silent after a compaction"
+  [ ! -e "$TMP/resume-hook-empty/.oms/hooks/events.jsonl" ] || fail "a silent resume hook must not write a ledger row"
+  # The ledger refuses sizes and kinds it cannot vouch for.
+  printf '{"session_id":"me","cwd":"%s"}' "$repo" | python3 "$ROOT/scripts/lib/hook_state.py" injected --kind resume --bytes 0
+  printf '{"session_id":"me","cwd":"%s"}' "$repo" | python3 "$ROOT/scripts/lib/hook_state.py" injected --kind 'not a kind!' --bytes 12
+  printf '{"session_id":"me","cwd":"%s"}' "$repo" | OMS_HARNESS_CHILD=1 python3 "$ROOT/scripts/lib/hook_state.py" injected --kind resume --bytes 12
+  [ "$(resume_injection_rows "$repo/.oms/hooks/events.jsonl" | wc -l | tr -d '[:space:]')" = 3 ] ||
+    fail "empty, unnamed and harness-child injections must not be recorded: $(resume_injection_rows "$repo/.oms/hooks/events.jsonl")"
 
   printf '{"cwd":"%s","hook_event_name":"SessionStart","model":"gpt-6","permission_mode":"default","session_id":"codex-session-start","source":"startup","transcript_path":null}' \
     "$repo" > "$TMP/codex-sessionstart-input.json"

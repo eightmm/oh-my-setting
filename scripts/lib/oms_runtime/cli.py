@@ -95,8 +95,20 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
             return 0
         if args.command == 'context-inspect':
             from .context_inspect import InspectionError, inspect_files
+            from .context_session import inspect_injections, inspect_session
             try:
-                value = inspect_files(repo, args.manifest, compare=args.compare, limit=args.limit, verify_current=args.verify_current)
+                modes = sum((args.manifest is not None, args.injections, args.session is not None))
+                if modes != 1 or (args.manifest is None and (args.compare is not None or args.verify_current)):
+                    raise InspectionError('context-inspect takes one of: MANIFEST, --injections, --session TRANSCRIPT '
+                                          '(--compare and --verify-current need MANIFEST)')
+                if args.session_hash is not None and not args.injections:
+                    raise InspectionError('--session-hash needs --injections')
+                if args.injections:
+                    value = inspect_injections(repo, session=args.session_hash, limit=args.limit)
+                elif args.session is not None:
+                    value = inspect_session(repo, args.session, limit=args.limit)
+                else:
+                    value = inspect_files(repo, args.manifest, compare=args.compare, limit=args.limit, verify_current=args.verify_current)
             except InspectionError as exc:
                 raise CoreError(str(exc)) from None
             emit(value, args.pretty)

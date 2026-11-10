@@ -5,9 +5,9 @@ set -uo pipefail
 # SessionStart hook: print one bounded resume block so a fresh session starts
 # knowing what this repo was doing — active task packet (goal, next step,
 # verify), newest handoff digest, and unresolved failures. Everything here is
-# read from .oms state that was scrubbed at write time. Its only write is the
+# read from .oms state that was scrubbed at write time. Its writes are the
 # regenerable autopilot shadow-judgment row, which is ambient to the check
-# gate; receipts, claims, and every other surface stay untouched (the digest's
+# gate, and one content-free injection-ledger row (byte and line counts); receipts, claims, and every other surface stay untouched (the digest's
 # `git merge-tree --write-tree` adds only unreferenced loose objects).
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
@@ -403,8 +403,27 @@ case "$au_line" in
   *) append "- auto-update ${au_line#attention: }" ;;
 esac
 
-relay_line="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/hook_state.py" relay-hint 2>/dev/null)" || relay_line=""
+relay_line="$(printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/hook_state.py" relay-hint --nested 2>/dev/null)" || relay_line=""
 [ -z "$relay_line" ] || append "${relay_line//$'\r'/}"
+
+# After a compaction the provider's summary replaces the conversation, and
+# Claude Code does not list skill descriptions again. The task, plan, handoff
+# and failure lines above are re-read from .oms state on every SessionStart,
+# so they survive by construction; this line restores the one routing fact the
+# summary cannot be trusted to keep. It rides an existing block only: a
+# repository with nothing to resume stays silent after a compaction too.
+session_source="$(printf '%s' "$payload" | python3 -X utf8 -I -B -c '
+import json, sys
+try:
+    value = json.load(sys.stdin).get("source")
+except Exception:
+    value = ""
+print(value if value in ("startup", "resume", "clear", "compact", "fork") else "")
+' 2>/dev/null)" || session_source=""
+session_source="${session_source//$'\r'/}"
+if [ "$session_source" = compact ] && [ -n "$out" ]; then
+  append "- after compaction: the lines above were re-read from .oms state, not from the summary; OMS skills are invoked by name (/oms-<skill>), and oms state shows the rest"
+fi
 
 # Shared memory, opt-in (OMS_RESUME_MEMORY=1). The project writes pins and
 # notes all day, but only peer calls and delegations ever read them back; the
@@ -513,7 +532,7 @@ EOF_MEMORY
 fi
 
 [ -n "$out" ] || exit 0
-printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |
+block="$(printf '[oms resume] %s\n%s' "$(basename "$cwd")" "$out" |
   python3 -X utf8 -I -B -c '
 import os, sys
 cap = 4096
@@ -524,5 +543,13 @@ if len(raw) + len(footer.encode()) > cap:
     footer = "\n[resume truncated; inspect current state]\n" + footer
     text = raw[:cap - len(footer.encode())].decode("utf-8", errors="ignore")
 sys.stdout.buffer.write((text + footer).encode("utf-8"))
-' | tr -d '\r'
+' | tr -d '\r')" || exit 0
+[ -n "$block" ] || exit 0
+printf '%s\n' "$block"
+# Injection ledger: how many bytes this block put into the session, never the
+# block. One content-free row in .oms/hooks/events.jsonl; best-effort.
+block_bytes="$(printf '%s\n' "$block" | wc -c | tr -d '[:space:]')"
+block_lines="$(printf '%s\n' "$block" | wc -l | tr -d '[:space:]')"
+printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/hook_state.py" \
+  injected --kind resume --bytes "${block_bytes:-0}" --lines "${block_lines:-0}" >/dev/null 2>&1 || true
 exit 0
