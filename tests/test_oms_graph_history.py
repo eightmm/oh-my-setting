@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 from oms_graph.project.build import build, load_graph
-from oms_graph.project import history
+from oms_graph.errors import GraphError
+from oms_graph.project import history, impact
 
 
 class CouplingPureTest(unittest.TestCase):
@@ -101,6 +102,62 @@ class CouplingRepoTest(unittest.TestCase):
         self.assertEqual(report["graph_revision"], "")
         focused = history.coupling_report(self.repo, None, commits=100, min_shared=5, min_degree=30, focus=["c.py"])
         self.assertTrue(all("c.py" in (row["a"], row["b"]) for row in focused["pairs"]))
+
+    def test_impact_brief_joins_tests_dependents_history_and_owners(self) -> None:
+        self.commit({"core.py": "def run():\n    return 1\n", "app.py": "import core\n\ndef main():\n    return core.run()\n",
+                     "settings.json": "{}\n", "docs/guide.md": "# guide\n",
+                     "tests/test_core.py": "import core\n\ndef test_run():\n    assert core.run()\n"})
+        for round_ in range(6):
+            self.commit({"core.py": "def run():\n    return %d\n" % round_, "settings.json": '{"round": %d}\n' % round_})
+        self.commit({"CODEOWNERS": "# owners\n*        @everyone\n/docs/    @writers\n*.py      @py-team @lead\n"
+                                   "[Section]\n!negated  @nobody\n/app.py\n"})
+        base = self.git("rev-parse", "HEAD").strip()
+        self.commit({"core.py": "def run():\n    return 99\n", "docs/guide.md": "# guide 2\n", "app.py": "import core\n"})
+        build(self.repo, state=self.state)
+        graph = load_graph(self.repo, state=self.state)
+        brief = impact.impact_brief(self.repo, graph, base=base, commits=100)
+        self.assertEqual((brief["kind"], brief["truncated"], brief["omitted"]), ("impact-brief", False, {}))
+        self.assertIn("not evidence", brief["note"])
+        self.assertEqual([row["path"] for row in brief["changes"]], ["app.py", "core.py", "docs/guide.md"])
+        self.assertIn("tests/test_core.py", brief["affected"]["tests"])
+        self.assertEqual(brief["documentation_paths"], ["docs/guide.md"])
+        # app.py depends on core.py but is itself in the range, and tests are listed apart: neither is a dependent here.
+        self.assertNotIn("app.py", brief["dependents"]["files"])
+        self.assertNotIn("tests/test_core.py", brief["dependents"]["files"])
+        # History, not the parsers, says settings.json moves with core.py; this range left it alone.
+        partners = {row["path"]: row for row in brief["co_change"]["not_in_range"]}
+        self.assertEqual(list(partners), ["settings.json"])
+        self.assertEqual((partners["settings.json"]["with"], partners["settings.json"]["structural"]), ("core.py", False))
+        # The last matching rule wins; a rule without owners clears them; unsupported lines are skipped.
+        self.assertEqual(brief["owners"]["file"], "CODEOWNERS")
+        owners = {row["path"]: (row["owners"], row["pattern"]) for row in brief["owners"]["paths"]}
+        self.assertEqual(owners, {"app.py": ([], "/app.py"), "core.py": (["@py-team", "@lead"], "*.py"),
+                                  "docs/guide.md": (["@writers"], "/docs/")})
+        text = impact.brief_text(brief)
+        self.assertTrue(text.startswith("impact brief %s..HEAD (orientation only" % base))
+        self.assertIn("  settings.json  with core.py", text)
+        self.assertIn("  app.py  (no owner)\n", text)
+
+        cut = impact.impact_brief(self.repo, graph, base=base, commits=100, limit=1)
+        self.assertEqual(len(cut["changes"]), 1)
+        self.assertEqual((cut["omitted"]["changes"], cut["omitted"]["owners.paths"], cut["truncated"]), (2, 2, True))
+        self.assertIn("omitted: changes +2 (raise --limit)", impact.brief_text(cut))
+        with self.assertRaises(GraphError):
+            impact.impact_brief(self.repo, graph, base=base, limit=0)
+
+        # No CODEOWNERS, or one that is a symlink, is no owners section; the file is never followed or guessed.
+        (self.repo / "CODEOWNERS").unlink()
+        self.assertIsNone(impact.impact_brief(self.repo, graph, base=base, commits=100)["owners"])
+        (self.repo / "CODEOWNERS").symlink_to(self.repo / "settings.json")
+        self.assertEqual(impact.read_codeowners(self.repo), ("", []))
+
+    def test_codeowners_patterns_follow_last_match_and_anchoring(self) -> None:
+        rules = impact.parse_codeowners("*.js @js\n/build/logs/ @logs\ndocs/* @docs\napps/ @apps\n**/gen/** @gen\nsrc/[ab].py @skip\n")
+        cases = {"lib/x.js": ["@js"], "build/logs/a/b.txt": ["@logs"], "x/build/logs/a.txt": [],
+                 "docs/a.md": ["@docs"], "docs/sub/a.md": [], "deep/apps/x.py": ["@apps"], "apps": [],
+                 "a/gen/b/c.py": ["@gen"], "src/a.py": []}
+        self.assertEqual({path: impact.owners_for(rules, path)[0] for path in cases}, cases)
+
 
 
 if __name__ == "__main__":

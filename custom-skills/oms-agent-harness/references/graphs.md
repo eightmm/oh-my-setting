@@ -20,6 +20,7 @@ oms graph project trace symbol:scripts/plan-run.sh::main --direction in --depth 
 oms graph project blast --base origin/main   # --limit N bounds the JSON lists
 oms graph project coupling --path scripts/plan-run.sh   # co-change pairs from Git history; structural=no = the parsers cannot see it
 oms graph project affected --base origin/main --head HEAD --json
+oms graph project impact --base origin/main   # one brief: tests, dependents, usual co-change partners left out, CODEOWNERS; orientation, not evidence
 oms graph project map --signatures --task "lease recovery" --max-bytes 4096   # ranked files as signatures, no bodies
 oms graph project ensure         # explicit build-or-refresh; check reports only
 ```
@@ -187,7 +188,7 @@ plan/autopilot hierarchy without this extra layer.
 
 ## Boundaries
 
-- Harness children may run `project build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling`
+- Harness children may run `project build|ensure|check|map|find|api|search|neighbors|trace|blast|affected|coupling|impact`
   and `exec validate|render|route|status|events|test` — the project graph is a
   regenerable cache carrying no authority, and an isolated worktree has no
   other way to get one.

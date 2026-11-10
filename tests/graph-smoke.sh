@@ -802,8 +802,14 @@ OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project coupling --limit 1 
   > "$work/child-coupling.out" 2>&1 || child_rc=$?
 [ "$child_rc" -eq 0 ] || fail "a child must be able to read coupling (exit $child_rc): $(cat "$work/child-coupling.out")"
 
-# The signature map is a reader too: a child may run it, and its flags are
-# refused before any refresh.
+# The two orientation views are readers too: a child may run them, their flags
+# are refused before any refresh, and the impact brief says what it is not.
+child_rc=0
+OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project impact --base HEAD --limit 3 \
+  > "$work/child-impact.out" 2>&1 || child_rc=$?
+[ "$child_rc" -eq 0 ] || fail "a child must be able to read the impact brief (exit $child_rc): $(cat "$work/child-impact.out")"
+grep -q '^impact brief HEAD\.\.HEAD (orientation only' "$work/child-impact.out" ||
+  fail "the impact brief must be labelled orientation: $(cat "$work/child-impact.out")"
 child_rc=0
 OMS_HARNESS_CHILD=1 "$OMS" graph --repo "$exec_repo" project map --signatures --task "graph" --max-bytes 512 \
   > "$work/child-signatures.out" 2>&1 || child_rc=$?
