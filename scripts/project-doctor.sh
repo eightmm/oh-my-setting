@@ -8,11 +8,14 @@ PROJECT_DIR="$PWD"
 FAILED=0
 WARNED=0
 STRICT=0
+BUDGET=0
+BUDGET_JSON=0
 PROJECT_DIR_SET=0
 
 usage() {
   cat <<'EOF'
 Usage: project-doctor.sh [--strict] [project_dir]
+       project-doctor.sh --budget [--json] [--strict] [project_dir]
 
 Verify that all agent-facing files in a project give every agent the same
 view. Checks:
@@ -28,12 +31,23 @@ view. Checks:
 
 Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks. --strict
 also makes warnings fail, for CI or release gates.
+
+--budget is a standalone read-only report: the always-loaded instruction files
+Claude Code, Codex and Antigravity read for a session in this project, with
+bytes, words and lines per file and per provider, the imports Claude follows
+(up to four hops), paragraphs one provider loads twice, and an AGENTS.md that
+Claude does not read because a CLAUDE.md is present. Files are read as text;
+nothing runs and no model is called. Findings are warnings (--strict fails on
+them). OMS_RULES_MAX_LINES (default 200) and OMS_RULES_MAX_TOTAL_BYTES
+(default 32768) set the limits; --json prints the same report as data.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
+    --budget) BUDGET=1 ;;
+    --json) BUDGET_JSON=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -50,6 +64,15 @@ done
   exit 2
 }
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+if [ "$BUDGET" = 1 ]; then
+  budget_args=("$PROJECT_DIR")
+  [ "$BUDGET_JSON" = 0 ] || budget_args+=(--json)
+  [ "$STRICT" = 0 ] || budget_args+=(--strict)
+  command -v python3 >/dev/null 2>&1 || { echo "error: --budget needs python3" >&2; exit 2; }
+  exec python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/instruction-budget.py" "${budget_args[@]}"
+fi
+[ "$BUDGET_JSON" = 0 ] || { echo "error: --json is only for --budget" >&2; exit 2; }
 
 fail() {
   echo "drift: $*"
