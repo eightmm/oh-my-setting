@@ -1165,7 +1165,14 @@ records, and nothing forwards a task's list there yet.
 metrics, undecided review findings, CI history, open plan tasks, and rejected
 hypotheses. It fails closed on corrupt or over-budget evidence. The planner
 proposes evidence-cited candidates through imagination, gap-critique, and
-pruning lenses; speculative candidates remain report-only. A run with no
+pruning lenses; speculative candidates remain report-only. When the contract
+lists acceptance criteria, a fourth lens, spec gap, asks for each criterion
+whose implementing source the planner could not find: such a candidate names
+the criterion's id in `criterion` and cites the `src:PATH:LINE` lines it
+checked. One that names an id the spec does not carry is recorded as
+`unknown_criterion_report_only`, and one without a source citation as
+`unresolved_evidence_report_only`; neither becomes a task. The lens reports what
+looks unimplemented and never marks a criterion satisfied. A run with no
 eligible work creates no proposal and exits successfully. Otherwise it prints
 the proposal, evidence packet, and candidate report paths with their SHA-256
 digests. With `--collaboration auto`, the council reviews the contract without
