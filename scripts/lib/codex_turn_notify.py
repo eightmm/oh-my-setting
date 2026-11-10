@@ -91,16 +91,41 @@ def target_ttys(cwd: str) -> list:
     return []
 
 
+OSC_MODES = ("9", "777", "99")
+
+
+def sequence(mode: str, title: str, text: str) -> bytes:
+    """One OSC notification for `mode` (9, 777 or 99; anything else is 9) with every control byte removed.
+
+    OSC payloads end at BEL or ESC, so no control character from either field reaches the terminal; C1 controls
+    go too, since 0x9c ends a sequence on an 8-bit terminal."""
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    title = re.sub(r"[\x00-\x1f\x7f-\x9f;]", " ", title)
+    if mode == "777":
+        return ("\033]777;notify;%s;%s\a" % (title, text)).encode("utf-8")
+    if mode == "99":
+        return ("\033]99;;%s\033\\" % text).encode("utf-8")
+    return ("\033]9;%s\a" % text).encode("utf-8")
+
+
 def escape(title: str, body: str) -> bytes:
     from work_journal import sanitize_text
 
     text = sanitize_text("%s: %s" % (title, body), 240)
-    # OSC payloads end at BEL/ESC; sanitize_text already removed controls.
-    text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
-    title = re.sub(r"[\x00-\x1f\x7f;]", " ", title)
-    if os.environ.get("OMS_TERMINAL_NOTIFY_OSC") == "777":
-        return ("\033]777;notify;%s;%s\a" % (title, text)).encode("utf-8")
-    return ("\033]9;%s\a" % text).encode("utf-8")
+    return sequence("777" if os.environ.get("OMS_TERMINAL_NOTIFY_OSC") == "777" else "9", title, text)
+
+
+def write_ttys(ttys: list, data: bytes) -> int:
+    """Write `data` to each terminal device; the number that accepted it. A refused terminal is skipped."""
+    written = 0
+    for tty in ttys:
+        try:
+            with open(tty, "wb", buffering=0) as handle:
+                handle.write(data)
+            written += 1
+        except OSError:
+            continue
+    return written
 
 
 def main() -> int:
@@ -115,12 +140,7 @@ def main() -> int:
     cwd = str(event.get("cwd") or "")
     data = escape("🔔 Codex 작업 완료 · %s" % (Path(cwd).name or "codex"),
                   str(event.get("last-assistant-message") or ""))
-    for tty in target_ttys(cwd):
-        try:
-            with open(tty, "wb", buffering=0) as handle:
-                handle.write(data)
-        except OSError:
-            continue
+    write_ttys(target_ttys(cwd), data)
     return 0
 
 

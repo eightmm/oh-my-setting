@@ -143,6 +143,7 @@ def panel_environment():
     from terminal_panel import EXECUTION_ENV
     return ["env"] + [name + "=" + os.environ[name] for name in
                       ("OMS_PANEL_NO_ANIMATION", "OMS_PANEL_AUTO_SWAP", "OMS_PANEL_ATTENTION_BELL", "OMS_PANEL_ATTENTION_CMD",
+                       "OMS_PANEL_ATTENTION_OSC",
                        "OMS_PANEL_COLOR", "NO_COLOR",
                        "OMS_CODEX_NOTIFY", "OMS_CLAUDE_NOTIFY",
                        "CLAUDE_CONFIG_DIR",

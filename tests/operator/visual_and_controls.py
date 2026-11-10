@@ -351,10 +351,11 @@ assert panel_watch.ring_bell(piped_bell) is False and piped_bell.text == ""
 assert panel_watch.ring_bell(broken_bell) is False and panel_watch.ring_bell(object()) is False
 # The watcher rings only with OMS_PANEL_ATTENTION_BELL=1 and, in a managed panel, only from the main window's
 # board; the clock is artificial, so two reads cost no real refresh wait.
-def bell_watch(bell, managed=False, main_watch="", command=None, notified=None):
+def bell_watch(bell, managed=False, main_watch="", command=None, notified=None, osc=None, noticed=None):
     bell_clock = itertools.count(0, 10)
     reads = [(report, 0, "codex", None, "graph", False, "endings") for report in (guard_read, ending_fixture, ending_fixture)]
-    environment = {"OMS_PANEL_ATTENTION_BELL": bell, "OMS_PANEL_ATTENTION_CMD": command, "TMUX": "", "TMUX_PANE": "%1"}
+    environment = {"OMS_PANEL_ATTENTION_BELL": bell, "OMS_PANEL_ATTENTION_CMD": command, "OMS_PANEL_ATTENTION_OSC": osc,
+                   "TMUX": "", "TMUX_PANE": "%1"}
     with patch.dict(os.environ, {key: value for key, value in environment.items() if value is not None}), \
             patch.object(panel, "BackgroundRead", ImmediateRead), patch.object(panel, "read_panel", side_effect=reads), \
             patch.object(panel, "managed_session", return_value=managed), \
@@ -366,13 +367,17 @@ def bell_watch(bell, managed=False, main_watch="", command=None, notified=None):
             patch("panel_navigation.pane_local_option", return_value=main_watch), \
             patch.object(panel.time, "monotonic", side_effect=lambda: next(bell_clock)), \
             patch.object(panel_watch, "run_attention_command") as ran, \
+            patch.object(panel_watch, "send_attention_osc") as wrote, \
             patch.object(panel_watch, "ring_bell") as rung:
-        for name, value in (("OMS_PANEL_ATTENTION_BELL", bell), ("OMS_PANEL_ATTENTION_CMD", command)):
+        for name, value in (("OMS_PANEL_ATTENTION_BELL", bell), ("OMS_PANEL_ATTENTION_CMD", command),
+                            ("OMS_PANEL_ATTENTION_OSC", osc)):
             if value is None:
                 os.environ.pop(name, None)
         assert panel.watch(Path("endings-repo"), "codex", count=3) == 0
     if notified is not None:
         notified.extend(call.args for call in ran.call_args_list)
+    if noticed is not None:
+        noticed.extend(call.args for call in wrote.call_args_list)
     return rung.call_count
 assert bell_watch("1") == 1 and bell_watch(None) == 0 and bell_watch("0") == 0 and bell_watch("yes") == 0
 assert bell_watch("1", managed=True, main_watch="1") == 1 and bell_watch("1", managed=True) == 0
@@ -395,6 +400,57 @@ notifications.clear()
 assert bell_watch(None, notified=notifications) == 0 and bell_watch("1", notified=notifications) == 1 and notifications == []
 assert bell_watch(None, managed=True, command="notify", notified=notifications) == 0 and notifications == []
 assert bell_watch(None, managed=True, main_watch="1", command="notify", notified=notifications) == 0 and len(notifications) == 1
+# OMS_PANEL_ATTENTION_OSC writes a terminal notification on the same event and under the same one-board rule;
+# a value that names no OSC form is osc_ignored, and the variable alone neither rings nor runs a notifier.
+notices = []
+notifications.clear()
+for osc_mode in ("9", "777", "99"):
+    assert bell_watch(None, osc=osc_mode, noticed=notices, notified=notifications) == 0 and notifications == []
+    assert len(notices) == 1 and notices[0][0] == osc_mode and notices[0][1]["new"] == {"guard_stop": 1}, notices
+    assert set(notices[0][1]) == set(sent), notices
+    notices.clear()
+for osc_ignored in ("", "1", "8", "osc9", "9 "):
+    assert bell_watch(None, osc=osc_ignored, noticed=notices) == 0 and notices == [], osc_ignored
+assert bell_watch(None, noticed=notices) == 0 and bell_watch("1", noticed=notices) == 1 and notices == []
+assert bell_watch(None, managed=True, osc="9", noticed=notices) == 0 and notices == []
+assert bell_watch("1", managed=True, main_watch="1", command="notify", osc="9", noticed=notices) == 1 and len(notices) == 1
+# The text is the repository name, counts and class words: nothing an item says, and nothing that ends the sequence.
+assert panel_watch.attention_notice(sent) == (
+    "oms endings-repo", "1 new (1 guard stop), %d waiting" % len(ending_queue)), panel_watch.attention_notice(sent)
+osc_tty = temporary / "attention-osc.tty"
+def osc_bytes(mode, event=None):
+    event = sent if event is None else event
+    osc_tty.write_bytes(b"")
+    with patch.object(panel_watch, "attention_ttys", return_value=[str(osc_tty), str(temporary / "missing" / "tty")]):
+        assert panel_watch.send_attention_osc(mode, event) is (mode in ("9", "777", "99")), mode
+    return osc_tty.read_bytes()
+osc_text = ("oms endings-repo: 1 new (1 guard stop), %d waiting" % len(ending_queue)).encode()
+assert osc_bytes("9") == b"\x1b]9;" + osc_text + b"\x07", osc_bytes("9")
+assert osc_bytes("777") == b"\x1b]777;notify;oms endings-repo;" + osc_text + b"\x07", osc_bytes("777")
+assert osc_bytes("99") == b"\x1b]99;;" + osc_text + b"\x1b\\", osc_bytes("99")
+assert osc_bytes("8") == b"" and osc_bytes("") == b""
+for item in ending_queue:
+    assert not any(str(value).encode() in osc_bytes("9") for value in (item.get("who"), item.get("what"), item.get("task")) if value), item
+osc_hostile = dict(sent, repo="re\x07po\x1b]0;evil\x1b\\;x\x9c\n")
+for osc_mode, osc_opener, osc_closer in (("9", b"\x1b]9;", b"\x07"), ("777", b"\x1b]777;notify;", b"\x07"), ("99", b"\x1b]99;;", b"\x1b\\")):
+    osc_wire = osc_bytes(osc_mode, osc_hostile)
+    osc_inner = osc_wire[len(osc_opener):-len(osc_closer)]
+    assert osc_wire.startswith(osc_opener) and osc_wire.endswith(osc_closer) and b"evil" in osc_inner, osc_wire
+    assert not re.search(rb"[\x00-\x1f\x7f]", osc_inner) and "\x9c" not in osc_inner.decode("utf-8"), osc_wire
+# The 777 title is one field: it keeps no separator of its own, so the body starts where OMS put it.
+assert osc_bytes("777", osc_hostile).split(b";", 3)[2].rstrip() == b"oms re po ]0 evil \\ x", osc_bytes("777", osc_hostile)
+# Inside tmux the notification goes to the most recently active client of this pane's session, and only to a device.
+def osc_clients(stdout, returncode=0, environment=None):
+    osc_listed = subprocess.CompletedProcess([], returncode, stdout, "")
+    with patch.dict(os.environ, environment or {"TMUX": "/tmp/tmux-sock,1,0", "TMUX_PANE": "%7"}), \
+            patch.object(panel_watch.subprocess, "run", return_value=osc_listed) as osc_asked:
+        osc_found = panel_watch.attention_ttys()
+    return osc_found, osc_asked
+osc_found, osc_asked = osc_clients("100\t/dev/pts/3\n200\t/dev/pts/9\n300\t/tmp/not-a-device\nlater\t/dev/pts/4\n")
+assert osc_found == ["/dev/pts/9"] and osc_asked.call_args.args[0][-5:] == ["list-clients", "-t", "%7", "-F", "#{client_activity}\t#{client_tty}"], (osc_found, osc_asked.call_args)
+assert osc_clients("", returncode=1)[0] == [] and osc_clients("")[0] == []
+osc_found, osc_asked = osc_clients("100\t/dev/pts/3\n", environment={"TMUX": "/tmp/tmux-sock,1,0", "TMUX_PANE": "main"})
+assert osc_found == [] and not osc_asked.called
 # The notifier gets one JSON line on stdin, without a shell; a bad command or a busy notifier is skipped quietly.
 notifier_out = temporary / "attention-notifier.json"
 notifier_argv = [sys.executable, "-c", "import sys; open(sys.argv[1], 'w').write(sys.stdin.read() + '|' + sys.argv[2])",
@@ -1975,6 +2031,9 @@ with patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "0", "OMS_CLAUDE_NOTIFY": "0"},
 with patch.dict(os.environ, {"OMS_PANEL_ATTENTION_BELL": "1", "OMS_PANEL_ATTENTION_CMD": "notify --json"}, clear=True):
     assert "OMS_PANEL_ATTENTION_BELL=1" in panel.panel_environment()
     assert "OMS_PANEL_ATTENTION_CMD=notify --json" in panel.panel_environment()
+    assert not any(value.startswith("OMS_PANEL_ATTENTION_OSC=") for value in panel.panel_environment())
+    os.environ["OMS_PANEL_ATTENTION_OSC"] = "777"
+    assert "OMS_PANEL_ATTENTION_OSC=777" in panel.panel_environment()
 for mode in ("animated", "static", "environment", "interrupt"):
     clock = [0.0]
     output = io.StringIO()
