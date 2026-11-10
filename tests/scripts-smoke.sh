@@ -45052,6 +45052,96 @@ test_external_receipts_record_egress_and_hash_drift() {
   fi
 }
 
+test_candidate_results_stay_attached_to_one_candidate() {
+  local project="$TMP/candidate-results" cand="$ROOT/scripts/candidate.sh" ext="$ROOT/scripts/external.sh"
+  local out cap rid i
+  make_committed_repo "$project"
+  cap="$(cd "$project" && "$ROOT/scripts/run-capsule.sh" run --no-ledger -- true 2>/dev/null)" ||
+    fail "fixture capsule failed"
+  out="$(cd "$project" && "$ext" add --kind tool --name vina --version 1.2)" || fail "receipt failed"
+  rid="$(printf '%s\n' "$out" | sed -n 's/^\(ext-[0-9a-f]*\):.*/\1/p' | head -n 1)"
+  [ -n "$rid" ] || fail "receipt id missing: $out"
+
+  out="$(cd "$project" && "$cand" add --id LIG-1 --kind ligand --ref inchikey=AAAA-BBBB --smiles 'CCO')" ||
+    fail "add failed: $out"
+  contains "$out" 'only the sha256 and length of the SMILES were stored' || fail "smiles note missing: $out"
+  (cd "$project" && "$cand" add --id LIG-2) >/dev/null || fail "second add failed"
+  if grep -q 'CCO' "$project/.oms/candidates.jsonl"; then fail "SMILES string was stored without --store-structure"; fi
+  grep -q 'smiles_sha256=' "$project/.oms/candidates.jsonl" || fail "smiles digest not stored"
+  (cd "$project" && "$cand" add --id LIG-3 --smiles 'CCN' --store-structure) >/dev/null || fail "store-structure failed"
+  grep -q '"smiles": "CCN"' "$project/.oms/candidates.jsonl" || fail "--store-structure did not keep the string"
+
+  for bad in 'bad id' '-x' 'a/b' "$(printf 'a%.0s' $(seq 1 70))"; do
+    if (cd "$project" && "$cand" add --id "$bad") >/dev/null 2>&1; then fail "bad id accepted: $bad"; fi
+  done
+  if (cd "$project" && "$cand" result --id NOPE --tool vina --metric score --value 1 --unlinked) >/dev/null 2>&1; then
+    fail "result for an unregistered candidate must fail"
+  fi
+
+  out="$(cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value -7.2 \
+    --run "$cap" --lower-is-better)" || fail "linked result failed: $out"
+  contains "$out" "run $cap" || fail "link not reported: $out"
+  (cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value -7.2 --external "$rid") >/dev/null ||
+    fail "receipt-linked result failed"
+  if (cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value -1 --run nope) >/dev/null 2>"$project/err"; then
+    fail "unknown run must be refused"
+  fi
+  assert_file_contains "$project/err" 'unresolvable link'
+  if (cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value -1 --external ext-0000000000) >/dev/null 2>&1; then
+    fail "unknown receipt must be refused"
+  fi
+  if (cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value -1) >/dev/null 2>&1; then
+    fail "a result without a link or --unlinked must be refused"
+  fi
+  if (cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value nan --unlinked) >/dev/null 2>&1; then
+    fail "non-numeric value must be refused"
+  fi
+
+  out="$(cd "$project" && "$cand" show LIG-1)"
+  contains "$out" 'conflict' && fail "equal values from two links are not a conflict: $out"
+  (cd "$project" && "$cand" result --id LIG-1 --tool admet --metric logp --value 1.5 --unlinked) >/dev/null ||
+    fail "unlinked result failed"
+  (cd "$project" && "$cand" result --id LIG-1 --tool vina --metric score --value -6.1 --external "$rid" \
+    --conditions rerun --lower-is-better) >/dev/null || fail "other-conditions result failed"
+  (cd "$project" && "$cand" result --id LIG-2 --tool vina --metric score --value -8.0 --run "$cap" \
+    --lower-is-better) >/dev/null || fail "LIG-2 result failed"
+  (cd "$project" && "$cand" result --id LIG-3 --tool vina --metric score --value -7.2 --run "$cap" \
+    --lower-is-better) >/dev/null || fail "LIG-3 result failed"
+  out="$(cd "$project" && "$cand" show LIG-1)"
+  contains "$out" 'unlinked' || fail "unlinked result not marked: $out"
+  contains "$out" 'receipt '"$rid" || fail "receipt link not shown: $out"
+  (cd "$project" && "$cand" result --id LIG-3 --tool vina --metric score --value -6.9 --external "$rid" \
+    --lower-is-better) >/dev/null || fail "conflicting result failed"
+  out="$(cd "$project" && "$cand" show LIG-3)"
+  contains "$out" 'conflict: same tool, metric and conditions' || fail "conflict not flagged: $out"
+  contains "$out" 'none picked' || fail "conflict must not pick a value: $out"
+  out="$(cd "$project" && "$cand" show LIG-3 --json)"
+  contains "$out" '"conflict": true' || fail "json conflict flag missing: $out"
+
+  out="$(cd "$project" && "$cand" table)"
+  contains "$out" '| LIG-2 | - | -8.0 |' || fail "matrix should show - for missing: $out"
+  contains "$out" '!conflict' || fail "matrix conflict marker missing: $out"
+  contains "$out" '?unlinked' || fail "matrix unlinked marker missing: $out"
+  contains "$out" 'not ranked' || fail "multi-metric table must not rank: $out"
+  out="$(cd "$project" && "$cand" table --metric score)"
+  [ "$(printf '%s\n' "$out" | grep -n '^| LIG-2 ' | cut -d: -f1)" -lt "$(printf '%s\n' "$out" | grep -n '^| LIG-1 ' | cut -d: -f1)" ] ||
+    fail "single metric with direction should order best first: $out"
+  contains "$out" 'ordered by vina:score (lower is better)' || fail "ordering line missing: $out"
+  out="$(cd "$project" && "$cand" table --metric score --format tsv | head -n 2 | tail -n 1)"
+  contains "$out" 'LIG-2' || fail "tsv first row wrong: $out"
+  out="$(cd "$project" && "$cand" table --metric score --metric logp --json)"
+  contains "$out" '"by": null' || fail "two metrics must not rank: $out"
+
+  # Concurrent appends keep every row whole.
+  for i in 1 2 3 4 5 6 7 8; do
+    (cd "$project" && "$cand" result --id LIG-2 --tool pk --metric "m$i" --value "$i" --unlinked >/dev/null) &
+  done
+  wait
+  [ "$(grep -c '"metric": "m[0-9]"' "$project/.oms/candidates.jsonl")" = 8 ] || fail "concurrent appends lost rows"
+  python3 -c 'import json,sys; [json.loads(l) for l in open(sys.argv[1])]' "$project/.oms/candidates.jsonl" ||
+    fail "candidates.jsonl has a torn row"
+}
+
 test_portable_capsule_rejects_unknown_fields() {
   local project="$TMP/portable-capsule-fields"
   make_committed_repo "$project"
