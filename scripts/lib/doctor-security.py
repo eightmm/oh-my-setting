@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 
 LIMIT = 1024 * 1024
@@ -163,6 +164,11 @@ def codex(rows, facts, home):
                                 "codex.profiles.%s" % clean(name, 30))
             if inner:
                 found["profile:" + name] = inner
+    skipped = max(0, len(profiles) - 20)
+    if skipped:
+        found["profiles_skipped"] = skipped
+        rows.append(("unknown", "codex: %d profile(s) skipped; posture incomplete" % skipped,
+                     "codex.profiles"))
     if len(rows) == before:
         rows.append(("ok", "codex: config.toml sets no sandbox or approval override", "codex.config.toml"))
     facts["codex"] = found
@@ -245,17 +251,24 @@ def drift(rows, facts, home):
             rows.append(("ok", "unchanged since %s" % when, "security.drift"))
     if os.environ.get("OMS_HARNESS_CHILD") == "1":
         return since
+    scratch = None
     try:
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        scratch = "%s.%d.tmp" % (path, os.getpid())
-        descriptor = os.open(scratch, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        descriptor, scratch = tempfile.mkstemp(prefix=".doctor-security.", dir=os.path.dirname(path))
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump({"schema": 1, "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                        "sections": sections}, handle, sort_keys=True)
             handle.write("\n")
         os.replace(scratch, path)
+        scratch = None
     except OSError:
         rows.append(("info", "could not record this check for later comparison", "security.state"))
+    finally:
+        if scratch is not None:
+            try:
+                os.unlink(scratch)
+            except OSError:
+                pass
     return since
 
 

@@ -1204,6 +1204,35 @@ assert doc["changed_since"]["baseline"] is False, doc  # the text run just befor
   case "$json" in *$'\033'*) fail "--json must not carry an escape either" ;; esac
   case "$out" in *$'\033'*) fail "a settings value must not carry an escape to the terminal" ;; esac
 
+  # Profiles beyond the inspection cap must make the result incomplete.
+  python3 - "$home/.codex/config.toml" <<'PYPROFILES'
+import sys
+with open(sys.argv[1], "w") as out:
+    for i in range(21):
+        out.write("[profiles.p%02d]\n" % i)
+        if i == 20:
+            out.write('sandbox_mode = "danger-full-access"\n')
+PYPROFILES
+  out="$(security)"
+  contains "$out" "unknown: codex: 1 profile(s) skipped" || fail "skipped profiles must be reported: $out"
+  ! contains "$out" "sets no sandbox or approval override" || fail "incomplete inspection cannot be clean: $out"
+
+  # A predictable planted scratch name must not be opened or truncated.
+  python3 - "$ROOT/scripts/lib/doctor-security.py" "$home" <<'PYATOMIC' || fail "scratch file was not created safely"
+import importlib.util, os, pathlib, sys
+spec = importlib.util.spec_from_file_location("security", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+home = pathlib.Path(sys.argv[2]); os.environ["XDG_STATE_HOME"] = str(home / "state")
+os.environ.pop("OMS_HARNESS_CHILD", None)
+target = home / "target"; target.write_text("preserved")
+scratch = pathlib.Path(m.state_path(str(home)) + ".%d.tmp" % os.getpid())
+scratch.symlink_to(target)
+m.drift([], {}, str(home))
+assert target.read_text() == "preserved"
+assert scratch.is_symlink()
+assert pathlib.Path(m.state_path(str(home))).is_file()
+PYATOMIC
+
   # A harness child may read the report but records nothing.
   rm -f "$home/state/oh-my-setting/doctor-security.json"
   out="$(OMS_HARNESS_CHILD=1 security)" || fail "a harness child may read the report: $out"

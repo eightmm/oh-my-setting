@@ -4119,7 +4119,7 @@ def digest(path):
 
 
 def tree(path):
-    """A rules directory: names and bytes of its regular files, bounded."""
+    """Hash names and the first 500 file contents; use metadata for the rest."""
     if not os.path.isdir(path):
         return "absent"
     acc, seen = hashlib.sha256(), 0
@@ -4127,10 +4127,16 @@ def tree(path):
         dirs.sort()
         for name in sorted(names):
             seen += 1
-            if seen > 500:
-                return "large:%d" % seen
             full = os.path.join(base, name)
-            acc.update(os.path.relpath(full, path).encode("utf-8", "replace") + b"\0" + digest(full).encode() + b"\n")
+            if seen <= 500:
+                value = digest(full)
+            else:
+                try:
+                    info = os.stat(full)
+                    value = "metadata:%d:%d" % (info.st_size, info.st_mtime_ns)
+                except OSError:
+                    value = "unreadable"
+            acc.update(os.path.relpath(full, path).encode("utf-8", "replace") + b"\0" + value.encode() + b"\n")
     return acc.hexdigest()
 
 

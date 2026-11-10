@@ -5052,6 +5052,47 @@ assert len(rows) == 5 and all(row["diff_sha256"] == scope["diff_sha256"] and row
 assert {row["anchor"]: row["quote_found"] for row in rows if row["quote"]} == {"in-diff": True, "anchor-not-found": False}, rows
 assert [row["rule"] for row in rows if "rule" in row] == ["style-nits"], rows
 PYFIND
+  # Direct lifecycle probes keep receipt times and competing transitions deterministic.
+  python3 - "$ROOT/scripts/lib/review_findings.py" "$found" <<'PYREVIEW' || fail "finding lifecycle regression"
+import importlib.util, json, pathlib, sys, types
+from unittest import mock
+spec = importlib.util.spec_from_file_location("findings", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.finding_id("file", chr(0xd800), "").startswith("f-")
+import hashlib
+assert m.finding_id("file", chr(0xdc80), "") == "f-" + hashlib.sha256(b"file\0\x80\0").hexdigest()[:12]
+root = pathlib.Path(sys.argv[2]); directory = root / "artifacts"
+rows = list(directory.glob("_findings-*.jsonl")); entry = json.loads(rows[0].read_text().splitlines()[0]); ident = entry["id"]
+args = types.SimpleNamespace(artifact_dir=str(directory), id=ident, action="verify", repo=str(root), run="probe", note=None)
+history = [{"state": "fixed", "ts": "2026-01-01T00:00:00Z", "runs": [entry["run"]]}]
+receipt = {"kind": "review-verify", "exit": 0, "artifact_id": "probe", "ts": history[0]["ts"]}
+resolved = (ident, dict(entry, runs=[(entry["ts"], entry["run"])]), history)
+with mock.patch.object(m, "resolve", return_value=resolved), mock.patch.object(m, "index_rows", return_value=[receipt]), mock.patch.object(m, "record") as record:
+    for stamp in ("", "malformed", "2025-12-31T23:59:59Z", history[0]["ts"]):
+        receipt["ts"] = stamp
+        try: m.transition(args)
+        except SystemExit: pass
+        else: raise AssertionError("invalid or stale timestamp accepted: " + stamp)
+        assert not record.called
+    receipt["ts"] = "2026-01-01T00:00:01Z"
+    m.transition(args)
+    assert record.called
+# Resolution must run while another descriptor cannot acquire the lock.
+def locked_resolve(*unused):
+    import fcntl, os
+    fd = os.open(directory / (m.EVENTS_FILE + ".lock"), os.O_WRONLY)
+    try:
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: pass
+        else: raise AssertionError("resolution was not locked")
+    finally: os.close(fd)
+    raise SystemExit("probe")
+with mock.patch.object(m, "resolve", side_effect=locked_resolve):
+    try: m.transition(args)
+    except SystemExit: pass
+
+PYREVIEW
+
   # fixed is a claim; verified needs a passing verify receipt recorded after it.
   fixed_id="$(awk '/in-diff/{print $1}' "$TMP/findings-list")"
   dismissed_id="$(awk '/outside-scope/{print $1}' "$TMP/findings-list")"
@@ -40128,6 +40169,19 @@ test_worker_guard_sees_planted_and_ignored_files() {
     fail "replacing a file inside an ignored directory should fail a strict run"
   contains "$result" 'outside its worktree: files' ||
     fail "an ignored-tree replacement should be named: $result"
+
+  # The rules tree stays sensitive to changes after its content-hash cap.
+  local rules_home="$TMP/guard-many-rules"
+  mkdir -p "$rules_home/.codex/rules"
+  python3 - "$rules_home/.codex/rules" <<'PYRULES'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+for i in range(501): (root / ("%04d" % i)).write_text("a")
+PYRULES
+  HOME="$rules_home" bash -c '. "$1/scripts/lib/oms-common.sh"; oms_user_config_fingerprint "$2"' _ "$ROOT" "$TMP/rules-before"
+  printf 'changed' > "$rules_home/.codex/rules/0500"
+  HOME="$rules_home" bash -c '. "$1/scripts/lib/oms-common.sh"; oms_user_config_fingerprint "$2"' _ "$ROOT" "$TMP/rules-after"
+  ! cmp -s "$TMP/rules-before" "$TMP/rules-after" || fail "large rules tree change was missed"
 
   # User-level settings and start files decide what the next session runs. A
   # change to one during the run is reported by name only and never fails the

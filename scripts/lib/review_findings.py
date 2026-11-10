@@ -18,6 +18,8 @@ without that provenance.
 """
 
 import argparse
+import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -58,7 +60,11 @@ def normalized(value):
 
 def finding_id(path, summary, quote):
     body = "\0".join((path, normalized(summary), normalized(quote or "")))
-    return "f-" + hashlib.sha256(body.encode("utf-8", "surrogateescape")).hexdigest()[:12]
+    try:
+        encoded = body.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        encoded = body.encode("utf-8", "replace")
+    return "f-" + hashlib.sha256(encoded).hexdigest()[:12]
 
 
 def now():
@@ -479,6 +485,18 @@ def show(args):
 
 
 def transition(args):
+    if not os.path.isdir(args.artifact_dir):
+        resolve(args.artifact_dir, args.id)
+    lock_path = os.path.join(args.artifact_dir, EVENTS_FILE + ".lock")
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return transition_locked(args)
+    finally:
+        os.close(fd)
+
+
+def transition_locked(args):
     ident, entry, history = resolve(args.artifact_dir, args.id)
     state, _ = status(entry, history)
     if args.action == "fix":
@@ -503,8 +521,13 @@ def transition(args):
                              "verified needs a recorded verification run, not a claim" % clean(args.run, 120))
         if receipt["exit"] != 0:
             raise SystemExit("review findings: that verification run failed (exit %d)" % receipt["exit"])
-        if str(receipt.get("ts") or "") < fixed_at:
-            raise SystemExit("review findings: that verification run predates the fix record (%s)" % fixed_at)
+        try:
+            fixed_time = datetime.datetime.strptime(fixed_at, "%Y-%m-%dT%H:%M:%SZ")
+            receipt_time = datetime.datetime.strptime(str(receipt.get("ts") or ""), "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            raise SystemExit("review findings: invalid verification or fix timestamp")
+        if receipt_time <= fixed_time:
+            raise SystemExit("review findings: that verification run predates the fix record or has the same timestamp as it (%s)" % fixed_at)
         commit = verify_binding(args, entry, history[-1], receipt)
         record(args.artifact_dir, ident, "verified", entry, verify_artifact_id=clean(receipt.get("artifact_id") or "", 120),
                verify_artifact=clean(receipt.get("artifact") or "", 400), commit=commit, note=clean(args.note or ""))
