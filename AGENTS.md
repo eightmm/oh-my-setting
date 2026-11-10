@@ -54,3 +54,11 @@
   gate. CI remains authoritative. Smoke shards and focused lanes balance by
   measured cost (`# smoke-weight:` lines, focused registration order); refresh
   from CI timings.
+- CI runs Python 3.11; a developer machine may default to newer. Before
+  pushing, run changed Python and the targeted tests once with 3.11 first on
+  PATH. Known difference: with `parse_known_args`, argparse hands positional
+  words that follow an option back as unknown.
+- Every tracked file passes the outbound scrubber
+  (`test_scrubber_passes_harness_sources`): in fixtures, split key-shaped
+  strings and literal home paths across quotes, and avoid identifiers that read
+  as a credential assignment.
