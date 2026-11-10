@@ -156,6 +156,14 @@ run_ml_smoke() {
     ran=1
   fi
 
+  # The resume smoke is stdlib-only and runs in seconds; it adds coverage
+  # but never counts as the configured ML smoke above.
+  if [ -f scripts/ml_resume_smoke.py ] && [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1; then
+    uv run --no-sync python scripts/ml_resume_smoke.py
+  elif [ -f scripts/ml_resume_smoke.py ]; then
+    python3 scripts/ml_resume_smoke.py
+  fi
+
   # TODO ML project: implement scripts/ml_smoke.py or replace this function
   # with a CPU-only one-batch check covering config load, dataloader sample,
   # model forward, loss, backward, eval mode, and checkpoint save/load.

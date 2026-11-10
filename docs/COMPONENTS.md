@@ -2024,6 +2024,17 @@ commands; keep one flow under one authority.
 
 The ML template records the scientific contract in PROJECT.md; optional
 reference docs require `--full-docs` and never overwrite existing files.
+The ML scaffold also copies `scripts/ml_resume_smoke.py` (stdlib only, CPU, seconds;
+`bash scripts/check.sh ml-smoke` runs it after `ml_smoke.py`, and it does not count as the
+configured ML smoke). It runs a toy training twice through the project's `build`/`step`/
+`save`/`load`/`parts` plug-ins: straight through, and interrupted at step K with an atomic
+`latest` write, discarded state and a reload. It proves the two runs agree on every loss and
+the final state digest, that step counter, optimizer, scheduler and RNG continued rather than
+restarted, and that an interrupted save leaves no truncated `latest`; `--self-test` shows the
+harness flags a checkpoint missing RNG, optimizer or scheduler state. It does not prove a real
+preempted Slurm job resumes, signal handling, multi-GPU or data-loader position; the built-in
+demo only proves the harness until `project_plugin()` is replaced, and `--torch` skips
+without torch.
 ML/Slurm workflows use local-first experiment controls:
 
 - `oms run new/current/show/timeline` for the run spine.
