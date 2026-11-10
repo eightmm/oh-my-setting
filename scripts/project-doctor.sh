@@ -8,11 +8,13 @@ PROJECT_DIR="$PWD"
 FAILED=0
 WARNED=0
 STRICT=0
+TEAM=0
 PROJECT_DIR_SET=0
 
 usage() {
   cat <<'EOF'
 Usage: project-doctor.sh [--strict] [project_dir]
+       project-doctor.sh --team [project_dir]
 
 Verify that all agent-facing files in a project give every agent the same
 view. Checks:
@@ -28,12 +30,18 @@ view. Checks:
 
 Exit 0 when consistent (warnings allowed), 1 on drift/missing blocks. --strict
 also makes warnings fail, for CI or release gates.
+
+--team is a standalone report-only check of the tracked baseline file
+.oms-team.json (min_oms_version, capabilities, digests) against this
+installation. It prints the exact command for each unmet item and runs none;
+exit 1 when any item is unmet.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --strict) STRICT=1 ;;
+    --team) TEAM=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -50,6 +58,16 @@ done
   exit 2
 }
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+if [ "$TEAM" = 1 ]; then
+  command -v python3 >/dev/null 2>&1 || { echo "error: --team needs python3" >&2; exit 2; }
+  # shellcheck source=scripts/lib/install-contract.sh
+  . "$ROOT/scripts/lib/install-contract.sh"
+  team_receipt="$(oms_install_receipt_path)"
+  [ -f "$team_receipt" ] || team_receipt=""
+  exec python3 -I "$ROOT/scripts/lib/team-baseline.py" "$PROJECT_DIR" "$ROOT" "$team_receipt" \
+    "${OMS_CAPABILITY_RECEIPT:-${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/capabilities.json}"
+fi
 
 fail() {
   echo "drift: $*"
