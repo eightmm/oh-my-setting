@@ -34,12 +34,13 @@ PROVIDER_TIMEOUT="${OMS_PEER_TIMEOUT:-5m}"
 GOAL_TEXT=""
 INTENT_ID=""
 AMEND_REASON=""
+DRAFT_KIND=""
 EXPECTED_PROJECT_SHA=""
 
 usage() {
   cat <<'EOF'
 usage:
-  intent.sh draft --goal "TEXT" [--to PROVIDER] [--repo PATH]
+  intent.sh draft --goal "TEXT" [--kind feature|bugfix|quick] [--to PROVIDER] [--repo PATH]
                   [--model M] [--fallback-model M] [--fallback-to PROVIDER|none]
                   [--reasoning-effort E] [--provider-timeout DUR]
   intent.sh show [--id ID] [--repo PATH]
@@ -55,7 +56,11 @@ draft   Ask a provider to expand the goal into a structured intent spec
         with provenance; never touches PROJECT.md. Review the candidate —
         editing it is expected — then adopt. A transient failed call retries
         once on the other installed core provider by default; --fallback-to
-        none disables that retry.
+        none disables that retry. --kind changes only the skeleton asked
+        for: bugfix adds a Behavior section (Current, Expected, Preserve) so
+        the behavior that must not change is written down; quick asks for
+        Status, Project and Verification alone. Validation and the adopt
+        gate are the same for every kind.
 show    List candidates, or print one with --id.
 adopt   The explicit approval act and the only PROJECT.md writer. Refuses
         while a live autopilot receipt exists (a spec swap under a live
@@ -91,6 +96,7 @@ while [ "$#" -gt 0 ]; do
     --goal) [ "$#" -ge 2 ] || fail "--goal requires text"; GOAL_TEXT="$2"; shift 2 ;;
     --id) [ "$#" -ge 2 ] || fail "--id requires an intent id"; INTENT_ID="$2"; shift 2 ;;
     --reason) [ "$#" -ge 2 ] || fail "--reason requires text"; AMEND_REASON="$2"; shift 2 ;;
+    --kind) [ "$#" -ge 2 ] || fail "--kind requires feature, bugfix or quick"; DRAFT_KIND="$2"; shift 2 ;;
     --expected-project-sha256)
       [ "$#" -ge 2 ] || fail "--expected-project-sha256 requires a digest"
       EXPECTED_PROJECT_SHA="$2"; shift 2 ;;
@@ -114,6 +120,11 @@ while [ "$#" -gt 0 ]; do
     *) fail "unknown argument: $1" ;;
   esac
 done
+[ -z "$DRAFT_KIND" ] || [ "$ACTION" = draft ] || fail "--kind is valid only with draft"
+case "${DRAFT_KIND:-feature}" in
+  feature|bugfix|quick) ;;
+  *) fail "--kind must be feature, bugfix or quick" ;;
+esac
 
 [ -n "$ACTION" ] || { usage >&2; exit 2; }
 REPO="$(cd "$REPO" && pwd -P)" || fail "bad --repo"
@@ -607,6 +618,54 @@ if [ "$ACTION" = draft ]; then
   fi
   tree_listing="$(cd "$REPO" && ls -1 | sed -n '1,40p')"
 
+  # --kind swaps skeleton sections only; the default text is the one every
+  # earlier draft was asked for, byte for byte.
+  kind_decisions="## Decisions
+
+- Rationale/invariants: <why this matters and behavior to preserve; unresolved choices go in Open decisions>
+- Alternatives ruled out: <evidence-backed rejected approaches, or none>
+- References (repo-relative paths/sections): <existing task-relevant design or intent documents, or none; do not invent paths>
+
+## Commands
+
+- Test: <how this repository runs its tests>
+
+"
+  kind_middle="$kind_decisions"
+  kind_tail="## Edge cases
+
+- <the edge cases the implementation must survive, one bullet each>
+
+## Notes
+
+- Risks: <what could go wrong>
+- Do not touch: <boundaries>
+"
+  kind_rule=""
+  case "${DRAFT_KIND:-feature}" in
+    bugfix)
+      kind_middle="## Behavior
+
+- Current: <what happens now, with the command or input that shows it>
+- Expected: <what should happen instead>
+- Preserve: <behavior next to the bug that must stay exactly as it is, each with the existing test or command that shows it>
+
+$kind_decisions"
+      kind_rule="
+This is a bug fix. Required checks must fail on the Current behavior, pass on
+the Expected one, and also run the check that shows Preserve still holds. Do
+not widen Scope beyond what the fix needs; a redesign goes under Open decisions."
+      ;;
+    quick)
+      kind_middle=""
+      kind_tail=""
+      kind_rule="
+This is a small, well-understood change: the three sections above are the whole
+contract. If it needs a decision, an interface change or more than one area of
+the repository, say so under Open decisions instead of expanding the skeleton."
+      ;;
+  esac
+
   prompt="Turn ONE goal sentence into a durable intent specification for this
 repository. The spec is a delegation contract: an agent must be able to
 execute it end-to-end without follow-up questions. Anything you would have
@@ -626,17 +685,7 @@ matching exactly this skeleton:
 - Scope: <one line: repo-relative path prefixes the work may touch>
 - Non-goals: <one line: what this explicitly does not do>
 
-## Decisions
-
-- Rationale/invariants: <why this matters and behavior to preserve; unresolved choices go in Open decisions>
-- Alternatives ruled out: <evidence-backed rejected approaches, or none>
-- References (repo-relative paths/sections): <existing task-relevant design or intent documents, or none; do not invent paths>
-
-## Commands
-
-- Test: <how this repository runs its tests>
-
-## Verification
+$kind_middle## Verification
 
 - Success criteria: <one line: observable outcome>
 - Required checks: <ONE runnable shell command, on one line, that FAILS
@@ -645,19 +694,11 @@ matching exactly this skeleton:
   REQUIRED for any custom command; omit the bullet entirely only when the
   command is a conventional entrypoint such as bash tests/run.sh or pytest>
 
-## Edge cases
-
-- <the edge cases the implementation must survive, one bullet each>
-
-## Notes
-
-- Risks: <what could go wrong>
-- Do not touch: <boundaries>
-
+$kind_tail
 Rules: every bullet shown above must be present and non-empty; Goal, Scope,
 Non-goals and Required checks each stay on one line; Required checks is a
 real command against this repository, not a placeholder; Scope names real
-path prefixes from the repository listing below.
+path prefixes from the repository listing below.$kind_rule
 Before writing Scope and Verification, find existing tests outside the new work
 that exercise interfaces or modules the goal changes, including callers,
 importers and fixtures. Required checks must prove the new behavior AND run
@@ -816,6 +857,7 @@ PY
     printf -- '- Drafted by: %s (intent.sh; content below is model output — review before adopt)\n' "$answering_provider"
     printf -- '- Drafted at: %s\n' "$ts"
     printf -- '- Goal sentence: %s\n' "$GOAL_TEXT"
+    [ -z "$DRAFT_KIND" ] || [ "$DRAFT_KIND" = feature ] || printf -- '- Kind: %s\n' "$DRAFT_KIND"
     printf -- '- Artifact: %s\n' "$artifact_ref"
     if [ -n "$fallback_artifact" ]; then
       printf -- '- First call artifact: %s\n' "$first_artifact_ref"
