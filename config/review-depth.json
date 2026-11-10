@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "none_lines": 10,
+  "gate_lines": 200,
+  "gate_files": 10,
+  "council_lines": 800,
+  "council_files": 30,
+  "contract_paths": [
+    "AGENTS.md", "*/AGENTS.md", "CLAUDE.md", "*/CLAUDE.md", "GEMINI.md", "*/GEMINI.md",
+    "PROJECT.md", "SECURITY.md", "config/*", "scripts/oms", "*.schema.json"
+  ]
+}

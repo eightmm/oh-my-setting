@@ -1699,6 +1699,18 @@ answer without a final `SECURITY: pass|fail` line, a missing provider or a
 withheld prompt is `incomplete`, never a pass. The verdict is advisory: it does
 not change the GATE verdict or exit code, and no scanner is run.
 
+`oms peer-review advise [--json] [--base REF]` prints how deep to review the
+tracked diff: `none`, `single` (one reviewer of another model family),
+`gate+security` or `council`, with the reasons. It reads the same risk paths as
+the security seat, the contract files and size limits in
+`config/review-depth.json`, and calls no model. It is advice only: it starts no
+review and never changes a gate verdict.
+
+Escalation ladder: self-check, then a different-family review, then council,
+then a human. Stop and ask a human before an irreversible action, work outside
+the stated scope, an ambiguity that changes the result, or the same failure
+repeating a second time.
+
 ### Acceptance freshness and reuse
 
 Acceptance stays fresh by default. An explicit `- Acceptance reuse: same-run`

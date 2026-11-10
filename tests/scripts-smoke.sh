@@ -5246,6 +5246,53 @@ EOF
   assert_file_contains "$TMP/findings-out" 'security: incomplete (codex; advisory'
   ! HOME="$found/home" PATH="$found/bin:/usr/bin:/bin" "$review" --repo "$found" --artifact-dir "$found/artifacts" \
     --providers claude --security-audit codex --prompt "No gate" > "$TMP/findings-out" 2>&1 || fail "--security-audit without --gate must be refused"
+
+  # advise prints a review depth from the same risk paths, the contract files
+  # and the size; it starts no review and records nothing.
+  local depth="$TMP/review-depth" advise_out i
+  mkdir -p "$depth/src" "$depth/config"
+  git -C "$depth" init -q
+  git -C "$depth" config user.email t@example.invalid
+  git -C "$depth" config user.name t
+  : > "$depth/src/a.txt"
+  git -C "$depth" add src/a.txt
+  git -C "$depth" commit -qm base
+  advise_out="$("$review" advise --repo "$depth")" || fail "advise on a clean tree failed"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'review depth: none'
+  printf 'one\n' >> "$depth/src/a.txt"
+  advise_out="$("$review" advise --repo "$depth" --json)"
+  [ "$(printf '%s' "$advise_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["depth"])')" = none ] ||
+    fail "a one-line change should advise none: $advise_out"
+  for i in $(seq 1 20); do printf 'line %s\n' "$i" >> "$depth/src/a.txt"; done
+  advise_out="$("$review" advise --repo "$depth")"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'review depth: single'
+  assert_file_contains <(printf '%s\n' "$advise_out") 'advice only'
+  git -C "$depth" checkout -q -- src/a.txt
+  printf 'x\n' > "$depth/app_settings.cfg"
+  git -C "$depth" add app_settings.cfg
+  git -C "$depth" commit -qm settings
+  printf 'y\n' > "$depth/app_settings.cfg"
+  advise_out="$("$review" advise --repo "$depth")"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'review depth: gate+security'
+  assert_file_contains <(printf '%s\n' "$advise_out") 'risk path: app_settings.cfg'
+  git -C "$depth" checkout -q -- app_settings.cfg
+  printf '{}\n' > "$depth/config/x.json"
+  git -C "$depth" add config/x.json
+  git -C "$depth" commit -qm contract
+  printf '{"a": 1}\n' > "$depth/config/x.json"
+  advise_out="$("$review" advise --repo "$depth")"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'review depth: gate+security'
+  assert_file_contains <(printf '%s\n' "$advise_out") 'contract file: config/x.json'
+  printf 'z\n' > "$depth/app_settings.cfg"
+  advise_out="$("$review" advise --repo "$depth" --json)"
+  [ "$(printf '%s' "$advise_out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["depth"])')" = council ] ||
+    fail "a risk path with a contract file should advise council: $advise_out"
+  git -C "$depth" checkout -q -- .
+  for i in $(seq 1 850); do printf 'line %s\n' "$i"; done > "$depth/src/a.txt"
+  advise_out="$("$review" advise --repo "$depth")"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'review depth: council'
+  [ -z "$(git -C "$depth" diff --cached --name-only)" ] || fail "advise must not touch the index"
+  ! "$review" advise --repo "$depth" --bogus > /dev/null 2>&1 || fail "advise must refuse an unknown option"
 }
 
 test_prompt_takers_refuse_a_mistyped_option() {

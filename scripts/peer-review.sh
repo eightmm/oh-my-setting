@@ -56,6 +56,7 @@ Usage: peer-review.sh [options] --prompt TEXT
        peer-review.sh findings dismiss ID --reason TEXT
        peer-review.sh findings reopen ID --reason TEXT
        peer-review.sh findings suggest-rules
+       peer-review.sh advise [--json] [--repo PATH] [--base REF]
 
 Review an existing diff with an independent provider council. The default
 council is Codex, Claude Code, and Antigravity.
@@ -69,6 +70,11 @@ is used. Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable; 2 takes
 precedence over 1 (a died provider means the round must be re-run before any
 fail is meaningful). Dry-run artifacts have no exit section and therefore
 always read as incomplete.
+
+advise: print how deep to review the tracked diff against --base (default
+HEAD): none, single, gate+security or council, with the reasons (risk paths,
+contract files, size; thresholds in config/review-depth.json). Advice only: it
+starts no review and never changes a gate verdict. --json for machines.
 
 findings: what gate seats reported in their fenced findings block, and what
 became of each. A gate run checks every reported file:line against the diff
@@ -464,6 +470,20 @@ if [ "${1:-}" = "verdicts" ]; then
     shift
   fi
   review_verdicts "${1:-$PWD/.oms/artifacts/review}" "" "" "$VERDICTS_JSON_STDOUT"
+fi
+
+# Read-only advice on review depth for the current diff; starts no review.
+if [ "${1:-}" = "advise" ]; then
+  shift
+  advise_args=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) advise_args+=(--json); shift ;;
+      --base|--repo) [ "$#" -ge 2 ] || fail "$1 requires a value"; advise_args+=("$1" "$2"); shift 2 ;;
+      *) fail "unknown option: $1" ;;
+    esac
+  done
+  exec python3 -I "$(ma_scripts_dir)/lib/review_depth.py" "${advise_args[@]}"
 fi
 
 write_prompt() {
