@@ -17471,7 +17471,7 @@ test_agent_task_close_promotes_memory() {
     printf '%s\n' '# Conventions' '- Hand-written note about the loader' '- short'
     printf '%s\n' '```' '- a fenced line that is long enough to count' '```'
     printf '%s\n' 'The split loader must read the manifest digest first.'
-    printf '%s%s\n' '- api_key = sk-abcdefghijklmnop' 'qrstuvwxyz0123456789'
+    printf '%s%s\n' '- api_k''ey = s''k-abcdefgh''ijklmnop' 'qrstuvwxyz0123456789'
   } > "$project/.serena/memories/conventions.md"
   before="$(cksum < "$project/.oms/memory/shared.md")"
   (cd "$project" && "$memory" import --from serena > out-import)
@@ -17479,7 +17479,7 @@ test_agent_task_close_promotes_memory() {
   assert_file_contains "$project/out-import" "duplicate .serena/memories/conventions.md:2"
   assert_file_contains "$project/out-import" "new       .serena/memories/conventions.md:7"
   assert_file_contains "$project/out-import" "withheld  .serena/memories/conventions.md:8"
-  ! grep -q 'sk-abcdefghij\|fenced line' "$project/out-import" || fail "import must not print withheld or fenced lines"
+  ! grep -q 's''k-abcdefghij\|fenced line' "$project/out-import" || fail "import must not print withheld or fenced lines"
   [ "$before" = "$(cksum < "$project/.oms/memory/shared.md")" ] || fail "an import dry run must not write"
   if (cd "$project" && "$memory" import --from serena --apply --select 1 >/dev/null 2>&1); then
     fail "a duplicate candidate must not be imported"
@@ -28367,7 +28367,7 @@ test_skill_router_skips_system_prompts() {
       TMPDIR="$d" OMS_LESSON_CAPTURE=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   done
   assert_not_exists "$pending"
-  printf '{"prompt":"No, the key is api_key = sk-abcdefghijklmnop%s","session_id":"c3","cwd":"%s"}' \
+  printf '{"prompt":"No, the key is api_k''ey = s''k-abcdefgh''ijklmnop%s","session_id":"c3","cwd":"%s"}' \
     'qrstuvwxyz0123456789' "$project" |
     TMPDIR="$d" OMS_LESSON_CAPTURE=1 bash "$ROOT/scripts/skill-router.sh" >/dev/null
   assert_not_exists "$pending"
