@@ -388,7 +388,82 @@ def native_activity(repo: str) -> dict:
     }
 
 
-def telemetry(repo: str, index: str, limit: int) -> dict:
+GROUPINGS = ("day", "model", "provider", "task")
+USAGE_KEYS = ("input_tokens", "cache_read_tokens", "output_tokens")
+
+
+def parse_bound(value: Optional[str], end: bool) -> Optional[datetime.datetime]:
+    """A --since/--until bound in UTC. A bare date covers its whole day."""
+    if value is None:
+        return None
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            day = datetime.datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            raise SystemExit("error: artifact telemetry: not a calendar date: %s" % value)
+        return day + datetime.timedelta(days=1) if end else day
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        raise SystemExit("error: artifact telemetry: expected YYYY-MM-DD or an ISO-8601 time: %s" % value)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def in_range(row: dict[str, object], since, until, until_is_day: bool) -> bool:
+    """Whether the row's own time falls in the range; an undated row never does."""
+    stamp = parse_timestamp(row.get("ts"))
+    if stamp is None:
+        return False
+    if since is not None and stamp < since:
+        return False
+    if until is not None and (stamp >= until if until_is_day else stamp > until):
+        return False
+    return True
+
+
+def group_label(repo: str, row: dict[str, object], by: str) -> str:
+    """The recorded value the row is grouped under; never a guess."""
+    if by == "day":
+        stamp = parse_timestamp(row.get("ts"))
+        return stamp.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d") if stamp else "undated"
+    if by == "provider":
+        value = row.get("provider")
+    elif by == "task":
+        value = row.get("task_id")
+    else:
+        metrics = artifact_model_metrics(repo, row)
+        if metrics["model_attribution"] == "ambiguous":
+            return "ambiguous"
+        value = metrics["served_model"] or metrics["configured_model"] or row.get("selected_model")
+    return value if isinstance(value, str) and value else "unrecorded"
+
+
+def empty_group(label: str) -> dict:
+    return {"group": label, "calls": 0, "token_reports": 0, "provider_reported_tokens": 0,
+            "usage_reports": 0, "input_tokens": 0, "cache_read_tokens": 0, "output_tokens": 0,
+            "cumulative_reports_excluded": 0, "cost_reports": 0, "cost_usd": 0.0}
+
+
+def add_to_group(group: dict, repo: str, row: dict[str, object], tokens: Optional[int], detail: Optional[dict]) -> None:
+    group["calls"] += 1
+    if tokens is not None:
+        group["token_reports"] += 1
+        group["provider_reported_tokens"] += tokens
+    if detail and detail.get("session_cumulative") is True:
+        # A resumed session reports its running total: adding it to the calls
+        # before it would count the same tokens twice.
+        group["cumulative_reports_excluded"] += 1
+    elif detail and all(integer(detail.get(key)) is not None for key in USAGE_KEYS):
+        group["usage_reports"] += 1
+        for key in USAGE_KEYS:
+            group[key] += detail[key]
+    cost = artifact_model_metrics(repo, row)["cost_usd"]
+    if cost is not None:
+        group["cost_reports"] += 1
+        group["cost_usd"] = round(group["cost_usd"] + cost, 6)
+
+
+def telemetry(repo: str, index: str, limit: int, by: Optional[str] = None,
+              since: Optional[str] = None, until: Optional[str] = None) -> dict:
     rows: list[dict[str, object]] = []
     invalid_lines = 0
     if os.path.exists(index):
@@ -404,7 +479,12 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
                     continue
                 rows.append(row)
 
-    selected = rows[-limit:]
+    since_at, until_at = parse_bound(since, False), parse_bound(until, True)
+    bounded = since_at is not None or until_at is not None
+    until_is_day = until is not None and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", until) is not None
+    matched = [row for row in rows if in_range(row, since_at, until_at, until_is_day)] if bounded else rows
+    selected = matched[-limit:]
+    groups: dict[str, dict] = {}
     eligible = [
         row
         for row in selected
@@ -544,6 +624,9 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
             token_values.append(tokens)
             route["token_reports"] += 1
             route["provider_reported_tokens"] += tokens
+        if by:
+            label = group_label(repo, row, by)
+            add_to_group(groups.setdefault(label, empty_group(label)), repo, row, tokens, detail)
 
     first_ts = selected[0].get("ts", "") if selected else ""
     last_ts = selected[-1].get("ts", "") if selected else ""
@@ -626,6 +709,25 @@ def telemetry(repo: str, index: str, limit: int) -> dict:
         "routes": [routes[key] for key in sorted(routes)],
         "native_activity": native_activity(repo),
     }
+    if bounded:
+        # Only a bounded run reports these: an unbounded report keeps its shape.
+        report["window"].update({
+            "since": since, "until": until, "timezone": "UTC", "matched_rows": len(matched),
+            "undated_rows": sum(parse_timestamp(row.get("ts")) is None for row in rows),
+        })
+    if by:
+        for group in groups.values():
+            if not group["cost_reports"]:
+                group["cost_usd"] = None  # unreported is not free
+        report["usage_by"] = {
+            "by": by,
+            "timezone": "UTC",
+            "basis": "provider-reported values only; nothing is priced or estimated from tokens",
+            # More rows matched than the limit keeps: the oldest are not in the groups.
+            "capped": len(matched) > len(selected),
+            "omitted_rows": len(matched) - len(selected),
+            "groups": [groups[key] for key in sorted(groups)],
+        }
     from repair_replay import repeated, valid_trace
     delegates = [row for row in selected if row.get("kind") == "delegate"]
     traces = [row["repair_replay"] for row in delegates if valid_trace(row.get("repair_replay"))]
@@ -740,12 +842,60 @@ def emit_human(report: dict) -> None:
         )
 
 
+def reported(total, reports: int, calls: int) -> str:
+    """`-` when no call reported the value, `N+?` when only some did."""
+    if not reports:
+        return "-"
+    text = ("%.4f" % total) if isinstance(total, float) else str(total)
+    return text if reports == calls else text + "+?"
+
+
+def emit_usage_by(report: dict) -> None:
+    window, block = report["window"], report["usage_by"]
+    scope = "limit %d" % window["limit"]
+    if "matched_rows" in window:
+        scope = "%d in range; %s" % (window["matched_rows"], scope)
+    print("usage by %s%s: %d routed operation(s) in %d/%d retained row(s) (%s)" % (
+        block["by"], " (UTC)" if block["by"] == "day" else "", report["operations"]["eligible"],
+        window["selected_rows"], window["available_rows"], scope))
+    if block["capped"]:
+        print("window capped: the %d oldest matching row(s) are not counted; raise N or narrow the range"
+              % block["omitted_rows"])
+    else:
+        print("window complete: every matching retained row is counted (pruned history is not)")
+    if window.get("undated_rows"):
+        print("undated: %d row(s) carry no time and are outside any range" % window["undated_rows"])
+    head = (block["by"], "calls", "tokens", "input", "cached", "output", "cost-usd")
+    table = [head] + [(
+        group["group"], str(group["calls"]),
+        reported(group["provider_reported_tokens"], group["token_reports"], group["calls"]),
+        reported(group["input_tokens"], group["usage_reports"], group["calls"]),
+        reported(group["cache_read_tokens"], group["usage_reports"], group["calls"]),
+        reported(group["output_tokens"], group["usage_reports"], group["calls"]),
+        reported(group["cost_usd"], group["cost_reports"], group["calls"]),
+    ) for group in block["groups"]]
+    widths = [max(len(line[column]) for line in table) for column in range(len(head))]
+    for line in table:
+        print("  ".join([line[0].ljust(widths[0])] + [cell.rjust(widths[n]) for n, cell in enumerate(line) if n]).rstrip())
+    if not block["groups"]:
+        print("(no routed operation in this window)")
+    excluded = sum(group["cumulative_reports_excluded"] for group in block["groups"])
+    if excluded:
+        print("cumulative: %d resumed-session report(s) carry a running total and are left out of "
+              "input/cached/output" % excluded)
+    print("reported values only: `-` none reported, `+?` some calls reported nothing; "
+          "no cost is derived from tokens and groups are not summed")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--index")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--by", choices=GROUPINGS)
+    parser.add_argument("--since")
+    parser.add_argument("--until")
     # Extract mode exists so the index writer can cache what only this module
     # knows how to read, without a second copy of the regexes drifting from it.
     parser.add_argument("--extract", help="artifact path, repo-relative")
@@ -769,9 +919,11 @@ def main() -> int:
     if args.limit <= 0:
         parser.error("--limit must be positive")
     repo = os.path.realpath(args.repo)
-    report = telemetry(repo, args.index, args.limit)
+    report = telemetry(repo, args.index, args.limit, args.by, args.since, args.until)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    elif args.by:
+        emit_usage_by(report)
     else:
         emit_human(report)
     return 0

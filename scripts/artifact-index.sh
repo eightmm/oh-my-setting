@@ -29,6 +29,9 @@ TARGET_EVENTS=()
 # under `set -u`, and every non-resolve action has to test emptiness.
 TARGET_EVENT_COUNT=0
 REASON=""
+USAGE_BY=""
+SINCE=""
+UNTIL=""
 
 usage() {
   cat <<'EOF'
@@ -52,6 +55,16 @@ Commands:
   telemetry [N]  Summarize recorded routing/exit/verification/fallback evidence
                  over the retained window (default 1000). This does not infer
                  semantic task success.
+  --by KEY       telemetry: group routed operations by day, model, provider
+                 or task and print calls, provider-reported tokens, complete
+                 input/cached/output reports and provider-reported cost per
+                 group. `-` means no call reported the value, `N+?` that only
+                 some did; nothing is priced from tokens. Days are UTC.
+  --since WHEN, --until WHEN
+                 telemetry: keep only rows whose own time is in the range
+                 before applying N. WHEN is YYYY-MM-DD (the whole UTC day) or
+                 an ISO-8601 time. The index is pruned, so this covers
+                 retained rows only.
   resolve        Resolve the failed outcomes selected by --event-id, which may
                  be repeated to clear a triaged batch in one locked call.
   resolve-superseded
@@ -166,6 +179,24 @@ while [ "$#" -gt 0 ]; do
       AS_JSON=1
       shift
       ;;
+    --by)
+      [ "$#" -ge 2 ] || fail "--by requires day, model, provider or task"
+      case "$2" in
+        day|model|provider|task) USAGE_BY="$2" ;;
+        *) fail "--by must be day, model, provider or task" ;;
+      esac
+      shift 2
+      ;;
+    --since)
+      [ "$#" -ge 2 ] || fail "--since requires a date or time"
+      SINCE="$2"
+      shift 2
+      ;;
+    --until)
+      [ "$#" -ge 2 ] || fail "--until requires a date or time"
+      UNTIL="$2"
+      shift 2
+      ;;
     list|latest|latest-run|failures|unresolved|telemetry|resolve|resolve-superseded|resolve-recovered|validate|migrate|salvage|prune)
       [ "$ACTION_SET" -eq 0 ] || fail "unknown argument: $1"
       [ "$LIMIT_SET" -eq 0 ] || fail "unknown argument: $1"
@@ -205,6 +236,10 @@ esac
 [ "$DRY_RUN" -eq 0 ] || [ "$ACTION" = "prune" ] || [ "$ACTION" = "resolve-superseded" ] || [ "$ACTION" = "resolve-recovered" ] ||
   fail "--dry-run is only valid with prune, resolve-superseded, or resolve-recovered"
 [ "$APPLY" -eq 0 ] || [ "$ACTION" = "salvage" ] || fail "--apply is only valid with salvage"
+if [ "$ACTION" != "telemetry" ]; then
+  [ -z "$USAGE_BY" ] || fail "--by is only valid with telemetry"
+  [ -z "$SINCE$UNTIL" ] || fail "--since and --until are only valid with telemetry"
+fi
 if [ "$LIMIT_SET" -eq 0 ]; then
   case "$ACTION" in
     prune|telemetry) LIMIT="1000" ;;
@@ -239,7 +274,10 @@ runpy.run_path(store_helper)["read_index"](repo, index, missing_ok=True)
 PY
   set -- --repo "$REPO" --index "$INDEX_FILE" --limit "$LIMIT"
   [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
-  python3 "$ROOT_LIB/artifact-telemetry.py" "$@"
+  [ -z "$USAGE_BY" ] || set -- "$@" --by "$USAGE_BY"
+  [ -z "$SINCE" ] || set -- "$@" --since "$SINCE"
+  [ -z "$UNTIL" ] || set -- "$@" --until "$UNTIL"
+  python3 "$ROOT_LIB/artifact-telemetry.py" "$@" || exit 2
   exit 0
 fi
 
