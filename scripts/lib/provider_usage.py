@@ -13,7 +13,7 @@ from dashboard_projection import clean, display_width, mapping, number
 from panel_metrics import READING_FRESH_SECONDS, five_hour, percent, quota_bar
 
 SCHEMA = 1
-# name, long name, strip name, one-letter name, palette style. The panel has no colour per provider: Claude
+# name, long name, strip name, one-letter name, palette hue. The panel has no per-provider hue of its own, so Claude
 # takes the warm main colour, Codex the counsel blue and Antigravity the lavender judge colour.
 PROVIDERS = (("claude", "Claude", "Claude", "C", "main"),
              ("codex", "Codex", "Codex", "X", "counsel"),
@@ -26,6 +26,11 @@ STALE_HUD = "HUD cache over %d min old; numbers not shown" % (READING_FRESH_SECO
 
 def unreported(reason):
     return {"unreported": reason}
+
+
+def window_label(minutes):
+    """300 minutes is the 5-hour window; any other window length is named by its minutes, never guessed."""
+    return "5h" if minutes == 300 else "%dm" % minutes
 
 
 def _remaining(seconds):
@@ -125,7 +130,19 @@ def snapshot(report, now=None):
                                  "no HUD cache: no Claude main selected, or it recorded none" if not origin else
                                  "HUD cache carries no 5h window, or it already reset"))
             else:
-                out["windows_unreported"]["5h"] = "OMS reads only the weekly window of the Codex session log"
+                # Codex's session log records its windows by length: 300 minutes is the 5-hour one, any other
+                # non-weekly length is shown under its own minutes rather than guessed at.
+                shorts = [w for w in row.get("short_windows") or () if isinstance(w, dict)] if (
+                    collected and origin == "Codex session log") else []
+                for short in shorts:
+                    minutes = short.get("minutes")
+                    used = percent(short.get("used"))
+                    if used is None or not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+                        continue
+                    out["windows"].append(_window(window_label(minutes), used, short.get("resets_at"), None, observed,
+                                                  origin, now, held, False))
+                if not any(w["name"] == "5h" for w in out["windows"]):
+                    out["windows_unreported"]["5h"] = gone or "no 5-hour rate limit in the newest Codex session log"
             weekly = percent(row.get("weekly_used")) if collected and origin else None
             if weekly is not None:
                 out["windows"].append(_window("weekly", weekly, row.get("weekly_resets_at"), None, observed, origin,
@@ -189,12 +206,12 @@ def _seat_count(provider):
 
 
 def _segment(provider, key, mode, unicode, now):
-    """Pieces [(text, token)] of one provider at one detail level."""
-    short, letter, tone = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
+    """Pieces [(text, hue)] of one provider at one detail level."""
+    short, letter, hue = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
     tight = _tightest(provider)
     dash = "—" if unicode else "--"
     terse = mode in {"short_bars", "short", "minimal"}
-    pieces = [(letter if terse else short, tone)]
+    pieces = [(letter if terse else short, hue)]
     if tight is None:
         pieces.append((" " + dash, "dim"))
         if provider["reading"]["stale"]:
@@ -241,12 +258,12 @@ def strip(report, width, height, unicode=True, now=None):
     dot = " · " if unicode else " / "
     if width >= 80 and height >= 24:
         rows = []
-        for key, title, unused_short, unused_letter, token in PROVIDERS:
+        for key, title, unused_short, unused_letter, hue in PROVIDERS:
             provider = data[key]
             tight = _tightest(provider)
             account = provider["account"]
             name = title + (" (%s)" % account if isinstance(account, str) else "")
-            pieces = [((name + " " * 12)[:max(12, len(name) + 1)], token)]
+            pieces = [((name + " " * 12)[:max(12, len(name) + 1)], hue)]
             if tight is None:
                 reasons = provider["windows_unreported"]
                 reason = reasons.get("weekly") or next(iter(reasons.values()), "no reading")

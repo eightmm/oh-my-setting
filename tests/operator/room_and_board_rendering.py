@@ -5626,7 +5626,7 @@ strip_members = [
      "seq": 3, "parent": "strip-main"}]
 
 
-def strip_board(hud_age=60, codex_age=120, weekly=41, codex_used=62, codex=True):
+def strip_board(hud_age=60, codex_age=120, weekly=41, codex_used=62, codex=True, limits=None):
     """A board report whose provider_status was collected from fixture HUD-cache and Codex-log files."""
     resets = strip_now + 3 * 86400 + 4 * 3600 + 1800
     (strip_hud / ("ctx-" + strip_consumer[:24] + ".json")).write_text(json.dumps({
@@ -5636,7 +5636,8 @@ def strip_board(hud_age=60, codex_age=120, weekly=41, codex_used=62, codex=True)
     log = strip_day / "rollout-strip.jsonl"
     if codex:
         log.write_text(json.dumps({"timestamp": datetime.fromtimestamp(strip_now - codex_age, timezone.utc).isoformat(),
-            "rate_limits": {"primary": {"used_percent": codex_used, "window_minutes": 10080, "resets_at": resets}}}) + "\n")
+            "rate_limits": limits if limits is not None else {
+                "primary": {"used_percent": codex_used, "window_minutes": 10080, "resets_at": resets}}}) + "\n")
     elif log.exists():
         log.unlink()
     board = {"repo": {"name": "strip-fixture"}, "collection": {"ok": True},
@@ -5665,7 +5666,7 @@ assert [(w["name"], w["used"], w["resets_in"], w["source"], w["stale"], round(w[
 assert claude_usage["tightest"] == "weekly" and claude_usage["cache_read_share"]["percent"] == 80
 assert claude_usage["context_used"] == 38 and claude_usage["seats"] == {"live": 1, "main": 1, "workers": 0}
 assert [(w["name"], w["used"], w["source"], round(w["age_seconds"])) for w in codex_usage["windows"]] == [
-    ("weekly", 62, "Codex session log", 120)] and "weekly window" in codex_usage["windows_unreported"]["5h"]
+    ("weekly", 62, "Codex session log", 120)] and "no 5-hour rate limit" in codex_usage["windows_unreported"]["5h"]
 assert codex_usage["seats"] == {"live": 1, "main": 0, "workers": 1}, "an advisor is not a seat"
 # agy reports no quota window anywhere OMS reads; every missing value names why and none is a number.
 assert agy_usage["windows"] == [] and set(agy_usage["windows_unreported"]) == {"5h", "weekly"}
@@ -5707,6 +5708,65 @@ assert "written 11m ago" in strip_rows(old_strip, 120, 30).splitlines()[1]
 missing = strip_board(codex=False)
 assert strip_rows(missing, 40, 12).splitlines()[1] == "C 41% · X — · A —"
 assert "no weekly rate limit" in provider_usage.snapshot(missing, strip_now)["providers"]["codex"]["windows_unreported"]["weekly"]
+# Codex's other window: the log records it beside the weekly one, 300 minutes is the 5-hour window, and any
+# other non-weekly length is shown under its own minutes. Fixtures only: no real Codex log was available.
+week_reset, five_reset = strip_now + 3 * 86400 + 1800, strip_now + 3 * 3600 + 1800
+both_limits = {"primary": {"used_percent": 30, "window_minutes": 300, "resets_at": five_reset},
+               "secondary": {"used_percent": 62, "window_minutes": 10080, "resets_at": week_reset}}
+both = strip_board(limits=both_limits)
+both_codex = provider_usage.snapshot(both, strip_now)["providers"]["codex"]
+assert [(w["name"], w["used"], w["resets_in"], w["source"], w["stale"], round(w["age_seconds"]))
+        for w in both_codex["windows"]] == [("5h", 30, "3h30m", "Codex session log", False, 120),
+                                            ("weekly", 62, "3d0h", "Codex session log", False, 120)], both_codex
+assert both_codex["tightest"] == "weekly" and "5h" not in both_codex["windows_unreported"]
+assert strip_rows(both, 40, 12).splitlines()[1] == "C 41% · X 62% · A —"
+assert "Codex       ▮▮▮▯▯ weekly 62% used · resets in 3d0h · 5h 30% · 1 live" in strip_rows(both, 100, 30)
+hot_five = strip_board(limits=dict(both_limits, primary=dict(both_limits["primary"], used_percent=95)))
+assert provider_usage.snapshot(hot_five, strip_now)["providers"]["codex"]["tightest"] == "5h"
+assert strip_rows(hot_five, 40, 12).splitlines()[1] == "C 41% · X 95%!! · A —", "the tighter window wins"
+assert re.search(r"Codex       ▮▮▮▮▯ 5h 95% used !! critical · resets in 3h[23]\dm · weekly 62% · 1 live",
+                 strip_rows(hot_five, 120, 30)), strip_rows(hot_five, 120, 30)
+both_text = provider_usage.text(provider_usage.snapshot(both, strip_now))
+assert re.search(r"  5h      30% used; resets in 3h30m; age [12]m; source Codex session log", both_text), both_text
+# Only the 5-hour window: the weekly one stays unreported and the row is still a session-log reading.
+only_five = strip_board(limits={"primary": both_limits["primary"]})
+only_five_codex = provider_usage.snapshot(only_five, strip_now)["providers"]["codex"]
+assert [(w["name"], w["used"], round(w["age_seconds"])) for w in only_five_codex["windows"]] == [("5h", 30, 120)]
+assert "no weekly rate limit" in only_five_codex["windows_unreported"]["weekly"] and only_five_codex["tightest"] == "5h"
+assert strip_rows(only_five, 40, 12).splitlines()[1] == "C 41% · X 30% · A —"
+assert only_five["provider_status"]["codex"]["weekly_used"] is None
+# A stale reading keeps its numbers, marked stale, and raises no cue; both windows age together.
+stale_both = strip_board(codex_age=700, limits=dict(both_limits, primary=dict(both_limits["primary"], used_percent=95)))
+stale_windows = provider_usage.snapshot(stale_both, strip_now)["providers"]["codex"]["windows"]
+assert [(w["name"], w["stale"], w["level"]) for w in stale_windows] == [("5h", True, None), ("weekly", True, None)]
+assert strip_rows(stale_both, 40, 12).splitlines()[1] == "C 41% · X 95%~ · A —"
+# An unnamed length is labelled by its minutes; a malformed or out-of-range window is dropped, never a number.
+odd = strip_board(limits={"primary": {"used_percent": 20, "window_minutes": 90, "resets_at": strip_now + 3000},
+                          "secondary": dict(both_limits["secondary"])})
+assert [(w["name"], w["used"]) for w in provider_usage.snapshot(odd, strip_now)["providers"]["codex"]["windows"]] == [
+    ("90m", 20), ("weekly", 62)]
+assert "5h" in provider_usage.snapshot(odd, strip_now)["providers"]["codex"]["windows_unreported"]
+for bad_window in ({"used_percent": 150, "window_minutes": 300, "resets_at": five_reset},
+                   {"used_percent": -1, "window_minutes": 300, "resets_at": five_reset},
+                   {"used_percent": "30", "window_minutes": 300, "resets_at": five_reset},
+                   {"used_percent": 30, "window_minutes": 300, "resets_at": strip_now - 1},
+                   {"used_percent": 30, "window_minutes": 300},
+                   {"used_percent": 30, "window_minutes": "300", "resets_at": five_reset},
+                   {"used_percent": 30, "window_minutes": True, "resets_at": five_reset},
+                   {"used_percent": 30, "window_minutes": 0, "resets_at": five_reset},
+                   {"used_percent": 30, "window_minutes": 300.5, "resets_at": five_reset},
+                   {"used_percent": 30, "window_minutes": float("inf"), "resets_at": five_reset},
+                   {"used_percent": 30, "resets_at": five_reset}, "malformed", None, []):
+    junk = provider_usage.snapshot(strip_board(limits={"primary": bad_window, "secondary": both_limits["secondary"]}),
+                                   strip_now)["providers"]["codex"]
+    assert [w["name"] for w in junk["windows"]] == ["weekly"] and "5h" in junk["windows_unreported"], (bad_window, junk)
+# The weekly reading itself is untouched by the other window.
+with patch.dict(os.environ, {"CODEX_HOME": str(strip_codex)}):
+    strip_board(limits=both_limits)
+    assert codex_weekly_reading(strip_now) == {"weekly_used": 62, "source": "session log"}
+    from panel_metrics import codex_short_windows
+    assert [(w["minutes"], w["used"]) for w in codex_short_windows(strip_now)] == [(300, 30)]
+    assert codex_short_windows(strip_now + 4 * 3600) == [], "a window past its reset is not a reading"
 # The non-colour cue reuses the quota line and the health band: ! past OMS_QUOTA_WARN_PCT, !! at 10% left or less.
 with patch.dict(os.environ, {"OMS_QUOTA_WARN_PCT": "50"}):
     assert strip_rows(fresh_strip, 40, 12).splitlines()[1] == "C 41% · X 62%! · A —"
