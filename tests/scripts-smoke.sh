@@ -2874,6 +2874,7 @@ test_project_doctor_checks_subdirectory_loaders() {
     fail "budget must stop at the fourth hop and say so: $out"
   case "$out" in *'notes/span.md'*|*'notes/fence.md'*|*'l  notes/h5.md'*) fail "code spans, fences and a fifth hop are not loaded: $out" ;; esac
   contains "$out" 'warn: CLAUDE.md has 9 lines, over the 4-line budget' || fail "budget must apply the line limit: $out"
+  ! "$ROOT/scripts/project-doctor.sh" --budget --contract "$budget" >/dev/null 2>&1 || fail "--budget must refuse --contract"
   printf '@AGENTS.md\n' > "$budget/CLAUDE.md"
   out="$(HOME="$budget_home" CODEX_HOME="$budget_home/.codex" "$ROOT/scripts/project-doctor.sh" --budget --json "$budget")" || fail "budget --json should exit 0"
   printf '%s' "$out" | python3 -c '
@@ -3132,6 +3133,65 @@ JSON
     fail "a missing read_file rule is a warning, not a failure: $out"
   contains "$out" 'read_file' ||
     fail "the doctor should name the missing file-read permission: $out"
+
+  # --extensions: the same homes read as an inventory. Files are parsed, never
+  # run: a server command that would leave a marker must leave none, and no
+  # argument, environment value, header or URL path may reach the report.
+  local ext_marker="$TMP/doctor-extensions-ran" ext_word="fixture-private-value"
+  # Built in pieces: a URL with userinfo in one literal reads as a credential to the outbound scrubber.
+  local ext_url="https://user"
+  ext_url+=":$ext_word"
+  ext_url+="@mcp.example.test/path/$ext_word?k=$ext_word"
+  cat > "$home_dir/.claude.json" <<JSON
+{"mcpServers": {
+  "oh-my-setting": {"command": "bash", "args": ["$ROOT/scripts/mcp-server.sh"]},
+  "notes": {"command": "/opt/tools/notes-server --flag $ext_word", "args": ["--run", "touch $ext_marker"],
+            "env": {"NOTES_AUTH": "$ext_word"}},
+  "remote": {"type": "http", "url": "$ext_url",
+             "headers": {"Authorization": "$ext_word"}}},
+ "projects": {"$(cd "$project" && pwd -P)": {"mcpServers": {"local-only": {"command": "node"}}}}}
+JSON
+  printf '{"mcpServers": {"team": {"command": "uvx"}}}\n' > "$project/.mcp.json"
+  mkdir -p "$home_dir/.claude" "$home_dir/.codex" "$home_dir/.gemini/config/plugins/oh-my-setting" \
+    "$home_dir/.gemini/extensions/helper"
+  printf '{"enabledPlugins": {"oh-my-setting@local": true, "formatter@market": false}}\n' > "$home_dir/.claude/settings.json"
+  printf '[mcp_servers.oh-my-setting]\ncommand = "bash"\n\n[mcp_servers.notes]\ncommand = "python3"\nargs = ["%s"]\n' \
+    "$ext_word" > "$home_dir/.codex/config.toml"
+  printf '{"mcpServers": {"oh-my-setting": {"command": "bash"}}}\n' \
+    > "$home_dir/.gemini/config/plugins/oh-my-setting/mcp_config.json"
+  out="$(cd "$project" && HOME="$home_dir" CODEX_HOME="$home_dir/.codex" "$ROOT/scripts/doctor.sh" --extensions)" ||
+    fail "the extension inventory is findings only and exits 0: $out"
+  [ ! -e "$ext_marker" ] || fail "the inventory must not run anything a configuration names"
+  case "$out" in *"$ext_word"*|*"touch"*|*"/path/"*|*"Authorization"*|*"NOTES_AUTH"*)
+    fail "arguments, environment, headers and URL paths must stay out of the inventory: $out" ;; esac
+  contains "$out" 'claude: 5 server(s), 2 plugin(s)' || fail "inventory must count user, local and project servers: $out"
+  contains "$out" 'https://mcp.example.test' || fail "a URL server is shown by scheme and host only: $out"
+  printf '%s\n' "$out" | grep -Eq 'server notes +stdio +user +notes-server  \[1 env name\(s\)\]' ||
+    fail "a stdio server is shown by its command base name and env count: $out"
+  printf '%s\n' "$out" | grep -Eq 'server oh-my-setting .*\[oms\]' || fail "the OMS server must be marked as owned: $out"
+  printf '%s\n' "$out" | grep -Eq 'plugin formatter@market +user  \[disabled\]' || fail "a disabled plugin is listed as disabled: $out"
+  contains "$out" 'plugin helper' || fail "an Antigravity extension directory is listed by name: $out"
+  contains "$out" 'note: server notes is configured for claude, codex but not for antigravity' ||
+    fail "a server one CLI lacks must be noted: $out"
+  contains "$out" 'note: server notes points at different targets: notes-server, python3' ||
+    fail "one name with two targets must be noted: $out"
+  printf '[mcp_servers.broken\n' > "$home_dir/.codex/config.toml"
+  out="$(cd "$project" && HOME="$home_dir" CODEX_HOME="$home_dir/.codex" "$ROOT/scripts/doctor.sh" --extensions --json)" ||
+    fail "an unparsable file is unread, not a failure"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+codex = next(row for row in report["providers"] if row["provider"] == "codex")
+assert report["kind"] == "oms-extension-inventory" and report["unread"] == 1, report
+assert codex["sources"][0]["status"] == "unread" and codex["servers"] == [], codex
+assert not any("codex" in item.get("missing", []) for item in report["mismatches"]), report["mismatches"]
+' || fail "an unread Codex config must be unknown: not empty, and not compared: $out"
+  if (cd "$project" && HOME="$home_dir" "$ROOT/scripts/doctor.sh" --extensions --repair) >/dev/null 2>&1; then
+    fail "--extensions must refuse to run with --repair"
+  fi
+  if (cd "$project" && HOME="$home_dir" "$ROOT/scripts/doctor.sh" --extensions --security) >/dev/null 2>&1; then
+    fail "--extensions must refuse to run with --security"
+  fi
 }
 
 # smoke-weight: 24

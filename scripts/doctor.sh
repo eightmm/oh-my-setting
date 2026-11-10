@@ -40,6 +40,7 @@ REPAIR=0
 SURFACES=0
 TOOL_LOCK_ONLY=0
 SECURITY_ONLY=0
+EXTENSIONS_ONLY=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
 MODEL_DOCTOR_STRICT=0
@@ -76,6 +77,7 @@ Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--security]
                  [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
+       doctor.sh --extensions [--repo PATH] [--json]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
 from this checkout for a legacy install without a receipt. The local model
@@ -126,6 +128,15 @@ that cannot be read is unknown, not ok. The report records a fingerprint of
 its own findings under the user state directory and says which section
 changed since the last check; it changes no provider file.
 
+--extensions is a standalone read-only inventory of the MCP servers and
+native plugins each provider CLI is configured with, user-level and for the
+--repo project: name, transport, scope and the command's base name or the
+URL's host. Configuration files are parsed as data; no server starts, no
+provider command runs and nothing is contacted. Arguments, environment
+values, headers and URL paths are never printed. It notes a server one CLI
+has and another lacks, and one name with different targets; a file that
+cannot be parsed is "unread", not empty. Rows never change the exit status.
+
 --repo selects the project whose .oms state is inspected without changing
 install ownership. --json returns the same verdict as a bounded structured
 report. --remediation-plan prints only exact remedies already emitted by the
@@ -146,6 +157,7 @@ while [ "$#" -gt 0 ]; do
       REPORT_REPO="$2"
       shift 2
       ;;
+    --extensions) EXTENSIONS_ONLY=1; shift ;;
     --json) REPORT_JSON=1; shift ;;
     --remediation-plan) REPORT_PLAN=1; shift ;;
     --repair) REPAIR=1; FORWARD_ARGS+=(--repair); shift ;;
@@ -191,6 +203,20 @@ if ! REPORT_REPO="$(cd "$REPORT_REPO" 2>/dev/null && pwd -P)"; then
 fi
 OMS_DOCTOR_PROJECT_DIR="$REPORT_REPO"
 export OMS_DOCTOR_PROJECT_DIR
+
+# --extensions is its own read-only report and shares no state with a health
+# pass: it leaves before any probe, lock or delegation.
+if [ "$EXTENSIONS_ONLY" = 1 ]; then
+  if [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] || [ "$TOOL_LOCK_ONLY" = 1 ] ||
+     [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ] || [ "$SECURITY_ONLY" = 1 ]; then
+    echo "error: --extensions is a standalone read-only report; only --repo and --json go with it" >&2
+    exit 2
+  fi
+  command -v python3 >/dev/null 2>&1 || { echo "error: --extensions needs python3" >&2; exit 2; }
+  extension_args=(--repo "$REPORT_REPO")
+  [ "$REPORT_JSON" = 0 ] || extension_args+=(--json)
+  exec python3 -I "$ROOT/scripts/lib/doctor-extensions.py" "${extension_args[@]}"
+fi
 
 if [ "$REPORT_JSON" = 1 ] && [ "$REPORT_PLAN" = 1 ]; then
   echo "error: --json and --remediation-plan are mutually exclusive" >&2
