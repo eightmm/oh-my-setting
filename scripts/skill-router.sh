@@ -9,7 +9,8 @@ set -euo pipefail
 # Automatic task recording is opt-in with OMS_AUTO_TASK=1.
 # OMS_SKILL_ROUTER_OFF=1 skips the routing helper (including context/peer/relay
 # hints and turn-start tracking). Journal/daily-state work and state hints run
-# first; OMS_STATE_HINTS=0 disables the hints. Claude Code installs this directly;
+# first; OMS_STATE_HINTS=0 disables the hints. OMS_LESSON_CAPTURE=1 queues a
+# correction-shaped sentence for memory review. Claude Code installs this directly;
 # Codex installs it through the repo-local oh-my-setting plugin.
 
 # A harness child is not the user's prompt: it ticks no journal, prints no hint
@@ -34,6 +35,15 @@ fi
 # becomes agent context, which is what makes the journal self-referencing.
 if [ -n "$state_repo" ] && git -C "$state_repo" rev-parse --git-dir >/dev/null 2>&1; then
   work_journal_prompt_tick "$state_repo" resolved
+fi
+
+# OMS_LESSON_CAPTURE=1: keep one bounded sentence of a prompt that reads like a
+# correction ("no, use X instead") as a candidate for `oms agent-memory review`.
+# Off by default — it stores a fragment of what the person typed. Adopted repos
+# only, scanned before it is kept, never printed, never promoted on its own.
+if [ "${OMS_LESSON_CAPTURE:-0}" = 1 ] && [ -n "$state_repo" ] && [ -d "$state_repo/.oms" ]; then
+  printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/agent_memory_review.py" \
+    capture --repo "$state_repo" >/dev/null 2>&1 || true
 fi
 
 # State-conditional hints: inject the one thing native skill matching cannot

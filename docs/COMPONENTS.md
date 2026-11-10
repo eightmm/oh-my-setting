@@ -1181,6 +1181,17 @@ same writer as `append`. Imported notes wait in `review`. The source is only eve
 read, at most 50 files of 256 KiB and 200 candidates per run, each limit reported
 when reached. `--from claude` and `--from codex` are refused: OMS does not verify
 where a provider keeps its own memory, so name the path yourself.
+
+With `OMS_LESSON_CAPTURE=1` the prompt hook also queues corrections: when a
+prompt contains a sentence that reads like one ("no, use X instead", "항상 …",
+"… 말고 …"), that one sentence — at most 240 characters, scanned first, never
+the rest of the prompt — is appended to `.oms/memory/pending.jsonl`. It is not
+memory: `review` lists it as a `correction`, `--accept ID` records it as a
+`kind: lesson` note and `--reject ID` drops it for good. The detector is a fixed
+pattern list with no model, so it misses most corrections and sometimes keeps a
+sentence that was not one. It is off by default because it stores a fragment of
+what the person typed; it runs only in a repository that already has `.oms`,
+never for a harness child, and holds at most 200 undecided rows.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
