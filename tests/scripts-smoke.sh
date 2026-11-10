@@ -22039,7 +22039,8 @@ case "$TRIAGE_CASE:$*" in
     printf 'smoke (1/4)\tstep\t%s\t=%s\n' "$(printf '%s' 'pass''word')" 'hunter2hunter2-fixture'
     printf 'leaky\033[31m job\tstep\t%0200d%s%s\n' 0 'pass''word' '=hunter2hunter2-fixture' ;;
   huge:"run view 21 --log-failed")
-    head -c 2097153 /dev/zero | tr '\000' x ;;
+    head -c 2097153 /dev/zero | tr '\000' x
+    printf '\nlint\tshellcheck\tcheck: tail_kept_case FAILED\n' ;;
   slowlog:"run view 21 --log-failed") sleep 5 ;;
   *:"run view 21 --log-failed")
     i=0; while [ "$i" -lt 40 ]; do printf 'lint\tshellcheck\t2026-11-10T00:00:00.0000000Z early line %s\n' "$i"; i=$((i + 1)); done
@@ -22085,7 +22086,8 @@ EOF
   triage unsafejob feature
   [ "$rc" -eq 2 ] && ! contains "$out" '12345678901234567890' || fail "sensitive metadata must be withheld: $out"
   triage huge feature
-  [ "$rc" -eq 1 ] && contains "$out" 'log: not downloaded' || fail "oversized log must be withheld: $out"
+  [ "$rc" -eq 1 ] && contains "$out" 'tail_kept_case' && ! contains "$out" 'log: not downloaded' ||
+    fail "an oversized log keeps its newest bytes: $out"
   triage mixed feature
   [ "$rc" -eq 2 ] || fail "a pending run on a green SHA must be unknown: $out"
   triage newer feature

@@ -3117,8 +3117,9 @@ read leaves the comparison `unknown`. Each excerpt passes the sensitive-content 
 before it is printed and is withheld when it looks sensitive or the scan cannot run.
 The action issues only read requests through `gh`, records nothing and never re-runs,
 retries, pushes or dispatches. It exits 0 when nothing is red, 1 after a triage and 2
-when the run could not be read; `OMS_CI_TRIAGE_TIMEOUT` (1 to 300 seconds, default 60)
-bounds the log download. The closing brief is an observation of CI, not verification
+when the answer is unknown: the run could not be read, or a run on the commit has not
+finished. `OMS_CI_TRIAGE_TIMEOUT` (1 to 300 seconds, default 60) bounds the log
+download, and of a longer log only the newest 2 MiB is kept. The closing brief is an observation of CI, not verification
 evidence.
 
 `oms ci-status record` names what failed on a completed red run: the row in

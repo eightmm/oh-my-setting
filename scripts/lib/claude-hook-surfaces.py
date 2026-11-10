@@ -79,15 +79,17 @@ def is_oms_root(candidate, roots):
     )
 
 
-def _dead_launcher(command, root):
-    """True for the managed launcher form whose checkout is gone from disk."""
+def _dead_launcher(command, root, roots):
+    """True for the managed launcher form whose checkout is no longer an OMS
+    checkout: gone, a dangling symlink, or a leftover directory without the
+    source markers."""
     try:
         argv = shlex.split(command)
     except ValueError:
         return False
     return (len(argv) == 4 and argv[0] == "bash" and argv[2] == "bash"
             and _norm(argv[1]) == root + "/scripts/lib/python-entry.sh"
-            and not os.path.lexists(root))
+            and not is_oms_root(root, roots))
 
 
 def owned_script(hook, roots):
@@ -103,7 +105,7 @@ def owned_script(hook, roots):
     root = parts[0]
     if not (root.startswith("/") or (len(root) > 2 and root[1:3] == ":/")):
         return None
-    if is_oms_root(root, roots) or _dead_launcher(command, root):
+    if is_oms_root(root, roots) or _dead_launcher(command, root, roots):
         return parts[2]
     return None
 
@@ -282,24 +284,25 @@ def audit(hooks, surfaces, command_root, roots):
             continue
         if len(rows) > 1:
             issues.append(("duplicate", "%d registrations" % len(rows)))
-        entry, hook = rows[0]
-        want = hook_command(command_root, row["script"])
-        if hook.get("type") != "command":
-            issues.append(("drift", "type absent, expected command"))
-        if hook.get("command") != want:
-            issues.append(("drift", "command %r, expected %r" % (hook.get("command"), want)))
-        if hook.get("timeout") != row["timeout"]:
-            issues.append(("drift", "timeout %s, expected %s" % (
-                hook.get("timeout", "absent"),
-                "absent" if row["timeout"] is None else row["timeout"])))
-        if "onFailure" in hook and not (row.get("fail_closed") and hook["onFailure"] == "block"):
-            issues.append(("drift", "onFailure %r, expected absent%s" % (
-                hook["onFailure"], " or 'block'" if row.get("fail_closed") else "")))
-        path = entry_path(str(hook.get("command")), "bash")
-        if path is not None and _dead_launcher(
-                hook["command"], _norm(path).rsplit("/", 2)[0]):
-            issues.append(("drift", "dead OMS hook: its checkout no longer exists"))
-        if not matcher_ok(entry, row["matcher"]):
-            issues.append(("drift", "matcher %r, expected %r" % (
-                entry.get("matcher"), row["matcher"])))
+        for entry, hook in rows:
+            want = hook_command(command_root, row["script"])
+            if hook.get("type") != "command":
+                issues.append(("drift", "type absent, expected command"))
+            if hook.get("command") != want:
+                issues.append(("drift", "command %r, expected %r" % (hook.get("command"), want)))
+            if hook.get("timeout") != row["timeout"]:
+                issues.append(("drift", "timeout %s, expected %s" % (
+                    hook.get("timeout", "absent"),
+                    "absent" if row["timeout"] is None else row["timeout"])))
+            if "onFailure" in hook and not (row.get("fail_closed") and hook["onFailure"] == "block"):
+                issues.append(("drift", "onFailure %r, expected absent%s" % (
+                    hook["onFailure"], " or 'block'" if row.get("fail_closed") else "")))
+            path = entry_path(str(hook.get("command")), "bash")
+            if path is not None and _dead_launcher(
+                    hook["command"], _norm(path).rsplit("/", 2)[0], roots):
+                issues.append(("drift", "dead OMS hook: its checkout no longer exists"))
+            if not matcher_ok(entry, row["matcher"]):
+                issues.append(("drift", "matcher %r, expected %r" % (
+                    entry.get("matcher"), row["matcher"])))
+        issues[:] = list(dict.fromkeys(issues))
     return problems, sorted(found)

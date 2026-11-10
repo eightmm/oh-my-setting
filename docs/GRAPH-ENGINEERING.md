@@ -949,8 +949,8 @@ on the changed ones through EXTRACTED edges (`--depth`, default 3; changed
 files and tests are not repeated there), the paths history says usually move
 with a changed path but this range left alone (`structural: false` is the
 partner no parser can see), and, only when the repository has a `CODEOWNERS`
-file (`CODEOWNERS`, `.github/CODEOWNERS`, `docs/CODEOWNERS`; a symlink or a
-file over 1 MiB is treated as absent), the owners of each changed path by the
+file (the first of `.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`, the
+order hosts read them; a symlink or a file over 1 MiB is treated as absent), the owners of each changed path by the
 last matching rule. The CODEOWNERS reader is stdlib and read-only; negations,
 character classes, escapes and section headers are skipped, never guessed.
 Every list is cut to `--limit` (default 20, 1–500) with the cut counted in

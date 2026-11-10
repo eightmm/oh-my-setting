@@ -524,14 +524,13 @@ def ask(args, limit=timeout, cap=None):
                     proc.kill()
                     proc.communicate()
                     return None
-                chunk = os.read(proc.stdout.fileno(), min(65536, cap - len(out)))
+                chunk = os.read(proc.stdout.fileno(), 65536)
                 if not chunk:
                     break
                 out.extend(chunk)
-                if len(out) >= cap:
-                    proc.kill()
-                    proc.communicate()
-                    return None
+                if len(out) > cap:
+                    # Keep the newest bytes: a failed step's cause is at its log's end.
+                    del out[:len(out) - cap]
         try:
             proc.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:

@@ -248,6 +248,17 @@ def publish(project, staged, intent_dir, ident, expected, delta_json):
         os.chmod(staged, stat.S_IMODE(os.stat(project).st_mode))
         os.replace(staged, project)
     except OSError as exc:
+        # Withdraw the receipt so it never records an amendment PROJECT.md does not hold.
+        try:
+            descriptor = os.open(os.path.join(intent_dir, "amendments.jsonl"),
+                                 os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    os.ftruncate(descriptor, original_size)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            pass
         die("cannot replace PROJECT.md: %s" % (exc.strerror or exc))
     print(previous)
 

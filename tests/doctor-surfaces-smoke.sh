@@ -357,7 +357,10 @@ for entry in hooks["PostToolUse"]:
     if "syntax-guard-hook.sh" in entry["hooks"][0]["command"]:
         entry["matcher"] = "Edit"
 resume = [e for e in hooks["SessionStart"] if "resume-hook.sh" in e["hooks"][0]["command"]]
-hooks["SessionStart"].append(json.loads(json.dumps(resume[0])))
+# The second registration drifts; the audit checks every registration, not only the first.
+duplicate = json.loads(json.dumps(resume[0]))
+duplicate["hooks"][0]["timeout"] = 99
+hooks["SessionStart"].append(duplicate)
 hooks["SubagentStop"] = [{"hooks": [
     {"type": "command", "command": "bash %s/scripts/telemetry-hook.sh" % root, "timeout": 5}]}]
 hooks["UserPromptSubmit"][0]["hooks"][0]["command"] = "bash %s/old/scripts/skill-router.sh" % home
@@ -376,6 +379,7 @@ PY
     "REGISTRATION DRIFT: SessionEnd -> precompact-handoff.sh (type absent, expected command)" \
     "REGISTRATION DRIFT: PostToolUse -> syntax-guard-hook.sh (matcher 'Edit', expected 'Edit|Write|MultiEdit')" \
     "DUPLICATE REGISTRATION: SessionStart -> resume-hook.sh (2 registrations)" \
+    "REGISTRATION DRIFT: SessionStart -> resume-hook.sh (timeout 99, expected" \
     "RETIRED REGISTRATION: SubagentStop -> telemetry-hook.sh (still registered)" \
     "REGISTRATION DRIFT: UserPromptSubmit -> skill-router.sh (command" \
     "MISSING REGISTRATION: PreCompact -> precompact-handoff.sh"; do
@@ -544,6 +548,8 @@ for es in d["hooks"].values():
 json.dump(d, open(sys.argv[1], "w"))
 PY
   cp "$cfg" "$home/dead-settings.json"
+  # A dangling symlink where the checkout was is as dead as a missing one.
+  ln -s "$home/nowhere" "$home/gone-checkout"
   out="$(run_default_doctor "$home")"
   case "$out" in *"dead OMS hook"*) ;; *) printf '%s\n' "$out"; fail "doctor should report a dead OMS hook row" ;; esac
   HOME="$home" XDG_CONFIG_HOME="$home/.config" OMS_INSTALL_RECEIPT="$home/.config/oh-my-setting/install.json" OMS_LOCK_DIR="$home/.locks" \
