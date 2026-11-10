@@ -13,7 +13,7 @@ from dashboard_projection import clean, display_width, mapping, number
 from panel_metrics import READING_FRESH_SECONDS, five_hour, percent, quota_bar
 
 SCHEMA = 1
-# name, long name, strip name, one-letter name, palette token. The panel has no per-provider token: Claude
+# name, long name, strip name, one-letter name, palette hue. The panel has no per-provider hue: Claude
 # takes the warm main colour, Codex the counsel blue and Antigravity the lavender judge colour.
 PROVIDERS = (("claude", "Claude", "Claude", "C", "main"),
              ("codex", "Codex", "Codex", "X", "counsel"),
@@ -87,7 +87,7 @@ def snapshot(report, now=None):
     warned = {ident for ident, unused in quota_warnings(report, now)}
     seats = _seats(report)
     providers = {}
-    for key, title, unused_short, unused_letter, unused_token in PROVIDERS:
+    for key, title, unused_short, unused_letter, unused_hue in PROVIDERS:
         row = mapping(status.get(key))
         source = row.get("source")
         out = {"name": title, "windows": [], "windows_unreported": {}}
@@ -189,12 +189,12 @@ def _seat_count(provider):
 
 
 def _segment(provider, key, mode, unicode, now):
-    """Pieces [(text, token)] of one provider at one detail level."""
-    short, letter, token = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
+    """Pieces [(text, hue)] of one provider at one detail level."""
+    short, letter, hue = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
     tight = _tightest(provider)
     dash = "—" if unicode else "--"
     terse = mode in {"short_bars", "short", "minimal"}
-    pieces = [(letter if terse else short, token)]
+    pieces = [(letter if terse else short, hue)]
     if tight is None:
         pieces.append((" " + dash, "dim"))
         if provider["reading"]["stale"]:
@@ -241,12 +241,12 @@ def strip(report, width, height, unicode=True, now=None):
     dot = " · " if unicode else " / "
     if width >= 80 and height >= 24:
         rows = []
-        for key, title, unused_short, unused_letter, token in PROVIDERS:
+        for key, title, unused_short, unused_letter, hue in PROVIDERS:
             provider = data[key]
             tight = _tightest(provider)
             account = provider["account"]
             name = title + (" (%s)" % account if isinstance(account, str) else "")
-            pieces = [((name + " " * 12)[:max(12, len(name) + 1)], token)]
+            pieces = [((name + " " * 12)[:max(12, len(name) + 1)], hue)]
             if tight is None:
                 reasons = provider["windows_unreported"]
                 reason = reasons.get("weekly") or next(iter(reasons.values()), "no reading")
@@ -275,7 +275,7 @@ def strip(report, width, height, unicode=True, now=None):
             continue
         glue = dot if mode == "minimal" else sep
         built = []
-        for key, unused_title, unused_short, unused_letter, unused_token in PROVIDERS:
+        for key, unused_title, unused_short, unused_letter, unused_hue in PROVIDERS:
             built.append(_segment(data[key], key, mode, unicode, now))
         pieces = []
         for index, part in enumerate(built):
@@ -294,7 +294,7 @@ def text(snap):
              (snap["fresh_seconds"] // 60)]
     if snap["held"]:
         lines.append("Held frame: readings below were not refreshed")
-    for key, unused_title, unused_short, unused_letter, unused_token in PROVIDERS:
+    for key, unused_title, unused_short, unused_letter, unused_hue in PROVIDERS:
         provider = snap["providers"][key]
         lines.append("%s" % provider["name"])
         lines.append("  account: " + _value(provider["account"]))
