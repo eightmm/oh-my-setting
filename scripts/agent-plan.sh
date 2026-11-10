@@ -251,6 +251,12 @@ Commands:
   list   [--state STATE] [--json]    List tasks (optionally by state); --json
                                      emits every task's `show` view at once.
   ready                              Print ids actionable now (deps done).
+  retro  [--json]                    Read-only: what took more than one try
+                                     (cycles, repairs, amendments), blocked and
+                                     cancelled tasks with their reasons, where
+                                     a drive parked and how acceptance ran.
+                                     Counts of recorded rows; not evidence.
+                                     Run it before retire.
   status [--json]                    Typed plan snapshot or human summary.
   accept [--reuse-pass RUN_ID]        Reuse a matching pass only when PROJECT.md
                                      declares Acceptance reuse: same-run; otherwise
@@ -403,7 +409,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel|amend)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|status|next|brief|accept|lint-verify|cancel|amend|retro)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -493,7 +499,7 @@ case "$ACTION" in
 esac
 PLAN_READ_ONLY=0
 case "$ACTION" in
-  show|evidence-snapshot|list|ready|status|brief) PLAN_READ_ONLY=1 ;;
+  show|evidence-snapshot|list|ready|status|brief|retro) PLAN_READ_ONLY=1 ;;
   next) [ "$CLAIM" = 1 ] || PLAN_READ_ONLY=1 ;;
 esac
 REPO="$(oms_repo_root "$REPO")" || fail "bad --repo"
@@ -557,6 +563,15 @@ if [ "$ACTION" = lint-verify ]; then
   [ -n "$ALLOWED" ] || fail "lint-verify requires --allowed \"p1,p2\""
   exec python3 "$ROOT/scripts/lib/verify-floor-lint.py" \
     --verify "$VERIFY" --allowed "$ALLOWED"
+fi
+
+# What took more than one try, counted from the plan and its progress ledger.
+# It reads two files and writes nothing, so it takes no lock.
+if [ "$ACTION" = retro ]; then
+  if [ "$AS_JSON" = 1 ]; then
+    exec python3 "$ROOT/scripts/lib/plan_retro.py" "$PY_PLAN_FILE" --json
+  fi
+  exec python3 "$ROOT/scripts/lib/plan_retro.py" "$PY_PLAN_FILE"
 fi
 
 case "$ACTION" in

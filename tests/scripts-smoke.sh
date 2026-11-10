@@ -31815,6 +31815,48 @@ test_agent_plan_reopen_only_from_blocked() {
   "$sh" --repo "$d" reopen --id t1 >/dev/null
   "$sh" --repo "$d" show --id t1 | grep -F '"state": "ready"' > /dev/null ||
     fail "reopen should return a blocked task to ready"
+
+  # retro counts what the plan and its progress ledger recorded and writes nothing.
+  local before after
+  "$sh" --repo "$d" add --id t2 --title "second" >/dev/null
+  "$sh" --repo "$d" block --id t2 --reason "format undecided" >/dev/null
+  {
+    printf '%s\n' '{"schema":1,"kind":"goal-cycle","run_id":"r1","cycle":1,"task_id":"t1","lease_id":""}'
+    printf '%s\n' '{"schema":1,"kind":"goal-cycle","run_id":"r1","cycle":2,"task_id":"t1","lease_id":""}'
+    printf '%s\n' '{"schema":1,"kind":"goal-cycle","run_id":"old","cycle":1,"task_id":"gone","lease_id":""}'
+    printf '%s\n' '{"schema":1,"kind":"acceptance","run_id":"r1","status":"fail","exit":1,"reason":""}'
+    printf '%s\n' '{"schema":1,"kind":"acceptance","run_id":"old","status":"fail","exit":1,"reason":""}'
+    printf '%s\n' '{"schema":1,"kind":"acceptance","run_id":"r1","status":"pass","exit":0,"reason":""}'
+    printf '%s\n' '{"schema":1,"kind":"terminal","run_id":"r1","status":"park","reason":"cycles-exhausted"}'
+    printf '%s\n' '{"schema":1,"kind":"terminal","run_id":"old","status":"park","reason":"other-plan"}'
+    printf '%s\n' 'not json'
+  } > "$d/.oms/plan/progress.jsonl"
+  before="$(cd "$d/.oms/plan" && cksum tasks.json progress.jsonl && ls)"
+  "$sh" --repo "$d" retro > "$d/retro" || fail "retro should read a live plan"
+  assert_file_contains "$d/retro" "plan retro: reopen contract"
+  assert_file_contains "$d/retro" "drive: 1 run(s), 2 cycle(s), 0 finished"
+  assert_file_contains "$d/retro" "parked 1x: cycles-exhausted"
+  assert_file_contains "$d/retro" "acceptance: 1 pass, 1 fail"
+  assert_file_contains "$d/retro" "t1  cycles=2  ready"
+  assert_file_contains "$d/retro" "t2  second  [format undecided]"
+  assert_file_contains "$d/retro" "not approval or verification evidence"
+  ! grep -q 'other-plan' "$d/retro" || fail "retro must leave out another plan's drive rows"
+  "$sh" --repo "$d" retro --json > "$d/retro.json" || fail "retro --json should read a live plan"
+  python3 - "$d/retro.json" <<'PY' || fail "retro --json shape"
+import json, sys
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+assert report["kind"] == "oms-plan-retro" and report["schema"] == 1, report
+assert report["drive"] == {"runs": 1, "cycles": 2, "finished": 0, "parks": {"cycles-exhausted": 1}}, report["drive"]
+assert [item["id"] for item in report["blocked"]] == ["t2"], report["blocked"]
+assert report["retried"][0]["id"] == "t1" and report["retried"][0]["cycles"] == 2, report["retried"]
+PY
+  after="$(cd "$d/.oms/plan" && cksum tasks.json progress.jsonl && ls)"
+  [ "$before" = "$after" ] || fail "retro must not write plan state"
+  rm -f "$d/.oms/plan/tasks.json"
+  if "$sh" --repo "$d" retro >/dev/null 2>"$d/err"; then
+    fail "retro without a plan must fail"
+  fi
+  assert_file_contains "$d/err" "no readable plan"
 }
 
 # smoke-weight: 49
