@@ -223,6 +223,20 @@ Codex plugin, 활성 MCP/Antigravity 인터페이스를 확인한다. 실패하�
 바이너리는 core 롤백 대상이 아니다. `--no-doctor`나 예약 실행의 doctor
 생략 설정을 쓰면 이 검증 근거도 생략한다.
 
+### 설치·업데이트 미리 보기
+
+`install.sh --plan`과 `oms update --plan`은 실행이 바꿀 내용을 출력하고 아무것도 바꾸지 않는다.
+clone·fetch, lifecycle lock, link, 백업 이동, 설정 편집, 등록이 모두 일어나지 않는다. 각 줄은
+`STEP: STATUS: detail`이고 status는 `change`, `current`, `skip`, `not-previewed`, `note` 중 하나다.
+
+쓰기 없는 모드가 있는 단계(link와 백업, capability profile, Claude hook 행, Antigravity 권한 규칙,
+auto-update trigger)는 그 단계 자신의 코드로 미리 본다. 나머지는 로직을 따로 흉내 내지 않고
+`not-previewed`로 이름만 적는다: clone·fetch, Python runtime, tool installer와 그것이 추가하는 PATH 줄,
+서비스 로그인, Codex plugin과 `config.toml` 블록, MCP·Antigravity plugin 등록, Claude의 `statusLine`·
+`modelSettings`·`attribution` key. plan은 디스크에 있는 checkout을 읽으므로, update plan은 fetch가 가져올
+commit이 아니라 현재 commit을 다시 link하는 경우를 설명한다. checkout이 아직 없으면(첫 설치 전 curl 형태)
+그렇게 말하고 멈춘다.
+
 ## 서비스와 화면
 
 GitHub나 Notion capability를 고르면, 대화형 설치기는 브라우저 로그인을

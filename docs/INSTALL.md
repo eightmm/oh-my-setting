@@ -243,6 +243,33 @@ account's user services, so OMS does not silently enable it by default.
 The daily updater applies clean fast-forwards by default and skips dirty or
 diverged checkouts.
 
+### Previewing an install or update
+
+`install.sh --plan` and `oms update --plan` print what the run would change and
+change nothing: no clone or fetch, no lifecycle lock, no link, backup move,
+settings edit or registration. Each line reads `STEP: STATUS: detail`, with
+status `change`, `current`, `skip`, `not-previewed` or `note`:
+
+```text
+links: change: move your existing ~/.codex/AGENTS.md to ~/.codex/AGENTS.md.backup.<timestamp>; it would no longer be in effect
+links: change: link ~/.local/bin/oms -> ~/.oh-my-setting/scripts/oms
+claude-hooks: change: register SessionStart hook resume-hook.sh
+mcp: not-previewed: install-mcp.sh registers the harness MCP server through the claude and codex CLIs
+plan: 38 change(s), 0 already current, 6 step part(s) not previewed; nothing was written
+```
+
+A step is previewed by its own code where that code has a write-free mode
+(links and backups, the capability profile, Claude hook rows, Antigravity
+permission rules, the auto-update trigger). Everything else is named
+`not-previewed` rather than described from a second copy of its logic: the
+clone or fetch, the Python runtime, tool installers and any PATH line they add,
+service logins, the Codex plugin and its `config.toml` block, MCP and
+Antigravity plugin registration, and the Claude `statusLine`, `modelSettings`
+and `attribution` keys. The plan reads the checkout as it is on disk, so an
+update plan describes relinking the current commit, not the one a fetch would
+bring; with no checkout yet (the curl form before a first install) it says so
+and stops.
+
 ### Verification policy
 
 The entry points intentionally accept different evidence. A successful workflow

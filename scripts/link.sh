@@ -28,22 +28,32 @@ PREVIOUS_OWNER=""
 
 usage() {
   cat <<'EOF'
-usage: link.sh
+usage: link.sh [--plan]
 
 Install this checkout's rules, skills, and the oms dispatcher for
 Codex, Claude Code, and Antigravity, and record this checkout as the canonical
-install owner. Takes no arguments; behaviour comes from the environment
+install owner. Behaviour comes from the environment
 (OH_MY_SETTING_LINK_MODE, OH_MY_SETTING_PROFILE, the snapshot toggles).
+
+  --plan   Walk the same steps and print what each would do ("would ..."),
+           changing nothing: no link, copy, backup move, removal, receipt,
+           lock file or directory is created.
 EOF
 }
 
 # Refuse anything on the command line. This used to ignore its arguments and run,
 # so `link.sh --help` silently relinked a live install and moved canonical
 # ownership to whichever checkout was asked for help — the receipt names an
-# owner, so that is a real transfer, not a no-op. Every caller passes nothing.
+# owner, so that is a real transfer, not a no-op. Every installing caller passes
+# nothing; --plan is the one argument, and it installs nothing.
+LINK_PLAN=0
 if [ "$#" -gt 0 ]; then
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    --plan)
+      [ "$#" -eq 1 ] || { echo "error: link.sh --plan takes no further arguments: $2" >&2; exit 2; }
+      LINK_PLAN=1
+      ;;
     *) echo "error: link.sh takes no arguments: $1" >&2; usage >&2; exit 2 ;;
   esac
 fi
@@ -63,6 +73,10 @@ backup_if_needed() {
 
   case "$state" in
     symlink-current|symlink-owned|copy-current|copy-owned)
+      if [ "$LINK_PLAN" = 1 ]; then
+        echo "would replace managed $target"
+        return 0
+      fi
       oms_install_remove_managed_target "$target"
       return 0
       ;;
@@ -77,6 +91,10 @@ backup_if_needed() {
       "$ROOT"/*)
         previous_source="$PREVIOUS_OWNER/${source#"$ROOT"/}"
         if oms_install_target_owned "$previous_source" "$target"; then
+          if [ "$LINK_PLAN" = 1 ]; then
+            echo "would replace $target installed by $PREVIOUS_OWNER"
+            return 0
+          fi
           oms_install_remove_managed_target "$target"
           return 0
         fi
@@ -89,12 +107,20 @@ backup_if_needed() {
   if [ -L "$target" ] &&
      [ "$source" = "$ROOT/rules/global-AGENTS.md" ] &&
      [ "$(readlink "$target")" = "$ROOT/AGENTS.md" ]; then
+    if [ "$LINK_PLAN" = 1 ]; then
+      echo "would replace pre-split link $target"
+      return 0
+    fi
     rm -f "$target"
     return 0
   fi
 
   if [ -L "$target" ] || [ -e "$target" ]; then
     backup="$target.backup.$STAMP"
+    if [ "$LINK_PLAN" = 1 ]; then
+      echo "would move your existing $target to $target.backup.<timestamp>; it would no longer be in effect"
+      return 0
+    fi
     mv "$target" "$backup"
     # A modified managed copy is now preserved as user data. Its ownership
     # marker must not travel into the backup or claim that it is removable.
@@ -112,7 +138,7 @@ link_target() {
   local desired_mode
   local state
 
-  mkdir -p "${target%/*}"
+  [ "$LINK_PLAN" = 1 ] || mkdir -p "${target%/*}"
   desired_mode="$(oms_install_link_mode)" || return
   state="$(oms_install_target_state "$source" "$target")" || return
   case "$desired_mode:$state" in
@@ -122,6 +148,14 @@ link_target() {
       ;;
   esac
   backup_if_needed "$target" "$source" "$state"
+  if [ "$LINK_PLAN" = 1 ]; then
+    if [ "$desired_mode" = copy ]; then
+      echo "would copy $source -> $target"
+    else
+      echo "would link $target -> $source"
+    fi
+    return 0
+  fi
   oms_install_materialize "$source" "$target"
   if [ "$desired_mode" = copy ]; then
     echo "copied $source -> $target"
@@ -138,8 +172,8 @@ link_skills() {
   local enabled_sources
   local link
 
-  mkdir -p "$target_root"
-  oms_ops_clean_backup_skill_links "$target_root" 0
+  [ "$LINK_PLAN" = 1 ] || mkdir -p "$target_root"
+  oms_ops_clean_backup_skill_links "$target_root" "$LINK_PLAN"
 
   # A skill with `requires` is linked only where every listed command exists,
   # so a Slurm skill never reaches a workstation. A requires-failed skill is
@@ -163,6 +197,10 @@ link_skills() {
     grep -Fxq "$source" <<< "$enabled_sources" && continue
     name="${skill##*/}"
     if oms_install_target_owned "$skill" "$target_root/$name"; then
+      if [ "$LINK_PLAN" = 1 ]; then
+        echo "would unlink disabled skill $target_root/$name"
+        continue
+      fi
       oms_install_remove_managed_target "$target_root/$name"
       echo "unlinked disabled skill $target_root/$name"
     fi
@@ -176,6 +214,10 @@ link_skills() {
     source="$(oms_install_target_owned_source_under \
       "$ROOT/custom-skills" "$link")" || continue
     if [ ! -e "$source" ]; then
+      if [ "$LINK_PLAN" = 1 ]; then
+        echo "would unlink stale skill $link (target removed)"
+        continue
+      fi
       oms_install_remove_managed_target "$link"
       echo "unlinked stale skill $link (target removed)"
     fi
@@ -203,6 +245,11 @@ retire_skills() {
     oms_install_target_owned_source_under "$ROOT/custom-skills" "$link" \
       >/dev/null || continue
     backup="$(oms_ops_latest_backup "$link")"
+    if [ "$LINK_PLAN" = 1 ]; then
+      echo "would unlink retired skill $link"
+      [ -z "$backup" ] || echo "would restore $link from $backup"
+      continue
+    fi
     oms_install_remove_managed_target "$link"
     echo "unlinked retired skill $link"
     if [ -n "$backup" ]; then
@@ -210,7 +257,7 @@ retire_skills() {
       echo "restored $link from $backup"
     fi
   done
-  rmdir "$target_root" 2>/dev/null || true
+  [ "$LINK_PLAN" = 1 ] || rmdir "$target_root" 2>/dev/null || true
 }
 
 link_all() {
@@ -223,7 +270,7 @@ link_all() {
     printf '%s\n' "$skill_validation" >&2
     return 1
   fi
-  oms_ops_cleanup_legacy_links 0
+  oms_ops_cleanup_legacy_links "$LINK_PLAN"
 
   # A missing or invalid receipt yields no owner: relinking then behaves as a
   # first install.
@@ -255,7 +302,11 @@ link_all() {
   link_target "$ROOT/output-styles/oms-korean.md" "$HOME/.claude/output-styles/oms-korean.md"
   # Soul was the last shared prompt. Retire only proven-owned links/copies;
   # modified copies and foreign paths remain user data.
-  if oms_install_target_owned "$ROOT/prompts" "$retired_prompts"; then
+  if [ "$LINK_PLAN" = 1 ]; then
+    if oms_install_target_owned "$ROOT/prompts" "$retired_prompts"; then
+      echo "would remove retired prompt target $retired_prompts"
+    fi
+  elif oms_install_target_owned "$ROOT/prompts" "$retired_prompts"; then
     backup="$(oms_ops_latest_backup "$retired_prompts")"
     oms_install_remove_managed_target "$retired_prompts"
     echo "removed retired prompt target $retired_prompts"
@@ -270,6 +321,14 @@ link_all() {
   # This is the batch commit marker: interrupted relinks retain the previous
   # owner and are diagnosed as drift rather than certifying a mixed install.
   receipt="$(oms_install_receipt_path)"
+  if [ "$LINK_PLAN" = 1 ]; then
+    if [ "$PREVIOUS_OWNER" = "$ROOT" ]; then
+      echo "would rewrite install receipt: $receipt"
+    else
+      echo "would write install receipt: $receipt (owner ${PREVIOUS_OWNER:-none} -> $ROOT)"
+    fi
+    return 0
+  fi
   oms_install_write_receipt "$ROOT" "$receipt"
   oms_install_bash_write_record
   echo "install receipt: $receipt"
@@ -277,6 +336,13 @@ link_all() {
 
 # The receipt path is stable across checkouts, so concurrent link.sh runs for
 # the same HOME cannot interleave their global agent configuration.
+if [ "$LINK_PLAN" = 1 ]; then
+  # No lock: taking it would create the lock file. A plan read while another
+  # install runs can be stale, which a preview is allowed to be.
+  link_all
+  echo "not previewed: registered provider account refresh"
+  exit 0
+fi
 oms_with_file_lock "$(oms_install_receipt_path)" link_all
 
 # Account refresh takes the registry lock, then the hook install lock. Start

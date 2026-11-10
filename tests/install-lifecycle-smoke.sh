@@ -607,6 +607,51 @@ OMS_TEST_REAL_PYTHON="$(command -v "$PYTHON")"
 export OMS_TEST_REAL_PYTHON
 
 notion_data_source_id="ea343dea-4a66-4421-9653-dfc4fe68ed10"
+
+# --plan is the install contract's preview: it must write nothing at all, and
+# what it lists must be what the install then does. Names and file contents of
+# the whole fixture HOME and the sandbox cron file are compared around it.
+plan_snapshot() {
+  {
+    find "$HOME" -print | LC_ALL=C sort
+    find "$HOME" -type f -exec cksum {} + | LC_ALL=C sort
+    find "$HOME" -type l -exec ls -ld {} + | LC_ALL=C sort
+    if [ -e "$OH_MY_SETTING_AUTO_UPDATE_CRON_FILE" ]; then cksum < "$OH_MY_SETTING_AUTO_UPDATE_CRON_FILE"; else echo no-cron; fi
+    git -C "$upstream" status --porcelain --untracked-files=all
+  } 2>&1
+}
+# The previews are extra runs, not lifecycle steps: they stay out of the
+# path-tool spawn budget measured at the end of this suite.
+plan_run() { (cd "$HOME" && OMS_TEST_PATH_TOOL_LOG=/dev/null "$@"); }
+plan_snapshot > "$TMP/plan-before.txt"
+plan_run bash "$standalone_installer" --plan > "$TMP/plan-standalone.txt" 2>&1 ||
+  { cat "$TMP/plan-standalone.txt" >&2; fail "install --plan without a checkout failed"; }
+grep -Fq "checkout: not-previewed: $HOME/.oh-my-setting does not exist yet" "$TMP/plan-standalone.txt" ||
+  fail "a plan with no checkout to read must say the clone is not previewed: $(cat "$TMP/plan-standalone.txt")"
+! grep -q '^links: ' "$TMP/plan-standalone.txt" ||
+  fail "a plan with no checkout must not describe steps it cannot derive"
+plan_run bash "$upstream/install.sh" --plan --notion-data-source "$notion_data_source_id" \
+  > "$TMP/plan-install.txt" 2>&1 ||
+  { cat "$TMP/plan-install.txt" >&2; fail "install --plan failed"; }
+plan_snapshot > "$TMP/plan-after.txt"
+cmp -s "$TMP/plan-before.txt" "$TMP/plan-after.txt" ||
+  fail "install --plan changed the machine: $(diff "$TMP/plan-before.txt" "$TMP/plan-after.txt" | head -n 20)"
+[ ! -e "$HOME/.oh-my-setting" ] || fail "install --plan created the checkout"
+grep -Fq "links: change: move your existing $HOME/.codex/AGENTS.md to $HOME/.codex/AGENTS.md.backup.<timestamp>" \
+  "$TMP/plan-install.txt" || fail "the plan must name the user file an install displaces: $(cat "$TMP/plan-install.txt")"
+grep -Eq "^links: change: (link $HOME/.local/bin/oms -> |copy .* -> $HOME/.local/bin/oms\$)" "$TMP/plan-install.txt" ||
+  fail "the plan must list the dispatcher link"
+grep -Fq "claude-hooks: change: register SessionStart hook resume-hook.sh" "$TMP/plan-install.txt" ||
+  fail "the plan must list the Claude hook rows the installer expects"
+grep -Fq "auto-update: change: install cron trigger" "$TMP/plan-install.txt" ||
+  fail "the plan must relay the auto-update trigger preview: $(grep '^auto-update' "$TMP/plan-install.txt")"
+grep -Eq '^codex-plugin: skip: ' "$TMP/plan-install.txt" || fail "a step turned off must read skip"
+grep -Eq '^mcp: not-previewed: ' "$TMP/plan-install.txt" ||
+  fail "a step with no write-free preview must be named not-previewed"
+grep -Eq '^plan: [1-9][0-9]* change\(s\), [0-9]+ already current, [1-9][0-9]* step part\(s\) not previewed; nothing was written$' \
+  "$TMP/plan-install.txt" || fail "plan summary missing: $(tail -n 1 "$TMP/plan-install.txt")"
+! grep -Ev '^(install plan for |[a-z-]+: (change|current|skip|not-previewed|note): |plan: )' "$TMP/plan-install.txt" ||
+  fail "every plan line must be STEP: STATUS: detail"
 lifecycle_lock="$OMS_LOCK_DIR/install-lifecycle.lock.d"
 mkdir -p "$lifecycle_lock"
 printf '%s\n' "$$" > "$lifecycle_lock/pid"
@@ -673,6 +718,39 @@ dest="$(cd "$dest" && pwd -P)"
 case "$HOME:$dest" in
   *//*) fail "paths are not normalized (HOME=$HOME dest=$dest)" ;;
 esac
+# The plan against the install that followed it: every link or copy it listed
+# exists now, and the user file it said would be displaced has its backup.
+planned_targets=0
+while IFS= read -r planned; do
+  case "$planned" in
+    "links: change: link "*) planned="${planned#links: change: link }"; planned="${planned%% -> *}" ;;
+    "links: change: copy "*) planned="${planned##* -> }" ;;
+    *) continue ;;
+  esac
+  [ -L "$planned" ] || [ -e "$planned" ] || fail "the plan listed $planned but the install did not create it"
+  planned_targets=$((planned_targets + 1))
+done < "$TMP/plan-install.txt"
+[ "$planned_targets" -ge 5 ] || fail "the plan listed too few link targets to compare ($planned_targets)"
+set -- "$HOME/.codex/AGENTS.md.backup."*
+[ -e "$1" ] || fail "the plan announced a backup of the user's rules that the install did not make"
+# After the install the same preview finds the links current, and an update
+# plan resolves the recorded profile and still writes nothing.
+plan_snapshot > "$TMP/plan-before.txt"
+plan_run "$dest/scripts/update.sh" --plan > "$TMP/plan-update.txt" 2>&1 ||
+  { cat "$TMP/plan-update.txt" >&2; fail "update --plan failed"; }
+plan_snapshot > "$TMP/plan-after.txt"
+cmp -s "$TMP/plan-before.txt" "$TMP/plan-after.txt" ||
+  fail "a plan after install changed the machine: $(diff "$TMP/plan-before.txt" "$TMP/plan-after.txt" | head -n 20)"
+! grep -Eq '^links: change: (link|copy|move) ' "$TMP/plan-update.txt" ||
+  fail "a plan over a current install must not relink: $(grep '^links: change' "$TMP/plan-update.txt" | head -n 5)"
+grep -Eq "^links: current: .* current: $HOME/.local/bin/oms\$" "$TMP/plan-update.txt" ||
+  fail "a plan over a current install must report the dispatcher current: $(grep '^links' "$TMP/plan-update.txt" | head -n 5)"
+grep -Fq "update plan for $dest " "$TMP/plan-update.txt" || fail "update --plan must name the checkout"
+grep -Eq '^checkout: not-previewed: fetching ' "$TMP/plan-update.txt" ||
+  fail "update --plan must say the fetch is not previewed"
+plan_status=0
+plan_run "$dest/scripts/update.sh" --plan --check > "$TMP/plan-conflict.txt" 2>&1 || plan_status=$?
+[ "$plan_status" = 2 ] || fail "update --plan --check must be refused (got $plan_status)"
 export PATH="$HOME/.local/bin:$PATH"
 command -v python3 >/dev/null 2>&1 ||
   fail "installer did not expose a python3 command"

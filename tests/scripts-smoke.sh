@@ -42489,6 +42489,7 @@ git-move-guard-hook
 generate-slurm-reference
 import-agent-result
 install-autoupdate
+install-plan
 run-capsule
 uninstall-autoupdate
 write-machine-snapshot

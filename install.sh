@@ -69,6 +69,7 @@ INSTALL_TOOLS="${OH_MY_SETTING_INSTALL_TOOLS:-1}"
 CAPABILITY_PROFILES="${OH_MY_SETTING_CAPABILITY_PROFILES:-core}"
 PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
 TOOLS_FULL=0
+PLAN_ONLY=0
 CONNECT_SERVICES="${OH_MY_SETTING_CONNECT_SERVICES:-auto}"
 STAR_PROMPT="${OH_MY_SETTING_STAR_PROMPT:-0}"
 # The apply-mode update trigger is a default, not an opt-in: a harness that
@@ -88,9 +89,13 @@ OMS_INSTALL_LIFECYCLE_PROTOCOL=1
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--ref REF] [--profile NAME]... [--primary-provider NAME] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--help]
+Usage: install.sh [--ref REF] [--profile NAME]... [--primary-provider NAME] [--full] [--connect-services] [--no-connect-services] [--no-auto-update] [--machine-snapshot] [--slurm-snapshot] [--notion-data-source ID] [--peer-permissions] [--star] [--plan] [--help]
 
 Options:
+  --plan              Print what this install would change, step by step, and
+                      change nothing: no clone, fetch, lock, link, backup,
+                      settings edit or registration. Steps with no write-free
+                      preview are listed as not-previewed, not guessed.
   --ref REF           Install edge, a tag, branch, or commit (default: installer channel).
   --profile NAME      Add a capability profile to the default core install:
                       council, github, notion, research, hpc, container,
@@ -153,6 +158,9 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "error: --ref requires a value" >&2; exit 2; }
       REF="$2"
       shift
+      ;;
+    --plan)
+      PLAN_ONLY=1
       ;;
     --full)
       PROFILE=full
@@ -298,6 +306,35 @@ esac
 
 export OH_MY_SETTING_REF="$REF"
 export OH_MY_SETTING_PROFILE="$PROFILE"
+# --plan stops here, before the lifecycle lock, the clone or fetch and every
+# step: the preview reads the checkout that is already on disk and writes
+# nothing. With no checkout to read (the curl-pipe form before a first
+# install) there is nothing to derive a plan from, and it says so.
+if [ "$PLAN_ONLY" = 1 ]; then
+  plan_root="" plan_checkout=present
+  if [ -f "$DEST/scripts/install-plan.sh" ]; then
+    plan_root="$DEST"
+  else
+    plan_source="${BASH_SOURCE[0]:-}"
+    if [ -n "$plan_source" ] && plan_dir="$(cd "$(dirname "$plan_source")" 2>/dev/null && pwd -P)" &&
+       [ -f "$plan_dir/scripts/install-plan.sh" ]; then
+      plan_root="$plan_dir" plan_checkout=entry
+    fi
+  fi
+  if [ -z "$plan_root" ]; then
+    echo "install plan for $DEST (home $HOME): nothing is written by this command"
+    echo "checkout: not-previewed: $DEST does not exist yet; it would be cloned from $REPO_URL at $REF"
+    echo "plan: not-previewed: every later step is derived from the checkout's own scripts, and there is no checkout to read; after cloning, run $DEST/install.sh --plan"
+    exit 0
+  fi
+  export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT" OH_MY_SETTING_CONNECT_SERVICES="$CONNECT_SERVICES"
+  export OH_MY_SETTING_GENERATE_MACHINE="$GENERATE_MACHINE" OH_MY_SETTING_GENERATE_SLURM="$GENERATE_SLURM"
+  export OH_MY_SETTING_AUTO_UPDATE="$AUTO_UPDATE" OH_MY_SETTING_CODEX_PLUGIN="$CODEX_PLUGIN"
+  export OH_MY_SETTING_PEER_PERMISSIONS="$PEER_PERMISSIONS"
+  export OMS_PLAN_CHECKOUT="$plan_checkout" OMS_PLAN_DEST="$DEST" OMS_PLAN_TOOLS_FULL="$TOOLS_FULL"
+  export OMS_PLAN_CAPABILITIES="$CAPABILITY_PROFILES" OMS_PLAN_PRIMARY_PROVIDER="$PRIMARY_PROVIDER"
+  exec "$OMS_BASH" "$plan_root/scripts/install-plan.sh" --install
+fi
 export OH_MY_SETTING_STAR_PROMPT="$STAR_PROMPT"
 export OH_MY_SETTING_INSTALL_TOOLS="$INSTALL_TOOLS"
 export OH_MY_SETTING_CONNECT_SERVICES="$CONNECT_SERVICES"
