@@ -1158,6 +1158,29 @@ Antigravity global rules, each with its size, file count and modification time.
 It reads no file, writes nothing, and does not report whether a provider has its
 memory turned on; the Claude auto-memory location is derived from the repository
 path rather than confirmed by the CLI.
+
+Two kinds of note reach shared memory without a person reading them: the one-line
+outcome `oms agent-task close` promotes and the lessons `oms journal distill`
+writes. `oms agent-memory review` lists those, plus anything brought in by
+`import`, until someone decides: `--accept ID` appends one receipt row to
+`.oms/memory/reviews.jsonl` and leaves the log untouched; `--retire ID --reason
+TEXT` is the ordinary retirement. `--kind task-close|distill|imported|correction`
+narrows the list and `--json` prints it. A harness child can list but not decide.
+Review is a reading aid: an unreviewed note is still searched, recalled and
+summarized exactly as before, and an accepted one is not thereby verified.
+
+`oms agent-memory import --from serena|PATH` reads Markdown memory written
+elsewhere — a file, a directory of `.md`/`.txt` files, or the repository's
+`.serena/memories` — and lists each bullet or sentence as a candidate with its
+file, line and a short hash of the normalized text. Headings, tables, fenced code
+and front matter are skipped; a line memory already holds is `duplicate`; a line
+the sensitive scan flags is `withheld` and never printed. Nothing is written
+until `--apply --select N[,N]` (or `--all`), which appends each chosen line as
+`kind: imported` with an `imported from: FILE#Lline sha256:…` line, through the
+same writer as `append`. Imported notes wait in `review`. The source is only ever
+read, at most 50 files of 256 KiB and 200 candidates per run, each limit reported
+when reached. `--from claude` and `--from codex` are refused: OMS does not verify
+where a provider keeps its own memory, so name the path yourself.
 Inbox reports dead-PID delegation markers at P1 with a GC dry run and prior-month
 unsealed journal events at P3 with a journal seal dry run. Neither query nor
 `--fix-safe` removes those markers or seals the journal.
