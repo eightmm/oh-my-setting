@@ -2260,6 +2260,16 @@ different targets. A file that cannot be parsed is `unread` and that CLI is left
 the comparison. Codex plugin state is not in a file the report parses and is reported as
 not read. Rows never change the exit status.
 
+`oms doctor --providers [--json]` is a standalone read-only matrix of what OMS supports
+per provider and per function (launch a main, worker call, observe, resume, send,
+stop, approval relay, usage, handoff), read from `config/provider-capabilities.json`.
+Each cell is `supported`, `partial` (with its limit), `unsupported` or `unknown`, and
+`fixture` (exercised by fake CLIs only) or `live`; no cell is `live` today. Every
+supported or partial cell names its implementation and test, and
+`tests/provider-registry-smoke.sh` fails when a named symbol or test is missing or a
+registry provider has no row. Nothing runs and nothing is contacted. Custom adapters are
+not rows.
+
 
 #### Optional hints and budgets
 

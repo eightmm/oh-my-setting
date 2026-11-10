@@ -1026,4 +1026,29 @@ targets, error = server["peer_targets"]("glm")
 assert not targets and "registered provider" in error, (targets, error)
 PY
 
+# The capability table stays honest: one row per registry provider, every
+# supported/partial cell names an implementation definition and a test that
+# exist in the tree, and a renamed symbol fails the check.
+capability_helper="$ROOT/scripts/lib/doctor-providers.py"
+python3 -I "$capability_helper" --check >/dev/null || fail 'provider capability evidence check failed'
+capability_rows="$(python3 -I "$capability_helper" --json | python3 -c 'import json,sys; print("\n".join(sorted(json.load(sys.stdin)["providers"])))')"
+registry_rows="$(oms_provider_supported_names | LC_ALL=C sort)"
+[ "$(printf '%s\n' "$capability_rows" | LC_ALL=C sort)" = "$registry_rows" ] ||
+  fail "capability table rows differ from the provider registry: $(diff <(printf '%s\n' "$capability_rows" | LC_ALL=C sort) <(printf '%s\n' "$registry_rows") | tr '\n' ' ')"
+sed 's/::native_command"/::native_command_renamed"/' "$ROOT/config/provider-capabilities.json" > "$TMP/capabilities-renamed.json"
+if python3 -I "$capability_helper" --check --table "$TMP/capabilities-renamed.json" >/dev/null 2>"$TMP/capabilities-renamed.err"; then
+  fail 'a renamed implementation symbol passed the capability check'
+fi
+grep -Fq 'implementation not found: scripts/lib/panel_native.py::native_command_renamed' "$TMP/capabilities-renamed.err" ||
+  fail 'capability check did not name the renamed symbol'
+sed "s/::run_write_attempt\"/::run_write_attempt_$$\"/" "$ROOT/config/provider-capabilities.json" > "$TMP/capabilities-renamed-test.json"
+if python3 -I "$capability_helper" --check --table "$TMP/capabilities-renamed-test.json" >/dev/null 2>&1; then
+  fail 'a renamed test passed the capability check'
+fi
+capability_text="$("$ROOT/scripts/doctor.sh" --providers)"
+case "$capability_text" in *"fixture means not verified against a live CLI"*"legend:"*|*"legend:"*"fixture means not verified against a live CLI"*) ;; *) fail 'capability view lost its legend or fixture reminder' ;; esac
+"$ROOT/scripts/doctor.sh" --providers --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["schema"] == 1 and d["providers"]["claude"]["resume"]["status"] == "supported"' ||
+  fail 'capability --json shape changed'
+if "$ROOT/scripts/doctor.sh" --providers --repair >/dev/null 2>&1; then fail 'capability view accepted --repair'; fi
+
 echo 'provider-registry-smoke: ok'
