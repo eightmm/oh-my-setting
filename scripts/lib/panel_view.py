@@ -1209,6 +1209,17 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
             styles.append("main")
     keep = max(pinned, budget - 3)
     head, styles = head[:keep], styles[:keep]
+    # The work health line sits under the goal box; it is the first optional row dropped when the inbox would get short.
+    import panel_work_health
+    from room_view import nodes
+    health_rows = panel_work_health.lines(report, items, width, height, unicode,
+                                          next((m for m in nodes(report) if m.get("role") == "main"), None))
+    health_spans = {}
+    if health_rows and len(head) + len(health_rows) <= keep and budget - len(head) - len(health_rows) >= 4:
+        for offset, (text, spans) in enumerate(health_rows):
+            head.insert(pinned + offset, text)
+            styles.insert(pinned + offset, "dim")
+            health_spans[pinned + offset] = spans
     boxed = width >= 28 and budget - len(head) >= 4
     available = max(0, budget - len(head) - (2 if boxed else 0))
     shown, hidden = items[:INBOX_LIMIT], max(0, len(items) - INBOX_LIMIT)
@@ -1252,9 +1263,12 @@ def render_inbox(report, width, height, color, unicode, managed, previous, navig
     if shown and more and available > len(window):
         body.append(("+%s more%s" % (more, sep + "arrows, wheel or page keys" if len(shown) > len(window) else ""), "dim", None))
     lines, hits = [], []
-    for text, style in zip(head, styles):
+    for index, (text, style) in enumerate(zip(head, styles)):
         lines.append(clipped(text, width))
-        lines[-1] = (PALETTE[style] + lines[-1] + "\033[0m") if color else lines[-1]
+        if color and index in health_spans:
+            lines[-1] = "".join(PALETTE[tone] + part + "\033[0m" for part, tone in health_spans[index])
+        else:
+            lines[-1] = (PALETTE[style] + lines[-1] + "\033[0m") if color else lines[-1]
     if boxed:
         new = sum(is_unread(report, item) for item in items)
         title = "Needs you" + (sep + ("%s" % len(items) if new == len(items) else "%d new / %d waiting" % (new, len(items)))

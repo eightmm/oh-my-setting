@@ -2017,10 +2017,10 @@ claude_main = next(m for m in flow["room"]["participants"] if m.get("role") == "
 for left, words in ((42, "ctx 58% used"), (22, "ctx 78% used"), (12, "ctx 88% used")):
     metered = dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": left}})
     picture = render(metered, "codex", 110, 30, view="graph", navigation={"selected": ("chat", claude_main)})
-    # The usage row already says "ctx N% used"; the card is the second place.
-    assert picture.count(words) == 1, (left, picture)
+    # The card and the work health line under the goal box both carry it.
+    assert picture.count(words) == 2, (left, picture)
     plain = render(metered, "codex", 110, 30, view="graph", unicode=False, navigation={"selected": ("chat", claude_main)})
-    assert plain.count(words.replace("·", "/")) == 1 and not any(g in plain for g in "─│·"), (left, plain)
+    assert plain.count(words.replace("·", "/")) == 2 and not any(g in plain for g in "─│·"), (left, plain)
     note = sys.modules["room_view"].context_note(metered, next(m for m in flow["room"]["participants"] if m["participant"] == claude_main))
     assert note == (100 - left, "alert" if left <= 15 else "dim" if left > 30 else None), note
 picture_80x40 = render(dict(flow, provider_status={"claude": {"participant": claude_main, "context_left": 10}}),
@@ -5012,10 +5012,78 @@ with tempfile.TemporaryDirectory() as health_dir:
     with patch.dict(os.environ, {"OMS_CI_LEDGER": str(ledger), "OMS_FAIL_LEDGER": str(Path(health_dir) / "none.jsonl")}):
         panel_work_health._seen.clear()
         assert panel_work_health.collect(health_dir, {"repo": {"branch": "oms/x"}}) == {
-            "ci": {"status": "completed", "conclusion": "failure", "ts": "2026-11-02T00:00:00Z"}, "unresolved": None}
+            "ci": {"status": "completed", "conclusion": "failure", "ts": "2026-11-02T00:00:00Z"}, "unresolved": None, "stalls": None}
         assert panel_work_health.collect(health_dir)["ci"]["ts"] == "2026-11-03T00:00:00Z"
         with patch.object(panel_work_health, "_ci_row", side_effect=AssertionError("re-read unchanged ledger")):
             assert panel_work_health.collect(health_dir)["ci"]["ts"] == "2026-11-03T00:00:00Z"
+# Stalls: the detector runs in-process on the ledger rows, appears, and clears once the loop is broken.
+import stall_detect
+with tempfile.TemporaryDirectory() as stall_dir:
+    failures = Path(stall_dir) / "failures.jsonl"
+    stamp_now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def ledger_row(**row):
+        with failures.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict({"ts": stamp_now, "fingerprint": "fp1"}, **row)) + "\n")
+    for unused in range(3):
+        ledger_row(event="fail", cmd="make test", exit=2, summary="boom")
+    with patch.dict(os.environ, {"OMS_CI_LEDGER": str(Path(stall_dir) / "none-ci.jsonl"), "OMS_FAIL_LEDGER": str(failures)}), \
+            patch.object(panel_work_health, "_unresolved", return_value=1), \
+            patch("subprocess.run", side_effect=AssertionError("stall reading must not spawn a process")):
+        panel_work_health._seen.clear()
+        stalled = panel_work_health.collect(stall_dir)["stalls"]
+        assert [(row["rule"], row["count"]) for row in stalled] == [("error-repeat", 3)], stalled
+        with patch.object(stall_detect, "ledger_events", side_effect=AssertionError("re-read unchanged ledger")):
+            assert panel_work_health.collect(stall_dir)["stalls"] == stalled
+        ledger_row(event="resolved")
+        assert panel_work_health.collect(stall_dir)["stalls"] == []
+        with patch.dict(os.environ, {"OMS_STALL_MAX_AGE": "1"}), patch("time.time", return_value=time.time() + 600):
+            ledger_row(event="fail", cmd="make test", exit=2, summary="boom")
+            panel_work_health._seen.clear()
+            assert panel_work_health.collect(stall_dir)["stalls"] == []
+stalled_report = deepcopy(health)
+stalled_report["work_health"] = dict(health["work_health"], stalls=[{"rule": "error-repeat", "count": 3, "stream": "cmd", "key": "make test"}])
+for glyphs in (True, False):
+    for columns in (40, 60, 80, 120):
+        found = [text for text, unused in panel_work_health.lines(stalled_report, health_ranked, columns, 30, glyphs, health_main)]
+        assert ("↻" if glyphs else "stall") in found[0], (columns, found)
+        assert all(health_width(text) <= columns for text in found), (columns, found)
+wide = [text for text, unused in panel_work_health.lines(stalled_report, health_ranked, 120, 30, True, health_main)]
+assert wide[0] == "▶ running 1 · ⏸ waiting on you 3 · oldest 50m · ↻ stalls 1 · ✗ failed 4 · ✓ done 2", wide
+assert "! stalls 1" in panel_work_health.lines(stalled_report, health_ranked, 120, 30, False, health_main)[0][0]
+# Priority sits just below waiting on you and above everything else.
+by_priority = [key for prio, unused, unused_tone, unused_forms, key in
+               sorted(panel_work_health.segments(stalled_report, health_ranked, True, health_main))]
+assert by_priority[:3] == ["waiting", "stalls", "failed"] and by_priority[-1] == "done", by_priority
+narrow = panel_work_health.lines(stalled_report, health_ranked, 12, 30, True, health_main)[0][0]
+assert "⏸" in narrow and "↻" in narrow and "▶" not in narrow, narrow
+assert panel_work_health.lines(health, health_ranked, 120, 30, True, health_main)[0][0].count("↻") == 0
+# The same line leads the graph view and the control menu header, at the same widths, hidden below the row cut-off.
+for columns in (60, 80, 120):
+    for glyphs in (True, False):
+        word = "↻ stalls 1" if glyphs else "! stalls 1"
+        frames = {"graph": graph_text.render_graph(stalled_report, columns, 30, unicode=glyphs),
+                  "menu": render(stalled_report, "codex", columns, 30, unicode=glyphs, menu=True, navigation={})}
+        for view, frame in frames.items():
+            picture = frame.splitlines()
+            assert all(health_width(line) <= columns for line in picture), (view, columns, picture)
+            assert sum("⏸" in line or "waiting" in line or "you 3" in line for line in picture[:12]) >= 1, (view, columns, picture[:12])
+            if columns >= 80:
+                assert word in frame, (view, columns, glyphs, picture[:12])
+    # Hidden below the cut-offs: the graph keeps its rows for the call tree under 28, the menu header under 16.
+    assert "stalls" not in graph_text.render_graph(stalled_report, columns, 24)
+    assert "stalls" not in render(stalled_report, "codex", columns, 15, menu=True, navigation={})
+# Plain and NO_COLOR frames carry the same text as the colored ones.
+with patch.dict(os.environ, {"NO_COLOR": "1"}):
+    for build in (lambda c: graph_text.render_graph(stalled_report, 120, 30, color=c),
+                  lambda c: render(stalled_report, "codex", 120, 30, menu=True, color=c, navigation={})):
+        assert build(True) == build(False) and "\033" not in build(True)
+# oms panel --health: text and JSON carry the same segments.
+described = panel_work_health.describe(stalled_report, health_ranked, health_main)
+assert [part["id"] for part in described["segments"]][:3] == ["running", "waiting", "stalls"] and len(described["stalls"]) == 1, described
+shown = panel_health.render(stalled_report, 120, 100)
+assert any("Work: " in line and "stalls 1" in line for line in shown.splitlines()), shown
+assert "Work:" not in panel_health.render(nothing, 120, 100)
 # Repeated reviews collapse under their task and expand through the existing Past input path.
 review_group = [dict(review_member, participant="review-%s" % n, task_id="same-task") for n in range(3)]
 review_group_nav = {"tab": "past"}

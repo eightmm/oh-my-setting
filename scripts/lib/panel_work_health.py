@@ -67,8 +67,34 @@ def _unresolved(repo):
     return sum(mapping(row).get("actionable") is True for row in rows) if isinstance(rows, list) else None
 
 
+def _stalls(root, ledger):
+    """Stall findings from the detector library, called in-process; None when neither stream is recorded.
+
+    The parsed events are cached per file stamp; the detector itself is pure and cheap, so it runs every
+    collection and a finding ages out on its own (OMS_STALL_MAX_AGE) without any file changing."""
+    import stall_detect
+    progress = os.path.join(root, ".oms", "plan", "progress.jsonl")
+    stamp = (_stamp(ledger), _stamp(progress))
+    if stamp == (None, None):
+        return None
+    cached = _seen.get(("stalls", ledger))
+    if cached and cached[0] == stamp:
+        events = cached[1]
+    else:
+        events = []
+        if stamp[0] is not None:
+            events += stall_detect.ledger_events(ledger)
+        if stamp[1] is not None:
+            events += stall_detect.progress_events(progress)
+        _seen[("stalls", ledger)] = (stamp, events)
+    config = stall_detect._config()
+    found = stall_detect.detect_stalls(stall_detect._recent(events, config["max_age"]), config)
+    return [{"rule": row["rule"], "count": row["count"], "stream": row["stream"], "key": str(row["key"])[:80]}
+            for row in found]
+
+
 def collect(repo, state=None):
-    """{"unresolved": int|None, "ci": {status, conclusion, ts}|None}; fail-open. A ledger is re-read only when it changed."""
+    """{"unresolved": int|None, "ci": {...}|None, "stalls": [finding]|None}; fail-open. A ledger is re-read only when it changed."""
     root = os.fspath(repo)
     branch = mapping(mapping(state).get("repo")).get("branch")
     branch = branch if isinstance(branch, str) else ""
@@ -87,7 +113,24 @@ def collect(repo, state=None):
         else:
             out[key] = read(path)
             _seen[(key, path)] = (stamp, out[key])
+    try:
+        out["stalls"] = _stalls(root, sources[1][1])
+    except Exception:  # advisory reading: never break the collection
+        out["stalls"] = None
     return out
+
+
+def describe(report, ranked=None, main=None):
+    """The same segments as plain text plus structured counts, for `oms panel --health`."""
+    from panel_view import attention_items
+    ranked = attention_items(report, False) if ranked is None else ranked
+    if main is None:
+        from room_view import nodes
+        main = next((m for m in nodes(report) if m.get("role") == "main"), None)
+    found = sorted(segments(report, ranked, False, main), key=lambda part: part[1])
+    health = mapping(report.get("work_health"))
+    return {"segments": [{"id": key, "text": forms[0]} for unused, unused_order, unused_tone, forms, key in found],
+            "stalls": health.get("stalls") if isinstance(health.get("stalls"), list) else []}
 
 
 def _calls(report):
@@ -113,38 +156,43 @@ def segments(report, ranked, unicode, main=None):
     from room_view import context_note, plan_summary
     found = []
 
-    def add(priority, order, tone, uni, asc):
-        found.append((priority, order, tone, tuple(uni if unicode else asc)))
+    def add(key, priority, order, tone, uni, asc):
+        found.append((priority, order, tone, tuple(uni if unicode else asc), key))
 
     calls = _calls(report)
     n = calls["running"]
     if n:
-        add(3, 0, "running", ("▶ running %d" % n, "▶ run %d" % n, "▶%d" % n), ("> running %d" % n, "> run %d" % n, "run %d" % n))
+        add("running", 4, 0, "running", ("▶ running %d" % n, "▶ run %d" % n, "▶%d" % n), ("> running %d" % n, "> run %d" % n, "run %d" % n))
     needs = [item for item in ranked if item.get("cls") == "needs"]
     if needs:
         n = len(needs)
         stamps = sorted(str(item["stamp"]) for item in needs if item.get("stamp"))
         age = age_label(stamps[0]) if stamps else ""
-        add(1, 1, "alert",
+        add("waiting", 1, 1, "alert",
             ("⏸ waiting on you %d" % n + (" · oldest " + age if age else ""), "⏸ waiting %d" % n + (" · " + age if age else ""),
              "⏸%d" % n + (" " + age if age else "")),
             ("! waiting on you %d" % n + (" / oldest " + age if age else ""), "! waiting %d" % n + (" / " + age if age else ""),
              "you %d" % n + (" " + age if age else "")))
+    stalled = mapping(report.get("work_health")).get("stalls")
+    n = len(stalled) if isinstance(stalled, list) else 0
+    if n:
+        add("stalls", 2, 2, "alert", ("↻ stalls %d" % n, "↻ stalls %d" % n, "↻%d" % n),
+            ("! stalls %d" % n, "! stalls %d" % n, "stall %d" % n))
     n = calls["failed"]
     if n:
-        add(2, 2, "bad", ("✗ failed %d" % n, "✗ fail %d" % n, "✗%d" % n), ("x failed %d" % n, "x fail %d" % n, "fail %d" % n))
+        add("failed", 3, 3, "bad", ("✗ failed %d" % n, "✗ fail %d" % n, "✗%d" % n), ("x failed %d" % n, "x fail %d" % n, "fail %d" % n))
     n = calls["done"]
     if n:
-        add(8, 3, "good", ("✓ done %d" % n, "✓ done %d" % n, "✓%d" % n), ("+ done %d" % n, "+ done %d" % n, "done %d" % n))
+        add("done", 9, 4, "good", ("✓ done %d" % n, "✓ done %d" % n, "✓%d" % n), ("+ done %d" % n, "+ done %d" % n, "done %d" % n))
     summary = plan_summary(report)
     if summary and summary[2]:
         form = ("plan %d/%d tasks" % summary[1:3], "plan %d/%d" % summary[1:3], "plan %d/%d" % summary[1:3])
-        add(6, 4, "dim", form, form)
+        add("plan", 7, 5, "dim", form, form)
     health = mapping(report.get("work_health"))
     open_failures = health.get("unresolved")
     if type(open_failures) is int and open_failures > 0:
         form = ("! %d unresolved" % open_failures, "! %d unresolved" % open_failures, "! %d open" % open_failures)
-        add(5, 5, "bad", form, form)
+        add("unresolved", 6, 6, "bad", form, form)
     ci = mapping(health.get("ci"))
     if ci.get("status"):
         age = age_label(ci.get("ts"))
@@ -162,12 +210,12 @@ def segments(report, ranked, unicode, main=None):
             return ("CI %s %s%s" % (mark, word, " " + age + " ago" if age and word != "running" else ""),
                     "CI %s%s" % (mark, " " + age if age and word != "running" else " " + word),
                     "CI%s%s" % (mark, age or ""))
-        add(4, 6, tone, forms(marks[0]), forms(marks[1]))
+        add("ci", 5, 7, tone, forms(marks[0]), forms(marks[1]))
     reading = context_note(report, main) if main is not None and report.get("capacity_stale") is not True else None
     if reading:
         hot = "! " if reading[0] >= 85 else ""
         form = (hot + "ctx %d%% used" % reading[0], hot + "ctx %d%%" % reading[0], hot + "ctx %d%%" % reading[0])
-        add(7, 7, "alert" if hot else "dim", form, form)
+        add("context", 8, 8, "alert" if hot else "dim", form, form)
     return found
 
 
@@ -180,7 +228,7 @@ def lines(report, ranked, width, height, unicode, main=None):
     from panel_view import display_width
     tier = 0 if width >= 80 else 1 if width >= 50 else 2
     sep = (" · " if unicode else " / ") if tier < 2 else " "
-    found = [(prio, order, tone, forms[tier]) for prio, order, tone, forms in segments(report, ranked, unicode, main)]
+    found = [(prio, order, tone, forms[tier]) for prio, order, tone, forms, unused_key in segments(report, ranked, unicode, main)]
     if not found:
         return []
 
@@ -193,7 +241,7 @@ def lines(report, ranked, width, height, unicode, main=None):
     groups = [fit(found)]
     if width >= 100 and height >= 24 and len(groups[0]) < len(found):
         # Two lines when one cannot hold everything: work state first, then plan, failures, CI and context.
-        groups = [part for part in (fit([p for p in found if p[1] <= 3]), fit([p for p in found if p[1] > 3])) if part]
+        groups = [part for part in (fit([p for p in found if p[1] <= 4]), fit([p for p in found if p[1] > 4])) if part]
     rows = []
     for parts in groups:
         spans = []

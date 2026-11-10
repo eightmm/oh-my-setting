@@ -471,14 +471,16 @@ def main(argv=None):
         if args.health:
             import panel_health
             from panel_metrics import collect
+            import panel_work_health
             if args.room:
                 state, status = snapshot(repo, room_id=args.room)
                 state["provider_status"] = collect(state, repo=repo)
                 state["private_capacity"] = private_capacity(repo)
+                state["work_health"] = panel_work_health.collect(repo, state)
             else:
                 state, status, *_ = read_panel(repo, caller_owner(), None, False)
             if args.json:
-                print(json.dumps(panel_health.project(state), ensure_ascii=False))
+                print(json.dumps(dict(panel_health.project(state), work=panel_work_health.describe(state)), ensure_ascii=False))
             else:
                 print(panel_health.render(state, 120, 100))
             return status
