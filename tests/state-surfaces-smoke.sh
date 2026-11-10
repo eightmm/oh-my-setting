@@ -562,7 +562,7 @@ assert [tool["name"] for tool in core] == [
     "oms_project_graph_affected"], core
 with open(os.environ["OMS_T_FULL"], encoding="utf-8") as fh:
     full = {row["id"]: row for row in map(json.loads, fh)}[2]["result"]["tools"]
-assert len(full) == 26, len(full)
+assert len(full) == 27, len(full)
 assert all(tool in full for tool in core), "profile changed schemas or annotations"
 assert not rows[2]["result"]["isError"], rows[2]
 assert rows[3]["result"]["resources"][0]["uri"] == "ui://oms/project-graph/v1.html", rows[3]

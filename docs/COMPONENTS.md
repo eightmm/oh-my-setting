@@ -2225,7 +2225,7 @@ oversized input is rejected before provider argv or prompt files are built.
 By default `tools/list` exposes 12 core tools: inbox, repo state, journal,
 handoff list/read, peer start/result/operations, and graph render/query/trace/
 affected. Set `OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment
-and restart its connection to discover all 26 tools; `core` is the default.
+and restart its connection to discover all 27 tools; `core` is the default.
 The profile is fixed at process startup, so cached discovery is stable.
 Unlisted registered tools remain callable for existing clients: this setting
 reduces discovery overhead, not permissions. Schemas, annotations, UI resources,
