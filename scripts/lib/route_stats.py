@@ -5,10 +5,26 @@ stream and the owner decisions; nothing is stored here and nothing is applied. A
 line is reported history for a person to weigh, never a routing decision.
 """
 
+import os
 import statistics
+from pathlib import Path
 
 DECIDED = ("accepted", "completed", "rejected", "failed")
 DEFAULT_MIN_SAMPLES = 3
+
+
+def _env_number(name, default, kind):
+    try:
+        value = kind(os.environ.get(name) or default)
+    except ValueError:
+        return default
+    return value if 0 < value <= 1 else default
+
+
+# Estimates, not measured optima. A pair is nominated when the rarer role shares a task at least
+# this often; a best-to-worst admit-rate gap under the noise band is reported as no clear difference.
+FOLD_CO_OCCURRENCE = _env_number("OMS_FOLD_CO_OCCURRENCE", 0.8, float)
+MODEL_GAP_NOISE = _env_number("OMS_MODEL_GAP_NOISE", 0.15, float)
 
 
 def _clean(value, fallback):
@@ -55,6 +71,110 @@ def route_history(rows, reworked, min_samples=DEFAULT_MIN_SAMPLES):
             "note": "reported history, not a decision; nothing is applied"}
 
 
+def known_roles():
+    """Role names shipped with this checkout (roles/*.md); empty when the directory is absent."""
+    directory = Path(__file__).resolve().parents[2] / "roles"
+    return sorted(path.stem for path in directory.glob("*.md")) if directory.is_dir() else []
+
+
+def _tally(rows, keyfn):
+    out = {}
+    for row in rows:
+        entry = out.setdefault(keyfn(row), {"attempts": 0, "tokens": [], "tasks": {}})
+        entry["attempts"] += 1
+        if isinstance(row.get("tokens"), int) and not isinstance(row.get("tokens"), bool):
+            entry["tokens"].append(row["tokens"])
+        entry["tasks"].setdefault(row["task"], row["bucket"])
+    return out
+
+
+def _decided(entry):
+    buckets = list(entry["tasks"].values())
+    decided = sum(bucket in DECIDED for bucket in buckets)
+    return decided, buckets.count("accepted")
+
+
+def role_fold_audit(rows, min_samples=DEFAULT_MIN_SAMPLES, roles=None):
+    """Per-role use in the window plus role pairs that almost always share a task.
+
+    Nominates only: the reported history cannot show that a folded version would measure worse.
+    """
+    roles = known_roles() if roles is None else roles
+    tally = _tally(rows, lambda row: _clean(row.get("role"), "unknown"))
+    per_role = []
+    for role, entry in sorted(tally.items()):
+        decided, admitted = _decided(entry)
+        per_role.append({"role": role, "attempts": entry["attempts"], "tasks": len(entry["tasks"]),
+                         "decided": decided, "admitted": admitted,
+                         "admit_rate": round(admitted / decided, 4) if decided >= min_samples else None})
+    names = sorted(role for role in tally if role != "unknown")
+    pairs = []
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            one, two = set(tally[first]["tasks"]), set(tally[second]["tasks"])
+            rarer, shared = min(len(one), len(two)), len(one & two)
+            if rarer >= min_samples and shared / rarer >= FOLD_CO_OCCURRENCE:
+                pairs.append({"roles": [first, second], "shared_tasks": shared, "rarer_role_tasks": rarer,
+                              "co_occurrence": round(shared / rarer, 4)})
+    return {"min_samples": min_samples, "co_occurrence_threshold": FOLD_CO_OCCURRENCE,
+            "roles": per_role, "never_used": sorted(set(roles) - set(tally)), "pairs": pairs,
+            "note": "fold candidates (reported history, not a decision); thresholds are estimates; "
+                    "fold one at a time and keep a role only if the folded version measures worse"}
+
+
+def model_preference(rows, min_samples=DEFAULT_MIN_SAMPLES):
+    """Per role, provider/model groups side by side when at least two have enough decided tasks."""
+    tally = _tally(rows, lambda row: (_clean(row.get("role"), "unknown"),
+                                      _clean(row.get("provider"), "unknown"), _clean(row.get("model"), "unknown")))
+    by_role = {}
+    for (role, provider, model), entry in sorted(tally.items()):
+        decided, admitted = _decided(entry)
+        if decided < min_samples:
+            continue
+        by_role.setdefault(role, []).append({
+            "provider": provider, "model": model, "decided": decided, "admitted": admitted,
+            "admit_rate": round(admitted / decided, 4),
+            "median_tokens": statistics.median(entry["tokens"]) if entry["tokens"] else None})
+    roles = {}
+    for role, groups in by_role.items():
+        if len(groups) < 2:
+            continue
+        groups.sort(key=lambda item: (-item["admit_rate"], -item["decided"], item["provider"], item["model"]))
+        gap = round(groups[0]["admit_rate"] - groups[-1]["admit_rate"], 4)
+        roles[role] = {"groups": groups, "gap": gap, "clear": gap >= MODEL_GAP_NOISE}
+    return {"min_samples": min_samples, "noise_threshold": MODEL_GAP_NOISE, "roles": roles,
+            "note": "reported history, not a decision; the noise threshold is an estimate"}
+
+
+def fold_text(report):
+    lines = []
+    audit = report.get("role_fold_audit")
+    if audit:
+        lines.append("fold candidates (reported history, not a decision; thresholds are estimates):")
+        for item in audit["roles"]:
+            rate = "n<%d" % audit["min_samples"] if item["admit_rate"] is None else "%.1f%%" % (item["admit_rate"] * 100)
+            lines.append("fold role %s: attempts=%d decided=%d admit=%s" % (
+                item["role"], item["attempts"], item["decided"], rate))
+        lines.append("fold never used in window: %s" % (", ".join(audit["never_used"]) or "none"))
+        for pair in audit["pairs"]:
+            lines.append("fold pair %s + %s: same task %d/%d (%.0f%%, threshold %.0f%%)" % (
+                pair["roles"][0], pair["roles"][1], pair["shared_tasks"], pair["rarer_role_tasks"],
+                pair["co_occurrence"] * 100, audit["co_occurrence_threshold"] * 100))
+        if not audit["pairs"]:
+            lines.append("fold pairs: none")
+    preference = report.get("model_preference")
+    if preference:
+        for role, entry in preference["roles"].items():
+            side = "; ".join("%s/%s admit %.1f%% over %d decided median_tokens=%s" % (
+                g["provider"], g["model"], g["admit_rate"] * 100, g["decided"],
+                "none" if g["median_tokens"] is None else "%g" % g["median_tokens"]) for g in entry["groups"])
+            verdict = ("gap %.1f points" % (entry["gap"] * 100)) if entry["clear"] else "no clear difference (gap %.1f points)" % (entry["gap"] * 100)
+            lines.append("model preference %s: %s; %s" % (role, side, verdict))
+        if not preference["roles"]:
+            lines.append("model preference: no role has two groups with >= %d decided" % preference["min_samples"])
+    return lines
+
+
 def route_text(report):
     history = report.get("route_history") or {}
     lines = []
@@ -69,4 +189,5 @@ def route_text(report):
     for role, best in history.get("suggest", {}).items():
         lines.append("suggest %s: %s/%s effort=%s admit %.1f%% over %d decided (reported history, not a decision)" % (
             role, best["provider"], best["model"], best["effort"], best["admit_rate"] * 100, best["decided"]))
+    lines.extend(fold_text(report))
     return "\n".join(lines)

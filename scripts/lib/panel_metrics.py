@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from dashboard_projection import clean, mapping, number
 from call_ending import call_ending
-from route_stats import route_history, route_text
+from route_stats import model_preference, role_fold_audit, route_history, route_text
 from panel_view import TERMINAL_STATES
 
 
@@ -1293,6 +1293,8 @@ def aggregate(repo, since=None, now=None, min_samples=3):
             "tokens_by_decision": token_decisions,
             "decisions_by_model": decisions_by_model,
             "route_history": route_history(route_rows, reworked, min_samples),
+            "role_fold_audit": role_fold_audit(route_rows, min_samples),
+            "model_preference": model_preference(route_rows, min_samples),
             "coordination": coordination,
             "write_attempts": {"total": len(delegate_writes), "states": state_totals,
                                "state_counts": delegate_states,

@@ -2855,6 +2855,40 @@ with tempfile.TemporaryDirectory() as metrics_repo:
                    if row["refs"]["panel_access"] == "write" else row for n, row in enumerate(attempt_rows)]
     tuned = collect_coordination(effort_rows)["route_history"]["groups"][0]
     assert tuned["effort"] == "high" and tuned["median_tokens"] == 350 and tuned["token_reports"] == 6, tuned
+    # Fold audit and per-role model preference come from the same rows; they nominate, never decide.
+    import route_stats
+    audit = measured["role_fold_audit"]
+    assert [(r["role"], r["attempts"], r["decided"], r["admit_rate"]) for r in audit["roles"]] == [
+        ("builder", 6, 3, 0.6667)], audit
+    assert "builder" not in audit["never_used"] and "reviewer" in audit["never_used"], audit
+    assert audit["pairs"] == [] and measured["model_preference"]["roles"] == {}, measured
+    assert "fold candidates (reported history, not a decision" in text and "fold never used in window:" in text, text
+    assert "model preference: no role has two groups" in text, text
+    def fold_row(role, task, bucket, model="m1", tokens=None):
+        return {"role": role, "provider": "codex", "model": model, "effort": None,
+                "task": task, "bucket": bucket, "tokens": tokens}
+    fold_rows = [fold_row("builder", "t%d" % n, "accepted") for n in range(4)]
+    fold_rows += [fold_row("documenter", "t%d" % n, "accepted") for n in range(3)]
+    fold_rows += [fold_row("critic", "t0", "accepted"), fold_row("critic", "x1", "rejected")]
+    pairs = route_stats.role_fold_audit(fold_rows, 3, ["builder", "critic", "documenter", "scholar"])
+    assert pairs["pairs"] == [{"roles": ["builder", "documenter"], "shared_tasks": 3,
+                               "rarer_role_tasks": 3, "co_occurrence": 1.0}], pairs
+    assert pairs["never_used"] == ["scholar"], pairs
+    assert [r["admit_rate"] for r in pairs["roles"] if r["role"] == "critic"] == [None], pairs
+    assert route_stats.role_fold_audit(fold_rows, 4, [])["pairs"] == [], "rarer role below min-samples"
+    split = [fold_row("builder", "a%d" % n, "accepted" if n < 4 else "rejected", "big", 900) for n in range(5)]
+    split += [fold_row("builder", "b%d" % n, "accepted" if n < 2 else "rejected", "small", 100) for n in range(5)]
+    pref = route_stats.model_preference(split, 3)["roles"]["builder"]
+    assert pref["gap"] == 0.4 and pref["clear"] and pref["groups"][0]["model"] == "big", pref
+    assert pref["groups"][0]["median_tokens"] == 900 and pref["groups"][1]["median_tokens"] == 100, pref
+    close = [fold_row("builder", "a%d" % n, "accepted" if n < 4 else "rejected", "big", 900) for n in range(5)]
+    close += [fold_row("builder", "b%d" % n, "accepted" if n < 3 else "rejected", "small", 100) for n in range(4)]
+    close += [fold_row("builder", "b4", "accepted", "small", 100)]
+    same = route_stats.model_preference(close, 3)["roles"]["builder"]
+    assert not same["clear"], same
+    quiet = {"model_preference": route_stats.model_preference(close, 3), "role_fold_audit": None}
+    assert "no clear difference" in "\n".join(route_stats.fold_text(quiet)), quiet
+    assert route_stats.model_preference(split, 6)["roles"] == {}, "groups under min-samples are dropped"
     # No write pair, no second round and no review is a missing denominator,
     # rather than a 0% rate. Small provider/role cells stay in JSON only.
     empty = collect_coordination([], [])
