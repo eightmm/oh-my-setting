@@ -23909,6 +23909,67 @@ assert evs[0]["row"]["run_id"] == "r1", evs[0]
     fail "timeline --tool should include matching rows"
 }
 
+test_oms_run_checkpoints_flags_piles_and_never_deletes() {
+  local d="$TMP/ckpt-audit"
+  local SH="$ROOT/scripts/run.sh"
+  local out rc=0 n
+
+  mkdir -p "$d/checkpoints/ok" "$d/checkpoints/pile" "$d/checkpoints/topk" "$d/outside"
+  printf 'x' > "$d/checkpoints/ok/latest.pt"
+  printf 'x' > "$d/checkpoints/ok/best.pt"
+  printf 'x' > "$d/checkpoints/ok/notes.txt"
+  for n in 001 002 003; do printf 'xxxx' > "$d/checkpoints/pile/epoch_$n.pt"; done
+  printf 'x' > "$d/checkpoints/topk/best.pt"
+  printf 'x' > "$d/checkpoints/topk/best.safetensors"
+  printf 'x' > "$d/checkpoints/topk/latest.pt"
+  # A symlinked directory and file holding checkpoints must not be followed.
+  printf 'x' > "$d/outside/epoch_9.pt"
+  ln -s "$d/outside" "$d/checkpoints/linked"
+  ln -s "$d/outside/epoch_9.pt" "$d/checkpoints/ok/link.pt"
+
+  out="$(cd "$d" && "$SH" checkpoints)" || fail "checkpoints should exit 0 without --strict"
+  contains "$out" "ok: checkpoints/ok  2 files" || fail "conforming dir should be ok and ignore symlinks and non-checkpoints: $out"
+  contains "$out" "warn: checkpoints/pile holds 3 checkpoint files (12 B)" || fail "per-epoch pile should warn: $out"
+  contains "$out" "epoch_001.pt" || fail "warning should name example files: $out"
+  contains "$out" "warn: checkpoints/topk holds 3 checkpoint files" || fail "3 files exceed the default max 2: $out"
+  if contains "$out" "outside" || contains "$out" "epoch_9"; then
+    fail "symlinks must not be followed: $out"
+  fi
+  contains "$out" 'has no "- Checkpoints:" value' || fail "should say PROJECT.md names no directory: $out"
+  contains "$out" "nothing was deleted" || fail "summary should say nothing was deleted: $out"
+
+  out="$(cd "$d" && "$SH" checkpoints checkpoints/topk --max 5)" || fail "--max 5 run should exit 0"
+  contains "$out" "ok: checkpoints/topk  3 files" || fail "--max 5 should accept the top-k dir: $out"
+
+  (cd "$d" && "$SH" checkpoints --strict >/dev/null) || rc=$?
+  [ "$rc" = 1 ] || fail "--strict should exit 1 when a directory warns, got $rc"
+  rc=0
+  (cd "$d" && "$SH" checkpoints checkpoints/ok --strict >/dev/null) || rc=$?
+  [ "$rc" = 0 ] || fail "--strict should exit 0 when every directory conforms, got $rc"
+  rc=0
+  (cd "$d" && "$SH" checkpoints --max x >/dev/null 2>&1) || rc=$?
+  [ "$rc" = 2 ] || fail "bad --max should exit 2, got $rc"
+  rc=0
+  (cd "$d" && "$SH" checkpoints no-such-dir >/dev/null 2>&1) || rc=$?
+  [ "$rc" = 2 ] || fail "a missing DIR should exit 2, got $rc"
+
+  out="$(cd "$d" && "$SH" checkpoints --json)" || fail "--json should exit 0"
+  printf '%s' "$out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["schema"] == 1 and d["kind"] == "oms-run-checkpoints", d
+assert d["deleted"] == 0 and d["max"] == 2, d
+runs = {r["path"]: r for r in d["runs"]}
+assert set(runs) == {"checkpoints/ok", "checkpoints/pile", "checkpoints/topk"}, runs
+assert runs["checkpoints/ok"]["follows_default"] is True, runs
+assert runs["checkpoints/pile"]["follows_default"] is False and runs["checkpoints/pile"]["bytes"] == 12, runs
+assert d["totals"]["warnings"] == 2 and d["totals"]["files"] == 8, d["totals"]
+' || fail "--json must emit the schema-1 oms-run-checkpoints shape"
+
+  [ -f "$d/checkpoints/pile/epoch_003.pt" ] && [ -f "$d/outside/epoch_9.pt" ] ||
+    fail "checkpoints must never be deleted"
+}
+
 # smoke-weight: 7
 test_agent_plan_reclaim_requeues_stale_claim() {
   local d="$TMP/plan-reclaim"
@@ -45041,6 +45102,7 @@ import-agent-result
 install-autoupdate
 install-plan
 run-capsule
+run-checkpoints
 run-claims
 uninstall-autoupdate
 write-machine-snapshot

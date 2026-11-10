@@ -2107,6 +2107,18 @@ reference docs require `--full-docs` and never overwrite existing files.
 ML/Slurm workflows use local-first experiment controls:
 
 - `oms run new/current/show/timeline` for the run spine.
+- `oms run checkpoints [DIR ...] [--max N] [--strict] [--json]` is a read-only
+  check that a run keeps only the latest and best checkpoint. A run directory
+  is any directory that directly holds regular files ending `.pt .pth .ckpt
+  .safetensors .bin .h5 .keras .msgpack` (symlinks are not followed; the walk
+  stops at 2000 directories or 50000 files and says so). It reads sizes with
+  stat only and prints, per directory, the file count and total size, then
+  `ok:` when every file has the stem `latest` or `best` and there are at most
+  `--max` (default 2), else one `warn:` line with up to three example names. With no DIR it scans
+  `checkpoints/` plus the directories on the `- Checkpoints:` line of
+  PROJECT.md. A project that opted in to keep more raises `--max`. Exit 0;
+  `--strict` exits 1 when any directory warns; 2 on bad usage. `--json` is
+  schema 1, kind `oms-run-checkpoints`. OMS never deletes checkpoints.
 - `oms run capsule` for reproducibility capture and replay metadata. Its
   environment block records what is present and null otherwise: interpreter,
   python/torch/cuda, GPU names and count, package freeze digest, host and CPU
