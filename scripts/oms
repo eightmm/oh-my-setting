@@ -248,6 +248,7 @@ run-ledger
 run-reconcile
 runtime
 scratch-worktree
+session
 session-handoff
 skill-doctor
 skill-forge
