@@ -10,7 +10,8 @@ from . import RUNTIME_SCHEMA
 from .common import MAX_JSONL_ROWS, CoreError, append_jsonl, read_json, read_jsonl, sha256_bytes, sha256_file, utc_now
 from .common import install_root, run_output
 from .execution import run as run_execution
-from .experiment_contract import budget_status, load_contract, require_run_budget, run_index, validate
+from .experiment_budget import budget_status, require_run_budget, reserve_run, settle_run
+from .experiment_contract import load_contract, run_index, validate
 import json as _json
 import subprocess as _subprocess
 
@@ -77,6 +78,20 @@ def _metrics_snapshot(path: Path) -> Optional[Dict[str, Any]]:
     info = path.stat()
     return {'sha256': sha256_file(path), 'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
 
+def _execute(repo, run_id, profile, command, metrics_path, experiment_id, arm, seed, timeout_seconds, image, adapter, worktree):
+    if profile == 'trusted-local':
+        # One run, one authority: the existing run ledger executes the command
+        # and owns the record (command, commit, duration, exit); the runtime
+        # row is a projection linked by the shared operation id, never a
+        # second ledger with its own identity for the same run.
+        receipt, rc = _run_through_ledger(repo, run_id, command, metrics_path, experiment_id, arm, seed, timeout_seconds)
+        return (receipt, rc, receipt.get('ledger_id', ''))
+    # Backend-isolated profiles execute through the runtime backend so the
+    # isolation receipt is real; the ledger linkage is honestly absent and
+    # recorded as such rather than fabricated.
+    receipt, rc = run_execution(profile, repo, command, timeout_seconds=timeout_seconds, image=image, adapter=adapter, worktree=worktree, log_path=repo / '.oms' / 'experiments' / 'logs' / (run_id + '.log'))
+    return (receipt, rc, '')
+
 def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path: Path, command: Sequence[str], *, profile: str='trusted-local', timeout_seconds: int=86400, image: str='', adapter: str='', worktree: Optional[Path]=None, allow_existing_metrics: bool=False, budget_reason: str='') -> Tuple[Dict[str, Any], int]:
     contract = load_contract(repo, experiment_id)
     if arm not in ('baseline', 'treatment'):
@@ -88,19 +103,16 @@ def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path
     if before is not None and (not allow_existing_metrics):
         raise CoreError('metrics file already exists; refuse stale reuse unless --allow-existing-metrics is explicit')
     run_id = 'experiment-run-' + uuid.uuid4().hex
-    ledger_id = ''
-    if profile == 'trusted-local':
-        # One run, one authority: the existing run ledger executes the command
-        # and owns the record (command, commit, duration, exit); the runtime
-        # row below is a projection linked by the shared operation id, never a
-        # second ledger with its own identity for the same run.
-        receipt, rc = _run_through_ledger(repo, run_id, command, metrics_path, experiment_id, arm, seed, timeout_seconds)
-        ledger_id = receipt.get('ledger_id', '')
-    else:
-        # Backend-isolated profiles execute through the runtime backend so the
-        # isolation receipt is real; the ledger linkage is honestly absent and
-        # recorded as such rather than fabricated.
-        receipt, rc = run_execution(profile, repo, command, timeout_seconds=timeout_seconds, image=image, adapter=adapter, worktree=worktree, log_path=repo / '.oms' / 'experiments' / 'logs' / (run_id + '.log'))
+    # The preflight above reserves nothing; this takes the run's share of
+    # budget.runs under the state lock, so concurrent starts cannot all pass.
+    reserved_override, reserved = reserve_run(repo, contract, experiment_id, run_id, budget_reason, 'run')
+    budget_override = reserved_override or budget_override
+    try:
+        receipt, rc, ledger_id = _execute(repo, run_id, profile, command, metrics_path, experiment_id, arm, seed, timeout_seconds, image, adapter, worktree)
+    except BaseException as exc:
+        if reserved:
+            settle_run(repo, contract, run_id, 'released', 'run ended without a record: %s' % (str(exc) or type(exc).__name__))
+        raise
     after = _metrics_snapshot(metrics_path)
     stale_metrics = before is not None and after is not None and (before.get('sha256') == after.get('sha256')) and (before.get('size') == after.get('size'))
     metrics = None if stale_metrics else read_json(metrics_path, default=None)
@@ -127,7 +139,14 @@ def record_run(repo: Path, experiment_id: str, arm: str, seed: int, metrics_path
     row = {'schema': 1, 'run_id': run_id, 'created_at': utc_now(), 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'arm': arm, 'seed': seed, 'execution_receipt': receipt.get('receipt'), 'execution_operation_id': receipt.get('operation_id'), 'ledger_id': ledger_id or None, 'exit': effective_exit, 'command_exit': rc, 'metric': contract['primary_metric'], 'metric_value': metric_value, 'metrics': numeric, 'metrics_digest': after.get('sha256') if after and (not stale_metrics) else None, 'metric_error': metric_error, 'missing_required_metrics': missing_required_metrics, 'metrics_valid': metrics_valid, 'stale_metrics': stale_metrics}
     if budget_override:
         row['budget_override_reason'] = budget_override
-    append_jsonl(run_index(repo), row)
+    try:
+        append_jsonl(run_index(repo), row)
+    except BaseException as exc:
+        if reserved:
+            settle_run(repo, contract, run_id, 'released', 'run row not written: %s' % (str(exc) or type(exc).__name__))
+        raise
+    if reserved:
+        settle_run(repo, contract, run_id, 'used')
     return (row, effective_exit)
 
 def _bootstrap_ci(values: Sequence[float], seed_text: str, samples: int=2000) -> Optional[List[float]]:
@@ -239,7 +258,7 @@ def summarize(repo: Path, experiment_id: str) -> Dict[str, Any]:
     summary = {'schema': RUNTIME_SCHEMA, 'experiment_id': experiment_id, 'contract_digest': contract['contract_digest'], 'metric': primary, 'direction': contract['metrics']['primary']['direction'], 'arms': arms, 'complete': complete, 'data_complete': data_complete, 'improvement': improvement, 'min_improvement': float(contract['success'].get('min_improvement', 0.0)), 'primary_pass': primary_pass, 'no_regression': no_regression, 'invariants': {'required': invariant_required, 'complete': invariant_complete, 'passed': invariant_pass, 'result': invariant_result}, 'verdict': verdict}
     if contract['success'].get('noise_band') is not None:
         summary['noise_band'] = noise
-    budget = budget_status(repo, contract)
+    budget = budget_status(repo, contract, experiment_id)
     if budget is not None:
         summary['budget'] = budget
     return summary

@@ -5,17 +5,35 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 from .common import CoreError, install_root, read_json
-from .experiment_contract import require_run_budget, validate
+from .experiment_budget import require_run_budget, reserve_run, settle_run
+from .experiment_contract import validate
 
 RESEARCH_NOTE_MAX_CHARS = 1600
+
+
+def _ledger_has(ledger: Path, run_id: str) -> bool:
+    try:
+        raw = ledger.read_bytes().splitlines()
+    except OSError:
+        return False
+    for line in raw:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get('operation_id') == run_id:
+            return True
+    return False
 
 
 def launch(repo: Path, args) -> int:
     names = ('question', 'hypothesis', 'prediction', 'baseline', 'metric', 'success', 'change')
     fields = {name: getattr(args, name) for name in names}
+    contract = None
     if args.contract:
         path = Path(args.contract).expanduser()
         contract = validate(read_json(path if path.is_absolute() else repo / path))
@@ -83,5 +101,23 @@ def launch(repo: Path, args) -> int:
         print('experiment launch: launching registered experiment', file=sys.stderr, flush=True)
         env = dict(os.environ, OMS_RESEARCH_METADATA_FILE=str(metadata),
                    OMS_WORK_JOURNAL_EVENT_TYPE='experiment')
-        rc = subprocess.run(cmd, cwd=repo, env=env, check=False).returncode
+        # The preflight above reserved nothing: take the run's share of
+        # budget.runs under the state lock, and settle it from the run ledger.
+        run_id = 'experiment-run-' + uuid.uuid4().hex
+        reserved = False
+        if contract is not None:
+            _, reserved = reserve_run(repo, contract, '', run_id, args.reason, 'launch')
+        if reserved:
+            env['OMS_OPERATION_ID'] = run_id
+        try:
+            rc = subprocess.run(cmd, cwd=repo, env=env, check=False).returncode
+        except BaseException as exc:
+            if reserved:
+                settle_run(repo, contract, run_id, 'released', 'launch ended without a record: %s' % (str(exc) or type(exc).__name__))
+            raise
+        if reserved:
+            ledger = Path(args.file).expanduser() if args.file else Path('docs') / 'EXPERIMENTS.jsonl'
+            recorded = _ledger_has(ledger if ledger.is_absolute() else repo / ledger, run_id)
+            settle_run(repo, contract, run_id, 'used' if recorded else 'released',
+                       '' if recorded else 'the run ledger did not record this run')
         return rc if rc >= 0 else 128 - rc

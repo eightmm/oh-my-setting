@@ -760,13 +760,31 @@ A contract fixes:
 - invariant commands
 - optional `budget`: `{"runs": N, "gpu_hours": H, "final_evals": K}`, any
   subset. It is part of the contract digest. `experiment summarize` reports
-  `runs` used and remaining from the run index, and once the count reaches the
-  limit `experiment run` and `experiment launch --contract` refuse another run
-  unless `--reason TEXT` is given; `experiment run` records the reason on the
-  run row. A run already going is never cancelled. `gpu_hours` and
-  `final_evals` are stated limits only: `summarize` shows them with `used:
-  null` and where to look (`oms run-reconcile usage --experiment ID`), because
-  nothing here counts them yet.
+  `runs` as `used`, `reserved`, `remaining` and `limit`. Before a run starts,
+  `experiment run` and `experiment launch --contract` take the state lock,
+  count used + reserved again and append a `reserved` row (run id, time, pid,
+  host) to `.oms/experiments/budget-reservations.jsonl`; only then does the
+  command start, so runs started at the same time cannot all pass the
+  remaining budget. When the run ends a `settled` row turns the reservation
+  into a used run, or `released` when it ended without any record (the ledger
+  or the backend failed, a timeout, an interrupt); a command that ran and
+  exited non-zero is a recorded run and stays used. A launch counts once the
+  run ledger holds its row. Once used + reserved reaches the limit another run
+  is refused unless `--reason TEXT` is given; the reason is recorded on the
+  reservation and, for `experiment run`, on the run row. A run already going
+  is never cancelled. A reservation older than an hour whose process is gone
+  (same host, no such pid) is listed under `runs.stale` as `stale
+  reservation: ...`, is not counted, and is never deleted; a reservation from
+  another host cannot be checked and keeps counting. This is OMS's own usage
+  ledger, not a Slurm reservation: it does not hold nodes, and was not checked
+  on a real Slurm cluster. `gpu_hours` is the sum of `gpu_hours` in the
+  `oms run-reconcile` usage rows of jobs the run ledger tags
+  `experiment=ID` (`experiment run`; `experiment launch` carries no id, so its
+  jobs are not attributed), `null` when none is reconciled, and reported, not
+  enforced. `final_evals` stays `used: null`: no evaluation on a final split
+  is recorded on this branch; the `run-ledger` test-split count change
+  (branch `oms/run-ledger-test-split-count`) would supply it. Nothing is
+  estimated.
 
 `oms runtime experiment sweep plan FILE` enumerates a hyperparameter grid
 without running or submitting anything. The file is
