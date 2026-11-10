@@ -154,11 +154,15 @@ def frame_view(repo, provider, state, previous=None, menu=True, main_attempt=Non
 
 def _show_state(repo, main_attempt=None, navigation=None, cache=None):
     # A cache lets key presses redraw the last snapshot instead of collecting a new one.
-    from terminal_panel import hold_state, snapshot
+    from terminal_panel import hold_state, refresh_failed, snapshot
     if cache is not None and "state" in cache:
         state, status = cache["state"], cache["status"]
     else:
         state, status = snapshot(repo)
+        if not refresh_failed(state):
+            # In place, before hold_state: the held good state then keeps its read marks and stays the same object.
+            import panel_attention_read
+            state["attention_read"] = panel_attention_read.load(repo, os.environ.get("OMS_ROOM_ID", ""))
         if cache is not None:
             state, status, notice = hold_state(cache.setdefault("held", {}), state, status, os.environ.get("OMS_ROOM_ID", ""))
             if navigation is not None:
@@ -166,8 +170,6 @@ def _show_state(repo, main_attempt=None, navigation=None, cache=None):
         from panel_metrics import collect
         if state.get("room", {}).get("participants"):
             state = dict(state, provider_status=collect(state, main_attempt, repo=repo))
-        import panel_attention_read
-        state = dict(state, attention_read=panel_attention_read.load(repo, os.environ.get("OMS_ROOM_ID", "")))
         if cache is not None:
             cache.update(state=state, status=status)
     return state, status
