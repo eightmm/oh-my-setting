@@ -1609,7 +1609,7 @@ class RuntimeFixture(RuntimeFixtureBase):
         metrics = self.repo / 'metrics-capped.json'
         command = [sys.executable, '-c', "import json; json.dump({'score': 1.0, 'memory': 10.0}, open(%r,'w'))" % metrics.name]
         before = experiment.summarize(self.repo, 'exp-capped')['budget']
-        self.assertEqual(before['runs'], {'limit': 1, 'used': 0, 'remaining': 1, 'exceeded': False})
+        self.assertEqual(before['runs'], {'limit': 1, 'used': 0, 'reserved': 0, 'remaining': 1, 'exceeded': False, 'stale': []})
         self.assertIsNone(before['gpu_hours']['used'])
         self.assertIsNone(before['final_evals']['used'])
         _, rc = experiment.record_run(self.repo, 'exp-capped', 'baseline', 0, metrics, command, timeout_seconds=10)
@@ -1658,6 +1658,106 @@ class RuntimeFixture(RuntimeFixtureBase):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertIn('past the contract run budget (confirming seed)', allowed.stderr)
         self.assertEqual(ledger.read_bytes(), snapshot)
+
+    def test_experiment_budget_reserves_before_a_run_starts(self) -> None:
+        import time
+        contract = dict(self._experiment(), budget={'runs': 1, 'gpu_hours': 4, 'final_evals': 2})
+        experiment.register(self.repo, contract, 'exp-race')
+        resv = self.repo / '.oms' / 'experiments' / 'budget-reservations.jsonl'
+        cli = [sys.executable, str(ROOT / 'scripts/lib/oms_core.py'), '--repo', str(self.repo), 'experiment', 'run',
+               '--id', 'exp-race', '--seed', '0']
+        script = "import json,time; time.sleep(2); json.dump({'score': 1.0, 'memory': 10.0}, open(%r,'w'))"
+        procs = []
+        for arm in ('baseline', 'treatment'):
+            metrics = 'metrics-race-%s.json' % arm
+            procs.append(subprocess.Popen(cli + ['--arm', arm, '--metrics', metrics, '--', sys.executable, '-c', script % metrics],
+                                          cwd=str(self.repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        results = [(p.wait(), ) + p.communicate() for p in procs]
+        codes = sorted(code for code, _, _ in results)
+        self.assertEqual(codes, [0, 2], results)
+        self.assertEqual(len(read_jsonl(self.repo / '.oms' / 'experiments' / 'runs.jsonl')), 1)
+        refused = [err for code, _, err in results if code == 2][0]
+        self.assertIn('run budget spent: 1 of 1 run(s) recorded or reserved', refused)
+        rows = read_jsonl(resv)
+        self.assertEqual([row['kind'] for row in rows], ['reserved', 'settled'])
+        self.assertEqual(rows[1]['outcome'], 'used')
+        self.assertEqual({'pid', 'host', 'created_at', 'run_id'} - set(rows[0]), set())
+        runs = experiment.summarize(self.repo, 'exp-race')['budget']['runs']
+        self.assertEqual((runs['used'], runs['reserved'], runs['remaining']), (1, 0, 0))
+
+        # A run that ends without a record releases its reservation.
+        experiment.register(self.repo, dict(contract, budget={'runs': 1}), 'exp-release')
+        with self.assertRaises(CoreError):
+            experiment.record_run(self.repo, 'exp-release', 'baseline', 0, self.repo / 'm-rel.json',
+                                  [sys.executable, '-c', 'pass'], profile='isolated', timeout_seconds=5)
+        rows = [row for row in read_jsonl(resv) if row.get('experiment_id') in ('exp-release', None)]
+        self.assertEqual([row['kind'] for row in rows[-2:]], ['reserved', 'settled'])
+        self.assertEqual(rows[-1]['outcome'], 'released')
+        after = experiment.summarize(self.repo, 'exp-release')['budget']['runs']
+        self.assertEqual((after['used'], after['reserved'], after['exceeded']), (0, 0, False))
+
+        # A reservation held by a live run counts; one whose process is gone and
+        # that is old enough is reported as stale and not counted, and stays in the file.
+        registered = experiment.register(self.repo, dict(contract, budget={'runs': 2}), 'exp-stale')
+        digest = registered['contract_digest']
+        import socket
+        dead = subprocess.Popen([sys.executable, '-c', 'pass'])
+        dead.wait()
+        base = {'schema': 1, 'kind': 'reserved', 'contract_digest': digest, 'experiment_id': 'exp-stale', 'host': socket.gethostname()}
+        append_jsonl(resv, dict(base, run_id='r-live', pid=os.getpid(), created_at='2020-01-01T00:00:00Z'))
+        append_jsonl(resv, dict(base, run_id='r-fresh', pid=dead.pid, created_at=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
+        append_jsonl(resv, dict(base, run_id='r-stale', pid=dead.pid, created_at='2020-01-01T00:00:00Z'))
+        before = resv.read_bytes()
+        runs = experiment.summarize(self.repo, 'exp-stale')['budget']['runs']
+        self.assertEqual((runs['used'], runs['reserved'], runs['remaining']), (0, 2, 0))
+        self.assertEqual([item['run_id'] for item in runs['stale']], ['r-stale'])
+        self.assertTrue(runs['stale'][0]['message'].startswith('stale reservation: run r-stale'))
+        self.assertEqual(resv.read_bytes(), before)
+        metrics = self.repo / 'm-stale.json'
+        command = [sys.executable, '-c', "import json; json.dump({'score': 1.0, 'memory': 10.0}, open(%r,'w'))" % metrics.name]
+        with self.assertRaisesRegex(CoreError, '2 of 2 run.*2 reserved by a run in progress'):
+            experiment.record_run(self.repo, 'exp-stale', 'baseline', 0, metrics, command, timeout_seconds=10)
+        row, rc = experiment.record_run(self.repo, 'exp-stale', 'baseline', 0, metrics, command, timeout_seconds=10,
+                                        budget_reason='both reservations are mine')
+        self.assertEqual((rc, row['budget_override_reason']), (0, 'both reservations are mine'))
+        self.assertEqual(read_jsonl(resv)[-2]['budget_override_reason'], 'both reservations are mine')
+
+        # A contract without a budget never touches the reservation file.
+        experiment.register(self.repo, self._experiment(), 'exp-plain')
+        size = resv.stat().st_size
+        experiment.record_run(self.repo, 'exp-plain', 'baseline', 0, self.repo / 'm-plain.json',
+                              [sys.executable, '-c', "import json; json.dump({'score': 1.0, 'memory': 10.0}, open('m-plain.json','w'))"], timeout_seconds=10)
+        self.assertEqual(resv.stat().st_size, size)
+        self.assertNotIn('budget', experiment.summarize(self.repo, 'exp-plain'))
+
+        # experiment launch reserves the same way and settles from the run ledger.
+        launch_contract = self.repo / 'launch-budget.json'
+        atomic_write_json(launch_contract, dict(contract, budget={'runs': 1}))
+        launch_cli = [sys.executable, str(ROOT / 'scripts/lib/oms_core.py'), '--repo', str(self.repo), 'experiment',
+                      'launch', '--contract', str(launch_contract), '--', 'bash', '-c', 'sleep 2']
+        pair = [subprocess.Popen(launch_cli, cwd=str(self.repo), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        outcomes = [(p.wait(), p.communicate()[1]) for p in pair]
+        self.assertEqual(sorted(code for code, _ in outcomes), [0, 2], outcomes)
+        third = subprocess.run(launch_cli, cwd=str(self.repo), capture_output=True, text=True)
+        self.assertEqual(third.returncode, 2, third.stderr)
+        self.assertIn('run budget spent: 1 of 1', third.stderr)
+        launched = [row for row in read_jsonl(resv) if row.get('source') == 'launch']
+        self.assertEqual(len(launched), 1)
+
+        # GPU-hours come only from run-reconcile usage rows of this experiment's ledgered jobs.
+        experiment.register(self.repo, dict(contract, budget={'gpu_hours': 4}), 'exp-gpu')
+        gpu = experiment.summarize(self.repo, 'exp-gpu')['budget']['gpu_hours']
+        self.assertIsNone(gpu['used'])
+        self.assertIn('not counted', gpu['note'])
+        ledger = self.repo / 'docs' / 'EXPERIMENTS.jsonl'
+        with ledger.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'id': 'x1', 'slurm_job_id': '77', 'note': 'experiment=exp-gpu arm=baseline seed=0 contract-run'}) + '\n')
+        reconcile = self.repo / '.oms' / 'runs' / 'reconcile.jsonl'
+        reconcile.parent.mkdir(parents=True, exist_ok=True)
+        reconcile.write_text(json.dumps({'job_id': '77', 'submit': 's', 'state': 'COMPLETED', 'usage': {'gpu_hours': 1.5}}) + '\n', encoding='utf-8')
+        gpu = experiment.summarize(self.repo, 'exp-gpu')['budget']['gpu_hours']
+        self.assertEqual((gpu['used'], gpu['limit'], gpu['exceeded']), (1.5, 4.0, False))
+        self.assertIsNone(experiment.summarize(self.repo, 'exp-race')['budget']['final_evals']['used'])
 
     def test_experiment_sweep_names_each_cell_and_only_prints(self) -> None:
         from oms_runtime import experiment_sweep
