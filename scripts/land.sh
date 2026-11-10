@@ -27,6 +27,11 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
                [--sync-shared PATH]
        land.sh status [--repo PATH] [--json] [--active-exit]
        land.sh notes [--repo PATH] --from REV --to REV [--output NEW_FILE]
+       land.sh blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE
+
+blame-session prints, per commit, the attribution row recorded in
+.oms/attribution.jsonl (ai | human | mixed | unknown) or `unrecorded`, then a
+summary line. See docs/COMPONENTS.md (Delegating writes).
 
 notes prints a release-notes skeleton for REV..REV: first-parent commit
 subjects grouped by Conventional Commit type, with the commits this checkout's
@@ -103,6 +108,18 @@ EOF
 if [ "${1:-}" = notes ]; then
   shift
   exec python3 "$ROOT/scripts/lib/land_notes.py" "$@"
+fi
+
+# Read-only: which recorded attempt produced each commit of a range.
+if [ "${1:-}" = blame-session ]; then
+  shift
+  blame_repo="$PWD" blame_prev=""
+  for blame_arg in "$@"; do
+    [ "$blame_prev" != --repo ] || blame_repo="$blame_arg"
+    blame_prev="$blame_arg"
+  done
+  blame_state="$(oms_state_root "$blame_repo" 2>/dev/null)" || blame_state="$blame_repo"
+  exec python3 "$ROOT/scripts/lib/attribution.py" blame --state-repo "$blame_state" "$@"
 fi
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=2700
@@ -442,6 +459,17 @@ handoff_receipt() {
   return "$rc"
 }
 
+# Best effort: tie the pushed commits to recorded worker-patch landings. A
+# ledger problem warns in the log and never changes the landing outcome.
+record_attribution() {  # BASE_SHA
+  local state out
+  state="$(oms_state_root "$REPO" 2>/dev/null)" || return 0
+  out="$(python3 "$ROOT/scripts/lib/attribution.py" commits --repo "$REPO" --state-repo "$state" \
+    --range "$1..$SHA" --receipt "$(basename "$RECEIPT" .json)" 2>&1)" || true
+  [ -z "$out" ] || note "$out"
+  return 0
+}
+
 receipt_value() {
   python3 - "$RECEIPT" "$1" <<'PY' | tr -d '\r'
 import json, sys
@@ -668,6 +696,7 @@ run_job() {
     fi
     if [ "$remote_sha" != "$SHA" ]; then
       rset push.rc=0 push.base="$remote_sha"
+      record_attribution "$remote_sha"
     else
       # A reverify moved nothing: it proves the gate, never a landed range.
       rset push.rc=0 push.moved=0

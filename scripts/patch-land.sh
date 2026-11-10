@@ -1682,6 +1682,14 @@ if ! record_landing_lineage_once "$PATCH" "$PATCH_SHA" "${PLAN_TASK:-$PANEL_ACCE
   echo "warning: patch-land: lineage for $SOURCE_PATCH is missing from .oms/artifacts/index.jsonl" >&2
 fi
 
+# Commit-level attribution is best effort: record which attempt produced the
+# applied tree so `oms land` can tie the later commit to it. It must never fail
+# or unwind a landing; a miss only warns.
+python3 "$ROOT/scripts/lib/attribution.py" landed --repo "$REPO" --state-repo "$STATE_REPO" \
+  --landing-id "$LANDING_ID" --base "$LANDING_BASE" --patch "$PATCH" --patch-sha "$PATCH_SHA" \
+  --task "${PLAN_TASK:-$PANEL_ACCEPT_TASK}" >&2 ||
+  echo "warning: patch-land: attribution record failed; the landing is unaffected" >&2
+
 # The patch was rejected before but lands now: resolve the fingerprint so the
 # shared failure memory stops warning about it.
 if [ -n "$known_reject_fp" ]; then
