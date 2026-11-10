@@ -73,7 +73,10 @@ top             Rank runs by a recorded metric ("best run for val_auc"):
                 are counted on stderr with the fields that differ. When no
                 run qualifies, or rows carry different contracts and none
                 is declared now, top prints "not comparable" and exits 4.
-                --mixed ranks every row regardless and says so.
+                Recorded data identities must also agree; known and unrecorded
+                data are not silently mixed. --mixed overrides ranking filters
+                with a warning, but never pools different inputs into one seed
+                group. Replicate reruns use the last retained ledger row.
                 --by-group ranks seed groups by their mean instead of single
                 runs: n, mean, stdev and a bootstrap 95% interval. A group
                 with one seed is listed apart: one seed supports no claim
@@ -112,6 +115,20 @@ run_ledger_append_row() {
 }
 
 command -v python3 >/dev/null 2>&1 || fail "python3 is required for ledger rows"
+
+if [ "${OMS_RUN_LEDGER_CAPTURED+x}" = x ]; then
+  [ -n "${OMS_RUN_LEDGER_STATUS_OVERRIDE:-}" ] || fail "captured metadata is only valid for a completed capsule companion"
+  python3 - "$ROOT_LIB" <<'PY_CAPTURE_CHECK' || exit 2
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import run_ledger_metrics as metrics
+try:
+    metrics.decode_capture(os.environ["OMS_RUN_LEDGER_CAPTURED"])
+except (ValueError, TypeError, RecursionError):
+    sys.stderr.write("ledger: invalid captured capsule metadata; no companion row recorded\n")
+    sys.exit(2)
+PY_CAPTURE_CHECK
+fi
 
 MODE="run"
 case "${1:-}" in
@@ -252,7 +269,19 @@ else:
         sys.exit(4)
     if left:
         sys.stderr.write("top: left out as not comparable under today's contract for %s: %s\n" % (metric, detail))
-rows.sort(key=lambda x: x[0], reverse=(direction == "max"))
+# Retain append order until reruns of the same seed have been reconciled.
+data_rows, data_left = contract_lib.data_comparable(rows)
+if data_left:
+    detail = "; ".join("%d run(s): %s" % (count, reason) for reason, count in sorted(data_left.items()))
+    if mixed:
+        sys.stderr.write("warning: --mixed ignores recorded data comparability (%s)\n" % detail)
+    elif not data_rows:
+        sys.stderr.write("top: not comparable: recorded data identities disagree or are invalid (%s); --mixed overrides this ranking check\n" % detail)
+        sys.exit(4)
+    else:
+        sys.stderr.write("top: excluded invalid recorded input identities (%s)\n" % detail)
+if not mixed:
+    rows = data_rows
 if os.environ["OMS_BY_GROUP"] == "1":
     groups, loose = contract_lib.group_summaries(rows, metric)
     if not groups:
@@ -270,8 +299,9 @@ if os.environ["OMS_BY_GROUP"] == "1":
         for group, count, mean, stdev, ci, seeds in single[:n]:
             print("    %s=%.6g  n=1  group=%s  seed=%s" % (metric, mean, group[:60], seeds[0]))
     if loose:
-        sys.stderr.write("top: %d run(s) without a seed are not grouped\n" % loose)
+        sys.stderr.write("top: %d run(s) without a usable seed group or input identity are not grouped\n" % loose)
     sys.exit(0)
+rows.sort(key=lambda x: x[0], reverse=(direction == "max"))
 def _clean(x):
     s = str(x).replace("\n", " ").replace("\r", " ").replace("\t", " ")
     return s[:60]
@@ -527,7 +557,9 @@ if seed is not None:
     row["seed"] = seed
 if group:
     row["group"] = group
-if row["exit"] is not None:
+if "OMS_RUN_LEDGER_CAPTURED" in os.environ:
+    row = contract_lib.attach_capture(row, contract_lib.decode_capture(os.environ["OMS_RUN_LEDGER_CAPTURED"]))
+elif row["exit"] is not None:
     recorded = contract_lib.row_contract(os.environ["OMS_RL_LEDGER"], os.environ["OMS_RL_ROOT"],
                                          lambda text: sys.stderr.write(text + "\n"))
     if recorded:

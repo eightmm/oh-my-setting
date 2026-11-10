@@ -13,6 +13,7 @@ import math
 import os
 import re
 import statistics
+import unicodedata
 
 CONTRACT_NAME = "metric-contract.json"
 FIELDS = ("unit", "direction", "split", "aggregation", "eval_command")
@@ -180,24 +181,250 @@ def comparable(rows, metric, current):
                 for key, count in digests.items()}
 
 
+
+IDENTITY_KEYS = {"schema", "capture", "git", "config_sha256", "data_sha256",
+                 "config_status", "data_status", "recorded_configs", "recorded_data", "digest"}
+HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _canonical_digest(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _recorded_hashes(rows, label_key, hash_key, lengths):
+    if not isinstance(rows, list) or len(rows) > 128:
+        raise ContractError("input identity has an invalid or oversized source list")
+    found = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ContractError("input identity has an invalid source row")
+        label, digest = row.get(label_key), row.get(hash_key)
+        if (not isinstance(label, str) or not label or len(label) > 4096
+                or any(unicodedata.category(ch).startswith("C") for ch in label)
+                or not isinstance(digest, str) or len(digest) not in lengths
+                or not re.fullmatch(r"[0-9a-f]+", digest)):
+            raise ContractError("input identity lacks a bounded label or recorded digest")
+        if label in found and found[label] != digest:
+            raise ContractError("input identity has conflicting duplicate sources")
+        found[label] = digest
+    return found
+
+
+def make_input_identity(git, configs, data, expected_configs):
+    """Fingerprint pre-command captured metadata, not the data/config contents or their actual use."""
+    if not isinstance(git, dict):
+        raise ContractError("input identity lacks a git record")
+    commit, dirty, diff = git.get("commit_full"), git.get("dirty"), git.get("diff_sha256") or ""
+    if (not isinstance(commit, str) or not (re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit)
+                                          or commit in ("none", "no-commit"))
+            or type(dirty) is not int or not 0 <= dirty <= 10**9
+            or not isinstance(diff, str) or (diff and not re.fullmatch(r"[0-9a-f]{16}|[0-9a-f]{64}", diff))):
+        raise ContractError("input identity has invalid git metadata")
+    if (not isinstance(expected_configs, list) or len(expected_configs) > 128
+            or any(not isinstance(x, str) or not x or len(x) > 4096 for x in expected_configs)):
+        raise ContractError("input identity has invalid declared config paths")
+    cfg = _recorded_hashes(configs, "path", "sha256", (32, 64))
+    datasets = _recorded_hashes(data, "name", "manifest_sha256", (64,))
+    complete = set(expected_configs) == set(cfg)
+    body = {"schema": 1, "capture": "pre-command",
+            "git": {"commit": commit, "dirty": dirty, "diff_sha256": diff},
+            "config_status": "incomplete" if not complete else "recorded" if cfg else "unrecorded",
+            "data_status": "recorded" if datasets else "unrecorded",
+            "config_sha256": _canonical_digest(sorted(cfg.items())) if cfg and complete else None,
+            "data_sha256": _canonical_digest(sorted(datasets.items())) if datasets else None,
+            "recorded_configs": len(cfg), "recorded_data": len(datasets)}
+    return dict(body, digest=_canonical_digest(body))
+
+
+def validate_input_identity(value):
+    """Validate recorded consistency. Hashes do not authenticate a local writer."""
+    if not isinstance(value, dict) or set(value) != IDENTITY_KEYS:
+        raise ContractError("invalid recorded input identity")
+    if type(value["schema"]) is not int or value["schema"] != 1 or value["capture"] != "pre-command":
+        raise ContractError("unsupported recorded input identity")
+    git = value["git"]
+    if not isinstance(git, dict) or set(git) != {"commit", "dirty", "diff_sha256"}:
+        raise ContractError("invalid recorded input identity git state")
+    # Reuse producer validation for git metadata, without opening source files.
+    make_input_identity({"commit_full": git["commit"], "dirty": git["dirty"],
+                         "diff_sha256": git["diff_sha256"]}, [], [], [])
+    for prefix, count_key in (("config", "recorded_configs"), ("data", "recorded_data")):
+        status, digest, count = value[prefix + "_status"], value[prefix + "_sha256"], value[count_key]
+        allowed = ("recorded", "unrecorded", "incomplete") if prefix == "config" else ("recorded", "unrecorded")
+        if (status not in allowed or type(count) is not int or not 0 <= count <= 128
+                or (digest is not None and (not isinstance(digest, str) or not HEX64.fullmatch(digest)))
+                or status == "recorded" and (digest is None or count == 0)
+                or status != "recorded" and digest is not None
+                or status == "unrecorded" and count != 0):
+            raise ContractError("inconsistent recorded input identity coverage")
+    body = {key: value[key] for key in value if key != "digest"}
+    if not isinstance(value["digest"], str) or value["digest"] != _canonical_digest(body):
+        raise ContractError("recorded input identity digest mismatch")
+    return value
+
+
+def data_comparable(rows):
+    """Do not rank different recorded datasets, or recorded against unknown, without --mixed."""
+    kept, left, datasets = [], {}, {}
+    for pair in rows:
+        row = pair[1]
+        identity = row.get("input_identity")
+        if "input_identity" in row:
+            try:
+                validate_input_identity(identity)
+            except (ContractError, TypeError, ValueError):
+                left["invalid input identity"] = left.get("invalid input identity", 0) + 1
+                continue
+        digest = identity["data_sha256"] if identity else None
+        key = "data " + digest if digest else "data unrecorded"
+        datasets[key] = datasets.get(key, 0) + 1
+        kept.append(pair)
+    if len(datasets) > 1:
+        for key, count in datasets.items():
+            left[key] = left.get(key, 0) + count
+        return [], left
+    return kept, left
+
+
+def captured_contract(value):
+    """Only already captured metric records may cross the capsule-to-ledger bridge."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or len(value) > MAX_METRICS:
+        raise ContractError("invalid captured metric contract")
+    clean = {}
+    for name, record in value.items():
+        _text(name, "recorded", "name")
+        if not isinstance(record, dict) or not set(record) <= {"unit", "direction", "split", "aggregation", "eval_sha256", "digest"}:
+            raise ContractError("invalid captured metric record")
+        if not isinstance(record.get("digest"), str) or not HEX64.fullmatch(record["digest"]):
+            raise ContractError("invalid captured metric digest")
+        for key, item in record.items():
+            _text(item, "recorded", key)
+        if record.get("direction") not in ("min", "max"):
+            raise ContractError("invalid captured metric direction")
+        if "eval_sha256" in record and not HEX64.fullmatch(record["eval_sha256"]):
+            raise ContractError("invalid captured evaluation digest")
+        clean[name] = dict(record)
+    return clean or None
+
+
+CAPTURE_KEYS = {"schema", "capsule_id", "inputs", "metric_contract", "seeds"}
+
+
+def capture_for_ledger(git, configs, data, expected_configs, contract, seeds, capsule_id):
+    """An allowlisted pre-command projection; never copies config values or source paths into the ledger."""
+    value = {"schema": 1, "capsule_id": capsule_id,
+             "inputs": make_input_identity(git, configs, data, expected_configs),
+             "metric_contract": captured_contract(contract), "seeds": seeds}
+    return decode_capture(json.dumps(value, ensure_ascii=False, allow_nan=False))
+
+
+def decode_capture(raw):
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 65536:
+        raise ContractError("captured run metadata exceeds its limit")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ContractError("duplicate captured metadata key")
+            result[key] = value
+        return result
+    def reject(_):
+        raise ContractError("non-finite captured metadata")
+    try:
+        value = json.loads(raw, object_pairs_hook=unique, parse_constant=reject)
+    except (ValueError, RecursionError):
+        raise ContractError("invalid captured run metadata") from None
+    if (not isinstance(value, dict) or set(value) != CAPTURE_KEYS
+            or type(value["schema"]) is not int or value["schema"] != 1
+            or not isinstance(value["capsule_id"], str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", value["capsule_id"])
+            or ".." in value["capsule_id"]):
+        raise ContractError("invalid captured run envelope")
+    validate_input_identity(value["inputs"])
+    captured_contract(value["metric_contract"])
+    seeds = value["seeds"]
+    if (not isinstance(seeds, list) or len(seeds) > 128
+            or any(not isinstance(seed, str) or len(seed) > 100 for seed in seeds)):
+        raise ContractError("invalid captured seed declarations")
+    return value
+
+
+def attach_capture(row, value):
+    """Return a row using pre-command provenance, not the current checkout after execution."""
+    result = dict(row)
+    identity = value["inputs"]
+    git = identity["git"]
+    result.update(capsule_id=value["capsule_id"], input_identity=identity,
+                  git_sha=git["commit"], dirty=git["dirty"], dirty_hash=git["diff_sha256"])
+    result.pop("metric_contract", None)
+    if value["metric_contract"] is not None:
+        result["metric_contract"] = value["metric_contract"]
+    seeds = value["seeds"]
+    declared = list(dict.fromkeys(seeds))
+    seed, group = seed_and_group(result["cmd"], result["git_sha"], result["dirty_hash"])
+    status = "command" if seed is not None else "unrecorded"
+    if declared:
+        if len(declared) == 1 and re.fullmatch(r"-?[0-9]{1,18}", declared[0]):
+            explicit = int(declared[0])
+            if seed is not None and seed != explicit:
+                seed, group, status = None, None, "conflicting-declarations"
+            else:
+                seed, group = seed_and_group(result["cmd"], result["git_sha"], result["dirty_hash"], str(explicit))
+                status = "declared"
+        else:
+            seed, group, status = None, None, "multiple-or-unrecognized"
+    result.pop("seed", None)
+    result.pop("group", None)
+    result["seed_status"] = status
+    if seed is not None:
+        result["seed"] = seed
+        result["group"] = group
+    return result
+
+
 def group_summaries(rows, metric):
-    """[(group, n, mean, stdev, ci95, seeds)] from (value, row) pairs, plus the count of rows without a seed group.
-    The latest row of a (group, seed) wins, as a rerun replaces the run it repeats."""
+    """Summarize append-ordered rows; reruns replace the same seed only inside an exact recorded scope.
+
+    Explicit group labels never merge different input identities or metric contracts. Legacy rows retain
+    their old label when no conflicting recorded scope exists. Unknown external inputs stay unproven.
+    """
     from oms_runtime.experiment_run import _bootstrap_ci
-    latest, loose = {}, 0
+    latest, loose, scopes = {}, 0, {}
     for value, row in rows:
         group, seed = row.get("group"), row.get("seed")
-        if not isinstance(group, str) or not group or isinstance(seed, bool) or not isinstance(seed, int):
+        if (not isinstance(group, str) or not group or len(group) > 60
+                or not re.fullmatch(r"[A-Za-z0-9._-]+", group)
+                or type(seed) is not int or not numeric(value)):
             loose += 1
             continue
-        latest[(group, seed)] = float(value)
+        identity = row.get("input_identity")
+        if "input_identity" in row:
+            try:
+                validate_input_identity(identity)
+            except (ContractError, TypeError, ValueError):
+                loose += 1
+                continue
+            if (identity["config_status"] == "incomplete"
+                    or identity["git"]["commit"] in ("none", "no-commit")
+                    or identity["git"]["dirty"] and not identity["git"]["diff_sha256"]):
+                loose += 1
+                continue
+        signature = (identity["digest"] if identity else None, row_digest(row, metric))
+        scopes.setdefault(group, set()).add(signature)
+        latest[(group, signature, seed)] = float(value)
     groups = {}
-    for (group, seed), value in latest.items():
-        groups.setdefault(group, {})[seed] = value
+    for (group, signature, seed), value in latest.items():
+        groups.setdefault((group, signature), {})[seed] = value
     out = []
-    for group, by_seed in groups.items():
+    for (group, signature), by_seed in groups.items():
+        label = group
+        if len(scopes[group]) > 1:
+            label = group[:44] + "@" + _canonical_digest(signature)[:12]
         values = [by_seed[seed] for seed in sorted(by_seed)]
-        out.append((group, len(values), statistics.mean(values),
+        out.append((label, len(values), statistics.mean(values),
                     statistics.stdev(values) if len(values) > 1 else None,
-                    _bootstrap_ci(values, group + metric) if len(values) > 1 else None, sorted(by_seed)))
+                    _bootstrap_ci(values, label + metric) if len(values) > 1 else None, sorted(by_seed)))
     return out, loose
