@@ -576,6 +576,54 @@ recent_out="$("$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --recent 
 [ "$(printf '%s\n' "$recent_out" | wc -l | tr -d ' ')" = 3 ] ||
   fail "journal show --recent 3 did not return three event lines"
 
+# Decisions are a read view over the same events, and a blocker is closed by a
+# correction that supersedes the event carrying it: --blockers stops listing
+# it, the resolution reads as a decision, and a child cannot record one.
+"$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --decisions |
+  grep -F -- '- keep the observer local-first (' > /dev/null ||
+  fail "journal show --decisions missed a recorded decision"
+"$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --decisions --since 2999-01-01 |
+  grep -Fx -- '- none recorded' > /dev/null ||
+  fail "journal show --decisions --since must bound the view"
+if "$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --decisions --since yesterday >/dev/null 2>&1; then
+  fail "journal show --decisions must refuse a malformed --since"
+fi
+if "$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --blockers --since 2026-01-01 >/dev/null 2>&1; then
+  fail "--since must apply to --decisions only"
+fi
+python3 - "$ROOT/scripts/lib" "$lifecycle_repo" <<'PY'
+import datetime
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import work_journal as wj
+
+store = wj.JournalStore(sys.argv[2])
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+store.record_event({"event_type": "annotation", "occurred_at": now,
+                    "source": {"type": "fixture", "id": "resolve-me"},
+                    "verification_status": "not_verified", "blocker": "quota exhausted on the big queue"})
+store.materialize()
+PY
+blocker_id="$("$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --blockers --json |
+  python3 -c 'import json,sys; rows=[r for r in json.load(sys.stdin)["blockers"] if r["text"]=="quota exhausted on the big queue"]; print(rows[0]["event_id"])')" ||
+  fail "the fixture blocker was not listed as open"
+if OMS_HARNESS_CHILD=1 "$ROOT/scripts/journal.sh" resolve "$blocker_id" --repo "$lifecycle_repo" --how "x" >/dev/null 2>&1; then
+  fail "a harness child must not resolve a journal blocker"
+fi
+"$ROOT/scripts/journal.sh" resolve "$blocker_id" --repo "$lifecycle_repo" --how "moved the job to the small queue" |
+  grep -F "blocker on $blocker_id as resolved" > /dev/null ||
+  fail "journal resolve did not record the resolution"
+if "$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --blockers | grep -F 'quota exhausted on the big queue' > /dev/null; then
+  fail "a resolved blocker must leave journal show --blockers"
+fi
+"$ROOT/scripts/journal.sh" show --repo "$lifecycle_repo" --decisions |
+  grep -F 'Resolved blocker "quota exhausted on the big queue": moved the job to the small queue' > /dev/null ||
+  fail "a resolution should read as a decision"
+if "$ROOT/scripts/journal.sh" resolve "$blocker_id" --repo "$lifecycle_repo" --how "again" >/dev/null 2>&1; then
+  fail "resolving an event that no longer carries an open blocker must be refused"
+fi
+
 # Distillation promotes a recurring unresolved blocker once, then advances its
 # cursor so a second run cannot append the same lesson.
 distill_repo="$TMP/distill-repo"

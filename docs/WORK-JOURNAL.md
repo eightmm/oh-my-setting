@@ -106,6 +106,7 @@ Operational commands are intentionally small:
 oms journal show --repo . --today
 oms journal show --repo . --week
 oms journal show --repo . --blockers
+oms journal show --repo . --decisions --since 2026-11-01
 oms journal show --repo . --recent 20 --json
 oms journal status --repo .
 oms journal rebuild --repo .
@@ -199,6 +200,17 @@ Reading is always local; the Notion mirror is never in the agent read path.
   annotations observed in the last seven days, newest occurrence first, each
   with its event ID. Annotations have no resolution record, so "open" means
   recently observed and not superseded.
+- `oms journal show --decisions [--since YYYY-MM-DD]` lists every decision
+  recorded on an active event, newest first, each text once with its date,
+  task and event ID (at most 200). It is a read view of existing events, not
+  a separate decision store.
+- `oms journal resolve EVENT_ID --how TEXT` records that the blocker on that
+  event is resolved. It writes the journal's existing `correction` event with
+  `supersedes_event_id`, so the superseded event becomes inactive as a whole:
+  its blocker leaves `--blockers`, and anything else it carried leaves the
+  active views with it. The resolution itself reads as a decision. Another
+  event with the same blocker text keeps it open, and the command names those
+  events. Parent only.
 - `oms journal show --recent 20` prints the most recent events one line each.
 - `--json` returns the same data structurally in any mode.
 

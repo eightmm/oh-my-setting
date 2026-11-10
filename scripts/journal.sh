@@ -26,13 +26,15 @@ esac
 # Read (show), inspect, rebuild, configure, or explicitly sync the local-first
 # Work Journal. `show --today|--week|--blockers|--recent N [--json]` is the
 # agent read path over the derived summaries and event index.
+# `show --decisions [--since DATE]` lists recorded decisions; `resolve EVENT_ID
+# --how TEXT` records a blocker as resolved (parent only).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PYTHON_ENTRY="$ROOT/scripts/lib/work_journal.py"
 
 if [ "${OMS_HARNESS_CHILD:-0}" = 1 ]; then
   case "${1:-}" in
-    configure|disconnect|sync)
+    configure|disconnect|sync|resolve)
       echo "error: a harness child cannot mutate parent-owned host or global state; return the request to the parent agent" >&2
       exit 2
       ;;
@@ -56,7 +58,7 @@ if [ "${1:-}" = disconnect ] && ! command -v python3 >/dev/null 2>&1; then
 fi
 
 case "${1:-}" in
-  status|show|rebuild|seal|sync|distill|identity|materialize|tick|observe)
+  status|show|resolve|rebuild|seal|sync|distill|identity|materialize|tick|observe)
     command_name="$1"
     repo="."
     previous=""

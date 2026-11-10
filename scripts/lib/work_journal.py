@@ -4664,8 +4664,14 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--week", action="store_true")
     mode.add_argument("--period", metavar="YYYY-MM-DD|YYYY-Www")
     mode.add_argument("--blockers", action="store_true")
+    mode.add_argument("--decisions", action="store_true")
     mode.add_argument("--recent", type=int, metavar="N")
+    show.add_argument("--since", metavar="YYYY-MM-DD")
     show.add_argument("--json", action="store_true")
+    resolve = sub.add_parser("resolve")
+    resolve.add_argument("event_id")
+    resolve.add_argument("--repo", default=".")
+    resolve.add_argument("--how", required=True)
     sync = sub.add_parser("sync")
     sync.add_argument("--repo", default=".")
     sync.add_argument("--force", action="store_true")
@@ -4683,6 +4689,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_show(store: JournalStore, args: argparse.Namespace) -> int:
+    if args.since and not args.decisions:
+        print("error: --since applies to --decisions", file=sys.stderr)
+        return 2
+    if args.decisions:
+        import journal_decisions
+
+        try:
+            report = journal_decisions.decisions(store, args.since)
+        except ValueError:
+            print("error: --since requires a date as YYYY-MM-DD", file=sys.stderr)
+            return 2
+        return journal_decisions.print_decisions(report, args.json)
     if args.recent is not None:
         events = store.recent_events(limit=args.recent)
         if args.json:
@@ -5002,6 +5020,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     if args.command == "show":
         return _run_show(store, args)
+    if args.command == "resolve":
+        import journal_decisions
+
+        try:
+            payload, blocker, same = journal_decisions.resolve(
+                store, args.event_id, args.how,
+                _utc_rfc3339(dt.datetime.now(dt.timezone.utc)),
+            )
+        except ValueError:
+            print("error: resolve requires --how TEXT", file=sys.stderr)
+            return 2
+        except LookupError:
+            print(
+                "error: no active journal event with that ID carries a blocker"
+                " (see: oms journal show --blockers)",
+                file=sys.stderr,
+            )
+            return 2
+        event, created = store.record_event(payload)
+        store.materialize()
+        print(
+            "journal: %s blocker on %s as resolved [%s]"
+            % ("recorded the" if created else "already recorded the", args.event_id, event["event_id"])
+        )
+        print("  %s" % blocker)
+        if same:
+            print(
+                "note: %d other event(s) carry the same blocker text and keep it open: %s"
+                % (len(same), ", ".join(same[:5]))
+            )
+        return 0
     if args.command == "observe":
         payload = source_payload(
             store.repo,
