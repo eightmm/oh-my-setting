@@ -2028,6 +2028,10 @@ result_lint = [c for c in os.environ.get("OMS_INDEX_RESULT_LINT", "").strip().sp
 if kind == "delegate" and result_lint:
     # Warnings only: absence means clean or not linted, never "verified".
     row["result_lint"] = result_lint[:8]
+worker_claim = os.environ.get("OMS_INDEX_WORKER_CLAIM", "")
+if kind == "delegate" and worker_claim in ("pass", "done"):
+    # What the worker said about itself; route history compares it with the admission re-run.
+    row["worker_claim"] = worker_claim
 scratch_path = os.environ.get("OMS_INDEX_SCRATCH_PATH", "")
 if kind == "delegate" and scratch_path:
     row["scratch_path"] = scratch_path

@@ -2,7 +2,8 @@
 """Advisory text lint for a delegation brief and for the result a worker returns.
 
     delegation_lint.py brief FILE|- [--strict]
-    delegation_lint.py result FILE|- [--writer]
+    delegation_lint.py result FILE|- [--writer] [--verify=none|pass|fail]
+    delegation_lint.py claim FILE|- [--writer]
     delegation_lint.py review FILE|- --verdict=pass|fail
 
 Mechanical regex checks only: no model call, no network, nothing written. Human
@@ -11,6 +12,12 @@ carries the comma-separated warning codes (empty when none) so a caller can
 record them. Exit 0 always, except `brief --strict` which exits 1 on any
 warning. A clean lint says the text has the expected shape, nothing more: it is
 never verification evidence.
+
+`result --verify=STATE` also compares the closing completion claim with the verify
+receipt the caller recorded for that attempt (none: no verify ran, pass, fail) and
+warns `claim-without-receipt` / `claim-failing-receipt`. `claim` prints `pass` or
+`done` when the closing lines carry such a claim, else nothing. Phrase lists are
+the small CLAIM_* tuples below; they are a heuristic, not a check.
 
 `review` lints one gate seat's final answer and adds only what the gate does
 not already check: the GATE line, SECURITY line, answer quality and the fenced
@@ -40,6 +47,8 @@ WARNING_TEXT = {
     "finding-without-pointer": "findings without a path:line pointer",
     "no-unresolved-line": 'no explicit unresolved line (write "Unresolved: none" when nothing is open)',
     "no-changed-files": "writer result lists no changed files",
+    "claim-without-receipt": "closing line claims tests pass or work is done but this attempt has no verify receipt",
+    "claim-failing-receipt": "closing line claims tests pass or work is done but this attempt's verify receipt failed",
     "findings-not-trackable": "prose findings but no fenced findings block, so nothing is tracked",
     "pass-with-blocking": "GATE: pass contradicts a blocking finding in the findings block",
     "long-answer-no-summary": "answer over %d bytes with no summary line" % REVIEW_CAP_BYTES,
@@ -117,7 +126,47 @@ def section_after(lines, index):
     return body
 
 
-def lint_result(text, writer=False):
+# Closing-claim phrases: small on purpose, edit here. Only the last CLAIM_TAIL_LINES non-empty
+# lines are read, and a line that also negates (not/no/failed/skipped/못/않) is not a claim.
+CLAIM_TAIL_LINES = 8
+CLAIM_TESTS_PASS = (
+    r"\b(tests?|checks?|test suite|suite|build|lint|verification|verify)\b[^.\n]{0,40}\b(pass(ed|es|ing)?|green|succe(ed|eds|eded))\b",
+    r"\b(pass(ed|es|ing)?|green)\b[^.\n]{0,20}\b(tests?|checks?|suite)\b",
+    r"테스트[^.\n]{0,20}통과",
+)
+CLAIM_DONE = (
+    r"^\W*(all )?(done|complete|completed|finished)\b",
+    r"\b(implemented|fixed|resolved) (the|this|it|all)\b",
+    r"작업\s*완료|완료했",
+)
+CLAIM_NEGATION = (r"\b(not|no|never|cannot|unable|without|fail(s|ed|ing)?|skipp?ed|untested|unverified)\b"
+                  r"|n't\b|못|않|미검증|미실행|실패")
+CLAIM_TESTS_PASS_RE = [re.compile(p, re.I) for p in CLAIM_TESTS_PASS]
+CLAIM_DONE_RE = [re.compile(p, re.I) for p in CLAIM_DONE]
+CLAIM_NEGATION_RE = re.compile(CLAIM_NEGATION, re.I)
+
+
+def closing_claim(text, writer=False):
+    """'pass' when the closing lines claim passing tests, 'done' (writers only) for a bare done claim."""
+    tail = [line for line in text.splitlines() if line.strip()][-CLAIM_TAIL_LINES:]
+    found = ""
+    for line in tail:
+        if CLAIM_NEGATION_RE.search(line):
+            continue
+        if any(pattern.search(line) for pattern in CLAIM_TESTS_PASS_RE):
+            return "pass"
+        if writer and any(pattern.search(line) for pattern in CLAIM_DONE_RE):
+            found = "done"
+    return found
+
+
+def claim_codes(text, receipt, writer=False):
+    if receipt not in ("none", "fail") or not closing_claim(text, writer):
+        return []
+    return ["claim-without-receipt" if receipt == "none" else "claim-failing-receipt"]
+
+
+def lint_result(text, writer=False, receipt=""):
     lines = text.splitlines()
     codes = []
     summary = []
@@ -155,7 +204,7 @@ def lint_result(text, writer=False):
                     break
         if not listed:
             codes.append("no-changed-files")
-    return codes
+    return codes + claim_codes(text, receipt, writer)
 
 
 NONE_ITEM = re.compile(r"^\W*(none|no (blocking |actionable )?(findings?|issues?)|n/?a|nothing|없음)\b", re.I)
@@ -205,8 +254,12 @@ def main(argv):
     flags = {arg for arg in argv if arg.startswith("--")}
     verdicts = [arg[10:] for arg in flags if arg.startswith("--verdict=")]
     flags -= {"--verdict=" + value for value in verdicts}
-    if len(args) != 2 or args[0] not in ("brief", "result", "review") or flags - {"--strict", "--writer"} or \
-            (args[0] == "review") != (len(verdicts) == 1) or any(value not in ("pass", "fail") for value in verdicts):
+    receipts = [arg[9:] for arg in flags if arg.startswith("--verify=")]
+    flags -= {"--verify=" + value for value in receipts}
+    if len(args) != 2 or args[0] not in ("brief", "result", "review", "claim") or flags - {"--strict", "--writer"} or \
+            (args[0] == "review") != (len(verdicts) == 1) or any(value not in ("pass", "fail") for value in verdicts) or \
+            len(receipts) > 1 or (receipts and args[0] != "result") or \
+            any(value not in ("none", "pass", "fail") for value in receipts):
         sys.stderr.write(__doc__)
         return 2
     kind, source = args
@@ -216,10 +269,14 @@ def main(argv):
         sys.stderr.write("error: %s\n" % exc)
         return 2
     text = raw.decode("utf-8", "replace")
+    if kind == "claim":
+        sys.stdout.write(closing_claim(text, "--writer" in flags) + "\n")
+        return 0
     if kind == "review":
         codes = lint_review(text, verdicts[0])
     else:
-        codes = lint_brief(text) if kind == "brief" else lint_result(text, writer="--writer" in flags)
+        codes = lint_brief(text) if kind == "brief" else lint_result(
+            text, writer="--writer" in flags, receipt=receipts[0] if receipts else "")
     for code in codes:
         sys.stderr.write("warning: %s: %s\n" % (kind, WARNING_TEXT[code]))
     sys.stdout.write(",".join(codes) + "\n")

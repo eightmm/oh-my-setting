@@ -2857,6 +2857,23 @@ with tempfile.TemporaryDirectory() as metrics_repo:
     assert tuned["effort"] == "high" and tuned["median_tokens"] == 350 and tuned["token_reports"] == 6, tuned
     # Fold audit and per-role model preference come from the same rows; they nominate, never decide.
     import route_stats
+    # Worker "tests pass" claims against the parent's admission re-run, joined by patch digest.
+    claims = route_stats.claim_check([
+        {"kind": "delegate", "role": "builder", "provider": "codex", "selected_model": "m1",
+         "worker_claim": "pass", "patch_sha256": "a"},
+        {"kind": "delegate", "role": "builder", "provider": "codex", "selected_model": "m1",
+         "worker_claim": "pass", "patch_sha256": "b"},
+        {"kind": "delegate", "role": "builder", "provider": "codex", "selected_model": "m1",
+         "worker_claim": "pass", "patch_sha256": "c"},
+        {"kind": "delegate", "role": "builder", "provider": "codex", "selected_model": "m1", "patch_sha256": "d"},
+        {"kind": "patch-admit", "patch_sha256": "a", "verify_exit": 0},
+        {"kind": "patch-admit", "patch_sha256": "b", "verify_exit": 1},
+        {"kind": "patch-admit", "patch_sha256": "d", "verify_exit": 1}])
+    assert claims["groups"] == [{"role": "builder", "provider": "codex", "model": "m1",
+                                 "claimed_pass": 3, "rerun": 2, "disagreed": 1}], claims
+    assert "claim builder codex/m1: claimed_pass=3 rerun=2 disagreed=1" in route_stats.route_text(
+        {"claim_check": claims}), claims
+    assert measured["claim_check"]["groups"] == [], measured["claim_check"]
     audit = measured["role_fold_audit"]
     assert [(r["role"], r["attempts"], r["decided"], r["admit_rate"]) for r in audit["roles"]] == [
         ("builder", 6, 3, 0.6667)], audit

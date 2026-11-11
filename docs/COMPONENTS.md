@@ -1251,6 +1251,18 @@ records the codes as `result_lint` on the delegate row of the artifact index.
 The lint checks shape only: a clean result is never verification evidence, and
 no `result_lint` field means clean or not linted.
 
+The result lint also compares the worker's closing lines with this attempt's verify
+receipt (`--verify=none|pass|fail`: no verify ran, passed, failed). A closing "all tests
+pass" (writers also a bare "done") with no receipt records `claim-without-receipt`; with a
+failing one, `claim-failing-receipt`. The phrase lists are the small `CLAIM_*` tuples in
+`delegation_lint.py`, matched on the last eight non-empty lines, skipping lines that also
+negate; it is a heuristic warning and never changes admission. A "tests pass" claim is
+also recorded as `worker_claim: pass` on the delegate row. `oms panel --metrics` then
+prints, per role/provider/model, `claim ...: claimed_pass=N rerun=M disagreed=K`: delegate
+rows with that claim joined by patch digest to the `patch-admit` rows that re-ran verify
+(`scripts/lib/route_stats.py` `claim_check`). A count, not a verdict; claims without a
+re-run are not counted as agreement.
+
 The same lint reads each gate seat's final answer in `peer-review` (`delegation_lint.py
 review`) and adds only what the gate does not already check: prose findings with no
 fenced `findings` block (`findings-not-trackable`, plus `finding-without-pointer` when an

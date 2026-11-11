@@ -175,6 +175,49 @@ def fold_text(report):
     return lines
 
 
+def _patch_sha(row):
+    sha = row.get("patch_sha256")
+    external = row.get("patch_external")
+    if not sha and isinstance(external, dict):
+        sha = external.get("sha256")
+    return sha if isinstance(sha, str) and sha else None
+
+
+def claim_check(index_rows):
+    """Per role/provider/model: how often a worker's own "tests pass" claim met a failing admission re-run.
+
+    Joins delegate rows that recorded `worker_claim: pass` to patch-admit rows by patch digest. Only an
+    admission that actually re-ran verification (numeric verify_exit) counts as `rerun`; the latest one wins.
+    A count, never a verdict: nothing here changes admission or routing.
+    """
+    rerun = {}
+    for row in index_rows:
+        if isinstance(row, dict) and row.get("kind") == "patch-admit" and _patch_sha(row) \
+                and isinstance(row.get("verify_exit"), int) and not isinstance(row.get("verify_exit"), bool):
+            rerun[_patch_sha(row)] = row["verify_exit"]
+    groups = {}
+    for row in index_rows:
+        if not isinstance(row, dict) or row.get("kind") != "delegate" or row.get("worker_claim") != "pass":
+            continue
+        key = (_clean(row.get("role"), "unknown"), _clean(row.get("provider"), "unknown"),
+               _clean(row.get("selected_model") or row.get("requested_model"), "unknown"))
+        entry = groups.setdefault(key, {"claimed_pass": 0, "rerun": 0, "disagreed": 0})
+        entry["claimed_pass"] += 1
+        sha = _patch_sha(row)
+        if sha in rerun:
+            entry["rerun"] += 1
+            entry["disagreed"] += rerun[sha] != 0
+    return {"groups": [dict(role=k[0], provider=k[1], model=k[2], **v) for k, v in sorted(groups.items())],
+            "note": "worker said tests pass vs the parent's admission re-run; counts, not a verdict"}
+
+
+def claim_text(report):
+    check = report.get("claim_check") or {}
+    return ["claim %s %s/%s: claimed_pass=%d rerun=%d disagreed=%d (counts, not a verdict)" % (
+        g["role"], g["provider"], g["model"], g["claimed_pass"], g["rerun"], g["disagreed"])
+        for g in check.get("groups", [])]
+
+
 def route_text(report):
     history = report.get("route_history") or {}
     lines = []
@@ -189,5 +232,6 @@ def route_text(report):
     for role, best in history.get("suggest", {}).items():
         lines.append("suggest %s: %s/%s effort=%s admit %.1f%% over %d decided (reported history, not a decision)" % (
             role, best["provider"], best["model"], best["effort"], best["admit_rate"] * 100, best["decided"]))
+    lines.extend(claim_text(report))
     lines.extend(fold_text(report))
     return "\n".join(lines)

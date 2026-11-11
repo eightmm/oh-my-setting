@@ -7798,6 +7798,18 @@ test_delegate_dry_run() {
   [ "$lint_codes" = "finding-without-pointer,no-unresolved-line,no-changed-files" ] || fail "result lint codes: $lint_codes"
   lint_codes="$(printf 'Fixed the parser.\n\nChanged files: scripts/a.sh\n\n## Findings\n- scripts/a.sh:3 off by one\n\nUnresolved: none\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --writer 2>/dev/null)"
   [ -z "$lint_codes" ] || fail "a complete result must lint clean: $lint_codes"
+  # Closing completion claim against the attempt's verify receipt (heuristic phrases, warning only).
+  local claim_text_body=$'Summary: fixed the parser.\n\nAll tests pass.\n\nUnresolved: none\n'
+  lint_codes="$(printf '%s' "$claim_text_body" | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --verify=none 2>/dev/null)"
+  [ "$lint_codes" = "claim-without-receipt" ] || fail "claim without receipt: $lint_codes"
+  lint_codes="$(printf '%s' "$claim_text_body" | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --verify=fail 2>/dev/null)"
+  [ "$lint_codes" = "claim-failing-receipt" ] || fail "claim with failing receipt: $lint_codes"
+  lint_codes="$(printf '%s' "$claim_text_body" | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --verify=pass 2>/dev/null)"
+  [ -z "$lint_codes" ] || fail "claim with passing receipt must lint clean: $lint_codes"
+  lint_codes="$(printf 'Summary: ok.\n\nTests not run.\n\nUnresolved: none\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --verify=none 2>/dev/null)"
+  [ -z "$lint_codes" ] || fail "a negated claim is not a claim: $lint_codes"
+  [ "$(printf 'Done.\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" claim - --writer)" = done ] || fail "writer done claim"
+  [ -z "$(printf 'Done.\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" claim -)" ] || fail "bare done is a claim for writers only"
   # The dry run also prints an advisory inline/researcher/worker verdict from facts.
   local advice_brief="$TMP/advice-brief.md" advice_out="$TMP/advice.out"
   OH_MY_SETTING_DELEGATE_DRY_RUN=1 "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
@@ -8103,6 +8115,7 @@ cat >/dev/null
 printf 'hello from worker\n' > delegated.txt
 printf 'assert() { test -f file.txt; }\nassert\n' > tests/verify.sh
 echo "worker done"
+echo "All tests pass."
 EOF
 
   local consent out
@@ -8137,6 +8150,8 @@ import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 row = [r for r in rows if r.get("kind") == "delegate" and r.get("exit") == 0][-1]
 assert row.get("result_lint") == ["no-unresolved-line", "no-changed-files"], row
+# A passing verify receipt matches the claim (no claim code); the claim itself is recorded for route history.
+assert row.get("worker_claim") == "pass", row
 PY
 }
 
