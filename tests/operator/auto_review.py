@@ -380,6 +380,19 @@ assert panel_review_impl._security_audit_paths(["scripts/permissions.sh"], None)
 assert panel_review_impl._security_audit_paths(["docs/permissions.md"], None) == ["docs/permissions.md"]
 assert panel_review_impl._security_audit_paths(["docs/readme.md"], None) == []
 assert panel_review_impl._security_audit_paths(["rules/x.md"], None) == ["rules/x.md"]
+for exec_path in (".vscode/tasks.json", "app/.vscode/tasks.json", ".envrc", "svc/.envrc", ".husky/pre-commit",
+                  ".githooks/pre-push", "lefthook.yml", ".lefthook-local.yaml", ".pre-commit-config.yaml",
+                  ".devcontainer/devcontainer.json", ".devcontainer.json", ".gitlab-ci.yml", ".circleci/config.yml",
+                  ".github/actions/setup/action.yml", "Jenkinsfile", ".npmrc", ".pnpmfile.cjs"):
+    assert panel_review_impl._security_audit_paths([exec_path], None) == [exec_path], exec_path
+    assert panel._automatic_review_workload({"changed_files": ["docs/x.md", exec_path]}) == "deep", exec_path
+for quiet_path in (".vscode/extensions.json", "src/envrc.py", "src/app.py", "package.json", "docs/devcontainer.md"):
+    assert panel_review_impl._security_audit_paths([quiet_path], None) == [], quiet_path
+# package.json is a risk path only when the patch adds a lifecycle script or hook-manager key.
+pkg_head = b"diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1,2 @@\n old\n+"
+assert panel_review_impl._security_audit_paths(["package.json"], pkg_head + b'  "postinstall": "node x.js"\n') == ["package.json"]
+assert panel_review_impl._security_audit_paths(["package.json"], pkg_head + b'  "simple-git-hooks": {}\n') == ["package.json"]
+assert panel_review_impl._security_audit_paths(["package.json"], pkg_head + b'  "version": "1.2.3"\n') == []
 assert panel_review_impl._security_audit_paths(["docs/cleanup.md"], b"+++ b/docs/cleanup.md\n+rm -rf old\n") == []
 assert panel_review_impl._security_audit_paths(["src/x.py"], b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1,2 +1,2 @@\n--- note\n+kept\n") == []
 assert panel_review_impl._security_audit_paths(["src/x.py"], b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1 +1,2 @@\n old\n+os.unlink(path)\n") == ["src/x.py"]
