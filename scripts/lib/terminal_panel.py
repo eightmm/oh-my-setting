@@ -163,7 +163,7 @@ def main(argv=None):
                 parser.error("argument --count: invalid int value: %r" % values)
     parser.set_defaults(count_rows=False)
     parser.add_argument("--count", action=CountAction, nargs="?", metavar="N",
-                        help="stop after N watch snapshots; bare with --sessions, print only the number of matching rows")
+                        help="stop --watch or --log --follow after N snapshots; bare with --sessions, print only the number of matching rows")
     parser.add_argument("--no-animation", action="store_true", help="keep --watch motion-free")
     parser.add_argument("--view", choices=("auto", "summary", "compact", "detail", "graph", "tree"), help="activity density for the menu or --watch")
     parser.add_argument("--attention-only", action="store_true", help="show only calls awaiting action in the menu or --watch")

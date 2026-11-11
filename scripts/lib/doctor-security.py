@@ -229,7 +229,7 @@ def hook_commands(value):
 
 def project_root():
     """The nearest directory at or above the working directory that holds `.git`, else the working directory."""
-    here = os.path.realpath(os.getcwd())
+    here = os.path.realpath(report_dir())
     probe = here
     while True:
         if os.path.exists(os.path.join(probe, ".git")):
@@ -463,6 +463,11 @@ PROMPT_HINT_DEFAULT = 20
 PROMPT_DAYS = 7
 
 
+def report_dir():
+    """The project `doctor --repo` names (exported by doctor.sh), else the current directory."""
+    return os.environ.get("OMS_DOCTOR_PROJECT_DIR") or os.getcwd()
+
+
 def prompt_ledger(start):
     """The nearest enclosing project's hook ledger, or None; nothing is created."""
     here = os.path.realpath(start)
@@ -483,7 +488,7 @@ def permission_prompts(rows):
     the drift fingerprint, and never edits a permission or allow rule. The ledger
     keeps no tool or command text, so there is no per-tool breakdown.
     """
-    path = prompt_ledger(os.getcwd())
+    path = prompt_ledger(report_dir())
     if path is None:
         rows.append(("info", "permission prompts: no project hook ledger here; run from an adopted project",
                      "security.prompts"))

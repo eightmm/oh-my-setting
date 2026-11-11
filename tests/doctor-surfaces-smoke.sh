@@ -1355,6 +1355,11 @@ PYATOMIC
   out="$(security_cwd="$proj/sub" security)"
   case "$out" in *"hint at"*) fail "no hint below the default threshold: $out" ;; esac
   [ "$before" = "$(cat "$proj/.oms/hooks/events.jsonl")" ] || fail "the prompt summary must not touch the ledger"
+  # --repo names the project the report reads, wherever it runs from; --security never rides along with --contract.
+  out="$(cd "$home" && HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+    bash "$ROOT/scripts/doctor.sh" --repo "$proj" --security 2>&1)" || fail "--repo --security failed: $out"
+  contains "$out" "info: permission prompts: 4 in 2 session(s)" || fail "--repo must choose the ledger the report reads: $out"
+  if out="$(bash "$ROOT/scripts/doctor.sh" --contract --security 2>&1)"; then fail "--contract must refuse --security: $out"; fi
   json="$(cd "$proj/sub" && HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --security --json 2>/dev/null)" || fail "--json with prompts failed: $json"
   printf '%s' "$json" | python3 -c '

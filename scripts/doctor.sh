@@ -337,6 +337,10 @@ if [ "$REPORT_PLAN" = 1 ] && [ "$SECURITY_ONLY" = 1 ]; then
 fi
 
 if [ "$CONTRACT_ONLY" = 1 ]; then
+  if [ "$SECURITY_ONLY" = 1 ]; then
+    echo "error: --security is a standalone read-only report; run it alone" >&2
+    exit 2
+  fi
   if command -v python3 >/dev/null 2>&1 &&
       ! python3 -I -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' >/dev/null 2>&1; then
     echo "warn: host Python is older than 3.11; reinstall to provision the managed runtime"
