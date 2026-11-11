@@ -3378,6 +3378,72 @@ JSON
   if (cd "$project" && HOME="$home_dir" OMS_MCP_PIN_FILE="$pins" "$ROOT/scripts/doctor.sh" --extensions --mcp) >/dev/null 2>&1; then
     fail "--extensions must refuse to run with --mcp"
   fi
+
+  # --probe-tools: the only path that starts a server, for one named local stdio server.
+  local fake="$TMP/fake-mcp-server.py" fdir="$TMP/fake-mcp" probe_pins="$TMP/doctor-mcp-tool-pins.json"
+  mkdir -p "$fdir"
+  cat > "$fake" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+open(os.path.join(d, "started"), "a").write(str(os.getpid()) + "\n")
+if open(os.path.join(d, "mode")).read().strip() == "hang":
+    import time
+    time.sleep(600)
+desc = open(os.path.join(d, "desc")).read().strip()
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    if msg["method"] == "initialize":
+        res = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1"}}
+    else:
+        res = {"tools": [{"name": "alpha", "description": desc, "inputSchema": {"type": "object"}},
+                         {"name": "beta", "description": "fixed", "inputSchema": {"type": "object"}}]}
+        if open(os.path.join(d, "extra")).read().strip() == "1":
+            res["tools"].append({"name": "gamma", "description": "new", "inputSchema": {"type": "object"}})
+    print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": res}), flush=True)
+PY
+  printf 'v1\n' > "$fdir/desc"; printf '0\n' > "$fdir/extra"; printf 'ok\n' > "$fdir/mode"
+  cat > "$home_dir/.claude.json" <<JSON
+{"mcpServers": {
+  "probed": {"command": "python3", "args": ["$fake", "$fdir"]},
+  "remote": {"url": "https://mcp.example.test/x"}}}
+JSON
+  local probe_env=(HOME="$home_dir" CODEX_HOME="$home_dir/.codex" OMS_MCP_PIN_FILE="$probe_pins")
+  (cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp --pin) >/dev/null || fail "--pin should record"
+  (cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp) >/dev/null || fail "plain --mcp must work"
+  [ ! -e "$fdir/started" ] || fail "--mcp without --probe-tools must never start a server"
+  out="$(cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp --probe-tools probed)" ||
+    fail "a probe without a tool pin reports and exits 0: $out"
+  contains "$out" 'probe: claude:user:probed: 2 tool definition(s) read' || fail "the probe must count tools: $out"
+  contains "$out" 'no tool pin recorded' || fail "a missing tool pin must be said: $out"
+  [ "$(wc -l < "$fdir/started")" = 1 ] || fail "the probe must start the named server exactly once"
+  grep -q '"tools"' "$probe_pins" && fail "a probe without --pin must not write tool hashes"
+  (cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp --probe-tools probed --pin) >/dev/null ||
+    fail "--probe-tools --pin should record tool hashes"
+  grep -q '"alpha"' "$probe_pins" && grep -q '"beta"' "$probe_pins" || fail "tool hashes must be stored in the existing pin file"
+  grep -q 'v1' "$probe_pins" && fail "descriptions must never be stored, only hashes"
+  [ "$(stat -c '%a' "$probe_pins" 2>/dev/null || stat -f '%Lp' "$probe_pins")" = 600 ] || fail "the pin file must stay private"
+  out="$(cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp --probe-tools probed)" || fail "probe: $out"
+  contains "$out" 'ok: every tool definition of claude:user:probed matches its pin' || fail "an unchanged server must match: $out"
+  printf 'v2\n' > "$fdir/desc"; printf '1\n' > "$fdir/extra"
+  out="$(cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp --probe-tools probed)" || fail "probe: $out"
+  contains "$out" 'tool changed: claude:user:probed: alpha (tool definition changed since pin)' ||
+    fail "a description-only change must be reported: $out"
+  contains "$out" 'tool added: claude:user:probed: gamma' || fail "an added tool must be reported: $out"
+  case "$out" in *v2*) fail "descriptions must not print: $out" ;; esac
+  contains "$out" 'ok: every server matches its pin' || fail "the launch pin must stay unchanged: $out"
+  out="$(cd "$project" && env "${probe_env[@]}" "$ROOT/scripts/doctor.sh" --mcp --probe-tools remote 2>&1)" &&
+    fail "a URL server must never be probed"
+  contains "$out" 'remote or network server' || fail "refusing a remote server must say why: $out"
+  [ "$(wc -l < "$fdir/started")" = 4 ] || fail "only the named stdio server may ever have been started"
+  printf 'hang\n' > "$fdir/mode"
+  out="$(cd "$project" && env "${probe_env[@]}" OMS_MCP_PROBE_TIMEOUT=1 "$ROOT/scripts/doctor.sh" --mcp --probe-tools probed)" &&
+    fail "a hung server must fail the probe"
+  contains "$out" 'probe failed: claude:user:probed: timed out' || fail "a timeout must be reported: $out"
+  local hung_pid
+  hung_pid="$(tail -n 1 "$fdir/started")"
+  ! kill -0 "$hung_pid" 2>/dev/null || { kill -9 "$hung_pid" 2>/dev/null; fail "the probed server must be terminated"; }
 }
 
 # smoke-weight: 24

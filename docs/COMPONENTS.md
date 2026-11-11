@@ -2921,8 +2921,22 @@ override with `OMS_MCP_PIN_FILE`). Without `--pin` nothing is written: the repor
 `npx`/`bunx`/`uvx` package with no pinned version and on plain `http` to a non-loopback
 host. `--pin` records the current servers; that is the person's approval, never inferred
 from the report. A provider whose file cannot be parsed is `unknown`: its pins are not
-compared and `--pin` keeps them. Servers are never started, so tool descriptions are not
-hashed; the exit status is 0.
+compared and `--pin` keeps them. By default servers are never started, so tool
+descriptions are not hashed; the exit status is 0.
+
+`oms doctor --mcp --probe-tools NAME [--pin]` (`NAME` or a full `provider:scope:name` key)
+is the one opt-in exception: it starts that single local stdio server (never a server with
+a URL, never more than one, never by default), asks `tools/list` over stdio, and hashes
+each full tool definition (name, description, `inputSchema`, `outputSchema`, annotations
+and any other field). The hashes live in an optional `tools` field of the same pin file;
+only `--pin` writes them. Later runs report `tool added`, `tool changed (tool definition
+changed since pin)` and `tool removed`; descriptions are never printed or stored. The
+server runs under a hard timeout (`OMS_MCP_PROBE_TIMEOUT` seconds, default 15, range
+1-120), with a minimal environment plus the variables its own configuration names, its
+stderr discarded, and its process group is always terminated. A failed probe exits 1 and
+records nothing. Limits: the server is not sandboxed and may use the network itself, and
+a changed server binary that lists identical tools is not detected. Code:
+`scripts/lib/doctor-mcp-probe.py`.
 
 `oms doctor --providers [--json]` is a standalone read-only matrix of what OMS supports
 per provider and per function (launch a main, worker call, observe, resume, send,
