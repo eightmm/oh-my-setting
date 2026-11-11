@@ -99,18 +99,29 @@ def main(argv):
     parser.add_argument("--base", default="HEAD")
     parser.add_argument("--config", default=os.path.join(ROOT, "config", "review-depth.json"))
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--red-check", metavar="CMD", default="")
+    parser.add_argument("--red-timeout", type=int, default=300)
     args = parser.parse_args(argv)
     try:
         result = advise(load_config(args.config), *measure(args.repo, args.base))
+        red = None
+        if args.red_check:
+            import red_check
+            red = red_check.check(os.path.realpath(args.repo), git(args.repo, "--binary", args.base, "--"),
+                                  args.red_check, args.base, args.red_timeout)
     except (OSError, ValueError) as error:
         print("error: %s" % error, file=sys.stderr)
         return 2
+    if red is not None:
+        result["red_check"] = red
     if args.json:
         print(json.dumps(result, sort_keys=True))
         return 0
     print("review depth: %s" % result["depth"])
     for reason in result["reasons"]:
         print("  - %s" % reason)
+    if red is not None:
+        print("\n".join(red_check.render(red)))
     print("advice only: this starts no review and changes no gate verdict")
     return 0
 

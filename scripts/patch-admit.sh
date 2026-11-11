@@ -39,6 +39,8 @@ FLOOR_CHANGE_USED=false
 ALLOW_RESTRUCTURE=0
 ACCEPT_ENCODING_LOSS=0
 KEEP_WORKTREE=0
+RED_CHECK=""
+red_report=""
 REPORT=""
 PLAN_TASK=""
 COVERS=""
@@ -102,6 +104,10 @@ Options:
                  contract change. Run and record the failing base floor, but
                  admit only if candidate verification and all other gates pass.
   --accept-encoding-loss  Accept detected non-ASCII loss or transliteration in patch hunks.
+  --red-check CMD  Opt-in advisory: run CMD in a scratch worktree at HEAD with only
+                 the patch's test-file changes, per test file, and record whether
+                 each fails on base (good) or passes on base (does not test the
+                 change). Bounded (300s total), never changes the verdict.
   -h, --help     Show this help.
 
 Ladder: patch applies cleanly (not stale) -> changed files stay in scope ->
@@ -179,6 +185,7 @@ while [ "$#" -gt 0 ]; do
       ALLOW_FLOOR_CHANGE_REASON="$2"; shift 2 ;;
     --allow-restructure) ALLOW_RESTRUCTURE=1; shift ;;
     --accept-encoding-loss) ACCEPT_ENCODING_LOSS=1; shift ;;
+    --red-check) [ "$#" -ge 2 ] || fail "--red-check requires a command"; RED_CHECK="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -1073,6 +1080,26 @@ if [ "$security_status" != "ADVISE" ] && [ "$security_status" != "SKIP" ]; then
 fi
 record "security" "$security_status" "$security_detail"
 
+# --- Red check: opt-in advice, never evidence and never a verdict -----------
+if [ -n "$RED_CHECK" ]; then
+  red_json="$(python3 -I "$ROOT_LIB/red_check.py" --repo "$REPO" --patch "$PATCH" --verify "$RED_CHECK" --json 2>/dev/null)" || red_json=""
+  if [ -n "$red_json" ]; then
+    red_report="$(OMS_RED_JSON="$red_json" OMS_RED_LIB="$ROOT_LIB" python3 -I -c '
+import json, os, sys
+sys.path.insert(0, os.environ["OMS_RED_LIB"])
+import red_check
+result = json.loads(os.environ["OMS_RED_JSON"])
+print(red_check.summary(result))
+print("\n".join(red_check.render(result)[1:]))
+')" || red_report=""
+  fi
+  if [ -n "$red_report" ]; then
+    record "red-check" "ADVISE" "$(printf '%s\n' "$red_report" | sed -n '1p')"
+  else
+    record "red-check" "ADVISE" "red check could not run; advisory, not admission evidence"
+  fi
+fi
+
 if [ -n "$PLAN_TASK" ]; then
   current_prefix="$(python3 "$ROOT_LIB/landing-capture.py" batch-prefix "$reference_state" "$REPO" "$PLAN_TASK")" || current_prefix=""
   if [ "$current_prefix" != "$batch_prefix" ]; then
@@ -1125,6 +1152,10 @@ mkdir -p "$(dirname "$REPORT")"
     printf '%s\n' "$changed_files" | while IFS= read -r f; do
       [ -n "$f" ] && printf -- '- %s\n' "$f"
     done
+  fi
+  if [ -n "$red_report" ]; then
+    printf '\n## Red check (advisory, not admission evidence)\n\n'
+    printf '%s\n' "$red_report" | sed '1d'
   fi
   if [ -n "$verify_out" ]; then
     printf '\n## Verify output (tail)\n\n```\n%s\n```\n' "$(printf '%s' "$verify_out" | tail -n 40)"
