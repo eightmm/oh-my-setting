@@ -2039,12 +2039,15 @@ with patch.object(panel, "events", side_effect=lambda *a, **k: json.dumps(histor
     assert allocate("claude", role="reviewer", installed=both, writer=writer)["provider"] == "codex"
 
 # END linked writer family
+# BEGIN main-resume-permissions
 for owner in panel.PROVIDERS:
     plan = json.loads(call(["bash", str(panel.ENTRY), "panel", "--repo", str(project),
                            "--launch", owner, "--resume", "exact-session-id", "--dry-run"]))
     assert plan["executes"] is False and "exact-session-id" in plan["argv"]
     assert "--last" not in plan["argv"] and "--continue" not in plan["argv"]
-    assert "--dangerously" not in " ".join(plan["argv"])
+    flag = "--dangerously-skip-permissions" if owner == "claude" else "--dangerously-bypass-approvals-and-sandbox"
+    assert flag in plan["argv"]
+# END main-resume-permissions
 # With tmux installed, the fixed panel is the default home for bare and --launch runs, also inside
 # another tmux session; inline stays an explicit choice.
 if shutil.which("tmux") and os.name != "nt":

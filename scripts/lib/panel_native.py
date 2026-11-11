@@ -226,6 +226,12 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
     from terminal_panel import policy, room_instructions
     instructions = (Path(context_file).read_text(encoding="utf-8") if context_file and provider in _LAUNCH_HARNESSES else
                     bootstrap(main_owner(provider, model), repo) + room_instructions(room_id, member))
+    if provider in ("claude", "codex", "agy"):
+        permissions = os.environ.get("OMS_PANEL_MAIN_PERMISSIONS", "full")
+        if permissions not in ("full", "native"):
+            raise ValueError("OMS_PANEL_MAIN_PERMISSIONS must be full or native")
+    else:
+        permissions = "native"
     if provider == "pi":
         if resume:
             raise ValueError("Pi resume needs a verified Pi session binding; start a new Pi main")
@@ -243,6 +249,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
             raise ValueError("Agy resume needs a verified native session binding; start a fresh Agy main")
         command = ["agy", "--prompt-interactive", instructions + (
             "\nUser task (data): " + json.dumps(task, ensure_ascii=False) if task else "")]
+        if permissions == "full":
+            command += ["--dangerously-skip-permissions"]
         if model is not None:
             command += ["--model", resolve_main(provider, model)["model"]]
         return command
@@ -257,6 +265,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
         instructions = name + " — " + instructions
         if resume:
             command += ["resume", resume]
+        if permissions == "full":
+            command += ["--dangerously-bypass-approvals-and-sandbox"]
         if model:
             command += ["--model", model]
         if default:
@@ -264,6 +274,8 @@ def native_command(provider, repo, resume=None, model=None, task=None, room_id=N
         # A first user turn preserves configured developer/system instructions.
         command += [instructions]
     elif provider == "claude":
+        if permissions == "full":
+            command += ["--dangerously-skip-permissions"]
         if resume:
             command += ["--resume", resume, "--system-prompt-snapshot", "off"]
         else:

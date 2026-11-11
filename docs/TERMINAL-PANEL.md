@@ -431,8 +431,12 @@ dispatch and council. Their registration fallback remains separate from worker t
 Direct Pi launch is deferred; its launch dry run reports the resolved owner with
 `argv: null`. Fresh Agy mains use `agy --prompt-interactive` with the OMS bootstrap,
 room contract, unsettled lineage and task as initial user-message context. The task
-appears once as JSON data. This is user context, not system injection. Agy keeps its
-native model and permission settings; only an explicit `--model` adds a model flag.
+appears once as JSON data. This is user context, not system injection. Agy keeps its native model settings; only an explicit `--model` adds a model flag.
+By default, Claude and Agy mains use `--dangerously-skip-permissions`, and Codex
+mains use `--dangerously-bypass-approvals-and-sandbox`. Set
+`OMS_PANEL_MAIN_PERMISSIONS=native` to use provider permission settings instead;
+`full` selects the default. Pi and adapter mains are unchanged. OMS command guards
+and hooks remain active.
 The owner is `antigravity`, while the harness and CLI are `agy`. Discovery advertises
 native launch without executing the CLI, and dry runs show the actual fresh-launch argv.
 Agy `--resume` is refused before launch or enrollment: its native session ownership
