@@ -827,7 +827,7 @@ rs_managed="$TMP/resume-managed"
 rs_scratch="$(OMS_HARNESS_CHILD=0 OMS_HARNESS_DELEGATE_DEPTH=0 OMS_DELEGATE_WORKTREE_ROOT="$rs_managed" "$ROOT/scripts/scratch-worktree.sh" add --repo "$rs" --owner-pid $$)" ||
   fail "resume scratch fixture creation failed"
 PATH="$TMP/wake-bin:$PATH" OMS_ROOT="$ROOT" OMS_HARNESS_DELEGATE_DEPTH=0 OMS_DELEGATE_WORKTREE_ROOT="$rs_managed" python3 - "$rs" "$TMP" "$rs_scratch" <<'PY' || fail "no-main autopilot resume decisions are wrong"
-import contextlib, json, os, sys, time
+import contextlib, json, os, runpy, sys, time
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, os.environ["OMS_ROOT"] + "/scripts/lib")
@@ -923,6 +923,46 @@ with patch.object(panel_interaction, "_spawn_continuation", return_value=4242) a
     status = resume()
     assert status.startswith("skipped: autopilot driving: this run is already held by a live session") and spawn.call_count == 4, status
     receipt_file.with_name("autopilot-reentries.jsonl").unlink()
+    # Approval age: a recorded approval older than the bound is a recorded refusal to start (once per receipt state
+    # and day, nothing spawned, no marker); fresh, unrecorded and disabled bounds resume as before.
+    approvals = receipt_file.with_name("autopilot-approvals.jsonl")
+    def approved(age_days, source="run", spec=None):
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - age_days * 86400))
+        approvals.write_text(json.dumps({"schema": 1, "kind": "autopilot-approval", "at": at, "source": source,
+                                         "spec_sha256": spec or row["spec_sha256"], "owner_id": "", "branch": row["branch"]}) + "\n")
+    with patch.object(panel_interaction, "_spawn_continuation", return_value=4242) as spawn2:
+        stage("driving"); seed(0); approved(8)
+        stale_marker = marker()
+        status = resume(once=stale_marker)
+        assert status.startswith("skipped: autopilot approval is 8d old (approved ") and "by a person's run; limit 7d)" in status, status
+        assert "`oms autopilot --repo %s reenter`" % repo in status and "(0 disables)" in status, status
+        assert spawn2.call_count == 0 and not os.path.exists(stale_marker), spawn.call_count
+        assert [(w["main"], w["outcome"]) for w in rows()] == [("autopilot", "skipped")] and "8d old" in rows()[0]["reason"], rows()
+        resume(); assert len(rows()) == 1, rows()
+        before = ledger.read_text(); assert "8d old" in resume(dry_run=True) and ledger.read_text() == before
+        with patch.dict(os.environ, {"OMS_TICK_AUTOPILOT_MAX_AGE_DAYS": "10"}):
+            assert resume().startswith("resumed ") and spawn2.call_count == 1
+        seed(0); stage("driving")
+        with patch.dict(os.environ, {"OMS_TICK_AUTOPILOT_MAX_AGE_DAYS": "0"}):
+            assert resume().startswith("resumed ") and spawn2.call_count == 2
+        seed(0); approved(6); stage("driving")
+        assert resume().startswith("resumed ") and spawn2.call_count == 3
+        seed(0); approved(30, spec="f" * 64); stage("driving")  # another contract's record does not age this one
+        assert resume().startswith("resumed ") and spawn2.call_count == 4
+        seed(0); approvals.write_text("{"); stage("driving")
+        assert "approval ledger is unreadable; the approval age cannot be judged" in resume() and spawn2.call_count == 4
+        approvals.unlink(); seed(0); stage("driving")
+        assert resume().startswith("resumed ") and spawn2.call_count == 5
+        # The receipt writer records a person's approval, and a wake-launched approval only when none exists.
+        rules = runpy.run_path(lib + "/autopilot-receipt.py")
+        row["updated"] = "2026-11-09T00:00:00Z"
+        with patch.dict(os.environ, {"OMS_AUTOPILOT_WAKE_RESUME": "1"}):
+            rules["record_approval"](receipt_file, row); rules["record_approval"](receipt_file, row)
+        assert [json.loads(x)["source"] for x in approvals.read_text().splitlines()] == ["wake"], approvals.read_text()
+        row["updated"] = "2026-11-10T00:00:00Z"
+        rules["record_approval"](receipt_file, row)
+        assert rules["approval_time"](receipt_file, row)[1] == "run" and len(approvals.read_text().splitlines()) == 2
+    approvals.unlink(); seed(0); stage("driving")
     # A live main (or unverified liveness) goes the idle-main wake path; nothing is resumed or spawned.
     for blocker in ("a panel main is live", "main liveness unverified: tmux status unavailable"):
         with patch.object(panel_interaction, "_live_main_blocker", return_value=blocker):
