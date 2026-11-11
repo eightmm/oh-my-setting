@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import ctypes
 import errno
 import hashlib
@@ -480,6 +481,64 @@ def append_jsonl_ledger(ledger: Path, record: dict[str, Any]) -> None:
 
 def append_reentry_ledger(path: Path, record: dict[str, Any]) -> None:
     append_jsonl_ledger(path.with_name("autopilot-reentries.jsonl"), record)
+
+
+WAKE_RESUME_ENV = "OMS_AUTOPILOT_WAKE_RESUME"
+
+
+def approval_rows(path: Path, spec_sha: str, owner_id: str) -> list[dict[str, Any]]:
+    """Approval-time rows for one contract, file order; a missing ledger is empty.
+
+    Observation only, never approval evidence: it records WHEN a person last
+    ran the approved continuation so a headless wake can refuse a stale one.
+    Raises ReceiptError for an unreadable ledger so the caller can say so."""
+    ledger = path.with_name("autopilot-approvals.jsonl")
+    rows: list[dict[str, Any]] = []
+    try:
+        with open(ledger, encoding="utf-8") as handle:
+            for raw_line in handle:
+                if not raw_line.strip():
+                    continue
+                row = json.loads(raw_line)
+                if (not isinstance(row, dict) or row.get("schema") != 1
+                        or row.get("kind") != "autopilot-approval"
+                        or not UPDATED.fullmatch(str(row.get("at")))
+                        or row.get("source") not in {"run", "wake"}):
+                    raise ValueError("malformed approval row")
+                if row.get("spec_sha256") == spec_sha and row.get("owner_id", "") == owner_id:
+                    rows.append(row)
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ReceiptError("approval ledger is unreadable") from exc
+    return rows
+
+
+def approval_time(path: Path, row: dict[str, Any]) -> tuple[float, str] | None:
+    """(epoch, source) of the latest recorded approval of this contract, None when never recorded."""
+    rows = approval_rows(path, row["spec_sha256"], row.get("owner_id", ""))
+    if not rows:
+        return None
+    latest = max(rows, key=lambda item: item["at"])
+    return float(calendar.timegm(time.strptime(latest["at"], "%Y-%m-%dT%H:%M:%SZ"))), latest["source"]
+
+
+def record_approval(path: Path, row: dict[str, Any]) -> None:
+    """Append the time of an `approved` receipt write. A person's run always records; a wake-launched
+    run (WAKE_RESUME_ENV) records only when none exists, so unattended resumes never extend an approval
+    and a receipt that predates this ledger starts its clock at its first headless resume."""
+    source = "wake" if os.environ.get(WAKE_RESUME_ENV) == "1" else "run"
+    try:
+        if source == "wake" and approval_rows(path, row["spec_sha256"], row.get("owner_id", "")):
+            return
+        append_jsonl_ledger(path.with_name("autopilot-approvals.jsonl"), {
+            "schema": 1, "kind": "autopilot-approval", "at": row["updated"], "source": source,
+            "spec_sha256": row["spec_sha256"], "owner_id": row.get("owner_id", ""),
+            "branch": row.get("branch", ""),
+        })
+    except (OSError, ReceiptError) as exc:
+        # The receipt is already written; a missing note only leaves the age unknown.
+        print("autopilot: approval time not recorded (%s)" % exc, file=sys.stderr)
 
 
 def lineage_claims(
@@ -2452,6 +2511,8 @@ def main() -> int:
         if latest != current:
             raise ReceiptError("outer receipt changed before its atomic update")
         atomic_write(path, payload)
+        if row["stage"] == "approved":
+            record_approval(path, row)
         print(digest(payload))
         return 0
     except (OSError, ReceiptError, ValueError, KeyError, subprocess.SubprocessError) as exc:

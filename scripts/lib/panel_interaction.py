@@ -593,10 +593,34 @@ def _spawn_continuation(argv, log, cwd):
     """Start the approved continuation detached (own session, no inherited descriptors); returns its pid, never waits."""
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
+        # The marker keeps an unattended resume from refreshing the approval time the age bound reads.
         return subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=fd, stderr=subprocess.STDOUT,
-                                close_fds=True, start_new_session=True).pid
+                                close_fds=True, start_new_session=True,
+                                env=dict(os.environ, OMS_AUTOPILOT_WAKE_RESUME="1")).pid
     finally:
         os.close(fd)
+
+
+APPROVAL_MAX_AGE_DAYS = 7
+
+
+def _stale_approval(rules, receipt_path, row, now):
+    """"" when the approval may be resumed, else why not. OMS_TICK_AUTOPILOT_MAX_AGE_DAYS bounds the age
+    (default 7, 0 disables); an approval with no recorded time is not refused (its clock starts at the
+    first headless resume), an unreadable approval ledger is."""
+    raw = os.environ.get("OMS_TICK_AUTOPILOT_MAX_AGE_DAYS", "").strip()
+    limit = int(raw) if raw.isdigit() else APPROVAL_MAX_AGE_DAYS
+    if limit <= 0:
+        return ""
+    try:
+        recorded = rules["approval_time"](receipt_path, row)
+    except rules["ReceiptError"] as error:
+        return "%s; the approval age cannot be judged" % error
+    if recorded is None or now - recorded[0] <= limit * 86400:
+        return ""
+    return "autopilot approval is %dd old (approved %s by %s; limit %dd)" % (
+        (now - recorded[0]) // 86400, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(recorded[0])),
+        "a person's run" if recorded[1] == "run" else "its first headless resume", limit)
 
 
 def resume_autopilot(repo, dry_run=False, now=None, once=None, scheduled_only=False):
@@ -668,6 +692,16 @@ def resume_autopilot(repo, dry_run=False, now=None, once=None, scheduled_only=Fa
         if plan is None and scheduled_only:
             return skip("no schedule binds contract %s" % (contract or "(no owner id)"),
                         "`oms tick schedule --contract ID --every HOURS` binds one")
+        stale = _stale_approval(rules, receipt_path, row, now)
+        if stale:
+            # A refusal to start, recorded once per receipt state and day; running work is never touched.
+            stale_key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
+            if not dry_run and not any(w["main"] == RESUME_SUBJECT and w.get("key") == stale_key for w in wakes):
+                _record_wake(repo, ledger, wakes + [{
+                    "day": day, "main": RESUME_SUBJECT, "key": stale_key, "outcome": "skipped", "reason": stale,
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "stage": stage, "receipt": digest}])
+            return skip(stale, "a person re-approves it (`oms autopilot --repo %s reenter`), or "
+                               "OMS_TICK_AUTOPILOT_MAX_AGE_DAYS is raised (0 disables)" % repo)
         if plan is None:
             key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
             if any(w["main"] == RESUME_SUBJECT and w.get("key") == key for w in spent):

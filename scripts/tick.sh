@@ -80,6 +80,10 @@ Environment:
                                Default off; at most one per main per run, one
                                resume per run, 6 per UTC day in all;
                                --dry-run prints
+  OMS_TICK_AUTOPILOT_MAX_AGE_DAYS
+                               headless resume refuses to start a contract whose
+                               last person-run approval is older than this (7; 0
+                               disables); recorded as a skip, running work untouched
   OMS_TICK_STEP_TIMEOUT        seconds per step when `timeout` exists (600)
 EOF
 }
