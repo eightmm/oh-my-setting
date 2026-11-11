@@ -586,6 +586,48 @@ PY
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+# Manually dispatched runs live in their own event file so the push-run
+# assertions below keep counting only push-run queries.
+dispatch_log="$OMS_TEST_LAND_EVENTS.dispatch"
+if [ "$1 $2" = "workflow run" ]; then
+  echo "workflow $*" >> "$dispatch_log"
+  [ -z "${OMS_TEST_DISPATCH_DELAY:-}" ] || sleep "$OMS_TEST_DISPATCH_DELAY"
+  if [ "${OMS_TEST_CHECK_INTENT:-0}" = 1 ]; then
+    "$OMS_TEST_LAND_COMMAND" status --repo "$OMS_TEST_LAND_REPO" --json | python3 -c \
+      'import json,sys; assert json.load(sys.stdin)["ci"]["dispatch"] == "requested"' || exit 9
+  fi
+  [ -z "${OMS_TEST_DISPATCH_FAIL:-}" ] || { echo 'dispatch refused' >&2; exit 1; }
+  : > "$OMS_TEST_LAND_EVENTS.dispatched"
+  exit 0
+fi
+case " $* " in *" --event workflow_dispatch "*)
+  echo list >> "$dispatch_log"
+  [ -z "${OMS_TEST_TIP_MARKER:-}" ] || : > "$OMS_TEST_TIP_MARKER"
+  sha=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --commit ]; then sha="$2"; break; fi
+    shift
+  done
+  result="${OMS_TEST_DISPATCH_RESULT:-missing}"
+  if [ "${OMS_TEST_DELAYED_RUN:-0}" = 1 ]; then
+    count_file="$dispatch_log.visibility"
+    if [ ! -e "$count_file" ]; then : > "$count_file"; result=missing; else result=success; fi
+  fi
+  if [ "$result" = pending ]; then
+    printf '[{"databaseId":2,"headSha":"%s","status":"queued","conclusion":null}]\n' "$sha"
+    exit 0
+  fi
+  if [ "${OMS_TEST_DISPATCH_AFTER:-0}" = 1 ] && [ ! -e "$OMS_TEST_LAND_EVENTS.dispatched" ]; then result=missing; fi
+  if [ "$result" = missing ]; then echo '[]'; exit 0; fi
+  [ "$result" != wrong-sha ] || { sha=wrong; result=success; }
+  printf '[{"databaseId":2,"headSha":"%s","status":"completed","conclusion":"%s"}]\n' "$sha" "$result"
+  exit 0 ;;
+esac
+if [ "$2" = view ] && [ "$3" = 2 ]; then
+  echo "jobs-dispatch $3" >> "$dispatch_log"
+  export OMS_TEST_CI_SCOPE="${OMS_TEST_DISPATCH_SCOPE:-full}"
+  OMS_TEST_LAND_EVENTS="$OMS_TEST_LAND_EVENTS.dispatch-view"
+fi
 if [ "$2" = view ]; then
   # A run's jobs: the full selection, an affected-only run, or neither. The
   # full job set also arrives for another SHA, a failed run, with a duplicate
@@ -655,7 +697,7 @@ if [ "$OMS_TEST_CI_RESULT" = malformed ]; then echo '{}'; exit 0; fi
 printf '[{"databaseId":1,"headSha":"%s","status":"completed","conclusion":"%s"}]\n' "$sha" "$OMS_TEST_CI_RESULT"
 EOF
 chmod +x "$TMP/bin/gh"
-export PATH="$TMP/bin:$PATH" OMS_TEST_LAND_EVENTS="$TMP/events" OMS_TEST_LAND_REPO="$repo"
+export PATH="$TMP/bin:$PATH" OMS_TEST_LAND_EVENTS="$TMP/events" OMS_TEST_LAND_REPO="$repo" OMS_TEST_LAND_COMMAND="$LAND"
 for ci_result in malformed wrong-sha; do
   query_rc=0
   OMS_TEST_CI_RESULT="$ci_result" python3 "$ROOT/scripts/lib/ci-query.py" \
@@ -664,6 +706,9 @@ for ci_result in malformed wrong-sha; do
 done
 out="$(OMS_TEST_CI_RESULT=missing python3 "$ROOT/scripts/lib/ci-query.py" fixture/repo "$head" 1 main test.yml)"
 [ "$out" = '0 missing' ] || fail "absent CI must not look green"
+out="$(OMS_TEST_CI_RESULT=success python3 "$ROOT/scripts/lib/ci-query.py" "$TMP/remote with spaces.git" "$head" 1 main test.yml)" ||
+  fail "local remote with spaces was rejected by CI query"
+[ "$out" = '1 success' ] || fail "local remote CI query returned unexpected evidence"
 for ci_result in failure skipped success; do
   gate "echo CI $ci_result probe; echo 'check: ok'"
   : > "$TMP/events"
@@ -1388,7 +1433,7 @@ OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --gate 'echo other gate ran' --ci-wait 0 > "$TMP/other-gate.out" 2>&1 ||
   fail "an explicit gate on an already-pushed commit failed: $(cat "$TMP/other-gate.out")"
 ! grep -q 'already pushed and installed' "$TMP/other-gate.out" || fail "different gate reused prior evidence"
-grep -q 'install needs a full gate' "$TMP/other-gate.out" || fail "a gate without full proof installed"
+grep -q 'install needs successful CI plus full proof' "$TMP/other-gate.out" || fail "a gate without full proof installed"
 git clone -q --bare "$TMP/remote.git" "$TMP/other-remote.git"
 git -C "$repo" remote set-url origin "$TMP/other-remote.git"
 OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
@@ -1696,8 +1741,15 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/affected-pass.out" 2>&1 ||
   fail "an affected gate failed to land: $(cat "$TMP/affected-pass.out")"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "an affected gate and affected CI must push without installing"
-grep -q 'install needs a full gate or a full-selection CI run' "$TMP/affected-pass.out" ||
-  fail "the skipped install must name the missing proof"
+grep -q 'install needs a full-selection CI run for this SHA: request it with: gh workflow run test.yml --repo .* --ref main ;' "$TMP/affected-pass.out" ||
+  fail "the skipped install must name the CI route first: $(cat "$TMP/affected-pass.out")"
+affected_msg="$(grep -m1 'install needs' "$TMP/affected-pass.out")"
+case "$affected_msg" in
+  *"request it with: gh workflow run"*"then resume with:"*"--ci-full"*"alternative: a full local gate"*) ;;
+  *) fail "the CI route must come before the local full gate: $affected_msg" ;;
+esac
+[ ! -e "$TMP/events.dispatch" ] || [ "$(grep -c '^workflow ' "$TMP/events.dispatch")" = 0 ] ||
+  fail "land dispatched a workflow without --ci-full"
 land_field() { "$LAND" status --repo "$repo" --json | python3 -c 'import json,sys
 r = json.load(sys.stdin)
 for key in sys.argv[1].split("."): r = r.get(key, {}) if isinstance(r, dict) else {}
@@ -1771,6 +1823,178 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   fail "full-gate recovery of a pushed SHA failed: $(cat "$TMP/full-recovery.out")"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "full-gate recovery did not install after CI"
 [ "$(land_field update.authority)" = gate.scope=full ] || fail "install did not record its full-gate proof"
+# Default route to full proof: affected-only push CI, then a full-selection CI
+# run of the SAME SHA requested by dispatch. The capped gate is never proof.
+capped_gate='if [ "$#" = 0 ]; then echo "check: ok"; else echo "check: ok (affected tests; mode=full capped to lint and quick lane; ci-parity)"; fi'
+dispatch_lines() { { grep -c "^$1" "$TMP/events.dispatch" 2>/dev/null || true; } | head -n 1; }
+land_dispatch() {  # land_dispatch OUT [land args...]: the shared env for push CI success + install stub
+  local out="$1"; shift
+  OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+    "$LAND" --repo "$repo" --wait "$@" > "$out" 2>&1
+}
+gate "$capped_gate; # dispatch route"
+rm -f "$TMP/events.dispatched"; : > "$TMP/events"; : > "$TMP/events.dispatch"
+land_dispatch "$TMP/route-none.out" --ci-wait 5 || fail "affected CI without a full run failed: $(cat "$TMP/route-none.out")"
+[ "$(dispatch_lines list)" = 1 ] || fail "missing dispatch was polled repeatedly"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "no full run: land installed or re-ran CI: $(cat "$TMP/events")"
+[ "$(dispatch_lines workflow)" = 0 ] || fail "land dispatched a workflow without --ci-full"
+[ "$(land_field update.reason)" = partial-gate ] && [ -z "$(land_field ci.dispatch)" ] ||
+  fail "no-flag land recorded a dispatch or the wrong reason"
+if land_dispatch "$TMP/route-no-run-handoff.out" --ci-wait 1 --handoff-receipt-to "$handoff"; then
+  fail "missing full proof handed off a receipt"
+fi
+# A full run for another SHA, a cancelled run and an affected-only dispatched run never count.
+for dispatched in wrong-sha cancelled affected; do
+  : > "$TMP/events"
+  case "$dispatched" in
+    affected) set -- OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=affected ;;
+    *) set -- OMS_TEST_DISPATCH_RESULT="$dispatched" ;;
+  esac
+  env "$@" OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+    "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/route-$dispatched.out" 2>&1 && route_rc=0 || route_rc=$?
+  if [ "$dispatched" = cancelled ]; then [ "$route_rc" -ne 0 ] || fail "cancelled full run passed"; fi
+  ! grep -q '^update$' "$TMP/events" || fail "a $dispatched dispatched run installed"
+  [ "$(land_field update.authority)" != ci.scope=full ] || fail "a $dispatched dispatched run became proof"
+  [ "$(land_field ci.scope)" != full ] || fail "a $dispatched dispatched run was recorded as full scope"
+done
+: > "$TMP/events"
+OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=full land_dispatch "$TMP/route-full.out" --ci-wait 1 ||
+  fail "a full dispatched run for the same SHA did not install: $(cat "$TMP/route-full.out")"
+[ "$(land_field update.authority)" = ci.scope=full ] && [ "$(land_field ci.scope)" = full ] &&
+  [ "$(land_field ci.scope_run_id)" = 2 ] && [ "$(land_field update.reason)" = installed ] ||
+  fail "the dispatched full run was not recorded as the install proof"
+grep -q '^update$' "$TMP/events" || fail "the dispatched full run did not install"
+[ "$(dispatch_lines workflow)" = 0 ] || fail "resuming a dispatched run dispatched again"
+# An external dispatch becomes visible on a subsequent invocation.
+gate "$capped_gate; # delayed external dispatch"
+rm -f "$TMP/events.dispatch.visibility"; : > "$TMP/events"
+OMS_TEST_DELAYED_RUN=1 OMS_TEST_DISPATCH_SCOPE=full land_dispatch "$TMP/route-delayed-first.out" --ci-wait 2 || fail "missing run failed"
+OMS_TEST_DELAYED_RUN=1 OMS_TEST_DISPATCH_SCOPE=full land_dispatch "$TMP/route-delayed.out" --ci-wait 2 || fail "visible full run failed"
+grep -q '^update$' "$TMP/events" || fail "land did not wait for an external dispatch"
+# A successful run with unreadable job evidence remains blocked.
+gate "$capped_gate; # unreadable dispatched scope"
+: > "$TMP/events"
+if OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=error land_dispatch "$TMP/route-unknown.out" --ci-wait 1; then
+  fail "unreadable dispatched scope passed"
+fi
+[ "$(land_field state)" = blocked ] || fail "unreadable dispatched scope was not blocked"
+! grep -q '^update$' "$TMP/events" || fail "unreadable dispatched scope installed"
+# A queued exact-SHA run must not invite a second dispatch.
+gate "$capped_gate; # pending dispatched run"
+if OMS_TEST_DISPATCH_RESULT=pending land_dispatch "$TMP/route-pending.out" --ci-wait 4 --handoff-receipt-to "$handoff"; then
+  fail "pending run passed before receipt handoff"
+fi
+[ "$(land_field state)" = blocked ] || fail "pending proof was not blocked"
+grep -q 'resume with:' "$TMP/route-pending.out" || fail "pending run omitted resume command"
+grep -q 'has not completed within --ci-wait' "$TMP/route-pending.out" || fail "pending run timeout was misreported"
+! grep -q 'request it with: gh workflow run' "$TMP/route-pending.out" || fail "pending run invited another dispatch"
+OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=full land_dispatch "$TMP/route-pending-resume.out" --ci-wait 1 --handoff-receipt-to "$handoff" ||
+  fail "pending handoff could not resume: $(cat "$TMP/route-pending-resume.out")"
+# URL parsing never emits userinfo or URL suffixes, and rejects invalid slugs.
+python3 "$ROOT/scripts/lib/ci-query.py" > "$TMP/query-usage.out" 2>&1 || true
+grep -q 'query-repo DESTINATION' "$TMP/query-usage.out" || fail "query-repo omitted from usage"
+remote_url="$(printf '%s%s%s%s' 'HTTPS://person:' 'sample' '@example.com:443/owner/repo.git' '?view=1#part')"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" slug "$remote_url")" = owner/repo ] || fail "remote URL slug leaked or failed"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "file://$TMP/local remote.git")" = "$TMP/local remote" ] || fail "file remote query failed"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$remote_url")" = 'example.com:443/owner/repo' ] || fail "enterprise port was changed"
+scp_remote="$(printf '%s%s%s' 'user@part' '@example.com:' 'owner/repo.git')"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$scp_remote")" = 'example.com/owner/repo' ] || fail "SCP userinfo leaked"
+github_remote="$(printf '%s%s%s' 'HTTPS://person:' 'sample' '@github.com/owner/repo.git?view=1')"
+[ "$(GH_HOST=enterprise.example python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$github_remote")" = 'github.com/owner/repo' ] || fail "explicit GitHub host was lost"
+[ "$(GH_HOST=enterprise.example python3 "$ROOT/scripts/lib/ci-query.py" query-repo 'git@github.com:owner/repo.git')" = 'github.com/owner/repo' ] || fail "SCP GitHub host was lost"
+for bad_slug in '' 'https://example.com/' 'owner' 'https://example.com/a/b/c' 'https://example.com:invalid/a/b'; do
+  if python3 "$ROOT/scripts/lib/ci-query.py" slug "$bad_slug" > "$TMP/slug.out" 2>&1; then
+    fail "malformed slug accepted"
+  fi
+done
+# Budgets: a case that must reach the dispatch, or that succeeds at once, gets
+# room for a loaded host (land checks the deadline before each query).
+# --ci-full: a refused dispatch blocks; otherwise it dispatches once, records it,
+# and a rerun waits for that run instead of dispatching again.
+gate "$capped_gate; # ci-full route"
+rm -f "$TMP/events.dispatched"; : > "$TMP/events"; : > "$TMP/events.dispatch"
+if OMS_TEST_DISPATCH_FAIL=1 land_dispatch "$TMP/route-refused.out" --ci-wait 30 --ci-full; then
+  fail "a refused dispatch passed: $(cat "$TMP/route-refused.out")"
+fi
+[ "$(land_field ci.dispatch)" = requested ] || fail "uncertain dispatch intent was lost"
+if land_dispatch "$TMP/route-refused-retry.out" --ci-wait 1 --ci-full; then fail "uncertain dispatch passed"; fi
+[ "$(dispatch_lines workflow)" = 1 ] || fail "uncertain dispatch was duplicated"
+gate "$capped_gate; # timed dispatch"
+: > "$TMP/events.dispatch"
+if OMS_TEST_DISPATCH_DELAY=10 land_dispatch "$TMP/route-timeout.out" --ci-wait 5 --ci-full; then
+  fail "timed-out dispatch passed"
+fi
+[ "$(land_field ci.dispatch)" = requested ] && [ "$(land_field ci.dispatch_rc)" = 124 ] ||
+  fail "timed-out dispatch did not retain intent"
+if land_dispatch "$TMP/route-timeout-retry.out" --ci-wait 1 --ci-full; then fail "timed-out dispatch passed on retry"; fi
+[ "$(dispatch_lines workflow)" = 1 ] || fail "timed-out dispatch was duplicated"
+# The dispatch tip lookup is separate from the earlier push lookup.
+mkdir -p "$TMP/tip-intercept"
+cat > "$TMP/tip-intercept/git" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = ls-remote ] && [ -e "$OMS_TEST_TIP_MARKER" ]; then
+  echo attempt >> "$OMS_TEST_TIP_COUNT"
+  case "$OMS_TEST_TIP_MODE" in
+    fail) exit 1 ;;
+    moved) printf '%040d\trefs/heads/main\n' 0; exit 0 ;;
+    transient) [ "$(wc -l < "$OMS_TEST_TIP_COUNT")" -gt 1 ] || exit 1 ;;
+  esac
+fi
+exec "$OMS_TEST_REAL_GIT" "$@"
+EOF
+chmod +x "$TMP/tip-intercept/git"
+for tip_mode in fail moved transient; do
+  gate "$capped_gate; # tip $tip_mode"
+  rm -f "$TMP/tip-marker"; : > "$TMP/tip-count"; : > "$TMP/events.dispatch"
+  tip_rc=0
+  PATH="$TMP/tip-intercept:$PATH" OMS_TEST_REAL_GIT="$real_git" OMS_TEST_TIP_MARKER="$TMP/tip-marker" \
+    OMS_TEST_TIP_COUNT="$TMP/tip-count" OMS_TEST_TIP_MODE="$tip_mode" \
+    land_dispatch "$TMP/tip-$tip_mode.out" --ci-wait 8 --ci-full || tip_rc=$?
+  [ "$tip_rc" -ne 0 ] || fail "$tip_mode tip unexpectedly passed"
+  if [ "$tip_mode" = transient ]; then
+    [ "$(wc -l < "$TMP/tip-count")" -ge 2 ] || fail "transient tip error was not retried"
+    [ "$(dispatch_lines workflow)" = 1 ] || fail "recovered tip did not dispatch"
+  else
+    [ "$(land_field state)" = blocked ] || fail "$tip_mode tip did not block"
+    [ "$(dispatch_lines workflow)" = 0 ] || fail "$tip_mode tip dispatched"
+    grep -q 'resume with:' "$TMP/tip-$tip_mode.out" || fail "$tip_mode tip omitted resume"
+    ! grep -q 'request it with: gh workflow run' "$TMP/tip-$tip_mode.out" || fail "$tip_mode tip suggested dispatch"
+  fi
+done
+grep -q 'moved past this SHA' "$TMP/tip-moved.out" || fail "moved tip reason missing"
+grep -q 'remote tip lookup' "$TMP/tip-fail.out" || fail "transport failure reason missing"
+gate "$capped_gate; # ci-full route after tip checks"
+: > "$TMP/events.dispatch"
+if OMS_TEST_CHECK_INTENT=1 land_dispatch "$TMP/route-once.out" --ci-wait 8 --ci-full; then
+  fail "an unfinished dispatched run passed"
+fi
+[ "$(dispatch_lines workflow)" = 1 ] || fail "--ci-full did not dispatch exactly once"
+grep -q -- '--ref main' "$TMP/events.dispatch" || fail "the dispatch did not target the landed branch"
+[ "$(land_field ci.dispatch)" = requested ] && [ -n "$(land_field ci.dispatch_at)" ] || fail "the dispatch was not recorded"
+grep -q 'has not appeared within --ci-wait' "$TMP/route-once.out" || fail "missing run timeout was misreported"
+! grep -q '^update$' "$TMP/events" || fail "an unfinished dispatched run installed"
+if land_dispatch "$TMP/route-again.out" --ci-wait 1 --ci-full; then fail "missing dispatched run passed"; fi
+[ "$(dispatch_lines workflow)" = 1 ] || fail "a rerun with --ci-full dispatched a second time"
+: > "$TMP/events.dispatched"  # the dispatched run has now appeared
+OMS_TEST_DISPATCH_AFTER=1 OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=full \
+  land_dispatch "$TMP/route-landed.out" --ci-wait 30 --ci-full ||
+  fail "the dispatched run did not install on resume: $(cat "$TMP/route-landed.out")"
+[ "$(land_field update.authority)" = ci.scope=full ] || fail "resume did not record the full CI proof"
+[ "$(land_field ci.full_query_rc)" = 0 ] && [ "$(land_field ci.full_scope)" = full ] && [ -z "$(land_field ci.dispatch_rc)" ] ||
+  fail "successful retry retained stale full-route errors"
+[ "$(dispatch_lines workflow)" = 1 ] || fail "the resumed land dispatched again"
+if "$LAND" --repo "$repo" --wait --ci-full --ci-wait 0 > "$TMP/route-badflags.out" 2>&1; then
+  fail "--ci-full with --ci-wait 0 was accepted"
+fi
+# Skipped CI must not parse a local remote as a GitHub slug.
+git clone -q --bare "$TMP/remote.git" "$TMP/remote with spaces.git"
+git -C "$repo" remote set-url origin "$TMP/remote with spaces.git"
+git -C "$install" remote set-url origin "$TMP/remote with spaces.git"
+gate "$capped_gate; # local skipped CI"
+OMS_INSTALL_RECEIPT="$TMP/install.json" "$LAND" --repo "$repo" --wait --ci-wait 0 > "$TMP/local-skipped.out" 2>&1 ||
+  fail "local remote was rejected for skipped CI: $(cat "$TMP/local-skipped.out")"
+git -C "$repo" remote set-url origin "$TMP/remote.git"
+git -C "$install" remote set-url origin "$TMP/remote.git"
 gate 'echo "check: ok (quick local checks; full CI gate required)"'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \

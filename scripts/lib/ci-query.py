@@ -3,6 +3,15 @@
 
 ci-query.py DESTINATION SHA SECONDS BRANCH WORKFLOW
     prints "RUN_ID CONCLUSION" for the newest push run of SHA, "0 missing" if none.
+ci-query.py dispatch DESTINATION SHA SECONDS BRANCH WORKFLOW
+    the same for the newest manually dispatched (workflow_dispatch) run of SHA
+    on BRANCH; test.yml runs the full selection for every dispatch.
+ci-query.py slug DESTINATION
+    prints OWNER/REPO for DESTINATION without credentials.
+ci-query.py query-repo DESTINATION
+    prints the sanitized repository argument for gh.
+ci-query.py tip DESTINATION BRANCH SECONDS
+    prints the remote branch SHA, or exits nonzero on lookup failure.
 ci-query.py scope DESTINATION RUN_ID SHA SECONDS
     prints "full" when that successful run executed the full selection,
     "affected" when it ran the affected selection only; anything it cannot
@@ -22,6 +31,8 @@ import urllib.parse
 import urllib.request
 
 MAX_QUERY_BYTES = 1024 * 1024
+# A run id is read for scope whichever of these events started it.
+RUN_EVENTS = ("push", "workflow_dispatch")
 PUBLIC_REPO = "eightmm/oh-my-setting"
 PUBLIC_WORKFLOW = ".github/workflows/test.yml"
 
@@ -40,9 +51,46 @@ OPTIONAL_JOBS = re.compile(
 
 
 def repo_slug(destination):
-    destination = re.sub(r"^[a-z]+://", "", destination)
-    destination = re.sub(r"^[^@/]+@", "", destination).replace(":", "/")
-    return re.sub(r"\.git/?$", "", destination).rstrip("/")
+    try:
+        if "://" in destination:
+            parsed = urllib.parse.urlsplit(destination)
+            if not parsed.hostname or parsed.port is not None and not (1 <= parsed.port <= 65535):
+                raise ValueError
+            path = parsed.path
+        else:
+            destination = destination.split("?", 1)[0].split("#", 1)[0]
+            destination = destination.rsplit("@", 1)[-1]
+            if ":" in destination:
+                host, path = destination.split(":", 1)
+                if not host:
+                    raise ValueError
+            else:
+                parts = destination.strip("/").split("/")
+                path = "/".join(parts[-2:]) if len(parts) >= 2 else ""
+        path = re.sub(r"\.git/?$", "", path).strip("/")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", path):
+            raise ValueError
+        if any(part in (".", "..") for part in path.split("/")):
+            raise ValueError
+        return path
+    except ValueError:
+        raise ValueError("invalid repository destination") from None
+
+
+def query_repo(destination):
+    """Keep legacy gh arguments for non-GitHub remotes, without URL userinfo."""
+    if "://" in destination:
+        parsed = urllib.parse.urlsplit(destination)
+        if parsed.scheme.lower() == "file" and not parsed.netloc:
+            return re.sub(r"\.git/?$", "", parsed.path).rstrip("/")
+        if not parsed.hostname:
+            raise ValueError("invalid repository destination")
+        return re.sub(r"\.git/?$", "", parsed.netloc.rsplit("@", 1)[-1] + parsed.path).rstrip("/")
+    else:
+        destination = destination.split("?", 1)[0].split("#", 1)[0]
+        if "@" in destination.split("/", 1)[0]:
+            destination = destination.split("/", 1)[0].rsplit("@", 1)[-1] + ("/" + destination.split("/", 1)[1] if "/" in destination else "")
+    return re.sub(r"\.git/?$", "", destination.replace(":", "/")).rstrip("/")
 
 
 def public_destination(destination):
@@ -82,6 +130,42 @@ def stop_process(process):
     except ProcessLookupError:
         pass
     process.wait()
+
+
+def remote_tip(destination, branch, seconds):
+    try:
+        budget = float(seconds)
+        if not math.isfinite(budget) or budget <= 0:
+            raise ValueError
+        process = subprocess.Popen(
+            ["git", "ls-remote", "--exit-code", destination, "refs/heads/" + branch],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    except (ValueError, OSError):
+        print("remote tip lookup unavailable", file=sys.stderr)
+        return 2
+    try:
+        deadline = time.monotonic() + budget
+        output = bounded_call(lambda: process.stdout.read(MAX_QUERY_BYTES + 1), budget)
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if process.returncode or len(output) > MAX_QUERY_BYTES:
+            raise ValueError
+        rows = output.decode("utf-8").splitlines()
+        if len(rows) != 1:
+            raise ValueError
+        sha, ref = rows[0].split("\t")
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) or ref != "refs/heads/" + branch:
+            raise ValueError
+        print(sha)
+        return 0
+    except (subprocess.TimeoutExpired, TimeoutError):
+        stop_process(process)
+        print("remote tip lookup timed out", file=sys.stderr)
+        return 124
+    except (ValueError, UnicodeDecodeError):
+        if process.poll() is None:
+            stop_process(process)
+        print("remote tip lookup failed", file=sys.stderr)
+        return 2
 
 
 def gh(args, seconds):
@@ -163,9 +247,9 @@ def public_json(path, seconds):
         return 2, None
 
 
-def public_run(row, sha, run_id=None, branch=""):
+def public_run(row, sha, run_id=None, branch="", events=("push",)):
     if (not isinstance(row, dict) or row.get("head_sha") != sha
-            or row.get("event") != "push" or row.get("path") != PUBLIC_WORKFLOW
+            or row.get("event") not in events or row.get("path") != PUBLIC_WORKFLOW
             or row.get("repository", {}).get("full_name") != PUBLIC_REPO
             or type(row.get("id")) is not int or row["id"] <= 0
             or (run_id is not None and row["id"] != int(run_id))
@@ -175,7 +259,8 @@ def public_run(row, sha, run_id=None, branch=""):
             "status": row["status"], "conclusion": row["conclusion"]}
 
 
-def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_id=None):
+def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_id=None,
+          event="push"):
     """Keep gh first; a failed client may use bounded public OMS evidence."""
     deadline = time.monotonic() + min(30.0, max(0, seconds))
     rc, output = gh(args, seconds)
@@ -183,7 +268,7 @@ def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_i
             or workflow not in ("test.yml", PUBLIC_WORKFLOW) \
             or not re.fullmatch(r"[0-9a-f]{40}", sha):
         return rc, output
-    params = {"head_sha": sha, "event": "push", "per_page": 1}
+    params = {"head_sha": sha, "event": event, "per_page": 1}
     if branch:
         params["branch"] = branch
     path = ("actions/runs/" + run_id if run_id else
@@ -199,8 +284,9 @@ def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_i
                     or type(data["total_count"]) is not int or data["total_count"] < len(rows) \
                     or (not rows and data["total_count"]):
                 raise ValueError("invalid run list")
-            return 0, json.dumps([public_run(row, sha, branch=branch) for row in rows])
-        run = public_run(data, sha, run_id)
+            return 0, json.dumps([public_run(row, sha, branch=branch, events=(event,))
+                                  for row in rows])
+        run = public_run(data, sha, run_id, events=RUN_EVENTS)
         attempt = data["run_attempt"]
         if type(attempt) is not int or attempt <= 0:
             raise ValueError("invalid run attempt")
@@ -236,8 +322,8 @@ def run_conclusion(run, sha):
     return conclusion
 
 
-def latest_run(destination, sha, seconds, branch, workflow):
-    args = ["run", "list", "--repo", repo_slug(destination), "--commit", sha, "--event", "push",
+def latest_run(destination, sha, seconds, branch, workflow, event="push"):
+    args = ["run", "list", "--repo", query_repo(destination), "--commit", sha, "--event", event,
             "--limit", "1", "--json", "databaseId,status,conclusion,headSha"]
     if branch:
         args += ["--branch", branch]
@@ -256,7 +342,7 @@ def latest_run(destination, sha, seconds, branch, workflow):
         remaining = max(0.0, deadline - time.monotonic())
         # Only an explicit zero budget gets a full single-request timeout.
         rc, output = query(destination, sha, args, remaining if budget > 0 else 30,
-                           branch, workflow)
+                           branch, workflow, event=event)
         if rc:
             if rc == 124 and budget > 0 and pending_id is not None:
                 print(pending_id, "pending")
@@ -305,7 +391,7 @@ def run_scope(destination, run_id, sha, seconds):
         print("CI query wait budget is invalid", file=sys.stderr)
         return 2
     deadline = time.monotonic() + budget
-    args = ["run", "view", run_id, "--repo", repo_slug(destination),
+    args = ["run", "view", run_id, "--repo", query_repo(destination),
             "--json", "headSha,status,conclusion,jobs"]
     while True:
         remaining = max(0.0, deadline - time.monotonic())
@@ -358,6 +444,16 @@ def run_scope(destination, run_id, sha, seconds):
 def main():
     if sys.argv[1:2] == ["scope"] and len(sys.argv) == 6:
         return run_scope(*sys.argv[2:])
+    if sys.argv[1:2] == ["dispatch"] and len(sys.argv) == 7:
+        return latest_run(*sys.argv[2:], event="workflow_dispatch")
+    if sys.argv[1:2] == ["slug"] and len(sys.argv) == 3:
+        print(repo_slug(sys.argv[2]))
+        return 0
+    if sys.argv[1:2] == ["query-repo"] and len(sys.argv) == 3:
+        print(query_repo(sys.argv[2]))
+        return 0
+    if sys.argv[1:2] == ["tip"] and len(sys.argv) == 5:
+        return remote_tip(*sys.argv[2:])
     if len(sys.argv) != 6:
         print(__doc__.strip(), file=sys.stderr)
         return 2
@@ -365,4 +461,8 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ValueError:
+        print("invalid repository destination", file=sys.stderr)
+        raise SystemExit(2)

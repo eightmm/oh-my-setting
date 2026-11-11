@@ -42,10 +42,14 @@
   a full selection runs lint and the quick lane, never CI's full lanes, plus
   operator-tools when tier-routing inputs change, with every registry provider
   CLI hidden from PATH.
-  Installation needs successful CI for that same SHA plus full proof: a full
-  local gate (`--gate 'bash scripts/check.sh --parallel'`) or a CI run whose
-  jobs executed the full selection. Affected-only gates and runs push but
-  never install; the receipt's `update.authority` names the proof.
+  Installation needs successful CI for that same SHA plus full proof. The
+  default proof is a CI run whose jobs executed the full selection for exactly
+  that SHA: the push run when it was full, otherwise a dispatched `test.yml`
+  run (`gh workflow run test.yml --ref TARGET`, always the full selection;
+  `oms land --ci-full` dispatches it once, plain `oms land --wait` only waits
+  for one). The option is a full local gate
+  (`--gate 'bash scripts/check.sh --parallel'`). Affected-only gates and runs
+  push but never install; the receipt's `update.authority` names the proof.
   Direct pushes keep the full hook unless the destination requires CI's
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
