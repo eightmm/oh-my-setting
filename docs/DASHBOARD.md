@@ -45,6 +45,17 @@ or call a model. It does not refresh CI, touch the network, or keep a store of
 its own. The lifecycle stream is read twice per refresh: once inside
 `oms state` and once for per-attempt usage, which the compact state omits.
 
+## OpenTelemetry name map
+
+`config/otel-genai-map.json` maps lifecycle, hook-telemetry, artifact-index usage
+and trace-context fields to OpenTelemetry GenAI attribute names, for people who
+post-process the `.oms/` JSONL themselves. It is a reference table, not an
+exporter: OMS emits no OpenTelemetry data and nothing reads the file at runtime.
+The GenAI conventions are in Development, so the file records the source URLs
+and the date checked, marks names it could not confirm as `unconfirmed`, and
+lists fields with no equivalent. `python3 scripts/lib/otel_field_map.py` checks
+that every OMS field named there still appears in its writer.
+
 ## Reading the view
 
 - **Coverage.** Only OMS-managed records are shown. A native provider subagent
