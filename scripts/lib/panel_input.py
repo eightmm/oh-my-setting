@@ -12,10 +12,14 @@ PANEL_SESSION = r"oms-[a-z0-9][a-z0-9-]{0,47}"
 
 
 class TerminalInput:
-    def __init__(self, managed=False, active=True, extra_keys=()):
+    def __init__(self, managed=False, active=True, extra_keys=(), text_after=""):
         self.managed = managed
         self.active = active
         self.extra_keys = tuple(extra_keys)
+        # Text mode hands every printable key (and Backspace) over as typed text. The owner switches it
+        # off again; `text_after` is the key that opens a text field, so the rest of its batch is text too.
+        self.text_mode = False
+        self.text_after = text_after
         self.fd = None
         self.saved = None
         self.pending = b""
@@ -118,6 +122,16 @@ class TerminalInput:
                 self.pending = self.pending[1:]
                 continue
             value = self.pending[:1]
+            if self.text_mode and value[0] >= 0xc2:
+                size = 2 if value[0] < 0xe0 else 3 if value[0] < 0xf0 else 4
+                if len(self.pending) < size:
+                    break  # the rest of a multi-byte character is still on its way
+                raw, self.pending = self.pending[:size], self.pending[size:]
+                try:
+                    output.append((raw.decode(),))
+                except UnicodeDecodeError:
+                    output.append(("unbound",))
+                continue
             self.pending = self.pending[1:]
             if value in (b"\r", b"\n"):
                 output.append(("enter",))
@@ -125,6 +139,13 @@ class TerminalInput:
                 output.append(("tab",))
             elif value == b"\x0c":
                 output.append(("repaint",))
+            elif self.text_mode and value in (b"\x7f", b"\x08"):
+                output.append(("backspace",))
+            elif self.text_mode and 0x20 <= value[0] < 0x7f:
+                output.append((value.decode(),))
+            elif value == self.text_after.encode() and value and value.decode() in self.extra_keys:
+                output.append((value.decode(),))
+                self.text_mode = True
             elif value in (b" ", b"q", b"g", b"t", b"b", b"v", b"a", b"w", b"f", b"?", b"n", b"s", b"0", b"1", b"2", b"k", b"u", b"c", b"m", b"i", b"x") or value.decode("ascii", "ignore") in self.extra_keys:
                 output.append((value.decode(),))
             else:

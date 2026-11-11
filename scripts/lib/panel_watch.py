@@ -7,6 +7,7 @@ import math
 import os
 from contextlib import nullcontext
 import panel_debate
+import panel_filter
 import panel_host
 import panel_messages
 import panel_reader
@@ -727,7 +728,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     pass
         if capable:
             print("\033[?25l", end="", flush=True)
-        with TerminalInput(managed_session(), active=capable) as inputs:
+        with TerminalInput(managed_session(), active=capable, extra_keys=("/",), text_after="/") as inputs:
             # Native reads can defer Python's SIGINT handler; redirected watches need the input loop too.
             background = BackgroundRead() if inputs.fd is not None or not capable and not sys.stdout.isatty() else None
             previews = BackgroundRead()
@@ -893,6 +894,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
+                    inputs.text_mode = panel_filter.editing(navigation)
                     events = inputs.wait(min(.05 if previews.pending or auto_reads.pending else
                                              .25 if motion or inputs.fd is not None else 5, remaining))
                     try:
@@ -941,6 +943,16 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                         if event[0] == "click" and (mode_changed or navigation.get("hits") != batch_hits):
                             continue  # The board was redrawn after this batch was read; the click names the old map.
                         if navigation.get("health_view") and event[0] not in {"k", "escape", "u", "repaint", "q", "eof"}:
+                            continue
+                        if event[0] == "/" and not panel_filter.editing(navigation):
+                            navigation.pop("notice", None)
+                            if not panel_filter.start(navigation):
+                                navigation["notice"] = "Filter works on the board list; Esc closes the detail first"
+                            size = redraw()
+                            continue
+                        if panel_filter.editing(navigation) and panel_filter.edit(event, navigation):
+                            navigation.pop("notice", None)
+                            size = redraw()
                             continue
                         revision += 1
                         navigation.pop("notice", None)
@@ -1018,6 +1030,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             pass  # Esc first closes only the reader pane; the board keeps its preview.
                         elif event[0] == "escape" and navigation.get("health_view"):
                             navigation["health_view"] = False
+                        elif event[0] == "escape" and panel_filter.active(navigation) and not navigation.get("detail"):
+                            panel_filter.clear(navigation)
                         elif tab_event(event, navigation):
                             apply_read()
                             if navigation.get("finalize_call"):

@@ -95,6 +95,8 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
     if attention_only:
         calls = [m for m in calls if classify(m) != "past" and
                  (m["state"] in ATTENTION_STATES or classify(m) == "review")]
+    import panel_filter
+    calls, filter_stats = panel_filter.apply(calls, navigation, classify, ATTENTION_STATES)
     past = past_calls(calls, classify)
     prefix, end, stem = ("├╌╌ ", "└╌╌ ", "│   ") if unicode else ("+-  ", "`-  ", "|   ")
     top = "┌╌╌ " if unicode else ",-  "
@@ -307,7 +309,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
             leading = [r for r in compact_rows if r is first_main_row or r is first_call_row]
             rows = leading + [r for r in compact_rows if r not in leading]
             items = [r["action"] for r in rows]
-    if mains and not attention_only and not any(classify(c) != "past" for c in calls):
+    if mains and panel_filter.active(navigation) and not any(classify(c) != "past" for c in calls):
+        add("  No calls match the filter" + sep + "Esc clears", "dim")
+    elif mains and not attention_only and not any(classify(c) != "past" for c in calls):
         # Settled calls leave the board for Past; say so instead of drawing a bare main.
         add("  " + ("No active calls%s%s finished, see Past" % (sep, len(past)) if past else "No calls yet"), "dim")
     if not mains and not calls:
@@ -398,6 +402,9 @@ def render_tree(report, width, height, color=False, unicode=True, frame=None, me
              panel_work_health.lines(report, ranked, width, height, unicode, mains[0] if mains else None)]
     head += [{"text": clipped(alert, width), "style": "bad"} for alert in alerts]
     head += needs_strip(report, width, unicode, ranked=ranked)
+    filter_row = panel_filter.heading(navigation, filter_stats, width, unicode)
+    if filter_row:
+        head.append({"text": filter_row[0], "style": "alert" if filter_row[1] else "dim"})
     pinned = len(head)
     # The viewport owns its borders, so scrolling never leaves an open card.
     if boxed and budget - len(head) < 3:

@@ -1166,7 +1166,10 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     children = [c for c in everyone.get(primary["participant"], []) if classify(c) != "past"] if primary else []
     hidden_calls = [c for c in everyone.get(primary["participant"], []) if not c.get("_native")] if primary else []
     compact = height < 20 or mapping(report.get("collection")).get("ok") is not True or room.get("error")
-    folded_calls = hidden_calls if interactive and compact and not attention_only and not children else []
+    import panel_filter
+    children, filter_stats = panel_filter.apply(children, navigation, classify, ATTENTION_STATES)
+    folded_calls = hidden_calls if (interactive and compact and not attention_only and not children
+                                    and not panel_filter.active(navigation)) else []
     children.sort(key=lambda m: (call_rank(m["state"]), call_order(m)[1:]))
     judges = [c for c in children if role_style(c.get("role"), c.get("purpose")) == "judge"]
     gates = [c for c in judges if judge_band(c.get("role"), c.get("purpose")) == "gate"]
@@ -1273,6 +1276,9 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
     strip = "! State unavailable" + (" / " + clean(room.get("error"), 120) if room.get("error") else "") + " / u Refresh" if unavailable else attention_header(ranked, width, unicode)
     add(strip, "bad" if unavailable else "alert" if ranked else "metadata")
     hits.append({"y": len(lines), "x1": 1, "x2": width, "action": ("tab", "needs")})
+    filter_row = panel_filter.heading(navigation, filter_stats, width, unicode)
+    if filter_row:
+        add(filter_row[0], "alert" if filter_row[1] else "metadata")
     if total_rows - len(lines) - dock_rows - main_rows < minimum_tree:
         dock_rows = max(1, total_rows - len(lines) - main_rows - minimum_tree)
         if dock_rows == 2:
@@ -2360,7 +2366,7 @@ def footer_hints(navigation, width, managed, unicode, member, graph):
                 panel_hint('tab_next_tab') if tabs else "", panel_hint('g_graph'), panel_hint('t_tree'),
                 panel_hint('n_new_main') if managed and not navigation.get("main_occupied") else "",
                 panel_hint('s_swap_main') if managed and navigation.get("main_occupied") else "",
-                panel_hint('v_collapse' if navigation.get('expanded') else 'v_expand'), panel_hint('b_attention'),
+                panel_hint('v_collapse' if navigation.get('expanded') else 'v_expand'), panel_hint('b_attention'), panel_hint('slash_filter'),
                 panel_hint('r_read_all') if tabs and navigation.get("tab") == "needs" else "",
                 panel_hint('l_latest_unread') if tabs and navigation.get("tab") == "needs" else "",
                 panel_hint('shift_drag_copy') if managed else "", panel_hint('m_modes') if managed else "",
