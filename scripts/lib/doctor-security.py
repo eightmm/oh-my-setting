@@ -4,7 +4,9 @@
 `oms doctor --security` parses each CLI's user-level settings file as data and
 prints one row per fact that widens what an agent may do without asking. It
 changes no provider file, runs no provider command and executes nothing a
-settings file names. The one file it writes is its own: a fingerprint of the
+settings file names. With `--residue` it instead scans provider state
+directories (see RESIDUE_LOCATIONS) for lines the harness secret scanner flags;
+that one mode runs the scanner in a bash child and records no fingerprint. The one file it writes is its own: a fingerprint of the
 facts it reported, so the next run can say which of them moved.
 
 Rows are findings, not verdicts: `warn` marks a setting that removes a prompt
@@ -16,6 +18,8 @@ import hashlib
 import json
 import os
 import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -350,6 +354,111 @@ def drift(rows, facts, home):
     return since
 
 
+# `--residue`: an explicit, read-only scan of provider state for lines the
+# harness's own secret scanner flags. Locations are third-party claims about
+# where each CLI keeps transcripts and shell snapshots; only ones that exist
+# are scanned. Reports file, line and pattern class, never the value.
+RESIDUE_LOCATIONS = (
+    ("claude", "CLAUDE_CONFIG_DIR", ".claude", ("projects", "shell-snapshots")),
+    ("codex", "CODEX_HOME", ".codex", ("sessions", "shell_snapshots", "history.jsonl")),
+)
+RESIDUE_MAX_FILES = 200
+RESIDUE_MAX_BYTES = 4 * 1024 * 1024
+RESIDUE_MAX_DAYS = 30
+RESIDUE_MAX_SECONDS = 90
+RESIDUE_BATCH = 20
+RESIDUE_SCAN = '. "$1"; i=0; while IFS= read -r -d "" f; do ' \
+               'agent_memory_sensitive_report "$f" >/dev/null 2>&1; ' \
+               'while IFS=, read -r tier pattern _ line; do ' \
+               '[ "$tier" = secret ] && printf "%s,%s,%s\\n" "$i" "$pattern" "$line"; ' \
+               'done <<<"$MA_OUTBOUND_EVIDENCE"; i=$((i + 1)); done'
+
+
+def residue_candidates(home):
+    """(label, path) of every existing provider state file under the table, newest first, with counts of what was skipped."""
+    now, found, skipped, seen = time.time(), [], {"old": 0, "large": 0, "binary": 0}, set()
+    where = []
+    for provider, env, default, names in RESIDUE_LOCATIONS:
+        base = os.environ.get(env) or os.path.join(home, default)
+        where.extend((provider + " " + name, os.path.join(base, name)) for name in names)
+    present = [(label, path) for label, path in where if os.path.lexists(path) and not os.path.islink(path)]
+    for label, root in present:
+        if os.path.isfile(root):
+            walk = [(os.path.dirname(root), [], [os.path.basename(root)])]
+        else:
+            walk = os.walk(root, followlinks=False)
+        for top, _, names in walk:
+            for name in names:
+                path = os.path.join(top, name)
+                try:
+                    info = os.lstat(path)
+                    if not stat.S_ISREG(info.st_mode) or path in seen:
+                        continue
+                    seen.add(path)
+                    if now - info.st_mtime > RESIDUE_MAX_DAYS * 86400:
+                        skipped["old"] += 1
+                    elif info.st_size > RESIDUE_MAX_BYTES:
+                        skipped["large"] += 1
+                    else:
+                        with open(path, "rb") as handle:
+                            if b"\0" in handle.read(4096):
+                                skipped["binary"] += 1
+                                continue
+                        found.append((info.st_mtime, label, path))
+                except OSError:
+                    continue
+    found.sort(reverse=True)
+    return present, [(label, path) for _, label, path in found], skipped
+
+
+def residue(rows, home):
+    present, files, skipped = residue_candidates(home)
+    rows.append(("info", "residue limits: %d file(s), %d bytes each, modified within %d day(s), %d s; "
+                 "symlinks and binary files are skipped" % (RESIDUE_MAX_FILES, RESIDUE_MAX_BYTES,
+                                                           RESIDUE_MAX_DAYS, RESIDUE_MAX_SECONDS), "residue.limits"))
+    shown = lambda path: ("~" + path[len(home):]) if home and path.startswith(home + os.sep) else path
+    if not present:
+        rows.append(("info", "no provider state location from the table exists; nothing to scan", "residue.locations"))
+        return
+    for label, path in present:
+        mode = "%o" % (stat.S_IMODE(os.lstat(path).st_mode)) if os.path.exists(path) else "?"
+        rows.append(("info", "%s: %s (mode %s)" % (label, clean(shown(path), 120), mode), "residue.location"))
+    truncated = len(files) > RESIDUE_MAX_FILES
+    files = files[:RESIDUE_MAX_FILES]
+    deadline, hits, flagged, done = time.time() + RESIDUE_MAX_SECONDS, 0, set(), 0
+    scanner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-memory-common.sh")
+    for start in range(0, len(files), RESIDUE_BATCH):
+        batch = files[start:start + RESIDUE_BATCH]
+        left = deadline - time.time()
+        if left <= 0:
+            truncated = True
+            break
+        try:
+            run = subprocess.run(["bash", "-c", RESIDUE_SCAN, "residue", scanner], capture_output=True, text=True,
+                                 input="".join(path + "\0" for _, path in batch), timeout=left, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            truncated = True
+            break
+        done += len(batch)
+        for record in run.stdout.splitlines():
+            index, _, rest = record.partition(",")
+            pattern, _, line = rest.partition(",")
+            if not (index.isdigit() and int(index) < len(batch) and line.isdigit()
+                    and pattern.replace("-", "").isalnum()):
+                continue
+            label, path = batch[int(index)]
+            hits += 1
+            flagged.add(path)
+            rows.append(("warn", "%s: %s line %s matches secret pattern %s" % (label, clean(shown(path), 120), line, pattern),
+                         "residue.hit"))
+    rows.append(("info", "scanned %d file(s); skipped %d old, %d too large, %d binary"
+                 % (done, skipped["old"], skipped["large"], skipped["binary"]), "residue.scanned"))
+    if truncated:
+        rows.append(("info", "truncated: a limit stopped the scan before every file was read", "residue.truncated"))
+    rows.append(("warn" if hits else "ok", "%d flagged line(s) in %d file(s); values are never printed; "
+                 "rotate any credential you recognise, nothing was changed" % (hits, len(flagged)), "residue.summary"))
+
+
 # --json levels: `info` rows state a fact that is neither a warning nor a read failure.
 JSON_LEVEL = {"ok": "ok", "info": "info", "warn": "warn", "unknown": "unread"}
 
@@ -357,6 +466,18 @@ JSON_LEVEL = {"ok": "ok", "info": "info", "warn": "warn", "unknown": "unread"}
 def main():
     home = os.path.expanduser("~")
     rows, facts = [], {}
+    if "--residue" in sys.argv[1:]:
+        residue(rows, home)
+        warned = sum(row[0] == "warn" for row in rows)
+        if "--json" in sys.argv[1:]:
+            print(json.dumps({"schema": 1, "kind": "oms-doctor-residue",
+                              "findings": [{"id": ident, "level": JSON_LEVEL[level], "message": text}
+                                           for level, text, ident in rows],
+                              "warnings": warned, "exit": 0}, ensure_ascii=False, sort_keys=True))
+            return 0
+        for level, text, _ in rows:
+            print("%s: %s" % (level, text))
+        return 0
     claude(rows, facts, home)
     codex(rows, facts, home)
     antigravity(rows, facts, home)

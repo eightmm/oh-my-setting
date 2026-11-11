@@ -1294,6 +1294,31 @@ rows = {f["id"]: f for f in doc["findings"]}
 assert rows["security.prompts"]["level"] == "info" and "4 in 2 session(s)" in rows["security.prompts"]["message"], rows
 assert "security.prompts.hint" not in rows, rows
 ' || fail "--security --json prompt rows are wrong: $json"
+  # --residue scans existing provider state for scanner hits: file, line and
+  # class only, never the value; old files are skipped; nothing is changed.
+  local value="zz""zz9d8c7b6a5f4e3"
+  mkdir -p "$home/.claude/projects/p" "$home/.codex/shell_snapshots"
+  printf 'one\nexport my_to%s=%s\n' "ken" "$value" > "$home/.claude/projects/p/a.jsonl"
+  printf 'x\nx\nx\n%s\n' "gh""p_abcdefghijklmnopqrstuvwxyz0123" > "$home/.codex/shell_snapshots/s.sh"
+  printf 'x\nx\n%s\n' "gh""p_abcdefghijklmnopqrstuvwxyz0123" > "$home/.codex/shell_snapshots/old.sh"
+  touch -t 200001010000 "$home/.codex/shell_snapshots/old.sh"
+  before="$(cat "$home/.claude/projects/p/a.jsonl" "$home/.codex/shell_snapshots/s.sh")"
+  out="$(HOME="$home" XDG_STATE_HOME="$home/state" bash "$ROOT/scripts/doctor.sh" --security --residue 2>&1)" ||
+    fail "--security --residue must exit 0: $out"
+  contains "$out" "residue limits: 200 file(s)" || fail "the limits must be printed: $out"
+  contains "$out" "a.jsonl line 2 matches secret pattern token-assignment" || fail "a hit names file, line and class: $out"
+  contains "$out" "s.sh line 4 matches secret pattern github-token" || fail "a snapshot hit names file, line and class: $out"
+  contains "$out" "2 flagged line(s) in 2 file(s)" || fail "the old file must be skipped: $out"
+  contains "$out" "1 old" || fail "the skipped old file should be counted: $out"
+  case "$out" in *"$value"*|*abcdefghijklmnop*) fail "a residue report must never print a value: $out" ;; esac
+  [ "$before" = "$(cat "$home/.claude/projects/p/a.jsonl" "$home/.codex/shell_snapshots/s.sh")" ] ||
+    fail "--residue must not rewrite state files"
+  [ -e "$home/.codex/shell_snapshots/old.sh" ] || fail "--residue must not delete files"
+  if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --residue 2>&1)"; then
+    fail "--residue without --security must be refused"
+  fi
+  out="$(HOME="$TMP/no-such-home" bash "$ROOT/scripts/doctor.sh" --security --residue 2>&1)" || fail "no state is not an error: $out"
+  contains "$out" "nothing to scan" || fail "missing locations are skipped: $out"
 
   # It is a standalone mode.
   if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --repair 2>&1)"; then
