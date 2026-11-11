@@ -1998,6 +1998,19 @@ the security seat, the contract files and size limits in
 `config/review-depth.json`, and calls no model. It is advice only: it starts no
 review and never changes a gate verdict.
 
+`oms peer-review advise --red-check CMD` and `oms patch-admit --red-check CMD`
+add an opt-in, never automatic red check: do the tests the change adds fail on
+the base? CMD first runs once in a scratch worktree at the base (a base that is
+already red makes every file `could not run`), then once per test file with only
+that file's hunks applied (`{file}` in CMD is replaced by the path; at most 8
+files; `--red-timeout SEC` bounds the whole check, default 300). Each file reads
+`fails on base (good)`, `passes on base (does not test the change)` or
+`could not run`. Each file is applied alone, so a test that needs a helper added
+by the same patch fails on base for that reason. The scratch worktree is always
+removed and the working tree is not touched. In patch-admit the result is an
+`ADVISE` ladder line and a report section; like the security line it cannot
+change a verdict and is not admission evidence.
+
 Escalation ladder: self-check, then a different-family review, then council,
 then a human. Stop and ask a human before an irreversible action, work outside
 the stated scope, an ambiguity that changes the result, or the same failure

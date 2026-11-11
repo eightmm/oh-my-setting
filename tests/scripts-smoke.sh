@@ -5673,6 +5673,29 @@ PYSINCE
   advise_out="$("$review" advise --repo "$depth")"
   assert_file_contains <(printf '%s\n' "$advise_out") 'review depth: council'
   [ -z "$(git -C "$depth" diff --cached --name-only)" ] || fail "advise must not touch the index"
+  # --red-check: opt-in, per test file, scratch tree removed, advisory only.
+  git -C "$depth" checkout -q -- .
+  mkdir -p "$depth/tests"
+  printf 'old\n' > "$depth/src/b.txt"
+  git -C "$depth" add src/b.txt
+  git -C "$depth" commit -qm b
+  printf 'new\n' > "$depth/src/b.txt"
+  printf 'grep -q new src/b.txt\n' > "$depth/tests/t_real.sh"
+  printf 'true\n' > "$depth/tests/t_vacuous.sh"
+  git -C "$depth" add -A
+  advise_out="$("$review" advise --repo "$depth")"
+  ! grep -Fq 'red check' <<<"$advise_out" || fail "red check must be opt-in"
+  advise_out="$("$review" advise --repo "$depth" --red-check 'sh {file}')" || fail "advise --red-check failed"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'tests/t_real.sh: fails on base (good)'
+  assert_file_contains <(printf '%s\n' "$advise_out") 'tests/t_vacuous.sh: passes on base (does not test the change)'
+  assert_file_contains <(printf '%s\n' "$advise_out") 'not admission evidence'
+  advise_out="$("$review" advise --repo "$depth" --red-check 'exit 3')"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'tests/t_real.sh: could not run - the command already fails (exit 3) on the bare base'
+  advise_out="$("$review" advise --repo "$depth" --red-check 'sleep 30' --red-timeout 1)"
+  assert_file_contains <(printf '%s\n' "$advise_out") 'could not run - the command timed out on the bare base'
+  [ -z "$("$ROOT/scripts/scratch-worktree.sh" list --repo "$depth")" ] || fail "red check must remove its scratch worktree"
+  [ "$(git -C "$depth" worktree list | wc -l)" = 1 ] || fail "red check left a worktree registered"
+  [ "$(cat "$depth/src/b.txt")" = new ] || fail "red check must not touch the working tree"
   ! "$review" advise --repo "$depth" --bogus > /dev/null 2>&1 || fail "advise must refuse an unknown option"
 }
 
