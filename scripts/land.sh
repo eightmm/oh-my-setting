@@ -606,7 +606,12 @@ ci_full_route() {
         ROUTE_NOTE="dispatch budget expired before request"
         return 1
       fi
-      rset ci.dispatch=requested ci.dispatch_at="$(now)" ci.dispatch_ref="$TARGET"
+      # The intent must be durable before the request: a rerun reconciles from it.
+      if ! rset ci.dispatch=requested ci.dispatch_at="$(now)" ci.dispatch_ref="$TARGET" ||
+        [ "$(receipt_value ci.dispatch)" != requested ]; then
+        ROUTE_NOTE="could not record the dispatch intent; nothing was dispatched"
+        return 1
+      fi
       remaining="$(( deadline - $(date +%s) ))"
       if [ "$remaining" -le 0 ]; then
         ROUTE_NOTE="dispatch intent recorded but budget expired; wait for reconciliation"
@@ -1125,6 +1130,7 @@ if sys.argv[3] == "1":
     if matches:
         r["step"] = ("gate" if g.get("rc") == "pending" else "push" if p.get("rc") == "pending"
                      else "ci" if c.get("conclusion") == "pending"
+                     or c.get("dispatch") == "requested" and not c.get("full_conclusion")
                      else "sync" if r.get("sync", {}).get("state") == "running" else "update")
         try:
             r["minutes"] = max(0, int((time.time() - calendar.timegm(time.strptime(

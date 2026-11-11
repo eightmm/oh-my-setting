@@ -6,8 +6,6 @@ ci-query.py DESTINATION SHA SECONDS BRANCH WORKFLOW
 ci-query.py dispatch DESTINATION SHA SECONDS BRANCH WORKFLOW
     the same for the newest manually dispatched (workflow_dispatch) run of SHA
     on BRANCH; test.yml runs the full selection for every dispatch.
-ci-query.py slug DESTINATION
-    prints OWNER/REPO for DESTINATION without credentials.
 ci-query.py query-repo DESTINATION
     prints the sanitized repository argument for gh.
 ci-query.py tip DESTINATION BRANCH SECONDS
@@ -78,19 +76,31 @@ def repo_slug(destination):
 
 
 def query_repo(destination):
-    """Keep legacy gh arguments for non-GitHub remotes, without URL userinfo."""
+    """The gh --repo argument HOST[:PORT]/OWNER/REPO, without userinfo or an SSH
+    transport port; a file remote or local path stays a path."""
+    if not destination.strip():
+        raise ValueError("invalid repository destination")
     if "://" in destination:
         parsed = urllib.parse.urlsplit(destination)
-        if parsed.scheme.lower() == "file" and not parsed.netloc:
+        scheme = parsed.scheme.lower()
+        if scheme == "file" and not parsed.netloc:
             return re.sub(r"\.git/?$", "", parsed.path).rstrip("/")
-        if not parsed.hostname:
-            raise ValueError("invalid repository destination")
-        return re.sub(r"\.git/?$", "", parsed.netloc.rsplit("@", 1)[-1] + parsed.path).rstrip("/")
+        slug = repo_slug(destination)  # validates host, port and OWNER/REPO
+        host, port = parsed.hostname.lower(), parsed.port
+        # Only an HTTP(S) port addresses the API; drop it when it is the default.
+        if {"http": 80, "https": 443}.get(scheme) in (None, port):
+            port = None
+    elif ":" not in destination and "@" not in destination:
+        return re.sub(r"\.git/?$", "", destination).rstrip("/")
     else:
-        destination = destination.split("?", 1)[0].split("#", 1)[0]
-        if "@" in destination.split("/", 1)[0]:
-            destination = destination.split("/", 1)[0].rsplit("@", 1)[-1] + ("/" + destination.split("/", 1)[1] if "/" in destination else "")
-    return re.sub(r"\.git/?$", "", destination.replace(":", "/")).rstrip("/")
+        slug = repo_slug(destination)
+        host = destination.split("?", 1)[0].split("#", 1)[0].rsplit("@", 1)[-1].split(":", 1)[0].lower()
+        port = None
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?", host):
+        raise ValueError("invalid repository destination")
+    if host in ("github.com", "ssh.github.com", "www.github.com"):
+        host, port = "github.com", None
+    return "%s%s/%s" % (host, ":%d" % port if port else "", slug)
 
 
 def public_destination(destination):
@@ -446,9 +456,6 @@ def main():
         return run_scope(*sys.argv[2:])
     if sys.argv[1:2] == ["dispatch"] and len(sys.argv) == 7:
         return latest_run(*sys.argv[2:], event="workflow_dispatch")
-    if sys.argv[1:2] == ["slug"] and len(sys.argv) == 3:
-        print(repo_slug(sys.argv[2]))
-        return 0
     if sys.argv[1:2] == ["query-repo"] and len(sys.argv) == 3:
         print(query_repo(sys.argv[2]))
         return 0

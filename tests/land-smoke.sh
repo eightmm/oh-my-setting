@@ -1894,16 +1894,18 @@ OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=full land_dispatch "$TM
 python3 "$ROOT/scripts/lib/ci-query.py" > "$TMP/query-usage.out" 2>&1 || true
 grep -q 'query-repo DESTINATION' "$TMP/query-usage.out" || fail "query-repo omitted from usage"
 remote_url="$(printf '%s%s%s%s' 'HTTPS://person:' 'sample' '@example.com:443/owner/repo.git' '?view=1#part')"
-[ "$(python3 "$ROOT/scripts/lib/ci-query.py" slug "$remote_url")" = owner/repo ] || fail "remote URL slug leaked or failed"
 [ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "file://$TMP/local remote.git")" = "$TMP/local remote" ] || fail "file remote query failed"
-[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$remote_url")" = 'example.com:443/owner/repo' ] || fail "enterprise port was changed"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$remote_url")" = 'example.com/owner/repo' ] || fail "remote URL leaked or kept a default port"
+port_remote="$(printf '%s%s' 'https://person:sample' '@example.com:8443/owner/repo')"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$port_remote")" = 'example.com:8443/owner/repo' ] || fail "enterprise port was changed"
+[ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo 'ssh://git@ssh.github.com:443/owner/repo.git')" = 'github.com/owner/repo' ] || fail "SSH transport port reached gh"
 scp_remote="$(printf '%s%s%s' 'user@part' '@example.com:' 'owner/repo.git')"
 [ "$(python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$scp_remote")" = 'example.com/owner/repo' ] || fail "SCP userinfo leaked"
 github_remote="$(printf '%s%s%s' 'HTTPS://person:' 'sample' '@github.com/owner/repo.git?view=1')"
 [ "$(GH_HOST=enterprise.example python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$github_remote")" = 'github.com/owner/repo' ] || fail "explicit GitHub host was lost"
 [ "$(GH_HOST=enterprise.example python3 "$ROOT/scripts/lib/ci-query.py" query-repo 'git@github.com:owner/repo.git')" = 'github.com/owner/repo' ] || fail "SCP GitHub host was lost"
-for bad_slug in '' 'https://example.com/' 'owner' 'https://example.com/a/b/c' 'https://example.com:invalid/a/b'; do
-  if python3 "$ROOT/scripts/lib/ci-query.py" slug "$bad_slug" > "$TMP/slug.out" 2>&1; then
+for bad_slug in '' 'https://example.com/' 'https://example.com/a/b/c' 'https://example.com:invalid/a/b' 'https://u:pa/ss@example.com/a/b' 'host;x:a/b'; do
+  if python3 "$ROOT/scripts/lib/ci-query.py" query-repo "$bad_slug" > "$TMP/slug.out" 2>&1 || grep -q 'pa/ss\|ss@' "$TMP/slug.out"; then
     fail "malformed slug accepted"
   fi
 done
