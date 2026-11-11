@@ -3274,11 +3274,23 @@ fi
 result_lint_codes=""
 if [ "$DRY_RUN" = 0 ] && [ "$worker_status" -eq 0 ]; then
   result_lint_args=(result -)
-  [ "$WORKER_ACCESS" != write ] || [ "$REPORT_ONLY" = 1 ] || result_lint_args+=(--writer)
+  claim_writer_args=()
+  [ "$WORKER_ACCESS" != write ] || [ "$REPORT_ONLY" = 1 ] || { result_lint_args+=(--writer); claim_writer_args=(--writer); }
+  # The verify receipt of this attempt: none (not run or skipped), pass, or fail.
+  claim_receipt=none
+  if [ -n "$VERIFY_CMD" ] && [ -n "${verify_status:-}" ]; then
+    [ "$verify_status" -eq 0 ] && claim_receipt=pass || claim_receipt=fail
+  fi
+  result_lint_args+=("--verify=$claim_receipt")
   # Advisory and recorded beside the result row; a clean lint is never evidence.
-  result_lint_codes="$({ ma_final_attempt_output "$artifact" || extract_output "$artifact"; } 2>/dev/null |
+  final_answer="$({ ma_final_attempt_output "$artifact" || extract_output "$artifact"; } 2>/dev/null || true)"
+  result_lint_codes="$(printf '%s\n' "$final_answer" |
     python3 "$(ma_scripts_dir)/lib/delegation_lint.py" "${result_lint_args[@]}" || true)"
+  # What the worker said about its own result; compared with the admission re-run in route history.
+  worker_claim="$(printf '%s\n' "$final_answer" |
+    python3 "$(ma_scripts_dir)/lib/delegation_lint.py" claim - "${claim_writer_args[@]}" || true)"
 fi
+OMS_INDEX_WORKER_CLAIM="${worker_claim:-}" \
 OMS_INDEX_RESULT_LINT="$result_lint_codes" \
 OMS_INDEX_SCRATCH_PATH="${keep_investigation_scratch:+$worktree_parent/tmp}" \
 OMS_INDEX_REPAIR_REPLAY_JSON="$repair_replay_json" \
