@@ -297,7 +297,7 @@ test_scope_declarations_refuse_overlapping_write_dispatches_and_clear_on_release
 # BEGIN council missing family
 with patch.object(panel, "provider_catalog", return_value=[
         {"provider": "codex", "installed": True, "models": ["gpt-6.1-sol", "gpt-6.1-terra"]},
-        {"provider": "antigravity", "installed": True, "routable": ["gemini-4-argon-high"]}]):
+        {"provider": "antigravity", "installed": True, "routable": ["gemini-4-carbon-high"]}]):
     try:
         panel.council_command(project, "Compare", "missing-family", "Compare")
     except ValueError as error:
@@ -541,8 +541,8 @@ for role in ("advisor", "architect"):
     assert allocate("codex", role=role, tier="frontier", installed=both)["model"] == "gpt-6-astra"
 for role in ("critic", "reviewer", "verifier"):
     route = allocate("codex", role=role, tier="frontier", installed=both | {"antigravity"},
-                     catalogs={"antigravity": ["gemini-4-argon-high"]})
-    assert route["model"] == "gemini-4-argon-high", route
+                     catalogs={"antigravity": ["gemini-4-carbon-high"]})
+    assert route["model"] == "gemini-4-carbon-high", route
     try:
         allocate("codex", role=role, tier="frontier", installed=both)
     except ValueError as error:

@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "auto_review": true,
-  "council": {"extra": [{"provider": "antigravity", "model": "gemini-4-argon-high", "effort": "high"}]},
+  "council": {"extra": [{"provider": "antigravity", "model": "gemini-4-carbon-high", "effort": "high"}]},
   "tie_band": {"gap": 15},
   "main": {
     "codex": {"provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
@@ -16,10 +16,10 @@
                 {"provider": "codex", "model": "gpt-6.1-terra", "effort": "medium"}],
     "deep": [{"provider": "claude", "model": "claude-opus-5-5", "effort": "high"},
              {"provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
-             {"provider": "antigravity", "model": "gemini-4-argon-high", "effort": "high", "access": "read"}],
+             {"provider": "antigravity", "model": "gemini-4-carbon-high", "effort": "high", "access": "read"}],
     "frontier": [{"provider": "claude", "model": "claude-fable-5-1", "effort": "high"},
                  {"provider": "codex", "model": "gpt-6-astra", "effort": "high"},
-                 {"provider": "antigravity", "model": "gemini-4-argon-high", "effort": "high", "access": "read"}]
+                 {"provider": "antigravity", "model": "gemini-4-carbon-high", "effort": "high", "access": "read"}]
   },
   "roles": {
     "researcher": {"tier": "light"},

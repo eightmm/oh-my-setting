@@ -775,8 +775,8 @@ def exercise_antigravity_read_tiers():
     import panel_routing as routing
     configured = routing.policy()
     providers = {"claude", "codex", "antigravity"}
-    model = "gemini-4-argon-high"
-    catalogs = {"antigravity": [model, "gemini-4.10-argon-high", "gemini-5-argon-low"]}
+    model = "gemini-4-carbon-high"
+    catalogs = {"antigravity": [model, "gemini-4.10-carbon-high", "gemini-5-carbon-low"]}
     exhausted = {name: {"weekly_used": 90} for name in ("claude", "codex")}
 
     def choose(tier, **options):
@@ -832,7 +832,7 @@ def exercise_antigravity_read_tiers():
             assert routing.alternate_route(previous, providers, readings, resolve_accounts=False)["provider"] == ("claude" if tier == "deep" else "antigravity")
         assert choose(tier, provider_status=exhausted)["provider"] == "antigravity"
         assert choose(tier, installed={"antigravity"})["provider"] == "antigravity"
-        for missing in (None, {}, {"antigravity": []}, {"antigravity": ["gemini-5-argon-low"]}):
+        for missing in (None, {}, {"antigravity": []}, {"antigravity": ["gemini-5-carbon-low"]}):
             assert choose(tier, catalogs=missing)["provider"] == "codex"
             refused(lambda: choose(tier, installed={"antigravity"}, catalogs=missing))
             for used in (0, 89, 90, 100, None, "malformed"):
@@ -853,7 +853,7 @@ def exercise_antigravity_read_tiers():
             route = choose(tier, role=role, writer="claude", provider_status=exhausted)
             assert route["provider"] == "antigravity" and route["access"] == "read", route
             if role in routing.INDEPENDENT:
-                assert choose(tier, role=role, writer=dispatch.JudgedWriter("antigravity", "google/gemini-4-argon-high"))["provider"] != "antigravity"
+                assert choose(tier, role=role, writer=dispatch.JudgedWriter("antigravity", "google/gemini-4-carbon-high"))["provider"] != "antigravity"
                 assert choose(tier, role=role, installed={"claude", "antigravity"}, writer="claude",
                               provider_status={"claude": {"weekly_used": 0}})["provider"] == "antigravity"
                 with patch.object(routing, "model_family", return_value="google"):
@@ -876,10 +876,10 @@ def exercise_antigravity_read_tiers():
     rows = [dict(provider=name, binary=name, present=True, installed=True, exact_model_override=True,
                  access=["read", "write"],
                  catalog_models=catalogs.get(name, []), routable=catalogs.get(name, [])) for name in providers]
-    for available in (None, 0, "malformed", [], ["gemini-5-argon-low"], catalogs["antigravity"]):
+    for available in (None, 0, "malformed", [], ["gemini-5-carbon-low"], catalogs["antigravity"]):
         raw = [dict(row) for row in rows]
         agy = next(row for row in raw if row["provider"] == "antigravity")
-        agy["catalog_models"] = catalogs["antigravity"] + ["gemini-99-argon-high"]
+        agy["catalog_models"] = catalogs["antigravity"] + ["gemini-99-carbon-high"]
         if available is None:
             del agy["routable"]
         else:
@@ -910,7 +910,7 @@ def exercise_antigravity_read_tiers():
             chosen = json.loads(output.getvalue())["chosen"]["scholar"]
             if available == catalogs["antigravity"]:
                 selected = panel.selected_route("claude", "scholar", "deep", "read", None)
-                assert selected["model"] == "gemini-4.10-argon-high", selected
+                assert selected["model"] == "gemini-4.10-carbon-high", selected
                 assert chosen == {
                     "provider": "antigravity", "model": selected["model"], "effort": "high"}
             else:
@@ -929,7 +929,7 @@ def exercise_antigravity_read_tiers():
                     fallback, decision = panel.dispatch(project, "claude", "worker", "deep", "read", "explain",
                                                         prompt="Inspect source.")
                 if exact and available == catalogs["antigravity"]:
-                    assert fallback["provider"] == "antigravity" and fallback["model"] == "gemini-4.10-argon-high"
+                    assert fallback["provider"] == "antigravity" and fallback["model"] == "gemini-4.10-carbon-high"
                 else:
                     assert fallback is None and decision == "alternate-not-routable", (fallback, decision)
             agy["exact_model_override"] = True
@@ -2714,12 +2714,12 @@ main_catalog_rows = [
      "models": [], "catalog_models": [], "routable": []},
     {"provider": "codex", "installed": True, "models": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"]},
 ]
-argon_catalog = ["gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"]
+carbon_catalog = ["gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high"]
 
 # BEGIN council extra seats
 (capability_dir / "codex.models").write_text("gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n")
 with patch.object(panel, "provider_catalog", return_value=[
-        {"provider": "antigravity", "installed": True, "routable": ["gemini-4-argon-high"]}]):
+        {"provider": "antigravity", "installed": True, "routable": ["gemini-4-carbon-high"]}]):
     try:
         panel.council_command(project, "Compare", "missing-catalog", "Compare")
     except ValueError as error:
@@ -2730,48 +2730,48 @@ for codex_models in ([], ["gpt-6.2-sol", "gpt-6.2-terra", "gpt-6-astra"]):
     with patch.object(panel, "provider_catalog", return_value=[
             main_catalog_rows[0], dict(main_catalog_rows[1], binary="codex", models=codex_models,
                                       catalog_models=codex_models, routable=codex_models),
-            {"provider": "antigravity", "installed": True, "routable": ["gemini-4-argon-high"]}]):
+            {"provider": "antigravity", "installed": True, "routable": ["gemini-4-carbon-high"]}]):
         argv = panel.council_command(project, "Compare", "empty-catalog", "Compare")
         targets = argv[argv.index("--providers") + 1]
         assert "claude:model=claude-opus-5-5" in targets, targets
         if codex_models:
             assert "codex:model=gpt-6.2-sol" in targets and "codex:model=gpt-6.2-terra" in targets, targets
 for model, family, version in (
-        ("gemini-4-argon-high", "argon-high", (4,)),
-        ("gemini-4.0-argon-medium", "argon-medium", (4,)),
-        ("gemini-4.10-argon-low", "argon-low", (4, 10)),
+        ("gemini-4-carbon-high", "carbon-high", (4,)),
+        ("gemini-4.0-carbon-medium", "carbon-medium", (4,)),
+        ("gemini-4.10-carbon-low", "carbon-low", (4, 10)),
         ("gemini-3.1-pro-high", "pro-high", (3, 1)),
         ("gemini-0-deep-think-high", "deep-think-high", (0,))):
     assert panel.route_family("antigravity", model) == (family, version), model
     assert panel_routing.valid_route({"provider": "antigravity", "model": model, "effort": "high"}), model
-for model in (None, "", "gemini-latest", "gemini-4-argon", "gemini-4-argon-ultra",
-              "gemini-4..1-argon-high", "gemini-4.-argon-high", "gemini-4--high", "gpt-6-sol"):
+for model in (None, "", "gemini-latest", "gemini-4-carbon", "gemini-4-carbon-ultra",
+              "gemini-4..1-carbon-high", "gemini-4.-carbon-high", "gemini-4--high", "gpt-6-sol"):
     assert panel.route_family("antigravity", model) is None, model
     assert not panel_routing.valid_route({"provider": "antigravity", "model": model, "effort": "high"}), model
 configured_extra = panel.policy()["council"]["extra"][0]
-assert configured_extra["model"] == "gemini-4-argon-high", configured_extra
+assert configured_extra["model"] == "gemini-4-carbon-high", configured_extra
 for configured, routable, resolved, note in (
-        ("gemini-3.1-argon-high", argon_catalog, "gemini-4-argon-high", ""),
-        (configured_extra["model"], argon_catalog, "gemini-4-argon-high", ""),
-        (configured_extra["model"], ["gemini-5-argon-high"], "gemini-5-argon-high", ""),
-        ("gemini-3.1-pro-high", argon_catalog, "gemini-4-argon-high", ""),
-        ("gemini-3.1-pro-high", ["gemini-4-argon-high", "gemini-5-argon-high"], "gemini-5-argon-high", ""),
-        ("gemini-3.1-pro-high", ["gemini-4-argon-high", "gemini-4-orion-low"], "gemini-4-argon-high", ""),
-        ("gemini-3.1-argon-low", argon_catalog, "gemini-4-argon-low", ""),
-        ("gemini-3.1-argon-medium", argon_catalog, "gemini-4-argon-medium", ""),
-        ("gemini-4-argon-high", ["gemini-4.2-argon-high", "gemini-4.10-argon-high"], "gemini-4.10-argon-high", ""),
-        ("gemini-4.0-argon-high", ["gemini-4-argon-high"], "gemini-4-argon-high", ""),
-        ("gemini-3.1-argon-high", ["gemini-4-argon-high", "gemini-4-orion-high"], "gemini-4-argon-high", ""),
-        ("gemini-3.1-pro-high", ["gemini-4-argon-high", "gemini-4-orion-high"], None, "configured family pro-high"),
-        ("gemini-3.1-argon-high", ["gpt-6-sol"], None, "configured family argon-high"),
-        ("gemini-3.1-argon-high", argon_catalog[:2], None, "configured family argon-high"),
-        ("gemini-3.1-argon-high", ["gemini-4..1-argon-high", "gemini-5-argon-ultra"], None, "configured family argon-high"),
-        ("gemini-latest", argon_catalog, None, "role routes require a versioned model family"),
-        ("gemini-3.1-argon-high", [], None, "absent from the catalog"),
-        ("gemini-3.1-argon-high", None, None, "absent from the catalog"),
-        ("gemini-3.1-argon-high", 0, None, "absent from the catalog"),
-        ("gemini-3.1-argon-high", "malformed", None, "absent from the catalog"),
-        ("gemini-3.1-argon-high", [None], None, "absent from the catalog")):
+        ("gemini-3.1-carbon-high", carbon_catalog, "gemini-4-carbon-high", ""),
+        (configured_extra["model"], carbon_catalog, "gemini-4-carbon-high", ""),
+        (configured_extra["model"], ["gemini-5-carbon-high"], "gemini-5-carbon-high", ""),
+        ("gemini-3.1-pro-high", carbon_catalog, "gemini-4-carbon-high", ""),
+        ("gemini-3.1-pro-high", ["gemini-4-carbon-high", "gemini-5-carbon-high"], "gemini-5-carbon-high", ""),
+        ("gemini-3.1-pro-high", ["gemini-4-carbon-high", "gemini-4-orion-low"], "gemini-4-carbon-high", ""),
+        ("gemini-3.1-carbon-low", carbon_catalog, "gemini-4-carbon-low", ""),
+        ("gemini-3.1-carbon-medium", carbon_catalog, "gemini-4-carbon-medium", ""),
+        ("gemini-4-carbon-high", ["gemini-4.2-carbon-high", "gemini-4.10-carbon-high"], "gemini-4.10-carbon-high", ""),
+        ("gemini-4.0-carbon-high", ["gemini-4-carbon-high"], "gemini-4-carbon-high", ""),
+        ("gemini-3.1-carbon-high", ["gemini-4-carbon-high", "gemini-4-orion-high"], "gemini-4-carbon-high", ""),
+        ("gemini-3.1-pro-high", ["gemini-4-carbon-high", "gemini-4-orion-high"], None, "configured family pro-high"),
+        ("gemini-3.1-carbon-high", ["gpt-6-sol"], None, "configured family carbon-high"),
+        ("gemini-3.1-carbon-high", carbon_catalog[:2], None, "configured family carbon-high"),
+        ("gemini-3.1-carbon-high", ["gemini-4..1-carbon-high", "gemini-5-carbon-ultra"], None, "configured family carbon-high"),
+        ("gemini-latest", carbon_catalog, None, "role routes require a versioned model family"),
+        ("gemini-3.1-carbon-high", [], None, "absent from the catalog"),
+        ("gemini-3.1-carbon-high", None, None, "absent from the catalog"),
+        ("gemini-3.1-carbon-high", 0, None, "absent from the catalog"),
+        ("gemini-3.1-carbon-high", "malformed", None, "absent from the catalog"),
+        ("gemini-3.1-carbon-high", [None], None, "absent from the catalog")):
     candidate = deepcopy(panel.policy())
     candidate["council"] = {"extra": [{"provider": "antigravity", "model": configured, "effort": "high"}]}
     # Full-catalog presence cannot turn a non-routable model into a seat.
@@ -2948,7 +2948,7 @@ sys_path = os.pathsep.join(
 no_agy_env = dict(environment, PATH=str(no_agy_bin) + os.pathsep + sys_path)
 for key in ("OMS_ROOM_ID", "OMS_ROOM_REPO", "OMS_ROOM_PARTICIPANT", "OMS_PANEL_MAIN_ATTEMPT", "OMS_COUNCIL_ALLOW_PARTIAL"):
     no_agy_env.pop(key, None)
-(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
+(capability_dir / "antigravity.models").write_text("gemini-4-carbon-high\n")
 before_extra_calls = worker_log.read_bytes() if worker_log.exists() else b""
 attempt_log = project / ".oms/lifecycle/events.jsonl"
 before_extra_attempts = attempt_log.read_bytes() if attempt_log.exists() else b""
@@ -2967,14 +2967,14 @@ unrouted_refusal = subprocess.run(refusal_cmd, cwd=str(project),
                                   env=dict(no_agy_env, PATH=environment["PATH"]), capture_output=True, text=True)
 assert unrouted_refusal.returncode != 0, unrouted_refusal
 assert len(unrouted_refusal.stderr.strip().splitlines()) == 1, unrouted_refusal.stderr
-assert "antigravity" in unrouted_refusal.stderr and "argon-high" in unrouted_refusal.stderr, unrouted_refusal.stderr
+assert "antigravity" in unrouted_refusal.stderr and "carbon-high" in unrouted_refusal.stderr, unrouted_refusal.stderr
 assert (worker_log.read_bytes() if worker_log.exists() else b"") == before_extra_calls
 assert (attempt_log.read_bytes() if attempt_log.exists() else b"") == before_extra_attempts
 partial_plan_run = subprocess.run(refusal_cmd + ["--dry-run"], cwd=str(project),
                                   env=dict(no_agy_env, OMS_COUNCIL_ALLOW_PARTIAL="1"), capture_output=True, text=True)
 assert partial_plan_run.returncode == 0, partial_plan_run.stderr
 assert "council: antigravity seat skipped: not installed" in partial_plan_run.stderr, partial_plan_run.stderr
-(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
+(capability_dir / "antigravity.models").write_text("gemini-4-carbon-high\n")
 candidate = deepcopy(extra_policy)
 candidate["tiers"]["deep"].append(extra_route)
 with patch.object(panel_routing.Path, "read_text", return_value=json.dumps(candidate)):
@@ -3021,7 +3021,7 @@ class CouncilStarted(Exception):
     pass
 advertised = io.StringIO()
 with patch.object(panel, "policy", return_value=extra_policy), \
-        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
+        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": carbon_catalog}]), \
         patch.object(panel, "child_environment", return_value={}), \
         patch.object(panel.room, "resolve", return_value=None), \
         patch.object(panel, "events", side_effect=CouncilStarted), redirect_stdout(advertised):
@@ -3031,14 +3031,14 @@ with patch.object(panel, "policy", return_value=extra_policy), \
         pass
     else:
         raise AssertionError("council did not start")
-assert "gemini-4-argon-high" in advertised.getvalue(), advertised.getvalue()
+assert "gemini-4-carbon-high" in advertised.getvalue(), advertised.getvalue()
 assert extra_route["model"] not in advertised.getvalue(), advertised.getvalue()
 assert ":optional" not in advertised.getvalue(), advertised.getvalue()
 # END council extra seats
 
 # BEGIN council prompt defaults
 (capability_dir / "codex.models").write_text("gpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\n")
-(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
+(capability_dir / "antigravity.models").write_text("gemini-4-carbon-high\n")
 base = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council", "--owner", "codex", "--dry-run"]
 for prompt, label in (("  Compare options  \nDetails", "Compare options"),
                       ("x" * 60, "x" * 60), ("x" * 61, "x" * 60 + "…")):
@@ -3265,7 +3265,7 @@ assert recovered.returncode == 0, recovered
 # END council lens seats
 
 # Keep the subprocess council independent of any installed provider catalog.
-(capability_dir / "antigravity.models").write_text("gemini-4-argon-high\n")
+(capability_dir / "antigravity.models").write_text("gemini-4-carbon-high\n")
 # The council reuses the peer front door: seats over all three families, explicit rounds,
 # bounded repairs, and the owning main's child links rather than a new task DB.
 council_args = ["bash", str(panel.ENTRY), "panel", "--repo", str(project), "--council",
@@ -3276,7 +3276,7 @@ planned = json.loads(call(council_args + ["--rounds", "1", "--dry-run"]))
 assert planned["primary_calls"] == 10 and planned["max_calls"] == 20
 assert planned["families"] == 3 and planned["executes"] is False
 assert planned["argv"][planned["argv"].index("--providers") + 1] == \
-    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,antigravity:model=gemini-4-argon-high,claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
+    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,antigravity:model=gemini-4-carbon-high,claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra"
 assert len(planned["argv"][planned["argv"].index("--providers") + 1].split(",")) == 5 == planned["seats"]
 for rounds in (1, 2):
     partial_planned = json.loads(call(council_args + ["--rounds", str(rounds), "--dry-run"],
@@ -3288,7 +3288,7 @@ for rounds in (1, 2):
     routine_plan = json.loads(call(council_args + ["--workload", "routine", "--rounds", str(rounds), "--dry-run"]))
     assert (routine_plan["seats"], routine_plan["families"], routine_plan["primary_calls"]) == (3, 3, 3 * (rounds + 1))
     assert routine_plan["argv"][routine_plan["argv"].index("--providers") + 1] == \
-        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra,antigravity:model=gemini-4-argon-high"
+        "claude:model=claude-sonnet-5-5,codex:model=gpt-6.1-terra,antigravity:model=gemini-4-carbon-high"
 for invalid_tier in ("", "light", "malformed"):
     try:
         panel.council_command(project, "Compare", "invalid-tier", "Compare", workload=invalid_tier)
@@ -3298,7 +3298,7 @@ for invalid_tier in ("", "light", "malformed"):
         raise AssertionError("invalid council tier accepted: " + invalid_tier)
 frontier_plan = json.loads(call(council_args + ["--workload", "frontier", "--dry-run"]))
 assert frontier_plan["argv"][frontier_plan["argv"].index("--providers") + 1] == \
-    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,antigravity:model=gemini-4-argon-high,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
+    "claude:model=claude-opus-5-5,codex:model=gpt-6.1-sol,antigravity:model=gemini-4-carbon-high,claude:model=claude-fable-5-1,codex:model=gpt-6-astra"
 assert (project / ".oms/artifacts/index.jsonl").read_bytes() == before_index
 # A council rejects a tier that no longer preserves two-family independence.
 one_route = deepcopy(panel.policy())
@@ -3317,7 +3317,7 @@ council_attempts = json.loads(call(["bash", str(panel.ENTRY), "agent-events", "-
 council_attempts = [a for a in council_attempts if a.get("task_id") == "panel-council-test"]
 assert any(a["tool"] == "panel-council" and a["state"] == "done" for a in council_attempts)
 assert {a["refs"].get("panel_model") for a in council_attempts if a["tool"] != "panel-council"} == \
-    {"gpt-6.1-sol", "claude-opus-5-5", "gemini-4-argon-high", "claude-sonnet-5-5", "gpt-6.1-terra"}, council_attempts
+    {"gpt-6.1-sol", "claude-opus-5-5", "gemini-4-carbon-high", "claude-sonnet-5-5", "gpt-6.1-terra"}, council_attempts
 assert all(a.get("parent_attempt_id") == main_attempts["codex"] for a in council_attempts)
 # A control-menu council has no inherited main: it binds the room's one live main, or refuses, so Debate can show it.
 class CouncilBound(Exception):
@@ -3329,7 +3329,7 @@ def council_events(repo, *args, **kwargs):
 menu_env = {"OMS_ROOM_ID": "council-room", "OMS_ROOM_PARTICIPANT": ""}
 with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", return_value=[]), \
         patch.object(panel.room, "project", return_value={}), patch.object(panel, "events", council_events), \
-        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
+        patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": carbon_catalog}]), \
         patch.object(panel, "active_mains", return_value={"m1": {"attempt_id": "att_m1"}}):
     try:
         panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")
@@ -3341,7 +3341,7 @@ with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", retur
 for none in ({}, {"m1": {"attempt_id": "a1"}, "m2": {"attempt_id": "a2"}}):
     with patch.dict(os.environ, menu_env), patch.object(panel.room, "records", return_value=[]), \
             patch.object(panel.room, "project", return_value={}), patch.object(panel, "events", council_events), \
-            patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": argon_catalog}]), \
+            patch.object(panel, "provider_catalog", return_value=main_catalog_rows + [{"provider": "antigravity", "installed": True, "routable": carbon_catalog}]), \
             patch.object(panel, "active_mains", return_value=none):
         try:
             panel.council(project, "codex", "menu-council", "Menu council", "Compare options.")

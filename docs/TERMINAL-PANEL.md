@@ -1477,8 +1477,8 @@ and frontier; an explicit `--to` may select another provider.
 | --- | --- |
 | light | Pi `openrouter/thinkingmachines/inkling:free` (low), `claude-haiku-5-5` (low), `gpt-6-luna` (low) |
 | routine | Pi `openrouter/thinkingmachines/inkling:free` (medium), `claude-sonnet-5-5` (medium), `gpt-6.1-terra` (medium) |
-| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high), Antigravity `gemini-4-argon-high` (high, read-only) |
-| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high), Antigravity `gemini-4-argon-high` (high, read-only) |
+| deep | `claude-opus-5-5` (high), `gpt-6.1-sol` (high), Antigravity `gemini-4-carbon-high` (high, read-only) |
+| frontier | `claude-fable-5-1` (high), `gpt-6-astra` (high), Antigravity `gemini-4-carbon-high` (high, read-only) |
 
 Tier entries may declare `"access": "read"` to exclude them from every write
 selection, including provider fallback. Antigravity tier entries require this
@@ -1849,7 +1849,7 @@ frontier (five seats); two rounds mean nine for routine and twelve for deep or f
 after one same-family seat is dropped to fit the 12-primary-call budget.
 
 Its configured Gemini ID selects a name and
-level (for example, `gemini-4-argon-high` selects `argon-high`); council routing
+level (for example, `gemini-4-carbon-high` selects `carbon-high`); council routing
 pins the newest numeric generation of that family in the provider's routable
 catalog, excluding models shown as not routed by `oms models`. Codex and Claude
 seats also pin the newest catalog model in their configured family. If that Gemini

@@ -15,13 +15,13 @@ for owner in ("pi", "antigravity"):
     assert allocate(owner, role="reviewer", installed={"claude", "codex"},
                     writer="codex")["provider"] == "claude"
     providers = {"claude", "codex", "antigravity"}
-    catalogs = {"antigravity": ["gemini-4-argon-high"]}
+    catalogs = {"antigravity": ["gemini-4-carbon-high"]}
     readings = {"claude": {"weekly_used": 80}, "codex": {"weekly_used": 10}}
     assert allocate(owner, role="reviewer", installed=providers, writer="codex",
                     provider_status=readings, catalogs=catalogs)["provider"] == "antigravity"
     from datetime import datetime, timezone
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    capped = dict(readings, antigravity={"daily_cap": {"gemini-4-argon-high": today}})
+    capped = dict(readings, antigravity={"daily_cap": {"gemini-4-carbon-high": today}})
     assert allocate(owner, role="reviewer", installed=providers, writer="codex",
                     provider_status=capped, catalogs=catalogs)["provider"] == "claude"
     assert allocate(owner, role="reviewer", installed={"claude", "codex"}, writer=__import__("panel_dispatch").JudgedWriter(owner, "anthropic/claude-opus-5-5"),
@@ -35,22 +35,22 @@ for writer in ("codex", "claude"):
     else:
         raise AssertionError("writer judged its own work")
 assert allocate("codex", role="reviewer", tier="routine", installed={"codex", "antigravity"},
-                writer="codex", catalogs={"antigravity": ["gemini-4-argon-high"]})["provider"] == "antigravity"
+                writer="codex", catalogs={"antigravity": ["gemini-4-carbon-high"]})["provider"] == "antigravity"
 assert allocate("codex", role="reviewer", installed={"codex"}, writer="codex",
                 explicit_target=True)["judge_note"] == "same-family judge (owner-pinned)"
 for used in (90, 99):
     try:
         allocate("antigravity", role="reviewer", installed={"codex", "claude", "antigravity"},
-                 writer=__import__("panel_dispatch").JudgedWriter("antigravity", "google/gemini-4-argon-high"), owner_model="google/gemini-4-argon-high",
+                 writer=__import__("panel_dispatch").JudgedWriter("antigravity", "google/gemini-4-carbon-high"), owner_model="google/gemini-4-carbon-high",
                  provider_status={"codex": {"weekly_used": used}, "claude": {"weekly_used": used}},
-                 catalogs={"antigravity": ["gemini-4-argon-high"]})
+                 catalogs={"antigravity": ["gemini-4-carbon-high"]})
     except ValueError as error:
         assert "quota" in str(error), error
     else:
         raise AssertionError("saturated alternatives allowed self-review")
 route = allocate("antigravity", role="reviewer", installed={"codex", "antigravity"},
-                 writer=__import__("panel_dispatch").JudgedWriter("antigravity", "google/gemini-4-argon-high"), owner_model="google/gemini-4-argon-high",
-                 catalogs={"antigravity": ["gemini-4-argon-high"]})
+                 writer=__import__("panel_dispatch").JudgedWriter("antigravity", "google/gemini-4-carbon-high"), owner_model="google/gemini-4-carbon-high",
+                 catalogs={"antigravity": ["gemini-4-carbon-high"]})
 assert route["provider"] == "codex"
 assert __import__("panel_routing").alternate_route(route, {"codex", "antigravity"}) is None
 # END independent-antigravity-preference
@@ -164,7 +164,7 @@ for value, expected in ((None, "antigravity"), ("", "antigravity"), (0, "antigra
                         (89, "antigravity"), (90, "claude"), ("invalid", "antigravity")):
     status = dict(readings, antigravity={"weekly_used": value})
     selected = allocate("codex", role="reviewer", installed=providers, provider_status=status,
-                        catalogs={"antigravity": ["gemini-4-argon-high"]})
+                        catalogs={"antigravity": ["gemini-4-carbon-high"]})
     assert selected["provider"] == expected, value
     failed = dict(selected, provider="codex")
     assert judge_routing.alternate_route(failed, providers, status, resolve_accounts=False)["provider"] == expected
@@ -172,7 +172,7 @@ assert judge_routing.alternate_route(failed, {"codex"}, resolve_accounts=False) 
 try:
     allocate("codex", role="reviewer", installed={"antigravity"},
              provider_status={"antigravity": {"weekly_used": 90}},
-             catalogs={"antigravity": ["gemini-4-argon-high"]})
+             catalogs={"antigravity": ["gemini-4-carbon-high"]})
 except ValueError:
     pass
 else:

@@ -51,7 +51,7 @@ def fixture_provider_catalog(providers=None):
 def council_fixture_catalog(providers=None):
     models = {"claude": [],
               "codex": ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra"],
-              "antigravity": ["gemini-4-argon-high"]}
+              "antigravity": ["gemini-4-carbon-high"]}
     requested = set(providers.split(",")) if isinstance(providers, str) else set(providers or models)
     return [{"provider": name, "binary": name, "installed": True,
              "catalog_probe": "unsupported" if name == "claude" else "ok",
