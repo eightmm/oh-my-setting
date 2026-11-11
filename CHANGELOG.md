@@ -38,6 +38,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 - A swapped-in main inherits its predecessor's workers, reviews and plan
   completions only through the room's ordered swap chain; an attempt from a
   different provider or another repository is not adopted.
+- `oms agent-memory append` warns on stderr, without a model call, when the new
+  note repeats an active note's `KEY: value` with another value or says `never X`
+  against `use X` (same subject, same qualifier, same path scope); it names the
+  older note and the `supersede --id` command, and the append still succeeds.
 - `oms agent-memory supersede --id ID --text NEW` and `retire --id ID --reason TEXT`
   append a note linked to an earlier one (by its JSON `event_id`); search, recall,
   provider context and pins omit superseded and retired notes, and
