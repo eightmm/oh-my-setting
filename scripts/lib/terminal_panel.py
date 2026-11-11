@@ -142,6 +142,8 @@ def main(argv=None):
                         help="read-only usage of Claude, Codex and Antigravity as each reported it locally (--json for schema 1)")
     parser.add_argument("--metrics", action="store_true",
                         help="read-only recorded metrics; follow-up task IDs have no producer linkage")
+    parser.add_argument("--compare", metavar="TASK",
+                        help="read-only side-by-side comparison of the write attempts recorded for TASK (creation order, no ranking; --json supported)")
     parser.add_argument("--since", metavar="DURATION", help="limit --metrics to records within a duration (for example 7d)")
     parser.add_argument("--min-samples", type=int, metavar="N", help="with --metrics, hide role/provider/model/effort route groups with fewer than N decided tasks (default 3)")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
@@ -326,8 +328,11 @@ def main(argv=None):
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions, args.recommend,
-                                     args.usage, args.next_attention)) > 1:
+                                     args.usage, args.next_attention, args.compare)) > 1:
         parser.error("choose one panel operation")
+    if args.compare and (args.dry_run or args.view or args.attention_only
+                         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.compare)):
+        parser.error("--compare TASK is a read-only report for one valid task ID; use --repo and optional --json")
     if args.recommend:
         import route_rules
         return route_rules.cli(args, parser.error)
@@ -488,7 +493,7 @@ def main(argv=None):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
             or args.spawn_main or args.swap_main or not (
-            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions or args.usage)) and (
+            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions or args.usage or args.compare)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
@@ -580,6 +585,12 @@ def main(argv=None):
             usage = provider_usage.snapshot(state)
             print(json.dumps(usage, ensure_ascii=False, indent=2) if args.json else provider_usage.text(usage))
             return status
+        if args.compare:
+            import panel_compare
+            report = panel_compare.collect(repo, args.compare)
+            print(json.dumps(report, ensure_ascii=False, indent=2) if args.json
+                  else panel_compare.render(report, shutil.get_terminal_size().columns))
+            return 0
         if args.metrics:
             from panel_metrics import aggregate, metrics_text
             report = aggregate(repo, args.since, min_samples=args.min_samples or 3)
