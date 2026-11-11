@@ -1980,4 +1980,52 @@ assert by[sys.argv[3]]["status"] == "unrecorded", doc
 assert doc["summary"]["ai"] == 1 and doc["summary"]["unrecorded"] == 1, doc
 PY
 
+# land conflicts is a read-only pairwise preview: per pair `clean` or `conflicts in FILES`, a labelled
+# order suggestion, a printed branch limit, and no ref, object, index or worktree change.
+cf="$TMP/conflicts-repo"
+git init -q -b main "$cf"
+printf 'a\nb\nc\n' > "$cf/f"; echo x > "$cf/g"; git -C "$cf" add .; git -C "$cf" commit -q -m base
+for cf_name in one two three; do git -C "$cf" checkout -q -b "oms/$cf_name" main; done
+git -C "$cf" checkout -q oms/one; printf 'A\nb\nc\n' > "$cf/f"; git -C "$cf" commit -q -am one
+git -C "$cf" checkout -q oms/two; printf 'Z\nb\nc\n' > "$cf/f"; git -C "$cf" commit -q -am two
+git -C "$cf" checkout -q oms/three; echo q > "$cf/h"; git -C "$cf" add h; git -C "$cf" commit -q -m three
+git -C "$cf" checkout -q main
+git -C "$cf" gc -q --prune=now
+cf_snapshot() { { git -C "$cf" for-each-ref; GIT_OPTIONAL_LOCKS=0 git -C "$cf" status --porcelain=v1; find "$cf/.git" -type f -not -name '*.lock' | sort; } | cksum; }
+cf_before="$(cf_snapshot)"
+"$LAND" conflicts --repo "$cf" > "$TMP/cf.out" 2>&1 || fail "land conflicts failed: $(cat "$TMP/cf.out")"
+grep -Fq 'oms/one x oms/two  conflicts in f' "$TMP/cf.out" || fail "a conflicting pair names its files: $(cat "$TMP/cf.out")"
+grep -Fq 'oms/one x oms/three  clean' "$TMP/cf.out" || fail "a clean pair says clean"
+grep -Fq 'limit: 3 of 3 pending branch(es) checked' "$TMP/cf.out" || fail "the branch limit is printed"
+grep -Fq 'a suggestion, not a decision' "$TMP/cf.out" && grep -Fq '1. oms/three  (no pairwise conflicts)' "$TMP/cf.out" ||
+  fail "the landing order is labelled and puts the conflict-free branch first"
+"$LAND" conflicts --repo "$cf" --max 2 --json > "$TMP/cf.json" || fail "land conflicts --json failed"
+python3 - "$TMP/cf.json" <<'PY' || fail "land conflicts --json is wrong"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert doc["readonly"] and doc["status"] == "ok" and doc["limit"]["truncated"] and doc["limit"]["checked"] == 2, doc
+assert doc["suggested_order"]["label"] == "suggestion" and len(doc["pairs"]) == 1, doc
+PY
+"$LAND" conflicts --repo "$cf" --max 99 > /dev/null 2>&1 && fail "--max above the cap must be refused"
+[ "$(cf_snapshot)" = "$cf_before" ] || fail "land conflicts must not change refs, objects, index or worktree"
+# A merge driver in repository config is never run: the preview is skipped with a clear line.
+git -C "$cf" config merge.cfdrv.driver "touch $TMP/cf-driver-ran %A"
+echo 'f merge=cfdrv' > "$cf/.gitattributes"
+"$LAND" conflicts --repo "$cf" > "$TMP/cf-driver.out" 2>&1 || fail "a merge driver must degrade, not fail"
+grep -Fq 'not checked, repository config defines a merge driver' "$TMP/cf-driver.out" || fail "merge driver not reported: $(cat "$TMP/cf-driver.out")"
+[ ! -e "$TMP/cf-driver-ran" ] || fail "land conflicts ran a merge driver"
+# An inherited global clean filter is not consulted and repository filter config is refused.
+git -C "$cf" config --unset merge.cfdrv.driver; rm -f "$cf/.gitattributes"
+git -C "$cf" config filter.cffilter.clean "touch $TMP/cf-filter-ran"
+"$LAND" conflicts --repo "$cf" > "$TMP/cf-filter.out" 2>&1 || fail "a filter driver must degrade, not fail"
+grep -Fq 'not checked' "$TMP/cf-filter.out" && [ ! -e "$TMP/cf-filter-ran" ] || fail "land conflicts ran or ignored a filter driver"
+git -C "$cf" config --unset filter.cffilter.clean
+# git older than 2.38 has no merge-tree --write-tree: a clear line, nothing merged.
+mkdir -p "$TMP/oldgit"
+real_git="$(command -v git)"
+printf '#!/bin/sh\nfor a in "$@"; do if [ "$a" = --version ]; then echo "git version 2.30.2"; exit 0; fi; done\nexec "%s" "$@"\n' "$real_git" > "$TMP/oldgit/git"
+chmod +x "$TMP/oldgit/git"
+PATH="$TMP/oldgit:$PATH" "$LAND" conflicts --repo "$cf" > "$TMP/cf-old.out" 2>&1 || fail "old git must degrade, not fail"
+grep -Fq 'git 2.30 is too old' "$TMP/cf-old.out" || fail "old git is not reported: $(cat "$TMP/cf-old.out")"
+
 echo "land-smoke: ok"
