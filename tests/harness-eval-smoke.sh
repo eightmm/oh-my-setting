@@ -7,11 +7,23 @@ set -Eeuo pipefail
 # provider), and asserts on the state those commands recorded. This is a
 # regression instrument for harness behaviour, not a model-quality benchmark.
 #
-# Usage: harness-eval-smoke.sh [--json] [--only NAME]
+# Usage: harness-eval-smoke.sh [--json] [--only NAME] [--repeat K]
+#                              [--baseline FILE] [--update-baseline]
+#
+# --repeat K runs every selected scenario K times (default 1, output unchanged)
+# and reports passes out of K plus the "all K passed" rate; a scenario that
+# passes only some of the runs is `flaky(m/K)`, never `pass`, and fails the run.
+# Cost baseline (advisory): each passing scenario's median wall ms and the
+# counts it reports through `metric` are compared with tests/harness-eval-baseline.json;
+# drift beyond OMS_EVAL_BASELINE_TOLERANCE_PCT (counts, default 25) or a wall
+# time above OMS_EVAL_BASELINE_WALL_FACTOR x baseline (default 3) plus 1000 ms
+# prints `eval: warn:` and never changes the exit status. --update-baseline
+# rewrites the entries for the scenarios that ran. Wall times are machine
+# dependent and informational; the counts are the stable signal.
 #
 # One line per scenario: `eval: NAME: pass|fail|skip(REASON)|xfail(BRANCH)|unexpected-pass`,
 # then a summary and, once the hook-conformance scenarios ran, the per-hook
-# matrix. Exit 0 only with no `fail` and no `unexpected-pass`.
+# matrix. Exit 0 only with no `fail`, no `flaky` and no `unexpected-pass`.
 #
 # A scenario function returns 0 when the property holds and calls `violated`
 # (exit 3) when the property under test does not hold. Anything else (a setup
@@ -40,6 +52,7 @@ SCENARIOS=(
   hook-move-guard-lib-missing
   hook-matcher-agrees-with-payload-check
   hook-registration-drift-detected
+  repeat-reports-flaky-and-baseline-warns
 )
 
 # Known defects. A branch name means a branch that is open when this suite was
@@ -69,6 +82,10 @@ if [ "${1:-}" = "--run-one" ]; then
   export OMS_CAPABILITY_SKIP_MODELS=1 OMS_AGENT=claude
 
   violated() { echo "property violated: $*" >&2; exit 3; }
+  # Report one deterministic count for the cost baseline (parent collects the file).
+  metric() {  # KEY VALUE
+    [ -z "${OMS_EVAL_METRICS:-}" ] || printf '%s\t%s\t%s\n' "$NAME" "$1" "$2" >> "$OMS_EVAL_METRICS"
+  }
 
   new_repo() {  # DIR: a committed repository with a private .oms and a fixture HOME
     mkdir -p "$1/.oms" "$1/home" "$1/bin"
@@ -157,6 +174,8 @@ EOF
     [ "$counts" = "work=1 verify=1 land=1 landing-complete=1 provider-calls=1 commits=1 delegate-verify-files=1" ] ||
       violated "a resumed drive repeated a step: $counts"
     [ -z "$(git -C "$repo" status --porcelain)" ] || violated "resume left the worktree dirty"
+    metric provider_calls "$(wc -l < "$calls" | tr -d ' ')"
+    metric index_rows "$(wc -l < "$index" | tr -d ' ')"
     echo "resume: $counts"
   }
 
@@ -754,6 +773,53 @@ PY
     echo "doctor: removed git-move-guard row reported MISSING, altered command-guard matcher reported DRIFT (both modes)"
   }
 
+  # ---- repeat mode and cost baseline (runs this script's parent mode on a copy) --
+  # The copy gets one synthetic scenario, `flip`, that passes on odd runs and
+  # violates on even ones, so the check does not depend on a real flake.
+  scenario_repeat_reports_flaky_and_baseline_warns() {
+    local copy="$TMP/copy" line out rc base="$TMP/baseline.json"
+    mkdir -p "$copy/tests"
+    ln -s "$ROOT/tests/lib" "$copy/tests/lib"
+    ln -s "$ROOT/scripts" "$copy/scripts"
+    line="$(grep -n '^  fn="scenario_' "${BASH_SOURCE[0]}" | head -n 1 | cut -d: -f1)"
+    {
+      head -n "$((line - 1))" "${BASH_SOURCE[0]}"
+      cat <<'EOF'
+  scenario_flip() {
+    local n=0
+    [ ! -f "$OMS_EVAL_FLIP/count" ] || n="$(cat "$OMS_EVAL_FLIP/count")"
+    n=$((n + 1)); echo "$n" > "$OMS_EVAL_FLIP/count"
+    [ $((n % 2)) = 1 ] || violated "even run $n"
+    metric calls 7
+    echo "flip run $n"
+  }
+EOF
+      tail -n "+$line" "${BASH_SOURCE[0]}"
+    } | sed 's/^SCENARIOS=(/SCENARIOS=(flip/' > "$copy/tests/harness-eval-smoke.sh"
+    flip() {  # ARGS...: fresh counter per invocation
+      rm -rf "$TMP/flip"; mkdir -p "$TMP/flip"
+      OMS_EVAL_FLIP="$TMP/flip" bash "$copy/tests/harness-eval-smoke.sh" --only flip --baseline "$base" "$@" 2>&1
+    }
+    printf '{"schema":1,"scenarios":{"flip":{"calls":1,"wall_ms":1}}}\n' > "$base"
+
+    rc=0; out="$(flip --repeat 3)" || rc=$?
+    [ "$rc" != 0 ] || violated "a scenario passing 2 of 3 runs exits 0"
+    case "$out" in *"eval: flip: flaky(2/3)"*) ;; *) violated "no flaky(2/3) line: $(printf '%s\n' "$out" | tail -n 4 | tr '\n' '|')" ;; esac
+    case "$out" in *"eval: flip: pass"*) violated "a flaky scenario was also reported as pass" ;; esac
+    case "$out" in *"all-K-passed 0/1"*) ;; *) violated "repeat summary does not count the flaky scenario as not all-K-passed" ;; esac
+
+    rc=0; out="$(flip)" || rc=$?
+    [ "$rc" = 0 ] || violated "default K=1 invocation failed: $(printf '%s\n' "$out" | tail -n 3 | tr '\n' '|')"
+    case "$out" in *"eval: flip: pass"$'\n'*) ;; *) violated "K=1 output is no longer a bare pass line" ;; esac
+    case "$out" in *"eval: warn: baseline flip calls: 7 vs baseline 1"*) ;; *) violated "count drift did not warn: $(printf '%s\n' "$out" | tail -n 3 | tr '\n' '|')" ;; esac
+
+    flip --update-baseline > /dev/null || violated "--update-baseline run failed"
+    grep -Eq '"calls": 7' "$base" || violated "--update-baseline did not rewrite the baseline"
+    out="$(flip)" || violated "run against the refreshed baseline failed"
+    case "$out" in *"eval: warn:"*) violated "refreshed baseline still warns" ;; esac
+    echo "repeat: 2/3 passes reported flaky(2/3) and exit nonzero; baseline drift warned without failing; --update-baseline cleared it"
+  }
+
   fn="scenario_${NAME//-/_}"
   declare -F "$fn" > /dev/null || { echo "unknown scenario: $NAME" >&2; exit 64; }
   "$fn"
@@ -765,19 +831,29 @@ fi
 # --------------------------------------------------------------------------
 JSON=0
 ONLY=""
+REPEAT=1
+BASELINE="$ROOT/tests/harness-eval-baseline.json"
+UPDATE_BASELINE=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) JSON=1; shift ;;
     --only) [ "$#" -ge 2 ] || { echo "error: --only needs a scenario name" >&2; exit 2; }; ONLY="$2"; shift 2 ;;
-    -h|--help) sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --repeat)
+      [ "$#" -ge 2 ] || { echo "error: --repeat needs a count" >&2; exit 2; }
+      case "$2" in ''|*[!0-9]*|0) echo "error: --repeat needs a positive integer, got: $2" >&2; exit 2 ;; esac
+      REPEAT="$2"; shift 2 ;;
+    --baseline) [ "$#" -ge 2 ] || { echo "error: --baseline needs a file" >&2; exit 2; }; BASELINE="$2"; shift 2 ;;
+    --update-baseline) UPDATE_BASELINE=1; shift ;;
+    -h|--help) sed -n '3,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
 RESULTS="$(mktemp "${TMPDIR:-/tmp}/oms-eval-results.XXXXXX")"
 OMS_EVAL_MATRIX="$(mktemp "${TMPDIR:-/tmp}/oms-eval-matrix.XXXXXX")"
-export OMS_EVAL_MATRIX
-trap 'rm -f "$RESULTS" "$OMS_EVAL_MATRIX"' EXIT HUP INT TERM
+OMS_EVAL_METRICS="$(mktemp "${TMPDIR:-/tmp}/oms-eval-metrics.XXXXXX")"
+export OMS_EVAL_MATRIX OMS_EVAL_METRICS
+trap 'rm -f "$RESULTS" "$OMS_EVAL_MATRIX" "$OMS_EVAL_METRICS"' EXIT HUP INT TERM
 # With --json the human lines go to stderr so stdout is exactly one JSON object.
 say() { if [ "$JSON" = 1 ]; then printf '%s\n' "$*" >&2; else printf '%s\n' "$*"; fi; }
 
@@ -786,43 +862,73 @@ for name in "${SCENARIOS[@]}"; do
   [ -z "$ONLY" ] || [ "$ONLY" = "$name" ] || continue
   selected=$((selected + 1))
   branch="$(xfail_branch "$name")"
-  rc=0
-  out="$(bash "${BASH_SOURCE[0]}" --run-one "$name" 2>&1)" || rc=$?
-  last="$(printf '%s\n' "$out" | tail -n 1)"
-  if [ "$rc" = 0 ]; then
-    if [ -n "$branch" ]; then status="unexpected-pass"; else status="pass"; fi
-  elif [ "$rc" = 3 ] && [ -n "$branch" ]; then
-    status="xfail($branch)"
-  elif [ "$rc" = 77 ]; then
-    status="skip(${last:-no reason given})"   # the environment cannot run the scenario
-  else
-    status="fail"
-  fi
-  say "eval: $name: $status"
+  passes=0 first_status="" mixed=0 fail_out=""
+  for ((run = 1; run <= REPEAT; run++)); do
+    rc=0
+    started="${EPOCHREALTIME//[.,]/}"
+    out="$(bash "${BASH_SOURCE[0]}" --run-one "$name" 2>&1)" || rc=$?
+    finished="${EPOCHREALTIME//[.,]/}"
+    last="$(printf '%s\n' "$out" | tail -n 1)"
+    if [ "$rc" = 0 ]; then
+      if [ -n "$branch" ]; then status="unexpected-pass"; else status="pass"; fi
+    elif [ "$rc" = 3 ] && [ -n "$branch" ]; then
+      status="xfail($branch)"
+    elif [ "$rc" = 77 ]; then
+      status="skip(${last:-no reason given})"   # the environment cannot run the scenario
+    else
+      status="fail"
+    fi
+    if [ "$status" = pass ]; then
+      passes=$((passes + 1))
+      printf '%s\t%s\t%s\n' "$name" wall_ms "$(((finished - started) / 1000))" >> "$OMS_EVAL_METRICS"
+    elif [ "$status" = fail ]; then
+      fail_out="$out"
+    fi
+    if [ "$run" = 1 ]; then first_status="$status"; elif [ "$status" != "$first_status" ]; then mixed=1; fi
+  done
+  # A scenario that does not give the same answer every run is flaky, whatever
+  # the individual runs said; it is never reported as a pass.
+  if [ "$mixed" = 1 ]; then status="flaky"; else status="$first_status"; fi
+  label="$status"
+  case "$status" in pass|fail) [ "$REPEAT" -eq 1 ] || label="$status ($passes/$REPEAT)" ;; esac
+  [ "$status" != flaky ] || label="flaky($passes/$REPEAT)"
+  say "eval: $name: $label"
+  record() {  # STATUS BRANCH DETAIL
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$1" "$2" "$3" "$passes" "$REPEAT" >> "$RESULTS"
+  }
   case "$status" in
-    pass) printf '%s\t%s\t%s\t%s\n' "$name" pass "" "$last" >> "$RESULTS" ;;
-    skip*) printf '%s\t%s\t%s\t%s\n' "$name" skip "" "$last" >> "$RESULTS" ;;
+    pass) record pass "" "$last" ;;
+    skip*) record skip "" "$last" ;;
     xfail*)
       say "eval:   observed: $last"
-      printf '%s\t%s\t%s\t%s\n' "$name" xfail "$branch" "$last" >> "$RESULTS" ;;
+      record xfail "$branch" "$last" ;;
     unexpected-pass)
       say "eval:   $name now holds on this tree: remove it from xfail_branch (resolved by $branch)"
-      printf '%s\t%s\t%s\t%s\n' "$name" unexpected-pass "$branch" "$last" >> "$RESULTS"; failed=1 ;;
+      record unexpected-pass "$branch" "$last"; failed=1 ;;
+    flaky)
+      say "eval:   $name gave different results across $REPEAT runs ($passes passed); not counted as a pass"
+      [ -z "$fail_out" ] || printf '%s\n' "$fail_out" | tail -n 12 | sed 's/^/eval:   | /' | while IFS= read -r line; do say "$line"; done
+      record flaky "" "$passes/$REPEAT passed"; failed=1 ;;
     fail)
       printf '%s\n' "$out" | tail -n 12 | sed 's/^/eval:   | /' | while IFS= read -r line; do say "$line"; done
-      printf '%s\t%s\t%s\t%s\n' "$name" fail "$branch" "$last" >> "$RESULTS"; failed=1 ;;
+      record fail "$branch" "$last"; failed=1 ;;
   esac
 done
 [ -z "$ONLY" ] || [ "$selected" -gt 0 ] || { echo "error: unknown scenario: $ONLY" >&2; exit 2; }
 
-summary="$(python3 - "$RESULTS" "$OMS_EVAL_MATRIX" <<'PY'
-import json, sys
+summary="$(OMS_EVAL_BASELINE_FILE="$BASELINE" OMS_EVAL_UPDATE_BASELINE="$UPDATE_BASELINE" OMS_EVAL_REPEAT="$REPEAT" \
+  python3 - "$RESULTS" "$OMS_EVAL_MATRIX" "$OMS_EVAL_METRICS" <<'PY'
+import json, os, statistics, sys
 rows = [line.rstrip("\n").split("\t") for line in open(sys.argv[1], encoding="utf-8")]
-counts = {key: 0 for key in ("pass", "xfail", "fail", "skip", "unexpected-pass")}
+repeat = int(os.environ["OMS_EVAL_REPEAT"])
+counts = {key: 0 for key in ("pass", "xfail", "fail", "skip", "unexpected-pass", "flaky")}
 scenarios = []
-for name, status, branch, detail in rows:
+all_k = 0
+for name, status, branch, detail, passes, runs in rows:
     counts[status] += 1
-    entry = {"name": name, "status": status, "detail": detail}
+    entry = {"name": name, "status": status, "detail": detail, "passes": int(passes), "runs": int(runs)}
+    if passes == runs:
+        all_k += 1
     if branch:
         entry["fixed_by"] = branch
     scenarios.append(entry)
@@ -830,17 +936,77 @@ matrix = {}
 for line in open(sys.argv[2], encoding="utf-8"):
     hook, condition, outcome = line.rstrip("\n").split("\t")
     matrix.setdefault(hook, {})[condition] = outcome
-ok = counts["fail"] == 0 and counts["unexpected-pass"] == 0
-print(json.dumps({"schema": 1, "ok": ok, "counts": counts, "scenarios": scenarios, "hook_matrix": matrix}, sort_keys=True))
+
+# Cost metrics of passing runs: median per scenario and key. Advisory only.
+samples = {}
+for line in open(sys.argv[3], encoding="utf-8"):
+    name, key, value = line.rstrip("\n").split("\t")
+    samples.setdefault(name, {}).setdefault(key, []).append(int(value))
+current = {n: {k: int(statistics.median(v)) for k, v in keys.items()} for n, keys in samples.items()}
+path = os.environ["OMS_EVAL_BASELINE_FILE"]
+try:
+    with open(path, encoding="utf-8") as fh:
+        baseline = json.load(fh).get("scenarios", {})
+except (OSError, ValueError):
+    baseline = {}
+tolerance = float(os.environ.get("OMS_EVAL_BASELINE_TOLERANCE_PCT", "25"))
+wall_factor = float(os.environ.get("OMS_EVAL_BASELINE_WALL_FACTOR", "3"))
+warnings = []
+updating = os.environ["OMS_EVAL_UPDATE_BASELINE"] == "1"
+if not baseline and current and not updating:
+    warnings.append("no baseline entries in %s (run with --update-baseline)" % os.path.basename(path))
+for name in sorted(current if baseline and not updating else ()):
+    base = baseline.get(name)
+    if not base:
+        warnings.append("%s: no baseline entry (run with --update-baseline)" % name)
+        continue
+    for key, value in sorted(current[name].items()):
+        if key not in base:
+            continue
+        old = base[key]
+        if key == "wall_ms":
+            if value > old * wall_factor + 1000:
+                warnings.append("%s wall_ms: %d vs baseline %d (more than %gx + 1000 ms; machine dependent)" % (name, value, old, wall_factor))
+        elif abs(value - old) > max(1.0, old * tolerance / 100.0):
+            warnings.append("%s %s: %d vs baseline %d (tolerance %g%%)" % (name, key, value, old, tolerance))
+if os.environ["OMS_EVAL_UPDATE_BASELINE"] == "1":
+    merged = dict(baseline)
+    merged.update(current)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"schema": 1, "note": "advisory cost baseline for tests/harness-eval-smoke.sh; wall_ms is machine dependent",
+                   "scenarios": merged}, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+ok = counts["fail"] == 0 and counts["unexpected-pass"] == 0 and counts["flaky"] == 0
+print(json.dumps({"schema": 1, "ok": ok, "counts": counts, "scenarios": scenarios, "hook_matrix": matrix,
+                  "repeat": {"k": repeat, "all_k_passed": all_k, "scenarios": len(rows)},
+                  "baseline": {"warnings": warnings, "updated": os.environ["OMS_EVAL_UPDATE_BASELINE"] == "1"}},
+                 sort_keys=True))
 PY
 )"
-read -r total_pass total_xfail total_fail total_unexpected total_skip < <(printf '%s' "$summary" | python3 -c '
+read -r total_pass total_xfail total_fail total_unexpected total_skip total_flaky < <(printf '%s' "$summary" | python3 -c '
 import json, sys
 c = json.load(sys.stdin)["counts"]
-print(c["pass"], c["xfail"], c["fail"], c["unexpected-pass"], c["skip"])')
+print(c["pass"], c["xfail"], c["fail"], c["unexpected-pass"], c["skip"], c["flaky"])')
 skip_text=""
 [ "$total_skip" = 0 ] || skip_text=", $total_skip skip"
+[ "$total_flaky" = 0 ] || skip_text="$skip_text, $total_flaky flaky"
 say "eval: summary: $total_pass pass, $total_xfail xfail, $total_fail fail, $total_unexpected unexpected-pass$skip_text"
+if [ "$REPEAT" -gt 1 ]; then
+  printf '%s' "$summary" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+r = d["repeat"]
+rate = 100.0 * r["all_k_passed"] / r["scenarios"] if r["scenarios"] else 0.0
+print("eval: repeat: K=%d, all-K-passed %d/%d scenarios (%.1f%%)" % (r["k"], r["all_k_passed"], r["scenarios"], rate))
+for s in d["scenarios"]:
+    if s["status"] == "flaky":
+        print("eval:   flaky: %s passed %d of %d" % (s["name"], s["passes"], s["runs"]))' |
+    while IFS= read -r line; do say "$line"; done
+fi
+printf '%s' "$summary" | python3 -c '
+import json, sys
+for w in json.load(sys.stdin)["baseline"]["warnings"]:
+    print("eval: warn: baseline " + w)' | while IFS= read -r line; do say "$line"; done
 if [ "$total_xfail" -gt 0 ]; then
   say "eval: xfail (known defects, each named by the branch that fixes it or an owner decision; not counted as failures):"
   awk -F'\t' '$2 == "xfail" {print "eval:   " $1 " -> " $3}' "$RESULTS" | while IFS= read -r line; do say "$line"; done
