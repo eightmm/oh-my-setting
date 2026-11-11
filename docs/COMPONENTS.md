@@ -1840,6 +1840,16 @@ from the shared check, or a merge driver) prints "not checked" and runs nothing;
 and `--json` reports `status: unavailable` with a `reason`. Pending patch files are not
 included.
 
+`python3 scripts/lib/gate_timings.py` shows where gate and CI time goes, from logs that
+already exist; it runs nothing and writes nothing. `--timings FILE` reads a check runtime
+`timings` file, `--gate-log FILE` a gate log (`ok: NAME (Ns)`, `check: NAME FAILED (Ns)`,
+runner `smoke-timing:` lines, an optional `exit=N wall=S` line), and `--ci-jobs FILE`
+(`gh api repos/OWNER/REPO/actions/runs/ID/jobs?per_page=100`) with `--ci-run FILE`,
+`--ci-logs DIR` (files `job-<job id>.log`) reports job time, the sum of job time against the
+run's wall clock, suite totals and the slowest tests the logs printed. `--json` prints one
+document. A local gate prints per-test seconds only when `OMS_SMOKE_TIMINGS=1` reaches the
+runner; CI logs keep the slowest 25 tests of each scripts-smoke shard.
+
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
 compiles each bounded Bash-compatible glob once, and emits one deny-first
