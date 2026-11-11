@@ -2851,6 +2851,15 @@ Antigravity pass with `bwrap` or Landlock; macOS needs `sandbox-exec`). A fact i
 changed, nothing is installed and nothing is contacted. The exit status is 0 for any finding and 2
 for bad usage; `--json` is schema 1, kind `oms-doctor-sandbox`.
 
+Two more read-only rows. `container_socket` stats (never connects to) the Docker and Podman
+daemon sockets and a `DOCKER_HOST` `unix://` path, and notes docker group membership from
+`/etc/group`: a socket this user can write to is `restricted` (whoever reaches it can start a
+container that mounts the host, outside any sandbox) and adds a `warn:` while a provider sandbox
+setting is on. The `info: guard coverage` rows say which tool classes each provider's registered
+guards see, derived from the `HOOK_SURFACES` table of `install-claude-hooks.sh`, the Codex plugin
+`hooks.json` and the installed Antigravity `hooks.json`, so they follow a changed registration
+instead of this prose.
+
 `oms doctor --extensions [--repo PATH] [--json]` is a standalone read-only inventory of
 what else the provider CLIs load: MCP servers from Claude Code's user, local and project
 configuration, Codex's `config.toml` and Antigravity's settings and plugin
