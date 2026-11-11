@@ -7,7 +7,9 @@ set -uo pipefail
 # verify), newest handoff digest, and unresolved failures. Everything here is
 # read from .oms state that was scrubbed at write time. Its writes are the
 # regenerable autopilot shadow-judgment row, which is ambient to the check
-# gate, and one content-free injection-ledger row (byte and line counts); receipts, claims, and every other surface stay untouched (the digest's
+# gate, one content-free injection-ledger row (byte and line counts), and one
+# advisory pickup row (handoff name, session id, time) in
+# .oms/handoffs/consumed.jsonl when the handoff line was injected; receipts, claims, and every other surface stay untouched (the digest's
 # `git merge-tree --write-tree` adds only unreferenced loose objects).
 # Best-effort by contract: a hook that blocks session start costs more than a
 # missing resume line, so every failure path exits 0. OMS_RESUME_HOOK=0
@@ -142,8 +144,8 @@ land_line="${land_line//$'\r'/}"
 
 # Prefer the current task over recency. Legacy/other-task digests stay readable,
 # but never silently become the current task's continuation.
-handoff_line="$(python3 -X utf8 -I -B - "$cwd" "${task_id:-}" "${task_status:-}" <<'PY'
-import hashlib, pathlib, re, shlex, subprocess, sys, time
+handoff_line="$(OMS_HOOK_PAYLOAD="$payload" python3 -X utf8 -I -B - "$cwd" "${task_id:-}" "${task_status:-}" "$ROOT/scripts/lib" <<'PY'
+import hashlib, os, pathlib, re, shlex, subprocess, sys, time
 repo = pathlib.Path(sys.argv[1])
 active = sys.argv[2] if sys.argv[3] != 'closed' else ''
 root = repo / '.oms/handoffs'
@@ -183,10 +185,26 @@ for path in root.glob('*.md'):
     except (OSError, ValueError):
         continue
 if best:
-    print('- handoff (%s; %dh old): oms session-handoff show %s' % (best[4], max(0, int((time.time() - best[2]) // 3600)), shlex.quote(best[3])))
+    # A digest an earlier session was already shown stays visible but is no
+    # longer presented as fresh. Advisory: any failure leaves the plain line.
+    picked = ''
+    try:
+        sys.path.insert(0, sys.argv[4])
+        import handoff_consumed
+        first = handoff_consumed.pickups(str(repo)).get(best[3])
+        if first and first['session'] != handoff_consumed.payload_session(os.environ.get('OMS_HOOK_PAYLOAD', '')):
+            picked = '; already picked up by %s at %s' % (first['session'], first['ts'])
+    except Exception:
+        picked = ''
+    print('- handoff (%s; %dh old%s): oms session-handoff show %s' % (best[4], max(0, int((time.time() - best[2]) // 3600)), picked, shlex.quote(best[3])))
+    print(best[3])
 PY
 )" || handoff_line=""
 handoff_line="${handoff_line//$'\r'/}"
+handoff_name=""
+case "$handoff_line" in
+  *$'\n'*) handoff_name="${handoff_line#*$'\n'}"; handoff_line="${handoff_line%%$'\n'*}" ;;
+esac
 [ -z "$handoff_line" ] || append "$handoff_line"
 
 # Latest imported portable capsule: validated through the runtime projection so
@@ -552,4 +570,13 @@ block_bytes="$(printf '%s\n' "$block" | wc -c | tr -d '[:space:]')"
 block_lines="$(printf '%s\n' "$block" | wc -l | tr -d '[:space:]')"
 printf '%s' "$payload" | python3 -X utf8 "$ROOT/scripts/lib/cached-main.py" "$ROOT/scripts/lib/hook_state.py" \
   injected --kind resume --bytes "${block_bytes:-0}" --lines "${block_lines:-0}" >/dev/null 2>&1 || true
+# Pickup marker: only when the handoff line survived the byte cap and was
+# really printed. Best-effort; resume never fails on it.
+if [ -n "$handoff_name" ] && [ -n "$handoff_line" ]; then
+  case "$block" in
+    *"$handoff_line"*)
+      printf '%s' "$payload" | python3 -X utf8 -I -B "$ROOT/scripts/lib/handoff_consumed.py" \
+        --repo "$cwd" --name "$handoff_name" >/dev/null 2>&1 || true ;;
+  esac
+fi
 exit 0

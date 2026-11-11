@@ -1481,6 +1481,16 @@ printed, never the digest body; a line the secret scan flags is withheld with
 its pointer kept. Nothing is indexed, so a digest `oms gc` removed stops
 matching, and the recall injected into provider context carries no pointer.
 
+When the resume hook injects its block with a handoff line, it appends one row
+(`handoff`, `session`, `ts`) to `.oms/handoffs/consumed.jsonl` through the
+durable JSONL writer, once per session and digest. A later session still sees
+the digest, with `already picked up by SESSION at TIME` in place of a fresh
+presentation. `oms session-handoff list --status` prints `unclaimed` or
+`picked-up SESSION TIME` before each path, and `list --json` adds `picked_up`,
+`picked_up_by`, `picked_up_at` and `pickups`. The marker is advisory: it is
+not approval or verification evidence, and a failed write never fails resume.
+`oms gc` does not prune the file.
+
 `oms session-handoff prompt [--cwd PATH] [--max-bytes N] [--output NEW_FILE]`
 prints an editable next-session prompt for a person to review and paste into a
 fresh session of any provider, instead of relying on a provider's lossy

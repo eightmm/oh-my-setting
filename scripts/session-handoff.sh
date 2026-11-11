@@ -61,6 +61,10 @@ prompt options:
 list options:
   --json           Emit JSON.
   --limit N        Show at most N newest digests (default: all).
+  --status         Text mode: prefix each path with "unclaimed" or
+                   "picked-up SESSION TIME" (the first session the resume
+                   hook showed it to). --json always carries picked_up,
+                   picked_up_by, picked_up_at and pickups.
 
 capture options:
   --agent NAME     claude | codex | antigravity (default: claude).
@@ -834,10 +838,11 @@ slug_id() {
 }
 
 cmd_list() {
-  local as_json=0 limit=""
+  local as_json=0 limit="" status=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --json) as_json=1; shift ;;
+      --status) status=1; shift ;;
       --limit)
         [ "$#" -ge 2 ] || fail "--limit requires a nonnegative integer"
         case "$2" in ''|*[!0-9]*) fail "--limit requires a nonnegative integer" ;; esac
@@ -860,13 +865,24 @@ cmd_list() {
     return 0
   fi
   if [ "$as_json" -eq 1 ]; then
-    OMS_SH_DIR="$dir" OMS_SH_LIMIT="$limit" python3 -c '
-import glob, json, os
+    OMS_SH_DIR="$dir" OMS_SH_LIMIT="$limit" OMS_SH_LIB="$ROOT/scripts/lib" python3 -c '
+import glob, json, os, sys
+try:
+    sys.path.insert(0, os.environ["OMS_SH_LIB"])
+    import handoff_consumed
+    picked = handoff_consumed.pickups(os.path.dirname(os.path.dirname(os.path.dirname(os.environ["OMS_SH_DIR"] + "/"))))
+except Exception:
+    picked = {}
 rows = []
 for path in sorted(glob.glob(os.path.join(os.environ["OMS_SH_DIR"], "*.md")),
                    key=os.path.getmtime, reverse=True):
+    first = picked.get(os.path.basename(path))
     rows.append({"path": path, "bytes": os.path.getsize(path),
-                 "mtime": int(os.path.getmtime(path))})
+                 "mtime": int(os.path.getmtime(path)),
+                 "picked_up": bool(first),
+                 "picked_up_by": first["session"] if first else None,
+                 "picked_up_at": first["ts"] if first else None,
+                 "pickups": first["count"] if first else 0})
 limit = os.environ["OMS_SH_LIMIT"]
 result = {"schema": 1, "handoffs": rows}
 if limit:
@@ -877,13 +893,27 @@ print(json.dumps(result, ensure_ascii=False))
 '
     return 0
   fi
-  if [ -n "$limit" ]; then
-    OMS_SH_DIR="$dir" OMS_SH_LIMIT="$limit" python3 -c '
-import glob, os
+  if [ -n "$limit" ] || [ "$status" -eq 1 ]; then
+    OMS_SH_DIR="$dir" OMS_SH_LIMIT="$limit" OMS_SH_STATUS="$status" OMS_SH_LIB="$ROOT/scripts/lib" python3 -c '
+import glob, os, sys
 paths = sorted(glob.glob(os.path.join(os.environ["OMS_SH_DIR"], "*.md")),
                key=os.path.getmtime, reverse=True)
-for path in paths[:int(os.environ["OMS_SH_LIMIT"])]:
-    print(path)
+if os.environ["OMS_SH_LIMIT"]:
+    paths = paths[:int(os.environ["OMS_SH_LIMIT"])]
+picked = {}
+if os.environ["OMS_SH_STATUS"] == "1":
+    try:
+        sys.path.insert(0, os.environ["OMS_SH_LIB"])
+        import handoff_consumed
+        picked = handoff_consumed.pickups(os.path.dirname(os.path.dirname(os.path.dirname(os.environ["OMS_SH_DIR"] + "/"))))
+    except Exception:
+        picked = {}
+for path in paths:
+    if os.environ["OMS_SH_STATUS"] != "1":
+        print(path)
+        continue
+    first = picked.get(os.path.basename(path))
+    print("%s %s" % ("picked-up %s %s" % (first["session"], first["ts"]) if first else "unclaimed", path))
 '
   else
     find "$dir" -maxdepth 1 -type f -name '*.md' -exec ls -1t {} + 2>/dev/null
