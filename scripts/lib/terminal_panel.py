@@ -148,6 +148,9 @@ def main(argv=None):
     parser.add_argument("--min-samples", type=int, metavar="N", help="with --metrics, hide role/provider/model/effort route groups with fewer than N decided tasks (default 3)")
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
+    parser.add_argument("--log", action="store_true",
+                        help="read-only append-only event log: one plain line per room member (time, room, role, state change, title)")
+    parser.add_argument("--follow", action="store_true", help="--log only: keep printing state changes until interrupted or the pipe closes")
     parser.add_argument("--owner", help="main identity: claude, codex, pi or antigravity; registered adapters also support watch/dispatch/council")
     class CountAction(argparse.Action):
         def __call__(self, parser, namespace, values, option_string=None):
@@ -328,7 +331,7 @@ def main(argv=None):
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions, args.recommend,
-                                     args.usage, args.next_attention, args.compare)) > 1:
+                                     args.usage, args.next_attention, args.compare, args.log)) > 1:
         parser.error("choose one panel operation")
     if args.compare and (args.dry_run or args.view or args.attention_only
                          or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,159}", args.compare)):
@@ -338,6 +341,10 @@ def main(argv=None):
         return route_rules.cli(args, parser.error)
     if args.risk or args.size or args.diff or args.failed is not None:
         parser.error("--risk, --size, --diff and --failed require --recommend")
+    if args.follow and not args.log:
+        parser.error("--follow requires --log")
+    if args.log and (args.json or args.dry_run or args.view or args.attention_only or args.no_animation):
+        parser.error("--log is a plain read-only line stream; it takes only --repo, --room, --owner, --follow and --count")
     if args.json and (args.watch or args.launch or args.dispatch or args.routes or args.council or args.accept or args.finalize):
         parser.error("--json is only available for panel state or results")
     if args.open_chat and args.json and not args.dry_run:
@@ -357,13 +364,13 @@ def main(argv=None):
     if args.continue_task and (args.dispatch not in WRITERS or not args.brief_file or args.prompt or args.task_id):
         parser.error("--continue requires a write-capable --dispatch role with --brief-file, and takes no --prompt or --task-id")
     # A main names itself on every panel call; reading results accepts that identity without filtering by it.
-    if args.owner is not None and not (args.watch or args.dispatch or args.council or args.accept or args.finalize or args.results):
+    if args.owner is not None and not (args.watch or args.log or args.dispatch or args.council or args.accept or args.finalize or args.results):
         parser.error("--owner requires --watch, --dispatch, --council, --accept, --finalize or --results")
     if args.count_rows:
         if not args.sessions:
-            parser.error("--count without a number requires --sessions (with --watch, give N)")
-    elif args.count is not None and not args.watch:
-        parser.error("--count requires --watch")
+            parser.error("--count without a number requires --sessions (with --watch or --log --follow, give N)")
+    elif args.count is not None and not (args.watch or (args.log and args.follow)):
+        parser.error("--count requires --watch or --log --follow")
     if args.no_animation and not args.watch:
         parser.error("--no-animation requires --watch")
     if args.spawn_main and args.dry_run:
@@ -493,7 +500,7 @@ def main(argv=None):
         parser.error("invalid model ID")
     if (args.dispatch or args.council or args.finalize or args.retry_delivery or args.chats or args.open_chat
             or args.spawn_main or args.swap_main or not (
-            args.json or args.dry_run or args.watch or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions or args.usage or args.compare)) and (
+            args.json or args.dry_run or args.watch or args.log or args.routes or args.results or args.providers or args.health or args.mail or args.metrics or args.sessions or args.usage or args.compare)) and (
             os.environ.get("OMS_HARNESS_CHILD") == "1"
             or os.environ.get("OMS_HARNESS_DELEGATE_DEPTH", "0") != "0"):
         parser.error("a worker cannot open owner sessions or orchestrate peers; return the need to its parent")
@@ -741,6 +748,12 @@ def main(argv=None):
                 read_field("Exit %s; the answer is in the main's room mail. Press Enter to close: " % status,
                            required=False)
             return status
+        if args.log:
+            import panel_eventlog
+            provider = args.owner or caller_owner()
+            if provider not in MAIN_OWNERS:
+                provider = provider_catalog(provider)[0]["provider"]
+            return panel_eventlog.run(lambda: read_panel(repo, provider, None, False), args.follow, args.count or 0)
         if args.watch:
             provider = args.owner or caller_owner()
             if provider not in MAIN_OWNERS:
