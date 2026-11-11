@@ -1885,6 +1885,7 @@ if OMS_TEST_DISPATCH_RESULT=pending land_dispatch "$TMP/route-pending.out" --ci-
   fail "pending run passed before receipt handoff"
 fi
 [ "$(land_field state)" = blocked ] || fail "pending proof was not blocked"
+[ "$(land_field ci.full_conclusion)" = pending ] || fail "pending full run was not recorded"
 grep -q 'resume with:' "$TMP/route-pending.out" || fail "pending run omitted resume command"
 grep -q 'has not completed within --ci-wait' "$TMP/route-pending.out" || fail "pending run timeout was misreported"
 ! grep -q 'request it with: gh workflow run' "$TMP/route-pending.out" || fail "pending run invited another dispatch"

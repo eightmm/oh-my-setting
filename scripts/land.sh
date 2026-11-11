@@ -570,6 +570,8 @@ ci_full_route() {
     result="$(oms_strip_cr "$result")"
     read -r rid concl <<< "$result"
     if [ "$rid" != 0 ]; then
+      # Record every observation, so status and a resume never read a stale run.
+      rset ci.full_run_id="$rid" ci.full_conclusion="$concl"
       if [ "$concl" != pending ]; then break; fi
       ROUTE_PENDING=1
     fi
@@ -640,7 +642,6 @@ ci_full_route() {
       return 0
     fi
   done
-  rset ci.full_run_id="$rid" ci.full_conclusion="$concl"
   if [ "$concl" != success ]; then
     ROUTE_NOTE="dispatched run $rid is $concl; rerun it (gh run rerun $rid) and resume"
     return 1
@@ -1130,6 +1131,7 @@ if sys.argv[3] == "1":
     if matches:
         r["step"] = ("gate" if g.get("rc") == "pending" else "push" if p.get("rc") == "pending"
                      else "ci" if c.get("conclusion") == "pending"
+                     or c.get("full_conclusion") == "pending"
                      or c.get("dispatch") == "requested" and not c.get("full_conclusion")
                      else "sync" if r.get("sync", {}).get("state") == "running" else "update")
         try:
