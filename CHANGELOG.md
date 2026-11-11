@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- The command guard's refusal now says which time the same rule refused the
+  same session ("stop and ask the owner"), and `OMS_COMMAND_GUARD_NOTE=1`
+  (off by default) records allowed commands that read well-known secret paths
+  as `noted` audit rows, without text and without refusing anything.
 - `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
   summary on stdin, when a call or message newly waits; one notifier runs at a
   time, its process group is killed after a timeout or when the panel

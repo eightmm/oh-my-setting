@@ -503,6 +503,17 @@ print(json.dumps({"cwd": os.environ["OMS_P_CWD"], "tool_name": "Bash",
       expect_passed command-guard "$cmd"
     done
     expect_ignored_tool command-guard
+    # A repeat in one session adds the count to the same single line, exit 2 unchanged;
+    # the opt-in observe-only note never changes what is allowed.
+    printf '{"cwd":"%s","session_id":"eval-repeat","tool_name":"Bash","tool_input":{"command":"git stash drop"}}' "$FX_CWD" > "$TMP/p.json"
+    for cmd in 1 2; do
+      run_guard command-guard "$TMP/p.json" "$BASH" "$ROOT/scripts/command-guard-hook.sh"
+      [ "$H_RC" = 2 ] && [ "$(wc -l < "$TMP/h.err" | tr -d ' ')" = 1 ] || violated "a repeated refusal is not one line with exit 2 (rc=$H_RC)"
+    done
+    grep -Fq 'This is refusal 2 of this rule' "$TMP/h.err" || violated "the repeated refusal carries no count"
+    XENV=(OMS_COMMAND_GUARD_NOTE=1)
+    expect_passed command-guard 'cat ~/.ss''h/id_ed25519'
+    XENV=()
     echo "command-guard: $n refusals exit 2 with one reason line; 6 allowed commands and an Edit payload pass silently"
   }
 
