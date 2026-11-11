@@ -1432,6 +1432,20 @@ sentence that was not one. It is off by default because it stores a fragment of
 what the person typed; it runs only in a repository that already has `.oms`,
 never for a harness child, and holds at most 200 undecided rows.
 
+`append` also checks the new text, with no model call, against the active notes
+and pins before writing (`lib/agent_memory_contradict.py`). Two shapes count after
+lowercasing and whitespace normalisation: the same `KEY: value` subject with a
+disjoint value, and `use X` / `run X` against `do not use X` / `never X` /
+`avoid X` with the same subject and the same trailing qualifier ("in prod").
+It prints `may contradict <id> (<date>, shared.md line N)` plus the
+`supersede --id` command to stderr after the append succeeds; the append always
+succeeds and nothing extra is recorded. Retiring is the existing `supersede`
+and `retire`, so `append` has no `--supersedes`. Only notes with the same
+`--paths` and source citation are compared, generic labels (`Why:`, `Note:`,
+`Status:`), conditionals, questions, quotes and fenced blocks are skipped,
+and only the older note is quoted back. Recall is low by design;
+`OMS_AGENT_MEMORY_CONTRADICTION_WARN=0` turns it off.
+
 A note can be scoped to the paths it is about: `oms agent-memory append --paths
 'src/data/**,*.yaml' --text …` records up to eight repository-relative globs
 (`**` crosses directories, `*` and `?` stay inside one) in the note's metadata.

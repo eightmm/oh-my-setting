@@ -444,8 +444,17 @@ case "$ACTION" in
     ensure_tmpdir
     note_file="$(mktemp "$OMS_MEMORY_TMPDIR/note.XXXXXX")"
     write_note_file "$note_file"
+    # Advisory and mechanical: looked up before the write so the note is not
+    # compared with itself, printed only once the append has succeeded.
+    contradiction=""
+    if [ "${OMS_AGENT_MEMORY_CONTRADICTION_WARN:-1}" != 0 ]; then
+      contradiction="$(python3 -X utf8 "$ROOT/scripts/lib/agent_memory_contradict.py" \
+        --shared "$MEMORY_FILE" --pins "$(agent_memory_pins_file "$MEMORY_FILE")" \
+        --note-file "$note_file" --paths "${NOTE_PATHS:-}" --source-file "${SOURCE_FILE:-}" 2>/dev/null)" || contradiction=""
+    fi
     agent_memory_append_file "$MEMORY_FILE" "$SCOPE" "$AGENT" "$note_file" \
       note "$SOURCE_FILE" "$SOURCE_LINE"
+    [ -z "$contradiction" ] || printf '%s\n' "$contradiction" >&2
     echo "memory: appended $MEMORY_FILE"
     echo "memory: refreshed $(agent_memory_summary_file "$MEMORY_FILE")"
     ;;

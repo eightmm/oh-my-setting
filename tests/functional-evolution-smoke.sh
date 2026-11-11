@@ -409,6 +409,26 @@ test_memory_supersession_and_retirement() {
   bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" rebuild >/dev/null
   if bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" search "orchid old fact" >/dev/null 2>&1; then fail "rebuild lost supersession"; fi
 
+  # Append warns about a mechanically contradicting active note, records nothing
+  # extra, and stays quiet for scoped, qualified, generic-label and superseded cases.
+  local mem="$TMP/memory-contra" err old_id mem_cmd=(bash "$ROOT/scripts/agent-memory.sh")
+  make_repo "$mem"
+  "${mem_cmd[@]}" --repo "$mem" append --text $'timeout: 30s\nuse pip\nWhy: legacy' >/dev/null 2>&1
+  old_id="$("${mem_cmd[@]}" --repo "$mem" search --json "timeout" | python3 -c 'import json,sys; print(json.load(sys.stdin)["event_id"])')"
+  err="$("${mem_cmd[@]}" --repo "$mem" append --text $'timeout: 60s\nnever use pip\nWhy: other' 2>&1 >/dev/null)"
+  [[ "$err" == *"may contradict $old_id"* && "$err" == *'key "timeout" was "30s"'* && "$err" == *"supersede --id $old_id"* ]] || fail "contradiction not named: $err"
+  [[ "$err" != *"60s"* && "$err" != *"Why"* ]] || fail "warning echoed the new note"
+  [ "$("${mem_cmd[@]}" --repo "$mem" search --json "timeout" | grep -c event_id)" -eq 2 ] || fail "warned append was not recorded"
+  err="$("${mem_cmd[@]}" --repo "$mem" append --text $'use pip in ci\nnever use pip for docs' 2>&1 >/dev/null)"
+  [[ "$err" != *"may contradict"* ]] || fail "qualified polarity warned: $err"
+  err="$("${mem_cmd[@]}" --repo "$mem" append --paths 'src/**' --text 'timeout: 90s' 2>&1 >/dev/null)"
+  [[ "$err" != *"may contradict"* ]] || fail "differently scoped note warned: $err"
+  err="$(OMS_AGENT_MEMORY_CONTRADICTION_WARN=0 "${mem_cmd[@]}" --repo "$mem" append --text 'timeout: 5s' 2>&1 >/dev/null)"
+  [[ "$err" != *"may contradict"* ]] || fail "warning switch ignored"
+  "${mem_cmd[@]}" --repo "$mem" supersede --id "$old_id" --text 'timeout: 45s' >/dev/null 2>&1
+  err="$("${mem_cmd[@]}" --repo "$mem" append --text 'timeout: 45s' 2>&1 >/dev/null)"
+  [[ "$err" != *"$old_id"* ]] || fail "superseded note warned"
+
   # A clean old summary cannot make freshly generated sensitive text safe.
   printf '\n## 2026-06-10T00:00:00Z agent\n\n%s%s%s\n' 'pass' 'word' '=sensitive-value' >> "$repo/.oms/memory/shared.md"
   out="$(bash "$ROOT/scripts/agent-memory.sh" --repo "$repo" context)"
