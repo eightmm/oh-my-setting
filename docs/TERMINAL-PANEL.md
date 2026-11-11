@@ -2178,6 +2178,16 @@ with mode 600. The export holds only the reader's bounded, already-masked text. 
 transcript, patch body or raw log is added, nothing is uploaded, and `--json` is not
 combined with it.
 
+`oms panel --repo . --compare TASK [--json]` compares the write attempts recorded for one
+task, read-only and in creation order. Per attempt: provider, model, effort, state, the
+verifier exit of its latest delegate row, the latest review gate's seat verdicts for its
+patch, diff stat (files, +/-), the files only this attempt touched versus files another
+attempt also touched, tokens and duration. At 100 columns or more the attempts sit side
+by side; below that each gets its own block. Evidence that was never recorded (no verify
+receipt, no usage report, no review) reads `unrecorded`, never `failed`. There is no
+"best" mark or ranking, and the view accepts, verifies and lands nothing. The reader tab
+and its keys are not part of this view.
+
 ### Result delivery
 
 `--notify` sends a cleaned summary to the existing fixed Codex app receiver.

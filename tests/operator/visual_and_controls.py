@@ -2677,3 +2677,73 @@ for setting, expected in (({"TERM": "xterm", "NO_COLOR": "1", "OMS_PANEL_COLOR":
 with patch.dict(os.environ, {"TERM": "xterm", "OMS_PANEL_COLOR": "always"}, clear=True), \
         patch.object(panel.sys.stdout, "isatty", return_value=False):
     assert panel.terminal_style()[1] is False, "redirected output must stay plain"
+# oms panel --compare: read-only attempt columns, creation order, absent evidence reads unrecorded.
+import hashlib as compare_hashlib, json as compare_json, tempfile as compare_tempfile
+import panel_compare
+with compare_tempfile.TemporaryDirectory() as compare_dir:
+    compare_repo = Path(compare_dir)
+    (compare_repo / ".oms/artifacts").mkdir(parents=True)
+
+    def compare_patch(name, files):
+        body = b"".join(b"diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old\n+new\n" % ((f.encode(),) * 4)
+                        for f in files)
+        (compare_repo / ".oms/artifacts" / name).write_bytes(body)
+        return {"patch": ".oms/artifacts/" + name, "patch_sha256": compare_hashlib.sha256(body).hexdigest()}
+
+    def compare_attempt(ident, provider, model, created, state="done", tokens=0):
+        return {"task_id": "cmp", "attempt_id": ident, "provider": provider, "state": state, "created_at": created,
+                "updated_at": created[:-3] + "42Z", "refs": {"panel_access": "write", "panel_model": model, "panel_effort": "high"},
+                "usage": {"tokens": tokens, "duration_ms": 0}, "usage_reports": {"tokens": 1 if tokens else 0, "duration_ms": 0}}
+
+    p1, p2, p3 = (compare_patch("c1.patch", ["a.txt", "b.txt"]), compare_patch("c2.patch", ["a.txt", "c.txt"]),
+                  compare_patch("c3.patch", ["c.txt", "d.txt"]))
+    compare_attempts = [compare_attempt("cmp-1", "codex", "gpt-x", "2026-11-10T01:00:00Z", tokens=12500),
+                        compare_attempt("cmp-2", "claude", "opus-x", "2026-11-10T01:01:00Z", tokens=900),
+                        compare_attempt("cmp-3", "codex", "gpt-y", "2026-11-10T01:02:00Z", state="working"),
+                        {"task_id": "cmp", "attempt_id": "cmp-review", "state": "done", "refs": {"panel_access": "read"}}]
+    compare_rows = [dict(kind="delegate", task_id="cmp", attempt_id="cmp-1", exit=0, verify_exit=0, **p1),
+                    dict(kind="delegate", task_id="cmp", attempt_id="cmp-2", exit=0, verify_exit=1, **p2),
+                    dict(kind="delegate", task_id="cmp", attempt_id="cmp-3", exit=0, **p3),
+                    dict(kind="review-outcome", task_id="cmp", exit=0, review={
+                        "gate_verify_exit": 0, "candidate": {"patch_sha256": p1["patch_sha256"]},
+                        "seats": [{"verdict": "pass"}, {"verdict": "pass"}]})]
+    two = panel_compare.collect(compare_repo, "cmp", _records_data=(compare_attempts[:2], compare_rows))
+    assert [e["attempt_id"] for e in two["attempts"]] == ["cmp-1", "cmp-2"] and two["ranked"] is False
+    assert two["attempts"][0]["only_here"] == ["b.txt"] and two["attempts"][0]["shared"] == ["a.txt"]
+    assert two["attempts"][1]["changes"] == {"files": 2, "added": 2, "removed": 2}
+    assert two["attempts"][0]["review"]["seats"] == {"pass": 2} and two["attempts"][1]["review"]["status"] == "unrecorded"
+    three = panel_compare.collect(compare_repo, "cmp", _records_data=(compare_attempts, compare_rows))
+    assert len(three["attempts"]) == 3, "a reader attempt is not a candidate"
+    third = three["attempts"][2]
+    assert third["verify"] == {"status": "unrecorded", "exit": None}, third["verify"]
+    assert third["tokens"] is None and third["duration_s"] is None and third["only_here"] == ["d.txt"]
+    assert three["attempts"][1]["verify"]["status"] == "failed" and three["attempts"][0]["duration_s"] == 42
+    assert three["attempts"][1]["only_here"] == [] and three["attempts"][1]["shared"] == ["a.txt", "c.txt"]
+    wide = panel_compare.render(three, 120)
+    assert "unrecorded" in wide and "not a ranking" in wide and "best" not in wide.lower(), wide
+    assert all(display_width(line) <= 120 for line in wide.splitlines()), wide
+    header = next(line for line in wide.splitlines() if "#1" in line)
+    assert "#2" in header and "#3" in header, "three columns side by side at 120 cells"
+    for narrow_width in (99, 60, 40):
+        narrow = panel_compare.render(three, narrow_width)
+        assert not any("#1" in line and "#2" in line for line in narrow.splitlines()), narrow
+        assert all(display_width(line) <= narrow_width for line in narrow.splitlines()), (narrow_width, narrow)
+        assert "verify     unrecorded" in narrow
+    compare_out = io.StringIO()
+    with patch.object(panel_compare.results, "_records", return_value=(compare_attempts, compare_rows)), \
+            patch.object(panel, "git_toplevel", return_value=compare_repo), \
+            patch.object(panel.sys, "stdout", compare_out):
+        assert panel.main(["--repo", str(compare_repo), "--compare", "cmp", "--json"]) == 0
+    assert compare_json.loads(compare_out.getvalue())["attempts"][2]["verify"]["status"] == "unrecorded"
+    try:
+        panel_compare.collect(compare_repo, "cmp", _records_data=([], []))
+        raise AssertionError("an empty task must be refused")
+    except ValueError as error:
+        assert "no write attempts" in str(error)
+for bad in (["--compare", "cmp", "--dry-run"], ["--compare", "cmp", "--results"], ["--compare", "bad id"]):
+    with patch.object(panel.sys, "stderr", io.StringIO()), patch.object(panel, "git_toplevel", return_value=Path(".")):
+        try:
+            panel.main(["--repo", "."] + bad)
+            raise AssertionError(bad)
+        except SystemExit as error:
+            assert error.code == 2, bad

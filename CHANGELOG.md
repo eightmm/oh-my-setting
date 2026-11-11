@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms panel --compare TASK [--json]` shows the write attempts of one task side
+  by side (route, state, verify, review verdicts, diff stat, files only this
+  attempt touched, tokens, duration); missing evidence reads `unrecorded`, and
+  nothing is ranked or accepted.
 - `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
   summary on stdin, when a call or message newly waits; one notifier runs at a
   time, its process group is killed after a timeout or when the panel
