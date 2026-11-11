@@ -526,6 +526,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- `oms land` takes its install proof from a CI run that executed the full
+  selection for exactly the landed SHA: the push run when it was full,
+  otherwise a dispatched `test.yml` run, which `--ci-full` requests once
+  (bounded, never twice while an earlier request is unreconciled) and a plain
+  `--wait` only waits for. A failed, cancelled, pending or unreadable
+  dispatched run blocks the install with a resume command, and a full local
+  gate remains the alternative (PR #214).
+- `oms doctor`'s agy `/skills` probe runs in its own session through
+  `run-bounded.py` and reads a file, so a terminal stop or a lingering agy
+  child can no longer hang the doctor; ^C stops it cleanly.
 - CI runs operator-tools as four parallel shard jobs instead of inside focused
   lane 2 (PR #215).
 - Antigravity seats (council extra, deep and frontier tiers) route to Gemini 4
