@@ -320,7 +320,9 @@ if [ "$WITHOUT_OPERATOR" = 1 ] && [ "$MODE" != focused ]; then
 fi
 if [ "$MODE" = operator ]; then
   case "$SMOKE_SHARD" in
-    ''|[1-4]/[1-4]) ;;
+    '') ;;
+    [1-4]/[1-4]) [ "${SMOKE_SHARD%%/*}" -le "${SMOKE_SHARD##*/}" ] ||
+      { echo "error: operator --shard must be I/N with 1 <= I <= N <= 4" >&2; exit 2; } ;;
     *) echo "error: operator --shard must be I/N with 1 <= I <= N <= 4" >&2; exit 2 ;;
   esac
 fi

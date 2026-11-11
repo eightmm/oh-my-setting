@@ -108,6 +108,9 @@ lane_union="$( (for lane in 1 2 3 4; do
   fail "focused lanes plus operator-tools must partition the stage list exactly (no drop, no double)"
 [ "$(bash "$ROOT/scripts/check.sh" --focused-only --without-operator-tools --list-stages | grep -Fxc operator-tools || true)" = 0 ] ||
   fail "--without-operator-tools must leave operator-tools out"
+if bash "$ROOT/scripts/check.sh" --operator-only --shard 2/1 --list-stages >/dev/null 2>&1; then
+  fail "an operator shard index above its count must be refused"
+fi
 # Every operator section runs in exactly one shard (dispatch-results by case);
 # a shard that drops or doubles a unit fails the runner's own self-check.
 for shards in 1 2 3 4; do

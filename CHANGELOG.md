@@ -519,6 +519,8 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- CI runs operator-tools as four parallel shard jobs instead of inside focused
+  lane 2 (PR #215).
 - Antigravity seats (council extra, deep and frontier tiers) route to Gemini 4
   Carbon high and fall back to Argon when Carbon is not routable.
 - Headless autopilot resume, scheduled or not, refuses to start a contract
