@@ -45,6 +45,7 @@ SANDBOX_PROBE=0
 EXTENSIONS_ONLY=0
 MCP_PINS_ONLY=0
 MCP_PIN_RECORD=0
+MCP_PROBE_TOOLS=""
 PROVIDERS_ONLY=0
 MODEL_DOCTOR_MODE="${OH_MY_SETTING_MODEL_DOCTOR:-auto}"
 MODEL_DOCTOR_LIVE=0
@@ -84,7 +85,7 @@ Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
        doctor.sh --extensions [--repo PATH] [--json]
-       doctor.sh --mcp [--pin] [--repo PATH] [--json]
+       doctor.sh --mcp [--pin] [--probe-tools NAME] [--repo PATH] [--json]
        doctor.sh --providers [--json]
 
 Verify the canonical install. --repair relinks from the receipt owner, or
@@ -157,7 +158,13 @@ cannot be parsed is "unread", not empty. Rows never change the exit status.
 with a hash recorded in a private pin file, reporting new, changed and removed
 servers, unpinned npx/bunx/uvx packages and plain http to a non-loopback host.
 Nothing is written unless you add --pin, which records the current servers as
-your approval. No server starts and tool descriptions are not fetched.
+your approval. By default no server starts and tool descriptions are not
+fetched. --probe-tools NAME (implies --mcp) is the one opt-in exception: it
+starts the single local stdio server you name (never a URL server), reads its
+tool list under a hard timeout (OMS_MCP_PROBE_TIMEOUT seconds, default 15,
+1-120), always stops it, and compares a hash of each full tool definition with
+the pinned one (--pin records it). The server is not sandboxed and a changed
+binary with identical tools is not detected.
 --providers is a standalone read-only matrix of what OMS supports per provider
 and per function (launch, worker call, observe, resume, send, stop, approval,
 usage, handoff), read from config/provider-capabilities.json; fixture means not
@@ -186,6 +193,9 @@ while [ "$#" -gt 0 ]; do
     --extensions) EXTENSIONS_ONLY=1; shift ;;
     --mcp) MCP_PINS_ONLY=1; shift ;;
     --pin) MCP_PIN_RECORD=1; shift ;;
+    --probe-tools)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: --probe-tools requires one server name" >&2; exit 2; }
+      MCP_PINS_ONLY=1; MCP_PROBE_TOOLS="$2"; shift 2 ;;
     --providers) PROVIDERS_ONLY=1; shift ;;
     --json) REPORT_JSON=1; shift ;;
     --remediation-plan) REPORT_PLAN=1; shift ;;
@@ -286,13 +296,14 @@ if [ "$MCP_PINS_ONLY" = 1 ] || [ "$MCP_PIN_RECORD" = 1 ]; then
   if [ "$MCP_PINS_ONLY" = 0 ] || [ "$EXTENSIONS_ONLY" = 1 ] || [ "$REPAIR" = 1 ] || [ "$SURFACES" = 1 ] ||
      [ "$TOOL_LOCK_ONLY" = 1 ] || [ "$CONTRACT_ONLY" = 1 ] || [ "$REPORT_PLAN" = 1 ] ||
      [ "$SECURITY_ONLY" = 1 ]; then
-    echo "error: --mcp is a standalone report; only --pin, --repo and --json go with it" >&2
+    echo "error: --mcp is a standalone report; only --pin, --probe-tools, --repo and --json go with it" >&2
     exit 2
   fi
   command -v python3 >/dev/null 2>&1 || { echo "error: --mcp needs python3" >&2; exit 2; }
   mcp_args=(--repo "$REPORT_REPO")
   [ "$REPORT_JSON" = 0 ] || mcp_args+=(--json)
   [ "$MCP_PIN_RECORD" = 0 ] || mcp_args+=(--pin)
+  [ -z "$MCP_PROBE_TOOLS" ] || mcp_args+=(--probe-tools "$MCP_PROBE_TOOLS")
   exec python3 -I "$ROOT/scripts/lib/doctor-mcp-pins.py" "${mcp_args[@]}"
 fi
 
