@@ -14,6 +14,7 @@ or a sandbox, `unknown` a file that could not be read as what it claims to be.
 A missing file means the CLI's defaults apply and is not a warning.
 """
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -29,6 +30,16 @@ PRIMITIVES = ("bwrap", "socat", "sandbox-exec", "srt", "docker", "podman")
 USERNS = (("kernel.unprivileged_userns_clone", "/proc/sys/kernel/unprivileged_userns_clone"),
           ("kernel.apparmor_restrict_unprivileged_userns",
            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"))
+# Substrings of a Read deny rule that mean it covers a conventional secret path. The `~/.ssh` and
+# `~/.aws` spellings are split so the outbound scrubber does not read this table as a home path.
+SECRET_MARKS = (".env", ".ss" "h", ".aw" "s", "id_rsa", ".pem", ".netrc", ".git-credentials")
+# Environment names that look like credentials. The first group is the list `ma_scrub_credential_env`
+# in scripts/lib/peer-common.sh removes from an opted-in worker (a test keeps the two equal);
+# `GH_*` is added here because the GitHub CLI reads its token from it.
+WORKER_CREDENTIAL_GLOBS = ("AWS_*", "*_TOKEN", "*_SECRET", "*_SECRET_KEY", "*_API_KEY", "*_APIKEY",
+                           "*_ACCESS_KEY", "*_ACCESS_KEY_ID", "*_PRIVATE_KEY", "*_PASSWORD", "*_PASSWD",
+                           "*_CREDENTIALS")
+CREDENTIAL_GLOBS = WORKER_CREDENTIAL_GLOBS + ("GH_*",)
 
 
 def clean(value, limit=80):
@@ -64,6 +75,10 @@ def load(path, kind):
     if not isinstance(data, dict):
         return None, "top level is not a table"
     return data, None
+
+
+def credential_name(name):
+    return not name.startswith("OMS_") and any(fnmatch.fnmatchcase(name, glob) for glob in CREDENTIAL_GLOBS)
 
 
 def table(value):
@@ -120,6 +135,224 @@ def claude(rows, facts, home):
     else:
         rows.append(("info", "claude: sandbox.enabled is not on; shell commands run unsandboxed",
                      "claude.sandbox.enabled"))
+    hardening(rows, found, data, "claude", "claude", user=True)
+
+
+def name_list(names, limit=8):
+    """Names joined for one row; a long list is cut and says how many were left out."""
+    shown = ", ".join(clean(name, 40) for name in names[:limit])
+    return shown + (" and %d more" % (len(names) - limit) if len(names) > limit else "")
+
+
+def secret_deny(rules):
+    """True when a deny rule keeps the Read tool out of a conventional secret path."""
+    for rule in rules:
+        if rule.startswith("Read(") and any(mark in rule for mark in SECRET_MARKS):
+            return True
+    return False
+
+
+def broad_domain(entry):
+    """A wildcard that names no registrable domain: `*` or `*.com`."""
+    if "*" not in entry:
+        return False
+    return len([part for part in entry.split(".") if part and "*" not in part]) < 2
+
+
+def hardening(rows, found, data, label, prefix, user):
+    """Secret-path deny, unsandboxed fallback, excluded command names, wide network entries.
+
+    Only keys present in the file are judged; a value of an unexpected shape is `unknown`, because
+    a CLI version that renamed the key is not evidence of a safe setting."""
+    permissions = table(data.get("permissions"))
+    sandbox = table(data.get("sandbox"))
+    if user:
+        deny = strings(permissions.get("deny"))
+        found["secret_read_deny"] = secret_deny(deny)
+        if not found["secret_read_deny"]:
+            rows.append(("info", "%s: permissions.deny has no Read rule for .env, ~/.ssh or ~/.aws (%d deny rule(s)); "
+                         "a project's deny rules are not read here" % (label, len(deny)),
+                         prefix + ".permissions.deny"))
+    fallback = sandbox.get("allowUnsandboxedCommands")
+    if fallback is True:
+        found["allow_unsandboxed"] = True
+        rows.append(("warn", "%s: sandbox.allowUnsandboxedCommands is on; a command the sandbox blocks may be retried outside it"
+                     % label, prefix + ".sandbox.allowUnsandboxedCommands"))
+    elif fallback is not None and fallback is not False:
+        rows.append(("unknown", "%s: sandbox.allowUnsandboxedCommands is not true or false; posture not read" % label,
+                     prefix + ".sandbox.allowUnsandboxedCommands"))
+    excluded = strings(sandbox.get("excludedCommands"))
+    if excluded:
+        found["sandbox_excluded_names"] = sorted(excluded)
+        rows.append(("info", "%s: sandbox.excludedCommands runs outside the sandbox: %s" % (label, name_list(sorted(excluded))),
+                     prefix + ".sandbox.excludedCommands"))
+    network = sandbox.get("network")
+    domains = table(network).get("allowedDomains") if isinstance(network, dict) else None
+    if domains is not None and not isinstance(domains, list):
+        rows.append(("unknown", "%s: sandbox.network.allowedDomains is not a list; posture not read" % label,
+                     prefix + ".sandbox.network.allowedDomains"))
+    elif domains:
+        names = sorted(strings(domains))
+        wide = [name for name in names if broad_domain(name)]
+        found["allowed_domains"] = len(names)
+        found["broad_domains"] = wide
+        if wide:
+            rows.append(("warn", "%s: sandbox.network.allowedDomains has a catch-all entry (%s)"
+                         % (label, name_list(wide)), prefix + ".sandbox.network.allowedDomains"))
+        else:
+            wildcard = [name for name in names if "*" in name]
+            rows.append(("info", "%s: sandbox.network.allowedDomains lists %d domain(s)%s"
+                         % (label, len(names), "; wildcards: " + name_list(wildcard) if wildcard else ""),
+                         prefix + ".sandbox.network.allowedDomains"))
+
+
+# Settings keys that name a command Claude Code runs on its own; the value is never shown.
+CLAUDE_RUNNERS = ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh",
+                  "otelHeadersHelper", "statusLine", "fileSuggestion")
+# Environment names a project can set to move traffic or credentials somewhere else.
+REDIRECT_MARKS = ("BASE_URL", "PROXY", "ENDPOINT", "_HOST")
+
+
+def hook_commands(value):
+    """(events, commands) counted in a `hooks` table; the commands themselves are not kept."""
+    events, count = [], 0
+    for event, groups in sorted(table(value).items()):
+        before = count
+        for group in groups if isinstance(groups, list) else []:
+            for hook in table(group).get("hooks", []) if isinstance(table(group).get("hooks", []), list) else []:
+                if isinstance(hook, dict) and hook.get("type", "command") == "command":
+                    count += 1
+        if count > before:
+            events.append(event)
+    return events, count
+
+
+def project_root():
+    """The nearest directory at or above the working directory that holds `.git`, else the working directory."""
+    here = os.path.realpath(os.getcwd())
+    probe = here
+    while True:
+        if os.path.exists(os.path.join(probe, ".git")):
+            return probe
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            return here
+        probe = parent
+
+
+def project_claude(rows, found, root, name):
+    path = os.path.join(root, ".claude", name)
+    label = "project %s" % name
+    prefix = "project.claude." + name
+    data, problem = load(path, "json")
+    if problem:
+        rows.append(("unknown", "%s: %s; not read" % (label, problem), prefix))
+        found[name] = "unknown"
+        return
+    if data is None:
+        return
+    keys = {}
+    events, count = hook_commands(data.get("hooks"))
+    if count:
+        keys["hooks"] = [count] + events
+        rows.append(("warn", "%s: registers %d hook command(s) on %s; they run with your permissions"
+                     % (label, count, name_list(events)), prefix + ".hooks"))
+    runners = sorted(key for key in CLAUDE_RUNNERS if key in data)
+    if runners:
+        keys["runners"] = runners
+        rows.append(("warn", "%s: sets %s, which name a command Claude Code runs" % (label, name_list(runners)),
+                     prefix + ".commands"))
+    env = sorted(key for key in table(data.get("env")) if isinstance(key, str))
+    moved = [key for key in env if any(mark in key.upper() for mark in REDIRECT_MARKS) or credential_name(key)]
+    if moved:
+        keys["env_redirect"] = moved
+        rows.append(("warn", "%s: env sets %s (names only; values not read)" % (label, name_list(moved)), prefix + ".env"))
+    elif env:
+        keys["env"] = len(env)
+        rows.append(("info", "%s: env sets %d variable(s)" % (label, len(env)), prefix + ".env"))
+    if data.get("enableAllProjectMcpServers") is True:
+        keys["enableAllProjectMcpServers"] = True
+        rows.append(("warn", "%s: enableAllProjectMcpServers is on; every server in .mcp.json is approved unasked" % label,
+                     prefix + ".enableAllProjectMcpServers"))
+    approved = strings(data.get("enabledMcpjsonServers"))
+    if approved:
+        keys["enabledMcpjsonServers"] = sorted(approved)
+        rows.append(("info", "%s: pre-approves MCP server(s) %s" % (label, name_list(sorted(approved))),
+                     prefix + ".enabledMcpjsonServers"))
+    permissions = table(data.get("permissions"))
+    if permissions.get("defaultMode") == "bypassPermissions":
+        keys["defaultMode"] = "bypassPermissions"
+        rows.append(("warn", "%s: permissions.defaultMode is bypassPermissions" % label, prefix + ".permissions.defaultMode"))
+    broad = sorted(rule for rule in strings(permissions.get("allow")) if rule in ("Bash", "Bash(*)", "Bash(:*)", "*"))
+    if broad:
+        keys["broad_allow"] = broad
+        rows.append(("warn", "%s: permissions.allow grants every shell command (%s)"
+                     % (label, ", ".join(clean(rule, 20) for rule in broad)), prefix + ".permissions.allow"))
+    hardening(rows, keys, data, label, prefix, user=False)
+    found[name] = keys
+
+
+def project_mcp(rows, found, root):
+    data, problem = load(os.path.join(root, ".mcp.json"), "json")
+    if problem:
+        rows.append(("unknown", "project .mcp.json: %s; not read" % problem, "project.mcp.json"))
+        found["mcp.json"] = "unknown"
+        return
+    servers = table(data.get("mcpServers")) if data else {}
+    if not servers:
+        return
+    names = sorted(name for name in servers if isinstance(name, str))
+    launches = sorted(name for name in names if "command" in table(servers[name]))
+    env = sorted({key for name in names for key in table(table(servers[name]).get("env")) if isinstance(key, str)})
+    found["mcp.json"] = {"servers": names, "launch": launches, "env": env}
+    rows.append(("info", "project .mcp.json declares %d MCP server(s): %s; %d launch a local command (not run here)"
+                 % (len(names), name_list(names), len(launches)), "project.mcp.json"))
+    if env:
+        rows.append(("info", "project .mcp.json passes environment variable(s) %s to its servers (names only)"
+                     % name_list(env), "project.mcp.json.env"))
+
+
+def project_codex(rows, found, root):
+    data, problem = load(os.path.join(root, ".codex", "config.toml"), "toml")
+    if problem:
+        rows.append(("unknown", "project .codex/config.toml: %s; not read" % problem, "project.codex.config.toml"))
+        found["codex"] = "unknown"
+        return
+    if data is None:
+        return
+    keys = codex_table(rows, "project codex", data, "project.codex")
+    if "notify" in data:
+        keys["notify"] = True
+        rows.append(("warn", "project codex: notify names a command Codex runs", "project.codex.notify"))
+    servers = sorted(name for name in table(data.get("mcp_servers")) if isinstance(name, str))
+    if servers:
+        keys["mcp_servers"] = servers
+        rows.append(("info", "project codex: declares MCP server(s) %s" % name_list(servers), "project.codex.mcp_servers"))
+    providers = table(data.get("model_providers"))
+    redirected = sorted(name for name in providers if isinstance(name, str) and "base_url" in table(providers[name]))
+    if redirected:
+        keys["base_url"] = redirected
+        rows.append(("warn", "project codex: model_providers %s set a base_url (value not read)" % name_list(redirected),
+                     "project.codex.model_providers"))
+    found["codex"] = keys
+
+
+def project(rows, facts, home):
+    """Project-scope settings in the current repository, read as data: key names and counts, never values."""
+    root = project_root()
+    user = os.path.realpath(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude"))
+    found = {}
+    if os.path.realpath(os.path.join(root, ".claude")) != user:
+        for name in ("settings.json", "settings.local.json"):
+            project_claude(rows, found, root, name)
+    project_mcp(rows, found, root)
+    if os.path.realpath(os.path.join(root, ".codex")) != os.path.realpath(
+            os.environ.get("CODEX_HOME") or os.path.join(home, ".codex")):
+        project_codex(rows, found, root)
+    facts["project"] = found or "absent"
+    if not found:
+        rows.append(("info", "project: no .claude settings, .mcp.json or .codex/config.toml in this repository",
+                     "project.settings"))
 
 
 def codex_table(rows, label, config, prefix):
@@ -302,6 +535,22 @@ def permission_prompts(rows):
                      "security.prompts.hint"))
 
 
+def environment(rows):
+    """Names, never values, of credential-shaped variables this process would hand to a child.
+
+    Not part of the drift fingerprint: a session's environment is not a setting."""
+    names = sorted(name for name in os.environ if credential_name(name))
+    guard = os.environ.get("OMS_WORKER_SECRET_GUARD") == "1"
+    if not names:
+        rows.append(("info", "environment: no credential-shaped variable names in this session", "environment.credentials"))
+        return
+    tail = ("OMS_WORKER_SECRET_GUARD=1 removes them from provider workers, except login variables and OMS_WORKER_ENV_ALLOW"
+            if guard else
+            "OMS_WORKER_SECRET_GUARD is off, so provider workers inherit them unchanged")
+    rows.append(("info", "environment: %d credential-shaped variable name(s): %s (values not read); %s"
+                 % (len(names), name_list(names, 12), tail), "environment.credentials"))
+
+
 def state_path(home):
     root = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
     return os.path.join(root, "oh-my-setting", "doctor-security.json")
@@ -481,7 +730,9 @@ def main():
     claude(rows, facts, home)
     codex(rows, facts, home)
     antigravity(rows, facts, home)
+    project(rows, facts, home)
     primitives(rows, facts)
+    environment(rows)
     since = drift(rows, facts, home)
     permission_prompts(rows)
     warned = sum(row[0] == "warn" for row in rows)

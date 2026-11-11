@@ -2884,10 +2884,27 @@ id is the provider plus the setting key (`codex.approval_policy`,
 level is `ok`, `info`, `warn` or `unread`, as in the text report, and the
 message is the text line; `changed_since` carries the baseline flag, the earlier
 check's time and the sections that moved. Nothing is printed that the text mode
-does not print. Project-level
-settings, managed policy and command-line flags are not read, so the report
-describes the user-level starting point, not the effective posture of a given
-session.
+does not print. Beyond the user files it
+reads three more things, all as data and all showing key names and counts, never
+values. Claude `sandbox.allowUnsandboxedCommands` (`warn` when on), the names in
+`sandbox.excludedCommands`, `sandbox.network.allowedDomains` (`warn` for a
+catch-all such as `*` or `*.com`, `info` for other wildcards) and an `info`
+row when `permissions.deny` has no Read rule for `.env`, `.ssh` or `.aws`; a
+value of an unexpected shape is `unknown`. Then the current repository's
+project scope (nearest `.git` upward from the working directory, else the
+directory itself): `.claude/settings.json` and `.claude/settings.local.json`
+(hook command count and events, `apiKeyHelper` and the other command-naming
+keys, `env` names that redirect traffic or look like credentials,
+`enableAllProjectMcpServers`, pre-approved MCP servers, bypass mode, blanket
+allow, and the sandbox rows above), `.mcp.json` (server names, how many launch a
+local command, environment variable names) and `.codex/config.toml` (the Codex
+rows, `notify`, MCP server names, providers that set `base_url`). Finally an
+`info` row lists credential-shaped environment variable names in the current
+session (the `ma_scrub_credential_env` list plus `GH_*`; a test keeps the two
+equal) and says whether `OMS_WORKER_SECRET_GUARD` is on. The project rows are
+part of the fingerprint; the environment row is not. Managed policy, a
+project's own deny rules and command-line flags are not read, so the report is
+a starting point, not the effective posture of a given session.
 
 The same report adds `info` rows (`security.prompts`, `security.prompts.days`,
 `security.prompts.hint`) counting Claude Code `permission_prompt` notifications
