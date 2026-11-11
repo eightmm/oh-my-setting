@@ -28,10 +28,19 @@ Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
        land.sh status [--repo PATH] [--json] [--active-exit]
        land.sh notes [--repo PATH] --from REV --to REV [--output NEW_FILE]
        land.sh blame-session [--repo PATH] [--json] [--file PATH] [--export-notes] COMMIT_OR_RANGE
+       land.sh conflicts [--repo PATH] [--base REV] [--max N] [--json] [BRANCH...]
 
 blame-session prints, per commit, the attribution row recorded in
 .oms/attribution.jsonl (ai | human | mixed | unknown) or `unrecorded`, then a
 summary line. See docs/COMPONENTS.md (Delegating writes).
+
+conflicts previews, read-only, which pending local oms/* branches (or the named
+branches) would conflict with the base and with each other, using
+`git merge-tree --write-tree` (git 2.38+; older git prints a "too old" line).
+It prints `clean` or `conflicts in FILES` per pair and a landing order that is
+only a labelled suggestion. At most --max branches (default 12, cap 24) are
+checked and the limit is printed. Repository config that would run a program
+makes it print "not checked" instead of running it.
 
 notes prints a release-notes skeleton for REV..REV: first-parent commit
 subjects grouped by Conventional Commit type, with the commits this checkout's
@@ -108,6 +117,13 @@ EOF
 if [ "${1:-}" = notes ]; then
   shift
   exec python3 "$ROOT/scripts/lib/land_notes.py" "$@"
+fi
+
+# Read-only: pairwise merge-conflict preview among pending oms/* branches. It
+# starts no job, takes no lock and writes no ref, index, worktree or object.
+if [ "${1:-}" = conflicts ]; then
+  shift
+  exec python3 -I -B "$ROOT/scripts/lib/pending_conflicts.py" "$@"
 fi
 
 # Read-only: which recorded attempt produced each commit of a range.

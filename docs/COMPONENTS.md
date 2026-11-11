@@ -1761,6 +1761,20 @@ of a passed land on this machine. It is deterministic and calls no model; the wo
 a person's. It creates no tag, release, commit or CHANGELOG edit, and `--output` only
 creates a new file.
 
+`oms land conflicts [--base REV] [--max N] [--json] [BRANCH...]` previews, before anything
+lands, which pending local `oms/*` branches (or the named ones) conflict with the base and
+with each other. It runs `git merge-tree --write-tree` in memory per pair and prints
+`clean` or `conflicts in FILES`, then a landing order labelled as a suggestion: branches
+with the fewest pairwise conflicts first, branches that already conflict with the base last.
+Pairwise results do not prove three branches merge together. It merges, checks out and
+writes nothing (the objects `merge-tree` creates go to a throw-away directory), never
+approves or blocks a land, and is not verification evidence. At most `--max` branches
+(default 12, cap 24) are checked, newest first, and the limit is printed. Git older than
+2.38 prints a "too old" line; repository config that would run a program (execution config
+from the shared check, or a merge driver) prints "not checked" and runs nothing; both exit 0
+and `--json` reports `status: unavailable` with a `reason`. Pending patch files are not
+included.
+
 The change guard sends its sorted changed-path stream through the canonical
 scope engine once. The engine loads and validates the stored allow/deny rules,
 compiles each bounded Bash-compatible glob once, and emits one deny-first
