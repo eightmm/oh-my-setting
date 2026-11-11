@@ -19965,10 +19965,6 @@ test_skill_doctor_checks_agy_loaded_skills() {
   local fx_path="$stub_dir:/usr/bin:/bin"
 
   mkdir -p "$home_dir" "$stub_dir"
-  # A stub timeout keeps the case independent of the host's timeout tool; it
-  # drops "-k 5 20" and runs the command.
-  printf '#!/usr/bin/env bash\nshift 3\nexec "$@"\n' > "$stub_dir/timeout"
-  chmod +x "$stub_dir/timeout"
   # A stub agy prints the loaded-skill JSON shape agy 1.4 reports for /skills:
   # every enabled oms-* manifest skill whose `requires` commands exist on the
   # fixture PATH (the selection link.sh installs), except the one named in $1.
@@ -20000,6 +19996,15 @@ PY
   PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/complete" 2>&1 ||
     fail "skill-doctor should pass when agy loads every enabled oms-* skill: $(cat "$home_dir/complete")"
   assert_file_contains "$home_dir/complete" "ok: agy loaded all"
+
+  # A child agy leaves behind still holds its output: the check must not wait
+  # for it (it used to, through the $(...) pipe), and the group is reaped.
+  printf '#!/usr/bin/env bash\nsleep 60 &\ncat "%s"\n' "$home_dir/loaded.json" > "$stub_dir/agy"
+  local started=$SECONDS
+  PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/lingering" 2>&1 ||
+    fail "a lingering agy child must not fail the check: $(cat "$home_dir/lingering")"
+  [ $((SECONDS - started)) -lt 30 ] || fail "skill-doctor waited for a lingering agy child"
+  assert_file_contains "$home_dir/lingering" "ok: agy loaded all"
 
   # link.sh skips a skill whose `requires` command is absent, so agy not
   # loading it is correct; once the command exists, the skill is expected.

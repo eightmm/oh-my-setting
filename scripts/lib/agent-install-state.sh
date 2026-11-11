@@ -298,7 +298,6 @@ PY
 oms_ops_check_agy_loaded_skills() {
   local wanted=()
   local source
-  local bounder=""
   local agy_out
   local parsed
   local checked=0
@@ -311,13 +310,8 @@ oms_ops_check_agy_loaded_skills() {
     printf 'skip: agy is not on PATH; loaded-skill check skipped\n\n'
     return 0
   fi
-  if command -v timeout >/dev/null 2>&1; then
-    bounder=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then
-    bounder=gtimeout
-  fi
-  if [ -z "$bounder" ] || ! command -v python3 >/dev/null 2>&1; then
-    printf 'skip: no timeout or python3 to bound agy /skills; loaded-skill check skipped\n\n'
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf 'skip: no python3 to bound agy /skills; loaded-skill check skipped\n\n'
     return 0
   fi
 
@@ -329,8 +323,33 @@ oms_ops_check_agy_loaded_skills() {
     return 0
   fi
 
-  # agy blocks on login when it has no credentials, so the wall bounds the probe.
-  agy_out="$("$bounder" -k 5 20 agy -p "/skills" --output-format json </dev/null 2>/dev/null)" ||
+  # agy can block on a login or terminal prompt. Under timeout(1) it shared the
+  # caller's terminal from a background process group, so a terminal access
+  # stopped it (state T) where no deadline reached it, and a child holding the
+  # output pipe kept $(...) waiting. A new session has no controlling terminal,
+  # output goes to a file, and the deadline kills the whole group.
+  printf 'checking: agy /skills (up to 20s)\n'
+  agy_out="$(python3 -I -c '
+import os, signal, subprocess, sys, tempfile
+with tempfile.TemporaryFile() as out:
+    try:
+        child = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=out,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        sys.exit(127)
+    try:
+        code = child.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        code = 124
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    child.wait()
+    out.seek(0)
+    sys.stdout.buffer.write(out.read())
+sys.exit(code)
+' agy -p "/skills" --output-format json)" ||
     { printf 'skip: agy /skills did not finish cleanly; loaded-skill check skipped\n\n'; return 0; }
 
   parsed="$(printf '%s' "$agy_out" | python3 -I -c '
