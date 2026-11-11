@@ -5,6 +5,8 @@ Sizes are UTF-8 bytes. Nothing here is a tokenizer, a bill or the provider's
 view of its context, and no injected or transcript text is returned."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -146,6 +148,110 @@ def _repo_label(repo, raw):
     if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
         return None
     return relative.replace(os.sep, "/")
+
+
+MAX_STEPS = 20000
+MAX_TIMELINE_ROWS = 200
+
+
+def _when(value):
+    """Epoch seconds of an ISO-8601 time a transcript row recorded, else None."""
+    if not isinstance(value, str) or not 10 <= len(value) <= 40:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _call_key(name, arguments):
+    """Identity of one call for repeat detection; the arguments themselves are never kept."""
+    try:
+        text = json.dumps(arguments, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return None
+    return name, hashlib.sha256(text.encode("utf-8", errors="replace")).digest(), len(text.encode("utf-8", errors="replace"))
+
+
+def inspect_timeline(repo, transcript, *, rows=MAX_TIMELINE_ROWS):
+    """Ordered tool calls of one Claude Code JSONL transcript: name, recorded duration, error flag, sizes.
+
+    Arguments and results are never returned, only their UTF-8 byte sizes. `first_error` is the first
+    result the provider flagged as an error; it says where a failure first showed, not what caused it."""
+    if type(rows) is not int or not 1 <= rows <= MAX_TIMELINE_ROWS:
+        raise InspectionError("timeline rows must be between 1 and %d" % MAX_TIMELINE_ROWS)
+    if not isinstance(transcript, str) or not transcript:
+        raise InspectionError("--session needs a transcript path")
+    steps, by_id, seen = [], {}, {}
+    lines = unread = unmatched = dropped = 0
+    for line in _lines(os.path.expanduser(transcript), MAX_TRANSCRIPT_BYTES, "transcript"):
+        lines += 1
+        try:
+            row = json.loads(line) if line is not None else None
+        except (TypeError, ValueError):
+            row = None
+        if not isinstance(row, dict):
+            unread += 1
+            continue
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        stamp = _when(row.get("timestamp"))
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use" and isinstance(item.get("id"), str):
+                if len(steps) >= MAX_STEPS:
+                    dropped += 1
+                    continue
+                name = _label(item.get("name")) or "unnamed"
+                arguments = item.get("input")
+                key = _call_key(name, arguments)
+                step = {"step": len(steps) + 1, "tool": name, "started": stamp, "duration_ms": None,
+                        "ok": None, "error": False, "argument_bytes": key[2] if key else None,
+                        "result_bytes": None, "repeat_of": seen.get(key[:2]) if key else None}
+                if key and key[:2] not in seen:
+                    seen[key[:2]] = step["step"]
+                steps.append(step)
+                by_id[item["id"]] = step
+            elif item.get("type") == "tool_result":
+                step = by_id.get(item.get("tool_use_id"))
+                if step is None:
+                    unmatched += 1
+                    continue
+                failed = item.get("is_error") is True
+                step["ok"], step["error"] = not failed, failed
+                step["result_bytes"] = _result_bytes(item.get("content"))
+                if stamp is not None and step["started"] is not None and stamp >= step["started"]:
+                    step["duration_ms"] = int(round((stamp - step["started"]) * 1000))
+    recognized = bool(steps)
+    first_error = next((step for step in steps if step["error"]), None)
+    for step in steps:
+        step.pop("started")
+    shown = steps[:rows]
+    if first_error is not None and first_error["step"] > rows:
+        shown = steps[:rows - 1] + [first_error]
+    return {
+        "schema": 1, "kind": "oms-context-timeline", "unit": "utf-8 bytes",
+        "format": "claude-jsonl" if recognized else "unknown",
+        "lines": lines, "unread_lines": unread, "unmatched_results": unmatched,
+        "steps_total": len(steps), "steps_not_recorded": dropped,
+        "errors": sum(1 for step in steps if step["error"]),
+        "pending": sum(1 for step in steps if step["ok"] is None),
+        "first_error": first_error,
+        "steps_after_first_error": (len(steps) - first_error["step"]) if first_error else None,
+        "steps": shown, "steps_omitted": len(steps) - len(shown),
+        "note": ("Tool names, order, recorded timestamps and byte sizes only; arguments and outputs are not "
+                 "returned. `first_error` is the first result the provider flagged is_error, not a cause. "
+                 "Durations are the gap between the call row and its result row; null when not recorded. "
+                 "`repeat_of` names an earlier step with the same tool and identical arguments. "
+                 "Only Claude Code JSONL transcripts are read; any other file reports format unknown. "
+                 "Observation only, never verification or approval evidence."),
+    }
 
 
 def inspect_session(repo, transcript, *, limit=10):

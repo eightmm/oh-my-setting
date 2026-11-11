@@ -160,6 +160,29 @@ Antigravity and Pi transcripts are not read. The transcript is capped at
 256 MiB and opened without following a final symlink. A marked harness child
 may read the ledger but not a transcript.
 
+`--session TRANSCRIPT.jsonl --timeline` reads the same transcript as an
+ordered list instead: one `oms-context-timeline` step per tool call with the
+tool name, the recorded gap between the call row and its result row
+(`duration_ms`, null when a timestamp is missing), an error flag from the
+provider's own `is_error`, the byte size of the arguments and of the result, and
+`repeat_of` when an earlier step made the identical call. `first_error` is the
+first flagged result and `steps_after_first_error` counts what followed; it marks
+where a failure first showed, not what caused it. Arguments, commands and
+outputs are never returned; up to 200 steps are listed (`--limit` does not
+apply), and a first error beyond that is still included.
+
+`oms agent-events show --attempt ID --bundle [--json] [--transcript PATH]` gathers
+this timeline with the other records OMS keeps for one attempt: its lifecycle
+events and longest gap, the artifact-index rows that carry the attempt id (or
+answer one of them through `parent_event_id`: route, brief digest, exit and
+verify exit, result lint, review seat verdicts), and the fail-ledger rows stamped
+inside the attempt's time window (the ledger has no attempt id, so the match is
+only by time). The transcript is the path a panel participant recorded under
+`.oms/hooks/panel-activity/`, or `--transcript`. Each fact names its source file;
+nothing is copied wholesale or written. Every string passes the shared secret
+scanner first, flagged strings are withheld and a scan that cannot run prints
+nothing. It is observation, never verification or approval.
+
 Both are bytes as recorded. They are not tokens, not a bill and not the
 provider's current window: a provider may already have cleared or summarized
 what a transcript still holds.

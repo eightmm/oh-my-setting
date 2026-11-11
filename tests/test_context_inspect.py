@@ -521,6 +521,40 @@ class FilesystemTests(unittest.TestCase):
         self.assertFalse(policy.child_action_is_read_only(
             argparse.Namespace(command="context-inspect", session=str(transcript))))
 
+    def test_transcript_timeline_orders_calls_and_flags_first_error_without_content(self):
+        def use(ident, name, second, **fields):
+            return {"type": "assistant", "timestamp": "2026-11-11T10:00:%02dZ" % second, "message": {"content": [
+                {"type": "tool_use", "id": ident, "name": name, "input": fields}]}}
+        def result(ident, second, content, **extra):
+            return {"type": "user", "timestamp": "2026-11-11T10:00:%02dZ" % second, "message": {"content": [
+                dict({"type": "tool_result", "tool_use_id": ident, "content": content}, **extra)]}}
+        rows = [use("a", "Read", 0, file_path="private-path"), result("a", 1, "x" * 30),
+                use("b", "Bash", 2, command="private-command"), result("b", 5, "boom-text", is_error=True),
+                use("c", "Bash", 6, command="private-command"), result("c", 7, "ok"),
+                use("d", "Edit", 8, old="private-edit"), result("gone", 9, "w")]
+        transcript = self.root / "timeline.jsonl"
+        transcript.write_text("".join(json.dumps(row) + "\n" for row in rows) + "not json\n", encoding="utf-8")
+        before = tree_bytes(self.repo)
+        value = session_view.inspect_timeline(self.repo, str(transcript))
+        self.assertEqual([(s["step"], s["tool"], s["ok"], s["duration_ms"]) for s in value["steps"]],
+                         [(1, "Read", True, 1000), (2, "Bash", False, 3000), (3, "Bash", True, 1000), (4, "Edit", None, None)])
+        self.assertEqual(value["first_error"]["step"], 2)
+        self.assertEqual((value["errors"], value["pending"], value["steps_after_first_error"],
+                          value["unmatched_results"], value["unread_lines"]), (1, 1, 2, 1, 1))
+        self.assertEqual(value["steps"][2]["repeat_of"], 2)
+        self.assertEqual(value["steps"][0]["result_bytes"], 30)
+        text = json.dumps(value)
+        for private in ("private", "boom-text", str(self.root)):
+            self.assertNotIn(private, text)
+        self.assertEqual(before, tree_bytes(self.repo))
+        # A late first error stays visible when the row cap would cut it.
+        capped = session_view.inspect_timeline(self.repo, str(transcript), rows=2)
+        self.assertEqual([s["step"] for s in capped["steps"]], [1, 2])
+        with patch.object(session_view, "MAX_STEPS", 1):
+            self.assertEqual(session_view.inspect_timeline(self.repo, str(transcript))["steps_not_recorded"], 3)
+        with self.assertRaises(session_view.InspectionError):
+            session_view.inspect_timeline(self.repo, str(transcript), rows=0)
+
     def test_error_does_not_echo_input_or_path(self):
         self.file.write_text('{"private-fixture-value":', encoding="utf-8")
         with self.assertRaises(ERROR) as caught:
@@ -600,6 +634,11 @@ if CLI:
                 self.assertEqual(seen.returncode, 0, seen.stderr)
                 self.assertEqual(json.loads(seen.stdout)["result_bytes"], 3)
                 self.assertEqual(call("context-inspect", "--session", str(transcript), child=True).returncode, 2)
+                line = call("context-inspect", "--session", str(transcript), "--timeline")
+                self.assertEqual(line.returncode, 0, line.stderr)
+                self.assertEqual(json.loads(line.stdout)["kind"], "oms-context-timeline")
+                self.assertEqual(call("context-inspect", "--session", str(transcript), "--timeline", child=True).returncode, 2)
+                self.assertEqual(call("context-inspect", "--injections", "--timeline").returncode, 2)
                 for wrong in (("context-inspect",), ("context-inspect", "pack.json", "--injections"),
                               ("context-inspect", "--injections", "--verify-current"),
                               ("context-inspect", "pack.json", "--session-hash", "abc"),

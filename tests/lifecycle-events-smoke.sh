@@ -1049,4 +1049,53 @@ if otel_out="$(python3 -I "$ROOT/scripts/lib/otel_field_map.py" "$TMP/otelmap" 2
 fi
 case "$otel_out" in *no_such_field_xyz*) ;; *) fail "otel lint did not name the missing field: $otel_out" ;; esac
 
+# show --bundle is the read-only post-mortem: lifecycle, index rows linked by attempt id or by parent event,
+# fail-ledger rows in the attempt's time window and the transcript tool timeline, as facts without content.
+BUNDLE_REPO="$TMP/bundle-repo"
+new_repo "$BUNDLE_REPO"
+bundle_attempt="$($EVENTS --repo "$BUNDLE_REPO" start --provider claude --tool delegate \
+  --then starting:b-start --then working:b-work)" || fail "bundle attempt start failed"
+$EVENTS --repo "$BUNDLE_REPO" transition --attempt "$bundle_attempt" --state failed \
+  --reason-code verification_failed >/dev/null || fail "bundle attempt failure transition failed"
+bundle_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$BUNDLE_REPO/.oms/artifacts"
+leaky="gh""p_$(printf 'a%.0s' $(seq 1 30))"
+printf '{"schema":1,"event_id":"evt_b1","ts":"%s","kind":"delegate","provider":"claude","exit":1,"attempt_id":"%s","role":"implementer","prompt_sha256":"%s","result_lint":["no-test"],"selected_model":"%s"}\n{"schema":1,"event_id":"evt_b2","ts":"%s","kind":"patch-admit","provider":"claude","exit":0,"parent_event_id":"evt_b1","review":{"seats":[{"verdict":"reject"}]},"task_id":"other"}\n{"schema":1,"event_id":"evt_b3","ts":"%s","kind":"call","provider":"claude","exit":0,"attempt_id":"att_unrelated"}\n' \
+  "$bundle_now" "$bundle_attempt" "$(printf 'd%.0s' $(seq 1 64))" "$leaky" "$bundle_now" "$bundle_now" \
+  > "$BUNDLE_REPO/.oms/artifacts/index.jsonl"
+printf '{"ts":"%s","fingerprint":"abc123","kind":"cmd","exit":1,"cmd":"private-command","summary":"private-summary"}\n{"ts":"2001-01-01T00:00:00Z","fingerprint":"old","kind":"cmd","exit":1}\n' \
+  "$bundle_now" > "$BUNDLE_REPO/.oms/failures.jsonl"
+printf '%s\n' \
+  '{"type":"assistant","timestamp":"2026-11-11T10:00:00Z","message":{"content":[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"private-command"}}]}}' \
+  '{"type":"user","timestamp":"2026-11-11T10:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"private-output"}]}}' \
+  > "$TMP/bundle-transcript.jsonl"
+$EVENTS --repo "$BUNDLE_REPO" show --attempt "$bundle_attempt" --bundle --transcript "$TMP/bundle-transcript.jsonl" --json \
+  > "$TMP/bundle.json" || fail "show --bundle failed"
+$EVENTS --repo "$BUNDLE_REPO" show --attempt "$bundle_attempt" --bundle --transcript "$TMP/bundle-transcript.jsonl" \
+  > "$TMP/bundle.txt" || fail "show --bundle text failed"
+python3 - "$TMP/bundle.json" "$TMP/bundle.txt" "$leaky" <<'PY' || fail "bundle content is wrong"
+import json, sys
+bundle = json.load(open(sys.argv[1], encoding="utf-8"))
+text = open(sys.argv[1], encoding="utf-8").read() + open(sys.argv[2], encoding="utf-8").read()
+assert bundle["kind"] == "oms-attempt-bundle" and "Observation only" in bundle["notice"], bundle
+assert bundle["lifecycle"]["state"] == "failed" and bundle["lifecycle"]["events_total"] == 4, bundle["lifecycle"]
+rows = bundle["artifact_rows"]["rows"]
+assert [row["event_id"] for row in rows] == ["evt_b1", "evt_b2"], rows
+assert rows[0]["result_lint"] == ["no-test"] and rows[1]["linked_by"] == "answers parent_event_id", rows
+assert rows[1]["review"]["seat_verdicts"] == ["reject"], rows[1]
+assert [row["fingerprint"] for row in bundle["fail_ledger"]["rows"]] == ["abc123"], bundle["fail_ledger"]
+line = bundle["transcript_timeline"]
+assert line["first_error"]["step"] == 1 and line["steps"][0]["duration_ms"] == 2000, line
+assert rows[0]["selected_model"] == "[withheld: secret-like]", rows[0]
+for private in ("private-command", "private-output", "private-summary", sys.argv[3]):
+    assert private not in text, private
+PY
+before_bundle="$(cat "$BUNDLE_REPO/.oms/lifecycle/events.jsonl" "$BUNDLE_REPO/.oms/failures.jsonl" | cksum)"
+$EVENTS --repo "$BUNDLE_REPO" show --attempt "$bundle_attempt" --bundle >/dev/null || fail "bundle without a transcript failed"
+[ "$before_bundle" = "$(cat "$BUNDLE_REPO/.oms/lifecycle/events.jsonl" "$BUNDLE_REPO/.oms/failures.jsonl" | cksum)" ] ||
+  fail "show --bundle wrote state"
+if $EVENTS --repo "$BUNDLE_REPO" show --attempt "$bundle_attempt" --transcript "$TMP/bundle-transcript.jsonl" >/dev/null 2>&1; then
+  fail "--transcript without --bundle was accepted"
+fi
+
 echo "lifecycle-events-smoke: ok"
