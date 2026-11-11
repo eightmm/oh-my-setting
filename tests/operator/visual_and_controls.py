@@ -442,6 +442,67 @@ terminal_bell, piped_bell, broken_bell = BellStream(True), BellStream(False), Be
 assert panel_watch.ring_bell(terminal_bell) is True and terminal_bell.text == "\a"
 assert panel_watch.ring_bell(piped_bell) is False and piped_bell.text == ""
 assert panel_watch.ring_bell(broken_bell) is False and panel_watch.ring_bell(object()) is False
+# OMS_PANEL_ATTENTION_DONE adds finished work awaiting review (the calls' decide rows) to the same bell path:
+# off by default, seeded like every other class, reported as its own `done` class word.
+done_rows = {item["row_id"] for item in ending_queue if item["cls"] == "decide" and item["row_id"][0] == "call"}
+assert done_rows and not done_rows & entered[1]
+ring, with_done = panel_watch.attention_bell(known, ending_fixture, "endings", False, True)
+assert ring is True and with_done[1] - entered[1] == done_rows, with_done
+assert panel_watch.attention_bell(known, ending_fixture, "endings", False, False) == (True, entered)
+assert panel_watch.attention_bell(None, ending_fixture, "endings", False, True)[0] is False, "first read only seeds"
+assert panel_watch.attention_bell(with_done, ending_fixture, "endings", False, True) == (False, with_done)
+done_event = panel_watch.attention_event(ending_fixture, done_rows, "endings-repo", now=0)
+assert done_event["new"] == {"done": len(done_rows)} and done_event["waiting"]["decide"] >= len(done_rows), done_event
+assert "done" not in panel_watch.attention_event(ending_fixture, entered[1] - known[1], "endings-repo", now=0)["new"]
+# OMS_PANEL_TITLE=1 shows `OMS · N waiting · N failed`; off, dumb, piped and held reads write nothing.
+title_failed = sum(item["cls"] in panel_watch.BELL_CLASSES and item["cls"] != "needs" for item in ending_queue)
+title_waiting = sum(item["cls"] == "needs" for item in ending_queue)
+title_expect = " · ".join(["OMS"] + (["%d waiting" % title_waiting] if title_waiting else []) + ["%d failed" % title_failed])
+assert panel_watch.title_text(ending_fixture) == title_expect and title_failed, title_expect
+assert panel_watch.title_text({"collection": {"ok": False}}) is None
+assert panel_watch.title_text(dict(ending_fixture, room={"id": "endings", "error": "x"})) is None
+with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False):
+    os.environ.pop("TMUX", None)
+    os.environ.pop("OMS_PANEL_TITLE", None)
+    quiet = BellStream(True)
+    assert panel_watch.sync_title(None, ending_fixture, False, quiet) is None and quiet.text == "", "off by default"
+    os.environ["OMS_PANEL_TITLE"] = "yes"
+    assert panel_watch.sync_title(None, ending_fixture, False, quiet) is None and quiet.text == ""
+    os.environ["OMS_PANEL_TITLE"] = "1"
+    shown_stream = BellStream(True)
+    shown = panel_watch.sync_title(None, ending_fixture, False, shown_stream)
+    assert shown == title_expect and shown_stream.text == "\033[22;0t\033]2;%s\a" % title_expect, repr(shown_stream.text)
+    # Unchanged text, a held read and an unreadable one write nothing more; a change rewrites without a second push.
+    assert panel_watch.sync_title(shown, ending_fixture, False, shown_stream) == shown
+    assert panel_watch.sync_title(shown, guard_read, True, shown_stream) == shown
+    assert panel_watch.sync_title(shown, {"collection": {"ok": False}}, False, shown_stream) == shown
+    assert shown_stream.text == "\033[22;0t\033]2;%s\a" % title_expect
+    changed = panel_watch.sync_title(shown, guard_read, False, shown_stream)
+    guard_title = panel_watch.title_text(guard_read)
+    assert changed == guard_title != title_expect and shown_stream.text.endswith("\033]2;%s\a" % guard_title), changed
+    assert shown_stream.text.count("\033[22") == 1
+    panel_watch.restore_title(changed, shown_stream)
+    assert shown_stream.text.endswith("\033[23;0t")
+    panel_watch.restore_title(None, quiet)
+    assert quiet.text == ""
+    assert panel_watch.sync_title(None, ending_fixture, False, BellStream(False)) is None
+    assert panel_watch.sync_title(None, ending_fixture, False, BellStream(True, True)) is None
+    with patch.dict(os.environ, {"TERM": "dumb"}):
+        dumb = BellStream(True)
+        assert panel_watch.sync_title(None, ending_fixture, False, dumb) is None and dumb.text == ""
+    # Under tmux nothing goes to the terminal: the window option the counts already use carries it.
+    with patch.dict(os.environ, {"TMUX": "/tmp/tmux-1/default,1,0"}), \
+            patch.object(panel_watch, "publish_attention", return_value=True) as option:
+        tmux_stream = BellStream(True)
+        assert panel_watch.sync_title(None, ending_fixture, False, tmux_stream) == title_expect and tmux_stream.text == ""
+        option.assert_called_once_with(title_expect, panel_watch.TITLE_OPTION)
+        panel_watch.restore_title(title_expect, tmux_stream)
+        assert option.call_args.args == ("", panel_watch.TITLE_OPTION) and tmux_stream.text == ""
+        option.reset_mock()
+        panel_watch.restore_title(title_expect, tmux_stream, reloading=True)
+        option.assert_not_called()
+        option.return_value = False
+        assert panel_watch.sync_title(None, ending_fixture, False, tmux_stream) is None, "a refused write is retried"
 # The watcher rings only with OMS_PANEL_ATTENTION_BELL=1 and, in a managed panel, only from the main window's
 # board; the clock is artificial, so two reads cost no real refresh wait.
 def bell_watch(bell, managed=False, main_watch="", command=None, notified=None, osc=None, noticed=None, read=None):

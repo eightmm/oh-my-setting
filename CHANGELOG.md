@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `OMS_PANEL_ATTENTION_DONE=1` adds finished work awaiting review to the bell,
+  notifier and OSC events (class word `done`); `OMS_PANEL_TITLE=1` shows
+  `OMS · 2 waiting · 1 failed` as the terminal title (tmux window option
+  `@oms_panel_title` under tmux), restored on exit. Both are off by default.
 - `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
   summary on stdin, when a call or message newly waits; one notifier runs at a
   time, its process group is killed after a timeout or when the panel
