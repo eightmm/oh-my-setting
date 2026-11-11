@@ -331,6 +331,7 @@ def attention_bell(known, report, key, stale=False):
 
 
 CHANGED_ROW_SECONDS = 3
+COLLECTION_SECONDS = 5  # between collected snapshots of a watch and of `--log --follow`
 
 
 def changed_rows(known, report, key, stale=False):
@@ -748,7 +749,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     if n and not sys.stdout.isatty():
                         print("----")
                     n += 1
-                    next_read = time.monotonic() + 5
+                    next_read = time.monotonic() + COLLECTION_SECONDS
                     if inputs.fd is not None and not count and reload_ready(stamps):
                         # The re-executed watcher keeps what the person selected, so a reload never moves it.
                         os.environ["OMS_PANEL_RESUME"] = json.dumps({key: navigation.get(key) for key in (

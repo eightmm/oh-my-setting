@@ -76,6 +76,7 @@ oms panel --repo . --recommend debug --diff main..HEAD --failed 2   # read-only 
 oms panel --repo . --providers --json      # registered CLI peers; no provider execution
 oms panel --repo . --watch --owner claude  # read-only activity sidebar
 oms panel --repo . --watch --view compact --attention-only
+oms panel --repo . --log --follow          # append-only event lines for screen readers, narrow SSH and pipes
 oms panel --repo . --room team --watch --view tree
 oms panel --repo . --launch codex --task 'Explain the parser and fix its bounded bug'
 oms panel --repo . --launch claude --resume SESSION_ID
@@ -1008,6 +1009,23 @@ unrelated native chat histories; app navigation and the full chat catalog keep t
 bounded identity lookup.
 
 `--count` counts collected snapshots rather than animation frames.
+
+`oms panel --log` is the line-stream alternative to the repainting board: it prints one plain line per room
+member and exits. With `--follow` it keeps collecting at the watch interval (five seconds) and prints one line
+per member whose state moved, using the watch loop's own change detection; the first readable read lists every
+member, and a read that could not see the room prints nothing and re-seeds. Interrupt with Ctrl-C; a closed
+pipe also ends it with status 0. `--count N` bounds a follow. It is a foreground command, never a daemon, and
+takes only `--repo`, `--room`, `--owner`, `--follow` and `--count`.
+
+```
+14:02:11 room=team role=worker working -> failed Parser fix
+14:02:19 room=team role=reviewer - -> review Review parser
+```
+
+Fields are fixed words: time, `room=ID`, `role=ROLE`, `OLD -> NEW` (`-` for a snapshot line or a member that just
+appeared), then the call title. Output never contains escape sequences, cursor movement, colour or glyphs,
+whatever `TERM`, `NO_COLOR` or `OMS_PANEL_COLOR` say; titles are stripped of control bytes and bounded to 80
+characters, and no prompt, body or path is printed. Observation only: a line is never approval or evidence.
 
 Use `oms panel --watch --no-animation` for a motion-free view, or set
 `OMS_PANEL_NO_ANIMATION=1` in the launching environment to cover automatically

@@ -2328,6 +2328,42 @@ for unread, held_frame in (({"collection": {"ok": False}}, False), (dict(running
                            (dict(running, room={"id": "r", "error": "room unreadable"}), False), (running, True)):
     assert panel_watch.changed_rows(seen, unread, "r", held_frame) == (frozenset(), None)
 assert panel_watch.changed_rows(None, running, "r")[0] == frozenset()
+# `--log` reuses that differ: a snapshot is one line per member, a change is exactly one line, and nothing printed
+# carries an escape byte or cursor movement, even when a title does.
+import io
+import panel_eventlog
+escaped = deepcopy(running)
+escaped["room"]["participants"][-1]["label"] = "Live \x1b[2Jcall\x07"
+snapshot, seeded, announced = panel_eventlog.lines(quiet, None, "r", 0, False)
+assert snapshot and len(snapshot) == len(room_view.nodes(quiet)) and announced, snapshot
+assert all(entry.split()[1] == "room=r" and entry.split()[3:5] == ["-", "->"] for entry in snapshot), snapshot
+assert panel_eventlog.lines(quiet, seeded, "r", 0, True)[0] == []
+hostile = panel_eventlog.lines(escaped, None, "r", 0, False)[0]
+assert hostile[-1].endswith("Live call") and not any(ch in "".join(hostile) for ch in "\x1b\x07"), hostile
+moved_lines, moved_known, announced = panel_eventlog.lines(running, seeded, "r", 0, True)
+assert len(moved_lines) == 1 and moved_lines[0].split()[3:6] == ["-", "->", "working"] and moved_lines[0].endswith("Live call"), moved_lines
+failed_lines = panel_eventlog.lines(ended, moved_known, "r", 0, True)[0]
+assert len(failed_lines) == 1 and " working -> failed Live call" in failed_lines[0], failed_lines
+# A blind read prints nothing and forgets; a repeated read of the same state prints nothing.
+assert panel_eventlog.lines({"collection": {"ok": False}}, moved_known, "r", 0, True)[:2] == ([], None)
+assert panel_eventlog.lines(running, moved_known, "r", 0, True)[0] == []
+# The runner: a snapshot without --follow prints the lines and stops; a follow prints the one change; output has no
+# escape bytes; a closed pipe ends it quietly with status 0.
+reads = iter([(quiet, 0, "codex", None, None, False, "r"), (running, 0, "codex", None, None, False, "r")])
+sink = io.StringIO()
+assert panel_eventlog.run(lambda: next(reads), False, 0, sink) == 0
+assert sink.getvalue().count("\n") == len(snapshot) and "\x1b" not in sink.getvalue(), sink.getvalue()
+sink = io.StringIO()
+reads = iter([(quiet, 0, "codex", None, None, False, "r"), (running, 0, "codex", None, None, False, "r")])
+assert panel_eventlog.run(lambda: next(reads), True, 2, sink, 0, wait=lambda seconds: None) == 0
+assert "\x1b" not in sink.getvalue() and sink.getvalue().count(" -> working Live call") == 1, sink.getvalue()
+class ClosedPipe(io.StringIO):
+    def write(self, data):
+        raise BrokenPipeError
+with patch("os.dup2"):
+    assert panel_eventlog.run(lambda: (quiet, 0, "codex", None, None, False, "r"), True, 0, ClosedPipe(), 0,
+                              wait=lambda seconds: None) == 0
+assert panel_eventlog.run(lambda: (_ for _ in ()).throw(KeyboardInterrupt), True, 0, io.StringIO()) == 0
 # The marks end by themselves: the published set changes once when they are set and once when they run out.
 mark_nav, mark_clock = {}, {}
 assert panel_watch.mark_changed(mark_nav, mark_clock, {"call-run"}, 10.0) and mark_nav["changed"] == {"call-run"}
