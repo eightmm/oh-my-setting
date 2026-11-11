@@ -1052,13 +1052,14 @@ EOF
 # never executed, and the only file it writes is its own fingerprint.
 test_security_report_names_risky_posture_read_only() {
   local home="$TMP/security" out before
-  mkdir -p "$home/.claude" "$home/.codex" "$home/.gemini/antigravity-cli" "$home/bin"
+  mkdir -p "$home/.claude" "$home/.codex" "$home/.gemini/antigravity-cli" "$home/bin" "$home/proj/.git"
   printf '#!/bin/sh\ntouch "%s/executed"\n' "$home" > "$home/bin/codex"
   cp "$home/bin/codex" "$home/bin/claude"
   chmod +x "$home/bin/codex" "$home/bin/claude"
+  # Run from a fixture repository so the project-scope rows read it, not this checkout.
   security() {
-    HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
-      bash "$ROOT/scripts/doctor.sh" --security 2>&1
+    (cd "$home/proj" && HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+      bash "$ROOT/scripts/doctor.sh" --security 2>&1)
   }
 
   # No settings at all: defaults apply, nothing warns, and a baseline is recorded.
@@ -1108,7 +1109,7 @@ $out"
   # --json carries the same findings with stable ids, the same exit status, and
   # nothing the text mode does not print.
   local json
-  json="$(HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+  json="$(cd "$home/proj" && HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --security --json 2>/dev/null)" || fail "--security --json must exit like the text mode: $json"
   printf '%s' "$json" | python3 -c '
 import json, sys
@@ -1135,6 +1136,75 @@ assert "touch" not in json.dumps(doc), "a settings value must not be echoed beyo
   contains "$out" "ok: claude: sandbox.enabled is on; 1 command(s) excluded from it" || fail "an enabled sandbox is ok: $out"
   contains "$out" "warn: changed since " || fail "a changed posture should be flagged once: $out"
   contains "$out" ": claude" || fail "only the claude section moved: $out"
+  contains "$out" "info: claude: permissions.deny has no Read rule for .env" || fail "a missing secret-path deny is reported: $out"
+  contains "$out" "info: claude: sandbox.excludedCommands runs outside the sandbox: docker" || fail "excluded command names are listed: $out"
+  printf '%s\n' '{"permissions":{"deny":["Read(**/.env*)"]},"sandbox":{"enabled":true,"allowUnsandboxedCommands":"yes"}}' \
+    > "$home/.claude/settings.json"
+  out="$(security)"
+  case "$out" in *"permissions.deny has no Read rule"*) fail "a secret-path deny rule clears the row: $out" ;; esac
+  contains "$out" "unknown: claude: sandbox.allowUnsandboxedCommands is not true or false" || fail "an odd shape is unknown, not ok: $out"
+  printf '%s\n' '{"sandbox":{"allowUnsandboxedCommands":true,"network":{"allowedDomains":["*","*.example.org","api.example.org"]}}}' \
+    > "$home/.claude/settings.json"
+  out="$(security)"
+  contains "$out" "warn: claude: sandbox.allowUnsandboxedCommands is on" || fail "the unsandboxed fallback warns: $out"
+  contains "$out" "warn: claude: sandbox.network.allowedDomains has a catch-all entry (*)" || fail "a catch-all domain warns: $out"
+
+  # Project-scope settings of the repository it runs in: key names and counts only, nothing run.
+  local tokname=ZZ_FIXTURE_TO''KEN
+  mkdir -p "$home/proj/.claude" "$home/proj/.codex"
+  out="$(security)"
+  contains "$out" "info: project: no .claude settings, .mcp.json or .codex/config.toml in this repository" ||
+    fail "a clean repository says so: $out"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"touch '"$home"'/executed"}]}]},
+    "apiKeyHelper":"touch '"$home"'/executed","env":{"ANTHROPIC_BASE_URL":"http://sentinel-url.invalid","DEPLOY_TO''KEN":"sentinel-value","PLAIN":"1"},
+    "enableAllProjectMcpServers":true,"enabledMcpjsonServers":["docs"],"permissions":{"defaultMode":"bypassPermissions"}}' \
+    > "$home/proj/.claude/settings.json"
+  printf '%s\n' '{"mcpServers":{"docs":{"command":"touch","args":["'"$home"'/executed"],"env":{"DOCS_SERVER_KEY":"sentinel-value"}},"web":{"url":"https://example.org/mcp"}}}' \
+    > "$home/proj/.mcp.json"
+  printf 'notify = ["touch", "x"]\napproval_policy = "never"\n[model_providers.mine]\nbase_url = "http://sentinel-url.invalid"\n[mcp_servers.docs]\ncommand = "touch"\n' \
+    > "$home/proj/.codex/config.toml"
+  out="$(export "$tokname=sentinel-value"; OMS_WORKER_SECRET_GUARD=0 security)" || fail "project rows must not change the exit status: $out"
+  for row in \
+    "warn: project settings.json: registers 1 hook command(s) on PreToolUse" \
+    "warn: project settings.json: sets apiKeyHelper, which name a command Claude Code runs" \
+    "warn: project settings.json: env sets ANTHROPIC_BASE_URL, DEPLOY_TO""KEN (names only; values not read)" \
+    "warn: project settings.json: enableAllProjectMcpServers is on" \
+    "info: project settings.json: pre-approves MCP server(s) docs" \
+    "warn: project settings.json: permissions.defaultMode is bypassPermissions" \
+    "info: project .mcp.json declares 2 MCP server(s): docs, web; 1 launch a local command" \
+    "info: project .mcp.json passes environment variable(s) DOCS_SERVER_KEY" \
+    "warn: project codex: approval_policy is never" \
+    "warn: project codex: notify names a command Codex runs" \
+    "info: project codex: declares MCP server(s) docs" \
+    "warn: project codex: model_providers mine set a base_url" \
+    "$tokname"; do
+    contains "$out" "$row" || fail "--security should report: $row
+$out"
+  done
+  case "$out" in *sentinel-value*|*sentinel-url*) fail "a value from a project file or the environment reached the report: $out" ;; esac
+  contains "$out" "info: environment: " || fail "the environment row is info, never a warning: $out"
+  contains "$out" "(values not read); OMS_WORKER_SECRET_GUARD is off, so provider workers inherit them unchanged" ||
+    fail "a disabled guard is described: $out"
+  out="$(export "$tokname=sentinel-value"; OMS_WORKER_SECRET_GUARD=1 security)"
+  contains "$out" "OMS_WORKER_SECRET_GUARD=1 removes them from provider workers" || fail "an enabled guard is described: $out"
+  [ ! -e "$home/executed" ] || fail "project rows must not run anything a project file names"
+  printf '{broken' > "$home/proj/.mcp.json"
+  out="$(security)"
+  contains "$out" "unknown: project .mcp.json: not valid JSON; not read" || fail "an unreadable project file is unknown: $out"
+  contains "$out" "1 unread" || fail "the summary counts an unreadable project file: $out"
+  rm -rf "$home/proj/.claude" "$home/proj/.codex" "$home/proj/.mcp.json"
+
+  # The credential-name list is the one the worker guard scrubs, plus GH_*.
+  python3 -I - "$ROOT" <<'PY' || fail "doctor --security credential names drifted from ma_scrub_credential_env"
+import importlib.util, re, sys
+root = sys.argv[1]
+spec = importlib.util.spec_from_file_location("doctor_security", root + "/scripts/lib/doctor-security.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+text = open(root + "/scripts/lib/peer-common.sh", encoding="utf-8").read()
+line = re.search(r"^\s*(AWS_\*\|[^)\n]+)\)\n\s*unset", text, re.M).group(1)
+assert set(line.split("|")) == set(mod.WORKER_CREDENTIAL_GLOBS), line
+PY
 
   # Unreadable is unknown, never ok; control characters in a value cannot reach the terminal.
   printf '{not json' > "$home/.claude/settings.json"
@@ -1142,7 +1212,7 @@ assert "touch" not in json.dumps(doc), "a settings value must not be echoed beyo
   out="$(security)" || fail "an unreadable settings file must not fail the report: $out"
   contains "$out" "unknown: claude: settings.json not valid JSON; posture not read" || fail "invalid JSON is unknown: $out"
   contains "$out" "1 unread" || fail "the summary should count the unread file: $out"
-  json="$(HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+  json="$(cd "$home/proj" && HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
     bash "$ROOT/scripts/doctor.sh" --security --json 2>/dev/null)" || fail "unread settings must not fail --json: $json"
   printf '%s' "$json" | python3 -c '
 import json, sys

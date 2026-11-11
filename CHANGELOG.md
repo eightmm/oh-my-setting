@@ -8,6 +8,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms doctor --security` also reads the current repository's project-scope
+  Claude, MCP and Codex settings (names and counts only), reports Claude
+  sandbox fallback, excluded-command and allowed-domain settings and a missing
+  secret-path deny rule, and lists credential-shaped environment variable
+  names without values.
 - `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
   summary on stdin, when a call or message newly waits; one notifier runs at a
   time, its process group is killed after a timeout or when the panel
