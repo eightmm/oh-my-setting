@@ -1349,7 +1349,7 @@ test_sandbox_report_states_facts_and_cross_checks_settings() {
   printf '%s\n' '{"sandbox":{"enabled":true}}' > "$home/.claude/settings.json"
   sandbox() {
     HOME="$home" PATH="${SB_PATH:-$home/bin:/usr/bin:/bin}" OMS_SANDBOX_ROOT="$root" OMS_SANDBOX_OS="${SB_OS:-Linux}" \
-      bash "$ROOT/scripts/doctor.sh" --sandbox "$@" 2>&1
+      DOCKER_HOST="${SB_DOCKER_HOST:-}" OMS_COVERAGE_ROOT="${SB_COVERAGE_ROOT:-}" bash "$ROOT/scripts/doctor.sh" --sandbox "$@" 2>&1
   }
 
   out="$(sandbox)" || fail "--sandbox must exit 0: $out"
@@ -1381,6 +1381,39 @@ $out"
     fail "a missing bwrap should warn for Claude: $out"
   out="$(sandbox)"
   case "$out" in *"warn: claude"*) fail "a usable helper must not warn: $out" ;; esac
+  contains "$out" "available: container_socket: no container daemon socket found" || fail "no socket: $out"
+
+  # A writable daemon socket is outside the boundary: restricted, and a warn while a sandbox setting is on.
+  mkdir -p "$root/var/run"
+  (cd "$root/var/run" && python3 -I -c 'import socket; socket.socket(socket.AF_UNIX).bind("docker.sock")') || fail "could not make a socket fixture"
+  out="$(sandbox)" || fail "$out"
+  contains "$out" "restricted: container_socket: /var/run/docker.sock writable by this user" || fail "writable socket: $out"
+  contains "$out" "warn: claude: a sandbox setting is on but a container daemon socket is writable" || fail "socket warn: $out"
+  chmod 000 "$root/var/run/docker.sock"
+  out="$(sandbox)" || fail "$out"
+  if [ "$(id -u)" != 0 ]; then
+    contains "$out" "available: container_socket: /var/run/docker.sock exists but this user cannot write to it" || fail "unwritable socket: $out"
+  fi
+  rm -f "$root/var/run/docker.sock"
+  out="$(SB_DOCKER_HOST=tcp://example.invalid:2375 sandbox)" || fail "$out"
+  contains "$out" "DOCKER_HOST is tcp://… (not contacted)" || fail "remote DOCKER_HOST: $out"
+
+  # Guard coverage is read from the registrations: a changed table changes the rows.
+  contains "$out" "info: guard coverage claude: PreToolUse guards (git-move-guard-hook.sh [Bash]; command-guard-hook.sh [Bash]) see shell; they do not see file edit, MCP" ||
+    fail "claude coverage: $out"
+  contains "$out" "info: guard coverage codex: no pre-tool hook is registered" || fail "codex coverage: $out"
+  contains "$out" "info: guard coverage antigravity: no hooks.json installed" || fail "antigravity coverage: $out"
+  local cov="$home/cov"
+  mkdir -p "$cov/scripts" "$cov/plugins/oh-my-setting" "$home/.gemini/config/plugins/oh-my-setting"
+  printf "HOOK_SURFACES='\nPreToolUse|command-guard-hook.sh|Bash|Edit|Write|5\nPostToolUse|syntax-guard-hook.sh|Edit|5\n'\n" > "$cov/scripts/install-claude-hooks.sh"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"matcher":"shell","hooks":[{"type":"command","command":"bash \"x/harness-hook.sh\" demo-guard"}]}]}}' > "$cov/plugins/oh-my-setting/hooks.json"
+  printf '%s\n' '{"oh-my-setting":{"PreInvocation":[{"type":"command","command":"bash ./agy-hook.sh preinvocation"}]}}' > "$home/.gemini/config/plugins/oh-my-setting/hooks.json"
+  out="$(SB_COVERAGE_ROOT="$cov" sandbox)" || fail "$out"
+  contains "$out" "info: guard coverage claude: PreToolUse guards (command-guard-hook.sh [Bash|Edit|Write]) see shell, file edit; they do not see MCP, read/search/web" ||
+    fail "a changed claude table should change coverage: $out"
+  contains "$out" "PreToolUse guards (demo-guard [shell]) see only their matcher" || fail "codex pre-tool row: $out"
+  contains "$out" "info: guard coverage antigravity: installed hooks are PreInvocation; no tool-level hook" || fail "antigravity installed: $out"
+  rm -rf "$home/.gemini"
 
   # --probe is the only thing that runs bwrap, and a failure is a state, not an error.
   out="$(sandbox --probe)" || fail "a failing probe must not change the exit status: $out"
