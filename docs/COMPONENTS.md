@@ -388,6 +388,14 @@ oms uninstall
 `oms cleanup` previews removals; `--apply` performs them only when the preservation
 proof succeeds. Every kept item reports its reason.
 
+In both modes it also prints a read-only report of local `oms/*` work branches against
+the base (`origin/HEAD`, else `origin/main`, `main`, `master`): `safe to delete` (tip is
+an ancestor), `landed by equivalent commits` (every commit has a patch-id twin on the base,
+for work the owner landed by committing), `still unique`, and `in use` (a worktree has the
+branch checked out; a live harness marker is noted). Each row shows the tip, the age of the
+last commit and the upstream. It prints `git branch -d` / `-D` commands for you to run and
+never deletes a branch; a branch holding a merge commit counts as unique.
+
 > **Preserve ignored work before applying.** Eligible ignored trees in a settled,
 > dead delegate worktree can be discarded, including hand edits. The preserved
 > patch does not include that content.

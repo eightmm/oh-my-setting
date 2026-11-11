@@ -20013,6 +20013,54 @@ test_cleanup_prunes_stale_worktree_registration() {
   assert_file_contains "$project/cleanup.out" "pruned: 1 stale git worktree registration(s)"
 }
 
+# smoke-weight: 12
+test_cleanup_reports_oms_branches_without_deleting() {
+  local project="$TMP/cleanup-branches"
+  local home_dir="$TMP/cleanup-branches-home"
+  local out="$TMP/cleanup-branches.out" before after
+
+  make_committed_repo "$project"
+  mkdir -p "$home_dir"
+  git -C "$project" config user.email t@example.invalid
+  git -C "$project" config user.name t
+  # An ancestor, a branch the owner landed as a different commit, one with unique
+  # work, and one still checked out in a worktree.
+  git -C "$project" branch oms/merged
+  git -C "$project" checkout -q -b oms/equiv
+  printf 'x\n' > "$project/equiv.txt"
+  git -C "$project" add equiv.txt
+  git -C "$project" commit -qm equiv
+  git -C "$project" checkout -q main
+  # Main moves first, so the cherry-pick gets a new SHA instead of fast-forwarding.
+  printf 'o\n' > "$project/other.txt"
+  git -C "$project" add other.txt
+  git -C "$project" commit -qm other
+  git -C "$project" cherry-pick "$(git -C "$project" rev-parse oms/equiv)" >/dev/null
+  git -C "$project" checkout -q -b oms/unique
+  printf 'u\n' > "$project/unique.txt"
+  git -C "$project" add unique.txt
+  git -C "$project" commit -qm unique
+  git -C "$project" checkout -q main
+  git -C "$project" worktree add -q -b oms/inuse "$TMP/cleanup-branches-wt" HEAD
+  before="$(git -C "$project" for-each-ref refs/heads/oms/ | sort)"
+
+  (cd "$project" && HOME="$home_dir" "$ROOT/scripts/cleanup.sh" --apply >"$out")
+  after="$(git -C "$project" for-each-ref refs/heads/oms/ | sort)"
+  [ "$before" = "$after" ] || fail "branch report must not delete or move a branch"
+  assert_file_contains "$out" "safe to delete (tip is an ancestor of the base): 1"
+  assert_file_contains "$out" "git branch -d oms/merged"
+  assert_file_contains "$out" "landed by equivalent commits"
+  assert_file_contains "$out" "git branch -D oms/equiv  # was "
+  assert_file_contains "$out" "still unique (commits not on the base): 1"
+  assert_file_contains "$out" "- oms/unique  tip "
+  assert_file_contains "$out" "in use (worktree references; not offered for deletion): 1"
+  if grep -F "git branch -d oms/unique" "$out" >/dev/null ||
+      grep -F "oms/inuse  # was" "$out" >/dev/null ||
+      grep -E "git branch -[dD] oms/inuse" "$out" >/dev/null; then
+    fail "branch report offered to delete unique or in-use work"
+  fi
+}
+
 # smoke-weight: 20
 test_cleanup_removes_dead_lock_only() {
   local home_dir="$TMP/cleanup-lock-home"
