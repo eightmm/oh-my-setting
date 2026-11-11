@@ -2215,6 +2215,10 @@ for width, height in ((100, 32), (42, 34), (24, 18), (12, 10), (2, 8)):
 import io
 with patch.dict(os.environ, {"OMS_CODEX_NOTIFY": "0", "OMS_CLAUDE_NOTIFY": "0"}, clear=True):
     assert "OMS_CLAUDE_NOTIFY=0" in panel.panel_environment()
+    assert not any(entry.startswith("OMS_PANEL_MAIN_PERMISSIONS=") for entry in panel.panel_environment())
+    # The main-permissions opt-out reaches mains a running tmux server opens.
+    os.environ["OMS_PANEL_MAIN_PERMISSIONS"] = "native"
+    assert "OMS_PANEL_MAIN_PERMISSIONS=native" in panel.panel_environment()
     # The bell opt-in reaches automatically opened boards only when the launching environment sets it.
     assert not any(entry.startswith("OMS_PANEL_ATTENTION_BELL=") for entry in panel.panel_environment())
 with patch.dict(os.environ, {"OMS_PANEL_ATTENTION_BELL": "1", "OMS_PANEL_ATTENTION_CMD": "notify --json"}, clear=True):
