@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "purpose": "Checked name map for people who post-process .oms/ JSONL themselves. Not an exporter: nothing reads this file at runtime and OMS emits no OpenTelemetry data.",
+  "source": {
+    "checked": "2026-11-11",
+    "stability": "Development (gen_ai.* attributes and the invoke_agent / execute_tool operation values); error.type is Stable",
+    "urls": [
+      "https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/",
+      "https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-agent-spans.md",
+      "https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/reports/execute-tool-span.md"
+    ],
+    "version": "Registry page header showed semantic conventions 1.45.0 (its schema links point at v1.41.0); the agent-spans document links v1.44.0 and states no version of its own. The semantic-conventions release notes say the gen_ai.* definitions moved to the semantic-conventions-genai repository in v1.42.0, so the names here are read from that repository."
+  },
+  "unconfirmed": [
+    "execute_tool span name format and span kind (the fetched agent-spans page was cut off before that section)",
+    "whether gen_ai.usage.input_tokens includes cached tokens (OMS rows carry cache_in_input where the provider says)",
+    "any gen_ai.* attribute for total tokens, cost, or tool-call counts (none was found on the pages read)",
+    "OTLP span field names for the trace context (not part of the GenAI pages; check the OTLP specification)",
+    "how OMS provider values (claude, codex, antigravity, local) map to gen_ai.provider.name values; only anthropic and openai were seen in the registry list"
+  ],
+  "entries": [
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "attempt.created", "kind": "event_type", "otel": "gen_ai.operation.name=invoke_agent", "status": "confirmed", "fit": "approximate", "note": "an attempt read as one agent invocation; OMS stores no span end except a terminal state row"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "attempt.state_changed", "kind": "event_type", "otel": null, "status": "no-equivalent", "note": "state transitions have no GenAI attribute; keep to_state and reason_code as custom attributes"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "attempt.heartbeat", "kind": "event_type", "otel": null, "status": "no-equivalent", "note": "liveness only"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "attempt.usage", "kind": "event_type", "otel": null, "status": "no-equivalent", "note": "carries the usage.* fields below"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "provider", "kind": "field", "otel": "gen_ai.provider.name", "status": "confirmed", "fit": "approximate", "note": "required on invoke_agent; OMS values are not registry values, see unconfirmed list"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "run_id", "kind": "field", "otel": "gen_ai.conversation.id", "status": "confirmed", "fit": "approximate", "note": "a run groups attempts the way a conversation groups turns; the choice is the reader's"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "attempt_id", "kind": "field", "otel": null, "status": "no-equivalent", "note": "use as a custom attribute or as the span identity"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "task_id", "kind": "field", "otel": null, "status": "no-equivalent", "note": "custom attribute"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "parent_attempt_id", "kind": "field", "otel": null, "status": "no-equivalent", "note": "parent link; trace parent_span_id below carries it when a trace context was recorded"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "tool", "kind": "field", "otel": null, "status": "no-equivalent", "note": "an OMS front door such as agent-call, not a model tool call; do not map it to gen_ai.tool.name"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "to_state", "kind": "field", "otel": null, "status": "no-equivalent", "note": "custom attribute"},
+    {"record": "lifecycle", "writer": "scripts/lib/agent-events.py", "oms_field": "reason_code", "kind": "field", "otel": "error.type", "status": "confirmed", "fit": "approximate", "note": "only on failed, timed_out or abandoned rows; error.type is set when the operation errored"},
+    {"record": "lifecycle-usage", "writer": "scripts/lib/agent-events.py", "oms_field": "usage.tokens", "kind": "field", "otel": null, "status": "no-equivalent", "note": "a single total; the GenAI attributes are split into input and output"},
+    {"record": "lifecycle-usage", "writer": "scripts/lib/agent-events.py", "oms_field": "usage.duration_ms", "kind": "field", "otel": null, "status": "no-equivalent", "note": "span start and end timestamps carry duration"},
+    {"record": "lifecycle-usage", "writer": "scripts/lib/agent-events.py", "oms_field": "usage.cost_microusd", "kind": "field", "otel": null, "status": "no-equivalent", "note": "no cost attribute was found; keep as a custom attribute"},
+    {"record": "trace", "writer": "scripts/lib/agent-events.py", "oms_field": "trace_id", "kind": "field", "otel": "traceId", "status": "unconfirmed", "note": "OTLP span field, 32 hex characters as W3C Trace Context; not read from the GenAI pages"},
+    {"record": "trace", "writer": "scripts/lib/agent-events.py", "oms_field": "span_id", "kind": "field", "otel": "spanId", "status": "unconfirmed", "note": "OTLP span field, 16 hex characters"},
+    {"record": "trace", "writer": "scripts/lib/agent-events.py", "oms_field": "parent_span_id", "kind": "field", "otel": "parentSpanId", "status": "unconfirmed", "note": "OTLP span field"},
+    {"record": "trace", "writer": "scripts/lib/agent-events.py", "oms_field": "trace_flags", "kind": "field", "otel": "flags", "status": "unconfirmed", "note": "W3C trace-flags byte"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "tool_name", "kind": "field", "otel": "gen_ai.tool.name", "status": "confirmed", "fit": "exact", "note": "pair with gen_ai.operation.name=execute_tool; required on that span"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "model", "kind": "field", "otel": "gen_ai.request.model", "status": "confirmed", "fit": "approximate", "note": "use gen_ai.response.model instead when the row records the served model"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "input_tokens", "kind": "field", "otel": "gen_ai.usage.input_tokens", "status": "confirmed", "fit": "approximate", "note": "cached-token inclusion is unconfirmed"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "output_tokens", "kind": "field", "otel": "gen_ai.usage.output_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "cache_read_tokens", "kind": "field", "otel": "gen_ai.usage.cache_read.input_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "cache_creation_tokens", "kind": "field", "otel": "gen_ai.usage.cache_creation.input_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "reasoning_tokens", "kind": "field", "otel": "gen_ai.usage.reasoning.output_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "duration_ms", "kind": "field", "otel": null, "status": "no-equivalent", "note": "span timestamps carry duration"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "cost_usd", "kind": "field", "otel": null, "status": "no-equivalent", "note": "provider-reported; no cost attribute was found"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "success", "kind": "field", "otel": "error.type", "status": "confirmed", "fit": "approximate", "note": "set error.type only when success is false; the value is the reader's choice"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "agent_id_hash", "kind": "field", "otel": "gen_ai.agent.id", "status": "confirmed", "fit": "approximate", "note": "a 16-character hash of the provider agent id, not the id itself"},
+    {"record": "hook-telemetry", "writer": "scripts/lib/hook_state.py", "oms_field": "parent_agent_id_hash", "kind": "field", "otel": null, "status": "no-equivalent", "note": "custom attribute"},
+    {"record": "artifact-index-usage", "writer": "scripts/lib/artifact-telemetry.py", "oms_field": "input_tokens", "kind": "field", "otel": "gen_ai.usage.input_tokens", "status": "confirmed", "fit": "approximate", "note": "provider_usage.cache_in_input says whether cached tokens are already inside this count"},
+    {"record": "artifact-index-usage", "writer": "scripts/lib/artifact-telemetry.py", "oms_field": "output_tokens", "kind": "field", "otel": "gen_ai.usage.output_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "artifact-index-usage", "writer": "scripts/lib/artifact-telemetry.py", "oms_field": "cache_read_tokens", "kind": "field", "otel": "gen_ai.usage.cache_read.input_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "artifact-index-usage", "writer": "scripts/lib/artifact-telemetry.py", "oms_field": "cache_write_tokens", "kind": "field", "otel": "gen_ai.usage.cache_creation.input_tokens", "status": "confirmed", "fit": "exact"},
+    {"record": "artifact-index-usage", "writer": "scripts/lib/artifact-telemetry.py", "oms_field": "tool_calls", "kind": "field", "otel": null, "status": "no-equivalent", "note": "a count; no GenAI attribute was found"}
+  ]
+}

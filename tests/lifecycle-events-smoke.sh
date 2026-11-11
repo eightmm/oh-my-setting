@@ -1029,4 +1029,24 @@ if $EVENTS --repo "$REPO" start --provider codex --tool agent-call \
   fail "start --then accepted an invalid lifecycle state"
 fi
 
+# The OpenTelemetry GenAI name map is data only: every OMS field it names must still be a
+# literal in its writer, and a field that is not must be reported.
+python3 -I "$ROOT/scripts/lib/otel_field_map.py" || fail "otel field map lint should pass"
+mkdir -p "$TMP/otelmap/config" "$TMP/otelmap/scripts/lib"
+cp "$ROOT/scripts/lib/agent-events.py" "$ROOT/scripts/lib/hook_state.py" \
+  "$ROOT/scripts/lib/artifact-telemetry.py" "$TMP/otelmap/scripts/lib/"
+python3 - "$ROOT/config/otel-genai-map.json" "$TMP/otelmap/config/otel-genai-map.json" <<'PY' ||
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+data["entries"].append({"record": "lifecycle", "writer": "scripts/lib/agent-events.py",
+                        "oms_field": "no_such_field_xyz", "kind": "field", "otel": None,
+                        "status": "no-equivalent"})
+json.dump(data, open(sys.argv[2], "w", encoding="utf-8"))
+PY
+  fail "could not build otel map fixture"
+if otel_out="$(python3 -I "$ROOT/scripts/lib/otel_field_map.py" "$TMP/otelmap" 2>&1)"; then
+  fail "otel field map lint accepted a field no writer has"
+fi
+case "$otel_out" in *no_such_field_xyz*) ;; *) fail "otel lint did not name the missing field: $otel_out" ;; esac
+
 echo "lifecycle-events-smoke: ok"
