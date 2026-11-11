@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     inspection.add_argument('--session-hash', help='with --injections: one recorded session hash')
     inspection.add_argument('--session', metavar='TRANSCRIPT',
                             help='instead of a manifest: per-tool result bytes and repeated reads in one Claude Code JSONL transcript')
+    inspection.add_argument('--timeline', action='store_true',
+                            help='with --session: ordered tool calls (name, recorded duration, error flag, byte sizes, first error row); '
+                                 'no arguments or outputs; up to 200 steps, --limit does not apply')
     inspection.add_argument('--compare', help='compare with another saved manifest; never run either pack')
     inspection.add_argument('--verify-current', action='store_true', help='compare current source hashes (incompatible with --compare)')
     inspection.add_argument('--limit', type=int, default=10, help='rows per displayed list, 1..100 (default: 10)')

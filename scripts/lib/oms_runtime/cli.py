@@ -107,7 +107,12 @@ def main(argv: Optional[Sequence[str]]=None) -> int:
                                           '(--compare and --verify-current need MANIFEST)')
                 if args.session_hash is not None and not args.injections:
                     raise InspectionError('--session-hash needs --injections')
-                if args.injections:
+                if args.timeline and args.session is None:
+                    raise InspectionError('--timeline needs --session TRANSCRIPT')
+                if args.timeline:
+                    from .context_session import inspect_timeline
+                    value = inspect_timeline(repo, args.session)
+                elif args.injections:
                     value = inspect_injections(repo, session=args.session_hash, limit=args.limit)
                 elif args.session is not None:
                     value = inspect_session(repo, args.session, limit=args.limit)

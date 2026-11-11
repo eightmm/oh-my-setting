@@ -1344,6 +1344,21 @@ def event_show(args: argparse.Namespace) -> int:
     attempt = attempts.get(safe_id(args.attempt, "attempt"))
     if attempt is None:
         raise OpsError("unknown attempt: %s" % args.attempt)
+    if args.transcript and not args.bundle:
+        raise OpsError("--transcript needs --bundle")
+    if args.bundle:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import attempt_bundle
+        try:
+            bundle = attempt_bundle.scanned(attempt_bundle.build_bundle(
+                repo, attempt, read_rows(event_path(repo)), transcript=args.transcript))
+        except Exception as exc:  # CoreError from the scan or a store reader; nothing was printed yet
+            raise OpsError("post-mortem bundle failed: %s" % str(exc)[:200]) from None
+        if args.json:
+            print_json(bundle)
+        else:
+            print(attempt_bundle.render_text(bundle))
+        return 0
     if args.json:
         print_json(attempt)
     else:
@@ -2178,6 +2193,11 @@ def add_event_parser(subparsers: argparse._SubParsersAction) -> None:
     show = subparsers.add_parser("show", help="project one attempt")
     show.add_argument("--attempt", required=True)
     show.add_argument("--json", action="store_true")
+    show.add_argument("--bundle", action="store_true",
+                      help="read-only post-mortem: lifecycle events, artifact-index rows, fail-ledger rows "
+                           "and the tool-call timeline, as short facts with their source files")
+    show.add_argument("--transcript", default="", metavar="PATH",
+                      help="with --bundle: Claude Code JSONL transcript when none is recorded for the attempt")
     show.set_defaults(func=event_show)
 
     listing = subparsers.add_parser("list", help="list projected attempts")
