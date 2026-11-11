@@ -473,6 +473,16 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   waits. (PR #41)
 - The usage line and health screen draw a five-cell bar beside each reported
   quota percentage. (PR #38)
+- Panel mains launch with their provider's permission prompts bypassed
+  (Claude and Antigravity skip permissions, Codex bypasses approvals and
+  sandbox); `OMS_PANEL_MAIN_PERMISSIONS=native` keeps the native prompts and
+  reaches windows a running tmux server opens.
+- Read workers can attach exact quotations that the dispatcher checks against
+  the commit they read.
+- `oms patch-admit --regression-test` proves a named test fails on the base
+  with only the test hunks and passes on the candidate.
+- `oms tick schedule` gives an approved autopilot contract its own cadence,
+  pause, expiry and coalesced missed runs.
 
 ### Changed
 
@@ -1264,6 +1274,26 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   its ignored files.
 - `oms recall --all-repos` reads query words that follow the flag under Python 3.11. (PR #68)
 - Compare context selection policy digests. (PR #85)
+- Install, repair and remove recognise a fail-closed guard row whose checkout
+  moved; a failed `onFailure` probe downgrades it. Hook audit checks every
+  registration, and a launcher-form row counts as dead only when its root is
+  not an OMS checkout and its launcher is gone.
+- The Slurm template waits for its child after a second signal, reconcile
+  keeps a reused job id apart from a requeue, `slurm-lint` treats `--time=0`
+  as unlimited, and time splits compare parsed UTC timestamps.
+- `oms doctor --security` writes its state exclusively and reports skipped
+  profiles; review findings lock transitions and need a later receipt.
+- `oms run-ledger top` keeps the latest rerun of each seed and hashes only
+  regular eval files inside the ledger's repository.
+- Agent-memory redact refuses symlinked sources and `--file`, and finishes
+  derived cleanup on retry.
+- `oms intent amend` stages its writes and receipt, refuses child sessions,
+  checks its binding before gates and withdraws its receipt when PROJECT.md
+  cannot be replaced.
+- `oms ci-status` triage scans raw CI text before display, bounds the log read
+  to its newest 2 MiB and reports an unfinished run as unknown.
+- Fail-ledger advisor hints read no Git state when repository config would run
+  a program.
 
 ### Removed
 
