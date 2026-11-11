@@ -7946,7 +7946,7 @@ test_delegate_dry_run() {
   [ -z "$lint_codes" ] || fail "claim with passing receipt must lint clean: $lint_codes"
   lint_codes="$(printf 'Summary: ok.\n\nTests not run.\n\nUnresolved: none\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" result - --verify=none 2>/dev/null)"
   [ -z "$lint_codes" ] || fail "a negated claim is not a claim: $lint_codes"
-  [ "$(printf 'Done.\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" claim - --writer)" = done ] || fail "writer done claim"
+  [ "$(printf 'Done.\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" claim - --writer)" = "done" ] || fail "writer done claim"
   [ -z "$(printf 'Done.\n' | python3 "$ROOT/scripts/lib/delegation_lint.py" claim -)" ] || fail "bare done is a claim for writers only"
   # The dry run also prints an advisory inline/researcher/worker verdict from facts.
   local advice_brief="$TMP/advice-brief.md" advice_out="$TMP/advice.out"
