@@ -220,6 +220,84 @@ def primitives(rows, facts):
         rows.append(("info", "%s = %s" % (name, clean(value, 16)), "system." + name))
 
 
+PROMPT_LEDGER = os.path.join(".oms", "hooks", "events.jsonl")
+PROMPT_LEDGER_LIMIT = 8 * 1024 * 1024
+PROMPT_HINT_DEFAULT = 20
+PROMPT_DAYS = 7
+
+
+def prompt_ledger(start):
+    """The nearest enclosing project's hook ledger, or None; nothing is created."""
+    here = os.path.realpath(start)
+    while True:
+        path = os.path.join(here, PROMPT_LEDGER)
+        if os.path.isfile(path) and not os.path.islink(path):
+            return path
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None
+        here = parent
+
+
+def permission_prompts(rows):
+    """Count recorded `permission_prompt` Notification rows per session and per UTC day.
+
+    Read-only and advisory: it only reads the project hook ledger, is not part of
+    the drift fingerprint, and never edits a permission or allow rule. The ledger
+    keeps no tool or command text, so there is no per-tool breakdown.
+    """
+    path = prompt_ledger(os.getcwd())
+    if path is None:
+        rows.append(("info", "permission prompts: no project hook ledger here; run from an adopted project",
+                     "security.prompts"))
+        return
+    sessions, days = {}, {}
+    try:
+        with open(path, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size > PROMPT_LEDGER_LIMIT:
+                handle.seek(size - PROMPT_LEDGER_LIMIT)
+                handle.readline()
+            for raw in handle:
+                if b"permission_prompt" not in raw:
+                    continue
+                try:
+                    row = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("action") != "permission_prompt":
+                    continue
+                session, when = row.get("session"), row.get("ts")
+                if not isinstance(session, str) or not isinstance(when, str) or len(when) < 10:
+                    continue
+                sessions[session] = sessions.get(session, 0) + 1
+                days[when[:10]] = days.get(when[:10], 0) + 1
+    except OSError:
+        rows.append(("unknown", "permission prompts: hook ledger could not be read", "security.prompts"))
+        return
+    if not sessions:
+        rows.append(("info", "permission prompts: none recorded in this project's hook ledger", "security.prompts"))
+        return
+    try:
+        limit = max(1, int(os.environ.get("OMS_PERMISSION_PROMPT_HINT", "") or PROMPT_HINT_DEFAULT))
+    except ValueError:
+        limit = PROMPT_HINT_DEFAULT
+    total = sum(sessions.values())
+    busiest = max(sessions.items(), key=lambda item: (item[1], item[0]))
+    recent = sorted(days.items())[-PROMPT_DAYS:]
+    rows.append(("info", "permission prompts: %d in %d session(s) over %d day(s); busiest session %s had %d"
+                 % (total, len(sessions), len(days), clean(busiest[0][:8], 12), busiest[1]), "security.prompts"))
+    rows.append(("info", "permission prompts per day (last %d with any): %s"
+                 % (len(recent), ", ".join("%s=%d" % (day, count) for day, count in recent)),
+                 "security.prompts.days"))
+    peak = max(max(sessions.values()), max(days.values()))
+    if peak >= limit:
+        rows.append(("info", "permission prompts reached %d in one session or day (hint at %d): frequent approvals "
+                     "wear down review; consider narrow permissions.allow rules or the sandbox instead of "
+                     "bypassPermissions (this report never edits permissions)" % (peak, limit),
+                     "security.prompts.hint"))
+
+
 def state_path(home):
     root = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
     return os.path.join(root, "oh-my-setting", "doctor-security.json")
@@ -284,6 +362,7 @@ def main():
     antigravity(rows, facts, home)
     primitives(rows, facts)
     since = drift(rows, facts, home)
+    permission_prompts(rows)
     warned = sum(row[0] == "warn" for row in rows)
     unread = sum(row[0] == "unknown" for row in rows)
     if "--json" in sys.argv[1:]:

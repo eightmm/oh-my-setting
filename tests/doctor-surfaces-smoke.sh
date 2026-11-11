@@ -1263,6 +1263,38 @@ PYATOMIC
   out="$(OMS_HARNESS_CHILD=1 security)" || fail "a harness child may read the report: $out"
   [ ! -e "$home/state/oh-my-setting/doctor-security.json" ] || fail "a harness child must not record a fingerprint"
 
+  # Permission-prompt frequency: counted from the project hook ledger, read-only,
+  # informational (no warning), with a hint at the threshold and no ledger written.
+  local proj="$TMP/security-proj"
+  mkdir -p "$proj/.oms/hooks" "$proj/sub"
+  : > "$proj/.oms/hooks/events.jsonl"
+  out="$(cd "$proj/sub" && security)" || fail "an empty ledger must not fail: $out"
+  contains "$out" "info: permission prompts: none recorded" || fail "an empty ledger says none: $out"
+  {
+    for n in 1 2 3; do printf '%s\n' '{"action":"permission_prompt","hook":"Notification","session":"aaaaaaaa11","ts":"2026-11-10T01:00:0'"$n"'Z"}'; done
+    printf '%s\n' '{"action":"permission_prompt","hook":"Notification","session":"bbbbbbbb22","ts":"2026-11-11T02:00:00Z"}'
+    printf '%s\n' '{"action":"telemetry","hook":"Stop","session":"cccccccc33","ts":"2026-11-11T03:00:00Z"}' 'not json'
+  } > "$proj/.oms/hooks/events.jsonl"
+  before="$(cat "$proj/.oms/hooks/events.jsonl")"
+  out="$(cd "$proj/sub" && OMS_PERMISSION_PROMPT_HINT=3 security)" || fail "prompt summary must not fail the report: $out"
+  contains "$out" "info: permission prompts: 4 in 2 session(s) over 2 day(s); busiest session aaaaaaaa had 3" ||
+    fail "prompt totals are wrong: $out"
+  contains "$out" "2026-11-10=3, 2026-11-11=1" || fail "per-day counts are wrong: $out"
+  contains "$out" "reached 3 in one session or day (hint at 3)" || fail "the threshold hint is missing: $out"
+  contains "$out" "never edits permissions" || fail "the hint must say it edits nothing: $out"
+  out="$(cd "$proj/sub" && security)"
+  case "$out" in *"hint at"*) fail "no hint below the default threshold: $out" ;; esac
+  [ "$before" = "$(cat "$proj/.oms/hooks/events.jsonl")" ] || fail "the prompt summary must not touch the ledger"
+  json="$(cd "$proj/sub" && HOME="$home" XDG_STATE_HOME="$home/state" PATH="$home/bin:/usr/bin:/bin" \
+    bash "$ROOT/scripts/doctor.sh" --security --json 2>/dev/null)" || fail "--json with prompts failed: $json"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+rows = {f["id"]: f for f in doc["findings"]}
+assert rows["security.prompts"]["level"] == "info" and "4 in 2 session(s)" in rows["security.prompts"]["message"], rows
+assert "security.prompts.hint" not in rows, rows
+' || fail "--security --json prompt rows are wrong: $json"
+
   # It is a standalone mode.
   if out="$(HOME="$home" bash "$ROOT/scripts/doctor.sh" --security --repair 2>&1)"; then
     fail "--security --repair must be refused"
