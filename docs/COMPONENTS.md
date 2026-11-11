@@ -2832,6 +2832,19 @@ settings, managed policy and command-line flags are not read, so the report
 describes the user-level starting point, not the effective posture of a given
 session.
 
+The same report adds `info` rows (`security.prompts`, `security.prompts.days`,
+`security.prompts.hint`) counting Claude Code `permission_prompt` notifications
+as an approval-fatigue signal. The registered Notification hook
+(`telemetry-hook.sh`) appends one content-free row (`action: permission_prompt`,
+timestamp, session hash; no message, tool or command) to the adopted project's
+`.oms/hooks/events.jsonl`; the report reads the ledger of the project enclosing
+the current directory and shows prompts per session and per UTC day. Rows
+before this recording existed are absent, and no tool or command class is kept.
+At `OMS_PERMISSION_PROMPT_HINT` (default 20) prompts in one session or day it
+adds a hint to prefer narrow `permissions.allow` rules or the sandbox over
+`bypassPermissions`. These rows are not part of the drift fingerprint and
+nothing here edits a permission.
+
 `oms doctor --sandbox [--probe] [--json]` is a standalone read-only report of whether this
 host could sandbox at all; OMS sandboxes nothing itself. On Linux it reads whether `bwrap` is
 on `PATH`, `/proc/sys/kernel/unprivileged_userns_clone`, `/proc/sys/user/max_user_namespaces`,

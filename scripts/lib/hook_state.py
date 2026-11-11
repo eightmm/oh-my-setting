@@ -402,10 +402,27 @@ def first_metric(containers: list[dict[str, Any]], *names: str) -> int | float |
     return None
 
 
+def record_permission_prompt(payload: dict[str, Any]) -> None:
+    """One content-free ledger row per permission prompt (approval-fatigue count).
+
+    Only the notification type is kept: no message, title, tool name or command.
+    Adopted repos only, never fails the hook; `doctor --security` reads the rows.
+    """
+    if payload.get("notification_type") != "permission_prompt":
+        return
+    with contextlib.suppress(Exception):
+        repo = hook_repo(payload)
+        if repo is None or not (repo / ".oms").is_dir():
+            return
+        append_event(repo, payload, action="permission_prompt",
+                     notification_type="permission_prompt")
+
+
 def cmd_telemetry(_: argparse.Namespace) -> int:
     payload, _ = load_payload()
     if (payload.get("hook_event_name") or payload.get("hookEventName")) == "Notification":
         record_panel_activity(payload)
+        record_permission_prompt(payload)
         return 0
     repo = hook_repo(payload)
     # Hooks do not adopt arbitrary repositories merely because an agent opened

@@ -2314,7 +2314,17 @@ with patch.dict(os.environ, dict(env, OMS_TELEMETRY_DEBUG="1")):
         for stored in (repo / ".oms").rglob("*"):
             if stored.is_file():
                 assert b"private notification" not in stored.read_bytes(), stored
-        assert not (repo / ".oms/hooks/events.jsonl").exists()
+        # Only the permission prompt in the adopted repo leaves one content-free ledger row;
+        # elicitation, ignored types and the unadopted repo add none.
+        ledger = repo / ".oms/hooks/events.jsonl"
+        ledger_rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+        assert len(ledger_rows) == 1, ledger_rows
+        for entry in ledger_rows:
+            assert entry["hook"] == "Notification" and entry["action"] == "permission_prompt", entry
+            assert entry["notification_type"] == "permission_prompt" and "message" not in entry, entry
+            assert set(entry) <= {"schema", "ts", "agent", "hook", "session", "turn_id", "cwd_hash",
+                                  "action", "notification_type"}, entry
+        assert not (unadopted / ".oms").exists()
         result = subprocess.run(["bash", str(root / "scripts/fail-ledger-hook.sh")],
                                 input=json.dumps(dict(payload, cwd=str(repo if kind == "approval" else unadopted),
                                                       hook_event_name="PostToolUse", tool_name="Bash",
@@ -2350,7 +2360,9 @@ with patch.dict(os.environ, env), patch.object(hook_state.subprocess, "run", sid
         assert row["updated_at"] == (100 if now == 105 else now), row
         assert row["since"] == (115 if event == "Stop" else 100), row
         assert "never persist" not in path.read_text()
-    assert not (repo / ".oms/hooks/events.jsonl").exists()
+    # Panel activity adds no telemetry row; only the earlier permission prompts are in the ledger.
+    assert {json.loads(line)["action"] for line in
+            (repo / ".oms/hooks/events.jsonl").read_text().splitlines()} == {"permission_prompt"}
     assert not (repo / ".oms/threads").exists()
     before = path.read_bytes()
     for overrides in ({"OMS_HARNESS_CHILD": "1"}, {"OMS_PANEL_MAIN_ATTEMPT": ""},
