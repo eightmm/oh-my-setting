@@ -692,17 +692,24 @@ def resume_autopilot(repo, dry_run=False, now=None, once=None, scheduled_only=Fa
         if plan is None and scheduled_only:
             return skip("no schedule binds contract %s" % (contract or "(no owner id)"),
                         "`oms tick schedule --contract ID --every HOURS` binds one")
-        stale = _stale_approval(rules, receipt_path, row, now)
-        if stale:
-            # A refusal to start, recorded once per receipt state and day; running work is never touched.
-            stale_key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
+        def refuse_stale():
+            """The PR 211 approval-age refusal, checked only once a resume would otherwise start; it is recorded
+            once per receipt state and day under its own key, so an earlier resume today does not hide it."""
+            stale = _stale_approval(rules, receipt_path, row, now)
+            if not stale:
+                return None
+            stale_key = hashlib.sha256("\0".join((RESUME_SUBJECT, "stale-approval", day, digest)).encode()).hexdigest()[:16]
             if not dry_run and not any(w["main"] == RESUME_SUBJECT and w.get("key") == stale_key for w in wakes):
                 _record_wake(repo, ledger, wakes + [{
                     "day": day, "main": RESUME_SUBJECT, "key": stale_key, "outcome": "skipped", "reason": stale,
                     "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "stage": stage, "receipt": digest}])
             return skip(stale, "a person re-approves it (`oms autopilot --repo %s reenter`), or "
                                "OMS_TICK_AUTOPILOT_MAX_AGE_DAYS is raised (0 disables)" % repo)
+
         if plan is None:
+            refused = refuse_stale()
+            if refused:
+                return refused
             key = hashlib.sha256("\0".join((RESUME_SUBJECT, day, digest)).encode()).hexdigest()[:16]
             if any(w["main"] == RESUME_SUBJECT and w.get("key") == key for w in spent):
                 return skip("autopilot already resumed today at this receipt state", "the receipt changes or the UTC day rolls over")
@@ -720,6 +727,9 @@ def resume_autopilot(repo, dry_run=False, now=None, once=None, scheduled_only=Fa
             if occurrence is None:
                 return skip("%s not due" % named, "the next occurrence is due at %s" % (
                     _utc(following) if following else "never (the schedule expires first)"))
+            refused = refuse_stale()
+            if refused:
+                return refused
             key = hashlib.sha256("\0".join((RESUME_SUBJECT, contract, _utc(occurrence))).encode()).hexdigest()[:16]
 
             def budget(why):

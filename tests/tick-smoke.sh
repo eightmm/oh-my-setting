@@ -954,6 +954,13 @@ with patch.object(panel_interaction, "_spawn_continuation", return_value=4242) a
         assert "approval ledger is unreadable; the approval age cannot be judged" in resume() and spawn2.call_count == 4
         approvals.unlink(); seed(0); stage("driving")
         assert resume().startswith("resumed ") and spawn2.call_count == 5
+        # A resume earlier today at this receipt state does not hide a later stale refusal: it has its own key.
+        seed(0); approved(8); stage("driving")
+        with patch.dict(os.environ, {"OMS_TICK_AUTOPILOT_MAX_AGE_DAYS": "10"}):
+            assert resume().startswith("resumed ") and spawn2.call_count == 6
+        stage("driving")
+        assert "8d old" in resume() and len(rows()) == 2 and rows()[-1]["outcome"] == "skipped", rows()
+        approvals.unlink()
         # The receipt writer records a person's approval, and a wake-launched approval only when none exists.
         rules = runpy.run_path(lib + "/autopilot-receipt.py")
         row["updated"] = "2026-11-09T00:00:00Z"

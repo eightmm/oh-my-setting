@@ -3353,7 +3353,7 @@ Observation is not approval or verification evidence.
 `since`, so a row with no `since` never matches). Filters combine with AND, and a value
 outside the valid set (printed in the error) is refused with exit 2 before any read. A bare
 `--count` prints only the number of matching rows (`--count --json` gives kind
-`oms-sessions-count`); `--count N` still means N watch snapshots and requires `--watch`.
+`oms-sessions-count`); `--count N` still stops after N snapshots and requires `--watch` or `--log --follow`.
 A filter that matches nothing prints no rows and exits with the snapshot's status, and
 `stale` stays on the answer, so an empty filtered list from a held read is unknown, not none.
 

@@ -251,6 +251,10 @@ if ! REPORT_REPO="$(cd "$REPORT_REPO" 2>/dev/null && pwd -P)"; then
 fi
 OMS_DOCTOR_PROJECT_DIR="$REPORT_REPO"
 export OMS_DOCTOR_PROJECT_DIR
+if [ "$SECURITY_RESIDUE" = 1 ] && [ "$SECURITY_ONLY" = 0 ]; then
+  echo "error: --residue is an option of --security: run doctor --security --residue" >&2
+  exit 2
+fi
 
 # --providers reads one data table; it needs no repository, probe or lock.
 if [ "$PROVIDERS_ONLY" = 1 ]; then
@@ -353,10 +357,6 @@ if [ "$SECURITY_ONLY" = 1 ]; then
   [ "$SECURITY_RESIDUE" = 0 ] || security_args+=(--residue)
   [ "$REPORT_JSON" = 0 ] || security_args+=(--json)
   exec python3 -I "$ROOT/scripts/lib/doctor-security.py" "${security_args[@]}"
-fi
-if [ "$SECURITY_RESIDUE" = 1 ]; then
-  echo "error: --residue is an option of --security: run doctor --security --residue" >&2
-  exit 2
 fi
 
 doctor_probe_cache_cleanup() {
