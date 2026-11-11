@@ -61,6 +61,20 @@ def _security_audit_paths(changed_files, patch_bytes, frontier_paths=None):
     )
     patterns = tuple(frontier_paths if frontier_paths is not None else _AUTO_REVIEW_FRONTIER_PATHS)
     patterns += ("*secret*", "*scanner*", "*credential*")
+    # Files a tool runs when a folder is opened, a branch is checked out, a commit is made or
+    # dependencies are installed. Kept here, not in _AUTO_REVIEW_FRONTIER_PATHS, so the
+    # automatic-review tier cap stays as it was; each name also matches below any directory.
+    on_open = (
+        ".vscode/tasks.json", ".envrc", ".husky/*", ".githooks/*", ".lefthook/*",
+        "lefthook.y*ml", ".lefthook.y*ml", "lefthook-local.y*ml", ".lefthook-local.y*ml",
+        ".overcommit.yml", ".pre-commit-config.yaml", ".devcontainer.json", ".devcontainer/*",
+        ".gitlab-ci.yml", ".circleci/*", ".buildkite/*", ".azure-pipelines/*", "azure-pipelines.y*ml",
+        "Jenkinsfile", ".github/actions/*", ".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs",
+    )
+    patterns += on_open + tuple("*/" + pattern for pattern in on_open)
+    lifecycle = re.compile(
+        r'"(?:preinstall|install|postinstall|prepare|prepack|postpack|prepublish|prepublishOnly|'
+        r'simple-git-hooks|husky)"\s*:')
     touched = set()
     for path in changed_files if isinstance(changed_files, (list, tuple)) else ():
         if isinstance(path, str):
@@ -88,6 +102,9 @@ def _security_audit_paths(changed_files, patch_bytes, frontier_paths=None):
             elif hunk_remaining:
                 if (line.startswith("+") and current and not documentation(current)
                         and deletion.search(line[1:])):
+                    paths.add(current)
+                if (line.startswith("+") and current and current.rsplit("/", 1)[-1] == "package.json"
+                        and lifecycle.search(line[1:])):
                     paths.add(current)
                 hunk_remaining = max(0, hunk_remaining - (2 if line.startswith(" ") else 1
                                       if line.startswith(("+", "-")) else 0))
