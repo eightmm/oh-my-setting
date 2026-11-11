@@ -190,18 +190,25 @@ advise_hint_if_repeated() {
 advise_signals() {
   local base path reason
   oms_git_assert_safe_execution_config "$STATE_ROOT" diff-read >/dev/null 2>&1 || return 0
-  if git -C "$STATE_ROOT" ls-files -u 2>/dev/null | grep -q .; then
+  # The assertion above inspects repository config only. User and system
+  # config can define filter/fsmonitor/textconv drivers too, and a repository
+  # .gitattributes then selects them, so these reads run without either.
+  advise_git() {
+    env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
+      git -c core.fsmonitor=false -C "$STATE_ROOT" "$@"
+  }
+  if advise_git ls-files -u 2>/dev/null | grep -q .; then
     echo conflict
   fi
-  base="$(git -C "$STATE_ROOT" merge-base HEAD '@{upstream}' 2>/dev/null)" || base=HEAD
+  base="$(advise_git merge-base HEAD '@{upstream}' 2>/dev/null)" || base=HEAD
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if reason="$(oms_critical_path_reason "$path")"; then
       echo "contract:$reason"
       break
     fi
-  done < <(git -C "$STATE_ROOT" diff --name-only --no-renames "$base" -- 2>/dev/null
-    git -C "$STATE_ROOT" ls-files --others --exclude-standard 2>/dev/null)
+  done < <(advise_git diff --name-only --no-renames --no-ext-diff --no-textconv "$base" -- 2>/dev/null
+    advise_git ls-files --others --exclude-standard 2>/dev/null)
   return 0
 }
 
