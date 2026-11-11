@@ -2,6 +2,7 @@ if os.name == "posix":
     import fcntl
     import pty
     import select
+    import signal
     import struct
     import termios
     import time
@@ -10,6 +11,8 @@ if os.name == "posix":
         # then=(marker, bytes): sent once marker is drawn after the first inputs, so a later click meets its hit map.
         pid, fd = pty.fork()
         if pid == 0:
+            # A gate launched in the background hands down SIG_IGN for SIGINT; reset it so a typed ^C cancels.
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
             os.chdir(project)
             os.execvpe(command[0], command, dict(environment, TERM="xterm", OMS_AGENT="codex"))
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
