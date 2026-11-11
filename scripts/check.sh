@@ -185,8 +185,10 @@ manifest) then the test suites. With no arguments it runs both.
   --quick               Run a partial changed-file gate for protected pushes,
                         plus the whole-tree repo-invariants stage.
   --affected            Check ordinary docs directly; otherwise use the Project
-                        Graph for affected tests. Critical or uncertain changes
-                        fall back to the complete gate, including lint.
+                        Graph for affected tests (a test-only change runs only
+                        its own tests). Critical or uncertain changes fall back
+                        to the complete gate, including lint; OMS_AFFECTED_FULL=1
+                        forces that for every change.
   --print-affected-mode With --affected, print affected or full after planning
                         and exit without running test stages (with --ci-output
                         FILE, the plan keys are appended to FILE first).
@@ -852,11 +854,11 @@ prepare_affected_gate() {
   # documentation-only change. Unknown/quoted paths take the conservative path.
   while IFS= read -r path; do
     case "$path" in
-      README.md|README.ko.md|docs/*.md) ;;
+      README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md) ;;
       *) docs_only=0 ;;
     esac
     case "$path" in
-      README.md|README.ko.md|docs/*.md) ;;
+      README.md|README.ko.md|CHANGELOG.md|CONTRIBUTING.md|docs/*.md) ;;
       custom-skills/*.md|templates/*.md|roles/*.md) ;;
       *) scoped_only=0 ;;
     esac
@@ -868,6 +870,11 @@ prepare_affected_gate() {
     fi
   done < "$selector_changes"
 
+  if [ "${OMS_AFFECTED_FULL:-0}" = 1 ]; then
+    # Escape hatch for the narrowed selection: every change is critical.
+    AFFECTED_MODE=full
+    AFFECTED_REASONS="forced:OMS_AFFECTED_FULL"
+  fi
   if ! git diff --quiet "$QUICK_TO" -- ||
       [ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "$QUICK_TO^{tree}")" ] ||
       [ -n "$(git ls-files --others --exclude-standard)" ]; then

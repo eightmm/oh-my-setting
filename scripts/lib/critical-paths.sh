@@ -12,7 +12,8 @@
 #   for a critical path; prints nothing and returns 1 otherwise.
 oms_critical_path_reason() {
   case "$1" in
-    .github/workflows/*|scripts/check.sh|scripts/graph.sh|scripts/lib/oms_graph/*|tests/graph-smoke.sh|tests/run-smoke-shard.sh)
+    .github/workflows/*|scripts/check.sh|scripts/graph.sh|scripts/lib/oms_graph/*|scripts/lib/oms_graph_core.py|\
+    scripts/lib/critical-paths.sh|tests/graph-smoke.sh|tests/run-smoke-shard.sh)
       printf 'selector-boundary:%s\n' "$1"
       return 0
       ;;
@@ -21,11 +22,16 @@ oms_critical_path_reason() {
       return 0
       ;;
     custom-skills/*.md|templates/*.md) return 1 ;;
-    install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/doctor.sh|\
+    install.sh|scripts/install*|scripts/uninstall*|scripts/update*|scripts/link.sh|scripts/unlink.sh|\
+    scripts/repair*|scripts/doctor.sh|\
     scripts/python-runtime.sh|scripts/land.sh|scripts/patch-admit.sh|scripts/pre-push-check.sh|\
-    scripts/lib/oms-common.sh|\
-    scripts/lib/install*|scripts/lib/python-runtime.sh|scripts/lib/*lock*|scripts/lib/*state*|\
-    scripts/lib/*artifact*|scripts/lib/oms_runtime/common.py|scripts/lib/oms_runtime/child_policy.py|\
+    scripts/lib/oms-common.sh|scripts/lib/platform.sh|scripts/lib/python-entry.sh|\
+    scripts/lib/install*|scripts/lib/python-runtime.sh|scripts/lib/*lock*|\
+    scripts/*hook*|scripts/*guard*|scripts/*permission*|scripts/*sandbox*|\
+    scripts/lib/agent-memory-common.sh|\
+    scripts/lib/agent-install-state.sh|scripts/lib/oms-state-inventory.py|scripts/lib/project-state.*|\
+    scripts/lib/worker-state-transients.py|scripts/lib/artifact-index-*|\
+    scripts/lib/oms_runtime/common.py|scripts/lib/oms_runtime/child_policy.py|\
     scripts/lib/durable-jsonl.py|rules/*|config/*|templates/*|custom-skills/*|plugins/*)
       printf 'contract-boundary:%s\n' "$1"
       return 0

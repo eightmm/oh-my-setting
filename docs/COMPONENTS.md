@@ -3062,9 +3062,22 @@ For committed ranges, `--affected --changed-from BASE --changed-to HEAD` checks 
 README/docs changes directly, otherwise selects existing tests from positive graph
 evidence. Skill/template Markdown uses the direct skill validator (including project
 skill templates and their local references); `roles/*.md` relies on the repo invariants'
-role-injection check; neither runs runtime prompt/GC/lifecycle suites;
-install/permission/state, executable templates, selector changes, dirty trees, or
-uncertain graphs retain full coverage. `source-distribution-smoke.sh --docs-only` checks
+role-injection check; neither runs runtime prompt/GC/lifecycle suites. A document
+(README, CHANGELOG, CONTRIBUTING, `docs/*.md`) never widens a selection and never adds
+uncertainty, alone or beside code: it gets the documentation reference checks only.
+A change that touches only tests runs only those tests: a smoke file runs itself, an
+`tests/operator/SECTION.py` runs that operator section, and for `tests/scripts-smoke.sh`
+(too large for the graph to index) the changed `test_*` functions are derived from the diff
+and run through `tests/run-smoke-shard.sh --only`; a changed shared helper or top-level
+line, or a diff that cannot be read, runs that file whole, never the global full
+selection. In a mixed change the test part contributes only its own tests and the source
+part keeps its graph classification. Full coverage is retained for the paths in
+`scripts/lib/critical-paths.sh`: install/update/uninstall/link/repair lifecycle scripts
+and libraries, hook and guard scripts, permission/sandbox policy, the outbound scrubber,
+durable-state writers, `rules/`, `config/`, executable templates, workflows, and
+`check.sh` and the selector itself; so do dirty trees and uncertain graphs.
+`OMS_AFFECTED_FULL=1` makes `--affected` treat every change as critical.
+`source-distribution-smoke.sh --docs-only` checks
 documentation references without its CI orchestration, installation or CLI-help probes.
 
 `--quick` is partial feedback, not a substitute for affected or release checks.

@@ -1785,6 +1785,138 @@ EOF
   grep -Fxq skill-manifest <<< "$out" || fail "deleted guidance skipped resource validation"
 }
 
+test_affected_selection_narrows_to_changed_tests_and_keeps_critical_paths_full() {
+  local gate="$TMP/check-affected-narrow" log="$TMP/check-affected-narrow.log"
+  local base out name
+
+  mkdir -p "$gate/scripts/lib" "$gate/tests/operator" "$gate/docs"
+  cp "$ROOT/scripts/check.sh" "$gate/scripts/check.sh"
+  cp "$ROOT/scripts/graph.sh" "$gate/scripts/graph.sh"
+  cp "$ROOT/scripts/lib/oms-state-inventory.py" "$ROOT/scripts/lib/oms_graph_core.py" \
+    "$ROOT/scripts/lib/check-maintenance.sh" "$ROOT/scripts/lib/critical-paths.sh" "$ROOT/scripts/lib/file-lock.sh" \
+    "$ROOT/scripts/lib/poll.sh" "$ROOT/scripts/lib/provider-registry.sh" \
+    "$ROOT/scripts/lib/check-parallel.sh" "$gate/scripts/lib/"
+  cp -R "$ROOT/scripts/lib/oms_graph" "$ROOT/scripts/lib/oms_runtime" "$gate/scripts/lib/"
+  printf '#!/usr/bin/env bash\nprintf "syntax:%%s\\n" "$*" >> "$OMS_TEST_NARROW_LOG"\n' > "$gate/scripts/check-python.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$gate/tests/source-distribution-smoke.sh"
+  printf '#!/usr/bin/env bash\nprintf "smoke-args:%%s\\n" "$*" >> "$OMS_TEST_NARROW_LOG"\n' > "$gate/tests/run-smoke-shard.sh"
+  printf '#!/usr/bin/env bash\nprintf "operator-args:%%s\\n" "$*" >> "$OMS_TEST_NARROW_LOG"\n' > "$gate/tests/operator-tools-smoke.sh"
+  printf '#!/usr/bin/env bash\nprintf "foo-smoke\\n" >> "$OMS_TEST_NARROW_LOG"\n' > "$gate/tests/foo-smoke.sh"
+  printf '#!/usr/bin/env bash\nprintf "bar-smoke\\n" >> "$OMS_TEST_NARROW_LOG"\n' > "$gate/tests/bar-smoke.sh"
+  printf 'SECTIONS = (\n    ("sec-a", 0, "sec_a.py"),\n    ("sec-b", 0, "sec_b.py"),\n)\n' > "$gate/tests/operator/runner.py"
+  printf '# section a\n' > "$gate/tests/operator/sec_a.py"
+  printf '# section b\n' > "$gate/tests/operator/sec_b.py"
+  # Larger than the graph's per-file bound, so no graph node exists for it.
+  {
+    printf '#!/usr/bin/env bash\n'
+    awk 'BEGIN { for (i = 0; i < 50000; i++) print "# padding padding padding padding padding padding" }'
+    printf '\nshared_helper() {\n  printf "helper\\n"\n}\n\n'
+    printf 'test_one() {\n  printf "one\\n"\n}\n\ntest_two() {\n  printf "two\\n"\n}\n\n'
+    printf 'test_three() {\n  cat <<'"'"'EOF'"'"'\n}\nEOF\n}\n\n'
+    printf '# SMOKE_TEST_CALLS_BEGIN\n# SMOKE_TEST_CALLS_END\n'
+  } > "$gate/tests/scripts-smoke.sh"
+  printf 'one\n' > "$gate/scripts/lib/leaf.py"
+  printf 'one\n' > "$gate/docs/a.md"
+  printf 'one\n' > "$gate/CHANGELOG.md"
+  for name in install-x.sh x-guard-hook.sh lib/agent-memory-common.sh; do printf '#!/usr/bin/env bash\n' > "$gate/scripts/$name"; done
+  printf '.oms/\n__pycache__/\n' > "$gate/.gitignore"
+  git -C "$gate" init -q
+  git -C "$gate" config user.name test
+  git -C "$gate" config user.email test@example.com
+  git -C "$gate" add .
+  git -C "$gate" commit -qm base
+
+  # narrow_change LABEL FILE...: commit one appended line per FILE on the base and print the plan mode.
+  narrow_plan() {
+    local label="$1" file
+    shift
+    git -C "$gate" reset -q --hard "$base"
+    for file in "$@"; do printf '# edit %s\n' "$label" >> "$gate/$file"; done
+    git -C "$gate" add -A
+    git -C "$gate" commit -qm "$label"
+    (cd "$gate" && bash scripts/check.sh --affected --print-affected-mode \
+      --changed-from "$base" --changed-to HEAD 2>/dev/null)
+  }
+  narrow_run() {  # the executed selection of the commit narrow_plan just made
+    : > "$log"
+    (cd "$gate" && OMS_TEST_NARROW_LOG="$log" bash scripts/check.sh --affected --no-lint \
+      --changed-from "$base" --changed-to HEAD >/dev/null 2>&1) || fail "narrow selection failed to run: $(cat "$log")"
+  }
+  base="$(git -C "$gate" rev-parse HEAD)"
+
+  for name in docs/a.md CHANGELOG.md; do
+    [ "$(narrow_plan docs "$name")" = affected ] || fail "docs-only change fell to the full selection: $name"
+    out="$(cd "$gate" && bash scripts/check.sh --affected --changed-from "$base" --changed-to HEAD --list-stages 2>/dev/null)"
+    [ "$out" = source-distribution ] || fail "docs ran more than the reference checks: $out"
+  done
+  [ "$(narrow_plan docs-lib docs/a.md scripts/lib/leaf.py)" != "" ] || fail "docs plus a library file printed no plan"
+  [ "$(narrow_plan docs-smoke docs/a.md tests/foo-smoke.sh)" = affected ] || fail "docs added uncertainty to a test change"
+  narrow_run
+  grep -Fxq foo-smoke "$log" && ! grep -Fxq bar-smoke "$log" ||
+    fail "docs plus one smoke file did not run exactly that file: $(cat "$log")"
+
+  [ "$(narrow_plan smoke tests/foo-smoke.sh)" = affected ] || fail "a changed smoke file fell to the full selection"
+  narrow_run
+  grep -Fxq foo-smoke "$log" && ! grep -Fxq bar-smoke "$log" || fail "one smoke file ran others: $(cat "$log")"
+
+  [ "$(narrow_plan section tests/operator/sec_b.py)" = affected ] || fail "a changed operator section fell to the full selection"
+  (cd "$gate" && bash scripts/check.sh --affected --print-affected-mode --changed-from "$base" \
+    --changed-to HEAD --ci-output "$TMP/narrow-ci" >/dev/null 2>&1)
+  grep -Fxq 'operator=sec-b' "$TMP/narrow-ci" || fail "operator section plan was not one section: $(cat "$TMP/narrow-ci")"
+  narrow_run
+  grep -Fxq 'operator-args:--section sec-b' "$log" || fail "operator section run was not that section: $(cat "$log")"
+
+  # Two changed test functions of the oversized suite run alone.
+  git -C "$gate" reset -q --hard "$base"
+  python3 - "$gate/tests/scripts-smoke.sh" <<'PYTEST'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = text.replace('printf "one\\n"', 'printf "one!\\n"').replace('printf "three-extra"', "")
+text = text.replace('cat <<\'EOF\'\n', 'cat <<\'EOF\'\nextra line\n')
+open(path, "w", encoding="utf-8").write(text)
+PYTEST
+  git -C "$gate" add -A
+  git -C "$gate" commit -qm two-functions
+  [ "$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode --changed-from "$base" --changed-to HEAD 2>/dev/null)" = affected ] ||
+    fail "changed test functions of the oversized suite fell to the full selection"
+  narrow_run
+  grep -Fq 'smoke-args:' "$log" && grep -Fq -- '--only test_one' "$log" && grep -Fq -- '--only test_three' "$log" ||
+    fail "oversized suite did not run its changed functions: $(cat "$log")"
+  ! grep -Fq -- '--only test_two' "$log" || fail "oversized suite ran an unchanged function: $(cat "$log")"
+
+  # A shared helper outside any test function runs that suite file, not the global full selection.
+  git -C "$gate" reset -q --hard "$base"
+  python3 - "$gate/tests/scripts-smoke.sh" <<'PYTEST'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read().replace('printf "helper\\n"', 'printf "helper!\\n"')
+open(path, "w", encoding="utf-8").write(text)
+PYTEST
+  git -C "$gate" add -A
+  git -C "$gate" commit -qm helper
+  [ "$(cd "$gate" && bash scripts/check.sh --affected --print-affected-mode --changed-from "$base" --changed-to HEAD 2>/dev/null)" = affected ] ||
+    fail "a shared helper change fell to the global full selection"
+  narrow_run
+  grep -Fxq 'smoke-args:--jobs 4' "$log" || fail "a shared helper change did not run the suite file: $(cat "$log")"
+
+  # The critical set stays full.
+  for name in scripts/install-x.sh scripts/x-guard-hook.sh scripts/lib/agent-memory-common.sh scripts/check.sh \
+      .github/workflows/test.yml; do
+    mkdir -p "$gate/.github/workflows"
+    [ -e "$gate/$name" ] || printf 'name: t\n' > "$gate/$name"
+    git -C "$gate" add -A
+    git -C "$gate" commit -qm seed -q --allow-empty
+    base="$(git -C "$gate" rev-parse HEAD)"
+    [ "$(narrow_plan critical "$name")" = full ] || fail "critical path escaped the full selection: $name"
+  done
+  # OMS_AFFECTED_FULL=1 forces the full selection for any change.
+  base="$(git -C "$gate" rev-parse HEAD)"
+  narrow_plan docs docs/a.md >/dev/null
+  [ "$(cd "$gate" && OMS_AFFECTED_FULL=1 bash scripts/check.sh --affected --print-affected-mode \
+    --changed-from "$base" --changed-to HEAD 2>/dev/null)" = full ] || fail "OMS_AFFECTED_FULL=1 did not force the full selection"
+}
+
 test_uninstall_stops_before_unlink_on_removal_failure() {
   local checkout="$TMP/uninstall-removal-failure"
   local log="$TMP/uninstall-removal-failure.log"
@@ -1968,6 +2100,7 @@ test_large_artifact_index_compacts_before_append
 test_smoke_runner_tail_and_signal_cleanup
 test_smoke_runner_reports_bounded_opt_in_timings
 test_affected_gate_runs_positive_evidence_and_fails_open
+test_affected_selection_narrows_to_changed_tests_and_keeps_critical_paths_full
 test_invariants_gate_checks_committed_staged_and_worktree_sources
 test_gate_fingerprints_full_oms_state
 test_uninstall_stops_before_unlink_on_removal_failure

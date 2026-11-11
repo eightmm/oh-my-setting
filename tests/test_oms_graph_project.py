@@ -1001,5 +1001,42 @@ class ProjectGraphTest(unittest.TestCase):
                             self.assertEqual(graph.find(query, kinds=kinds, limit=limit,
                                                         include_tests=include_tests), expected)
 
+class SuiteCasesTest(unittest.TestCase):
+    """Changed-case selection for a suite too large for the graph (tests/scripts-smoke.sh)."""
+
+    BASE = ("#!/usr/bin/env bash\n\nhelper() {\n  :\n}\n\n# smoke-weight: 5\ntest_a() {\n  cat <<'EOF'\n}\nEOF\n}\n\n"
+            "test_b() {\n  :\n}\n\ntest_c() { :; }\n")
+
+    def hunks(self, old: str, new: str):
+        import difflib
+        rows, matcher = [], difflib.SequenceMatcher(None, old.split("\n"), new.split("\n"), autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != "equal":
+                rows.append({"old_lines": [(n + 1, t) for n, t in enumerate(old.split("\n")[i1:i2], i1)],
+                             "new_lines": [(n + 1, t) for n, t in enumerate(new.split("\n")[j1:j2], j1)]})
+        return rows
+
+    def select(self, new: str):
+        from oms_graph.project.suite_cases import changed_suite_cases
+        return changed_suite_cases(self.BASE, new, self.hunks(self.BASE, new))
+
+    def test_changed_functions_are_named_even_inside_a_heredoc(self) -> None:
+        new = self.BASE.replace("  :\n}\n\ntest_c", "  : b\n}\n\ntest_c").replace("\n}\nEOF\n", "\n}\nEOF\n: a\n")
+        self.assertEqual(self.select(new), ["test_a", "test_b"])
+
+    def test_added_function_and_weight_comment_select_their_case(self) -> None:
+        self.assertEqual(self.select(self.BASE + "\ntest_d() {\n  :\n}\n"), ["test_d"])
+        self.assertEqual(self.select(self.BASE.replace("smoke-weight: 5", "smoke-weight: 6")), ["test_a"])
+        self.assertEqual(self.select(self.BASE.replace("test_c() { :; }", "test_c() { : x; }")), ["test_c"])
+
+    def test_deleted_function_selects_nothing_and_shared_code_selects_the_file(self) -> None:
+        self.assertEqual(self.select(self.BASE.replace("test_b() {\n  :\n}\n\n", "")), [])
+        self.assertIsNone(self.select(self.BASE.replace("helper() {\n  :\n}", "helper() {\n  : x\n}")))
+        self.assertIsNone(self.select(self.BASE.replace("#!/usr/bin/env bash", "#!/bin/bash")))
+        self.assertIsNone(self.select(self.BASE + "echo top-level\n"))
+        # A heredoc the reader cannot close proves nothing: fall back to the file.
+        self.assertIsNone(self.select(self.BASE.replace("\n}\nEOF\n", "\n}\nEO\n")))
+
+
 if __name__ == "__main__":
     unittest.main()
