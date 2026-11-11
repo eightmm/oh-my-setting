@@ -45939,17 +45939,23 @@ test_memory_recall_marks_a_resolved_failure() {
   contains "$out" 'next: regenerate the manifest with the cluster seed' ||
     fail "a re-opened failure should recall the next steps again: $out"
 
-  # The ledger scans a command and summary before storing them but stores the
-  # next step and the fix as given, so each passes the secret scanner before it
-  # is indexed: a flagged note is left out and the failure itself still recalls.
+  # The ledger refuses a credential-looking next step before writing anything,
+  # so neither the note nor its failure reaches the index.
+  rc=0
   "$ledger" --repo "$project" record --cmd 'python3 tools/upload.py' --exit 1 --summary "upload refused" \
-    --next 'retry with API_TOK''EN=abcd1234abcd1234abcd' >/dev/null 2>&1 || fail "recording the flagged next step failed"
+    --next 'retry with API_TOK''EN=abcd1234abcd1234abcd' >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || fail "a credential-looking next step must be refused (rc=$rc)"
   "$ledger" --repo "$project" record --cmd 'python3 tools/long.py' --exit 1 --summary "long note case" \
     --next "$(printf 'step %.0s' {1..80})end-of-note" >/dev/null 2>&1 || fail "recording the long next step failed"
-  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "upload refused")"
-  contains "$out" 'upload refused' || fail "the failure with a flagged note should still recall: $out"
+  ! grep -Fq 'upload refused' "$project/.oms/failures.jsonl" && ! grep -Fq 'abcd1234' "$project/.oms/failures.jsonl" ||
+    fail "a refused next step must leave no ledger row"
+  # A ledger written before that refusal can still hold such a note: recall
+  # keeps the failure and leaves the note out of the index.
+  printf '{"schema": 2, "event": "fail", "ts": "2026-01-01T00:00:00Z", "agent": "claude", "fingerprint": "0123456789abcdef", "kind": "cmd", "cmd": "python3 tools/legacy.py", "exit": 1, "summary": "legacy upload refused", "next": "retry with API_TOK%sEN=abcd1234abcd1234abcd"}\n' '' >> "$project/.oms/failures.jsonl"
+  out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "legacy upload refused")"
+  contains "$out" 'legacy upload refused' || fail "a legacy failure with a flagged note should still recall: $out"
   ! contains "$out" 'abcd1234' && ! contains "$out" 'next: retry' ||
-    fail "a secret-looking next step must not enter the index: $out"
+    fail "a legacy secret-looking next step must not enter the index: $out"
   # A long note is cut to one bounded line.
   out="$("$ROOT/scripts/agent-memory.sh" --repo "$project" recall "long note case")"
   contains "$out" '| next: step step' && contains "$out" 'step st...' && ! contains "$out" 'end-of-note' ||
