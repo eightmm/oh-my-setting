@@ -299,6 +299,9 @@ oms_ops_check_agy_loaded_skills() {
   local wanted=()
   local source
   local agy_out
+  local helper
+  local out_file
+  local rc
   local parsed
   local checked=0
   local missing=0
@@ -325,31 +328,22 @@ oms_ops_check_agy_loaded_skills() {
 
   # agy can block on a login or terminal prompt. Under timeout(1) it shared the
   # caller's terminal from a background process group, so a terminal access
-  # stopped it (state T) where no deadline reached it, and a child holding the
-  # output pipe kept $(...) waiting. A new session has no controlling terminal,
-  # output goes to a file, and the deadline kills the whole group.
+  # stopped it (state T) and a child holding the $(...) pipe kept the doctor
+  # waiting. run-bounded.py gives it its own session, forwards an interrupt to
+  # that group and kills it at the deadline; output goes to a file.
   printf 'checking: agy /skills (up to 20s)\n'
-  agy_out="$(python3 -I -c '
-import os, signal, subprocess, sys, tempfile
-with tempfile.TemporaryFile() as out:
-    try:
-        child = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=out,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        sys.exit(127)
-    try:
-        code = child.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        code = 124
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except OSError:
-        pass
-    child.wait()
-    out.seek(0)
-    sys.stdout.buffer.write(out.read())
-sys.exit(code)
-' agy -p "/skills" --output-format json)" ||
+  helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/run-bounded.py"
+  out_file="$(mktemp "${TMPDIR:-/tmp}/oms-agy-skills.XXXXXX")" ||
+    { printf 'skip: no temporary file for agy /skills; loaded-skill check skipped\n\n'; return 0; }
+  rc=0
+  python3 "$helper" 20s 2s agy-skills agy -p "/skills" --output-format json \
+    </dev/null >"$out_file" 2>/dev/null || rc=$?
+  agy_out="$(cat "$out_file")"
+  rm -f "$out_file"
+  # An interrupt stopped the probe's group; stop this doctor the same way
+  # instead of reporting a skip and carrying on.
+  case "$rc" in 129|130|143) kill "-$((rc - 128))" "$$" ;; esac
+  [ "$rc" -eq 0 ] ||
     { printf 'skip: agy /skills did not finish cleanly; loaded-skill check skipped\n\n'; return 0; }
 
   parsed="$(printf '%s' "$agy_out" | python3 -I -c '
