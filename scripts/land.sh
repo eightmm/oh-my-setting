@@ -642,7 +642,7 @@ ci_full_route() {
   done
   rset ci.full_run_id="$rid" ci.full_conclusion="$concl"
   if [ "$concl" != success ]; then
-    ROUTE_NOTE="dispatched run $rid is $concl"
+    ROUTE_NOTE="dispatched run $rid is $concl; rerun it (gh run rerun $rid) and resume"
     return 1
   fi
   rc=0
