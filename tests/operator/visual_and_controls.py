@@ -566,6 +566,50 @@ pruned = panel_attention_read.mark(read_repo, read_room, guard_read, [], now=400
 assert set(pruned) <= {panel_attention_read.row_key(item["row_id"]) for item in attention_items(guard_read)} and guard_key not in pruned, pruned
 assert panel_attention_read.mark(read_repo, read_room, dict(ending_fixture, collection={"ok": False}), [(guard_item["row_id"], "guard_stop")]) is None
 assert panel_attention_read.mark(read_repo, read_room, ending_fixture, [(guard_item["row_id"], "failed")]) == pruned
+# Wait age: every Attention row with a recorded timestamp carries it; an undated row shows none, and a narrow row gives
+# the age up before it clips anything else. The since-you-looked line counts what was recorded after the read mark.
+import time as clock
+from panel_since import since_line
+aged_fixture = deepcopy(ending_fixture)
+stamp_at = lambda seconds_ago: clock.strftime("%Y-%m-%dT%H:%M:%SZ", clock.gmtime(clock.time() - seconds_ago))
+for attempt in aged_fixture["attempts"]["active_recent"]:
+    if attempt["attempt_id"] == "failure-output":
+        attempt["updated_at"] = stamp_at(7 * 60 + 30)
+    if attempt["attempt_id"] == "owner-decision":
+        attempt["updated_at"] = stamp_at(3 * 3600 + 30)
+aged_fixture["attempts"]["active_recent"].append({"attempt_id": "finished-later", "state": "done", "updated_at": stamp_at(120)})
+aged_queue = attention_items(aged_fixture)
+ages = {item["row_id"][1]: item["age"] for item in aged_queue}
+assert ages["failure-output"] == "7m" and ages["owner-decision"] == "3h" and ages["guard-record"] == "", ages
+for frame in (120, 80, 60, 40):
+    rows = [row[0] for row in attention_body(aged_queue, frame - 4, 30, {"tab": "needs"}, True)]
+    failed_row = next(row for row in rows if row.startswith("failed"))
+    assert all(len(row) <= frame - 4 for row in rows), (frame, rows)
+    assert ("7m" in failed_row) == (frame >= 60), (frame, failed_row)
+    assert not any("<1m" in row or "unknown" in row for row in rows if "guard" in row), (frame, rows)
+# No read mark, or nothing newer than it: no line. Newer finished, failed and waiting rows are counted.
+assert since_line(aged_fixture, aged_queue, 80) == ""
+marked_fixture = dict(aged_fixture, attention_read=panel_attention_read.ReadMap({guard_key: "guard_stop"}))
+assert since_line(marked_fixture, aged_queue, 80) == ""
+marked_fixture["attention_read"].marked_at = int(clock.time()) - 600
+line = since_line(marked_fixture, aged_queue, 120)
+assert line == "Since you looked 10m ago: 1 finished · 1 failed", line
+marked_fixture["attention_read"].marked_at = int(clock.time()) - 300
+assert since_line(marked_fixture, aged_queue, 120) == "Since you looked 5m ago: 1 finished", since_line(marked_fixture, aged_queue, 120)
+marked_fixture["attention_read"].marked_at = int(clock.time()) - 60
+assert since_line(marked_fixture, aged_queue, 120) == "", "nothing newer than the mark"
+marked_fixture["attention_read"].marked_at = int(clock.time()) - 600
+assert since_line(marked_fixture, aged_queue, 40) == "Since 10m: 1 done · 1 fail", since_line(marked_fixture, aged_queue, 40)
+assert since_line(dict(marked_fixture, collection={"ok": False}), aged_queue, 120) == ""
+loaded_marks = panel_attention_read.mark(read_repo, read_room, ending_fixture, [(guard_item["row_id"], "guard_stop")], now=5000)
+assert loaded_marks.marked_at == 5000 and panel_attention_read.load(read_repo, read_room).marked_at == 5000
+assert panel_attention_read.load(read_repo, "other-room").marked_at is None
+for frame in (120, 80, 60, 40):
+    shown = attention_body(aged_queue, frame - 4, 30, {"tab": "needs"}, True, since_line(marked_fixture, aged_queue, frame - 4))
+    assert shown[1][0].startswith("Since") and len(shown[1][0]) <= frame - 4 and shown[1][1] is None, (frame, shown[:3])
+assert not attention_body(aged_queue, 76, 30, {"tab": "needs"}, True)[1][0].startswith("Since")
+short_dock = attention_body(aged_queue, 76, 4, {"tab": "needs"}, True, "Since x")
+assert len(short_dock) == 4 and not any(row[0] == "Since x" for row in short_dock), "a short dock keeps the list"
 # A damaged file reads as nothing read, never as an error.
 (read_repo / ".oms" / "artifacts" / "panel-attention-read.json").write_text("{not json")
 assert panel_attention_read.load(read_repo, read_room) == {}

@@ -44,6 +44,17 @@ def parse(raw):
     return found
 
 
+class ReadMap(dict):
+    """{row key: class word}; `marked_at` is the newest read time in seconds, None when nothing is recorded."""
+    marked_at = None
+
+
+def read_map(rows):
+    found = ReadMap({key: value[0] for key, value in rows.items()})
+    found.marked_at = max((value[1] for value in rows.values()), default=None)
+    return found
+
+
 def load(repo, room):
     """{row key: class word} the person read in this room; empty when none or when the file is unreadable, so a
     failed read leaves everything unread rather than hiding a row."""
@@ -51,8 +62,8 @@ def load(repo, room):
     try:
         rows = parse(_read(repo, PATH, MAX_BYTES, missing=True, label=LABEL)).get(room_key(room), {})
     except (OSError, ValueError):
-        return {}
-    return {key: value[0] for key, value in rows.items()}
+        return ReadMap()
+    return read_map(rows)
 
 
 def is_unread(report, item):
@@ -101,4 +112,4 @@ def mark(repo, room, report, entries, now=None):
                                      max_output=MAX_BYTES, label=LABEL)
     except (OSError, ValueError, SystemExit):
         return None
-    return {key: value[0] for key, value in saved.items()}
+    return read_map(saved)

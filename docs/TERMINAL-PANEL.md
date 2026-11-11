@@ -2446,6 +2446,13 @@ oldest first, with its age; a patch awaiting admission is labeled `pending admis
 the Plan tab), `unread mail` (other unanswered room mail from or to mains), and
 `delivery failed` (a failed main wake-up delivery).
 
+Every Attention tab row ends with its wait age (`7m`, `3h`) when the room recorded a real
+timestamp for it; a row with no recorded time shows none, and a narrow row drops the age
+before anything else. Under the header, `Since you looked 41m ago: 3 finished · 1 failed ·
+1 needs you` counts what was recorded after the room's newest read mark (the read state
+below); it is absent when no read mark exists, when nothing is newer, and on a short dock.
+Both are display-only.
+
 Provider errors are labeled `failed`. Failed items open a reader with the ending,
 errors, kept worktree and a salvage hint when applicable. Within a class the newest
 comes first. Above the board a header such as `Attention 7 · 1 needs you · 2 failed · 3
