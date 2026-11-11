@@ -30,6 +30,16 @@
 # process of the same user, a worker included, can write or remove the file.
 # `command-guard-hook.sh --audit [N]` summarizes the newest N rows.
 #
+# When a session's guard refuses the same rule again, the refusal says which
+# time it is and suggests stopping to ask the owner (rows carry a digest of the
+# session id, never the id). Nothing is blocked or ended by the count.
+#
+# `OMS_COMMAND_GUARD_NOTE=1` (off by default) also records, as `noted`, an
+# allowed command that names a well-known secret path (~/.ssh, ~/.aws, ~/.gnupg,
+# .netrc, .env) for a reading command. It prints nothing, never refuses, and
+# keeps the same row shape (first word and digest, no text, no path). Commands
+# the tokenizer cannot see, such as the inside of a script, are still unseen.
+#
 # Before refusing git reset --hard, git clean or a whole-worktree discard in a
 # repository that already keeps OMS state, the guard takes a checkpoint of the
 # tracked changes and the untracked files (`oms checkpoint create --untracked
@@ -77,8 +87,9 @@ def word(value, size):
 counts = collections.Counter((word(row.get("verdict"), 12), word(row.get("rule"), 32)) for row in rows)
 refused = sum(n for (verdict, _), n in counts.items() if verdict == "refused")
 bypassed = sum(n for (verdict, _), n in counts.items() if verdict == "bypassed")
-print("command guard: newest %d row(s): %d refused, %d bypassed (guard switched off for the session)"
-      % (len(rows), refused, bypassed))
+noted = sum(n for (verdict, _), n in counts.items() if verdict == "noted")
+print("command guard: newest %d row(s): %d refused, %d bypassed (guard switched off for the session)%s"
+      % (len(rows), refused, bypassed, ", %d noted (allowed, observed only)" % noted if noted else ""))
 for (verdict, rule), n in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
     print("  %4d  %-9s %s" % (n, verdict, rule))
 print("last:")
@@ -105,6 +116,7 @@ if [[ "$payload" =~ $command_re ]]; then
   case "$command_text" in
     *'\u'*) ;;
     *rm*|*git*|*mkfs*|*dd*|*curl*|*wget*|*scp*|*sftp*|*rsync*) ;;
+    *.ssh*|*.aws*|*.gnupg*|*.netrc*|*.env*) [ "${OMS_COMMAND_GUARD_NOTE:-0}" = 1 ] || exit 0 ;;
     *) exit 0 ;;
   esac
 fi
@@ -596,7 +608,59 @@ def verdict(text, cwd):
     return None
 
 
-def record(rule, outcome, name, text):
+def session_digest(session):
+    if not isinstance(session, str) or not session:
+        return None
+    return hashlib.sha256(("command-guard-session\0" + session).encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
+def earlier_refusals(rule, digest):
+    """How many times this session was already refused by this rule (the log is at most 1000 rows)."""
+    if not digest:
+        return 0
+    count = 0
+    try:
+        with open(audit_log, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and row.get("rule") == rule and row.get("verdict") == "refused" \
+                        and row.get("session") == digest:
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
+SECRET_PATH = re.compile(r"(?:^|/)\.(?:ssh|aws|gnupg)(?:/|$)|"
+                         r"(?:^|/)\.(?:netrc|env(?:\.(?!example$|sample$|template$)[\w.-]+)?)$")
+SECRET_READERS = frozenset(("cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "awk", "sed",
+                            "cp", "mv", "scp", "rsync", "tar", "zip", "base64", "xxd", "od", "strings", "bat",
+                            "source", ".", "curl", "wget", "nc", "openssl", "ssh-add", "diff", "cut", "sort"))
+
+
+def secret_read(text):
+    """Name of the first reading command in `text` that names a well-known secret path, else None."""
+    home = ("~", "$HOME", "${HOME}")
+    for segment in direct_shell_segments(text):
+        words = [w for w, is_op in segment if not is_op]
+        i = command_word(words)
+        if i >= len(words) or os.path.basename(words[i]) not in SECRET_READERS:
+            continue
+        for word in words[i + 1:]:
+            for part in (word, word.split("=", 1)[-1], word.lstrip("@<")):
+                for prefix in home:
+                    if part.startswith(prefix + "/"):
+                        part = part[len(prefix):]
+                        break
+                if SECRET_PATH.search(part):
+                    return os.path.basename(words[i])
+    return None
+
+
+def record(rule, outcome, name, text, session=None):
     """One row per refusal in the per-user log: never the command text. Best effort."""
     try:
         directory = os.path.dirname(audit_log)
@@ -612,6 +676,8 @@ def record(rule, outcome, name, text):
             "sha256": hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(),
             "child": child,
         }
+        if session:
+            row["session"] = session
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(audit_log, flags, 0o600)
         try:
@@ -648,14 +714,28 @@ try:
     cwd = doc.get("cwd")
     if not isinstance(cwd, str) or not cwd:
         cwd = os.getcwd()
-    found = (verdict(command, cwd) or transfer_rule(command, doc.get("session_id") or doc.get("sessionId"))) if isinstance(command, str) else None
+    session = doc.get("session_id") or doc.get("sessionId")
+    found = (verdict(command, cwd) or transfer_rule(command, session)) if isinstance(command, str) else None
     if found:
         rule, reason, instead, name, base = found
-        record(rule, "bypassed" if mode == "bypass" else "refused", name, command)
+        digest = session_digest(session)
+        again = earlier_refusals(rule, digest) + 1 if mode != "bypass" else 1
+        record(rule, "bypassed" if mode == "bypass" else "refused", name, command, digest)
         if mode != "bypass":
-            print("%s. Instead: %s." % (reason, instead))
+            line = "%s. Instead: %s." % (reason, instead)
+            if again >= 2:
+                line += (" This is refusal %d of this rule in this session: stop and ask the owner "
+                         "instead of rewording the command." % again)
+            print(line)
             if rule in CHECKPOINTED:
                 print(checkpoint(rule, base))
+    elif mode != "bypass" and os.environ.get("OMS_COMMAND_GUARD_NOTE") == "1" and isinstance(command, str):
+        try:
+            name = secret_read(command)
+            if name:
+                record("secret-path-read", "noted", name, command, session_digest(session))
+        except Exception:
+            pass
 except Exception:
     sys.exit(4)
 PY

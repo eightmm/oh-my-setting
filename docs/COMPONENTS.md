@@ -2858,7 +2858,16 @@ rows): the time, the rule id, the verdict, the command's first word and a
 sha256 of its text. The text itself is never written. A session started with
 `OMS_COMMAND_GUARD=0` still records, as `bypassed`, each command the guard
 would have refused, so switching it off is visible afterwards; allowed commands
-record nothing. `bash scripts/command-guard-hook.sh --audit [N]` prints the
+record nothing unless `OMS_COMMAND_GUARD_NOTE=1` is set in the session's
+environment (off by default): then an allowed command whose reading word
+(`cat`, `grep`, `cp`, `curl`, ...) names a well-known secret path (`.ssh`,
+`.aws`, `.gnupg`, `.netrc`, `.env`, not `.env.example`) leaves a `noted` row
+with the same fields, prints nothing and is never refused. Rows written since
+this change also carry a 24-hex digest of the session id; when the same rule
+refuses the same session again, the refusal line adds `This is refusal N of
+this rule in this session: stop and ask the owner instead of rewording the
+command.` (no blocking or ending; the count reads the log, so a removed log
+restarts it). A script's inside is still unseen. `bash scripts/command-guard-hook.sh --audit [N]` prints the
 newest N rows (default 50) counted by verdict and rule. The log records what
 the guard saw and is not a boundary: any process of the same user, an OMS
 worker included, can write or remove the file.
