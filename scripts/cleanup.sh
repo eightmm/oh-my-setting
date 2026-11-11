@@ -27,6 +27,10 @@ preserved (raw bytes compared with that patch applied to HEAD; no index row is
 needed, a present indexed digest must match); the proof is read again just before removal.
 Scratch worktrees with uncommitted files and HEADs on no ref stay kept. Every
 kept line names the missing proof.
+
+Also reports, read-only in both modes, local oms/* branches grouped as safe to
+delete, landed by equivalent commits, still unique, or in use by a worktree,
+with the delete commands printed for you to run; it never deletes a branch.
 EOF
 }
 
@@ -71,6 +75,12 @@ if git -C "$PWD" rev-parse --git-dir >/dev/null 2>&1; then
   repo_dir="$PWD"
 fi
 oms_harness_cleanup_residue "$repo_dir" "$DRY_RUN"
+
+# Report only, in both modes: leftover oms/* work branches and the commands a
+# person may run. Nothing here deletes a branch.
+if [ -n "$repo_dir" ]; then
+  python3 -I -B "$ROOT/scripts/lib/branch_sweep.py" "$repo_dir" || true
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   total=$((OMS_OPS_WOULD_REMOVE + OMS_HARNESS_RESIDUE_WOULD_REMOVE))
