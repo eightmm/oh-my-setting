@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/hero.png" alt="세 코딩 agent가 저장소의 프로젝트 규칙, 상태와 리뷰를 중앙 계층에서 공유하는 모습" width="100%"></p>
+<p align="center"><img src="docs/assets/hero.png" alt="Claude Code, Codex, Antigravity 로봇이 저장소 위에서 프로젝트 규칙, 상태와 리뷰를 공유하고 oh-my-setting 이름과 설명이 표시된 모습" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>

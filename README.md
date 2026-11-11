@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/hero.png" alt="Three coding agents share a central layer of project rules, state and review around a repository" width="100%"></p>
+<p align="center"><img src="docs/assets/hero.png" alt="Claude Code, Codex and Antigravity robots share project rules, state and review above a repository, with the oh-my-setting name and tagline" width="100%"></p>
 
 <p align="center">
   <a href="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml"><img src="https://github.com/eightmm/oh-my-setting/actions/workflows/test.yml/badge.svg?branch=main" alt="CI"></a>
