@@ -11,7 +11,7 @@ oms_memory_prev="" oms_memory_at=0
 for oms_memory_arg in "$@"; do
   oms_memory_at=$((oms_memory_at + 1))
   case "$oms_memory_prev" in
-    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--paths|--target|--from|--select|--kind|--accept|--retire|--reject|--to)
+    --repo|--file|--agent|--text|--limit|--source-file|--source-line|--id|--reason|--paths|--target|--from|--select|--kind|--accept|--retire|--reject|--to|--cold-days)
       oms_memory_prev=""; continue ;;
   esac
   case "$oms_memory_arg" in
@@ -20,6 +20,10 @@ for oms_memory_arg in "$@"; do
         "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
     promote|graduate)
       exec python3 -X utf8 "$ROOT/scripts/lib/agent_memory_promote.py" "$oms_memory_arg" \
+        "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
+    hygiene)
+      # hygiene is read-only: it opens the index read-only and writes nothing.
+      exec python3 -X utf8 "$ROOT/scripts/lib/agent_memory_hygiene.py" "$oms_memory_arg" \
         "${@:1:oms_memory_at-1}" "${@:oms_memory_at+1}" ;;
     recall)
       # recall --all-repos reads every registered clone's index and writes nothing.
@@ -181,6 +185,12 @@ Commands:
                     List candidate lines from Markdown memory written elsewhere
                     (a file, a directory, or .serena/memories); dry run unless
                     --apply, which appends the chosen ones as kind=imported.
+  hygiene [--cold-days N] [--limit N] [--json]
+                    Read-only report: notes never recalled (or not for N days,
+                    default 30), notes already worded in AGENTS.md/CLAUDE.md, and
+                    a Claude auto-memory index longer than its load cap
+                    (OMS_MEMORY_INDEX_CAP_LINES/_BYTES override; 0 turns off).
+                    Never edits, retires or synchronizes anything.
   review [--kind task-close|distill|imported|correction] [--json]
          [--accept ID | --retire ID --reason TEXT | --reject ID]
                     List notes that reached shared memory unread (task-close

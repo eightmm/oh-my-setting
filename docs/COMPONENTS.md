@@ -1385,6 +1385,27 @@ Antigravity global rules, each with its size, file count and modification time.
 It reads no file, writes nothing, and does not report whether a provider has its
 memory turned on; the Claude auto-memory location is derived from the repository
 path rather than confirmed by the CLI.
+`oms agent-memory hygiene [--cold-days N] [--limit N] [--json]` is a read-only
+report on the project's notes; it never deletes, edits, retires or synchronizes
+anything, and a listed note is a candidate for a person to retire, not a verdict.
+It names (1) cold notes: active shared notes older than `--cold-days` (default 30)
+that `recall` never returned, or last returned that long ago, from the recall
+receipts already kept in the derived index (not assessed when no index exists;
+receipts restart on `rebuild`, and pins are left out because they load without
+recall); (2) notes and pins whose normalised text already appears in an
+always-loaded instruction file (`AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`,
+`CLAUDE.local.md`, `GEMINI.md`, the user-level Claude, Codex and Antigravity files,
+and one level of repository-local `@imports`), as `exact` or `near` (at least 90%
+of the note's five-word runs), so they cost tokens twice; and (3) a Claude
+auto-memory `MEMORY.md` index longer than what Claude Code loads. The Claude cap
+(first 200 lines or 25KB, content beyond it not loaded at session start) is from
+the official memory page, https://code.claude.com/docs/en/memory; because that
+page does not say whether KB is 1000 or 1024 bytes, 25000 is used. Set
+`OMS_MEMORY_INDEX_CAP_LINES` or `OMS_MEMORY_INDEX_CAP_BYTES` to override (0 turns
+that check off). No cap is assumed for Codex memories or Antigravity rules, whose
+load limits were not confirmed. The index file is opened only to count lines, and
+its location is derived from the repository path like `sources`; a custom
+`autoMemoryDirectory` setting is not read.
 The text view of `oms state` ends with one advisory line counting the
 non-instruction provider locations (auto-memory, subagent memory, Codex
 memories) when any exist; it uses the same stat-only inventory under a one-second
