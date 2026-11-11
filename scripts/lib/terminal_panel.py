@@ -93,8 +93,13 @@ MAIN_KEYS = tuple((key, _MAIN_COMMANDS[key]) for key in dict.fromkeys(
     row[0] for row in PANEL_KEYS if "root" in row[2]))
 
 
+def session_status_filters(args):
+    import session_status
+    return session_status.check_filters(args.state, args.provider, args.role, args.min_age)
+
+
 def main(argv=None):
-    arguments = list(sys.argv[1:] if argv is None else argv)
+    arguments =list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in ("terminal", "job"):
         backend_name = "panel_terminals" if arguments[0] == "terminal" else "panel_jobs"
         try:
@@ -125,6 +130,14 @@ def main(argv=None):
     parser.add_argument("--health", action="store_true", help="read context, reported quota, room bounds and private slot/history capacity")
     parser.add_argument("--sessions", action="store_true",
                         help="read-only normalized status of every recorded session (one line each; --json for schema 1)")
+    parser.add_argument("--state", help="--sessions: only rows in this state (working, waiting, blocked, done, failed, unknown)")
+    parser.add_argument("--provider", help="--sessions: only rows of this provider")
+    parser.add_argument("--role", help="--sessions: only rows of this role")
+    parser.add_argument("--min-age", metavar="DURATION",
+                        help="--sessions: only rows whose recorded since is at least this old (30m, 2h, 7d); rows with no since never match")
+    parser.add_argument("--next-attention", action="store_true",
+                        help="print the board holding the oldest item waiting on you; --switch moves this tmux client there")
+    parser.add_argument("--switch", action="store_true", help="--next-attention: select that board's tmux window (never answers or approves)")
     parser.add_argument("--usage", action="store_true",
                         help="read-only usage of Claude, Codex and Antigravity as each reported it locally (--json for schema 1)")
     parser.add_argument("--metrics", action="store_true",
@@ -134,7 +147,18 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="read-only availability and shared OMS state")
     parser.add_argument("--watch", action="store_true", help="read-only activity tree, refreshed every five seconds")
     parser.add_argument("--owner", help="main identity: claude, codex, pi or antigravity; registered adapters also support watch/dispatch/council")
-    parser.add_argument("--count", type=int, help="stop after N watch snapshots")
+    class CountAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            if values is None:
+                namespace.count_rows = True
+                return
+            try:
+                namespace.count = int(values)
+            except ValueError:
+                parser.error("argument --count: invalid int value: %r" % values)
+    parser.set_defaults(count_rows=False)
+    parser.add_argument("--count", action=CountAction, nargs="?", metavar="N",
+                        help="stop after N watch snapshots; bare with --sessions, print only the number of matching rows")
     parser.add_argument("--no-animation", action="store_true", help="keep --watch motion-free")
     parser.add_argument("--view", choices=("auto", "summary", "compact", "detail", "graph", "tree"), help="activity density for the menu or --watch")
     parser.add_argument("--attention-only", action="store_true", help="show only calls awaiting action in the menu or --watch")
@@ -277,6 +301,16 @@ def main(argv=None):
         parser.error("--sessions is a read-only report; use --repo, --room and optional --json")
     if args.usage and (args.dry_run or args.view or args.attention_only):
         parser.error("--usage is a read-only report; use --repo, --room and optional --json")
+    if (args.state or args.provider or args.role or args.min_age or args.count_rows) and not args.sessions:
+        parser.error("--state, --provider, --role, --min-age and a bare --count apply to --sessions")
+    if args.switch and not args.next_attention:
+        parser.error("--switch requires --next-attention")
+    if args.next_attention and (args.dry_run or args.view or args.attention_only or args.room or args.json):
+        parser.error("--next-attention reads every known board; it takes only --repo and --switch")
+    try:
+        sessions_filter = session_status_filters(args) if args.sessions else None
+    except ValueError as error:
+        parser.error(str(error))
     if args.since is not None and not args.metrics:
         parser.error("--since requires --metrics")
     if args.min_samples is not None and (not args.metrics or args.min_samples < 1):
@@ -292,7 +326,7 @@ def main(argv=None):
     if sum(bool(value) for value in (args.watch, args.launch, args.spawn_main, args.swap_main, args.reopen, args.dispatch, args.routes,
                                      args.council, args.results, args.accept, args.finalize, args.retry_delivery, args.providers,
                                      args.chats, args.open_chat, args.health, args.mail, args.metrics, args.sessions, args.recommend,
-                                     args.usage)) > 1:
+                                     args.usage, args.next_attention)) > 1:
         parser.error("choose one panel operation")
     if args.recommend:
         import route_rules
@@ -320,7 +354,10 @@ def main(argv=None):
     # A main names itself on every panel call; reading results accepts that identity without filtering by it.
     if args.owner is not None and not (args.watch or args.dispatch or args.council or args.accept or args.finalize or args.results):
         parser.error("--owner requires --watch, --dispatch, --council, --accept, --finalize or --results")
-    if args.count is not None and not args.watch:
+    if args.count_rows:
+        if not args.sessions:
+            parser.error("--count without a number requires --sessions (with --watch, give N)")
+    elif args.count is not None and not args.watch:
         parser.error("--count requires --watch")
     if args.no_animation and not args.watch:
         parser.error("--no-animation requires --watch")
@@ -504,9 +541,17 @@ def main(argv=None):
         if args.sessions:
             import session_status
             state, status = snapshot(repo, room_id=args.room)
-            read = session_status.project(state)
-            print(json.dumps(read, ensure_ascii=False, indent=2) if args.json else session_status.text(read))
+            read = session_status.narrow(session_status.project(state), *sessions_filter)
+            if args.count_rows:
+                print(json.dumps({"schema": 1, "kind": "oms-sessions-count", "count": len(read["sessions"]),
+                                  "stale": read["stale"], "stale_reason": read["stale_reason"]})
+                      if args.json else len(read["sessions"]))
+            else:
+                print(json.dumps(read, ensure_ascii=False, indent=2) if args.json else session_status.text(read))
             return status
+        if args.next_attention:
+            import panel_next_attention
+            return panel_next_attention.run(repo, args.switch)
         if args.health:
             import panel_health
             from panel_metrics import collect

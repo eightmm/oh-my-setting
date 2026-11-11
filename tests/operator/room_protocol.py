@@ -2182,6 +2182,98 @@ for bad in (["--sessions", "--health"], ["--sessions", "--dry-run"], ["--session
     refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), *bad],
                              capture_output=True, text=True)
     assert refused.returncode == 2, (bad, refused)
+# --sessions filters narrow the same projection (state, provider, role, minimum age); --count prints only the number.
+def sessions_cli(*extra, report=None, code=0):
+    report = sessions_report if report is None else report
+    out = io.StringIO()
+    with patch.object(panel, "snapshot", return_value=(report, 0)), patch.object(panel.sys, "stdout", out):
+        assert panel.main(["--repo", str(project), "--sessions", *extra]) == code, extra
+    return out.getvalue()
+def sessions_rows(*extra, report=None):
+    return json.loads(sessions_cli(*extra, "--json", report=report))["sessions"]
+assert {row["id"] for row in sessions_rows("--state", "failed")} == {
+    row["id"] for row in projected["sessions"] if row["state"] == "failed"} and sessions_rows("--state", "failed")
+assert {row["id"] for row in sessions_rows("--provider", "claude")} == {"att-main-done", "att-main-idle"}
+assert {row["id"] for row in sessions_rows("--role", "main", "--state", "waiting")} == {"att-main-idle"}
+assert {row["id"] for row in sessions_rows("--min-age", "1m")} == {
+    row["id"] for row in projected["sessions"] if row["since"]}, "minimum age selected a row with no recorded since"
+assert sessions_rows("--min-age", "9999w") == [] and sessions_rows("--role", "builder") == []
+assert sessions_cli("--count") == "%d\n" % len(projected["sessions"])
+assert sessions_cli("--count", "--state", "failed") == "%d\n" % sum(r["state"] == "failed" for r in projected["sessions"])
+counted = json.loads(sessions_cli("--count", "--provider", "claude", "--json"))
+assert counted["kind"] == "oms-sessions-count" and counted["count"] == 2 and counted["stale"] is False
+# A filtered answer from a held read stays marked stale instead of reading as none.
+held_filtered = json.loads(sessions_cli("--state", "done", "--json", report=dict(sessions_report, capacity_stale=True)))
+assert held_filtered["stale"] is True and held_filtered["stale_reason"] and all(r["stale"] for r in held_filtered["sessions"])
+for bad, word in ((["--sessions", "--state", "bogus"], "working, waiting, blocked, done, failed, unknown"),
+                  (["--sessions", "--role", "bogus"], "researcher"), (["--sessions", "--provider", "bogus"], "claude"),
+                  (["--sessions", "--min-age", "5x"], "30m"), (["--sessions", "--min-age", "0m"], "30m"),
+                  (["--providers", "--state", "done"], "--sessions"), (["--count"], "--sessions"), (["--switch"], "--next-attention"),
+                  (["--sessions", "--count", "3"], "requires --watch")):
+    refused = subprocess.run(["bash", str(panel.ENTRY), "panel", "--repo", str(project), *bad], capture_output=True, text=True)
+    assert refused.returncode == 2 and word in refused.stderr, (bad, refused)
+# oms panel --next-attention: the oldest waiting item across the known boards, by the panel's own attention rules.
+import panel_next_attention
+import panel_release
+def board_report(stamp, state, participant):
+    return {"collection": {"ok": True, "sources": {"state": "ok"}},
+            "attempts": {"active_recent": [], "recent": [{"attempt_id": "att-" + participant, "state": state, "provider": "codex",
+                "updated_at": stamp, "panel": {"role": "worker", "room_id": "r", "room_participant": participant}}]},
+            "room": {"id": "r", "participants": [{"participant": participant, "role": "worker", "provider": "codex", "joined": True}]}}
+next_alpha, next_beta = temporary / "next-alpha", temporary / "next-beta"
+next_alpha.mkdir(exist_ok=True)
+next_beta.mkdir(exist_ok=True)
+next_reports = {(str(next_alpha.resolve()), "room-a"): board_report("2026-11-10T05:00:00Z", "waiting_input", "w-a"),
+                (str(next_beta.resolve()), "room-b"): board_report("2026-11-10T01:00:00Z", "failed", "w-b")}
+tmux_calls = []
+real_run = subprocess.run
+def fake_tmux(windows, clients="/dev/pts/1\t$1\n"):
+    def answer(command, **kwargs):
+        if command[0] != "tmux":
+            return real_run(command, **kwargs)
+        tmux_calls.append(list(command))
+        out = {"list-windows": windows, "display-message": "$1\n", "list-clients": clients}.get(command[1], "")
+        return subprocess.CompletedProcess(command, 0, out, "")
+    return answer
+two_boards = "@3\t$1\t%%3\t%s\troom-a\n@7\t$2\t%%7\t%s\troom-b\n@8\t$2\t%%8\t%s\troom-b\n" % (
+    next_alpha.resolve(), next_beta.resolve(), next_beta.resolve())
+def next_attention(*extra, windows=None, reports=None, env=None, clients="/dev/pts/1\t$1\n"):
+    windows = two_boards if windows is None else windows
+    reports = next_reports if reports is None else reports
+    out, err = io.StringIO(), io.StringIO()
+    tmux_calls.clear()
+    with patch.object(panel_next_attention.shutil, "which", return_value="/usr/bin/tmux"), \
+            patch.object(panel_next_attention.subprocess, "run", side_effect=fake_tmux(windows, clients)), \
+            patch("panel_state.snapshot", side_effect=lambda repo, room_id=None, **kw: (reports[(str(repo), room_id)], 0)), \
+            patch.object(panel_release, "dead_mains", return_value={"releasable": [], "unverifiable": []}), \
+            patch.dict(os.environ, dict({"TMUX": "/tmp/t,1,0", "TMUX_PANE": "%1"}, **(env or {}))), \
+            patch.object(panel.sys, "stdout", out), patch.object(panel_next_attention.sys, "stderr", err):
+        return panel.main(["--repo", str(project), "--next-attention", *extra]), out.getvalue(), err.getvalue(), list(tmux_calls)
+code, printed, notice, calls = next_attention()
+assert code == 0 and printed.startswith("failed: ") and "next-beta / room-b" in printed and "next-alpha" not in printed, printed
+assert [c[1] for c in calls] == ["list-windows"], "printing alone touched tmux beyond reading windows: %r" % calls
+code, printed, notice, calls = next_attention("--switch")
+assert code == 0 and "next-beta" in printed and calls[-3:] == [
+    ["tmux", "select-window", "-t", "@7"], ["tmux", "select-pane", "-t", "%7"],
+    ["tmux", "switch-client", "-c", "/dev/pts/1", "-t", "$2"]], calls
+assert not any(c[1] in {"send-keys", "kill-window", "kill-pane", "set-option", "bind-key"} for c in calls), calls
+# The same session needs no client switch; outside tmux --switch refuses after printing.
+code, printed, notice, calls = next_attention("--switch", windows="@7\t$1\t%%7\t%s\troom-b\n" % next_beta.resolve())
+assert code == 0 and calls[-1] == ["tmux", "select-pane", "-t", "%7"], calls
+code, printed, notice, calls = next_attention("--switch", env={"TMUX": ""})
+assert code == 1 and "next-beta" in printed and "inside tmux" in notice and not any(c[1] == "select-window" for c in calls), (printed, notice)
+# Nothing waiting, and unreadable boards, both stay a quiet exit 0 with the fixed word; the unreadable count goes to stderr.
+quiet = {key: board_report("2026-11-10T01:00:00Z", "working", "w-q") for key in next_reports}
+code, printed, notice, calls = next_attention(reports=quiet)
+assert (code, printed, notice) == (0, "nothing waiting\n", ""), (code, printed, notice)
+code, printed, notice, calls = next_attention(reports={
+    **quiet, (str(next_beta.resolve()), "room-b"): {"collection": {"ok": False}, "room": {}}})
+assert (code, printed) == (0, "nothing waiting\n") and "1 board could not be read" in notice, (printed, notice)
+# No tmux boards at all: the calling repository alone is read, and --switch has nowhere to go.
+code, printed, notice, calls = next_attention(windows="", reports={(str(project.resolve()), None): next_reports[(str(next_beta.resolve()), "room-b")]})
+assert code == 0 and printed.startswith("failed: "), printed
+code, printed, notice, calls = next_attention("--switch", windows="", reports={(str(project.resolve()), None): next_reports[(str(next_beta.resolve()), "room-b")]})
+assert code == 1 and "no tmux window" in notice, notice
 snapshot = call(["bash", str(panel.ENTRY), "panel", "--watch", "--count", "1", "--owner", "claude"],
                 dict(environment, OMS_HARNESS_CHILD="1", NO_COLOR=""))
 assert "MAIN " in snapshot and "\033" not in snapshot, snapshot

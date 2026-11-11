@@ -4,7 +4,10 @@ Nothing here reads a new record or calls a provider. Rows come from room_view.no
 panel_view.worker_rows() (attempts and delegation markers outside the room); the raw OMS state is mapped
 through STATE_MAP, the one table. Unknown stays unknown: a raw state with no row maps to unknown/unknown.
 """
+import calendar
 import datetime
+import re
+import time
 
 SCHEMA = 1
 STATES = ("working", "waiting", "blocked", "done", "failed", "unknown")
@@ -117,6 +120,62 @@ def project(report):
                 row.get("role"), raw, None, None, row.get("source") or "marker")
     return {"schema": SCHEMA, "kind": "oms-sessions", "stale": bool(all_stale or attempts_stale),
             "stale_reason": reason, "sessions": sessions}
+
+
+ADAPTER_PROVIDER = re.compile(r"oms-agent-adapter-[a-z0-9][a-z0-9._-]{0,63}")
+AGE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def valid_providers():
+    from panel_routing import MAIN_OWNERS
+    return sorted({*MAIN_OWNERS, "agy", "unknown"})
+
+
+def valid_roles():
+    from panel_routing import KINDS
+    from room_view import ROLES
+    return sorted({*ROLES, *KINDS, "unknown"})
+
+
+def check_filters(state=None, provider=None, role=None, min_age=None):
+    """Refuse an unknown filter value with the valid list; returns (state, provider, role, min_age_seconds).
+
+    A filter that names nothing recorded is still valid: it matches no row, it is not a typo."""
+    if state is not None and state not in STATES:
+        raise ValueError("unknown --state %r; valid: %s" % (state, ", ".join(STATES)))
+    if provider is not None and provider not in valid_providers() and not ADAPTER_PROVIDER.fullmatch(provider):
+        raise ValueError("unknown --provider %r; valid: %s, oms-agent-adapter-ID" % (provider, ", ".join(valid_providers())))
+    if role is not None and role not in valid_roles():
+        raise ValueError("unknown --role %r; valid: %s" % (role, ", ".join(valid_roles())))
+    seconds = None
+    if min_age is not None:
+        match = re.fullmatch(r"([0-9]{1,9})(s|m|h|d|w)", min_age)
+        if not match or int(match.group(1)) < 1:
+            raise ValueError("invalid --min-age %r; use a positive whole duration such as 30m, 2h or 7d" % min_age)
+        seconds = int(match.group(1)) * AGE_UNITS[match.group(2)]
+    return state, provider, role, seconds
+
+
+def narrow(report, state=None, provider=None, role=None, min_age=None, now=None):
+    """The same projection with only the rows that match every given filter (arguments from check_filters).
+
+    Age counts from `since`; a row with no `since` has no provable age, so --min-age never selects it. Stale and
+    stale_reason stay on the report, so a held or unreadable read is not mistaken for an empty answer."""
+    if state is None and provider is None and role is None and min_age is None:
+        return report
+    now = time.time() if now is None else now
+
+    def old_enough(row):
+        try:
+            then = calendar.timegm(time.strptime(str(row["since"])[:19], "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, TypeError):
+            return False
+        return now - then >= min_age
+
+    rows = [row for row in report["sessions"]
+            if (state is None or row["state"] == state) and (provider is None or row["provider"] == provider)
+            and (role is None or row["role"] == role) and (min_age is None or old_enough(row))]
+    return dict(report, sessions=rows)
 
 
 def text(report):
