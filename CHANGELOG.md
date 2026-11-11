@@ -8,6 +8,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- The panel reader's Files view (`f`) shows a worker's declared scope and
+  changed files as a directory tree with `+N -M`, marks files outside its scope
+  or shared with another live write worker, opens a file's coloured diff with
+  Enter, and opens it read-only with `o` (tmux popup) or `O` (split pane). The
+  board's worker rows carry a `files N/M` segment with an overlap mark, and
+  diff file headers, hunk headers, additions and removals each get their own
+  style.
 - `oms doctor --security` counts Claude Code permission prompts per session and
   day as an approval-fatigue signal (PR #186), scans provider state for
   secret-scanner hits with `--residue` (PR #188), and reports project-scope
