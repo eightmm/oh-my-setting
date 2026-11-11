@@ -356,6 +356,14 @@ def self_check(total):
                          "cases in DISPATCH_SECONDS): " + ", ".join(sorted("%s[%s]" % unit for unit in delta)))
     if selected("1/1") != names or requested_sections(",".join(names)) != names:
         raise ValueError("serial and focused section manifests differ")
+    # CI runs one job per shard: the shards together must run every section
+    # once (dispatch-results is split by case) and none may be an empty job.
+    shard_runs = Counter(name for index in range(1, total + 1) for name in selected("%s/%s" % (index, total)))
+    if any(not selected("%s/%s" % (index, total)) for index in range(1, total + 1)) or \
+            shard_runs != Counter({name: 1 for name in names if name != "dispatch-results"}) + \
+            Counter({"dispatch-results": len({bucket for unit, _, bucket in assignments(total)
+                                              if unit == "dispatch-results"})}):
+        raise ValueError("operator shards do not cover each section exactly once: " + repr(shard_runs))
     execution_contract(total)
     parsed.cache_clear()
     fixture_names.cache_clear()

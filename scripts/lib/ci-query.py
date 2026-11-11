@@ -25,13 +25,15 @@ MAX_QUERY_BYTES = 1024 * 1024
 PUBLIC_REPO = "eightmm/oh-my-setting"
 PUBLIC_WORKFLOW = ".github/workflows/test.yml"
 
-# test.yml's full selection: lint, four focused lanes, four smoke shards, the
-# Linux copy lifecycle, the selector and the stable gate. An affected-only run
-# reports these matrix jobs once, skipped, under their unexpanded names.
-# source-distribution-smoke pins the four-lane/four-shard shape.
+# test.yml's full selection: lint, four focused lanes, four smoke shards, four
+# operator-tools shards, the Linux copy lifecycle, the selector and the stable
+# gate. An affected-only run reports these matrix jobs once, skipped, under
+# their unexpanded names. source-distribution-smoke pins the four-lane/
+# four-shard shape.
 FULL_JOBS = (["lint", "affected_plan", "gate", "native (ubuntu-latest, copy)"]
              + ["focused (%d/4)" % lane for lane in range(1, 5)]
-             + ["scripts-smoke (%d/4)" % shard for shard in range(1, 5)])
+             + ["scripts-smoke (%d/4)" % shard for shard in range(1, 5)]
+             + ["operator-tools (%d/4)" % shard for shard in range(1, 5)])
 # Native-risk legs and the affected-only operator and narrow-check jobs run only when the plan asks.
 OPTIONAL_JOBS = re.compile(
     r"python311|native \((macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks")

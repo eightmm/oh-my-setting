@@ -58,7 +58,8 @@ jobs:
   # automatically and the lane union is provably the whole focused list
   # (source-distribution-smoke pins that invariant). runtime-core and
   # install-profile are registered focused stages, so they are no longer
-  # repeated here as extra steps.
+  # repeated here as extra steps. operator-tools is registered too but left out
+  # here (--without-operator-tools, position kept): operator_shard runs it.
   focused:
     needs: affected_plan
     if: needs.affected_plan.outputs.mode == 'full'
@@ -73,7 +74,28 @@ jobs:
       - uses: actions/checkout@v7
       - name: focused suites
         timeout-minutes: 75
-        run: bash scripts/check.sh --focused-only --focused-lane "${{ matrix.lane }}/4"
+        run: bash scripts/check.sh --focused-only --without-operator-tools --focused-lane "${{ matrix.lane }}/4"
+
+  # operator-tools was one 1773 s stage inside focused lane 2 and set the run's
+  # wall clock (run 42950293025). tests/operator-tools-smoke.sh --shard I/N
+  # places whole sections and dispatch-results cases by measured weight;
+  # --self-check (run by every shard) proves the shards cover each section
+  # once. Job names are install evidence like the matrices above.
+  operator_shard:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    name: operator-tools (${{ matrix.shard }}/4)
+    steps:
+      - uses: actions/checkout@v7
+      - name: operator-tools shard
+        timeout-minutes: 60
+        run: bash scripts/check.sh --operator-only --shard "${{ matrix.shard }}/4"
 
   # scripts-smoke is the dominant wall-clock cost. Native matrix children get
   # separate runners instead of four process trees racing on one VM. The
@@ -288,7 +310,7 @@ jobs:
   # are accepted; missing, failed, and cancelled required jobs fail closed.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311]
+    needs: [lint, focused, smoke_shard, operator_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -298,6 +320,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           FOCUSED_RESULT: ${{ needs.focused.result }}
           SMOKE_SHARD_RESULT: ${{ needs.smoke_shard.result }}
+          OPERATOR_SHARD_RESULT: ${{ needs.operator_shard.result }}
           AFFECTED_PLAN_RESULT: ${{ needs.affected_plan.result }}
           AFFECTED_VERIFY_RESULT: ${{ needs.affected_verify.result }}
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
@@ -322,7 +345,8 @@ jobs:
           for result in \
             "$LINT_RESULT" \
             "$FOCUSED_RESULT" \
-            "$SMOKE_SHARD_RESULT"; do
+            "$SMOKE_SHARD_RESULT" \
+            "$OPERATOR_SHARD_RESULT"; do
             if [ "$result" != "$expected" ]; then
               echo "required job result: $result (expected $expected)" >&2
               status=1
@@ -352,6 +376,6 @@ jobs:
           esac
           [ "$PYTHON311_RESULT" = "$python_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
-            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
+            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT operator_shards=$OPERATOR_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
           fi
           exit "$status"

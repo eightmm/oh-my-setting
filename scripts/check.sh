@@ -151,6 +151,7 @@ FOCUSED_LANE=""
 FOCUSED_LANE_I=0
 FOCUSED_LANE_N=0
 FOCUSED_STAGE_INDEX=0
+WITHOUT_OPERATOR=0
 LIST_STAGES=0
 PRINT_AFFECTED_MODE=0
 CI_OUTPUT=""
@@ -175,9 +176,18 @@ manifest) then the test suites. With no arguments it runs both.
                         so a newly registered stage lands in a lane
                         automatically and the lane union is always the whole
                         focused list.
+  --without-operator-tools
+                        With --focused-only, leave out the operator-tools
+                        stage that CI runs as its own sharded job. The stage
+                        keeps its registration position, so the other stages
+                        stay in the same lanes; the focused lanes plus the
+                        operator shards are always the whole stage list.
+  --operator-only       Run only tests/operator-tools-smoke.sh (every section,
+                        or one shard with --shard I/N).
   --scripts-smoke-only  Run only tests/scripts-smoke.sh.
   invariants            Run the fast repository-wide pre-land invariant set.
-  --shard I/N           Select one scripts-smoke shard (with the mode above).
+  --shard I/N           Select one scripts-smoke or operator-tools shard (with
+                        the mode above).
   --list-stages         Print the stage names the selected mode and lane
                         would run, one per line, without running anything.
                         (The scripts-smoke shards run outside the stage list
@@ -229,6 +239,8 @@ while [ "$#" -gt 0 ]; do
     --lint-only) select_mode lint; shift ;;
     --focused-only) select_mode focused; shift ;;
     --scripts-smoke-only) select_mode scripts-smoke; shift ;;
+    --operator-only) select_mode operator; shift ;;
+    --without-operator-tools) WITHOUT_OPERATOR=1; shift ;;
     invariants) select_mode invariants; shift ;;
     --shard)
       [ "$#" -ge 2 ] || { echo "error: --shard requires I/N" >&2; exit 2; }
@@ -298,9 +310,19 @@ if [ "$SKIP_LINT" = 1 ] && [ "$MODE" != full ] && [ "$MODE" != lint ] && [ "$MOD
   echo "error: --no-lint only modifies the complete or affected gate" >&2
   exit 2
 fi
-if [ -n "$SMOKE_SHARD" ] && [ "$MODE" != scripts-smoke ]; then
-  echo "error: --shard requires --scripts-smoke-only" >&2
+if [ -n "$SMOKE_SHARD" ] && [ "$MODE" != scripts-smoke ] && [ "$MODE" != operator ]; then
+  echo "error: --shard requires --scripts-smoke-only or --operator-only" >&2
   exit 2
+fi
+if [ "$WITHOUT_OPERATOR" = 1 ] && [ "$MODE" != focused ]; then
+  echo "error: --without-operator-tools requires --focused-only" >&2
+  exit 2
+fi
+if [ "$MODE" = operator ]; then
+  case "$SMOKE_SHARD" in
+    ''|[1-4]/[1-4]) ;;
+    *) echo "error: operator --shard must be I/N with 1 <= I <= N <= 4" >&2; exit 2 ;;
+  esac
 fi
 if [ -n "$FOCUSED_LANE" ]; then
   if [ "$MODE" != focused ]; then
@@ -358,6 +380,7 @@ fi
 RUN_LINT=0
 RUN_FOCUSED=0
 RUN_SMOKE=0
+RUN_OPERATOR=0
 RUN_INVARIANTS=0
 RUN_QUICK=0
 RUN_AFFECTED=0
@@ -370,6 +393,7 @@ case "$MODE" in
   lint) RUN_LINT=1 ;;
   focused) RUN_FOCUSED=1 ;;
   scripts-smoke) RUN_SMOKE=1 ;;
+  operator) RUN_OPERATOR=1 ;;
   invariants) RUN_INVARIANTS=1 ;;
   quick) RUN_QUICK=1 ;;
   affected) RUN_AFFECTED=1 ;;
@@ -603,6 +627,11 @@ stage() {  # stage NAME COMMAND...
     if [ $(( (FOCUSED_STAGE_INDEX - 1) % FOCUSED_LANE_N )) -ne $((FOCUSED_LANE_I - 1)) ]; then
       return 0
     fi
+  fi
+  # Counted above, so the other stages keep their lane; CI runs this one as
+  # its own sharded job.
+  if [ "$WITHOUT_OPERATOR" = 1 ] && [ "$name" = operator-tools ]; then
+    return 0
   fi
   if [ "$LIST_STAGES" = 1 ]; then
     echo "$name"
@@ -1363,6 +1392,11 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   # lane 3 slots, trading places with near-zero stages, to unload lane 2.
   # Predicted stage-sum means per CI lane 1..4: 1021, 1208, 1065, 1159s (lane 2
   # was 1381 before the swap); the eight local lanes are not re-derived.
+  # CI no longer runs operator-tools here: --without-operator-tools skips it
+  # (position kept) and the operator-tools matrix job runs it as shards. With
+  # it gone, run 42950293025 left lanes 1..4 at 979, 598, 1043, 1461s of stage
+  # time, so goal-drive-recovery-1 (346) and tick (82) trade places with
+  # self-advice-disclosure and context-core to give 979, 1012, 1043, 1047s.
   # Re-derive when a heavy suite is added
   # or one changes by minutes: assign by cost to the lightest lane that still
   # has a slot, balance the k/k+4 pairs, then list lane 1..8, 1..8, ... The
@@ -1371,9 +1405,9 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage autonomy-plan-run bash tests/autonomy-plan-run-smoke.sh
   stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"
   stage patch-admit-verifier-floor bash tests/patch-admit-verifier-floor-smoke.sh
-  stage goal-drive-recovery-1 env OMS_GDR_PART=1 bash tests/goal-drive-recovery-smoke.sh
-  stage update-v04 bash tests/update-v04-smoke.sh
   stage self-advice-disclosure bash tests/self-advice-disclosure-smoke.sh
+  stage update-v04 bash tests/update-v04-smoke.sh
+  stage goal-drive-recovery-1 env OMS_GDR_PART=1 bash tests/goal-drive-recovery-smoke.sh
   stage goal-drive-recovery-2 env OMS_GDR_PART=2 bash tests/goal-drive-recovery-smoke.sh
   stage autopilot bash tests/autopilot-smoke.sh
   stage functional-evolution bash tests/functional-evolution-smoke.sh
@@ -1381,13 +1415,13 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage patch-land-approval bash tests/patch-land-approval-smoke.sh
   stage land bash tests/land-smoke.sh
   stage runtime-core bash tests/runtime-core-smoke.sh
-  stage context-core bash tests/context-core-smoke.sh
+  stage tick bash tests/tick-smoke.sh
   stage inputs python3 tests/test_inputs.py
   stage draft-pr bash tests/draft-pr-smoke.sh
   stage graph bash tests/graph-smoke.sh
   stage autonomy-hook bash tests/autonomy-hook-smoke.sh
   stage failure-attention bash tests/failure-attention-smoke.sh
-  stage tick bash tests/tick-smoke.sh
+  stage context-core bash tests/context-core-smoke.sh
   stage source-distribution bash tests/source-distribution-smoke.sh
   stage atomic-state bash tests/atomic-state-smoke.sh
   stage artifact-supersession bash tests/artifact-supersession-smoke.sh
@@ -1450,6 +1484,14 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   fi
 fi
 
+if [ "$RUN_OPERATOR" = 1 ]; then
+  if [ -n "$SMOKE_SHARD" ]; then
+    stage operator-tools bash tests/operator-tools-smoke.sh --shard "$SMOKE_SHARD"
+  else
+    stage operator-tools bash tests/operator-tools-smoke.sh --jobs "${OMS_OPERATOR_JOBS:-4}"
+  fi
+fi
+
 if [ "$LIST_STAGES" = 1 ]; then
   RUN_SMOKE=0
 fi
@@ -1475,6 +1517,7 @@ verify_oms_state
 case "$MODE" in
   focused) echo "check: ok (focused only)" ;;
   scripts-smoke) echo "check: ok (scripts-smoke only)" ;;
+  operator) echo "check: ok (operator-tools only${SMOKE_SHARD:+; shard $SMOKE_SHARD})" ;;
   invariants) echo "check: ok (invariants only; pre-land)" ;;
   quick) echo "check: ok (quick local checks; full CI gate required)" ;;
   affected)

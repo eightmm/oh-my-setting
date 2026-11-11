@@ -3299,8 +3299,13 @@ lets later checks report failures after an earlier failure without continuing
 a cancelled run.
 
 CI selects once and runs affected tests plus changed-file lint in that same job for PRs
-and main pushes. Full selections fan out to the existing Linux lint, four focused lanes,
-four smoke shards and copy lifecycle runner. The selector also emits
+and main pushes. Full selections fan out to the existing Linux lint, four focused lanes
+(which skip operator-tools through `check.sh --without-operator-tools`, keeping every
+other stage in its lane), four smoke shards, four `operator-tools (I/4)` shards
+(`check.sh --operator-only --shard I/4`, weights in `tests/operator/runner.py`; its
+`--self-check` fails unless the shards run every section exactly once) and copy
+lifecycle runner. `ci-query.py` counts the operator shards as full-selection
+evidence and `gate` requires them. The selector also emits
 `native=true|false`: install/lifecycle, shell portability, Python compatibility, shared
 runtime/configuration and workflow changes require macOS lifecycle with Homebrew Bash 5
 and BSD userland fixtures, plus real Python 3.11 compatibility. Weekly/manual runs and

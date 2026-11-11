@@ -593,7 +593,7 @@ if [ "$2" = view ]; then
   echo jobs >> "$OMS_TEST_LAND_EVENTS"
   [ "${OMS_TEST_CI_SCOPE:-affected}" != error ] || exit 4
   sha="$(git -C "$OMS_TEST_LAND_REPO" rev-parse HEAD)"
-  full='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)"'
+  full='"lint","affected_plan","gate","native (ubuntu-latest, copy)","focused (1/4)","focused (2/4)","focused (3/4)","focused (4/4)","scripts-smoke (1/4)","scripts-smoke (2/4)","scripts-smoke (3/4)","scripts-smoke (4/4)","operator-tools (1/4)","operator-tools (2/4)","operator-tools (3/4)","operator-tools (4/4)"'
   count_file=/dev/null
   case "${OMS_TEST_CI_SCOPE:-affected}" in
     full|full-operator-skipped|wrong-sha|failed-run|duplicate|extra-failure|settles-full) jobs="$full" ;;
