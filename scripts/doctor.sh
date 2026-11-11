@@ -40,6 +40,7 @@ REPAIR=0
 SURFACES=0
 TOOL_LOCK_ONLY=0
 SECURITY_ONLY=0
+SECURITY_RESIDUE=0
 SANDBOX_ONLY=0
 SANDBOX_PROBE=0
 EXTENSIONS_ONLY=0
@@ -79,7 +80,7 @@ usage() {
   cat <<'EOF'
 Usage: doctor.sh [--repo PATH] [--json|--remediation-plan]
                  [--repair] [--surfaces] [--tool-lock] [--contract]
-                 [--security]
+                 [--security [--residue]]
        doctor.sh --sandbox [--probe] [--json]
                  [--live-models] [--strict-diversity]
                  [--no-model-doctor] [-h|--help]
@@ -136,6 +137,11 @@ that cannot be read is unknown, not ok. The report records a fingerprint of
 its own findings under the user state directory and says which section
 changed since the last check; it changes no provider file. With --json it
 prints one oms-doctor-security document (schema 1) with the same findings.
+--security --residue instead scans existing provider state (Claude projects
+and shell-snapshots, Codex sessions, shell_snapshots and history.jsonl) for
+lines the harness secret scanner flags, within printed file-count, size, age
+and time limits, and prints file, line and pattern class, never the value.
+Nothing is deleted, rewritten or recorded.
 
 --sandbox is a standalone read-only report of whether this host could sandbox
 (bwrap, user-namespace switches, AppArmor restriction, Landlock, seccomp; on
@@ -193,6 +199,7 @@ while [ "$#" -gt 0 ]; do
     --surfaces) SURFACES=1; FORWARD_ARGS+=(--surfaces); shift ;;
     --tool-lock) TOOL_LOCK_ONLY=1; FORWARD_ARGS+=(--tool-lock); shift ;;
     --security) SECURITY_ONLY=1; shift ;;
+    --residue) SECURITY_RESIDUE=1; shift ;;
     --sandbox) SANDBOX_ONLY=1; shift ;;
     --probe) SANDBOX_PROBE=1; shift ;;
     --contract)
@@ -331,10 +338,14 @@ if [ "$SECURITY_ONLY" = 1 ]; then
     echo "error: --security needs python3" >&2
     exit 2
   }
-  if [ "$REPORT_JSON" = 1 ]; then
-    exec python3 -I "$ROOT/scripts/lib/doctor-security.py" --json
-  fi
-  exec python3 -I "$ROOT/scripts/lib/doctor-security.py"
+  security_args=()
+  [ "$SECURITY_RESIDUE" = 0 ] || security_args+=(--residue)
+  [ "$REPORT_JSON" = 0 ] || security_args+=(--json)
+  exec python3 -I "$ROOT/scripts/lib/doctor-security.py" "${security_args[@]}"
+fi
+if [ "$SECURITY_RESIDUE" = 1 ]; then
+  echo "error: --residue is an option of --security: run doctor --security --residue" >&2
+  exit 2
 fi
 
 doctor_probe_cache_cleanup() {

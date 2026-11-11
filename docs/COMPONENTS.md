@@ -2832,6 +2832,25 @@ settings, managed policy and command-line flags are not read, so the report
 describes the user-level starting point, not the effective posture of a given
 session.
 
+`oms doctor --security --residue [--json]` is a separate, operator-invoked scan
+of provider state for secrets the CLIs left behind. It reads only locations
+that exist, from a small table in `scripts/lib/doctor-security.py`
+(`RESIDUE_LOCATIONS`; the paths are third-party claims about each CLI, not a
+contract): Claude `projects/` and `shell-snapshots/` under `CLAUDE_CONFIG_DIR`
+or `~/.claude`, Codex `sessions/`, `shell_snapshots/` and `history.jsonl` under
+`CODEX_HOME` or `~/.codex`. Each regular file (symlinks are not followed) is run
+through the existing secret-tier scanner, `agent_memory_sensitive_report` in
+`scripts/lib/agent-memory-common.sh`, so the pattern list is not duplicated; the
+machine tier (home paths) is ignored because provider state is full of them. A
+hit prints the file, line number and pattern class (`github-token`,
+`token-assignment`, ...), never the matched text. The scan is bounded and says
+so: the newest 200 files, each at most 4 MiB, modified within 30 days, 90
+seconds in all; skipped and `truncated` counts are printed, and a directory's
+mode is shown. Nothing is deleted, rewritten or recorded (no fingerprint is
+written), and the exit status stays 0. Antigravity state is not scanned because
+no stable location is documented. A clean result means the scanner found
+nothing in that window, not that the state is free of secrets.
+
 `oms doctor --sandbox [--probe] [--json]` is a standalone read-only report of whether this
 host could sandbox at all; OMS sandboxes nothing itself. On Linux it reads whether `bwrap` is
 on `PATH`, `/proc/sys/kernel/unprivileged_userns_clone`, `/proc/sys/user/max_user_namespaces`,

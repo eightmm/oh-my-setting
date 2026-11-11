@@ -8,6 +8,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms doctor --security --residue` scans existing Claude and Codex state
+  (transcripts, shell snapshots) with the harness secret scanner and reports
+  file, line and pattern class only, within printed file, size, age and time
+  limits; nothing is deleted, rewritten or recorded.
 - `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
   summary on stdin, when a call or message newly waits; one notifier runs at a
   time, its process group is killed after a timeout or when the panel
