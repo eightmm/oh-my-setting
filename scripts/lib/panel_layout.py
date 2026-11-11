@@ -41,6 +41,7 @@ PANEL_KEYS = (
     ('tab', 'Next tab', ('board',), 'tab_next_tab'),
     ('a', 'Ask advisor', ('board',), 'a_ask_advisor'),
     ('b', 'Attention', ('board',), 'b_attention'),
+    ('/', 'Filter calls', ('board',), 'slash_filter'),
     ('c', 'Cancel call', ('board',), 'c_cancel_call'),
     ('f', 'Full result', ('board',), 'f_full_result'),
     ('f', 'Full text', ('board',), 'f_full_text'),

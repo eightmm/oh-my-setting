@@ -1712,6 +1712,45 @@ for columns, rows_high in ((42, 24), (50, 50)):
     if rows_high == 50:
         assert last_nav["tab_body_visible"] and last_nav["box"]["y2"] - last_nav["box"]["y1"] - 1 >= min(dock_body_rows(rows_high), max(3, last_nav["dock_content_rows"])), last_nav
 use_unicode(True)
+# `/` board filter: narrows call rows, reports shown N of M, never narrows the Attention header.
+import panel_filter
+filter_report = deepcopy(last_attention)
+filter_report["attempts"]["active_recent"][1]["panel"]["label"] = "Fix parser"
+for glyphs in (True, False):
+    for columns, rows_high in ((40, 24), (60, 30), (80, 30), (120, 40)):
+        for surface in (render_tree, cjk_graph):
+            plain = surface(filter_report, columns, rows_high, unicode=glyphs, navigation={})
+            assert "Filter /" not in plain, plain
+            narrowed = surface(filter_report, columns, rows_high, unicode=glyphs,
+                               navigation={"filter": "parser"})
+            assert "Filter /parser" in narrowed and ("shown 1 of 6" in narrowed or columns < 60 and "1/6" in narrowed), narrowed
+            assert len(narrowed.splitlines()) <= rows_high and (glyphs or narrowed.isascii()), narrowed
+            assert ("Attention 1" in plain) == ("Attention 1" in narrowed), narrowed
+            none = surface(filter_report, columns, rows_high, unicode=glyphs, navigation={"filter": "zzz"})
+            assert "Filter /zzz" in none and "hidden" in none, none
+            assert columns < 60 or "shown 0 of 6" in none and "waiting hidden" in none, none
+            assert "Attention 1" in none, none
+assert panel_filter.matches({"title": "Fix 파서", "state": "timed_out", "role": "worker"}, "파서 timed out")
+assert not panel_filter.matches({"title": "a", "state": "working"}, "fail")
+# Typing: text keys edit, Enter keeps, Esc clears, arrows pass through; `/` itself starts it.
+type_nav = {}
+assert panel_filter.start(type_nav) and panel_filter.editing(type_nav)
+for key in ("f", "a", "q", "/", "backspace", "i", "l"):
+    assert panel_filter.edit((key,), type_nav), key
+assert type_nav["filter"] == "faqil" and not panel_filter.edit(("up",), type_nav)
+assert panel_filter.edit(("enter",), type_nav) and not panel_filter.editing(type_nav) and panel_filter.active(type_nav)
+assert panel_filter.heading(type_nav, (1, 4, 0), 80, True)[0].endswith("shown 1 of 4 · Esc clears")
+assert panel_filter.heading(type_nav, (1, 4, 2), 80, False)[1] is True
+for width in range(1, 60):
+    assert display_width(panel_filter.heading(type_nav, (1, 4, 2), width, True)[0]) <= width, width
+panel_filter.clear(type_nav)
+assert not panel_filter.active(type_nav) and panel_filter.heading(type_nav, None, 80, True) is None
+assert not panel_filter.start({"detail": {"x": 1}})
+# The decoder hands text over only in text mode, including a multi-byte character split across reads.
+typed = TerminalInput(extra_keys=("/",), text_after="/")
+assert typed.decode(b"q") == [("q",)] and typed.decode(b"/qn") == [("/",), ("q",), ("n",)]
+assert typed.text_mode and typed.decode(b"\x7f\xed\x8c") == [("backspace",)] and typed.decode(b"\x8c\xea") == [("파",)]
+assert TerminalInput().decode(b"/") == [("unbound",)] and TerminalInput(extra_keys=("/",)).decode(b"/q") == [("/",), ("q",)]
 # Tree and graph share tab navigation; a separate detail screen consumes its own keys.
 assert tab_event(("tab",), tree_nav) and not tab_event(("tab",), dict(tree_nav, surface="graph", detail={"target": ("chat", "m2")}))
 helped = render_tree(msg_report, 110, 40, navigation=dict(tree_nav, keys_help=True))

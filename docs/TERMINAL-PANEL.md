@@ -496,7 +496,7 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `k` / `u` | Capacity / refresh | — |
 | `m` | Cycle Work / Overview / Focus in a managed panel | — |
 | `[` / `]` / `o` | `[` / `]` scroll the Log tab older / newer while it is active; the wheel scrolls over its body | Previous / next section / outline |
-| `/` | — | Search result text |
+| `/` | Filter the call rows: type words to narrow by title, role, provider, model or state (every word must match, case-insensitive); `Enter` keeps the filter, `Esc` clears it, arrows still move. The heading shows `Filter /text · shown N of M`. The Attention header and counts are never filtered, and a hidden call that waits on you is reported as `N waiting hidden`. Resets when the room changes | Search result text |
 | `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
 | `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |
 | `?` | Show/hide board key help | — |
