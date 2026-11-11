@@ -34759,7 +34759,12 @@ PY_REFERENCE
     reference-metadata "$ROOT" "$d" "$managed" || fail "managed metadata path was mistaken for an ordinary input file"
   OMS_ATTEMPT_ID=att_original_native "$sh" --repo "$d" append --text "$managed" --dedupe-key "$dedupe_key" >/dev/null ||
     fail "task packet rejected a valid managed reference"
-  "$sh" --repo "$d" init --goal third >/dev/null
+  # The appends above refreshed last_activity, so "second" is a goal still
+  # being pursued: replacing it is a parent's explicit, recorded decision.
+  if "$sh" --repo "$d" init --goal third >/dev/null 2>&1; then
+    fail "init replaced a goal still being pursued without --replace-goal"
+  fi
+  "$sh" --repo "$d" init --goal third --replace-goal "rotation fixture" >/dev/null
   grep -Fl "$managed" "$d/.oms/task/archive/"*.md >/dev/null ||
     fail "rotation lost the durable managed reference pin"
   "$sh" --repo "$d" --file "$d/external.md" init --goal legacy >/dev/null ||
