@@ -8,6 +8,39 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Added
 
+- `oms doctor --security` counts Claude Code permission prompts per session and
+  day as an approval-fatigue signal (PR #186), scans provider state for
+  secret-scanner hits with `--residue` (PR #188), and reports project-scope
+  settings, sandbox fallback and domain rows and the names, never values, of
+  credential-shaped environment variables (PR #196). `--sandbox` reports
+  container socket reach and guard coverage (PR #190); `--mcp --probe-tools
+  NAME` pins one stdio server's full tool definitions (PR #191).
+- `oms cleanup` reports leftover `oms/*` work branches, read-only (PR #187);
+  `oms land conflicts` previews pairwise merge conflicts among them (PR #200).
+- A checked OpenTelemetry GenAI name map for OMS record fields (PR #189).
+- `patch-admit --red-check` notes, as advice, whether a patch's tests fail on
+  the base (PR #192); security advice also flags files that run on open,
+  checkout, commit or install (PR #199).
+- The resume hook marks a handoff digest as picked up (PR #193);
+  `agent-memory append` warns when a note contradicts an active one (PR #194)
+  and `agent-memory hygiene` reports cold notes, notes duplicated in
+  instruction files and an over-cap Claude memory index (PR #201).
+- A worker's closing claim without a matching verify receipt is flagged
+  (PR #195); verify receipts flag an exit 0 that ran zero tests and record the
+  environment (PR #203).
+- `oms agent-events show --bundle` is a read-only post-mortem of one attempt with a
+  transcript tool timeline (PR #197); `harness-eval --repeat` measures
+  consistency against an advisory cost baseline (PR #198).
+- The command guard counts repeated refusals and can note secret reads
+  (`OMS_COMMAND_GUARD_NOTE`, opt-in) (PR #204).
+- Panel: opt-in title counts and a done-class attention notice (PR #205), wait
+  ages and a since-you-looked line on Attention (PR #202), `--sessions`
+  filters and `--count`, `--next-attention` (PR #206), a `/` call filter
+  (PR #207), `--compare TASK` (PR #208), `--log [--follow]` (PR #209), and
+  reported-quota pace in the provider snapshot, strip and `--usage` (PR #210).
+- `scripts/lib/gate_timings.py` tabulates gate stages and CI job, suite and
+  test seconds from existing logs (PR #212).
+
 - `OMS_PANEL_ATTENTION_CMD` runs the person's own notifier, with the attention
   summary on stdin, when a call or message newly waits; one notifier runs at a
   time, its process group is killed after a timeout or when the panel
@@ -485,6 +518,17 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
   pause, expiry and coalesced missed runs.
 
 ### Changed
+
+- Antigravity seats (council extra, deep and frontier tiers) route to Gemini 4
+  Carbon high and fall back to Argon when Carbon is not routable.
+- Headless autopilot resume, scheduled or not, refuses to start a contract
+  whose approval is older than `OMS_TICK_AUTOPILOT_MAX_AGE_DAYS` (default 7,
+  0 disables) (PR #211).
+- `check.sh --affected` narrows what forces the full selection: a test-only
+  change runs its own tests, CHANGELOG.md and CONTRIBUTING.md count as docs,
+  and `OMS_AFFECTED_FULL=1` forces the full selection; the selector itself,
+  link, repair, hook, guard, permission and sandbox scripts are critical
+  (PR #213).
 
 - A needs-judgment notice names its type: a second blocking review is a design
   question to settle with `oms panel --council` before implementing; anything
