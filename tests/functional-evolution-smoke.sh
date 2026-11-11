@@ -614,6 +614,57 @@ assert all(set(row) <= {"provider", "role", "path", "kind", "bytes", "files", "m
   if bash "$am" --global sources >/dev/null 2>&1; then fail "sources accepted --global"; fi
 }
 
+test_memory_hygiene_report_is_read_only() {
+  local repo="$TMP/memory-hygiene" fresh="$TMP/memory-hygiene-fresh" am="$ROOT/scripts/agent-memory.sh"
+  local home="$TMP/memory-hygiene-home" key out before after
+  make_repo "$repo"
+  make_repo "$fresh"
+  mkdir -p "$home"
+  printf '# Rules\n\n- Always run the focused heron test\n  before pushing parser changes.\n' > "$repo/AGENTS.md"
+  printf '@AGENTS.md\n' > "$repo/CLAUDE.md"
+  bash "$am" --repo "$repo" append --text "cold ibis note nobody asks about" >/dev/null
+  bash "$am" --repo "$repo" append --text "warm egret note someone recalls" >/dev/null
+  bash "$am" --repo "$repo" append --text "Always run the focused heron test before pushing parser changes." >/dev/null
+  bash "$am" --repo "$repo" recall "egret" >/dev/null
+  # Back-date the log: the report only calls a note cold after --cold-days.
+  python3 - "$repo/.oms/memory/shared.md" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+open(path, "w", encoding="utf-8").write(re.sub(r"^## 20\d\d-\d\d-\d\dT", "## 2026-01-01T", text, flags=re.M))
+PY
+  key="$(printf '%s' "$(cd "$repo" && pwd -P)" | tr -c 'A-Za-z0-9' '-')"
+  mkdir -p "$home/.claude/projects/$key/memory"
+  seq 1 230 > "$home/.claude/projects/$key/memory/MEMORY.md"
+
+  before="$(cksum "$repo"/.oms/memory/* | sort)"
+  out="$(HOME="$home" CODEX_HOME="" bash "$am" --repo "$repo" hygiene)" || fail "hygiene failed: $out"
+  after="$(cksum "$repo"/.oms/memory/* | sort)"
+  [ "$before" = "$after" ] || fail "hygiene changed the memory store"
+  [[ "$out" == *"cold ibis note"* ]] || fail "never-recalled old note not listed: $out"
+  [[ "$out" != *"warm egret"* ]] || fail "a recalled note was called cold: $out"
+  [[ "$out" == *"exact in AGENTS.md"* && "$out" == *"focused heron test"* ]] || fail "wrapped duplicate of AGENTS.md not found: $out"
+  [[ "$out" == *"230 lines"*"-> over"*"30 line(s)"* && "$out" == *"code.claude.com/docs/en/memory"* ]] || fail "index cap warning missing: $out"
+  out="$(HOME="$home" CODEX_HOME="" OMS_MEMORY_INDEX_CAP_LINES=0 bash "$am" --repo "$repo" hygiene)" || fail "hygiene with cap off failed"
+  [[ "$out" == *"-> ok"* && "$out" == *"overridden"* ]] || fail "cap override ignored: $out"
+  if HOME="$home" OMS_MEMORY_INDEX_CAP_LINES=many bash "$am" --repo "$repo" hygiene >/dev/null 2>&1; then fail "bad cap accepted"; fi
+  HOME="$home" CODEX_HOME="" bash "$am" --repo "$repo" hygiene --json | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+assert report["schema"] == 1 and report["read_only"] is True, report
+assert [row["reason"] for row in report["cold"]["items"]] == ["never", "never"], report
+assert report["duplicated"]["items"][0]["match"] == "exact", report
+assert report["index_caps"][0]["status"] == "over" and report["index_caps"][0]["lines_not_loaded"] == 30, report
+' || fail "hygiene --json shape"
+  # No index yet: cold notes are not assessed, and the report does not create one.
+  bash "$am" --repo "$fresh" append --text "lonely note in a fresh repository" >/dev/null
+  rm -f "$fresh"/.oms/memory/*.sqlite3*
+  out="$(HOME="$home" CODEX_HOME="" bash "$am" --repo "$fresh" hygiene)" || fail "hygiene without an index failed"
+  [[ "$out" == *"cold notes: not assessed"* ]] || fail "missing index not reported: $out"
+  ! ls "$fresh"/.oms/memory/*.sqlite3 >/dev/null 2>&1 || fail "hygiene created the index"
+  if bash "$am" --global hygiene >/dev/null 2>&1; then fail "hygiene accepted --global"; fi
+}
+
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup() {
   local repo="$TMP/checkpoint"
   local created checkpoint_id before_dry
@@ -3254,6 +3305,7 @@ test_unresolved_queue_triages_by_patch_bytes_and_clears_in_one_batch
 test_memory_citations_revalidate_and_stay_out_of_default_context
 test_memory_supersession_and_retirement
 test_memory_redaction_and_native_sources
+test_memory_hygiene_report_is_read_only
 test_checkpoint_restores_staged_and_unstaged_content_with_a_backup
 test_checkpoint_restores_from_unstaged_only_with_stale_stat
 
