@@ -21,7 +21,15 @@ PROVIDERS = (("claude", "Claude", "Claude", "C", "main"),
 # The health screen's own "warning" band for a weekly or 5-hour window: 10% left or less.
 CRITICAL_USED = 90
 # cached() drops the numbers of a HUD record older than the freshness limit; the snapshot says so instead of guessing.
-STALE_HUD = "HUD cache over %d min old; numbers not shown" % (READING_FRESH_SECONDS // 60)
+# Pace needs the window length: 300 minutes (5h) and 10080 minutes (weekly). A verdict is "even" within this many
+# points of the elapsed share, and is withheld in the first PACE_MIN_ELAPSED percent, where it is only noise.
+WINDOW_SECONDS = {"5h": 5 * 3600, "weekly": 7 * 86400}
+PACE_MARGIN = 5
+PACE_MIN_ELAPSED = 5
+# The HUD cache and the Codex session log each hold only the latest reading of a window, and storing more is out of
+# scope, so no exhaustion time is projected; the snapshot and `--usage` say so.
+NO_PROJECTION = "only the latest reading of each window is kept, and a projection needs two"
+STALE_HUD ="HUD cache over %d min old; numbers not shown" % (READING_FRESH_SECONDS // 60)
 
 
 def unreported(reason):
@@ -50,11 +58,35 @@ def _age(observed, now):
     return None if stamp is None or stamp > now else now - stamp
 
 
+def pace(name, used, reset, now, stale):
+    """Used percent against the share of the window already gone, from the reported percent and reset time alone.
+
+    The window length must be known (the 5-hour and weekly windows; other lengths are not guessed at), the
+    reading fresh, and the reset still ahead and no further out than one window. Never derived from tokens.
+    Returns {"elapsed_pct", "verdict": ahead|even|behind} or {"unreported": reason}."""
+    length = WINDOW_SECONDS.get(name)
+    if length is None:
+        return unreported("window length not known (only the 5h and weekly windows have one)")
+    if stale:
+        return unreported("reading is stale")
+    if reset is None or reset <= now:
+        return unreported("no usable reset time reported")
+    remaining = reset - now
+    if remaining > length + 600:
+        return unreported("reset time lies further out than the window is long")
+    elapsed = max(0.0, 1 - remaining / length) * 100
+    if elapsed < PACE_MIN_ELAPSED:
+        return unreported("window just started")
+    gap = used - elapsed
+    return {"elapsed_pct": round(elapsed), "verdict": "ahead" if gap > PACE_MARGIN else "behind" if gap < -PACE_MARGIN else "even"}
+
+
 def _window(name, used, resets_at, resets_text, observed, source, now, held, warned):
     age = _age(observed, now)
     reset = number(resets_at)
     stale = held or (age is not None and age > READING_FRESH_SECONDS)
     entry = {"name": name, "used": used, "source": source, "stale": stale,
+             "pace": pace(name, used, reset, now, stale),
              "resets_at": reset if reset is not None else unreported("the provider reported no reset time"),
              "resets_in": (resets_text or unreported("no usable reset time reported")) if resets_text is not None else (
                  _remaining(reset - now) if reset is not None and reset > now else
@@ -188,7 +220,8 @@ def snapshot(report, now=None):
         fresh = [w for w in out["windows"] if not w["stale"]]
         pool = fresh or out["windows"]
         out["tightest"] = max(pool, key=lambda w: w["used"])["name"] if pool else None
-    return {"schema": SCHEMA, "now": now, "fresh_seconds": READING_FRESH_SECONDS, "held": held, "providers": providers}
+    return {"schema": SCHEMA, "now": now, "fresh_seconds": READING_FRESH_SECONDS, "held": held,
+            "projection": unreported(NO_PROJECTION), "providers": providers}
 
 
 def _tightest(provider):
@@ -205,7 +238,17 @@ def _seat_count(provider):
     return "?" if "unreported" in seats else str(seats["live"])
 
 
-def _segment(provider, key, mode, unicode, now):
+def _pace_verdict(window):
+    got = window.get("pace")
+    return got.get("verdict") if isinstance(got, dict) else None
+
+
+def _pace_glyph(window, unicode):
+    """One cue after the percentage: up for ahead of an even pace, down for behind; nothing when even or unknown."""
+    return {"ahead": "↑" if unicode else "^", "behind": "↓" if unicode else "v"}.get(_pace_verdict(window), "")
+
+
+def _segment(provider, key, mode, unicode, now, paced=False):
     """Pieces [(text, hue)] of one provider at one detail level."""
     short, letter, hue = next(entry[2:] for entry in PROVIDERS if entry[0] == key)
     tight = _tightest(provider)
@@ -221,7 +264,7 @@ def _segment(provider, key, mode, unicode, now):
         cue = {"critical": "!!", "warn": "!"}.get(tight["level"], "")
         if mode in {"bars", "short_bars"}:
             pieces.append((" " + _used_bar(quota_bar(100 - tight["used"], unicode), unicode), tone))
-        pieces.append((" %s%%%s" % (tight["used"], cue), tone))
+        pieces.append((" %s%%%s%s" % (tight["used"], cue, _pace_glyph(tight, unicode) if paced else ""), tone))
         if tight["stale"]:
             pieces.append(("~" if terse else " stale " + _age_text(provider), "dim"))
         resets = tight["resets_in"]
@@ -275,7 +318,11 @@ def strip(report, width, height, unicode=True, now=None):
                 tone = {"critical": "bad", "warn": "alert"}.get(tight["level"], "text")
                 cue = {"critical": " !! critical", "warn": " ! past your line"}.get(tight["level"], "")
                 pieces.append((_used_bar(quota_bar(100 - tight["used"], unicode), unicode) + " ", tone))
+                glyph = _pace_glyph(tight, unicode)
+                word = {"ahead": " ahead", "behind": " behind"}.get(_pace_verdict(tight), "")
                 pieces.append(("%s %s%% used%s" % (tight["name"], tight["used"], cue), tone))
+                if glyph:
+                    pieces.append((" %s%s" % (glyph, word), tone))
                 if tight["stale"]:
                     pieces.append((dot + "stale %s" % _age_text(provider), "dim"))
                 if isinstance(tight["resets_in"], str):
@@ -293,7 +340,7 @@ def strip(report, width, height, unicode=True, now=None):
         glue = dot if mode == "minimal" else sep
         built = []
         for key, unused_title, unused_short, unused_letter, unused_token in PROVIDERS:
-            built.append(_segment(data[key], key, mode, unicode, now))
+            built.append(_segment(data[key], key, mode, unicode, now, paced=width >= 80))
         pieces = []
         for index, part in enumerate(built):
             pieces += ([(glue, "dim")] if index else []) + part
@@ -311,6 +358,8 @@ def text(snap):
              (snap["fresh_seconds"] // 60)]
     if snap["held"]:
         lines.append("Held frame: readings below were not refreshed")
+    lines.append("Pace compares reported used percent with the share of the window elapsed; exhaustion projection: " +
+                 _value(snap["projection"]))
     for key, unused_title, unused_short, unused_letter, unused_token in PROVIDERS:
         provider = snap["providers"][key]
         lines.append("%s" % provider["name"])
@@ -323,6 +372,9 @@ def text(snap):
                 "in " + reset if isinstance(reset, str) else _value(reset),
                 _remaining(age) if isinstance(age, (int, float)) else _value(age), window["source"],
                 "; STALE" if window["stale"] else ""))
+            got = window["pace"]
+            lines.append("          pace: " + (_value(got) if "unreported" in got else "%s%% used · %s%% of window elapsed · %s" % (
+                window["used"], got["elapsed_pct"], {"ahead": "ahead of pace", "behind": "behind pace", "even": "on pace"}[got["verdict"]])))
         for name, reason in provider["windows_unreported"].items():
             lines.append("  %-7s unreported (%s)" % (name, reason))
         lines.append("  context: " + (_value(provider["context_used"]) if isinstance(provider["context_used"], dict)

@@ -894,6 +894,16 @@ HUD freshness limit; the percentage is of quota used, and `!` marks a window pas
 neither on a stale reading. Provider names take the palette's warm main colour (Claude), counsel
 blue (Codex) and lavender judge colour (Antigravity); the marks carry the meaning without colour.
 
+From 80 columns the tightest window also carries a pace cue: `↑` (ASCII `^`) when its reported
+used percent is more than 5 points ahead of the share of the window already elapsed, `↓` (`v`)
+when more than 5 points behind, nothing when even; the tall rows spell it `↑ ahead` / `↓ behind`.
+Pace comes from the reported percent and reset time alone (never from tokens) and needs a known
+window length (5h, weekly), a fresh reading and a reset no further out than one window; it is
+withheld in the first 5% of a window. `oms panel --usage` prints it per window, e.g. `pace: 62% used
+· 54% of window elapsed · ahead of pace`, or `pace: unreported (reason)`. No exhaustion time is
+projected: the HUD cache and the Codex session log keep only the latest reading of a window, a
+projection needs two, and OMS stores no history for it (`projection` in the JSON says so).
+
 `oms panel --usage [--json]` prints the snapshot behind the strip and exits (schema 1: per
 provider the account label, every reported window with `used`, `resets_at`, `resets_in`,
 `age_seconds`, `source` and `stale`, the context, the cache-read share and the live seats). It

@@ -5682,8 +5682,9 @@ assert json.loads(json.dumps(fresh_snapshot)) == fresh_snapshot
 expected_rows = {
     (40, 12): "C 41% · X 62% · A —",
     (60, 12): "C ▮▮▯▯▯ 41% 3d4h ·1 │ X ▮▮▮▯▯ 62% 3d4h ·1 │ A — ·0",
-    (80, 12): "Claude 41% 3d4h 1 live │ Codex 62% 3d4h 1 live │ agy — 0 live",
-    (120, 12): "Claude ▮▮▯▯▯ 41% 3d4h 1 live │ Codex ▮▮▮▯▯ 62% 3d4h 1 live │ agy — 0 live"}
+    # From 80 columns the tightest window carries one pace glyph: up is ahead of an even pace, down behind it.
+    (80, 12): "Claude 41%↓ 3d4h 1 live │ Codex 62%↑ 3d4h 1 live │ agy — 0 live",
+    (120, 12): "Claude ▮▮▯▯▯ 41%↓ 3d4h 1 live │ Codex ▮▮▮▯▯ 62%↑ 3d4h 1 live │ agy — 0 live"}
 for (columns, rows), line in expected_rows.items():
     frame = strip_rows(fresh_strip, columns, rows)
     assert frame.splitlines()[1] == line, frame
@@ -5691,11 +5692,32 @@ for (columns, rows), line in expected_rows.items():
     assert any("MAIN" in row for row in frame.splitlines()), frame
 for columns in (80, 120):
     tall = strip_rows(fresh_strip, columns, 30).splitlines()
-    assert tall[1:4] == ["Claude      ▮▮▯▯▯ weekly 41% used · resets in 3d4h · 5h 23% · 1 live",
-                         "Codex       ▮▮▮▯▯ weekly 62% used · resets in 3d4h · 1 live",
+    assert tall[1:4] == ["Claude      ▮▮▯▯▯ weekly 41% used ↓ behind · resets in 3d4h · 5h 23% · 1 live",
+                         "Codex       ▮▮▮▯▯ weekly 62% used ↑ ahead · resets in 3d4h · 1 live",
                          "Antigravity — agy reports no quota window locally · 0 live"], tall
 ascii_row = strip_rows(fresh_strip, 60, 12, unicode=False).splitlines()[1]
 assert ascii_row == "C [##---] 41% 3d4h x1 | X [###--] 62% 3d4h x1 | A -- x0" and ascii_row.isascii(), ascii_row
+assert strip_rows(fresh_strip, 80, 12, unicode=False).splitlines()[1] == "Claude 41%v 3d4h 1 live | Codex 62%^ 3d4h 1 live | agy -- 0 live"
+# Pace: reported percent against the share of the window gone, from the percent and reset time alone. The weekly
+# window resets in 3d4h30m of 7d, so 54% has elapsed; the 5h window resets in 2h00m30s of 5h, so 60% has.
+assert [(w["name"], w["pace"]) for w in claude_usage["windows"]] == [
+    ("5h", {"elapsed_pct": 60, "verdict": "behind"}), ("weekly", {"elapsed_pct": 54, "verdict": "behind"})]
+assert codex_usage["windows"][0]["pace"] == {"elapsed_pct": 54, "verdict": "ahead"}
+assert "unreported" in fresh_snapshot["projection"] and "two" in fresh_snapshot["projection"]["unreported"]
+fresh_text = provider_usage.text(fresh_snapshot)
+assert "  weekly  41% used; resets in 3d4h; age 1m; source HUD cache\n          pace: 41% used · 54% of window elapsed · behind pace" in fresh_text, fresh_text
+assert "pace: 62% used · 54% of window elapsed · ahead of pace" in fresh_text and "exhaustion projection: unreported" in fresh_text
+# Even within the margin, early in the window, a too-far reset, an unknown length and a stale reading show no pace.
+for used_now, elapsed_now, verdict_now in ((54, 54, "even"), (49, 54, "even"), (59, 54, "even"), (60, 54, "ahead"), (48, 54, "behind")):
+    assert provider_usage.pace("weekly", used_now, strip_now + 7 * 86400 * (100 - elapsed_now) / 100, strip_now, False) == {
+        "elapsed_pct": elapsed_now, "verdict": verdict_now}, (used_now, elapsed_now)
+week_s = 7 * 86400
+assert "just started" in provider_usage.pace("weekly", 3, strip_now + week_s * 0.97, strip_now, False)["unreported"]
+assert "further out" in provider_usage.pace("weekly", 3, strip_now + week_s + 700, strip_now, False)["unreported"]
+assert "no usable reset" in provider_usage.pace("weekly", 3, None, strip_now, False)["unreported"]
+assert "no usable reset" in provider_usage.pace("weekly", 3, strip_now - 1, strip_now, False)["unreported"]
+assert "stale" in provider_usage.pace("weekly", 3, strip_now + 1000, strip_now, True)["unreported"]
+assert "length not known" in provider_usage.pace("90m", 3, strip_now + 1000, strip_now, False)["unreported"]
 # A reading older than the freshness limit keeps its numbers (Codex) or says so (Claude's dropped HUD record).
 old_strip = strip_board(hud_age=700, codex_age=700)
 old_snapshot = provider_usage.snapshot(old_strip, strip_now)["providers"]
@@ -5722,11 +5744,13 @@ assert [(w["name"], w["used"], w["resets_in"], w["source"], w["stale"], round(w[
                                             ("weekly", 62, "3d0h", "Codex session log", False, 120)], both_codex
 assert both_codex["tightest"] == "weekly" and "5h" not in both_codex["windows_unreported"]
 assert strip_rows(both, 40, 12).splitlines()[1] == "C 41% · X 62% · A —"
-assert "Codex       ▮▮▮▯▯ weekly 62% used · resets in 3d0h · 5h 30% · 1 live" in strip_rows(both, 100, 30)
+assert "Codex       ▮▮▮▯▯ weekly 62% used ↑ ahead · resets in 3d0h · 5h 30% · 1 live" in strip_rows(both, 100, 30)
+assert both_codex["windows"][0]["pace"] == {"elapsed_pct": 30, "verdict": "even"}, "30% used, 30% of the 5h window gone"
+assert both_codex["windows"][1]["pace"] == {"elapsed_pct": 57, "verdict": "ahead"}
 hot_five = strip_board(limits=dict(both_limits, primary=dict(both_limits["primary"], used_percent=95)))
 assert provider_usage.snapshot(hot_five, strip_now)["providers"]["codex"]["tightest"] == "5h"
 assert strip_rows(hot_five, 40, 12).splitlines()[1] == "C 41% · X 95%!! · A —", "the tighter window wins"
-assert re.search(r"Codex       ▮▮▮▮▯ 5h 95% used !! critical · resets in 3h[23]\dm · weekly 62% · 1 live",
+assert re.search(r"Codex       ▮▮▮▮▯ 5h 95% used !! critical ↑ ahead · resets in 3h[23]\dm · weekly 62% · 1 live",
                  strip_rows(hot_five, 120, 30)), strip_rows(hot_five, 120, 30)
 both_text = provider_usage.text(provider_usage.snapshot(both, strip_now))
 assert re.search(r"  5h      30% used; resets in 3h30m; age [12]m; source Codex session log", both_text), both_text
@@ -5742,11 +5766,18 @@ stale_both = strip_board(codex_age=700, limits=dict(both_limits, primary=dict(bo
 stale_windows = provider_usage.snapshot(stale_both, strip_now)["providers"]["codex"]["windows"]
 assert [(w["name"], w["stale"], w["level"]) for w in stale_windows] == [("5h", True, None), ("weekly", True, None)]
 assert strip_rows(stale_both, 40, 12).splitlines()[1] == "C 41% · X 95%~ · A —"
+# A stale reading shows no pace anywhere, and the unknown-length "90m" window shows none either.
+assert all("stale" in w["pace"]["unreported"] for w in stale_windows)
+assert "Codex 95% stale 11m " in strip_rows(stale_both, 80, 12).splitlines()[1]
+assert not re.search(r"Codex .*(↑|↓| ahead| behind)", strip_rows(stale_both, 120, 30).split("Antigravity")[0].split("Codex")[1])
+assert "pace: unreported (reading is stale)" in provider_usage.text(provider_usage.snapshot(stale_both, strip_now))
 # An unnamed length is labelled by its minutes; a malformed or out-of-range window is dropped, never a number.
 odd = strip_board(limits={"primary": {"used_percent": 20, "window_minutes": 90, "resets_at": strip_now + 3000},
                           "secondary": dict(both_limits["secondary"])})
 assert [(w["name"], w["used"]) for w in provider_usage.snapshot(odd, strip_now)["providers"]["codex"]["windows"]] == [
     ("90m", 20), ("weekly", 62)]
+assert "length not known" in provider_usage.snapshot(odd, strip_now)["providers"]["codex"]["windows"][0]["pace"]["unreported"]
+assert "pace: unreported (window length not known" in provider_usage.text(provider_usage.snapshot(odd, strip_now))
 assert "5h" in provider_usage.snapshot(odd, strip_now)["providers"]["codex"]["windows_unreported"]
 for bad_window in ({"used_percent": 150, "window_minutes": 300, "resets_at": five_reset},
                    {"used_percent": -1, "window_minutes": 300, "resets_at": five_reset},
