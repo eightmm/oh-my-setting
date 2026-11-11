@@ -78,7 +78,7 @@ def mark_window(attention, asked=False):
 ATTENTION_OPTION = "@oms_panel_attention_counts"
 
 
-def publish_attention(summary):
+def publish_attention(summary, option=ATTENTION_OPTION):
     """Set this watcher's own OMS window option to the room's attention summary; an empty summary unsets it.
 
     tmux formats read the option without starting a process. No-op outside a managed tmux pane; returns
@@ -87,8 +87,8 @@ def publish_attention(summary):
     pane = os.environ.get("TMUX_PANE", "")
     if not os.environ.get("TMUX") or not managed_session() or not re.fullmatch(r"%[0-9]+", pane):
         return False
-    command = (("set-option", "-w", "-t", pane, ATTENTION_OPTION, summary) if summary else
-               ("set-option", "-wu", "-t", pane, ATTENTION_OPTION))
+    command = (("set-option", "-w", "-t", pane, option, summary) if summary else
+               ("set-option", "-wu", "-t", pane, option))
     try:
         return subprocess.run(tmux_command(*command), capture_output=True, check=False, timeout=2,
                               stdin=subprocess.DEVNULL).returncode == 0
@@ -102,6 +102,76 @@ def sync_attention(published, report, stale=False):
     from panel_view import attention_summary
     summary = "?" if stale else attention_summary(report)
     return summary if summary != published and publish_attention(summary) else published
+
+
+# OMS_PANEL_TITLE=1: the counts as a terminal title, or under tmux as this window's own option (a status format
+# can show it). Off by default; xterm's title stack (CSI 22/23 t) returns the person's own title on exit.
+TITLE_OPTION = "@oms_panel_title"
+TITLE_PUSH, TITLE_POP = "\033[22;0t", "\033[23;0t"
+
+
+def title_text(report):
+    """`OMS · 2 waiting · 1 failed` from the attention queue (counts and class words only, zero classes dropped),
+    or None for a snapshot that is not a completed collection or whose room was unreadable."""
+    from dashboard_projection import mapping
+    from panel_view import attention_items
+    if mapping(report.get("collection")).get("ok") is not True or mapping(report.get("room")).get("error"):
+        return None
+    ranked = attention_items(report, False)
+    waiting = sum(item["cls"] == "needs" for item in ranked)
+    failed = sum(item["cls"] in BELL_CLASSES and item["cls"] != "needs" for item in ranked)
+    return " · ".join(["OMS"] + ["%d %s" % (n, word) for n, word in ((waiting, "waiting"), (failed, "failed")) if n])
+
+
+def title_stream(stream):
+    """The stream a title may be written to: a terminal that is not `TERM=dumb`, never under tmux (which has the
+    option instead)."""
+    term = os.environ.get("TERM", "")
+    try:
+        return bool(term) and term != "dumb" and not os.environ.get("TMUX") and stream.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def sync_title(shown, report, stale=False, stream=None):
+    """Show the queue counts as a title when OMS_PANEL_TITLE=1 and they differ from `shown`; returns what is now
+    shown. A held or unreadable snapshot keeps the last title. Nothing is written to a non-terminal."""
+    if os.environ.get("OMS_PANEL_TITLE") != "1" or stale:
+        return shown
+    text = title_text(report)
+    if text is None or text == shown:
+        return shown
+    if os.environ.get("TMUX"):
+        return text if publish_attention(text, TITLE_OPTION) else shown
+    stream = sys.stdout if stream is None else stream
+    if not title_stream(stream):
+        return shown
+    # Every control byte goes, so no counts text can end the sequence early.
+    clean_text = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", text)
+    try:
+        stream.write((TITLE_PUSH if shown is None else "") + "\033]2;%s\a" % clean_text)
+        stream.flush()
+    except (OSError, ValueError):
+        return shown
+    return text
+
+
+def restore_title(shown, stream=None, reloading=False):
+    """Undo sync_title on exit: pop the saved terminal title, or unset the tmux option (a re-executed watcher
+    keeps its option, as publish_attention does)."""
+    if shown is None:
+        return
+    if os.environ.get("TMUX"):
+        if not reloading:
+            publish_attention("", TITLE_OPTION)
+        return
+    stream = sys.stdout if stream is None else stream
+    if title_stream(stream):
+        try:
+            stream.write(TITLE_POP)
+            stream.flush()
+        except (OSError, ValueError):
+            pass
 
 
 def start_spawn(repo, provider, spawns, navigation, swap=False, auto=None):
@@ -309,8 +379,15 @@ BELL_CLASSES = frozenset({"needs", "failed", "guard_stop", "timed_out", "verify_
                           "provider_error"})
 
 
-def attention_bell(known, report, key, stale=False):
+def is_done(item):
+    """A call whose work finished and waits to be looked at: the `decide` rows of calls, not the backlog warning."""
+    return item["cls"] == "decide" and item["row_id"][0] == "call"
+
+
+def attention_bell(known, report, key, stale=False, done=False):
     """(ring, known) for one snapshot: whether an item entered the person-facing attention classes.
+
+    With `done` (OMS_PANEL_ATTENTION_DONE=1) a call that finished and awaits review also counts.
 
     `known` is None or (key, row ids) from the previous completed read of the same room `key`. The first read
     of a room only seeds it, so a board start, restart or room switch never rings for what already waited. A
@@ -322,7 +399,7 @@ def attention_bell(known, report, key, stale=False):
         return False, known
     # A row the person already read stays quiet; a row that moved to another class is unread again and rings.
     current = frozenset(item["row_id"] for item in attention_items(report, False)
-                        if item["cls"] in BELL_CLASSES and item["unread"])
+                        if (item["cls"] in BELL_CLASSES or done and is_done(item)) and item["unread"])
     import panel_health
     # An opt-in quota line the reported window just crossed rings like a new item, once per window.
     current |= frozenset(ident for ident, unused in panel_health.quota_warnings(report))
@@ -404,7 +481,8 @@ def attention_event(report, fresh, repo_name, now=None):
         return found
 
     ranked = attention_items(report, False)
-    new = [item for item in ranked if item["row_id"] in fresh]
+    # Only a fresh row can be new, and finished work is fresh only under OMS_PANEL_ATTENTION_DONE: it counts as `done`.
+    new = [dict(item, cls="done") if is_done(item) else item for item in ranked if item["row_id"] in fresh]
     import panel_health
     # Reported quota windows past the person's opt-in line are counted under their own class word.
     quota = [{"cls": "quota", "row_id": ident} for ident, unused in panel_health.quota_warnings(report)]
@@ -565,6 +643,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
     stamps = source_stamps()
     flagged = None
     published = None
+    titled = None
     spawns = []
     installed = [name for name in MAIN_HARNESSES if main_installed(name)]
 
@@ -694,7 +773,8 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                     osc = osc if osc in ("9", "777", "99") else ""
                     if bell or notifier or osc:
                         waited = belled
-                        ring, belled = attention_bell(belled, board, selected_room, bool(notice))
+                        ring, belled = attention_bell(belled, board, selected_room, bool(notice),
+                                                      os.environ.get("OMS_PANEL_ATTENTION_DONE") == "1")
                         # One event signals once: in a managed panel only the main window's board does.
                         if ring and (not managed_session() or pane_local_option("@oms_panel_main_watch") == "1"):
                             if bell:
@@ -734,6 +814,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
                             flagged = alert
                     if managed_session():
                         published = sync_attention(published, board, bool(notice))
+                    titled = sync_title(titled, board, bool(notice))
                     if managed_session():
                         update_context_header(state, main_attempt, repo, navigation)
                         if (status == 0 and state.get("collection", {}).get("ok") is True
@@ -1186,6 +1267,7 @@ def watch(repo, provider, count=0, no_animation=False, view=None, attention_only
             mark_window(False)
         if published and sys.exc_info()[0] is not ReloadWatcher:
             publish_attention("")  # a board that stopped reading must not leave counts behind
+        restore_title(titled, reloading=sys.exc_info()[0] is ReloadWatcher)
         if expanded:
             try:
                 expand(False)

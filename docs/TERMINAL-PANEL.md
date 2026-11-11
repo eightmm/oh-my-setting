@@ -2553,6 +2553,26 @@ such as `oms my-project: 1 new (1 failed), 3 waiting`; it never carries a label,
 prompt, command, path or message text, and control characters are removed. It is off
 by default and any other value is ignored.
 
+Set `OMS_PANEL_ATTENTION_DONE=1` to add finished work to those same events: a call whose
+work ended and awaits your review (`patch awaits admission` or `awaiting decision`, not the
+review-backlog warning) then rings the bell, runs the notifier and writes the OSC notice
+once, under the same seeding, one-board rule, unread rule and notifier skip as the other
+classes. It selects what is announced and does not enable a channel: without
+`OMS_PANEL_ATTENTION_BELL`, `_CMD` or `_OSC` nothing is emitted. In the payload such a row
+counts under the class word `done` in `new` (it stays `decide` in `waiting`); the payload
+keeps `schema` 1, so a consumer must ignore class words it does not know. Notification is
+not approval: nothing is accepted, answered or changed. Off by default; any other value
+is ignored.
+
+Set `OMS_PANEL_TITLE=1` to show the queue counts as the terminal title,
+`OMS · 2 waiting · 1 failed` (`waiting` is answers needed, `failed` is every failed
+class; zero classes are dropped and an empty queue reads `OMS`). It is written only when
+the text changes, never to a non-terminal or when `TERM=dumb`, and the saved title is
+restored when the board exits (xterm title stack, `CSI 22;0 t` / `CSI 23;0 t`). Under tmux
+no escape is written: a managed panel sets the window option `@oms_panel_title` the way it
+sets `@oms_panel_attention_counts`, for a status format to show, and unsets it on exit.
+Held or unreadable reads keep the last title. It is off by default.
+
 Each Attention item is unread until you look at it. Opening a row of the Attention tab
 (Enter, a click or `f`) or a row of the control window's Needs-you list marks it read;
 in the Attention tab `r` marks every row read and `l` moves the selection to the
