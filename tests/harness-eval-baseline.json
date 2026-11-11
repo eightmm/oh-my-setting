@@ -1,0 +1,68 @@
+{
+  "note": "advisory cost baseline for tests/harness-eval-smoke.sh; wall_ms is machine dependent",
+  "scenarios": {
+    "criterion-change-invalidates-evidence": {
+      "wall_ms": 1858
+    },
+    "hook-command-guard-bash-old": {
+      "wall_ms": 684
+    },
+    "hook-command-guard-lib-missing": {
+      "wall_ms": 1028
+    },
+    "hook-command-guard-payload": {
+      "wall_ms": 997
+    },
+    "hook-command-guard-python-absent": {
+      "wall_ms": 532
+    },
+    "hook-command-guard-python-absent-registered": {
+      "wall_ms": 429
+    },
+    "hook-matcher-agrees-with-payload-check": {
+      "wall_ms": 175
+    },
+    "hook-move-guard-bash-old": {
+      "wall_ms": 465
+    },
+    "hook-move-guard-lib-missing": {
+      "wall_ms": 1086
+    },
+    "hook-move-guard-payload": {
+      "wall_ms": 801
+    },
+    "hook-move-guard-python-absent": {
+      "wall_ms": 632
+    },
+    "hook-move-guard-python-absent-registered": {
+      "wall_ms": 676
+    },
+    "hook-refusal-contract-command-guard": {
+      "wall_ms": 5952
+    },
+    "hook-refusal-contract-move-guard": {
+      "wall_ms": 4979
+    },
+    "hook-registration-drift-detected": {
+      "wall_ms": 9463
+    },
+    "memory-fits-budget": {
+      "wall_ms": 25981
+    },
+    "panel-matches-source": {
+      "wall_ms": 18554
+    },
+    "repeat-reports-flaky-and-baseline-warns": {
+      "wall_ms": 1226
+    },
+    "resume-no-duplicate": {
+      "index_rows": 3,
+      "provider_calls": 1,
+      "wall_ms": 70597
+    },
+    "unrelated-verification-no-resolve": {
+      "wall_ms": 22449
+    }
+  },
+  "schema": 1
+}
