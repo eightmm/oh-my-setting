@@ -25500,6 +25500,33 @@ EOF
     --prompt "Gate verify backstop" >"$project/out-pass" 2>&1 || rc=$?
   [ "$rc" = "0" ] || fail "verify pass + reviewer pass should exit 0, got $rc"
   assert_file_contains "$project/out-pass" "gate verify: pass ("
+  # The receipt carries the environment beside its exit; no tests claim without a recognised summary.
+  python3 -c '
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+row = [r for r in rows if r["kind"] == "review-verify"][-1]
+assert row["verify_exit"] == 0 and "python3" in row["verify_env"]["tools"], row
+assert "verify_zero_tests" not in row, row
+' "$project/.oms/artifacts/index.jsonl" || fail "review-verify receipt should carry verify_env and no zero-tests claim"
+  case "$(cat "$project/out-pass")" in *"reported no tests run"*) fail "no warning without a recognised zero summary" ;; esac
+  # A recognised zero-test summary under exit 0 is a warning and a receipt field; the pass stands.
+  printf '#!/usr/bin/env bash\necho "Ran 0 tests in 0.000s"\n' > "$project/scripts/check.sh"
+  rc=0
+  HOME="$home_dir" PATH="$bin_dir:/usr/bin:/bin" "$ROOT/scripts/peer-review.sh" \
+    --repo "$project" \
+    --artifact-dir "$project/artifacts-zero" \
+    --providers claude,antigravity \
+    --no-diff \
+    --gate --verify "bash scripts/check.sh" \
+    --prompt "Gate verify backstop" >"$project/out-zero" 2>&1 || rc=$?
+  [ "$rc" = "0" ] || fail "a zero-test pass must stay a pass, got $rc"
+  assert_file_contains "$project/out-zero" "gate verify: warning: exit 0 but unittest reported no tests run"
+  python3 -c '
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+row = [r for r in rows if r["kind"] == "review-verify"][-1]
+assert row["verify_exit"] == 0 and row["verify_zero_tests"] == ["unittest"], row
+' "$project/.oms/artifacts/index.jsonl" || fail "review-verify receipt should name the zero-test runner"
 
   # --no-verify keeps the old self-report-only behavior.
   printf '#!/usr/bin/env bash\nexit 1\n' > "$project/scripts/check.sh"
@@ -36013,6 +36040,71 @@ assert isinstance(d["rows"], list), d
   if ( cd "$project" && "$ROOT/scripts/artifact-index.sh" validate --json >/dev/null 2>&1 ); then
     fail "artifact-index --json must be refused where it means nothing"
   fi
+}
+
+# Advisory observations beside the verify exit code: no existing test covers
+# a zero-test exit 0 or the environment line, so this one does.
+test_verify_reports_zero_test_runs_and_environment() {
+  local project="$TMP/verify-observe"
+  local out
+
+  make_committed_repo "$project"
+  printf 'pytest==1.0\n' > "$project/requirements.txt"
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" init --goal "observe" \
+    --verify "printf '============ no tests ran in 0.01s ============\n'" >/dev/null )
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" verify 2>&1 )" ||
+    fail "a zero-test exit 0 must still verify: $out"
+  contains "$out" 'warning: exit 0 but pytest reported no tests run' ||
+    fail "a runner that reported zero tests should earn a warning: $out"
+  grep -Eq 'env: python3=[0-9.]+ bash=[0-9.]+ git=[0-9.]+ .*os=[A-Za-z]+/' "$project/.oms/task/current.md" ||
+    fail "the verification note should carry the environment line"
+  grep -Eq 'locks=1 lock_sha256=[0-9a-f]{12}' "$project/.oms/task/current.md" ||
+    fail "the environment line should name the lock files present as a digest"
+  case "$(cat "$project/.oms/task/current.md")" in *"$project"*) fail "the note must not record the repo path" ;; esac
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" status )"
+  contains "$out" 'verification: fresh' || fail "the warning must not change the verification status: $out"
+
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" update --verify "printf '3 passed in 0.02s\n'" >/dev/null )
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" verify 2>&1 )"
+  case "$out" in *warning:*) fail "a run that reported tests earns no warning: $out" ;; esac
+  ( cd "$project" && "$ROOT/scripts/agent-task.sh" update --verify "echo unrecognised output" >/dev/null )
+  out="$( cd "$project" && "$ROOT/scripts/agent-task.sh" verify 2>&1 )"
+  case "$out" in *warning:*) fail "unknown output makes no claim: $out" ;; esac
+
+  # Recognisers: summary lines per runner; mixed or unknown output claims nothing it cannot see.
+  python3 -I - "$ROOT/scripts/lib/verify_observe.py" <<'PY' || fail "verify_observe recognisers disagree with the fixtures"
+import runpy, sys
+v = runpy.run_path(sys.argv[1])
+cases = [
+    ("collected 0 items\n\n============ no tests ran in 0.01s ============\n", ["pytest"]),
+    ("== 2 skipped in 0.10s ==\n", ["pytest"]),
+    ("== 2 passed, 1 skipped in 0.10s ==\n", []),
+    ("Ran 0 tests in 0.000s\n\nNO TESTS RAN\n", ["unittest"]),
+    ("Ran 3 tests in 0.1s\n\nOK (skipped=3)\n", ["unittest"]),
+    ("Ran 3 tests in 0.1s\n\nOK\n", []),
+    ("?   \tpkg/a\t[no test files]\nok  \tpkg/b\t0.01s [no tests to run]\n", ["go"]),
+    ("?   \tpkg/a\t[no test files]\nok  \tpkg/b\t0.30s\n", []),
+    ("running 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n", ["cargo"]),
+    ("test result: ok. 4 passed; 0 failed; 0 ignored;\ntest result: ok. 0 passed; 0 failed; 0 ignored;\n", []),
+    ("Tests:       0 total\n", ["jest"]),
+    ("Tests:       1 skipped, 1 total\n", ["jest"]),
+    ("Tests:       2 passed, 2 total\n", []),
+    ("No test files found, exiting with code 0\n", ["vitest"]),
+    ("      Tests  3 passed | 1 skipped (4)\n", []),
+    ("scripts-smoke: skipped (shard 2/3, no selected tests)\n", ["oms-smoke"]),
+    ("scripts-smoke: ok (12 tests, duration=3s)\n", []),
+    ("0 tests, all good\nfinished\n", []),
+    ("", []),
+]
+for text, want in cases:
+    got = v["scan"](text)["zero"]
+    assert got == want, (text, got, want)
+gate = "# gate verify\n\n- command: pytest\n\n## Output\n\nno tests ran in 0.01s\n\n\n## Exit\n\n0\n"
+assert v["scan"](v["verify_output"](gate))["zero"] == ["pytest"]
+assert v["verify_output"]("review prose: Ran 0 tests in 0.0s") is None
+env = v["fingerprint"]("", ["go"])
+assert set(env) >= {"os", "tools"} and "locks" not in env, env
+PY
 }
 
 # smoke-weight: 8

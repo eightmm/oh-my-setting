@@ -1341,6 +1341,11 @@ print(json.dumps({
         fail "gate verify receipt was not recorded; failing closed"
       if [ "$gate_verify_exit" -eq 0 ]; then
         echo "gate verify: pass (${gate_verify_seconds}s)"
+        # Advisory only: a runner that reported zero tests is named, the pass stands.
+        gate_zero_tests="$(python3 -I "$(ma_scripts_dir)/lib/verify_observe.py" scan "$gate_verify_artifact" 2>/dev/null |
+          python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["zero"]))' 2>/dev/null || true)"
+        [ -z "$gate_zero_tests" ] ||
+          echo "gate verify: warning: exit 0 but ${gate_zero_tests// /, } reported no tests run (advisory; the verify status is unchanged)"
       else
         timeout_note="$(OMS_PEER_VERIFY_TIMEOUT="$gate_verify_budget" ma_verify_timeout_note "$gate_verify_exit")"
         echo "gate verify: fail (exit $gate_verify_exit, ${gate_verify_seconds}s${timeout_note:+; $timeout_note}) -> $gate_verify_artifact"
