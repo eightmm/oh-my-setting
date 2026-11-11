@@ -90,12 +90,30 @@ grep -Fq 'lane: [1, 2, 3, 4]' "$workflow" ||
   fail "focused CI matrix must declare lanes 1..4"
 full_stages="$(bash "$ROOT/scripts/check.sh" --focused-only --list-stages | sort)"
 [ -n "$full_stages" ] || fail "focused stage listing is empty"
-lane_union="$( (bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 1/4 --list-stages
-  bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 2/4 --list-stages
-  bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 3/4 --list-stages
-  bash "$ROOT/scripts/check.sh" --focused-only --focused-lane 4/4 --list-stages) | sort)"
+# CI's lanes leave operator-tools to its own four-shard job; the lanes plus
+# that job (check.sh --operator-only) are the whole list.
+grep -Fq -- '--focused-only --without-operator-tools --focused-lane "${{ matrix.lane }}/4"' "$workflow" ||
+  fail "CI focused lanes must skip operator-tools, which has its own job"
+grep -Fq -- '--operator-only --shard "${{ matrix.shard }}/4"' "$workflow" ||
+  fail "operator-tools CI job must run its assigned shard"
+grep -Fq 'name: operator-tools (${{ matrix.shard }}/4)' "$workflow" ||
+  fail "ci-query.py full-selection evidence needs the operator-tools shard job names"
+grep -Fq '"operator-tools (%d/4)"' "$ROOT/scripts/lib/ci-query.py" ||
+  fail "ci-query.py no longer reads the operator-tools shard jobs"
+lane_union="$( (for lane in 1 2 3 4; do
+    bash "$ROOT/scripts/check.sh" --focused-only --without-operator-tools --focused-lane "$lane/4" --list-stages
+  done
+  bash "$ROOT/scripts/check.sh" --operator-only --shard 1/4 --list-stages) | sort)"
 [ "$full_stages" = "$lane_union" ] ||
-  fail "focused lanes must partition the stage list exactly (no drop, no double)"
+  fail "focused lanes plus operator-tools must partition the stage list exactly (no drop, no double)"
+[ "$(bash "$ROOT/scripts/check.sh" --focused-only --without-operator-tools --list-stages | grep -Fxc operator-tools || true)" = 0 ] ||
+  fail "--without-operator-tools must leave operator-tools out"
+# Every operator section runs in exactly one shard (dispatch-results by case);
+# a shard that drops or doubles a unit fails the runner's own self-check.
+for shards in 1 2 3 4; do
+  bash "$ROOT/tests/operator-tools-smoke.sh" --self-check "$shards" >/dev/null 2>&1 ||
+    fail "operator-tools $shards-shard partition is incomplete or duplicated"
+done
 printf '%s\n' "$full_stages" | grep >/dev/null -Fx install-lifecycle ||
   fail "Linux auto lifecycle must remain in the focused gate"
 # Exercise the local orchestrator without recursively running the full gate.

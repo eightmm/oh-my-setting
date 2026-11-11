@@ -45,15 +45,17 @@
   risk-based `gate`; only then may local quick feedback replace it. Workflow
   presence alone is not branch protection.
 - CI scopes PRs and main pushes alike. Full selections keep Linux lint, focused,
-  smoke and copy lifecycle coverage. Core lifecycle changes (install, update,
+  smoke, operator-tools (4 shards) and copy lifecycle coverage. Core lifecycle changes (install, update,
   uninstall, link, doctor, Python runtime, platform/install/lock libraries,
   workflows) and weekly/manual runs cover native macOS lifecycle with Homebrew
   Bash 5 and BSD userland fixtures; every changed Python file and every full
   selection run Python 3.11 compatibility.
   Only plan-authorized skips pass the stable
   gate. CI remains authoritative. Smoke shards and focused lanes balance by
-  measured cost (`# smoke-weight:` lines, focused registration order); refresh
-  from CI timings.
+  measured cost (`# smoke-weight:` lines, focused registration order, operator
+  `SECTIONS`/`DISPATCH_SECONDS` weights); refresh from CI timings. Focused
+  lanes skip operator-tools (`--without-operator-tools`, position kept); the
+  `operator-tools (I/4)` jobs run it via `check.sh --operator-only --shard`.
 - CI runs Python 3.11; a developer machine may default to newer. Before
   pushing, run changed Python and the targeted tests once with 3.11 first on
   PATH. Known difference: with `parse_known_args`, argparse hands positional
