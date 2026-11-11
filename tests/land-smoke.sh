@@ -1980,4 +1980,38 @@ assert by[sys.argv[3]]["status"] == "unrecorded", doc
 assert doc["summary"]["ai"] == 1 and doc["summary"]["unrecorded"] == 1, doc
 PY
 
+# gate_timings.py only reads logs: gate stages (ok and failed), runner test lines, CI job time,
+# the wall clock of the run and the slowest tests across job logs, as text and as JSON.
+gt_dir="$TMP/gate-timings"
+mkdir -p "$gt_dir/logs"
+printf '35\tstage\trepo-invariants\n6\tstage\tseat-reliability\n30\ttest\ttest_slow_one\n2\ttest\ttest_fast_one\n' > "$gt_dir/timings"
+printf '2026-11-11T03:05:10.1Z ok: scripts-smoke (90s)\n2026-11-11T03:05:11.1Z smoke-timing: 40s test_ci_slow\nsmoke-timing: 5s test_ci_fast\ncheck: operator-tools FAILED (12s)\nexit=1 wall=120\n' > "$gt_dir/logs/job-11.log"
+printf 'ok: scripts-smoke (60s)\nslow-test: 50s test_other_shard\nslow-stage: 60s scripts-smoke\nslow-stage: 9s lane-only\n' > "$gt_dir/logs/job-12.log"
+cat > "$gt_dir/jobs.json" <<'JSON'
+{"jobs": [
+ {"id": 11, "name": "scripts-smoke (1/2)", "conclusion": "failure", "started_at": "2026-11-11T03:00:00Z", "completed_at": "2026-11-11T03:02:00Z", "steps": [{"name": "Run", "started_at": "2026-11-11T03:00:10Z", "completed_at": "2026-11-11T03:01:50Z"}]},
+ {"id": 12, "name": "scripts-smoke (2/2)", "conclusion": "success", "started_at": "2026-11-11T03:00:00Z", "completed_at": "2026-11-11T03:01:00Z"},
+ {"id": 13, "name": "skipped job", "conclusion": "skipped", "started_at": "2026-11-11T03:00:00Z", "completed_at": "2026-11-11T03:00:00Z"}]}
+JSON
+printf '{"created_at": "2026-11-11T03:00:00Z", "run_started_at": "2026-11-11T03:00:00Z", "updated_at": "2026-11-11T03:05:00Z"}\n' > "$gt_dir/run.json"
+python3 "$ROOT/scripts/lib/gate_timings.py" --json --timings "$gt_dir/timings" --gate-log "$gt_dir/logs/job-11.log" \
+  --ci-jobs "$gt_dir/jobs.json" --ci-run "$gt_dir/run.json" --ci-logs "$gt_dir/logs" > "$gt_dir/out.json" ||
+  fail "gate_timings --json failed"
+python3 - "$gt_dir/out.json" <<'PY' || fail "gate_timings report is wrong"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+local, ci = doc["local"], doc["ci"]
+assert [s["name"] for s in local["stages"]] == ["repo-invariants", "seat-reliability"], local
+assert local["wall"] == 120 and local["exit"] == 1 and local["tests"][0]["name"] == "test_slow_one", local
+assert ci["job_seconds_total"] == 180 and ci["wall_seconds"] == 300, ci
+assert [j["name"] for j in ci["jobs"]] == ["scripts-smoke (1/2)", "scripts-smoke (2/2)"], ci
+assert [t["name"] for t in ci["tests"]] == ["test_other_shard", "test_ci_slow", "test_ci_fast"], ci
+assert ci["tests"][0]["job"] == "scripts-smoke (2/2)", ci
+assert {s["name"]: s["seconds"] for s in ci["suites"]} == {"scripts-smoke": 150, "operator-tools": 12, "lane-only": 9}, ci
+assert [s["status"] for s in ci["stages"] if s["name"] == "operator-tools"] == ["failed"], ci
+PY
+python3 "$ROOT/scripts/lib/gate_timings.py" --timings "$gt_dir/timings" > "$gt_dir/out.txt" || fail "gate_timings text failed"
+grep -Fq 'local gate: stages by seconds (sum 41s)' "$gt_dir/out.txt" || fail "gate_timings text lost the stage table"
+if python3 "$ROOT/scripts/lib/gate_timings.py" > /dev/null 2>&1; then fail "gate_timings accepted no input"; fi
+
 echo "land-smoke: ok"
