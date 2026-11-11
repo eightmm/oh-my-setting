@@ -3,6 +3,11 @@
 
 ci-query.py DESTINATION SHA SECONDS BRANCH WORKFLOW
     prints "RUN_ID CONCLUSION" for the newest push run of SHA, "0 missing" if none.
+ci-query.py dispatch DESTINATION SHA SECONDS BRANCH WORKFLOW
+    the same for the newest manually dispatched (workflow_dispatch) run of SHA
+    on BRANCH; test.yml runs the full selection for every dispatch.
+ci-query.py slug DESTINATION
+    prints OWNER/REPO for DESTINATION without credentials.
 ci-query.py scope DESTINATION RUN_ID SHA SECONDS
     prints "full" when that successful run executed the full selection,
     "affected" when it ran the affected selection only; anything it cannot
@@ -22,6 +27,8 @@ import urllib.parse
 import urllib.request
 
 MAX_QUERY_BYTES = 1024 * 1024
+# A run id is read for scope whichever of these events started it.
+RUN_EVENTS = ("push", "workflow_dispatch")
 PUBLIC_REPO = "eightmm/oh-my-setting"
 PUBLIC_WORKFLOW = ".github/workflows/test.yml"
 
@@ -161,9 +168,9 @@ def public_json(path, seconds):
         return 2, None
 
 
-def public_run(row, sha, run_id=None, branch=""):
+def public_run(row, sha, run_id=None, branch="", events=("push",)):
     if (not isinstance(row, dict) or row.get("head_sha") != sha
-            or row.get("event") != "push" or row.get("path") != PUBLIC_WORKFLOW
+            or row.get("event") not in events or row.get("path") != PUBLIC_WORKFLOW
             or row.get("repository", {}).get("full_name") != PUBLIC_REPO
             or type(row.get("id")) is not int or row["id"] <= 0
             or (run_id is not None and row["id"] != int(run_id))
@@ -173,7 +180,8 @@ def public_run(row, sha, run_id=None, branch=""):
             "status": row["status"], "conclusion": row["conclusion"]}
 
 
-def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_id=None):
+def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_id=None,
+          event="push"):
     """Keep gh first; a failed client may use bounded public OMS evidence."""
     deadline = time.monotonic() + min(30.0, max(0, seconds))
     rc, output = gh(args, seconds)
@@ -181,7 +189,7 @@ def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_i
             or workflow not in ("test.yml", PUBLIC_WORKFLOW) \
             or not re.fullmatch(r"[0-9a-f]{40}", sha):
         return rc, output
-    params = {"head_sha": sha, "event": "push", "per_page": 1}
+    params = {"head_sha": sha, "event": event, "per_page": 1}
     if branch:
         params["branch"] = branch
     path = ("actions/runs/" + run_id if run_id else
@@ -197,8 +205,9 @@ def query(destination, sha, args, seconds, branch="", workflow="test.yml", run_i
                     or type(data["total_count"]) is not int or data["total_count"] < len(rows) \
                     or (not rows and data["total_count"]):
                 raise ValueError("invalid run list")
-            return 0, json.dumps([public_run(row, sha, branch=branch) for row in rows])
-        run = public_run(data, sha, run_id)
+            return 0, json.dumps([public_run(row, sha, branch=branch, events=(event,))
+                                  for row in rows])
+        run = public_run(data, sha, run_id, events=RUN_EVENTS)
         attempt = data["run_attempt"]
         if type(attempt) is not int or attempt <= 0:
             raise ValueError("invalid run attempt")
@@ -234,8 +243,8 @@ def run_conclusion(run, sha):
     return conclusion
 
 
-def latest_run(destination, sha, seconds, branch, workflow):
-    args = ["run", "list", "--repo", repo_slug(destination), "--commit", sha, "--event", "push",
+def latest_run(destination, sha, seconds, branch, workflow, event="push"):
+    args = ["run", "list", "--repo", repo_slug(destination), "--commit", sha, "--event", event,
             "--limit", "1", "--json", "databaseId,status,conclusion,headSha"]
     if branch:
         args += ["--branch", branch]
@@ -254,7 +263,7 @@ def latest_run(destination, sha, seconds, branch, workflow):
         remaining = max(0.0, deadline - time.monotonic())
         # Only an explicit zero budget gets a full single-request timeout.
         rc, output = query(destination, sha, args, remaining if budget > 0 else 30,
-                           branch, workflow)
+                           branch, workflow, event=event)
         if rc:
             if rc == 124 and budget > 0 and pending_id is not None:
                 print(pending_id, "pending")
@@ -356,6 +365,11 @@ def run_scope(destination, run_id, sha, seconds):
 def main():
     if sys.argv[1:2] == ["scope"] and len(sys.argv) == 6:
         return run_scope(*sys.argv[2:])
+    if sys.argv[1:2] == ["dispatch"] and len(sys.argv) == 7:
+        return latest_run(*sys.argv[2:], event="workflow_dispatch")
+    if sys.argv[1:2] == ["slug"] and len(sys.argv) == 3:
+        print(repo_slug(sys.argv[2]))
+        return 0
     if len(sys.argv) != 6:
         print(__doc__.strip(), file=sys.stderr)
         return 2

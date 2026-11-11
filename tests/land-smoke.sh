@@ -586,6 +586,34 @@ PY
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+# Manually dispatched runs live in their own event file so the push-run
+# assertions below keep counting only push-run queries.
+dispatch_log="$OMS_TEST_LAND_EVENTS.dispatch"
+if [ "$1 $2" = "workflow run" ]; then
+  echo "workflow $*" >> "$dispatch_log"
+  [ -z "${OMS_TEST_DISPATCH_FAIL:-}" ] || { echo 'dispatch refused' >&2; exit 1; }
+  : > "$OMS_TEST_LAND_EVENTS.dispatched"
+  exit 0
+fi
+case " $* " in *" --event workflow_dispatch "*)
+  echo list >> "$dispatch_log"
+  sha=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --commit ]; then sha="$2"; break; fi
+    shift
+  done
+  result="${OMS_TEST_DISPATCH_RESULT:-missing}"
+  if [ "${OMS_TEST_DISPATCH_AFTER:-0}" = 1 ] && [ ! -e "$OMS_TEST_LAND_EVENTS.dispatched" ]; then result=missing; fi
+  if [ "$result" = missing ]; then echo '[]'; exit 0; fi
+  [ "$result" != wrong-sha ] || { sha=wrong; result=success; }
+  printf '[{"databaseId":2,"headSha":"%s","status":"completed","conclusion":"%s"}]\n' "$sha" "$result"
+  exit 0 ;;
+esac
+if [ "$2" = view ] && [ "$3" = 2 ]; then
+  echo "jobs-dispatch $3" >> "$dispatch_log"
+  export OMS_TEST_CI_SCOPE="${OMS_TEST_DISPATCH_SCOPE:-full}"
+  OMS_TEST_LAND_EVENTS="$OMS_TEST_LAND_EVENTS.dispatch-view"
+fi
 if [ "$2" = view ]; then
   # A run's jobs: the full selection, an affected-only run, or neither. The
   # full job set also arrives for another SHA, a failed run, with a duplicate
@@ -1388,7 +1416,7 @@ OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
   "$LAND" --repo "$repo" --wait --gate 'echo other gate ran' --ci-wait 0 > "$TMP/other-gate.out" 2>&1 ||
   fail "an explicit gate on an already-pushed commit failed: $(cat "$TMP/other-gate.out")"
 ! grep -q 'already pushed and installed' "$TMP/other-gate.out" || fail "different gate reused prior evidence"
-grep -q 'install needs a full gate' "$TMP/other-gate.out" || fail "a gate without full proof installed"
+grep -q 'install needs successful CI plus full proof' "$TMP/other-gate.out" || fail "a gate without full proof installed"
 git clone -q --bare "$TMP/remote.git" "$TMP/other-remote.git"
 git -C "$repo" remote set-url origin "$TMP/other-remote.git"
 OMS_TEST_CI_RC=4 OMS_INSTALL_RECEIPT="$TMP/install.json" \
@@ -1696,8 +1724,15 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/affected-pass.out" 2>&1 ||
   fail "an affected gate failed to land: $(cat "$TMP/affected-pass.out")"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "an affected gate and affected CI must push without installing"
-grep -q 'install needs a full gate or a full-selection CI run' "$TMP/affected-pass.out" ||
-  fail "the skipped install must name the missing proof"
+grep -q 'install needs a full-selection CI run for this SHA: request it with: gh workflow run test.yml --repo .* --ref main ;' "$TMP/affected-pass.out" ||
+  fail "the skipped install must name the CI route first: $(cat "$TMP/affected-pass.out")"
+affected_msg="$(grep -m1 'install needs' "$TMP/affected-pass.out")"
+case "$affected_msg" in
+  *"request it with: gh workflow run"*"then resume with:"*"--ci-full"*"alternative: a full local gate"*) ;;
+  *) fail "the CI route must come before the local full gate: $affected_msg" ;;
+esac
+[ ! -e "$TMP/events.dispatch" ] || [ "$(grep -c '^workflow ' "$TMP/events.dispatch")" = 0 ] ||
+  fail "land dispatched a workflow without --ci-full"
 land_field() { "$LAND" status --repo "$repo" --json | python3 -c 'import json,sys
 r = json.load(sys.stdin)
 for key in sys.argv[1].split("."): r = r.get(key, {}) if isinstance(r, dict) else {}
@@ -1771,6 +1806,69 @@ OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/instal
   fail "full-gate recovery of a pushed SHA failed: $(cat "$TMP/full-recovery.out")"
 [ "$(cat "$TMP/events")" = "$(printf 'ci\nupdate')" ] || fail "full-gate recovery did not install after CI"
 [ "$(land_field update.authority)" = gate.scope=full ] || fail "install did not record its full-gate proof"
+# Default route to full proof: affected-only push CI, then a full-selection CI
+# run of the SAME SHA requested by dispatch. The capped gate is never proof.
+capped_gate='if [ "$#" = 0 ]; then echo "check: ok"; else echo "check: ok (affected tests; mode=full capped to lint and quick lane; ci-parity)"; fi'
+dispatch_lines() { { grep -c "^$1" "$TMP/events.dispatch" 2>/dev/null || true; } | head -n 1; }
+land_dispatch() {  # land_dispatch OUT [land args...]: the shared env for push CI success + install stub
+  local out="$1"; shift
+  OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+    "$LAND" --repo "$repo" --wait "$@" > "$out" 2>&1
+}
+gate "$capped_gate; # dispatch route"
+rm -f "$TMP/events.dispatched"; : > "$TMP/events"; : > "$TMP/events.dispatch"
+land_dispatch "$TMP/route-none.out" --ci-wait 1 || fail "affected CI without a full run failed: $(cat "$TMP/route-none.out")"
+[ "$(cat "$TMP/events")" = "$(printf 'ci\njobs')" ] || fail "no full run: land installed or re-ran CI: $(cat "$TMP/events")"
+[ "$(dispatch_lines workflow)" = 0 ] || fail "land dispatched a workflow without --ci-full"
+[ "$(land_field update.reason)" = partial-gate ] && [ -z "$(land_field ci.dispatch)" ] ||
+  fail "no-flag land recorded a dispatch or the wrong reason"
+# A full run for another SHA, a cancelled run and an affected-only dispatched run never count.
+for dispatched in wrong-sha cancelled affected; do
+  : > "$TMP/events"
+  case "$dispatched" in
+    affected) set -- OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=affected ;;
+    *) set -- OMS_TEST_DISPATCH_RESULT="$dispatched" ;;
+  esac
+  env "$@" OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \
+    "$LAND" --repo "$repo" --wait --ci-wait 1 > "$TMP/route-$dispatched.out" 2>&1 || true
+  ! grep -q '^update$' "$TMP/events" || fail "a $dispatched dispatched run installed"
+  [ "$(land_field update.authority)" != ci.scope=full ] || fail "a $dispatched dispatched run became proof"
+  [ "$(land_field ci.scope)" != full ] || fail "a $dispatched dispatched run was recorded as full scope"
+done
+: > "$TMP/events"
+OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=full land_dispatch "$TMP/route-full.out" --ci-wait 1 ||
+  fail "a full dispatched run for the same SHA did not install: $(cat "$TMP/route-full.out")"
+[ "$(land_field update.authority)" = ci.scope=full ] && [ "$(land_field ci.scope)" = full ] &&
+  [ "$(land_field ci.scope_run_id)" = 2 ] && [ "$(land_field update.reason)" = installed ] ||
+  fail "the dispatched full run was not recorded as the install proof"
+grep -q '^update$' "$TMP/events" || fail "the dispatched full run did not install"
+[ "$(dispatch_lines workflow)" = 0 ] || fail "resuming a dispatched run dispatched again"
+# --ci-full: a refused dispatch blocks; otherwise it dispatches once, records it,
+# and a rerun waits for that run instead of dispatching again.
+gate "$capped_gate; # ci-full route"
+rm -f "$TMP/events.dispatched"; : > "$TMP/events"; : > "$TMP/events.dispatch"
+if OMS_TEST_DISPATCH_FAIL=1 land_dispatch "$TMP/route-refused.out" --ci-wait 1 --ci-full; then
+  fail "a refused dispatch passed: $(cat "$TMP/route-refused.out")"
+fi
+[ "$(land_field ci.dispatch)" = failed ] || fail "a refused dispatch was not recorded"
+: > "$TMP/events.dispatch"
+land_dispatch "$TMP/route-once.out" --ci-wait 3 --ci-full ||
+  fail "an unfinished dispatched run failed the land: $(cat "$TMP/route-once.out")"
+[ "$(dispatch_lines workflow)" = 1 ] || fail "--ci-full did not dispatch exactly once"
+grep -q -- '--ref main' "$TMP/events.dispatch" || fail "the dispatch did not target the landed branch"
+[ "$(land_field ci.dispatch)" = requested ] && [ -n "$(land_field ci.dispatch_at)" ] || fail "the dispatch was not recorded"
+! grep -q '^update$' "$TMP/events" || fail "an unfinished dispatched run installed"
+land_dispatch "$TMP/route-again.out" --ci-wait 1 --ci-full || fail "rerun after dispatch failed: $(cat "$TMP/route-again.out")"
+[ "$(dispatch_lines workflow)" = 1 ] || fail "a rerun with --ci-full dispatched a second time"
+: > "$TMP/events.dispatched"  # the dispatched run has now appeared
+OMS_TEST_DISPATCH_AFTER=1 OMS_TEST_DISPATCH_RESULT=success OMS_TEST_DISPATCH_SCOPE=full \
+  land_dispatch "$TMP/route-landed.out" --ci-wait 1 --ci-full ||
+  fail "the dispatched run did not install on resume: $(cat "$TMP/route-landed.out")"
+[ "$(land_field update.authority)" = ci.scope=full ] || fail "resume did not record the full CI proof"
+[ "$(dispatch_lines workflow)" = 1 ] || fail "the resumed land dispatched again"
+if "$LAND" --repo "$repo" --wait --ci-full --ci-wait 0 > "$TMP/route-badflags.out" 2>&1; then
+  fail "--ci-full with --ci-wait 0 was accepted"
+fi
 gate 'echo "check: ok (quick local checks; full CI gate required)"'
 : > "$TMP/events"
 OMS_TEST_CI_RESULT=success OMS_TEST_UPDATE_RC=0 OMS_INSTALL_RECEIPT="$TMP/install.json" \

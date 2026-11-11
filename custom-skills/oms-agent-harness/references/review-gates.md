@@ -18,8 +18,9 @@ Other projects use their declared release check, not an inferred full suite.
 For an authorized OMS deployment, finish focused checks and local commits, then
 use `oms land` once. Its default affected gate can push the committed SHA and
 follow CI, but does not install. Installation requires successful CI for that
-SHA plus full proof: CI jobs that executed the full selection, or an explicit
-full local gate. Skipped CI or an affected-only gate does not authorize an
+SHA plus full proof: CI jobs that executed the full selection (default; for an
+affected-only push run request one with `gh workflow run test.yml --ref TARGET`
+or `oms land --ci-full`), or an explicit full local gate (option). Skipped CI or an affected-only gate does not authorize an
 installation refresh. `oms land` owns that sequence; do not precede it with
 another full gate or add a separate verification-cache authority. A direct Git
 push retains the installed hook. `install-hooks.sh --quick` is only appropriate when required

@@ -3154,9 +3154,20 @@ Deployment via `oms land` verifies the exact
 committed tree with CI-parity affected checks against `REMOTE/TARGET` (a full selection
 runs lint and the quick lane locally and the full lanes in CI; explicit `--gate` wins),
 pushes its SHA, waits for CI success, then updates only to that SHA when a full local
-gate or the run's jobs prove the full selection. Failed or skipped CI cannot
-refresh the installation. An affected-only run or one whose scope cannot be read
-does not supply full proof; an existing full local gate can supply that proof.
+the run's jobs prove the full selection (the default proof) or a full local gate does
+(the option). Failed or skipped CI cannot refresh the installation. When the push run
+was affected-only or its scope cannot be read, it supplies no full proof. For an
+affected-only run land finishes `passed`, installs nothing and prints the command that
+requests a full-selection run of the same SHA, `gh workflow run test.yml --repo
+OWNER/REPO --ref TARGET` (`workflow_dispatch` runs the full selection, including the
+macOS lifecycle leg), then the command that resumes the landing. Rerunning it with
+`--wait` waits within `--ci-wait` for that run and installs with `ci.scope=full`;
+`--ci-full` lets land dispatch it once itself, recorded as `ci.dispatch`, and no flag
+means land never dispatches. Only a completed successful dispatched run for exactly
+that SHA on TARGET with full scope counts; another SHA, a cancelled or failed run, or
+unreadable scope does not, and a run that must be repeated is dispatched by hand. A
+full run takes about 40 minutes of CI wall clock (one measured run), so pass a larger
+`--ci-wait` than the 2700 s default if it queues.
 
 A moving update target is rejected by the updater. Local CI-parity hides registry
 provider CLIs and adds operator-tools when tier-routing inputs change; it does not parse

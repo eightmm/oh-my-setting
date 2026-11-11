@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 usage() {
   cat <<'EOF'
 Usage: land.sh [--repo PATH] [--remote NAME] [--target BRANCH] [--gate CMD]
-               [--wait] [--no-update] [--ci-wait SECONDS]
+               [--wait] [--no-update] [--ci-wait SECONDS] [--ci-full]
                [--sibling-wait SECONDS] [--ignore-siblings] [--handoff-receipt-to PATH]
                [--sync-shared PATH]
        land.sh status [--repo PATH] [--json] [--active-exit]
@@ -53,12 +53,23 @@ outside the repo:
           are unchanged since the gate started
   ci      the GitHub run for the pushed commit, polled up to --ci-wait
           seconds (default 2700; 0 skips; gh or public OMS API fallback)
-  update  only after CI success plus full proof for the SHA: a full local
-          gate (gate.scope=full) or a CI run whose jobs show the full
-          selection (ci.scope=full; an affected-only or unreadable run
-          does not count), the matching install checkout's update.sh; its
-          target must still be the verified SHA. update.authority records
-          which proof installed. Skipped CI never updates.
+  update  only after CI success plus full proof for the SHA, the matching
+          install checkout's update.sh; its target must still be the
+          verified SHA. update.authority records which proof installed.
+          Skipped CI never updates. Full proof is, by default, a successful
+          CI run for exactly this SHA on TARGET whose jobs show the full
+          selection (ci.scope=full): the push run when it was full, else a
+          manually dispatched run (test.yml runs the full selection for
+          every dispatch). When the push run was affected-only land
+          finishes passed, installs nothing and prints the command to
+          request that run (gh workflow run test.yml --ref TARGET); then
+          rerun the same land command with --wait to wait for it (within
+          --ci-wait) and install. --ci-full lets land dispatch it once,
+          recorded as ci.dispatch, and wait for it; without the flag land
+          never dispatches. A run for another SHA, an unsuccessful or
+          cancelled run, or unreadable scope never counts. The option is
+          a full local gate (--gate 'bash scripts/check.sh --parallel',
+          gate.scope=full), which needs no CI run.
   sibling live autopilot runs (proposing, proposal-review, driving) in sibling
           worktrees are reported at intake and waited for before push, up to
           --sibling-wait seconds (default 1800; 0 checks once and blocks at
@@ -123,7 +134,7 @@ if [ "${1:-}" = blame-session ]; then
 fi
 
 REPO="$PWD" REMOTE=origin TARGET=main GATE="" GATE_EXPLICIT=0 WAIT=0 UPDATE=1 CI_WAIT=2700
-SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO="" SYNC_TO=""
+SIBLING_WAIT=1800 IGNORE_SIBLINGS=0 HANDOFF_TO="" SYNC_TO="" CI_FULL=0
 MODE=start JSON=0 ACTIVE_EXIT=0 STAMP="" READY_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -147,6 +158,7 @@ while [ "$#" -gt 0 ]; do
     --wait) WAIT=1; shift ;;
     --no-update) UPDATE=0; shift ;;
     --ci-wait) CI_WAIT="$2"; shift 2 ;;
+    --ci-full) CI_FULL=1; shift ;;
     --sibling-wait) SIBLING_WAIT="$2"; shift 2 ;;
     --ignore-siblings) IGNORE_SIBLINGS=1; shift ;;
     --json) JSON=1; shift ;;
@@ -159,6 +171,9 @@ case "$CI_WAIT" in ''|*[!0-9]*) echo "error: --ci-wait must be seconds" >&2; exi
 case "$SIBLING_WAIT" in ''|*[!0-9]*) echo "error: --sibling-wait must be seconds" >&2; exit 2 ;; esac
 # A leading zero would make shell arithmetic read "08" as bad octal after push.
 CI_WAIT=$((10#$CI_WAIT)) SIBLING_WAIT=$((10#$SIBLING_WAIT))
+if [ "$CI_FULL" -eq 1 ] && { [ "$CI_WAIT" -eq 0 ] || [ "$UPDATE" -eq 0 ]; }; then
+  echo "error: --ci-full needs --ci-wait above 0 and an install (no --no-update)" >&2; exit 2
+fi
 REPO="$(git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)" ||
   { echo "error: --repo is not a git checkout: $REPO" >&2; exit 2; }
 REPO="$(oms_strip_cr "$REPO")"
@@ -503,6 +518,82 @@ can_resume_ci_only() {
     git -C "$REPO" merge-base --is-ancestor "$SHA" "$REMOTE/$TARGET"
 }
 
+land_retry_command() {  # the command that resumes this landing from its receipt
+  local retry_args=("$ROOT/scripts/land.sh" --repo "$REPO" --remote "$REMOTE" --target "$TARGET" --gate "$GATE" --wait --ci-wait "$CI_WAIT" --sibling-wait "$SIBLING_WAIT")
+  [ -z "$HANDOFF_TO" ] || retry_args+=(--handoff-receipt-to "$HANDOFF_TO")
+  [ -z "$SYNC_TO" ] || retry_args+=(--sync-shared "$SYNC_TO")
+  [ "$IGNORE_SIBLINGS" -eq 0 ] || retry_args+=(--ignore-siblings)
+  printf '%q ' "${retry_args[@]}"
+}
+
+# Full proof from CI when the push run was affected-only: a manually dispatched
+# test.yml run (always the full selection) for exactly SHA on TARGET. Sets
+# ROUTE_SCOPE=full only for a completed successful run whose scope query says
+# full; otherwise ROUTE_NOTE says why not. Dispatches only with --ci-full, once
+# per receipt, and only while TARGET is still SHA. Returns 1 when it cannot
+# tell (query or dispatch error); that never counts as proof.
+ci_full_route() {
+  local destination slug deadline remaining result rid concl rc=0 tip
+  ROUTE_SCOPE="" ROUTE_NOTE=""
+  [ -f "$REPO/.github/workflows/test.yml" ] || { ROUTE_NOTE="no test.yml workflow"; return 0; }
+  destination="$(git remote get-url --push "$REMOTE")"
+  deadline="$(( $(date +%s) + CI_WAIT ))"
+  while :; do
+    remaining="$(( deadline - $(date +%s) ))"
+    [ "$remaining" -gt 0 ] || remaining=0
+    rc=0
+    result="$(python3 "$ROOT/scripts/lib/ci-query.py" dispatch "$destination" "$SHA" "$remaining" \
+      "$TARGET" test.yml 2>> "$LOG")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      rset ci.full_query_rc="$rc"
+      ROUTE_NOTE="full-run query exit $rc (see $LOG)"
+      return 1
+    fi
+    result="$(oms_strip_cr "$result")"
+    read -r rid concl <<< "$result"
+    [ "$rid" = 0 ] || break
+    if [ "$(receipt_value ci.dispatch)" != requested ]; then
+      [ "$CI_FULL" -eq 1 ] || { ROUTE_NOTE="no dispatched full run for this SHA"; return 0; }
+      tip="$(git ls-remote --exit-code "$destination" "refs/heads/$TARGET" 2>> "$LOG")" || tip=""
+      if [ "${tip%%[[:space:]]*}" != "$SHA" ]; then
+        ROUTE_NOTE="$REMOTE/$TARGET moved past this SHA; a dispatch would not run it"
+        return 0
+      fi
+      slug="$(python3 "$ROOT/scripts/lib/ci-query.py" slug "$destination")"
+      rc=0
+      "${OMS_GH_BIN:-gh}" workflow run test.yml --repo "$slug" --ref "$TARGET" >> "$LOG" 2>&1 || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        rset ci.dispatch=failed ci.dispatch_rc="$rc"
+        ROUTE_NOTE="could not dispatch test.yml (exit $rc)"
+        return 1
+      fi
+      rset ci.dispatch=requested ci.dispatch_at="$(now)" ci.dispatch_ref="$TARGET"
+    fi
+    remaining="$(( deadline - $(date +%s) ))"
+    [ "$remaining" -gt 0 ] || { ROUTE_NOTE="dispatched run has not appeared within --ci-wait"; return 0; }
+    [ "$remaining" -le 5 ] || remaining=5
+    sleep "$remaining"
+  done
+  rset ci.full_run_id="$rid" ci.full_conclusion="$concl"
+  if [ "$concl" != success ]; then
+    ROUTE_NOTE="dispatched run $rid is $concl"
+    return 0
+  fi
+  rc=0
+  result="$(python3 "$ROOT/scripts/lib/ci-query.py" scope "$destination" "$rid" "$SHA" 30 2>> "$LOG")" || rc=$?
+  result="$(oms_strip_cr "$result")"
+  rset ci.full_scope_query_rc="$rc"
+  if [ "$rc" -ne 0 ]; then
+    ROUTE_NOTE="dispatched run $rid has unreadable scope"
+  elif [ "$result" != full ]; then
+    ROUTE_NOTE="dispatched run $rid is not a full selection"
+  else
+    rset ci.scope=full ci.scope_run_id="$rid"
+    ROUTE_SCOPE=full
+  fi
+  return 0
+}
+
 request_stamp() {
   local destination
   destination="$(git -C "$REPO" remote get-url --push "$REMOTE")" || return 1
@@ -787,11 +878,30 @@ run_job() {
         fi
       fi
       rset ci.scope="$ci_scope"
-      [ "$ci_scope" != full ] || authority=ci.scope=full
+      if [ "$ci_scope" = full ]; then
+        authority=ci.scope=full
+      else
+        # Default route to full proof: a dispatched full-selection run of this SHA.
+        rc=0
+        ci_full_route || rc=$?
+        if [ "$rc" -ne 0 ]; then
+          rset update.reason=ci-full-route-failed
+          finish blocked "pushed $SHORT; ci success but affected-only; $ROUTE_NOTE; install needs full proof; retry to resume"
+          return 1
+        fi
+        [ "$ROUTE_SCOPE" != full ] || authority=ci.scope=full
+      fi
     fi
     if [ -z "$authority" ]; then
       rset update.reason=partial-gate
-      finish passed "pushed $SHORT; ci $conclusion; install needs a full gate or a full-selection CI run: oms land --gate 'bash scripts/check.sh --parallel'"
+      local full_cmd="" resume_cmd local_gate="oms land --gate 'bash scripts/check.sh --parallel'"
+      full_cmd="gh workflow run test.yml --repo $(python3 "$ROOT/scripts/lib/ci-query.py" slug "$(git remote get-url --push "$REMOTE")") --ref $TARGET"
+      resume_cmd="$(land_retry_command)"
+      if [ "$conclusion" = success ]; then
+        finish passed "pushed $SHORT; ci $conclusion but affected-only${ROUTE_NOTE:+ ($ROUTE_NOTE)}; install needs a full-selection CI run for this SHA: request it with: $full_cmd ; then resume with: $resume_cmd (or rerun with --ci-full to let land dispatch it once); alternative: a full local gate, $local_gate"
+      else
+        finish passed "pushed $SHORT; ci $conclusion; install needs successful CI plus full proof: a full-selection CI run for this SHA, or a full local gate, $local_gate"
+      fi
       return $?
     fi
     if [ "$conclusion" != success ]; then
@@ -827,12 +937,8 @@ run_job() {
     esac
     rset update.rc="$rc" update.reason="$update_reason" update.expected_sha="$SHA" update.root="$install" update.authority="$authority"
     if [ "$rc" -eq 76 ]; then
-      local retry_args=("$ROOT/scripts/land.sh" --repo "$REPO" --remote "$REMOTE" --target "$TARGET" --gate "$GATE" --wait --ci-wait "$CI_WAIT" --sibling-wait "$SIBLING_WAIT")
-      [ -z "$HANDOFF_TO" ] || retry_args+=(--handoff-receipt-to "$HANDOFF_TO")
-      [ -z "$SYNC_TO" ] || retry_args+=(--sync-shared "$SYNC_TO")
-      [ "$IGNORE_SIBLINGS" -eq 0 ] || retry_args+=(--ignore-siblings)
       local retry_command
-      retry_command="$(printf '%q ' "${retry_args[@]}")"
+      retry_command="$(land_retry_command)"
       finish failed "pushed; CI passed; installation deferred (live workers); retry: $retry_command"
       return 1
     fi
@@ -1066,6 +1172,7 @@ job=("$ROOT/scripts/land.sh" --run-job "$STAMP" --repo "$REPO" --remote "$REMOTE
 [ "$UPDATE" -eq 1 ] || job+=(--no-update)
 [ "$WAIT" -eq 0 ] || job+=(--wait)
 [ "$IGNORE_SIBLINGS" -eq 0 ] || job+=(--ignore-siblings)
+[ "$CI_FULL" -eq 0 ] || job+=(--ci-full)
 if [ "$WAIT" -eq 1 ]; then
   rc=0
   bash "${job[@]}" || rc=$?
