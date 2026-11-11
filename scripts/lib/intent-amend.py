@@ -224,42 +224,44 @@ def publish(project, staged, intent_dir, ident, expected, delta_json):
         "sections": changes.get("sections", []), "added": changes.get("added", []),
         "modified": changes.get("modified", []), "removed": changes.get("removed", []),
     }
+    data = (json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     try:
         descriptor = os.open(os.path.join(intent_dir, "amendments.jsonl"),
                              os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                die("receipt is not a regular file")
-            data = (json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
-            original_size = os.fstat(descriptor).st_size
-            try:
-                offset = 0
-                while offset < len(data):
-                    offset += os.write(descriptor, data[offset:])
-                os.fsync(descriptor)
-            except OSError:
-                os.ftruncate(descriptor, original_size)
-                raise
-        finally:
-            os.close(descriptor)
     except OSError as exc:
         die("cannot write the amendment receipt: %s" % (exc.strerror or exc))
     try:
-        os.chmod(staged, stat.S_IMODE(os.stat(project).st_mode))
-        os.replace(staged, project)
-    except OSError as exc:
-        # Withdraw the receipt so it never records an amendment PROJECT.md does not hold.
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            die("receipt is not a regular file")
+        original_size = os.fstat(descriptor).st_size
         try:
-            descriptor = os.open(os.path.join(intent_dir, "amendments.jsonl"),
-                                 os.O_WRONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+            mode = stat.S_IMODE(os.stat(project).st_mode)
+            os.chmod(staged, mode)
+            os.replace(staged, project)
+        except OSError as exc:
+            die("cannot replace PROJECT.md: %s" % (exc.strerror or exc))
+        # The receipt is appended only after PROJECT.md holds the amendment, so
+        # an interrupted run never leaves a receipt for a replacement that did
+        # not happen; a failed append puts the previous contract back.
+        try:
+            offset = 0
+            while offset < len(data):
+                offset += os.write(descriptor, data[offset:])
+            os.fsync(descriptor)
+        except OSError as exc:
+            restored = "PROJECT.md restored"
             try:
-                if stat.S_ISREG(os.fstat(descriptor).st_mode):
-                    os.ftruncate(descriptor, original_size)
-            finally:
-                os.close(descriptor)
-        except OSError:
-            pass
-        die("cannot replace PROJECT.md: %s" % (exc.strerror or exc))
+                os.ftruncate(descriptor, original_size)
+            except OSError:
+                pass
+            try:
+                write_new(staged, current, mode)
+                os.replace(staged, project)
+            except OSError:
+                restored = "PROJECT.md holds the amendment without a receipt; previous contract in archive/%s.md" % previous
+            die("cannot write the amendment receipt (%s): %s" % (restored, exc.strerror or exc))
+    finally:
+        os.close(descriptor)
     print(previous)
 
 

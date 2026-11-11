@@ -5075,7 +5075,7 @@ args = types.SimpleNamespace(artifact_dir=str(directory), id=ident, action="veri
 history = [{"state": "fixed", "ts": "2026-01-01T00:00:00Z", "runs": [entry["run"]]}]
 receipt = {"kind": "review-verify", "exit": 0, "artifact_id": "probe", "ts": history[0]["ts"]}
 resolved = (ident, dict(entry, runs=[(entry["ts"], entry["run"])]), history)
-with mock.patch.object(m, "resolve", return_value=resolved), mock.patch.object(m, "index_rows", return_value=[receipt]), mock.patch.object(m, "record") as record:
+with mock.patch.object(m, "resolve", return_value=resolved), mock.patch.object(m, "index_rows", return_value=[receipt]), mock.patch.object(m, "verify_binding", return_value="a" * 40), mock.patch.object(m, "record") as record:
     for stamp in ("", "malformed", "2025-12-31T23:59:59Z", history[0]["ts"]):
         receipt["ts"] = stamp
         try: m.transition(args)
@@ -23807,7 +23807,7 @@ case "$jid" in
   3008) echo "3008|PREEMPTED|0:0|00:05:00|c1|2026-01-02T04:00:00|2026-01-02T04:01:00|2026-01-02T04:06:00|cpu=8|gpu01||||train|0"
     [ ! -e "$0.done" ] ||
       echo "3008|COMPLETED|0:0|00:07:00|c1|2026-01-02T04:06:00|2026-01-02T04:10:00|2026-01-02T04:17:00|cpu=8|gpu03||||train|1" ;;
-  3010) printf '%s\n' "3010|COMPLETED|0:0|00:01:00|c1|2026-01-01T00:00:00||||||||old|0" "3010|FAILED|1:0|00:01:00|c1|2026-01-02T00:00:00||||||||new|0" ;;
+  3011) printf '%s\n' "3011|COMPLETED|0:0|00:01:00|c1|2026-01-01T00:00:00||||||||old|0" "3011|FAILED|1:0|00:01:00|c1|2026-01-02T00:00:00||||||||new|0" ;;
   3009) echo "3009|NODE_FAIL|0:0|00:00:40|c1|2026-01-02T05:00:00|2026-01-02T05:01:00|Unknown||None assigned" ;;
   # 3010 carries the limit and CPU fields too: two GPUs for 30 minutes of a
   # one-hour limit, 16 CPUs that did four CPU-hours of work.
@@ -23928,9 +23928,9 @@ test_run_reconcile_records_terminal_jobs() {
   assert_file_contains "$d/list.out" "job=3008  COMPLETED  exit=0:0  00:07:00  on c1  requeues=1"
   assert_file_contains "$d/list.out" "job=3007  OUT_OF_MEMORY  exit=0:125  00:00:30  on c1  tasks=COMPLETED:1,OUT_OF_MEMORY:1"
 
-  printf '%s\n' '{"schema": 1, "job_id": "3010", "state": "COMPLETED", "submit": "2026-01-01T00:00:00"}' >> "$rec"
-  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3010 >"$d/reused.out" 2>&1 ) || fail "reused id apply failed"
-  assert_file_contains "$rec" '"job_id": "3010", "state": "FAILED"'
+  printf '%s\n' '{"schema": 1, "job_id": "3011", "state": "COMPLETED", "submit": "2026-01-01T00:00:00"}' >> "$rec"
+  ( cd "$d" && env "${env_pfx[@]}" "$SH" apply --job 3011 >"$d/reused.out" 2>&1 ) || fail "reused id apply failed"
+  assert_file_contains "$rec" '"job_id": "3011", "state": "FAILED"'
   assert_file_contains "$rec" '"submit": "2026-01-02T00:00:00"'
 
   # NODE_FAIL that left the queue is an ending; sacct's "Unknown" and "None

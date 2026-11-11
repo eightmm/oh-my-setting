@@ -393,6 +393,8 @@ if __name__ == "__main__":
     try:
         if len(sys.argv) == 5 and sys.argv[1] == "--evidence-check":
             answer, _ = artifact_sections(Path(sys.argv[2]))
+            final = final_attempt_output(Path(sys.argv[2]))
+            answer = answer if final is None else final
             report = evidence_check(answer, Path(sys.argv[3]), sys.argv[4])
             if report:
                 print("\n" + report, end="")

@@ -360,8 +360,9 @@ if [ "$MODE" = "table" ]; then
   case "$FORMAT" in md|tsv|tex) ;; *) fail "--format must be md, tsv or tex" ;; esac
   LEDGER="${LEDGER:-$STATE_ROOT/docs/EXPERIMENTS.jsonl}"
   [ -f "$LEDGER" ] || fail "no ledger at $LEDGER"
+  CONTRACT_ROOT="$(oms_repo_root "$(dirname "$LEDGER")")"
   OMS_METRIC="$METRIC" OMS_DIRECTION="$DIRECTION" OMS_ALL="$INCLUDE_ALL" OMS_MIXED="$MIXED" \
-    OMS_FORMAT="$FORMAT" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$STATE_ROOT" \
+    OMS_FORMAT="$FORMAT" OMS_RL_LIB="$ROOT_LIB" OMS_RL_ROOT="$CONTRACT_ROOT" \
     python3 -I -c '
 import os, sys
 sys.path.insert(0, os.environ["OMS_RL_LIB"])
