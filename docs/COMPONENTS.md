@@ -1987,6 +1987,21 @@ finding that a later run reports again reads `open`. Every status is a record
 of what was said, never approval or verification evidence, and a refused
 action exits 2.
 
+Verify receipts carry two advisory observations beside the exit code
+(`scripts/lib/verify_observe.py`, no model, no network). Rows written with a
+`verify_exit` (the gate's `review-verify`, `patch-admit`, delegate) gain an
+optional `verify_env`: OS and machine, the version of `python3`, `bash`, `git`
+and of the tool behind each runner the output named, and, when lock or
+requirements files sit at the repo root, their names and one digest, never
+paths, users or contents. `oms agent-task verify` writes the same as an `env:`
+line in its note. When a recognised runner summary (pytest, unittest, go test,
+cargo test, jest, vitest, this repo's smoke runners) says zero tests ran under
+exit 0, the receipt names the runner in `verify_zero_tests` (the gate and
+admission artifacts) or a `tests:` note line (the task), and the gate and task
+print a `warning:` line. Output no recogniser understands makes no claim. A
+warning is not a failure and a clean result is no stronger than the receipt was:
+the exit code stays the only verdict.
+
 Dispositions end a review loop: `fix` is accept, `dismiss` is reject (the
 finding is wrong) and `findings out-of-scope ID --reason TEXT` records a
 finding that is right but not this change (owner only, like `dismiss`).

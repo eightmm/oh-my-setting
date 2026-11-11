@@ -2307,6 +2307,21 @@ if kind == "delegate":
                 row[field] = int(value)
 if verify_exit:
     row["verify_exit"] = int(verify_exit)
+    # Advisory observations beside the exit code; the verdict stays the exit.
+    # An unrecognised output adds no tests claim, and any failure here only
+    # drops the optional fields.
+    try:
+        observe = runpy.run_path(os.path.join(os.environ["OMS_INDEX_TRACE_LIB"], "verify_observe.py"))
+        found = {"runners": [], "zero": []}
+        if artifact_raw and os.path.isfile(artifact_raw):
+            output = observe["verify_output"](observe["read_text"](artifact_raw))
+            if output is not None:
+                found = observe["scan"](output)
+        if row["verify_exit"] == 0 and found["zero"]:
+            row["verify_zero_tests"] = found["zero"]
+        row["verify_env"] = observe["fingerprint"](repo, found["runners"])
+    except Exception:
+        pass
 if task_goal:
     row["task_goal"] = task_goal
 attach_trace_context(row)

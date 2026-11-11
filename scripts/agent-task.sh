@@ -644,6 +644,9 @@ print(json.dumps({
     set -e
     verify_finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     verify_finished_epoch="$(date +%s)"
+    # Advisory observations (environment, runner that reported zero tests);
+    # a failure here only drops the extra note lines.
+    verify_observed="$(python3 -I "$ROOT/scripts/lib/verify_observe.py" lines "$verify_log" --repo "$REPO" 2>/dev/null || true)"
     note_file="$(mktemp "$OMS_TASK_TMPDIR/note.XXXXXX")" || exit 1
     {
       printf 'command: %s\n' "$verify_cmd"
@@ -651,6 +654,7 @@ print(json.dumps({
       printf 'started_at: %s\n' "$verify_started"
       printf 'finished_at: %s\n' "$verify_finished"
       printf 'duration_seconds: %s\n' "$((verify_finished_epoch - verify_started_epoch))"
+      [ -z "$verify_observed" ] || printf '%s\n' "$verify_observed"
     } > "$note_file"
     if ! agent_task_verify_finalize "$TASK_FILE" "$verify_task_id" "$AGENT" \
       "$note_file" "" "" active; then
@@ -705,6 +709,7 @@ print(json.dumps({
       printf 'started_at: %s\n' "$verify_started"
       printf 'finished_at: %s\n' "$verify_finished"
       printf 'duration_seconds: %s\n' "$((verify_finished_epoch - verify_started_epoch))"
+      [ -z "$verify_observed" ] || printf '%s\n' "$verify_observed"
     } > "$verified_note"
     if ! agent_task_verify_finalize "$TASK_FILE" "$verify_task_id" "$AGENT" \
       "$verified_note" \
@@ -718,6 +723,9 @@ print(json.dumps({
     rm -f "$verified_note"
     work_journal_observe "$REPO" agent-task "$TASK_FILE" --operation verify
     echo "task: verified $TASK_FILE"
+    verify_zero="$(printf '%s\n' "$verify_observed" | sed -n 's/^tests: \(.*\) reported no tests run$/\1/p')"
+    [ -z "$verify_zero" ] ||
+      echo "task: warning: exit 0 but $verify_zero reported no tests run (advisory; the verify status is unchanged)"
     ;;
   rotate)
     ensure_tmpdir
