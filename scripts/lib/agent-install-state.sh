@@ -302,6 +302,8 @@ oms_ops_check_agy_loaded_skills() {
   local helper
   local out_file
   local rc
+  local received
+  local saved_traps
   local parsed
   local checked=0
   local missing=0
@@ -330,19 +332,26 @@ oms_ops_check_agy_loaded_skills() {
   # caller's terminal from a background process group, so a terminal access
   # stopped it (state T) and a child holding the $(...) pipe kept the doctor
   # waiting. run-bounded.py gives it its own session, forwards an interrupt to
-  # that group and kills it at the deadline; output goes to a file.
+  # that group and kills it at the deadline; output goes to a file. A signal
+  # this shell itself receives meanwhile is replayed after cleanup, so ^C stops
+  # the doctor, while agy's own exit status, whatever it is, only skips.
   printf 'checking: agy /skills (up to 20s)\n'
   helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/run-bounded.py"
   out_file="$(mktemp "${TMPDIR:-/tmp}/oms-agy-skills.XXXXXX")" ||
     { printf 'skip: no temporary file for agy /skills; loaded-skill check skipped\n\n'; return 0; }
   rc=0
+  received=""
+  saved_traps="$(trap -p INT TERM HUP)"
+  trap 'received=INT' INT
+  trap 'received=TERM' TERM
+  trap 'received=HUP' HUP
   python3 "$helper" 20s 2s agy-skills agy -p "/skills" --output-format json \
     </dev/null >"$out_file" 2>/dev/null || rc=$?
+  trap - INT TERM HUP
+  eval "$saved_traps"
   agy_out="$(cat "$out_file")"
   rm -f "$out_file"
-  # An interrupt stopped the probe's group; stop this doctor the same way
-  # instead of reporting a skip and carrying on.
-  case "$rc" in 129|130|143) kill "-$((rc - 128))" "$$" ;; esac
+  [ -z "$received" ] || kill -s "$received" "$$"
   [ "$rc" -eq 0 ] ||
     { printf 'skip: agy /skills did not finish cleanly; loaded-skill check skipped\n\n'; return 0; }
 

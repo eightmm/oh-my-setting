@@ -19999,26 +19999,34 @@ PY
 
   # A child agy leaves behind still holds its output: the check must not wait
   # for it (it used to, through the $(...) pipe).
-  printf '#!/usr/bin/env bash\nsleep 60 &\ncat "%s"\n' "$home_dir/loaded.json" > "$stub_dir/agy"
+  printf '#!/usr/bin/env bash\nsleep 60 &\necho "$!" > "%s"\ncat "%s"\n' \
+    "$home_dir/child.pid" "$home_dir/loaded.json" > "$stub_dir/agy"
   local started=$SECONDS
   PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/lingering" 2>&1 ||
     fail "a lingering agy child must not fail the check: $(cat "$home_dir/lingering")"
+  kill "$(cat "$home_dir/child.pid")" 2>/dev/null || true
   [ $((SECONDS - started)) -lt 30 ] || fail "skill-doctor waited for a lingering agy child"
   assert_file_contains "$home_dir/lingering" "ok: agy loaded all"
 
-  # An interrupt during the probe stops the doctor and the probe's own session.
+  # agy's own interrupt-like status is not the doctor's interrupt: it skips.
+  printf '#!/usr/bin/env bash\nexit 130\n' > "$stub_dir/agy"
+  PATH="$fx_path" HOME="$home_dir" "$ROOT/scripts/skill-doctor.sh" >"$home_dir/agy130" 2>&1 ||
+    fail "agy exiting 130 must skip, not stop the doctor: $(cat "$home_dir/agy130")"
+  assert_file_contains "$home_dir/agy130" "skip: agy /skills did not finish cleanly"
+
+  # ^C during the probe stops the doctor and the probe's own session. The
+  # doctor runs in its own process group, as a terminal's foreground job does,
+  # with SIGINT restored (a background job starts with it ignored).
   printf '#!/usr/bin/env bash\necho "$$" > "%s"\nexec sleep 60\n' "$home_dir/agy.pid" > "$stub_dir/agy"
   rm -f "$home_dir/agy.pid"
-  # A background job starts with SIGINT ignored, as a terminal's foreground
-  # job does not; restore the default so the interrupt can stop the doctor.
   PATH="$fx_path" HOME="$home_dir" python3 -c 'import os, signal, sys
+os.setpgrp()
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 os.execv(sys.argv[1], sys.argv[1:])' "$ROOT/scripts/skill-doctor.sh" >"$home_dir/interrupted" 2>&1 &
   local doctor_pid=$! waited=0
   while [ ! -s "$home_dir/agy.pid" ] && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
   [ -s "$home_dir/agy.pid" ] || fail "the stub agy never started"
-  # The terminal's ^C reaches the probe runner, the stub agy's parent.
-  kill -INT "$(ps -o ppid= -p "$(cat "$home_dir/agy.pid")" | tr -d ' ')" || fail "no probe to interrupt"
+  kill -INT -- "-$doctor_pid" || fail "no doctor to interrupt"
   wait "$doctor_pid" && fail "an interrupted skill-doctor must not finish as a pass"
   waited=0
   while kill -0 "$(cat "$home_dir/agy.pid")" 2>/dev/null && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
