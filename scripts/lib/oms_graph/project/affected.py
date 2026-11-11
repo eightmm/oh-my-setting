@@ -14,6 +14,7 @@ from oms_runtime.common import run_output
 from .blast import DEFAULT_RELATIONS, blast_radius
 from .parsers import parser_for
 from .query import Graph
+from .suite_cases import SELECTABLE_SUITES, case_rows as suite_case_rows, changed_suite_cases
 
 
 DEFAULT_BOUNDARIES = (
@@ -355,6 +356,29 @@ def _case_containment_seeds(
     return seeds
 
 
+def _unindexed_suites(index: Graph, paths: Sequence[str], changes: Sequence[Mapping[str, str]],
+                      test_hunks: Optional[Mapping[str, Sequence[Mapping[str, Any]]]],
+                      repo: Optional[Path], base: str, head: str,
+                      runnable_patterns: Sequence[str]) -> Dict[str, Optional[List[str]]]:
+    """Modified runnable tests with no graph node (too large to index): path -> case names or None (whole file)."""
+    if repo is None or not base:
+        return {}
+    indexed = {str(node.get("path", "")) for node in index.nodes.values()}
+    modified = {str(row.get("path", "")).replace("\\", "/").lstrip("/")
+                for row in changes if str(row.get("status", ""))[:1] == "M"}
+    found: Dict[str, Optional[List[str]]] = {}
+    for path in paths:
+        if path in indexed or path not in modified or not _runnable_test(path, runnable_patterns):
+            continue
+        names = None
+        if path in SELECTABLE_SUITES and (test_hunks or {}).get(path):
+            old_text, new_text = _revision_text(repo, base, path), _revision_text(repo, head, path)
+            if old_text is not None and new_text is not None:
+                names = changed_suite_cases(old_text, new_text, test_hunks[path])
+        found[path] = names
+    return found
+
+
 def affected_plan(
     graph: Any,
     paths: Sequence[str],
@@ -374,6 +398,9 @@ def affected_plan(
         raise GraphError("affected depth must be zero or greater")
     index = graph if isinstance(graph, Graph) else Graph(graph)
     normalized = sorted(set(str(path).replace("\\", "/").lstrip("/") for path in paths if path))
+    suite_tests = _unindexed_suites(index, normalized, changes, test_hunks, repo, base, head,
+                                    runnable_patterns)
+    normalized = [path for path in normalized if path not in suite_tests]
     documents = [path for path in normalized
                  if _documentation_path(path) and not _boundary(path, boundary_patterns)]
     narrow_cases: Dict[str, List[Dict[str, str]]] = {}
@@ -394,7 +421,9 @@ def affected_plan(
                 if seeds is not None:
                     narrow_cases[path] = cases
                     narrow_seeds[path] = seeds
-    seed_paths = [path for path in normalized if path not in narrow_cases]
+    # Prose is checked by the documentation reference checks every plan runs;
+    # tests that merely mention a document must not widen a code selection.
+    seed_paths = [path for path in normalized if path not in narrow_cases and path not in documents]
     containment_seeds = set().union(*narrow_seeds.values()) if narrow_seeds else set()
     runner_invocations = {
         (edge["source"], edge["target"])
@@ -407,8 +436,9 @@ def affected_plan(
     # a dependency from each test to every other test in the suite. Apply the
     # cut only when all changed paths are tests directly invoked by a runner;
     # product or shared-helper seeds keep the complete reverse traversal.
-    runner_test_seeds = bool(normalized) and all(
-        path in runner_test_paths for path in normalized
+    code_paths = [path for path in normalized if path not in documents]
+    runner_test_seeds = bool(code_paths) and all(
+        path in runner_test_paths for path in code_paths
     )
     blast_index = index
     if runner_test_seeds:
@@ -490,6 +520,9 @@ def affected_plan(
         covered_paths = {index.nodes[ident].get("path") for ident in covered}
         reasons.extend("no-tests:%s" % path for path in normalized
                        if path not in documents and path not in covered_paths and path not in narrow_cases)
+    tests = sorted(set(tests) | {path for path, names in suite_tests.items() if names is None or names})
+    test_cases = test_cases + [row for path, names in suite_tests.items()
+                               for row in suite_case_rows(path, names or ())]
     return {
         "schema": 1,
         "mode": "full" if reasons else "affected",
@@ -498,6 +531,7 @@ def affected_plan(
         "documentation_paths": documents,
         "tests": tests,
         "test_cases": test_cases,
+        "suite_paths": sorted(suite_tests),
         "unsupported_test_count": len(result["tests"]) - len(tests),
         "confidence_counts": dict(sorted(confidence_counts.items())),
         "ignored_confidence_counts": dict(sorted(ignored_confidence_counts.items())),

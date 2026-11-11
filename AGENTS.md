@@ -27,9 +27,14 @@
 - Keep install, update, repair, and uninstall ownership transitions reversible.
 - During development, run affected checks; do not run a full gate for every
   edit or local commit. For committed ranges use `scripts/check.sh --affected`
-  with `--changed-from BASE --changed-to HEAD`: ordinary docs use reference
-  checks; positive graph evidence selects tests; critical/uncertain changes
-  use full coverage. Skill/template/role prose uses its bounded contract
+  with `--changed-from BASE --changed-to HEAD`: docs use reference checks
+  only, alone or beside code; a test-only change runs only its tests (a
+  smoke file, one operator section, the changed `test_*` functions of
+  `tests/scripts-smoke.sh`, or that file whole when a helper changed);
+  positive graph evidence selects tests for source; critical/uncertain changes
+  (`scripts/lib/critical-paths.sh`: lifecycle, hooks/guards, scrubber,
+  permission policy, selector, workflows) use full coverage, and
+  `OMS_AFFECTED_FULL=1` forces it. Skill/template/role prose uses its bounded contract
   suite (role edits add the role-injection invariant); executable templates and permission policy stay broad.
 - Deploy/install changed OMS code with `oms land`: it checks the committed HEAD
   and pushes only while HEAD and the tracked tree remain unchanged, without a
