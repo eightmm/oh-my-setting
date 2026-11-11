@@ -388,8 +388,13 @@ def _worker_owns(repo, worker, _rooms=None):
 def _diffstat(repo, row):
     """Changed files of a recorded patch, read only while its digest still matches."""
     data = verified_patch(repo, row)
+    return _diffstat_data(data)
+
+
+def _diffstat_data(data, limit=20):
+    """Summarize already verified bytes; the file picker retains full path spellings."""
     paths = _patch_paths(data)
-    files = {path: [clean(path, 160), 0, 0] for path in paths}
+    files = {path: [path if limit is None else clean(path, 160), 0, 0] for path in paths}
     current, header, remaining = None, True, 0
     lines = data.decode('utf-8', 'surrogateescape').split('\n')
     if lines[-1] == '':
@@ -417,7 +422,7 @@ def _diffstat(repo, row):
                 files[current][2] += 1
             remaining -= 2 if line.startswith(' ') else 1 if line.startswith(('+', '-')) else 0
             header = remaining == 0
-    return {'files': list(files.values())[:20], 'count': len(files),
+    return {'files': list(files.values())[:limit] if limit is not None else list(files.values()), 'count': len(files),
             'added': sum(f[1] for f in files.values()),
             'removed': sum(f[2] for f in files.values())}
 

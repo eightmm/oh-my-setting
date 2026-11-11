@@ -23,7 +23,7 @@ BOARD = "OMS_PANEL_READER_BOARD"  # set only in a reader's command; its --result
 PANE = re.compile(r"%[0-9]+\Z")
 SHARE, MIN_ROWS, MIN_CHAT = 62, 8, 5
 VIEWS = ("Summary", "Raw", "Events", "Diff", "Run info")
-READER_VIEWS = VIEWS + ("Transcript",)
+READER_VIEWS = VIEWS + ("Files", "Transcript")
 PATCH_LIMIT = 65536
 EVENT_TAIL_BYTES = 1024 * 1024
 SGR = re.compile(r"\x1b\[[0-9;]*m")
@@ -113,7 +113,7 @@ def cut_wrapped(wrap, text, width, limit):
 
 
 def render_view(view, report, call, events=(), patch=None, width=100, timeline_truncated=False,
-                patch_error=False, heading=None, color=None, transcript=()):
+                patch_error=False, heading=None, color=None, transcript=(), files=None, files_error=None):
     """Render one bounded, read-only view for a recorded call."""
     from dashboard_projection import display_width
     from panel_view import (call_identity, clipped, color_count, hanging_wrap, light_theme, paint, role_style, status_tag,
@@ -145,6 +145,13 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
             "dim")
     chrome = [tabs, title, ink(state, tone)]
     lines = []
+    if view == "Files" and files is not None:
+        lines = [clipped("  " + item["text"], max(1, width)) for item in files]
+        if files_error:
+            lines.append(ink(clipped("Files unavailable: " + clean(str(files_error), 160), width), "dim"))
+        if not lines:
+            lines.append(ink("No declared or changed files", "dim"))
+        return "\n".join(chrome + lines)
     if view == "Transcript":
         for line in transcript or ["transcript not captured"]:
             lines.extend(_result_structured(line, max(8, width)))
@@ -326,16 +333,24 @@ def render_view(view, report, call, events=(), patch=None, width=100, timeline_t
         lines.append("[✗ unavailable] patch unreadable (digest mismatch / read error)" if patch_error else "No patch recorded")
         return "\n".join(chrome + lines)
     content = patch[:PATCH_LIMIT].decode("utf-8", "replace")
+    in_hunk = False
     for line in content.splitlines():
-        line = clipped(line, max(8, width))
-        if line.startswith(("diff --git ", "--- ", "+++ ", "@@ ")):
-            lines.append(ink(line, "metadata", bold=True))
+        if line.startswith("diff --git "):
+            in_hunk = False
+            style, bold = "diff_header", True
+        elif not in_hunk and line.startswith(("--- ", "+++ ")):
+            style, bold = "diff_header", True
+        elif line.startswith("@@ "):
+            in_hunk = True
+            style, bold = "diff_hunk", False
         elif line.startswith("+"):
-            lines.append(ink(line, "good"))
+            style, bold = "diff_add", False
         elif line.startswith("-"):
-            lines.append(ink(line, "bad"))
+            style, bold = "diff_remove", False
         else:
-            lines.append(line)
+            style, bold = None, False
+        line = clipped(line, max(8, width))
+        lines.append(ink(line, style, bold=bold) if style else line)
     if len(patch) > PATCH_LIMIT:
         lines.append("[patch capped at %d bytes]" % PATCH_LIMIT)
     return "\n".join(chrome + lines)
@@ -467,6 +482,8 @@ def page(render, board, on_refresh=None):
     updated, notice, query, matches, full_lines, searching = None, "", None, [], None, False
     artifact, source_time, zoomed, trusted_style = None, None, False, False
     laid_out, previous = None, []
+    files_context, selected_file, opened_file = None, None, None
+    file_command = None
 
     def plain(value):
         return re.sub(r"\033\[[0-9;]*m", "", value)
@@ -477,7 +494,7 @@ def page(render, board, on_refresh=None):
     def find_matches():
         return [i for i, line in enumerate(lines) if query and query.casefold() in plain(line).casefold()]
 
-    def fetch(width, requested_view):
+    def fetch(width, requested_view, requested_file=None):
         # One read at a time off the input thread: a slow result query never blocks q/Esc or scrolling.
         try:
             if on_refresh is not None:
@@ -486,12 +503,16 @@ def page(render, board, on_refresh=None):
                 value = render(width, requested_view)
             except TypeError:
                 value = render(width)
+            next_files = getattr(value, "files", None)
+            if requested_view == "Files" and requested_file and next_files:
+                value = next_files["render"](requested_file, width)
             read["lines"] = (width, requested_view, value.splitlines(), None,
                              getattr(value, "artifact", None), getattr(value, "updated_at", None),
-                             getattr(value, "trusted_style", False) is True)
+                             getattr(value, "trusted_style", False) is True,
+                             requested_file, next_files)
         except Exception as error:  # the pane stays open to say why instead of vanishing
             read["lines"] = (width, requested_view, ["[✗ unavailable] " + clean(str(error), 200)], True,
-                             None, None, False)
+                             None, None, False, requested_file, None)
 
     try:
         with TerminalInput(extra_keys=tuple("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789[]/.-_")) as inputs:
@@ -501,13 +522,13 @@ def page(render, board, on_refresh=None):
                 if not running and (shown != size[0] or time.monotonic() >= refresh):
                     if shown == size[0] and updated is not None:
                         notice = "Updating…"
-                    read["thread"] = threading.Thread(target=fetch, args=(size[0], view), daemon=True)
+                    read["thread"] = threading.Thread(target=fetch, args=(size[0], view, opened_file), daemon=True)
                     read["thread"].start()
                     read["thread"].join(.2)
                     shown, refresh = size[0], time.monotonic() + 2
                 if "lines" in read:
-                    width, fetched_view, content, error, next_artifact, next_time, next_style = read.pop("lines")
-                    if width == size[0] and fetched_view == view:
+                    width, fetched_view, content, error, next_artifact, next_time, next_style, fetched_file, next_files = read.pop("lines")
+                    if width == size[0] and fetched_view == view and fetched_file == opened_file:
                         if error and updated is not None:
                             notice = content[0] + " · showing earlier content"
                         else:
@@ -523,6 +544,11 @@ def page(render, board, on_refresh=None):
                                 state = content[2] if len(content) > 2 else "[⟳ starting]"
                                 content = content[3:]
                             lines, notice, updated, full_lines = content or ["No result recorded yet"], "", time.monotonic(), None
+                            if next_files is not None:
+                                files_context = next_files
+                                paths = [item["path"] for item in next_files["rows"] if item["path"]]
+                                if selected_file not in paths:
+                                    selected_file = next(iter(paths), None)
                             if next_artifact != artifact and artifact is not None:
                                 offset = 0
                             elif anchor and next_artifact == artifact:
@@ -535,15 +561,25 @@ def page(render, board, on_refresh=None):
                             artifact, source_time, trusted_style = next_artifact, next_time, next_style
                             matches = find_matches()
                         drawn = None
-                    elif fetched_view != view:
+                    elif fetched_view != view or fetched_file != opened_file:
                         shown = None
                 compact = size[1] < 8
                 height = max(1, size[1] - (1 if compact else 6))
                 body_height = max(0, height - (1 if notice else 0))
-                offset = max(0, min(offset, len(lines) - max(1, body_height)))
-                if drawn != (offset, size, len(lines), notice, view, query):
+                display_lines = lines
+                if file_command:
+                    from panel_view import wrapped
+                    display_lines = wrapped(file_command, max(1, size[0]), 100000, max_chars=len(file_command))
+                offset = max(0, min(offset, len(display_lines) - max(1, body_height)))
+                if drawn != (offset, size, len(display_lines), notice, view, query, file_command):
                     from panel_view import clipped
-                    body = ([clipped(notice, size[0])] if notice else []) + lines[offset:offset + body_height]
+                    body = display_lines[offset:offset + body_height]
+                    if view == "Files" and not opened_file and not file_command and selected_file is not None and files_context:
+                        rows = files_context["rows"]
+                        body = [("▸ " + line[2:] if offset + index < len(rows) and
+                                 rows[offset + index]["path"] == selected_file else line)
+                                for index, line in enumerate(body)]
+                    body = ([clipped(notice, size[0])] if notice else []) + body
                     body += [""] * (height - len(body))
                     seconds = None
                     if source_time:
@@ -555,7 +591,7 @@ def page(render, board, on_refresh=None):
                     age = ("unknown" if seconds is None else "<1m" if seconds < 60 else
                            "%dm" % (int(seconds // 60)) if seconds < 3600 else
                            "%dh" % (int(seconds // 3600)) if seconds < 86400 else "%dd" % (int(seconds // 86400)))
-                    count = position_label(offset, body_height, len(lines))
+                    count = position_label(offset, body_height, len(display_lines))
                     age_text = "updated " + age
                     footer = count + " " * max(2, size[0] - len(count) - len(age_text)) + age_text
                     if compact:
@@ -564,11 +600,12 @@ def page(render, board, on_refresh=None):
                         frame = [title, state, tabs, ""] + body + [footer]
                         # Keep a single bottom region; the key hint is part of it.
                         from panel_keymap import reader_hint
-                        frame.append(reader_hint(size[0], size[0] < 120 or zoomed, size[0] >= 120))
+                        frame.append(reader_hint(size[0], size[0] < 120 or zoomed, size[0] >= 120,
+                                                 files=view == "Files", file_diff=bool(opened_file or file_command)))
                     fit_line = styled_clip if trusted_style else clipped
                     sys.stdout.write("\033[H\033[2J" + "\n".join(fit_line(line, size[0]) for line in frame[:size[1]]))
                     sys.stdout.flush()
-                    drawn = (offset, size, len(lines), notice, view, query)
+                    drawn = (offset, size, len(display_lines), notice, view, query, file_command)
                 page_rows = max(1, body_height)  # a notice row takes one body row; paging must not skip it
                 for event in inputs.wait(1):
                     kind = event[0]
@@ -589,23 +626,57 @@ def page(render, board, on_refresh=None):
                         view = previous_view
                         lines, offset, shown, drawn, updated = ["Reading recorded result…"], 0, None, None, None
                         continue
+                    if view == "Files" and files_context:
+                        if kind == "escape" and file_command:
+                            file_command, offset, drawn = None, 0, None
+                            continue
+                        if kind == "escape" and opened_file:
+                            opened_file = None
+                            lines, offset, shown, drawn, updated = ["Reading files…"], 0, None, None, None
+                            continue
+                        if kind in ("o", "O") and selected_file:
+                            try:
+                                notice = files_context["open"](selected_file, split=kind == "O")
+                                if notice.startswith("Open from a terminal:"):
+                                    file_command, notice, opened_file, offset = notice, "", None, 0
+                            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                                notice = "File unavailable: " + clean(str(error), 160)
+                            drawn = None
+                            continue
+                        if not opened_file and not file_command and kind in ("up", "down", "home", "end", "enter"):
+                            paths = [item["path"] for item in files_context["rows"] if item["path"]]
+                            if paths:
+                                current = paths.index(selected_file) if selected_file in paths else 0
+                                index = (0 if kind == "home" else len(paths) - 1 if kind == "end" else
+                                         max(0, min(len(paths) - 1, current + {"up": -1, "down": 1}.get(kind, 0))))
+                                selected_file = paths[index]
+                                if kind == "enter":
+                                    opened_file = selected_file
+                                    lines, offset, shown, drawn, updated = ["Reading file diff…"], 0, None, None, None
+                                else:
+                                    line_index = next(i for i, item in enumerate(files_context["rows"]) if item["path"] == selected_file)
+                                    offset = min(offset, line_index) if line_index < offset else max(offset, line_index - max(1, body_height) + 1)
+                                    drawn = None
+                            continue
                     if kind in ("q", "escape", "eof"):
                         return 0
                     if kind == "repaint":
                         shown = drawn = None
-                    if kind in ("tab", "r", "e", "d", "i", "x"):
+                    if kind in ("tab", "r", "e", "d", "i", "x", "f"):
                         if view != "Transcript":
                             previous_view = view
-                        view = {"r": "Raw", "e": "Events", "d": "Diff", "i": "Run info", "x": "Transcript"}.get(
+                        view = {"r": "Raw", "e": "Events", "d": "Diff", "i": "Run info", "x": "Transcript", "f": "Files"}.get(
                             kind, READER_VIEWS[(READER_VIEWS.index(view) + 1) % len(READER_VIEWS)])
                         tabs = "  ".join("[" + name + "]" if name == view else name for name in READER_VIEWS)
+                        opened_file = None
+                        file_command = None
                         lines, offset, shown, drawn, updated, notice, full_lines = (
                             ["[⟳ loading] Reading recorded result…"], 0, None, None, None, "", None)
                     if kind in ("[", "]"):
                         points = sections()
                         offset = (next((i for i in reversed(points) if i < offset), 0) if kind == "[" else
                                   next((i for i in points if i > offset), offset))
-                    if kind == "o":
+                    if kind == "o" and view != "Files":
                         if full_lines is not None:
                             lines, full_lines = full_lines, None
                         else:
@@ -623,7 +694,7 @@ def page(render, board, on_refresh=None):
                         if tmux("resize-pane", "-Z", "-t", os.environ["TMUX_PANE"]).returncode == 0:
                             zoomed = not zoomed
                             drawn = None
-                    offset = (0 if kind == "home" else len(lines) if kind == "end" else offset + (
+                    offset = (0 if kind == "home" else len(display_lines) if kind == "end" else offset + (
                         event[1] if kind == "scroll" else {"up": -1, "down": 1, "pageup": -page_rows, "pagedown": page_rows,
                                                            " ": page_rows}.get(kind, 0)))
                 if time.monotonic() >= alive:

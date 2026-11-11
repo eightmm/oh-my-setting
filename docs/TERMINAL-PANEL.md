@@ -483,13 +483,13 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 
 | Key | Graph/tree board | Result reader |
 | --- | --- | --- |
-| Arrow keys | Move through calls or the selected tab's items | Move through result lines |
+| Arrow keys | Move through calls or the selected tab's items | Move through result lines; Up/Down selects a file in Files |
 | `Home` / `End` | First / last item | Start / end of result |
 | `PageUp` / `PageDown`, wheel | Page through calls or selected Detail/Plan content; wheel over a graph band (including Goal) scrolls that band | Scroll result |
 | `Tab` | Next visible tab | Next reader view |
-| `Enter` | Preview a graph call; open a tree call; expand a message/group | Finish search input |
+| `Enter` | Preview a graph call; open a tree call; expand a message/group | Finish search input; show the selected file's diff in Files |
 | `Space` | Expand/collapse a selected group or fold a main in the tree | Page down |
-| `f` | Open the selected full result; open the recorded Debate result | — |
+| `f` | Open the selected full result; open the recorded Debate result | Files view |
 | `r` / `e` / `d` / `x` | — | Raw / Events / Diff / Transcript view |
 | `i` | Toggle pane context headers in a managed panel | Run info view |
 | `g` / `t` | Graph / tree view | — |
@@ -501,9 +501,10 @@ Keys apply to the focused surface. The board and reader bindings are contextual;
 | `k` / `u` | Capacity / refresh | — |
 | `m` | Cycle Work / Overview / Focus in a managed panel | — |
 | `[` / `]` / `o` | `[` / `]` scroll the Log tab older / newer while it is active; the wheel scrolls over its body | Previous / next section / outline |
+| `o` / `O` in Files | — | Open the selected file in a read-only tmux popup / persistent split pane |
 | `/` | Filter the call rows: type words to narrow by title, role, provider, model or state (every word must match, case-insensitive); `Enter` keeps the filter, `Esc` clears it, arrows still move. The heading shows `Filter /text · shown N of M`. The Attention header and counts are never filtered, and a hidden call that waits on you is reported as `N waiting hidden`. Resets when the room changes | Search result text |
 | `z` | — | Zoom the tmux reader pane when width is under 120 columns or it is already zoomed |
-| `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader |
+| `Esc` / `q` | `Esc` closes detail or returns; `q` quits an inline watcher, does nothing on a managed board, and detaches from the control menu | Close reader; Esc from a file diff returns to Files |
 | `?` | Show/hide board key help | — |
 | `Ctrl+L` | Repaint the board | Repaint the reader |
 | `F5` / `F8` / `F9` / `F12` | Control window (when present) / cycle layout / swap chat-board focus / panel-wide key list in tmux | — |
@@ -2371,15 +2372,47 @@ admission is tagged `patch awaits admission`.
 
 Click or Enter on a graph call selects its preview; Enter in the tree opens the
 call. Group drill-down is available in the tree. The right reader shows the
-selected call in `Summary`, `Raw`, `Events`, `Diff` and `Run info` views
-(Tab changes views; `r`, `e`, `d` and `i` select Raw, Events, Diff and Run
-info). A selected call's reader is revalidated against its recorded result.
+selected call in `Summary`, `Raw`, `Events`, `Diff`, `Run info`, `Files` and
+`Transcript` views (Tab changes views; `r`, `e`, `d`, `i`, `f` and `x` select
+the corresponding view). A selected call's reader is revalidated against its recorded result.
 Clicking the main previews its card. Child connections use explicit parent
 IDs. Lifecycle state drives activity marks; joining without lifecycle evidence
 shows `presence unknown`. Missing or old call records do not establish
 acceptance. Unknown calls retain their unknown status, and unhandled failures,
 blocked and waiting calls remain visible. Actions only change the display;
 they do not change room records, acknowledgments or lifecycle states.
+
+Files groups the worker's declared scope and observed changes by directory.
+Changed paths show `+N -M`; changes outside the declaration say `outside scope`.
+An empty declaration means no scope was recorded; it does not mark changes as
+outside scope. A declaration of `.` covers the whole repository.
+`overlap: PARTICIPANT` names another live room worker whose declaration or
+changed paths intersect the entry. These are inspection hints, not write grants.
+Finished calls use the digest-verified recorded patch. Only write workers and
+builders with a recorded worktree get live inventories and overlap checks;
+read-only calls and the main never inspect their working checkout. Running workers read their
+registered worktree against the recorded base commit, falling back to HEAD only
+when no base was retained, and include untracked, non-ignored files. The reader
+disables Git's optional index locks, bounds its Git reads to two seconds,
+and caches it for three seconds. Unavailable evidence produces a muted reason.
+Individual file reads are limited to 1 MiB; inventories and patches are bounded
+to the existing 16 MiB evidence limit.
+An unreadable, oversized, nested-repository or vanished untracked entry shows
+`+?`; the remaining tracked and untracked inventory stays visible.
+
+In Files, Up/Down selects a file, Enter shows its coloured diff, and Esc returns
+to the list. `o` opens a tmux popup; `O` splits the reader pane. The new pane stays
+until its pager is closed. Both use `less -R` in secure read-only mode, showing the file
+itself when unchanged, using the reader's colour and theme environment. Outside
+managed tmux, the quoted terminal command appears in the reader body and stays
+through refreshes until Esc returns to Files. In other reader views `o` still
+opens the outline. Diff additions and
+removals use the theme's added and removed colours, with distinct file and hunk
+headers; disabling colour leaves plain text. The graph board's worker rows show
+`files N/M` (changed paths / declared entries), with `!` for overlap, and drop
+this segment first on narrow boards. Board frames only read cached snapshots;
+at most two background jobs refresh them. Finished calls outside the displayed
+worker group are not queried. An initial or unavailable reading shows `files ?/M`.
 
 The graph pins its header, legend, Goal box and attention strip above the call
 layout. The full goal wraps instead of being clipped, and its counts summarize

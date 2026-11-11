@@ -44,9 +44,10 @@ def control_keys():
 # (key, label, rank): lower rank survives a narrow pane longer. Order here is display order.
 READER_KEYS = (
     ("Tab", "View", 1), ("r", "Raw", 6), ("e", "Events", 7), ("d", "Diff", 8), ("i", "Info", 9),
-    ("x", "Transcript", 2), ("[ ]", "Section", 4), ("o", "Outline", 5), ("/", "Search", 3),
+    ("x", "Transcript", 2), ("f", "Files", 3), ("[ ]", "Section", 4), ("o", "Outline", 5), ("/", "Search", 3),
     ("n/N", "Match", 10), ("z", "Zoom", 11), ("Space", "Page", 12), ("q/Esc", "close", 0),
 )
+FILE_KEYS = (("Up/Down", "File", 1), ("Enter", "Diff", 2), ("o", "Popup", 3), ("O", "Split", 4))
 
 
 def fit_hints(hints, width, separator="  "):
@@ -61,9 +62,12 @@ def fit_hints(hints, width, separator="  "):
     return clipped(separator.join(text for unused, text in kept), width)
 
 
-def reader_hint(width, zoomable=False, run_info=False):
+def reader_hint(width, zoomable=False, run_info=False, files=False, file_diff=False):
     """The result reader's key row for a pane `width` columns wide."""
     hints = []
+    if files:
+        return fit_hints([(0, "Esc " + ("Files" if file_diff else "close")), (5, "Tab View")] +
+                         [(rank, key + " " + label) for key, label, rank in FILE_KEYS], width)
     for key, label, rank in READER_KEYS:
         if key == "z" and not zoomable:
             continue

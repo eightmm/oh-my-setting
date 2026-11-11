@@ -19,6 +19,7 @@ import uuid
 # Call-local facade imports preserve the public entry point and avoid import cycles.
 _ACTIVITY_READERS = OrderedDict()
 _ACTIVITY_READER_LIMIT = 8
+_FILE_PAGERS = []
 
 
 def _cancel_window_id():
@@ -584,7 +585,9 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     from terminal_panel import _review_verdict, results_snapshot, verified_patch
     from panel_view import call_identity
     from panel_results import _indexed
+    from dashboard_projection import clean
 
+    repo = Path(repo)
     cache = {} if cache is None else cache
     if "snapshot" not in cache:
         cache["snapshot"] = results_snapshot(repo, task_id, participant)
@@ -626,6 +629,51 @@ def render_call_view(repo, participant, view, width, task_id=None, cache=None):
     def reader_text(value):
         return panel_reader.ReaderText(value, artifact=(call.get("attempt_id"), call.get("artifact")),
                                        updated_at=call.get("ts") or row.get("updated_at"))
+    if view == "Files":
+        import panel_files
+        from call_ending import LIVE_STATES
+        attempt = next((item for item in reversed(attempts) if item.get("attempt_id") == call.get("attempt_id")), {})
+        refs = attempt.get("refs", {})
+        members, reason = [], ""
+        try:
+            if refs.get("panel_room_id"):
+                members = room.status(repo, refs["panel_room_id"], exact=True)["participants"]
+        except (OSError, ValueError, TypeError) as error:
+            reason = "room scope unavailable: " + str(error)
+        linked = {item.get("refs", {}).get("panel_room_participant"): item for item in attempts}
+        members = [dict(member, state=linked.get(member.get("participant"), {}).get("state") or member.get("state"),
+                        access=member.get("access") or linked.get(member.get("participant"), {}).get("refs", {}).get("panel_access"),
+                        location=member.get("location") or linked.get(member.get("participant"), {}).get("refs", {}).get("panel_location"),
+                        file_attempt=linked.get(member.get("participant"), {}))
+                   for member in members if member.get("joined")]
+        member = next((item for item in members if item.get("participant") == participant),
+                      {"participant": participant, "owns": [], "role": row.get("role") or refs.get("panel_role") or "worker"})
+        member = dict(member, state=attempt.get("state") or row.get("process_state") or call.get("state"),
+                      access=member.get("access") or refs.get("panel_access") or row.get("access"),
+                      location=row.get("location") or call.get("worktree") or refs.get("panel_location"))
+        snapshot = panel_files.worker_inventory(repo, member, attempt, call)
+        others = [(item, panel_files.worker_inventory(repo, item, linked.get(item.get("participant"))))
+                  for item in members if item.get("participant") != participant and panel_files.is_write_worker(item, linked.get(item.get("participant")))
+                  and item.get("state") in LIVE_STATES]
+        rows = panel_files.tree_rows(snapshot["files"], member.get("owns") or [],
+                                     panel_files.overlaps(member, snapshot, others) if panel_files.is_write_worker(member, attempt) else {})
+        error = reason or snapshot.get("error")
+        if not error and snapshot.get("skipped"):
+            error = "%s untracked entries unreadable (+?)" % len(snapshot["skipped"])
+        value = reader_text(panel_reader.render_view("Files", report, call, width=width, heading=heading,
+                                                      files=rows, files_error=error))
+        def render_file(path, columns):
+            if path not in {item["path"] for item in rows if item["path"]}:
+                raise ValueError("select a file from this worker's inventory")
+            data = (panel_files.live_diff(snapshot, path) if snapshot.get("base") else
+                    panel_files.file_diff(verified_patch(repo, snapshot["record"]), path)
+                    if snapshot.get("record") else b"")
+            content = panel_reader.render_view("Files", report, call, patch=data, width=columns, heading=heading)
+            parts = content.splitlines()
+            return reader_text("\n".join(parts[:3] + [clean(path, 4096)] + parts[3:]))
+        value.files = {"rows": rows, "render": render_file,
+                       "open": lambda path, split=False: open_worker_file(repo, snapshot, path, split=split)}
+        return value
     if view == "Transcript":
         from panel_activity import transcript_lines
         return reader_text(panel_reader.render_view(view, report, call, width=width, heading=heading,
@@ -695,6 +743,47 @@ def advisor_command(repo, room_id, member):
             "bash", str(ENTRY), "panel", "--repo", str(repo), "--room", room_id, "--dispatch", "advisor",
             "--owner", member["provider"], "--main", member["participant"],
             "--label", "Advice for " + member["participant"]]
+
+
+def open_worker_file(repo, snapshot, path, split=False):
+    """Open a secure read-only pager; command text is usable outside managed tmux."""
+    import panel_files
+    from terminal_panel import managed_session, tmux_command
+    panel_files._relative(path)
+    spec = {key: snapshot[key] for key in ("record", "worktree", "base", "untracked", "location") if key in snapshot}
+    if spec.get("record"):
+        spec["record"] = {key: spec["record"].get(key) for key in ("patch", "patch_sha256")}
+    if snapshot.get("error"):
+        raise ValueError(snapshot["error"])
+    cwd = snapshot.get("worktree")
+    if not cwd:
+        try:
+            cwd = str(panel_files.worktree_path(repo, snapshot.get("location")))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if path not in {item[0] for item in snapshot.get("files", [])}:
+                raise ValueError("worker worktree unavailable for this unchanged file") from None
+            cwd = str(Path(repo).resolve())
+    script = ("import json,sys;sys.path.insert(0,sys.argv[1]);import panel_files;"
+              "sys.stdout.write(panel_files.pager_text(sys.argv[2],json.loads(sys.argv[3]),sys.argv[4]))")
+    import sys
+    style_names = ("OMS_PANEL_COLOR", "OMS_PANEL_THEME", "NO_COLOR", "COLORFGBG", "COLORTERM", "TERM")
+    style_environment = ["env"] + [word for name in style_names if name not in os.environ for word in ("-u", name)]
+    style_environment += [name + "=" + os.environ[name] for name in style_names if name in os.environ]
+    command = " ".join(shlex.quote(str(word)) for word in (
+        *style_environment, sys.executable, "-c", script, Path(__file__).parent, repo, json.dumps(spec), path))
+    command += " | env -u LESSOPEN -u LESSCLOSE LESSSECURE=1 LESSHISTFILE=- less -R"
+    if not managed_session():
+        return "Open from a terminal: cd " + shlex.quote(str(cwd)) + " && " + command
+    target = os.environ.get("TMUX_PANE", "")
+    if not panel_reader.PANE.fullmatch(target):
+        raise ValueError("reader pane unavailable for the file pager")
+    shell = "sh -c " + shlex.quote(command)
+    arguments = (("split-window", "-h", "-t", target, "-c", str(cwd), shell) if split else
+                 ("display-popup", "-E", "-w", "80%", "-h", "80%", "-t", target, "-d", str(cwd), shell))
+    _FILE_PAGERS[:] = [process for process in _FILE_PAGERS if process.poll() is None]
+    _FILE_PAGERS.append(subprocess.Popen(tmux_command(*arguments), stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    return "Read-only file pager opened" + (" in a split pane" if split else " in a popup")
 
 
 def ask_advisor(repo, state, navigation):

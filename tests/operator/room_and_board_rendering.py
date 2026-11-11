@@ -1394,6 +1394,190 @@ truncated_events = panel_reader.render_view("Events", {}, write_call, timeline_t
 plain_truncated = [re.sub(r"\033\[[0-9;]*m", "", line) for line in truncated_events.splitlines()]
 assert all(len(line) <= 40 for line in plain_truncated), plain_truncated
 patch_text = b"diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
+import panel_files
+import panel_navigation
+file_patch = (b"diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+              b"diff --git a/other.txt b/other.txt\n--- a/other.txt\n+++ b/other.txt\n@@ -0,0 +1 @@\n+extra\n")
+file_changes = panel_files.patch_changes(file_patch)
+assert file_changes == [("src/a.py", 1, 1), ("other.txt", 1, 0)], file_changes
+assert panel_files.file_diff(file_patch, "src/a.py").endswith(b"-old\n+new\n")
+assert panel_files.file_diff(file_patch, "missing") == b""
+many_files_patch = b"".join(("diff --git a/f%s b/f%s\n@@ -0,0 +1 @@\n+x\n" % (number, number)).encode()
+                            for number in range(23))
+assert len(panel_files.patch_changes(many_files_patch)) == 23
+file_rows = panel_files.tree_rows(file_changes, ["src/a.py", "src/clean.py"],
+                                  {"second worker": (["src"], ["other.txt"])})
+assert any(row["text"] == "src/" for row in file_rows), file_rows
+assert any("a.py +1 -1" in row["text"] and "second worker" in row["text"] for row in file_rows), file_rows
+assert any("other.txt +1 -0" in row["text"] and "outside scope" in row["text"] for row in file_rows), file_rows
+assert any("clean.py" in row["text"] and "declared" in row["text"] for row in file_rows)
+assert panel_files.tree_rows([], [], {}) == []
+deep_file_path = "/".join(["a"] * 1100) + "/file.py"
+assert panel_files.tree_rows([(deep_file_path, 0, 0)], ["a"])[-1]["path"] == deep_file_path
+assert panel_files.tree_rows([("src/[literal", 0, 0)], ["src"])[-1]["path"] == "src/[literal"
+try:
+    panel_files.tree_rows([], ["/outside"])
+except ValueError:
+    pass
+else:
+    raise AssertionError("malformed scope accepted")
+with tempfile.TemporaryDirectory(dir=temporary) as live_directory:
+    live_root = Path(live_directory)
+    def file_git(*args):
+        return subprocess.check_output(["git", "-C", str(live_root), *args], env=environment)
+    file_git("init", "-q")
+    (live_root / "tracked.txt").write_text("before\n")
+    (live_root / "unchanged.txt").write_text("  keep  spaces\n")
+    file_git("add", "tracked.txt", "unchanged.txt")
+    file_git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "base")
+    live_base = file_git("rev-parse", "HEAD").decode().strip()
+    (live_root / "committed.txt").write_text("committed after base\n")
+    file_git("add", "committed.txt")
+    file_git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "later")
+    (live_root / "tracked.txt").write_text("after\n")
+    (live_root / "new file.txt").write_text("untracked\n")
+    (live_root / ".gitignore").write_text("ignored\n")
+    (live_root / "ignored").write_text("skip\n")
+    index_before = (live_root / ".git/index").stat().st_mtime_ns
+    live_files = panel_files.read_live(live_root, live_base)
+    assert not live_files["error"], live_files
+    assert ("tracked.txt", 1, 1) in live_files["files"] and ("new file.txt", 1, 0) in live_files["files"], live_files
+    assert ("committed.txt", 1, 0) in live_files["files"], live_files
+    assert not any(path == "committed.txt" for path, *_ in panel_files.read_live(live_root)["files"])
+    assert not any(path == "ignored" for path, *_ in live_files["files"])
+    assert (live_root / ".git/index").stat().st_mtime_ns == index_before
+    with patch.object(panel_files, "_git", side_effect=AssertionError("cache missed")):
+        assert panel_files.read_live(live_root, live_base) is live_files
+    assert b"+untracked" in panel_files.live_diff(live_files, "new file.txt")
+    assert b"-before" in panel_files.live_diff(live_files, "tracked.txt")
+    assert panel_files.pager_text(live_root, live_files, "unchanged.txt") == "  keep  spaces\n"
+    assert panel_files.read_live(live_root, "--bad")["error"]
+    assert panel_files.read_live(live_root, {})["error"]
+    assert panel_files.read_live(live_root / "missing")["error"]
+    (live_root / "empty").write_bytes(b"")
+    assert panel_files._file_bytes(live_root, "empty") == b""
+    (live_root / "bounded").write_bytes(b"x" * panel_files.FILE_LIMIT)
+    assert len(panel_files._file_bytes(live_root, "bounded")) == panel_files.FILE_LIMIT
+    (live_root / "bounded").write_bytes(b"x" * (panel_files.FILE_LIMIT + 1))
+    try:
+        panel_files._file_bytes(live_root, "bounded")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("oversized file read was accepted")
+    (live_root / "link").symlink_to(live_root / "tracked.txt")
+    try:
+        panel_files._file_bytes(live_root, "link")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("pager followed a symlink")
+    link_snapshot = dict(live_files, untracked=("link",))
+    assert str(live_root / "tracked.txt").encode() in panel_files.live_diff(link_snapshot, "link")
+    (live_root / "linked-dir").symlink_to(live_root, target_is_directory=True)
+    try:
+        panel_files._file_bytes(live_root, "linked-dir/unchanged.txt")
+    except OSError:
+        pass
+    else:
+        raise AssertionError("pager followed a directory symlink")
+    for bad_path in ("", "../escape", "/outside", "a\x00b"):
+        try:
+            panel_files.live_diff(live_files, bad_path)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe file path accepted: " + repr(bad_path))
+    with patch.object(panel_files, "_git", side_effect=subprocess.TimeoutExpired("git", 2)):
+        assert panel_files.read_live(live_root, "a" * 40)["error"]
+    with patch.object(panel_files, "_git", return_value=b"malformed\0"):
+        assert panel_files.read_live(live_root, "b" * 40)["error"]
+    def readonly_git(command, **options):
+        assert "--no-optional-locks" in command and options["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+        assert 0 < options["timeout"] <= 2
+        return subprocess.CompletedProcess(command, 0)
+    with patch.object(panel_files.subprocess, "run", side_effect=readonly_git):
+        assert panel_files._git(live_root, ["diff", "--numstat", "HEAD"]) == b""
+    with patch.object(panel_files.tempfile, "gettempdir", return_value=str(live_root)):
+        try:
+            panel_files._git(live_root, ["diff"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Git reader created scratch in the worker worktree")
+    try:
+        panel_files._git(live_root, ["diff"], deadline=time.monotonic())
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("expired file read was started")
+    with patch.object(panel_files, "_CACHE", panel_files.OrderedDict()), \
+            patch.object(panel_files, "_git", return_value=b"") as empty_git, \
+            patch.object(panel_files.time, "monotonic", return_value=0) as file_clock:
+        empty_live = panel_files.read_live(live_root)
+        assert empty_live["files"] == [] and not empty_live["error"]
+        file_clock.return_value = panel_files.TTL - .01
+        assert panel_files.read_live(live_root) is empty_live
+        file_clock.return_value = panel_files.TTL
+        assert panel_files.read_live(live_root) is not empty_live and empty_git.call_count == 4
+        for number in range(65):
+            panel_files.read_live(live_root / str(number))
+        assert len(panel_files._CACHE) == 64
+file_evidence = project / ".oms/artifacts/delegate/files-view.patch"
+file_evidence.parent.mkdir(parents=True, exist_ok=True)
+file_evidence.write_bytes(file_patch)
+file_call = {"attempt_id": "files-attempt", "patch": str(file_evidence.relative_to(project)),
+             "patch_sha256": hashlib.sha256(file_patch).hexdigest(), "state": "done"}
+file_member = {"participant": "files-worker", "role": "worker", "joined": True,
+               "state": "done", "access": "write", "owns": ["src/a.py", "src/clean.py"], "location": "worktree:fixture/worker"}
+file_attempt = {"attempt_id": "files-attempt", "state": "done", "refs": {
+    "panel_room_id": "files-room", "panel_room_participant": "files-worker", "panel_location": "worktree:fixture/worker", "panel_access": "write"}}
+file_other = dict(file_member, participant="second-worker", state="working", owns=["other.txt"], location="worktree:fixture/other")
+file_other_attempt = {"attempt_id": "other-attempt", "state": "working", "refs": {
+    "panel_room_id": "files-room", "panel_room_participant": "second-worker", "panel_location": "worktree:fixture/other", "panel_access": "write"}}
+file_report = {"rows": [{"role": "worker", "process_state": "done", "location": "worktree:fixture/worker", "calls": [file_call]}]}
+with patch.object(panel, "results_snapshot", return_value=(file_report, ([file_attempt, file_other_attempt], []))), \
+        patch.object(room, "status", return_value={"participants": [file_member, file_other]}), \
+        patch.object(panel_files, "worktree_path", return_value=project), \
+        patch.object(panel_files, "read_live", return_value={"files": [], "error": ""}):
+    production_files = panel.render_call_view(project, "files-worker", "Files", 100)
+assert "src/" in production_files and "outside scope" in production_files and "second-worker" in production_files, production_files
+picked_diff = production_files.files["render"]("src/a.py", 100)
+assert "src/a.py" in picked_diff and "-old" in picked_diff and "+new" in picked_diff and "extra" not in picked_diff
+with patch.object(panel, "managed_session", return_value=False):
+    popup_command = production_files.files["open"]("src/a.py")
+    split_command = production_files.files["open"]("src/a.py", split=True)
+assert popup_command == split_command and "less -R" in popup_command and "LESSSECURE=1" in popup_command, popup_command
+pager_arguments = shlex.split(popup_command.split(" && ", 1)[1].split(" | env ", 1)[0])
+assert b"+new" in subprocess.check_output(pager_arguments, env=environment)
+with patch.object(panel, "managed_session", return_value=True), \
+        patch.dict(os.environ, {"TMUX_PANE": "%9", panel_reader.BOARD: "%1"}), \
+        patch.object(panel_files, "worktree_path", return_value=project), \
+        patch.object(panel_navigation.subprocess, "Popen") as file_open:
+    production_files.files["open"]("src/a.py")
+    production_files.files["open"]("src/a.py", split=True)
+assert "display-popup" in file_open.call_args_list[0].args[0] and "split-window" in file_open.call_args_list[1].args[0]
+assert "-h" in file_open.call_args_list[1].args[0]
+with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+    assert "\033[38;5;114m+new" in panel_files.pager_text(project, {"record": file_call}, "src/a.py")
+bad_file_call = dict(file_call, patch_sha256="0" * 64)
+assert panel_files.worker_inventory(project, file_member, file_attempt, bad_file_call)["error"]
+assert "File unavailable:" in panel_files.pager_text(project, {"record": bad_file_call}, "src/a.py")
+def immediate_file_job(**kwargs):
+    return Mock(start=lambda: kwargs["target"](*kwargs["args"]))
+with patch.object(panel_files, "_BOARD", panel_files.OrderedDict()), \
+        patch.object(panel_files, "_BOARD_SLOTS", threading.BoundedSemaphore(2)), \
+        patch.object(panel_files.threading, "Thread", side_effect=immediate_file_job), \
+        patch.object(panel_files, "worker_inventory", side_effect=lambda repo, member, *args: {
+        "files": [("other.txt", 1, 0)] if member["participant"] == "files-worker" else [], "error": ""}):
+    panel_files.board_summaries(project, [file_member, file_other])
+    summary_files = panel_files.board_summaries(project, [file_member, file_other])
+assert summary_files["files-worker"] == "files 1/2 !", summary_files
+file_board = deepcopy(join_only)
+with patch.object(panel_files, "board_summaries", return_value={child["participant"]: "files 1/2 !"}):
+    file_wide_board = render(file_board, "claude", 160, 44, view="graph")
+    file_narrow_board = render(file_board, "claude", 48, 44, view="graph")
+assert "files 1/2 !" in file_wide_board and "files " not in file_narrow_board, (file_wide_board, file_narrow_board)
 diff_view = panel_reader.render_view("Diff", {}, write_call, patch=patch_text)
 assert "file.py" in diff_view and "old" in diff_view and "new" in diff_view, diff_view
 assert "?[32m" not in diff_view and "\033[" not in diff_view, diff_view
@@ -1402,7 +1586,21 @@ with patch.dict(os.environ, {"NO_COLOR": "1"}):
 assert "+new" in plain_diff and "-old" in plain_diff and "\033[" not in plain_diff, plain_diff
 with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
     colored_diff = panel_reader.render_view("Diff", {}, write_call, patch=patch_text, color=True)
+    for ellipsis in ("...", "…"):
+        with patch.object(sys.modules["panel_view"], "ELLIPSIS", [ellipsis]), \
+                patch.object(sys.modules["dashboard_projection"], "ELLIPSIS", [ellipsis]):
+            narrow_diff = panel_reader.render_view("Diff", {}, write_call, patch=patch_text, color=True, width=8)
+        assert "\033[1;38;5;245mdiff " in narrow_diff and ellipsis in narrow_diff, narrow_diff
+        assert all(display_width(re.sub(r"\033\[[0-9;]*m", "", line)) <= 8
+                   for line in narrow_diff.splitlines()[3:]), narrow_diff
+    assert sys.modules["panel_view"].tint("x", "diff_header") != sys.modules["panel_view"].tint("x", "diff_hunk")
 assert "\033[38;5;114m+new\033[0m" in colored_diff and "\033[38;5;203m-old\033[0m" in colored_diff, colored_diff
+assert "\033[1;38;5;245mdiff --git" in colored_diff, colored_diff
+assert "\033[38;5;250m@@ -1 +1 @@" in colored_diff, colored_diff
+with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+    comment_diff = panel_reader.render_view("Diff", {}, write_call,
+        patch=b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n--- comment\n+++ comment\n", color=True)
+assert "\033[38;5;203m--- comment" in comment_diff and "\033[38;5;114m+++ comment" in comment_diff, comment_diff
 indented_patch = b"diff --git a/file.py b/file.py\n@@ -1 +1 @@\n context\n+  indented\n"
 assert "+  indented" in panel_reader.render_view("Diff", {}, write_call, patch=indented_patch), "diff indentation was collapsed"
 assert "No patch recorded" in panel_reader.render_view("Diff", {}, read_call), "read-only calls need an explicit no-patch view"
@@ -1410,6 +1608,7 @@ assert "patch unreadable (digest mismatch / read error)" in panel_reader.render_
     "Diff", {}, write_call, patch_error=True), "invalid patch evidence was mistaken for a read-only call"
 assert "patch capped" in panel_reader.render_view("Diff", {}, write_call, patch=b"x" * (panel_reader.PATCH_LIMIT + 1)), "large patches need a cap note"
 assert panel_reader.VIEWS == ("Summary", "Raw", "Events", "Diff", "Run info")
+assert "Files" in panel_reader.READER_VIEWS
 assert "Summary" in panel_reader.render_view("Summary", {"rows": []}, write_call)
 starting_reader = panel_reader.render_view("Summary", {"rows": []}, dict(write_call, state="working"))
 assert "[⟳ running]" in starting_reader and "status unknown" not in starting_reader, starting_reader
@@ -1603,6 +1802,193 @@ def read_page(render, batches, on_refresh=None, size=(80, 4)):
         assert panel_reader.page(render, "%1", on_refresh=on_refresh) == 0
     assert tmux_run.call_args.args == ("select-pane", "-t", "%1")
     return output.getvalue(), waits
+file_actions = []
+original_file_open = production_files.files["open"]
+production_files.files["open"] = lambda path, split=False: file_actions.append((path, split)) or "Opened read-only"
+try:
+    file_page_output, _ = read_page(
+        lambda width, view: production_files if view == "Files" else panel_reader.render_view("Summary", {}, {}),
+        iter([[("f",)], [("down",)], [("enter",)], [("escape",)], [("o",)], [("O",)], [("q",)]]), size=(100, 16))
+finally:
+    production_files.files["open"] = original_file_open
+assert "-old" in file_page_output and "+new" in file_page_output, file_page_output
+assert file_actions == [("src/a.py", False), ("src/a.py", True)], file_actions
+assert "\nOutline\n" not in file_page_output and file_page_output.count("outside scope") >= 2, file_page_output
+file_review_timeout = float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90"))
+file_review_writer = dict(file_member, access="write", location="worktree:fixture/writer", attempt="files-attempt")
+def file_review_board_path():
+    def paths_only(repo, members):
+        assert isinstance(repo, Path), type(repo)
+        return {}
+    with patch.object(panel_files, "board_summaries", side_effect=paths_only):
+        render(file_board, "claude", 160, 44, view="graph")
+
+def file_review_board_background():
+    foreground = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    observed = []
+    writers = [file_review_writer] + [dict(file_review_writer, participant="other%s" % number,
+                                            owns=["other%s.py" % number]) for number in (2, 3)]
+    def reading(repo, member, *args):
+        assert threading.get_ident() != foreground, "worker query ran on the render thread"
+        observed.append(isinstance(repo, Path))
+        if len(observed) == 2:
+            entered.set()
+        assert release.wait(file_review_timeout)
+        path = "src/a.py" if member["participant"] == "files-worker" else member["participant"] + ".py"
+        return {"files": [(path, 1, 1)], "error": ""}
+    with patch.object(panel_files, "_BOARD", panel_files.OrderedDict(), create=True), \
+            patch.object(panel_files, "_BOARD_SLOTS", threading.BoundedSemaphore(2), create=True), \
+            patch.object(panel_files.time, "monotonic", return_value=0), \
+            patch.object(panel_files, "worker_inventory", side_effect=reading) as read_worker:
+        try:
+            pending = panel_files.board_summaries(str(project), writers)
+            assert entered.wait(file_review_timeout) and "files ?/2" in pending["files-worker"], pending
+            panel_files.board_summaries(str(project), writers)
+            assert read_worker.call_count == 2
+        finally:
+            release.set()
+            for entry in panel_files._BOARD.values():
+                if entry.get("thread"):
+                    entry["thread"].join(file_review_timeout)
+        panel_files.board_summaries(str(project), writers)
+        for entry in panel_files._BOARD.values():
+            if entry.get("thread"):
+                entry["thread"].join(file_review_timeout)
+        assert observed == [True, True, True], observed
+        assert panel_files.board_summaries(str(project), writers)["files-worker"] == "files 1/2"
+        assert read_worker.call_count == 3
+    with patch.object(panel_files, "_BOARD", panel_files.OrderedDict()), \
+            patch.object(panel_files, "_BOARD_SLOTS", threading.BoundedSemaphore(2)), \
+            patch.object(panel_files.threading, "Thread", side_effect=immediate_file_job), \
+            patch.object(panel_files.time, "monotonic", return_value=0) as clock, \
+            patch.object(panel_files, "worker_inventory", return_value={"files": [], "error": ""}) as immediate:
+        panel_files.board_summaries(project, [file_review_writer])
+        clock.return_value = panel_files.TTL - .01
+        panel_files.board_summaries(project, [file_review_writer])
+        assert immediate.call_count == 1
+        clock.return_value = panel_files.TTL
+        panel_files.board_summaries(project, [file_review_writer])
+        assert immediate.call_count == 2
+        for number in range(65):
+            panel_files.board_summaries(project, [dict(file_review_writer, participant=str(number))])
+        assert len(panel_files._BOARD) == 64
+    with patch.object(panel_files, "_BOARD", panel_files.OrderedDict()), \
+            patch.object(panel_files, "_BOARD_SLOTS", threading.BoundedSemaphore(2)) as slots, \
+            patch.object(panel_files.threading, "Thread", return_value=Mock(start=Mock(side_effect=RuntimeError("unavailable")))):
+        assert "files ?/2" in panel_files.board_summaries(project, [file_review_writer])["files-worker"]
+        assert slots.acquire(False) and slots.acquire(False) and not slots.acquire(False)
+
+def file_review_finished_path():
+    def finished(repo, **kwargs):
+        assert isinstance(repo, Path), type(repo)
+        return file_report, ([], [])
+    with patch.object(panel_files, "_WORKERS", panel_files.OrderedDict()), \
+            patch.object(panel_results, "_records", return_value=([file_attempt], [])) as records, \
+            patch.object(panel_results, "results_snapshot", side_effect=finished):
+        result = panel_files.worker_inventory(str(project), file_review_writer, file_attempt)
+    assert not result["error"] and result["files"] == file_changes, result
+    assert not records.called, "finished workers queried unused base commits"
+
+def file_review_pane_environment():
+    with patch.dict(os.environ, {"TMUX_PANE": "%9", panel_reader.BOARD: "%1", "OMS_PANEL_COLOR": "always",
+                                 "OMS_PANEL_THEME": "light", "NO_COLOR": "1", "COLORFGBG": "0;15"}), \
+            patch.object(panel, "managed_session", return_value=True), \
+            patch.object(panel_files, "worktree_path", return_value=project), \
+            patch.object(panel_navigation.subprocess, "Popen") as open_pager:
+        production_files.files["open"]("src/a.py", split=True)
+    command = open_pager.call_args.args[0]
+    assert command[command.index("-t") + 1] == "%9", command
+    for value in ("OMS_PANEL_COLOR=always", "OMS_PANEL_THEME=light", "NO_COLOR=1", "COLORFGBG=0;15"):
+        assert value in command[-1], (value, command)
+    for invalid_pane in ("", "board;other"):
+        with patch.dict(os.environ, {"TMUX_PANE": invalid_pane}), \
+                patch.object(panel, "managed_session", return_value=True), \
+                patch.object(panel_files, "worktree_path", return_value=project):
+            try:
+                production_files.files["open"]("src/a.py", split=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid reader pane accepted")
+
+def file_review_read_only():
+    read_peer = dict(file_review_writer, participant="read-peer", state="working", access="read", location="repository")
+    main_peer = dict(read_peer, participant="main-peer", role="main")
+    repository_writer = dict(read_peer, participant="repo-writer", access="write")
+    with patch.object(panel_files, "_WORKERS", panel_files.OrderedDict()), \
+            patch.object(panel_files, "_git", side_effect=AssertionError("read-only checkout queried")), \
+            patch.object(panel_results, "_records", side_effect=AssertionError("read-only attempt queried")):
+        for peer in (read_peer, main_peer, repository_writer):
+            assert panel_files.worker_inventory(project, peer)["files"] == []
+    readers = [(read_peer, {"files": [("src/a.py", 1, 0)]}), (main_peer, {"files": []})]
+    assert not panel_files.overlaps(file_review_writer, {}, readers)
+    with patch.object(panel_files, "worker_inventory", side_effect=AssertionError("read-only board query")):
+        assert panel_files.board_summaries(project, [read_peer, main_peer, repository_writer]) == {}
+    assert panel_files.is_write_worker(dict(file_review_writer, role="builder"))
+    assert not panel_files.is_write_worker(file_review_writer, {"refs": {"panel_access": "read"}})
+
+def file_review_partial_inventory():
+    with tempfile.TemporaryDirectory(dir=temporary) as directory:
+        root_files = Path(directory)
+        strange = " space\\name "
+        (root_files / "valid").write_text("ok\n")
+        (root_files / strange).write_text("odd\n")
+        (root_files / "huge").write_bytes(b"x" * (panel_files.FILE_LIMIT + 1))
+        (root_files / "sub").mkdir()
+        names = ["valid", "huge", "sub/", strange, "gone"]
+        with patch.object(panel_files, "_git", side_effect=[b"1\t1\ttracked\0", "\0".join(names).encode() + b"\0"]):
+            reading = panel_files.read_live(root_files)
+        entries = {path: (added, removed) for path, added, removed in reading["files"]}
+        assert not reading["error"] and entries.get("tracked") == (1, 1), reading
+        assert entries.get("valid") == (1, 0) and entries.get(strange) == (1, 0), reading
+        assert all(entries.get(path) == (None, 0) for path in ("huge", "sub/", "gone")), reading
+        assert any("huge +?" in row["text"] for row in panel_files.tree_rows(reading["files"])), reading
+
+def file_review_tree_semantics():
+    unscoped = panel_files.tree_rows([("a", 1, 0)])
+    whole_repo = panel_files.tree_rows([], ["."], {"other": (["src"], [])})
+    replacement = panel_files.tree_rows([("node", 0, 1), ("node/child", 1, 0)], ["node"])
+    problems = []
+    if any("outside scope" in row["text"] for row in unscoped):
+        problems.append("empty scope treated as a denied scope")
+    if not any(row["overlap"] for row in whole_repo):
+        problems.append("whole-repository scope missed overlap")
+    if not any(row["path"] == "node" for row in replacement):
+        problems.append("replaced file cannot be selected")
+    replacement_patch = (b"diff --git a/node b/node\n--- a/node\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n"
+                         b"diff --git a/node/child b/node/child\n--- /dev/null\n+++ b/node/child\n@@ -0,0 +1 @@\n+child\n")
+    with patch.object(panel_files, "_git", return_value=replacement_patch):
+        if b"+child" in panel_files.live_diff({"worktree": str(project), "base": "HEAD"}, "node"):
+            problems.append("selected deleted file included child diffs")
+    assert not problems, problems
+
+def file_review_no_cursor():
+    rows = [{"path": None, "text": "src/"}, {"path": None, "text": "  *.py · declared"}]
+    value = panel_reader.ReaderText(panel_reader.render_view("Files", {}, {}, files=rows))
+    value.files = {"rows": rows}
+    output, _ = read_page(lambda width, view: value if view == "Files" else "Summary",
+                          iter([[("f",)], [("q",)]]), size=(80, 16))
+    assert "▸ " not in output, output
+
+def file_review_fallback_body():
+    rows = [{"path": "file", "text": "file"}]
+    value = panel_reader.ReaderText(panel_reader.render_view("Files", {}, {}, files=rows))
+    fallback = "Open from a terminal: " + "word " * 120 + "FALLBACK_END"
+    value.files = {"rows": rows, "open": lambda path, split=False: fallback}
+    output, _ = read_page(lambda width, view: value if view == "Files" else "Summary",
+                          iter([[("f",)], [("o",)], [], [], [("q",)]]), size=(60, 25))
+    assert output.count("FALLBACK_END") >= 2, output
+
+file_review_failures = []
+for file_review_check in (file_review_board_path, file_review_board_background, file_review_finished_path,
+                          file_review_pane_environment, file_review_read_only, file_review_partial_inventory,
+                          file_review_tree_semantics, file_review_no_cursor, file_review_fallback_body):
+    try:
+        file_review_check()
+    except Exception as error:
+        file_review_failures.append((file_review_check.__name__, type(error).__name__, str(error)))
+assert not file_review_failures, file_review_failures
 page_cache = {}
 with patch.object(panel, "results_snapshot", side_effect=[(running_report, ([], [])),
                                                             (finished_report, ([], []))]) as collected:
@@ -1835,6 +2221,14 @@ subprocess.run(["git", "-C", str(project), "worktree", "add", "--detach", str(ke
                check=True, capture_output=True)
 kept = {"participant": "call-kept", "role": "worker", "location": "worktree:oh-my-setting-delegate.fixture/wt-fixture"}
 assert panel.worker_worktree(project, dict(kept, state="done")) == kept_tree.resolve()
+assert panel_files.worktree_path(project, kept["location"]) == kept_tree.resolve()
+for bad_location in ("", "worktree:missing", "worktree:missing/tree"):
+    try:
+        panel_files.worktree_path(project, bad_location)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid worktree location accepted: " + bad_location)
 for member, reason in ((dict(kept, state="working"), "still running"),
                        (dict(kept, state="done", location="worktree:gone.parent/wt"), "cleaned up"),
                        (dict(kept, state="done", location="repository"), "recorded no worktree")):

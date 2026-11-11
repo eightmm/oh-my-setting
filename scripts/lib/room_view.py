@@ -149,6 +149,7 @@ def _project_nodes(report):
         decided = state == "review" and finalized.get(attempt.get("task_id")) in DECIDED
         token_label = call_tokens(report, attempt["attempt_id"], state, True) if attempt.get("attempt_id") else ""
         output.append(dict(member, attempt=attempt.get("attempt_id"), state=state, _decided=decided,
+                           file_attempt=attempt,
                            panel_activity=mapping(main_activity.get(member.get("participant"))),
                            tokens=(token_label if token_label != "tok n/a" else None)
                            if attempt.get("attempt_id") and member.get("role") != "main" else None,
@@ -1313,13 +1314,20 @@ def render_graph(report, width, height, color=False, unicode=True, frame=None, m
         return judgment_tag(member, report, unicode, execution_tag(member, unicode))
 
     band_tails = {}
+    from panel_files import board_summaries
+    from panel_view import _repo_root
+    from pathlib import Path
+    file_members = {member["participant"]: member for member in workers +
+                    [member for member in members if member.get("state") in LIVE_STATES]}
+    file_summaries = board_summaries(Path(_repo_root(report)), list(file_members.values()))
     for member in gates + counsel + workers:
         tag = tagged(member)
         advisor_figures = advisor_token_label(member, short=True) if member.get("_kind") == "advisor" else ""
         band_tails[id(member)] = [(tag, judgment_tone(tag, call_ending(member) or member.get("state"))),
                                   (advisor_figures or member.get("tokens") or "", "metadata"),
-                                  (elapsed(member.get("joined_at") or member.get("_started_at")) or "unknown", "metadata")]
-    tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5, optional=(1,))
+                                  (elapsed(member.get("joined_at") or member.get("_started_at")) or "unknown", "metadata"),
+                                  (file_summaries.get(member.get("participant"), ""), "metadata")]
+    tail_plan = plan_tail_columns(list(band_tails.values()), width, prefix_width=stem + 5, optional=(3, 1))
     band_tails = dict(zip(band_tails, tail_plan["rows"]))
 
     def card_lines(member, content, indent=0, tree_card=False, band_prefix=""):

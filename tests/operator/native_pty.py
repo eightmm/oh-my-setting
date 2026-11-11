@@ -1,3 +1,68 @@
+# BEGIN reader-files-pty
+if os.name == "posix":
+    import panel_reader
+    assert "Files" in panel_reader.READER_VIEWS
+    import pty
+    import select
+    import fcntl
+    import struct
+    import termios
+    file_reader_script = '''
+import subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import panel_reader
+panel_reader.tmux = lambda *args: subprocess.CompletedProcess(args, 0, "%1\\n", "")
+rows = [{"path": "file.py", "text": "file.py +1 -1"}]
+def render(width, view):
+    value = panel_reader.ReaderText(panel_reader.render_view(view, {}, {}, width=width,
+        files=rows if view == "Files" else None))
+    if view == "Files":
+        def diff(path, columns):
+            return panel_reader.ReaderText(panel_reader.render_view("Files", {}, {}, width=columns,
+                patch=b"diff --git a/file.py b/file.py\\n@@ -1 +1 @@\\n-old\\n+FILE_DIFF_READY\\n", color=True))
+        value.files = {"rows": rows, "render": diff,
+            "open": lambda path, split=False: "FILE_SPLIT_REQUESTED" if split else "FILE_POPUP_REQUESTED"}
+    return value
+panel_reader.page(render, "%1")
+'''
+    file_reader_pid, file_reader_fd = pty.fork()
+    if file_reader_pid == 0:
+        file_reader_environment = dict(environment, TERM="xterm-256color", OMS_PANEL_COLOR="always", OMS_PANEL_THEME="dark")
+        file_reader_environment.pop("NO_COLOR", None)
+        os.execvpe(sys.executable, [sys.executable, "-c", file_reader_script, str(root / "scripts/lib")],
+                   file_reader_environment)
+    fcntl.ioctl(file_reader_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
+    file_reader_output, file_reader_start = b"", 0
+    file_reader_steps = iter([(b"q/Esc close", b"f"), (b"[Files]", b"\r"),
+                              (b"FILE_DIFF_READY", b"o"), (b"FILE_POPUP_REQUESTED", b"O"),
+                              (b"FILE_SPLIT_REQUESTED", b"\x1b"), (b"[Files]", b"q")])
+    file_reader_step = next(file_reader_steps)
+    file_reader_done = False
+    file_reader_deadline = time.monotonic() + float(os.environ.get("OMS_TEST_CALL_TIMEOUT", "90"))
+    try:
+        while time.monotonic() < file_reader_deadline:
+            if select.select([file_reader_fd], [], [], .2)[0]:
+                try:
+                    file_reader_output += os.read(file_reader_fd, 65536)
+                except OSError:
+                    pass
+            if file_reader_step and file_reader_step[0] in file_reader_output[file_reader_start:]:
+                os.write(file_reader_fd, file_reader_step[1])
+                file_reader_start = len(file_reader_output)
+                file_reader_step = next(file_reader_steps, None)
+            waited, status = os.waitpid(file_reader_pid, os.WNOHANG)
+            if waited:
+                file_reader_done = True
+                assert os.waitstatus_to_exitcode(status) == 0 and file_reader_step is None, file_reader_output
+                break
+        assert file_reader_done and b"\033[38;5;114m+FILE_DIFF_READY" in file_reader_output, file_reader_output
+    finally:
+        if not file_reader_done:
+            os.kill(file_reader_pid, 9)
+            os.waitpid(file_reader_pid, 0)
+        os.close(file_reader_fd)
+# END reader-files-pty
+
 # BEGIN startup-main-pty
 if os.name == "posix":
     picker_previous_log = log.read_bytes() if log.exists() else None

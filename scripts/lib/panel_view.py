@@ -31,7 +31,8 @@ ROLE_COLORS = {"main": (215, 130, 33), "judge": (141, 97, 35),
 STATE_COLORS = {"running": (117, 24, 36), "good": (114, 28, 32),
                 "alert": (221, 130, 33), "bad": (203, 160, 31), "dim": (245, 242, 90)}
 TOKEN_COLORS = dict(ROLE_COLORS, **STATE_COLORS, metadata=(245, 242, 90), hint=(250, 238, 37), border=(240, 245, 90),
-                    text=(None, None, 39))
+                    text=(None, None, 39), diff_add=(114, 28, 32), diff_remove=(203, 160, 31),
+                    diff_header=(245, 242, 90), diff_hunk=(250, 238, 37))
 # Compatibility tokens share semantic colours while older consumers migrate.
 TOKEN_ALIASES = {"codex": "main", "review": "judge", "head": "text"}
 GATE_ROLES = {"reviewer", "verifier", "security-auditor", "judge"}
@@ -305,7 +306,7 @@ def color_count():
     return 16
 
 
-BOLD_TOKENS = {"main", "codex", "head"}
+BOLD_TOKENS = {"main", "codex", "head", "diff_header"}
 
 
 class _Palette(dict):
