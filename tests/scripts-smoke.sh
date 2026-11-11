@@ -33721,6 +33721,45 @@ PYROWS
   [ "$(resume_injection_rows "$repo/.oms/hooks/events.jsonl" | wc -l | tr -d '[:space:]')" = 3 ] ||
     fail "empty, unnamed and harness-child injections must not be recorded: $(resume_injection_rows "$repo/.oms/hooks/events.jsonl")"
 
+  # Pickup marker: the first injection (session "me") left one row, the block
+  # it printed carried no pickup note, repeat starts in the same session added
+  # nothing, and a second session sees the digest still shown but flagged.
+  contains "$out" 'session-handoff show claude-abc.md' || fail "first resume must show the handoff"
+  if contains "$out" 'already picked up'; then fail "an unclaimed handoff must not read as picked up: $out"; fi
+  [ "$(wc -l < "$repo/.oms/handoffs/consumed.jsonl" | tr -d '[:space:]')" = 1 ] ||
+    fail "one session must leave one pickup row: $(cat "$repo/.oms/handoffs/consumed.jsonl")"
+  grep -Fq '"session": "me"' "$repo/.oms/handoffs/consumed.jsonl" ||
+    fail "pickup row must name the session"
+  local second
+  second="$(printf '{"session_id":"other","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume hook must exit 0 for a second session"
+  printf '%s\n' "$second" | grep -E 'handoff \(.*already picked up by me at [0-9T:Z-]+\): oms session-handoff show claude-abc.md' >/dev/null ||
+    fail "a second session must see the handoff flagged as picked up: $second"
+  [ "$(wc -l < "$repo/.oms/handoffs/consumed.jsonl" | tr -d '[:space:]')" = 2 ] ||
+    fail "a second session must add one pickup row"
+  # list shows both states.
+  printf 'digest\n' > "$repo/.oms/handoffs/claude-new.md"
+  touch -t 203001010000 "$repo/.oms/handoffs/claude-new.md"
+  OMS_STATE_REPO="$repo" "$ROOT/scripts/session-handoff.sh" list --status | grep -E '^unclaimed .*claude-new.md$' >/dev/null ||
+    fail "list --status must mark an unseen digest unclaimed"
+  OMS_STATE_REPO="$repo" "$ROOT/scripts/session-handoff.sh" list --status | grep -E '^picked-up me [0-9T:Z-]+ .*claude-abc.md$' >/dev/null ||
+    fail "list --status must name the first session"
+  OMS_STATE_REPO="$repo" "$ROOT/scripts/session-handoff.sh" list --json | python3 -c '
+import json, sys, os
+rows = {os.path.basename(r["path"]): r for r in json.load(sys.stdin)["handoffs"]}
+assert rows["claude-new.md"]["picked_up"] is False and rows["claude-new.md"]["pickups"] == 0, rows
+assert rows["claude-abc.md"]["picked_up_by"] == "me" and rows["claude-abc.md"]["pickups"] == 2, rows
+' || fail "list --json pickup fields wrong"
+  # An unwritable marker never fails resume or hides the digest.
+  rm -f "$repo/.oms/handoffs/consumed.jsonl"
+  mkdir "$repo/.oms/handoffs/consumed.jsonl"
+  second="$(printf '{"session_id":"third","cwd":"%s"}' "$repo" | "$ROOT/scripts/resume-hook.sh")" ||
+    fail "resume must exit 0 when the pickup marker cannot be written"
+  contains "$second" 'session-handoff show claude-' || fail "an unwritable marker must not hide the handoff"
+  rmdir "$repo/.oms/handoffs/consumed.jsonl"
+  rm -f "$repo/.oms/handoffs/claude-new.md"
+  rm -f "$repo/.oms/handoffs/consumed.jsonl"
+
   printf '{"cwd":"%s","hook_event_name":"SessionStart","model":"gpt-6","permission_mode":"default","session_id":"codex-session-start","source":"startup","transcript_path":null}' \
     "$repo" > "$TMP/codex-sessionstart-input.json"
   OMS_HOOK_AGENT=codex OMS_CODEX_HOME="$TMP/codex-home" OMS_LOCK_DIR="$TMP/locks" \
