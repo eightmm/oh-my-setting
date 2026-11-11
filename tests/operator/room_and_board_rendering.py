@@ -4941,7 +4941,8 @@ ranked = attention_items(queue)
 assert [item["row_id"][1] for item in ranked] == ["builder", "advisor", "ask-all", "crash-new", "crash-held", "crash-old",
                                                   "reviewer", "explorer", "t-ended", "note-all", "wake-up"], ranked
 assert [item["cls"] for item in ranked] == ["needs"] * 3 + ["failed"] * 2 + ["timed_out"] + ["decide"] * 2 + ["stale", "mail", "info"]
-assert [item["age"] for item in ranked[6:8]] == ["30m", "5m"] and not any(item["age"] for item in ranked[:6] + ranked[8:])
+assert [item["age"] for item in ranked[6:8]] == ["30m", "5m"] and [item["age"] for item in ranked[:3]] == ["1m", "9m", "50m"]
+assert all(item["age"] for item in ranked), "every row with a recorded timestamp carries its wait age"
 assert ranked[8]["action"] == ("tab", "plan") and "Held t-ended" in ranked[8]["what"], ranked[8]
 # The narrow viewport keeps enough Attention rows to exercise scrolling after Activity was shortened.
 narrow_queue = deepcopy(queue)
@@ -5167,15 +5168,16 @@ assert group_nav["needs_ids"] == [item["action"] for item in selectable] and \
 def picked_rows():
     return [row[0].strip() for row in graph_text.attention_body(ranked, 123, 30, group_nav, True) if row[2]]
 group_nav["selected"] = ("chat", "flow-main")
-assert picked_rows() == ["answer needed · answer request · to all: Which way?"], picked_rows()
+age_of = {item["row_id"][1]: item["age"] for item in ranked}
+assert picked_rows() == ["answer needed · answer request · %s · to all: Which way?" % age_of["ask-all"]], picked_rows()
 stops = []
 for unused in range(8):
     assert graph_text.past_event(("down",), group_nav, "needs")
     stops.append(group_nav["needs_pick"])
 assert stops == [item["row_id"] for item in selectable[3:]] + [selectable[-1]["row_id"]], stops
-assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["unread mail · read message · to all: Status for all"]
+assert group_nav["selected"] == ("chat", "flow-main") and picked_rows() == ["unread mail · read message · %s · to all: Status for all" % age_of["note-all"]]
 assert graph_text.past_event(("up",), group_nav, "needs") and group_nav["selected"] == ("tab", "plan") and \
-    picked_rows() == ["held, workers ended · t-ended · release or continue task"], picked_rows()
+    picked_rows() == ["held, workers ended · t-ended · release or continue task · %s" % age_of["t-ended"]], picked_rows()
 for columns, rows_high in ((127, 40), (57, 40)):
     fixture = queue if columns == 127 else narrow_queue
     tab_nav = {"tab": "needs", "dismissed": True}

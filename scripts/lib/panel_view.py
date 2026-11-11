@@ -1129,7 +1129,7 @@ def attention_items(report, unicode=True):
         for item in group:
             if item["row_id"] not in seen:
                 seen.add(item["row_id"])
-                ranked.append(dict(item, age=age_label(item["stamp"]) if kind == "decide" and item["stamp"] else "",
+                ranked.append(dict(item, age=age_label(item["stamp"]) if item["stamp"] else "",
                                    unread=is_unread(report, item)))
     return ranked
 

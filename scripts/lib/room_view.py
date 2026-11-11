@@ -1797,7 +1797,9 @@ def tab_box(report, width, rows, navigation, color=False, unicode=True, *, membe
             elif active == "past":
                 rows = past_body(past, width - 4, capacity, navigation, labels, unicode)
             elif active == "needs":
-                rows = attention_body(attention, width - 4, capacity, navigation, unicode)
+                from panel_since import since_line
+                rows = attention_body(attention, width - 4, capacity, navigation, unicode,
+                                      since_line(report, attention, width - 4))
             else:
                 # The note costs a row, so a short dock keeps the summary and the messages.
                 noted = capacity >= 6
@@ -2092,7 +2094,7 @@ def past_body(past, width, capacity, navigation, labels, unicode):
     return rows
 
 
-def attention_body(ranked, width, capacity, navigation, unicode):
+def attention_body(ranked, width, capacity, navigation, unicode, since=""):
     """One row per owner action, retaining item-specific selection and wheel paging."""
     from panel_view import attention_header
     sep = " · " if unicode else " / "
@@ -2112,11 +2114,11 @@ def attention_body(ranked, width, capacity, navigation, unicode):
         task = item.get("task") or (item["row_id"][1] if item["row_id"][0] == "task" else None)
         next_action = item.get("next_action") or ("admit or reject patch" if kind == "pending admission" else next_steps[item["cls"]])
         text = sep.join(str(part) for part in (kind, task, next_action) if part)
-        if item.get("cls") == "decide" and item.get("age"):
-            text += sep + item["age"]
         # Mail and room-wide warnings have no task to finalize, so keep their existing reader action.
-        if not task:
-            text += sep + item["what"]
+        tail = sep + item["what"] if not task else ""
+        # The age shows only when a real timestamp was recorded, and is the first thing a narrow row gives up.
+        aged = text + sep + item["age"] + tail if item.get("age") else ""
+        text = aged if aged and display_width(aged) <= width else text + tail
         target = item.get("action")
         if task and target:
             navigation["needs_finalize"][item["row_id"]] = {"task_id": task, "target": target}
@@ -2125,7 +2127,9 @@ def attention_body(ranked, width, capacity, navigation, unicode):
     navigation["needs_ids"], navigation["needs_keys"] = [p[0] for p in picks], [p[1] for p in picks]
     view = navigation.setdefault("needs_view", {})
     header = capacity >= 3
-    page = max(1, capacity - int(header))
+    # The since-you-looked line costs a row, so a short dock keeps the list.
+    summary = [(since, None, False)] if since and capacity >= 5 else []
+    page = max(1, capacity - int(header) - len(summary))
     first = min(max(0, view.get("scroll", 0)), max(0, len(lines) - page))
     pick = past_pick(navigation, "needs")
     if view.pop("reveal", False) and pick is not None:
@@ -2133,7 +2137,7 @@ def attention_body(ranked, width, capacity, navigation, unicode):
         first = at if at < first else max(first, at - page + 1)
     view.update(scroll=first, page=page)
     title = attention_header(ranked, width, unicode)
-    rows = [(clipped(title + sep + "Enter finalize", width), None, False)] if header else []
+    rows = ([(clipped(title + sep + "Enter finalize", width), None, False)] if header else []) + (summary if header else [])
     return rows + [(text, target, key is not None and key == pick, key) for text, target, key in lines[first:first + page]]
 
 
