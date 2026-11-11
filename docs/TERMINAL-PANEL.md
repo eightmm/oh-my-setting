@@ -3310,6 +3310,27 @@ calls no provider CLI and no model; provider-native inputs such as `claude agent
 are a named but unimplemented extension point in the mapping table's docstring.
 Observation is not approval or verification evidence.
 
+`--sessions` takes read-only filters that narrow the same projection: `--state STATE`,
+`--provider NAME`, `--role ROLE` and `--min-age DURATION` (`30m`, `2h`, `7d`; counted from
+`since`, so a row with no `since` never matches). Filters combine with AND, and a value
+outside the valid set (printed in the error) is refused with exit 2 before any read. A bare
+`--count` prints only the number of matching rows (`--count --json` gives kind
+`oms-sessions-count`); `--count N` still means N watch snapshots and requires `--watch`.
+A filter that matches nothing prints no rows and exits with the snapshot's status, and
+`stale` stays on the answer, so an empty filtered list from a held read is unknown, not none.
+
+`oms panel --next-attention [--switch]` names the board holding the oldest item waiting on
+you, across the boards the panel already has open (the tmux windows carrying its
+`@oms_panel_repo` marker, one per repository and room; with no tmux, only `--repo`). Each
+board is read with the same attention queue the panel shows, so classes and their priority
+are unchanged and `info` rows are skipped; the oldest stamp wins, ties go to the higher-ranked
+class. It prints one line (`CLASS: WHO WHAT (AGE) | REPO / ROOM`), or `nothing waiting` and
+exit 0 when no readable board has anything waiting (unreadable boards are counted on stderr).
+`--switch` additionally selects that board's tmux window and, if it lives in another session,
+moves the current client there. It answers, approves and acknowledges nothing, and binds no
+key; bind it yourself if you want one, for example
+`bind-key -T prefix A run-shell 'oms panel --next-attention --switch'`.
+
 Clearing the panel display does not free model context or subscription quota.
 Use native compaction or an explicit handoff for context, and the native quota
 reset for exhausted usage. Room acknowledgement keeps message evidence; new
