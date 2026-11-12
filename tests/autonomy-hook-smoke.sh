@@ -2641,6 +2641,97 @@ PY
   git -C "$repo" worktree remove --force "$TMP/resume-digest-landed"
   git -C "$repo" worktree remove --force "$TMP/resume-digest-merged"
   git -C "$repo" worktree remove --force "$TMP/resume-digest-evil"
+
+  # Many worktrees must bound the queries themselves, not just the printed names.
+  python3 -X utf8 -I -B - "$ROOT/scripts/lib" <<'PY' || fail "unpublished work query budget"
+import subprocess
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, sys.argv[1])
+import resume_unpublished as hint
+
+names = ["side-%02d" % number for number in range(40)]
+base, current = "1" * 40, "f" * 40
+calls, elapsed = [], [0.0]
+aliases = fail_counts = slow = merge_only = False
+
+def run(command, **kwargs):
+    args = command[3:]
+    calls.append((args, kwargs["timeout"]))
+    if slow:
+        cost = 0.6 if args[0] == "rev-list" else 0.1
+        elapsed[0] += min(cost, kwargs["timeout"])
+        if cost >= kwargs["timeout"]:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+    if args[0] == "remote":
+        output = "origin\n"
+    elif args[0] == "worktree":
+        # Put the current branch last: it still gets the first graph query.
+        output = "\n".join("branch refs/heads/" + name for name in [*names, "feature"])
+    elif args[0] == "symbolic-ref":
+        output = "refs/heads/feature\n"
+    elif args[0] == "for-each-ref":
+        rows = [["refs/remotes/origin/main", base, "", "", "a" * 40],
+                ["refs/heads/feature", current, "", "", "b" * 40]]
+        rows += [["refs/heads/" + name, current if aliases else "%040x" % (number + 2),
+                  "", "", "c" * 40] for number, name in enumerate(names)]
+        output = "\n".join("\0".join(row) for row in rows) + "\n"
+    elif args[0] == "rev-list":
+        if fail_counts:
+            return SimpleNamespace(returncode=128, stdout="")
+        output = ("0" if merge_only and "--no-merges" in args else
+                  "3" if args[-1].endswith(current) else "1")
+    else:
+        raise AssertionError(args)
+    return SimpleNamespace(returncode=0, stdout=output)
+
+with patch.object(hint.subprocess, "run", side_effect=run), \
+        patch.object(hint.time, "monotonic", side_effect=lambda: elapsed[0]):
+    text = hint.summarize("fixture")
+    assert text.startswith("- unpublished: 3 commit(s) on feature not on origin/main;"), text
+    assert len(calls) == hint.MAX_QUERIES, calls
+    assert sum(args[0] == "for-each-ref" for args, _ in calls) == 1, calls
+    graph_queries = [args for args, _ in calls if args[0] == "rev-list"]
+    assert graph_queries[0][-1] == base + "..." + current, graph_queries
+    assert " +5 more; 27 worktree branch(es) unexamined (query budget)" in text, text
+    assert "side-07(1)" in text and "side-08(1)" not in text, text
+    assert all(0 < seconds <= hint.QUERY_SECONDS for _, seconds in calls), calls
+
+    # Multiple branches with the same base/head reuse the proven result.
+    aliases = True
+    calls.clear()
+    text = hint.summarize("fixture")
+    assert len(calls) == 6 and "unexamined" not in text, (text, calls)
+    assert "side-00(3)" in text and "+32 more" in text, text
+
+    # A deadline during optional merge classification keeps the known count,
+    # shortens the in-flight timeout and leaves subsequent branches unexamined.
+    aliases, slow = False, True
+    calls.clear()
+    text = hint.summarize("fixture", seconds=1.5)
+    assert len(calls) == 6 and abs(elapsed[0] - 1.5) < 0.000001, (elapsed, calls)
+    assert 0 < calls[-1][1] < 0.6, calls
+    known_current = "- unpublished: 3 commit(s) on feature not on origin/main; "
+    assert text == known_current + "40 worktree branch(es) unexamined (query budget)", text
+
+    # The count also survives hitting the cap just before merge-tree. Even
+    # branches sharing its base/head remain unexamined after the budget ends.
+    aliases, slow, merge_only = True, False, True
+    calls.clear()
+    text = hint.summarize("fixture", max_queries=6)
+    assert len(calls) == 6 and "--no-merges" in calls[-1][0], calls
+    assert not any(args[0] == "merge-tree" for args, _ in calls), calls
+    assert text == known_current + "40 worktree branch(es) unexamined (query budget)", text
+
+    # An ordinary failed query is unknown too, even before any budget is spent.
+    names, slow, fail_counts = [], False, True
+    calls.clear()
+    text = hint.summarize("fixture")
+    assert text == "- unpublished: 1 worktree branch(es) unexamined", text
+    assert len(calls) == 5, calls
+PY
 }
 
 test_compact_room_delivery

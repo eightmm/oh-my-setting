@@ -288,63 +288,8 @@ fi
 # Unpublished work: commits on this branch (and other registered worktrees'
 # branches) that no remote has. A branch without an upstream is measured
 # against the remote default branch, which the upstream count cannot see.
-# Counts and branch names only; every git call is time-bounded.
-ahead_line="$(python3 -X utf8 -I -B - "$cwd" <<'PYAHEAD' 2>/dev/null
-import subprocess, sys
-repo = sys.argv[1]
-def git(*args):
-    try:
-        done = subprocess.run(["git", "-C", repo, *args], stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, timeout=2)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.stdout.strip() if done.returncode == 0 else None
-try:
-    if not git("remote"):
-        raise SystemExit(0)
-    default = (git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-               or next((n for n in ("origin/main", "origin/master")
-                        if git("rev-parse", "--verify", "-q", "refs/remotes/" + n)), None))
-    def ahead(branch):
-        base = git("rev-parse", "--abbrev-ref", branch + "@{u}") or default
-        # Patch-id equivalence drops commits that landed under another SHA (regraft,
-        # cherry-pick); merges have no patch-id, so a merge-only branch counts only
-        # when its merged tree differs from the base tree. Without merge-tree
-        # (git < 2.38) or on conflict, merges count: never hides work.
-        if not base:
-            return None
-        rng = "%s...refs/heads/%s" % (base, branch)
-        count = git("rev-list", "--cherry-pick", "--right-only", "--count", rng)
-        if not (count and count.isdigit() and int(count)):
-            return None
-        if git("rev-list", "--cherry-pick", "--right-only", "--no-merges", "--count", rng) == "0":
-            merged = git("merge-tree", "--write-tree", base, "refs/heads/" + branch)
-            if merged and merged.split()[0] == git("rev-parse", base + "^{tree}"):
-                return None
-        return (int(count), base)
-    here = git("symbolic-ref", "--short", "HEAD")
-    parts, seen = [], set()
-    if here:
-        seen.add(here)
-        row = ahead(here)
-        if row:
-            parts.append("%d commit(s) on %s not on %s" % (row[0], here, row[1]))
-    others = []
-    for line in (git("worktree", "list", "--porcelain") or "").splitlines():
-        name = line[len("branch refs/heads/"):] if line.startswith("branch refs/heads/") else ""
-        if name and name not in seen:
-            seen.add(name)
-            row = ahead(name)
-            if row:
-                others.append("%s(%d)" % (name, row[0]))
-    if others:
-        parts.append("other worktrees: " + ", ".join(others[:8]) + (" +%d more" % (len(others) - 8) if len(others) > 8 else ""))
-    if parts:
-        print("- unpublished: " + "; ".join(parts))
-except Exception:
-    pass
-PYAHEAD
-)" || ahead_line=""
+# Counts and branch names only; both query count and total Git time are bounded.
+ahead_line="$(python3 -X utf8 -I -B "$ROOT/scripts/lib/resume_unpublished.py" "$cwd" 2>/dev/null)" || ahead_line=""
 ahead_line="${ahead_line//$'\r'/}"
 [ -z "$ahead_line" ] || append "$ahead_line"
 

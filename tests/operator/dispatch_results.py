@@ -3468,11 +3468,18 @@ def survey_record(value):
                       "artifact_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest()}]
 def survey_hint(expected):
     before = survey_plan_path.read_bytes()
+    # Use the real strict reader on each hint: changed decisions must be fresh,
+    # and projecting owner outcomes must never start an agent-events process.
+    survey_index = survey_repo / ".oms/artifacts/index.jsonl"
+    survey_index.parent.mkdir(parents=True, exist_ok=True)
+    survey_index.write_text("".join(json.dumps(row) + "\n" for row in survey_rows))
     notices = io.StringIO()
-    with patch.object(saved, "_records", return_value=([], survey_rows)), redirect_stderr(notices):
+    with patch.object(saved, "_query", side_effect=AssertionError("unexpected lifecycle query")) as query, \
+            redirect_stderr(notices):
         panel._print_dispatch_next_ready(survey_repo, "codex")
         with patch.dict(os.environ, OMS_ROOM_REPO=str(survey_repo), OMS_ROOM_PARTICIPANT=""):
             context = hook_state.panel_plan_hint({"cwd": str(project)})
+        query.assert_not_called()
     assert "next ready: " + expected in notices.getvalue(), notices.getvalue()
     assert "next ready: " + expected in context, context
     assert "0 of 3 verified" in context, context
@@ -3516,18 +3523,18 @@ survey_record(dict(survey_result, outcome="malformed"))
 survey_hint("survey")
 survey_rows[0]["artifact_sha256"] = "0" * 64
 survey_hint("survey")
-with patch.object(saved, "_records", side_effect=ValueError("unreadable index")):
+with patch.object(saved, "_artifact_rows", side_effect=ValueError("unreadable index")):
     assert "next ready: survey" in hook_state.panel_next_ready_hint(hook_state.plan_tasks(survey_repo)[1], "codex")
 survey_empty_repo = temporary / "empty-survey-plan"
 survey_empty_repo.mkdir()
-with patch.object(saved, "_records") as unused_records:
+with patch.object(saved, "_artifact_rows") as unused_records:
     assert hook_state.plan_tasks(survey_empty_repo) == ({}, [])
     assert saved.outcomes(survey_repo, [], _current_only=True) == {}
     unused_records.assert_not_called()
 survey_record(survey_result)
 del survey_plan["tasks"]["next-task"]
 survey_plan_path.write_text(json.dumps(survey_plan))
-with patch.object(saved, "_records", return_value=([], survey_rows)):
+with patch.object(saved, "_artifact_rows", return_value=survey_rows):
     assert not hook_state.panel_next_ready_hint(hook_state.plan_tasks(survey_repo)[1], "codex")
 # END finalized survey next-ready projection
 

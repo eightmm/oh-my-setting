@@ -1545,6 +1545,17 @@ presentation. `oms session-handoff list --status` prints `unclaimed` or
 not approval or verification evidence, and a failed write never fails resume.
 `oms gc` does not prune the file.
 
+The SessionStart resume block also checks unpublished work locally, using the
+current branch's upstream or the remote default and then other registered
+worktrees. Branch metadata is read in one batch; identical base/head pairs
+reuse their comparison. Git queries share a four-second deadline and a
+32-query budget, with at most two seconds per query. The current branch has
+priority, up to eight other branch names are shown, and any branches left
+unchecked are counted as `unexamined`. An unavailable ahead count is also
+unexamined; unavailable merge comparisons keep counting the merge as unpublished.
+Neither establishes that a branch is clean. This budget covers the
+unpublished-work check, not the resume block's other sections.
+
 `oms session-handoff prompt [--cwd PATH] [--max-bytes N] [--output NEW_FILE]`
 prints an editable next-session prompt for a person to review and paste into a
 fresh session of any provider, instead of relying on a provider's lossy
