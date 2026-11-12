@@ -13,6 +13,7 @@ rust/crates/oms-graph-shell/tests/python_env.json	python-reference	2
 rust/crates/oms-graph-shell/tests/python_fragment.json	python-reference	2
 rust/crates/oms-graph-shell/tests/python_long.json	python-reference	1
 rust/crates/oms-graph-shell/tests/python_other.json	python-reference	2
+rust/crates/oms-graph/Cargo.toml	python-reference	1
 scripts/agent-events.sh	python-reference	1
 scripts/agent-memory.sh	python-reference	6
 scripts/agent-ml-context.sh	python-reference	7

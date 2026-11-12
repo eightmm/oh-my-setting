@@ -2,7 +2,7 @@
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
 It contains the development inventory tool `oms-migrate`, a standalone native
-`oms` binary, and thirteen native libraries: `oms-context` (manifest projections
+`oms` binary, and fourteen native libraries: `oms-context` (manifest projections
 and lossless session JSON input), `oms-safe-fs` (descriptor-relative reads),
 `oms-json` (domain byte encodings), `oms-output` (streaming digest selection,
 reversible reducers and scoped retrieval metadata), `oms-graph-shell` (source
@@ -13,14 +13,17 @@ graph extraction), `oms-context-report` (text reports), `oms-context-session`
 `oms-work-inspect` (work projections with lossless timestamp handling),
 `oms-context-source` (bounded read-only ledger/transcript acquisition),
 `oms-graph-python` (native extraction through one private persistent helper),
-and `oms-output-capture` (pure retained-output validation, paging and search).
+`oms-output-capture` (pure retained-output validation, paging and search), and
+`oms-graph` (parser selection, Config/Markdown extraction, and shared-helper
+Python/Shell routing).
 
-The standalone binary currently implements manifest inspection, comparison and
-current-file verification through `oms runtime context-inspect`. Session modes
-are separate consumer integration work; the acquisition/projection libraries
-are present but not yet wired into that binary. Raw session Read-label support
-and descriptor-backed capture retrieval also remain in progress. The installed
-`oms` command still uses the legacy runtime. No legacy domain is retired.
+The standalone binary implements manifest inspection, comparison and current-file
+verification, plus injections, session reports and timelines, through
+`oms runtime context-inspect`. It preserves raw OS paths and lossless session
+Read labels. Descriptor-backed capture acquisition is available in `oms-safe-fs`;
+its capture projection adapter is still in progress. The graph facade explicitly
+rejects notebooks until their native parser is integrated. The installed `oms`
+command still uses the legacy runtime. No legacy domain is retired.
 
 The graph helper is a private libexec artifact, not another PATH command. Its
 malformed-input crashes are contained on Linux; macOS memory and dump-collector

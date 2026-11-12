@@ -386,6 +386,7 @@ dependencies = [
  "nix",
  "oms-context",
  "oms-context-report",
+ "oms-context-source",
  "oms-json",
  "oms-safe-fs",
  "rustix",
@@ -451,6 +452,16 @@ dependencies = [
  "oms-json",
  "regex",
  "unicode-general-category",
+]
+
+[[package]]
+name = "oms-graph"
+version = "0.1.0"
+dependencies = [
+ "oms-graph-python",
+ "oms-graph-shell",
+ "regex",
+ "serde_json",
 ]
 
 [[package]]

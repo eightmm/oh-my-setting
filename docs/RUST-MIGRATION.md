@@ -41,21 +41,30 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains thirteen implemented native libraries: context
+The workspace now also contains fourteen implemented native libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
 encodings, output selection, Shell graph extraction, context text reports,
 injection/session/timeline projections, task/project Markdown contracts,
 deterministic failure taxonomy, work projections with lossless timestamp
 handling, bounded read-only ledger/transcript acquisition, native Python graph
 extraction through a persistent private helper, and pure retained-output
-validation/paging/search. A standalone
-native `oms runtime context-inspect` binary handles manifest inspection,
-comparison and current-file verification. These products have scoped native
-tests and independent review; they remain local integration work until release.
+validation/paging/search, and graph parser selection with Config/Markdown
+extraction and shared-helper Python/Shell routing. A standalone native
+`oms runtime context-inspect` binary handles manifest inspection, comparison,
+current-file verification, injections, session reports and timelines. These
+products have scoped native tests and independent review; they remain local
+integration work until release.
 The native compiler floor is 1.99.1; the preparation inventory tool separately
-retains its 1.85 minimum. Wiring session modes into the binary, lossless raw
-Read-label handling, descriptor-backed capture retrieval and graph pipeline
-consumers remain in progress.
+retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
+capture read producer are implemented. Capture projection acquisition, notebook
+parsing and graph pipeline consumers remain in progress.
+
+Parent runtime probes verified SIGINT delivered on the real transcript read
+syscall returns exit 130 with empty stdout, actual socket rejection, and readable
+capture acceptance across file owners. A host-built native CLI failed the
+Ubuntu 20.04 runtime probe on newer glibc requirements; floor-native builds and
+exact-artifact runtime checks are required before installation. Darwin target
+checks do not establish native macOS runtime compatibility.
 No installed command, MCP transport, hook, lifecycle operation or state writer
 has switched to Rust, and no legacy source domain has yet been deleted.
 Library counts and local commits do not satisfy M1 or M6 retirement gates.
@@ -327,10 +336,15 @@ dependency names and fixture records inert; no blanket Rust-tree exemption is
 permitted. The helper is private and packaging must exclude its test fixture
 binary. No Python interpreter or per-transform process fallback was added.
 
+The graph facade adds one further reference row: its Cargo dependency on the
+native Python parser (1 line). M3 owns this inert dependency-name reference until
+a reviewed exact-path classifier refinement or dependency replacement removes
+it. This is not an interpreter invocation.
+
 The measured executable footprint remains 347 Python source files and 178,126
 physical lines. The conservative reference inventory rises from the original
-194 paths / 4,782 lines to 202 paths / 4,971 lines for the Shell corpus and native
-Python-parser names/data. The combined inventory now has 549 rows. No legacy
+194 paths / 4,782 lines to 203 paths / 4,972 lines for the Shell corpus and native
+Python-parser names/data. The combined inventory now has 550 rows. No legacy
 deletion or M6 zero result is claimed. Future retirement batches must lower the
 baseline again.
 
