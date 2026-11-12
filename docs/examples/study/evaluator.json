@@ -1,5 +1,0 @@
-{
-  "argv": ["python3", "{file:docs/examples/study/evaluate.py}", "{input}", "{prediction}", "{output}"],
-  "files": ["docs/examples/study/evaluate.py"],
-  "timeout_seconds": 30
-}

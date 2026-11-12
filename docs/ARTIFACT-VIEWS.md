@@ -19,8 +19,7 @@ an **aggregate** case; they do not invent per-molecule observations.
 
 ## Results contract
 
-The schema is also produced by `oms study` when that feature is installed. Any
-existing workflow can emit it without a study dependency:
+A workflow can emit the following results format:
 
 ```json
 {
@@ -76,9 +75,8 @@ the center; nonfinite X values are excluded from the scatter plot.
 
 Text (`txt`, `json`, `csv`, `tsv`, `md`), PNG/JPEG/GIF/WebP images and molecular
 PDB/SDF/MOL2/XYZ files can be embedded. An explicit artifact `format` (such as
-`json` or `sdf`) supports content-addressed paths with no extension, including
-study objects; otherwise the filename extension is used. Undeclared prediction
-formats are not guessed. Other formats remain labeled references.
+`json` or `sdf`) supports content-addressed paths with no extension; otherwise
+the filename extension is used. Undeclared prediction formats are not guessed. Other formats remain labeled references.
 Paths must be relative to the selected repository; symlinks and traversal are
 refused. A supplied artifact `sha256` must match its bytes. The view records
 the computed digest even when the source did not supply one.
