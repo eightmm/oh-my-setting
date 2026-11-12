@@ -8369,8 +8369,22 @@ fi
 printf 'worker done\n'
 EOF
 
+  local real_python
+  real_python="$(command -v python3)"
+  cat > "$bin_dir/python3" <<EOF
+#!$BASH
+if [[ " \$* " == *" --auto "* ]]; then
+  case "\${OMS_GRAPH_FAKE_FAILURE:-}" in
+    timeout) exit 124 ;;
+    invalid) exit 2 ;;
+  esac
+fi
+exec "\$OMS_GRAPH_REAL_PYTHON" "\$@"
+EOF
+  chmod +x "$bin_dir/python3"
+
   local mode
-  for mode in default first cached disabled autobuild-disabled unmatched scoped; do
+  for mode in default first cached disabled autobuild-disabled unmatched timeout invalid scoped; do
     local flags=()
     local query='recover lease'
     local expect_ready=0
@@ -8387,10 +8401,11 @@ EOF
       expect_ready=0
       autobuild=0
     fi
+    case "$mode" in timeout|invalid) expect_ready=0 ;; esac
     [ "$mode" != unmatched ] || query='zzzz_no_matching_subject'
     HOME="$home_dir" NVM_DIR="$home_dir/.nvm" \
       OMS_CONTEXT_CAPTURE="$capture" OMS_GRAPH_EXPECT_READY="$expect_ready" \
-      OMS_GRAPH_AUTOBUILD="$autobuild" \
+      OMS_GRAPH_AUTOBUILD="$autobuild" OMS_GRAPH_FAKE_FAILURE="$mode" OMS_GRAPH_REAL_PYTHON="$real_python" \
       OMS_PANEL_GRAPH_SCOPES="$( [ "$mode" != scoped ] || printf '["lease.py"]' )" \
       OMS_GRAPH_TEST_LIB="$ROOT/scripts/lib" PATH="$bin_dir:/usr/bin:/bin" \
       "$ROOT/scripts/peer-delegate.sh" --to codex --repo "$project" \
@@ -8412,9 +8427,9 @@ if mode == "scoped":
     assert "Consumers outside your scope" in text and "tests/test_lease.py" in text, text
 else:
     assert "Consumers outside your scope" not in text, text
-if mode in ("default", "disabled", "autobuild-disabled", "unmatched"):
+if mode in ("default", "disabled", "autobuild-disabled", "unmatched", "timeout", "invalid"):
     assert "## Project Graph orientation" not in text, text
-    if mode == "unmatched":
+    if mode in ("unmatched", "timeout", "invalid"):
         assert "inspect source paths, callers and tests directly" in text, text
     else:
         assert "Graph orientation unavailable" not in text, text
@@ -8424,7 +8439,7 @@ else:
     assert "detached worker snapshot" in text, text
 rows = [json.loads(line) for line in (graph.parents[1] / 'artifacts/index.jsonl').read_text(encoding='utf-8').splitlines()]
 row = next(row for row in reversed(rows) if row.get('kind') == 'delegate')
-expected = 'direct' if mode in ('default', 'disabled', 'autobuild-disabled') else 'graph-fallback' if mode == 'unmatched' else 'graph'
+expected = 'direct' if mode in ('default', 'disabled', 'autobuild-disabled') else 'graph-fallback' if mode in ('unmatched', 'timeout', 'invalid') else 'graph'
 assert row['context_mode'] == expected, row
 assert row['context_prepare_seconds'] >= 0, row
 assert (row['context_orientation_bytes'] > 0) == (expected == 'graph'), row
@@ -8432,6 +8447,8 @@ assert row['prompt_bytes'] >= row['context_orientation_bytes'], row
 assert row['context_verification'] == 'none', row
 artifact = max(artifact_dir.glob('codex-*.md'), key=lambda path: path.stat().st_mtime_ns).read_text(encoding='utf-8')
 assert '- context_mode: %s' % expected in artifact, artifact[:1000]
+reason = {'unmatched': 'empty', 'timeout': 'timeout', 'invalid': 'invalid'}.get(mode)
+assert ('- context_fallback: %s' % reason in artifact) if reason else ('- context_fallback:' not in artifact), artifact[:1000]
 assert '- context_prepare_seconds: ' in artifact, artifact[:1000]
 assert len(row['context_task_sha256']) == 64, row
 if mode in ('first', 'cached', 'disabled'):

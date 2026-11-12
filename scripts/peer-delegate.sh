@@ -35,6 +35,7 @@ CONTEXT_PACK_FILES=""
 CONTEXT_ORIENTATION_BYTES=0
 context_prepare_seconds=0
 context_mode=direct
+context_fallback=""
 context_pack_section=""
 context_pack_targets=""
 # Artifact provenance belongs to this operation. Do not inherit a caller's
@@ -1415,11 +1416,19 @@ if [ "$AUTO_GRAPH_CONTEXT" = 1 ] && [ -z "$CONTEXT_PACK" ] &&
   [ -n "$graph_task" ] || graph_task="$(head -c 2000 "$BRIEF_FILE")"
   graph_task="${graph_task:0:2000}"
   auto_pack="$worktree_parent/graph-context.json"
-  if OMS_PEER_KILL_AFTER=1 \
+  graph_status=0
+  OMS_PEER_KILL_AFTER=1 \
     ma_run_bounded 25 graph-context python3 -B "$(ma_scripts_dir)/lib/oms_runtime/context_pack.py" \
     --auto "$worktree" "$delegate_worktree_repo" "$worktree/.oms/project-graph" "$graph_task" \
-    > "$auto_pack" 2> "$worktree_parent/graph-context.log" &&
-    CONTEXT_PACK="$auto_pack" load_context_pack && [ "$CONTEXT_PACK_FILES" -gt 0 ]; then
+    > "$auto_pack" 2> "$worktree_parent/graph-context.log" || graph_status=$?
+  if [ "$graph_status" -ne 0 ]; then
+    case "$graph_status" in 124|137) context_fallback=timeout ;; *) context_fallback=invalid ;; esac
+  elif ! CONTEXT_PACK="$auto_pack" load_context_pack; then
+    context_fallback=invalid
+  elif [ "$CONTEXT_PACK_FILES" -eq 0 ]; then
+    context_fallback=empty
+  fi
+  if [ -z "$context_fallback" ]; then
     context_mode=graph
     context_pack_section="$context_pack_section
 Graph source: detached worker snapshot. Bounded orientation is not exhaustive coverage or test-pass evidence; inspect missing paths directly and refresh graph queries after edits."
@@ -1803,6 +1812,7 @@ fi
   printf -- '- started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf -- '- repo: %s\n' "$(ma_repo_label "$REPO")"
   printf -- '- context_mode: %s\n' "$context_mode"
+  [ -z "$context_fallback" ] || printf -- '- context_fallback: %s\n' "$context_fallback"
   printf -- '- context_prepare_seconds: %s\n' "$context_prepare_seconds"
   if [ -n "$CONTEXT_PACK_SHA" ]; then
     printf -- '- context_pack_sha256: %s\n' "$CONTEXT_PACK_SHA"
