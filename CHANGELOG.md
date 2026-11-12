@@ -1048,6 +1048,10 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- CI jobs run on `ubuntu-24.04` instead of `ubuntu-latest`: the rollout of
+  the Ubuntu 26.04 runner image failed `core/room-protocol`, `draft-pr` and
+  `runtime-core` on every branch while the same commits passed on 24.04 and
+  locally. The native lifecycle matrix keeps `ubuntu-latest`.
 - Managed landing captures default to 2048 entries (was 256). The 30-day GC
   age held about 450 ordinary landings, so admission was refused with 85% of
   the byte budget free; the 128 MiB byte cap still bounds disk use.
