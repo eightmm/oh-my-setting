@@ -1,0 +1,12 @@
+[package]
+name = "oms-graph-resolve"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[dependencies]
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+
+[lints.rust]
+unsafe_code = "forbid"

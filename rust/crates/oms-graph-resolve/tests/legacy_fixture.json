@@ -1,0 +1,1018 @@
+{
+  "records": [
+    {
+      "path": "src/pkg/__init__.py",
+      "sha256": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86",
+      "bytes": 18,
+      "parser": "python",
+      "parser_version": 6,
+      "nodes": [
+        {
+          "id": "file:src/pkg/__init__.py",
+          "kind": "file",
+          "name": "__init__.py",
+          "path": "src/pkg/__init__.py",
+          "language": "python",
+          "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "module:src/pkg/__init__.py",
+          "kind": "module",
+          "name": "__init__.py",
+          "path": "src/pkg/__init__.py",
+          "language": "python",
+          "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:src/pkg/__init__.py",
+          "target": "module:src/pkg/__init__.py",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "src/pkg/__init__.py",
+            "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86"
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "file:src/pkg/__init__.py",
+          "relation": "imports",
+          "kind": "module",
+          "value": ".",
+          "line": 1,
+          "binding": "sub",
+          "imported": "sub"
+        }
+      ]
+    },
+    {
+      "path": "src/pkg/sub.py",
+      "sha256": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+      "bytes": 50,
+      "parser": "python",
+      "parser_version": 6,
+      "nodes": [
+        {
+          "id": "file:src/pkg/sub.py",
+          "kind": "file",
+          "name": "sub.py",
+          "path": "src/pkg/sub.py",
+          "language": "python",
+          "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "module:src/pkg/sub.py",
+          "kind": "module",
+          "name": "sub.py",
+          "path": "src/pkg/sub.py",
+          "language": "python",
+          "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "symbol:src/pkg/sub.py::work",
+          "kind": "function",
+          "name": "work",
+          "path": "src/pkg/sub.py",
+          "language": "python",
+          "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "def work()",
+            "end_line": 1,
+            "qualname": "work",
+            "line": 1
+          }
+        },
+        {
+          "id": "symbol:src/pkg/sub.py::A",
+          "kind": "class",
+          "name": "A",
+          "path": "src/pkg/sub.py",
+          "language": "python",
+          "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "class A",
+            "end_line": 3,
+            "qualname": "A",
+            "line": 2
+          }
+        },
+        {
+          "id": "symbol:src/pkg/sub.py::A.run",
+          "kind": "method",
+          "name": "run",
+          "path": "src/pkg/sub.py",
+          "language": "python",
+          "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "def A.run(self)",
+            "end_line": 3,
+            "qualname": "A.run",
+            "line": 3
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:src/pkg/sub.py",
+          "target": "module:src/pkg/sub.py",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "src/pkg/sub.py",
+            "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774"
+          }
+        },
+        {
+          "source": "file:src/pkg/sub.py",
+          "target": "symbol:src/pkg/sub.py::work",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "src/pkg/sub.py",
+            "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+            "line": 1
+          }
+        },
+        {
+          "source": "file:src/pkg/sub.py",
+          "target": "symbol:src/pkg/sub.py::A",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "src/pkg/sub.py",
+            "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+            "line": 2
+          }
+        },
+        {
+          "source": "symbol:src/pkg/sub.py::A",
+          "target": "symbol:src/pkg/sub.py::A.run",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "src/pkg/sub.py",
+            "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+            "line": 3
+          }
+        }
+      ],
+      "refs": []
+    },
+    {
+      "path": "one.py",
+      "sha256": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "bytes": 19,
+      "parser": "python",
+      "parser_version": 6,
+      "nodes": [
+        {
+          "id": "file:one.py",
+          "kind": "file",
+          "name": "one.py",
+          "path": "one.py",
+          "language": "python",
+          "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "module:one.py",
+          "kind": "module",
+          "name": "one.py",
+          "path": "one.py",
+          "language": "python",
+          "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "symbol:one.py::common",
+          "kind": "function",
+          "name": "common",
+          "path": "one.py",
+          "language": "python",
+          "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "def common()",
+            "end_line": 1,
+            "qualname": "common",
+            "line": 1
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:one.py",
+          "target": "module:one.py",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "one.py",
+            "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c"
+          }
+        },
+        {
+          "source": "file:one.py",
+          "target": "symbol:one.py::common",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "one.py",
+            "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+            "line": 1
+          }
+        }
+      ],
+      "refs": []
+    },
+    {
+      "path": "two.py",
+      "sha256": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "bytes": 19,
+      "parser": "python",
+      "parser_version": 6,
+      "nodes": [
+        {
+          "id": "file:two.py",
+          "kind": "file",
+          "name": "two.py",
+          "path": "two.py",
+          "language": "python",
+          "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "module:two.py",
+          "kind": "module",
+          "name": "two.py",
+          "path": "two.py",
+          "language": "python",
+          "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "symbol:two.py::common",
+          "kind": "function",
+          "name": "common",
+          "path": "two.py",
+          "language": "python",
+          "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "def common()",
+            "end_line": 1,
+            "qualname": "common",
+            "line": 1
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:two.py",
+          "target": "module:two.py",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "two.py",
+            "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c"
+          }
+        },
+        {
+          "source": "file:two.py",
+          "target": "symbol:two.py::common",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "two.py",
+            "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+            "line": 1
+          }
+        }
+      ],
+      "refs": []
+    },
+    {
+      "path": "tests/test_use.py",
+      "sha256": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+      "bytes": 70,
+      "parser": "python",
+      "parser_version": 6,
+      "nodes": [
+        {
+          "id": "test:tests/test_use.py",
+          "kind": "test",
+          "name": "test_use.py",
+          "path": "tests/test_use.py",
+          "language": "python",
+          "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "module:tests/test_use.py",
+          "kind": "module",
+          "name": "test_use.py",
+          "path": "tests/test_use.py",
+          "language": "python",
+          "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [
+        {
+          "source": "test:tests/test_use.py",
+          "target": "module:tests/test_use.py",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "tests/test_use.py",
+            "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31"
+          }
+        }
+      ],
+      "refs": [
+        {
+          "from": "test:tests/test_use.py",
+          "relation": "imports",
+          "kind": "module",
+          "value": "pkg",
+          "line": 1,
+          "binding": "sub",
+          "imported": "sub"
+        },
+        {
+          "from": "test:tests/test_use.py",
+          "relation": "imports",
+          "kind": "module",
+          "value": "pkg.sub",
+          "line": 2,
+          "binding": "A",
+          "imported": "A"
+        },
+        {
+          "from": "test:tests/test_use.py",
+          "relation": "calls",
+          "kind": "name",
+          "value": "sub.work",
+          "line": 3
+        },
+        {
+          "from": "test:tests/test_use.py",
+          "relation": "calls",
+          "kind": "name",
+          "value": "A.run",
+          "line": 4
+        },
+        {
+          "from": "test:tests/test_use.py",
+          "relation": "calls",
+          "kind": "name",
+          "value": "common",
+          "line": 5
+        }
+      ]
+    },
+    {
+      "path": "scripts/lib/common.sh",
+      "sha256": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+      "bytes": 22,
+      "parser": "shell",
+      "parser_version": 8,
+      "nodes": [
+        {
+          "id": "file:scripts/lib/common.sh",
+          "kind": "file",
+          "name": "common.sh",
+          "path": "scripts/lib/common.sh",
+          "language": "shell",
+          "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "module:scripts/lib/common.sh",
+          "kind": "module",
+          "name": "common.sh",
+          "path": "scripts/lib/common.sh",
+          "language": "shell",
+          "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        },
+        {
+          "id": "symbol:scripts/lib/common.sh::helper",
+          "kind": "function",
+          "name": "helper",
+          "path": "scripts/lib/common.sh",
+          "language": "shell",
+          "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+          "summary": null,
+          "crux": null,
+          "metadata": {
+            "signature": "helper()",
+            "end_line": 1,
+            "qualname": "helper",
+            "line": 1
+          }
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:scripts/lib/common.sh",
+          "target": "module:scripts/lib/common.sh",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "scripts/lib/common.sh",
+            "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8"
+          }
+        },
+        {
+          "source": "file:scripts/lib/common.sh",
+          "target": "symbol:scripts/lib/common.sh::helper",
+          "relation": "contains",
+          "confidence": "EXTRACTED",
+          "evidence": {
+            "path": "scripts/lib/common.sh",
+            "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+            "line": 1
+          }
+        }
+      ],
+      "refs": []
+    },
+    {
+      "path": "tests/use.sh",
+      "sha256": "34550eae6c48dc3db7d2859f9d5737ab1d6b667d022e26d23578a07a05acb705",
+      "bytes": 59,
+      "parser": "shell",
+      "parser_version": 8,
+      "nodes": [
+        {
+          "id": "test:tests/use.sh",
+          "kind": "test",
+          "name": "use.sh",
+          "path": "tests/use.sh",
+          "language": "shell",
+          "source_digest": "34550eae6c48dc3db7d2859f9d5737ab1d6b667d022e26d23578a07a05acb705",
+          "summary": null,
+          "crux": null,
+          "metadata": {}
+        }
+      ],
+      "edges": [],
+      "refs": [
+        {
+          "from": "test:tests/use.sh",
+          "relation": "imports",
+          "kind": "path",
+          "value": "common.sh",
+          "line": 1,
+          "variable": false,
+          "shell_include": true
+        },
+        {
+          "from": "test:tests/use.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "helper",
+          "line": 2,
+          "shell_bare": true
+        },
+        {
+          "from": "test:tests/use.sh",
+          "relation": "calls",
+          "kind": "name",
+          "value": "python3",
+          "line": 3,
+          "shell_bare": true
+        },
+        {
+          "from": "test:tests/use.sh",
+          "relation": "imports",
+          "kind": "module",
+          "value": "pkg.sub",
+          "line": 4,
+          "binding": "pkg",
+          "heredoc_python": true
+        }
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "id": "file:one.py",
+      "kind": "file",
+      "name": "one.py",
+      "path": "one.py",
+      "language": "python",
+      "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "file:scripts/lib/common.sh",
+      "kind": "file",
+      "name": "common.sh",
+      "path": "scripts/lib/common.sh",
+      "language": "shell",
+      "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "file:src/pkg/__init__.py",
+      "kind": "file",
+      "name": "__init__.py",
+      "path": "src/pkg/__init__.py",
+      "language": "python",
+      "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "file:src/pkg/sub.py",
+      "kind": "file",
+      "name": "sub.py",
+      "path": "src/pkg/sub.py",
+      "language": "python",
+      "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "file:two.py",
+      "kind": "file",
+      "name": "two.py",
+      "path": "two.py",
+      "language": "python",
+      "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "module:one.py",
+      "kind": "module",
+      "name": "one.py",
+      "path": "one.py",
+      "language": "python",
+      "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "module:scripts/lib/common.sh",
+      "kind": "module",
+      "name": "common.sh",
+      "path": "scripts/lib/common.sh",
+      "language": "shell",
+      "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "module:src/pkg/__init__.py",
+      "kind": "module",
+      "name": "__init__.py",
+      "path": "src/pkg/__init__.py",
+      "language": "python",
+      "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "module:src/pkg/sub.py",
+      "kind": "module",
+      "name": "sub.py",
+      "path": "src/pkg/sub.py",
+      "language": "python",
+      "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "module:tests/test_use.py",
+      "kind": "module",
+      "name": "test_use.py",
+      "path": "tests/test_use.py",
+      "language": "python",
+      "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "module:two.py",
+      "kind": "module",
+      "name": "two.py",
+      "path": "two.py",
+      "language": "python",
+      "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "symbol:one.py::common",
+      "kind": "function",
+      "name": "common",
+      "path": "one.py",
+      "language": "python",
+      "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "def common()",
+        "end_line": 1,
+        "qualname": "common",
+        "line": 1
+      }
+    },
+    {
+      "id": "symbol:scripts/lib/common.sh::helper",
+      "kind": "function",
+      "name": "helper",
+      "path": "scripts/lib/common.sh",
+      "language": "shell",
+      "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "helper()",
+        "end_line": 1,
+        "qualname": "helper",
+        "line": 1
+      }
+    },
+    {
+      "id": "symbol:src/pkg/sub.py::A",
+      "kind": "class",
+      "name": "A",
+      "path": "src/pkg/sub.py",
+      "language": "python",
+      "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "class A",
+        "end_line": 3,
+        "qualname": "A",
+        "line": 2
+      }
+    },
+    {
+      "id": "symbol:src/pkg/sub.py::A.run",
+      "kind": "method",
+      "name": "run",
+      "path": "src/pkg/sub.py",
+      "language": "python",
+      "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "def A.run(self)",
+        "end_line": 3,
+        "qualname": "A.run",
+        "line": 3
+      }
+    },
+    {
+      "id": "symbol:src/pkg/sub.py::work",
+      "kind": "function",
+      "name": "work",
+      "path": "src/pkg/sub.py",
+      "language": "python",
+      "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "def work()",
+        "end_line": 1,
+        "qualname": "work",
+        "line": 1
+      }
+    },
+    {
+      "id": "symbol:two.py::common",
+      "kind": "function",
+      "name": "common",
+      "path": "two.py",
+      "language": "python",
+      "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "def common()",
+        "end_line": 1,
+        "qualname": "common",
+        "line": 1
+      }
+    },
+    {
+      "id": "test:tests/test_use.py",
+      "kind": "test",
+      "name": "test_use.py",
+      "path": "tests/test_use.py",
+      "language": "python",
+      "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "test:tests/use.sh",
+      "kind": "test",
+      "name": "use.sh",
+      "path": "tests/use.sh",
+      "language": "shell",
+      "source_digest": "34550eae6c48dc3db7d2859f9d5737ab1d6b667d022e26d23578a07a05acb705",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:one.py",
+      "target": "module:one.py",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "one.py",
+        "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c"
+      }
+    },
+    {
+      "source": "file:one.py",
+      "target": "symbol:one.py::common",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "one.py",
+        "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+        "line": 1
+      }
+    },
+    {
+      "source": "file:scripts/lib/common.sh",
+      "target": "module:scripts/lib/common.sh",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "scripts/lib/common.sh",
+        "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8"
+      }
+    },
+    {
+      "source": "file:scripts/lib/common.sh",
+      "target": "symbol:scripts/lib/common.sh::helper",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "scripts/lib/common.sh",
+        "source_digest": "3fe721f26052e7ef45def10e8d22d43a58b1b0c635564ddf2c5e5e56e98107c8",
+        "line": 1
+      }
+    },
+    {
+      "source": "file:src/pkg/__init__.py",
+      "target": "module:src/pkg/__init__.py",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "src/pkg/__init__.py",
+        "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86"
+      }
+    },
+    {
+      "source": "file:src/pkg/__init__.py",
+      "target": "module:src/pkg/sub.py",
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "src/pkg/__init__.py",
+        "source_digest": "3c0d2e6f16b73a5d6de8aad452eee14b76cff3ae8e673103b1a299d0dc2bee86",
+        "line": 1
+      }
+    },
+    {
+      "source": "file:src/pkg/sub.py",
+      "target": "module:src/pkg/sub.py",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "src/pkg/sub.py",
+        "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774"
+      }
+    },
+    {
+      "source": "file:src/pkg/sub.py",
+      "target": "symbol:src/pkg/sub.py::A",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "src/pkg/sub.py",
+        "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+        "line": 2
+      }
+    },
+    {
+      "source": "file:src/pkg/sub.py",
+      "target": "symbol:src/pkg/sub.py::work",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "src/pkg/sub.py",
+        "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+        "line": 1
+      }
+    },
+    {
+      "source": "file:two.py",
+      "target": "module:two.py",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "two.py",
+        "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c"
+      }
+    },
+    {
+      "source": "file:two.py",
+      "target": "symbol:two.py::common",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "two.py",
+        "source_digest": "d7ab60113e19b80307e833935ce1ee37e8044820d1bfdc35088c66fa2107bc0c",
+        "line": 1
+      }
+    },
+    {
+      "source": "symbol:src/pkg/sub.py::A",
+      "target": "symbol:src/pkg/sub.py::A.run",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "src/pkg/sub.py",
+        "source_digest": "f827f46c712f109817235d47ed3abb46b92895783cf84457b0ca7a167e46e774",
+        "line": 3
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "module:src/pkg/sub.py",
+      "relation": "tests",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+        "line": 1
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "module:src/pkg/sub.py",
+      "relation": "tests",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+        "line": 2
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "module:tests/test_use.py",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31"
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "symbol:one.py::common",
+      "relation": "calls",
+      "confidence": "AMBIGUOUS",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+        "line": 5,
+        "candidate_count": 2
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "symbol:src/pkg/sub.py::A.run",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+        "line": 4
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "symbol:src/pkg/sub.py::work",
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+        "line": 3
+      }
+    },
+    {
+      "source": "test:tests/test_use.py",
+      "target": "symbol:two.py::common",
+      "relation": "calls",
+      "confidence": "AMBIGUOUS",
+      "evidence": {
+        "path": "tests/test_use.py",
+        "source_digest": "ed2ecd1897fc864dc16dadf6e96878c242f4070714b2c63d04e8bda3d70dcd31",
+        "line": 5,
+        "candidate_count": 2
+      }
+    },
+    {
+      "source": "test:tests/use.sh",
+      "target": "file:scripts/lib/common.sh",
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/use.sh",
+        "source_digest": "34550eae6c48dc3db7d2859f9d5737ab1d6b667d022e26d23578a07a05acb705",
+        "line": 1
+      }
+    },
+    {
+      "source": "test:tests/use.sh",
+      "target": "module:src/pkg/sub.py",
+      "relation": "tests",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/use.sh",
+        "source_digest": "34550eae6c48dc3db7d2859f9d5737ab1d6b667d022e26d23578a07a05acb705",
+        "line": 4
+      }
+    },
+    {
+      "source": "test:tests/use.sh",
+      "target": "symbol:scripts/lib/common.sh::helper",
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "evidence": {
+        "path": "tests/use.sh",
+        "source_digest": "34550eae6c48dc3db7d2859f9d5737ab1d6b667d022e26d23578a07a05acb705",
+        "line": 2
+      }
+    }
+  ]
+}
