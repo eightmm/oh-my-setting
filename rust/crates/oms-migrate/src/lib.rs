@@ -59,8 +59,10 @@ fn kind(path: &str) -> Option<Kind> {
     // fence. Rust/build.rs review and clean-host execution remain independent.
     match extension.as_deref() {
         None | Some("") => Some(Kind::Reference),
-        Some("sh" | "bash" | "zsh" | "fish" | "js" | "mjs" | "cjs" | "json" | "yaml"
-        | "yml" | "toml") => Some(Kind::Reference),
+        Some(
+            "sh" | "bash" | "zsh" | "fish" | "js" | "mjs" | "cjs" | "json" | "yaml" | "yml"
+            | "toml",
+        ) => Some(Kind::Reference),
         _ => None,
     }
 }
@@ -109,8 +111,8 @@ pub fn inventory(repo: &Path) -> Result<Inventory> {
     }
     let mut result = Inventory::new();
     for raw in paths.split(|byte| *byte == 0).filter(|raw| !raw.is_empty()) {
-        let path = std::str::from_utf8(raw)
-            .map_err(|_| "tracked filename is not UTF-8".to_string())?;
+        let path =
+            std::str::from_utf8(raw).map_err(|_| "tracked filename is not UTF-8".to_string())?;
         validate_path(path)?;
         if kind(path).is_none() {
             continue;
@@ -158,7 +160,9 @@ pub fn parse_baseline(text: &str) -> Result<Inventory> {
         let path = fields[0];
         validate_path(path)?;
         if path <= previous {
-            return Err(format!("inventory paths must be unique and sorted: {path:?}"));
+            return Err(format!(
+                "inventory paths must be unique and sorted: {path:?}"
+            ));
         }
         let kind = match fields[1] {
             "python-source" => Kind::Source,
@@ -166,7 +170,9 @@ pub fn parse_baseline(text: &str) -> Result<Inventory> {
             _ => return Err(format!("invalid inventory kind for {path:?}")),
         };
         if self::kind(path) != Some(kind) {
-            return Err(format!("inventory kind disagrees with scan scope: {path:?}"));
+            return Err(format!(
+                "inventory kind disagrees with scan scope: {path:?}"
+            ));
         }
         let units = fields[2]
             .parse::<usize>()
@@ -216,7 +222,12 @@ mod tests {
             assert_eq!(entry(path, "pass\n").unwrap().kind, Kind::Source);
         }
         let text = "PYTHON3=tool\n# python parser fixture\npython3 -c pass; python3 -V\n";
-        for path in ["scripts/oms", "install.sh", "config/task.yaml", "tests/test.js"] {
+        for path in [
+            "scripts/oms",
+            "install.sh",
+            "config/task.yaml",
+            "tests/test.js",
+        ] {
             assert_eq!(entry(path, text).unwrap().units, 3);
         }
         for path in ["RUN.SH", "config/task.TOML", "tool."] {
