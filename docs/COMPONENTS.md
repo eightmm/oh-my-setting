@@ -3255,6 +3255,34 @@ allowlist/review-state, skill and provider registry, documentation reference and
 changed-source syntax checks; this lane is intentionally limited to these invariants and
 does not replace affected checks or the full landing gate.
 
+CI's lint, focused, scripts-smoke, operator-shard and affected-verification jobs
+retain failure diagnostics for seven days as `oms-ci-failure-*` artifacts.
+The console keeps its short output digest. A failed `check.sh` stage copies at
+most 256 KiB of its log, without the digest's per-line clipping, through the
+existing secret-line redactor, home-prefix normalizer and strict outbound scan.
+Unsafe, unreadable or oversized logs are omitted with a reason; a scan failure
+cannot publish unexamined content. Bounded decoded JSON-escape views are screened
+as well, so escaped diagnostic strings cannot hide assignments from the scanner.
+Metadata records the stage, mode/lane/shard,
+recognized failing test identifiers, exit, elapsed seconds, Python and Bash
+versions, GNU coreutils `stat` version when available, and allowlisted runner
+image fields. Versions describe the check supervisor and evidence collector;
+fixture subprocesses can select different tools. It never dumps the environment
+or arbitrary command arguments.
+These are explicitly diagnostic records, not verification receipts or proof
+that another test passed; an absent test identifier means it was not recorded.
+
+`OMS_CHECK_EVIDENCE_DIR` opts the outer check into retention; nested fixture
+checks do not inherit it. Each record is limited to 1 MiB, the final artifact to
+4 MiB, and each job to 16 stage records. Aggregate-limit omissions are counted.
+Before upload, `check_evidence.py` rereads and screens the retained records and
+creates one new JSON file. Symlink paths, hard-linked/non-regular inputs,
+unexpected directory entries and changed files are refused; CI never uploads
+the capture directory or a runner-temporary-file glob. Missing evidence or a
+failed upload does not change the original failed stage result. Cancellation,
+failure before a stage starts, and jobs running fixtures directly outside
+`check.sh` may have no retained artifact.
+
 For committed ranges, `--affected --changed-from BASE --changed-to HEAD` checks ordinary
 README/docs changes directly, otherwise selects existing tests from positive graph
 evidence. Skill/template Markdown uses the direct skill validator (including project

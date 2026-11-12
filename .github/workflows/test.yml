@@ -48,7 +48,28 @@ jobs:
           shellcheck --version
       - name: lint
         timeout-minutes: 15
+        env:
+          OMS_CHECK_EVIDENCE_DIR: ${{ runner.temp }}/oms-check-evidence
         run: bash scripts/check.sh --lint-only
+      - name: prepare failure evidence
+        id: failure_evidence
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          if python3 scripts/lib/check_evidence.py publish \
+              "$RUNNER_TEMP/oms-check-evidence" "$RUNNER_TEMP/oms-check-failure-evidence.json"; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: upload failure evidence
+        if: failure() && steps.failure_evidence.outputs.ready == 'true'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v7
+        with:
+          name: oms-ci-failure-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oms-check-failure-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
 
   # Focused suites stay serial WITHIN a lane — load-sensitive process tests
   # must not compete for one runner's CPU — but the lanes are separate VMs,
@@ -74,7 +95,28 @@ jobs:
       - uses: actions/checkout@v7
       - name: focused suites
         timeout-minutes: 75
+        env:
+          OMS_CHECK_EVIDENCE_DIR: ${{ runner.temp }}/oms-check-evidence
         run: bash scripts/check.sh --focused-only --without-operator-tools --focused-lane "${{ matrix.lane }}/4"
+      - name: prepare failure evidence
+        id: failure_evidence
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          if python3 scripts/lib/check_evidence.py publish \
+              "$RUNNER_TEMP/oms-check-evidence" "$RUNNER_TEMP/oms-check-failure-evidence.json"; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: upload failure evidence
+        if: failure() && steps.failure_evidence.outputs.ready == 'true'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v7
+        with:
+          name: oms-ci-failure-${{ github.job }}-${{ matrix.lane }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oms-check-failure-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
 
   # operator-tools was one 1773 s stage inside focused lane 2 and set the run's
   # wall clock (run 42950293025). tests/operator-tools-smoke.sh --shard I/N
@@ -95,7 +137,28 @@ jobs:
       - uses: actions/checkout@v7
       - name: operator-tools shard
         timeout-minutes: 60
+        env:
+          OMS_CHECK_EVIDENCE_DIR: ${{ runner.temp }}/oms-check-evidence
         run: bash scripts/check.sh --operator-only --shard "${{ matrix.shard }}/4"
+      - name: prepare failure evidence
+        id: failure_evidence
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          if python3 scripts/lib/check_evidence.py publish \
+              "$RUNNER_TEMP/oms-check-evidence" "$RUNNER_TEMP/oms-check-failure-evidence.json"; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: upload failure evidence
+        if: failure() && steps.failure_evidence.outputs.ready == 'true'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v7
+        with:
+          name: oms-ci-failure-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oms-check-failure-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
 
   # scripts-smoke is the dominant wall-clock cost. Native matrix children get
   # separate runners instead of four process trees racing on one VM. The
@@ -120,7 +183,27 @@ jobs:
         env:
           OMS_SMOKE_TIMINGS: "1"
           OMS_SMOKE_TIMING_LIMIT: "25"
+          OMS_CHECK_EVIDENCE_DIR: ${{ runner.temp }}/oms-check-evidence
         run: bash scripts/check.sh --scripts-smoke-only --shard "${{ matrix.shard }}/4"
+      - name: prepare failure evidence
+        id: failure_evidence
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          if python3 scripts/lib/check_evidence.py publish \
+              "$RUNNER_TEMP/oms-check-evidence" "$RUNNER_TEMP/oms-check-failure-evidence.json"; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: upload failure evidence
+        if: failure() && steps.failure_evidence.outputs.ready == 'true'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v7
+        with:
+          name: oms-ci-failure-${{ github.job }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oms-check-failure-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
 
   # Select once here and publish the plan; GitHub exposes job outputs only when
   # a job ends, so narrow verification runs in affected_verify while
@@ -207,6 +290,7 @@ jobs:
           PLAN_PYTHON: ${{ needs.affected_plan.outputs.python }}
           PLAN_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
           OMS_TEST_CALL_TIMEOUT: "240"
+          OMS_CHECK_EVIDENCE_DIR: ${{ runner.temp }}/oms-check-evidence
         run: |
           bash scripts/check.sh --affected --changed-from "$DIFF_BASE" --changed-to HEAD \
             --ci-output "$RUNNER_TEMP/verify-output"
@@ -217,6 +301,25 @@ jobs:
             echo "verified:" >&2; cat "$RUNNER_TEMP/verify-output" >&2
             exit 1
           fi
+      - name: prepare failure evidence
+        id: failure_evidence
+        if: failure()
+        timeout-minutes: 2
+        run: |
+          if python3 scripts/lib/check_evidence.py publish \
+              "$RUNNER_TEMP/oms-check-evidence" "$RUNNER_TEMP/oms-check-failure-evidence.json"; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: upload failure evidence
+        if: failure() && steps.failure_evidence.outputs.ready == 'true'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v7
+        with:
+          name: oms-ci-failure-${{ github.job }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oms-check-failure-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
 
   # Exercise the same install -> update -> uninstall contract on every
   # supported host and ownership mode. Linux auto is already a focused stage;
