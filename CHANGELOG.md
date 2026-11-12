@@ -526,6 +526,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Worker orientation builds its graph context pack in a private candidate
+  directory, reuses the parent's cache entries by content key and publishes
+  with an atomic rename, so a cold pack takes seconds instead of hitting the
+  25s bound; a fallback names its reason (`context_fallback: timeout`,
+  `invalid` or `empty`) in the artifact header.
 - `oms land` takes its install proof from a CI run that executed the full
   selection for exactly the landed SHA: the push run when it was full,
   otherwise a dispatched `test.yml` run, which `--ci-full` requests once
@@ -1043,6 +1048,13 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- CI jobs run on `ubuntu-24.04` instead of `ubuntu-latest`: the rollout of
+  the Ubuntu 26.04 runner image failed `core/room-protocol`, `draft-pr` and
+  `runtime-core` on every branch while the same commits passed on 24.04 and
+  locally. The native lifecycle matrix keeps `ubuntu-latest`.
+- Managed landing captures default to 2048 entries (was 256). The 30-day GC
+  age held about 450 ordinary landings, so admission was refused with 85% of
+  the byte budget free; the 128 MiB byte cap still bounds disk use.
 - Plan completion accepts a main that swapped provider after its room rolled
   over: each room is checked against the swap chain at that point instead of
   the final provider.
@@ -1360,6 +1372,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Removed
 
+- `oms decide` (OpenAI Responses decision records) and the OpenTelemetry
+  GenAI field map with its lint are removed: no front-door caller used them.
+- `oms study` and its suite/run workflow are removed. They were a second
+  experiment schema beside run capsules and experiment-board. Stored
+  `.oms/studies` files stay as plain files, and `oms artifact-view` keeps
+  reading the `oms-study-results` format that capsules and remote views use.
 - Knobs and flags no caller reached: `oms plan-run --claimed-lease`,
   `oms apply-project-template --private`, `oms advise --no-role`,
   `oms panel --retry-delivery --result-id`, and the `OMS_DOCTOR_MAX_SCAN`,

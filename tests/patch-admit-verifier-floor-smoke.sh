@@ -1207,7 +1207,7 @@ for byte_limit in "$charged_bytes" "$((2 * charged_bytes - 1))"; do
   [ "$quota_rc" -eq 1 ] || fail "byte quota refusal ($byte_limit) should exit 1, got $quota_rc: $(cat "$TMP/quota-bytes.err")"
   [ "$(wc -l < "$TMP/quota-bytes.err" | tr -d ' \r')" = 1 ] ||
     fail "byte quota refusal must be one line: $(cat "$TMP/quota-bytes.err")"
-  contains "$TMP/quota-bytes.err" "managed landing capture quota exhausted (count 1/256, bytes ${charged_bytes}/${byte_limit}, need ${charged_bytes} bytes)"
+  contains "$TMP/quota-bytes.err" "managed landing capture quota exhausted (count 1/2048, bytes ${charged_bytes}/${byte_limit}, need ${charged_bytes} bytes)"
   contains "$TMP/quota-bytes.err" "oms gc"
   ! grep -Fq "hint:" "$TMP/quota-bytes.err" || fail "byte quota refusal must not print usage hint"
 done

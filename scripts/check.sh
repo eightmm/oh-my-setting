@@ -1464,7 +1464,6 @@ if [ "$RUN_FOCUSED" = 1 ]; then
   stage provider-registry bash tests/provider-registry-smoke.sh
   stage prompt-budget bash tests/prompt-budget-smoke.sh
   stage tsp-queue bash tests/tsp-queue-smoke.sh
-  stage studies python3 tests/test_studies.py
   stage seat-reliability bash tests/seat-reliability-smoke.sh
   stage state-surfaces bash tests/state-surfaces-smoke.sh
   stage provider-permissions-mcp-boundary bash tests/provider-permissions-mcp-boundary-smoke.sh

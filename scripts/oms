@@ -210,7 +210,6 @@ connect-services
 consult
 dashboard
 data-manifest
-decide
 deps
 doctor
 draft-pr
@@ -263,7 +262,6 @@ snapshot
 state
 state-verify
 status
-study
 sync-shared
 thread
 tick

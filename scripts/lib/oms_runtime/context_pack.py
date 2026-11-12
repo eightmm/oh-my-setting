@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -272,34 +274,71 @@ def validate_automatic_graph_state(repo: Path, state: Path) -> None:
 
 def automatic_context_pack(repo: Path, parent: Path, state: Path, task: str) -> Dict[str, Any]:
     from oms_runtime.context import _fresh_graph, _safe_repo_file
-    from oms_runtime.common import atomic_write_bytes, ensure_private_dir, read_bytes
+    from oms_runtime.common import MAX_STATE_BYTES, atomic_write_bytes, ensure_private_dir, read_bytes
     from oms_graph.project import build
     from oms_graph.project.context import context_pack
 
     validate_automatic_graph_state(repo, state)
-    # Do not refresh a shared parent graph from a detached tree: parallel
-    # viewers/delegates could otherwise mix graph and manifest generations.
+    # A copied generation is not visible at the worker's default state until
+    # freshness has been checked against the worker's bytes.
     state = ensure_private_dir(state)
-    try:
-        source = parent / ".oms" / "project-graph"
-        graph_bytes = read_bytes(_safe_repo_file(parent, str(source / "graph.json")), build.GRAPH_BYTES_LIMIT)
-        manifest_bytes = read_bytes(_safe_repo_file(parent, str(source / "manifest.json")))
-        graph, manifest = json.loads(graph_bytes), json.loads(manifest_bytes)
-        coherent = (isinstance(graph, dict) and isinstance(manifest, dict)
-                    and bool(graph.get("revision"))
-                    and graph.get("revision") == manifest.get("revision")
-                    and graph.get("schema") == manifest.get("schema"))
-    except (CoreError, OSError, ValueError):
-        coherent = False
-    if coherent:
-        atomic_write_bytes(state / "graph.json", graph_bytes)
-        atomic_write_bytes(state / "manifest.json", manifest_bytes)
-    checked = _fresh_graph(repo, state=state)
+    checked = _fresh_graph(repo, state=state) if (state / "manifest.json").is_file() else None
     if checked is None:
-        build.ensure(repo, state=state)
-        checked = _fresh_graph(repo, state=state)
-    if checked is None:
-        raise CoreError("automatic context graph is stale, unsafe or inconsistent")
+        with tempfile.TemporaryDirectory(prefix=".prepare-", dir=state) as temporary:
+            candidate = Path(temporary)
+            try:
+                source = parent / ".oms" / "project-graph"
+                graph_bytes = read_bytes(_safe_repo_file(parent, str(source / "graph.json")), build.GRAPH_BYTES_LIMIT)
+                manifest_bytes = read_bytes(_safe_repo_file(parent, str(source / "manifest.json")))
+                graph, manifest = json.loads(graph_bytes), json.loads(manifest_bytes)
+                coherent = (isinstance(graph, dict) and isinstance(manifest, dict)
+                            and bool(graph.get("revision"))
+                            and graph.get("revision") == manifest.get("revision")
+                            and graph.get("schema") == manifest.get("schema"))
+            except (CoreError, OSError, ValueError):
+                coherent = False
+            if coherent:
+                atomic_write_bytes(candidate / "graph.json", graph_bytes)
+                atomic_write_bytes(candidate / "manifest.json", manifest_bytes)
+            checked = _fresh_graph(repo, state=candidate)
+            if checked is None:
+                if coherent and isinstance(manifest.get("files"), dict):
+                    from oms_graph import PARSER_VERSION, PROJECT_SCHEMA
+                    from oms_graph.project.cache import cache_key
+                    from oms_graph.project.parsers import parser_for
+                    cache = candidate / "cache"
+                    for name, entry in manifest["files"].items():
+                        if not isinstance(name, str) or not isinstance(entry, dict):
+                            continue
+                        digest = entry.get("sha256")
+                        if not isinstance(digest, str) or len(digest) != 64 or any(c not in HEX for c in digest):
+                            continue
+                        parser = parser_for(name)
+                        key = cache_key(name, digest, parser.version if parser else PARSER_VERSION, PROJECT_SCHEMA)
+                        try:
+                            origin = _safe_repo_file(parent, str(source / "cache" / (key + ".json")))
+                            if origin.stat().st_size > MAX_STATE_BYTES:
+                                continue
+                            cache.mkdir(exist_ok=True)
+                            shutil.copyfile(origin, cache / (key + ".json"))
+                        except (CoreError, OSError):
+                            continue
+                build.ensure(repo, state=candidate)
+                checked = _fresh_graph(repo, state=candidate)
+            if checked is None:
+                raise CoreError("automatic context graph is stale, unsafe or inconsistent")
+            # Invalidate the prior pair before publishing either new file.
+            (state / "manifest.json").unlink(missing_ok=True)
+            target = state / "graph.json"
+            if target.is_symlink() or (target.exists() and not target.is_file()):
+                raise CoreError("graph output must be a regular non-symlink file")
+            os.replace(candidate / "graph.json", target)
+            if (candidate / "cache").is_dir() and not (state / "cache").exists() and not (state / "cache").is_symlink():
+                try:
+                    os.rename(candidate / "cache", state / "cache")
+                except OSError:
+                    pass
+            atomic_write_bytes(state / "manifest.json", read_bytes(candidate / "manifest.json"))
     # Continuation prompts quote findings linking into another checkout; the
     # pack validator refuses absolute paths, so drop them from the task text.
     task = ABSOLUTE_PATH_RE.sub("[absolute-path-omitted]", task)

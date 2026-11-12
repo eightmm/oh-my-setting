@@ -25,7 +25,7 @@ jobs:
   lint:
     needs: affected_plan
     if: needs.affected_plan.outputs.mode == 'full'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     # apt has hung this job for an hour before timing anything out (observed
     # 2026-08-18: "install shellcheck" stalled 60+ minutes and held a release
@@ -67,7 +67,7 @@ jobs:
       fail-fast: false
       matrix:
         lane: [1, 2, 3, 4]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 85
     name: focused (${{ matrix.lane }}/4)
     steps:
@@ -88,7 +88,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 70
     name: operator-tools (${{ matrix.shard }}/4)
     steps:
@@ -110,7 +110,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 70
     name: scripts-smoke (${{ matrix.shard }}/4)
     steps:
@@ -126,7 +126,7 @@ jobs:
   # a job ends, so narrow verification runs in affected_verify while
   # affected_operator starts right after this selection.
   affected_plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -161,7 +161,7 @@ jobs:
   affected_verify:
     needs: affected_plan
     if: needs.affected_plan.outputs.mode == 'affected'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 105
     name: affected checks
     steps:
@@ -289,7 +289,7 @@ jobs:
   affected_operator:
     needs: affected_plan
     if: needs.affected_plan.outputs.mode == 'affected' && needs.affected_plan.outputs.operator != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 85
     name: operator-tools (affected)
     steps:
@@ -311,7 +311,7 @@ jobs:
   gate:
     if: always()
     needs: [lint, focused, smoke_shard, operator_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: require every verification job

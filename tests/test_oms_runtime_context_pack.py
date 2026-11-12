@@ -171,6 +171,65 @@ class ContextPackValidatorTest(unittest.TestCase):
             automatic_context_pack(self.repo, parent, build.state_dir(self.repo), 'recover lease')
         self.assertEqual((self.repo / '.oms/project-graph/graph.json').read_bytes(), mixed_bytes)
 
+    def test_automatic_pack_validates_before_publishing_and_reuses_fresh_state(self) -> None:
+        from oms_graph.project import build
+        from oms_runtime import context as runtime_context
+        (self.repo / 'lease.py').write_text('def recover_lease(): pass\n', encoding='utf-8')
+        build.build(self.repo)
+        state = Path(self.tmp.name) / 'private'
+        original = runtime_context._fresh_graph
+
+        def checked(repo, *, state=None):
+            if state != private:
+                self.assertFalse((private / 'graph.json').exists())
+                self.assertFalse((private / 'manifest.json').exists())
+            return original(repo, state=state)
+
+        private = state
+        with mock.patch.object(runtime_context, '_fresh_graph', side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                automatic_context_pack(self.repo, self.repo, state, 'recover lease')
+        self.assertFalse((state / 'graph.json').exists())
+        self.assertFalse((state / 'manifest.json').exists())
+        with mock.patch.object(runtime_context, '_fresh_graph', side_effect=checked):
+            automatic_context_pack(self.repo, self.repo, state, 'recover lease')
+        with mock.patch.object(build, 'build', side_effect=AssertionError('unexpected rebuild')), \
+                mock.patch('oms_runtime.common.read_bytes', wraps=__import__('oms_runtime.common', fromlist=['read_bytes']).read_bytes) as reads:
+            automatic_context_pack(self.repo, self.repo, state, 'recover lease')
+        parent_graph = self.repo / '.oms/project-graph/graph.json'
+        self.assertFalse(any(call.args and call.args[0] == parent_graph for call in reads.call_args_list))
+
+    def test_automatic_pack_reuses_parent_cache_for_unchanged_bytes(self) -> None:
+        from oms_graph.project import build
+        parent = Path(self.tmp.name) / 'parent'
+        parent.mkdir()
+        for name in ('lease.py', 'other.py'):
+            (parent / name).write_text('def recover_lease(): return 1\n', encoding='utf-8')
+            (self.repo / name).write_text((parent / name).read_text(), encoding='utf-8')
+        build.build(parent)
+        (self.repo / 'lease.py').write_text('def recover_lease(): return 2\n', encoding='utf-8')
+        cache = parent / '.oms/project-graph/cache'
+        before = {p.name: p.read_bytes() for p in cache.iterdir()}
+        state = Path(self.tmp.name) / 'private'
+        automatic_context_pack(self.repo, parent, state, 'recover lease')
+        manifest = json.loads((state / 'manifest.json').read_text())
+        self.assertEqual(manifest['stats']['cached'], 1)
+        self.assertEqual(manifest['stats']['parsed'], 1)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in cache.iterdir()})
+        self.assertTrue((state / 'cache').is_dir())
+        for entry in cache.iterdir():
+            entry.write_text('{malformed', encoding='utf-8')
+        state = Path(self.tmp.name) / 'malformed'
+        automatic_context_pack(self.repo, parent, state, 'recover lease')
+        stats = json.loads((state / 'manifest.json').read_text())['stats']
+        self.assertEqual((stats['cached'], stats['parsed']), (0, 2))
+        for entry in cache.iterdir():
+            entry.unlink()
+        state = Path(self.tmp.name) / 'empty'
+        automatic_context_pack(self.repo, parent, state, 'recover lease')
+        stats = json.loads((state / 'manifest.json').read_text())['stats']
+        self.assertEqual((stats['cached'], stats['parsed']), (0, 2))
+
     def refuses(self, value, needle: str, *, text: str = "") -> None:
         self.write(value, text=text)
         with self.assertRaises(CoreError) as caught:
