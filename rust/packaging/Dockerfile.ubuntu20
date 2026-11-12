@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=ubuntu:20.04
+FROM ${BASE_IMAGE}
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        binutils build-essential ca-certificates git pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
