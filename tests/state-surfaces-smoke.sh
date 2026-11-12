@@ -358,6 +358,8 @@ assert {"oms_inbox", "oms_task_state", "oms_fail_ledger", "oms_handoffs",
         "oms_handoff_show", "oms_journal", "oms_repo_state",
         "oms_agent_operations", "oms_approvals", "oms_runtime_release",
         "oms_runtime_profile", "oms_runtime_failures"} <= tools, tools
+for name in ("oms_inbox", "oms_repo_state", "oms_approvals"):
+    assert listed[name]["inputSchema"]["properties"]["after"]["type"] == "string", listed[name]
 # Every tool tells a client what it costs to call. A reader that advertised
 # itself as a write would be approved by hand forever; a consultation that
 # advertised itself as a read would spend a peer's wall clock unattended.
@@ -472,6 +474,62 @@ root, repo = map(Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location("mcp_bounds", root / "scripts/oms-mcp-server.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+# Conditional delivery opts in without changing any existing command shape.
+# Each request still reads fresh state; a cursor cannot hide a new failure,
+# expiration, or liveness transition from the authoritative reader.
+state_tools = [t for t in m.TOOLS if t["name"] in ("oms_inbox", "oms_repo_state", "oms_approvals")]
+baseline = {"schema": 1, "status": "running", "stale": False,
+            "items": [{"id": i, "summary": "근거🙂" * 30} for i in range(8)]}
+other = repo.parent / "another-repo"
+other.mkdir()
+for state_tool in state_tools:
+    name = state_tool["name"]
+    payload = [{"id": "approval", "effective_state": "requested", "note": "evidence " * 80}] if name == "oms_approvals" else baseline
+    source = json.dumps(payload, ensure_ascii=False, indent=2)
+    def call(arguments, stdout=source, returncode=0):
+        with patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], returncode, stdout, "")) as child:
+            result = m.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                               "params": {"name": name, "arguments": {"repo": str(repo), **arguments}}})["result"]
+        return result["content"][0]["text"], result["isError"], child.call_count
+    text, error, calls = call({})
+    assert not error and text == source and calls == 1, (name, text)
+    text, error, calls = call({"after": ""})
+    full = json.loads(text)
+    assert not error and calls == 1 and not full["unchanged"] and full["data"] == payload, full
+    cursor = full["cursor"]
+    text, error, calls = call({"after": cursor}, json.dumps(payload, sort_keys=True))
+    assert not error and calls == 1 and json.loads(text) == {"cursor": cursor, "unchanged": True}, text
+    assert len(text.encode()) < len(source.encode()) // 4, (len(text), len(source))
+    for changed in ([[], [{"id": "approval", "effective_state": "expired"}]] if name == "oms_approvals" else
+                    [dict(baseline, status="failed"), dict(baseline, status="completed"),
+                     dict(baseline, stale=True), dict(baseline, age_seconds=1),
+                     dict(baseline, items=baseline["items"] + [{"id": "new-mail"}])]):
+        text, error, calls = call({"after": cursor}, json.dumps(changed))
+        fresh = json.loads(text)
+        assert not error and calls == 1 and not fresh["unchanged"] and fresh["data"] == changed, fresh
+        assert fresh["cursor"] != cursor
+    text, error, _ = call({"after": cursor, "repo": str(other)})
+    assert not error and not json.loads(text)["unchanged"], text
+    text, error, _ = call({"after": ""})
+    assert not error and json.loads(text)["data"] == payload, text
+    text, error, _ = call({"after": cursor}, returncode=1)
+    assert error and text == source, text
+    for invalid in (None, True, 1, [], "result:" + "a" * 64, "state:" + "a" * 65,
+                    "state:" + "a" * 63, "state:" + "A" * 64):
+        text, error, calls = call({"after": invalid})
+        assert error and calls == 0 and "after" in text, (invalid, text, calls)
+    for invalid in ("not-json", "null", "42", '{"bad": NaN}', '{"bad": Infinity}'):
+        text, error, calls = call({"after": cursor}, invalid)
+        assert error and calls == 1, (invalid, text)
+    text, error, _ = call({"after": cursor}, json.dumps({"large": "x" * m.OUTPUT_LIMIT}))
+    assert error and "limit" in text, text
+    # The envelope itself is part of the bounded response, not free overhead.
+    with patch.object(m, "OUTPUT_LIMIT", 50):
+        text, error, _ = call({"after": ""}, "{}")
+        assert error and "limit" in text, text
+left, _ = m.state_result_response("oms_inbox", repo, "{}", "")
+right, _ = m.state_result_response("oms_repo_state", repo, "{}", json.loads(left)["cursor"])
+assert not json.loads(right)["unchanged"], "cursor crossed tool scope"
 tool = next(t for t in m.TOOLS if t["name"] == "oms_project_graph_query")
 for size in (0, m.OUTPUT_LIMIT, m.OUTPUT_LIMIT + 1):
     with patch.object(m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "x" * size, "")):
