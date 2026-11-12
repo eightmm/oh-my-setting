@@ -1774,13 +1774,17 @@ assert read_capture(Path(args["repo"]), args)["content"] == "hello\n한글 줄\n
   # Complete-data representations are independently reconstructible; loss marking
   # also covers cuts within a retained line, UTF-8 and the source's real newline sizes.
   python3 - "$ROOT" "$dir" <<'PY' || fail "output digest representation/loss contracts failed"
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 from pathlib import Path
 import subprocess
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/lib"))
 import output_digest as digest
+import output_capture as stored_capture
 
 root, directory = Path(sys.argv[1]), Path(sys.argv[2])
 
@@ -1827,6 +1831,7 @@ assert digest.build(path, max_bytes=256)["representation"]["algorithm"] == "none
 for value in ('{"repeated_field":1,"repeated_field":2}', '{"repeated_field":NaN}',
               '{"repeated_field":Infinity}', '{"repeated_field":[1]}',
               '{"repeated_field":1e-400}', '{"repeated_field":1.234567890123456789}',
+              '{"repeated_field":1e-999999999999999999999}',
               '{"repeated_field":"\\ud800"}', '{"\\ud800":1}'):
     _path, declined = capture("unsupported.json", "[" + ",".join([value] * 40) + "]", max_bytes=400)
     assert declined["representation"]["algorithm"] == "none", value
@@ -1857,6 +1862,26 @@ try:
     assert doc["shown"]["omitted_bytes"] >= doc["raw"]["unread_leading_bytes"]
 finally:
     digest.READ_CAP = old_cap
+
+retained_repo = directory / "retained"
+retained = retained_repo / stored_capture.CAPTURE_ROOT / "20261112T123456Z-1.log"
+retained.parent.mkdir(parents=True)
+with patch.object(stored_capture, "READ_CAP", 128):
+    for size in (128, 129):
+        retained.write_bytes(b"x" * size)
+        output = StringIO()
+        with redirect_stdout(output):
+            assert digest.main([str(retained), "--capture-repo", str(retained_repo), "--json"]) == 0
+        issued = json.loads(output.getvalue())
+        if size == 128:
+            assert issued["raw"]["read_tool"] == "oms_output_read"
+            assert "read_unavailable_reason" not in issued["raw"]
+        else:
+            assert "read_tool" not in issued["raw"] and "read_arguments" not in issued["raw"]
+            assert issued["raw"]["read_unavailable_reason"] == "capture_too_large"
+            assert issued["raw"]["read_max_bytes"] == 128
+            assert "read: unavailable (capture_too_large)" in digest.render(issued)
+        assert retained.read_bytes() == b"x" * size
 
 for kwargs in ({"strategy": "unknown"}, {"max_bytes": 255}, {"head": -1}, {"tail": 10001}):
     try:

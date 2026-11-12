@@ -892,6 +892,9 @@ matches, incompatible with an explicit `limit`). Results include continuation
 arguments, offsets, stored-byte SHA and content sizes. Invalid UTF-8 is replaced
 for display, so offsets refer to normalized text while the hash describes the
 exact stored bytes. Each request revalidates the complete capture, up to 64 MiB.
+Larger retained captures keep their file and SHA, but advertise no MCP reader:
+`raw.read_unavailable_reason=capture_too_large` and `raw.read_max_bytes` explain
+the read limit in JSON, and the text view also reports it.
 References bind canonical repository, generated filename and stored hash;
 they are integrity references, not authorization credentials. Arbitrary paths,
 symlinked stores/files, hardlinks and stale hashes are refused. Missing or

@@ -3,7 +3,7 @@
 import json
 import math
 import re
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 
 
 def _dump(value):
@@ -61,7 +61,7 @@ def _json_table(text, max_bytes):
                          "lossless_scope": "JSON values and scalar types", "source_bytes_lossless": False,
                          "rows": len(rows), "missing_cell": [],
                          "decode": "For each row zip keys with cells; omit cells equal to []; all other cells are JSON scalars."}
-    except (ValueError, TypeError, OverflowError, RecursionError):
+    except (ValueError, TypeError, OverflowError, RecursionError, DecimalException):
         return None
 
 

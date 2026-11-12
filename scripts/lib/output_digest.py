@@ -251,6 +251,9 @@ def render(doc):
     out.append("raw: %s  sha256=%s" % (raw["ref"] or "not kept", raw["sha256"]))
     if raw.get("read_tool"):
         out.append("read: %s %s" % (raw["read_tool"], json.dumps(raw["read_arguments"], ensure_ascii=False, separators=(",", ":"))))
+    elif raw.get("read_unavailable_reason"):
+        out.append("read: unavailable (%s); MCP capture limit=%d bytes; stored file and SHA are retained"
+                   % (raw["read_unavailable_reason"], raw["read_max_bytes"]))
     if raw["unread_leading_bytes"]:
         out.append("read: the last %d bytes; the first %d bytes were not read"
                    % (raw["bytes"] - raw["unread_leading_bytes"], raw["unread_leading_bytes"]))
@@ -322,12 +325,15 @@ def main(argv=None):
         doc = build(args.path, args.exit_code, args.max_bytes, args.head, args.tail,
                     args.ref, args.duration, args.withhold, args.strategy)
         if args.capture_repo and not args.withhold:
-            from output_capture import CAPTURE_ROOT, capture_metadata
+            from output_capture import CAPTURE_ROOT, READ_CAP as CAPTURE_READ_CAP, capture_metadata
             repo = Path(args.capture_repo).resolve()
             source = Path(args.path)
             if source.resolve() != repo / CAPTURE_ROOT / source.name:
                 raise ValueError("capture is outside the retained output store")
-            doc["raw"].update(capture_metadata(repo, source.name, doc["raw"]["sha256"]))
+            if doc["raw"]["bytes"] <= CAPTURE_READ_CAP:
+                doc["raw"].update(capture_metadata(repo, source.name, doc["raw"]["sha256"]))
+            else:
+                doc["raw"].update(read_unavailable_reason="capture_too_large", read_max_bytes=CAPTURE_READ_CAP)
     except OSError as error:
         print("output-digest: cannot read the capture: %s" % error.strerror, file=sys.stderr)
         return 2
