@@ -1,0 +1,33 @@
+[package]
+name = "oms-graph-python"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[dependencies]
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", rev = "05cdc36a45a29e078c2af9358969d0f576408bef" }
+ruff_python_ast = { git = "https://github.com/astral-sh/ruff", rev = "05cdc36a45a29e078c2af9358969d0f576408bef" }
+ruff_text_size = { git = "https://github.com/astral-sh/ruff", rev = "05cdc36a45a29e078c2af9358969d0f576408bef" }
+ruff_source_file = { git = "https://github.com/astral-sh/ruff", rev = "05cdc36a45a29e078c2af9358969d0f576408bef" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-general-category = "0.6"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["resource", "process"] }
+
+[[bin]]
+name = "oms-graph-python-helper"
+path = "src/bin/oms-graph-python-helper.rs"
+
+# TEST FIXTURE ONLY: a misbehaving stand-in for the helper, used by
+# tests/graph_contract.rs through CARGO_BIN_EXE_oms-graph-python-fixture. It is
+# not a product artifact: packaging installs oms-graph-python-helper alone.
+[[bin]]
+name = "oms-graph-python-fixture"
+path = "tests/support/fixture_helper.rs"
+test = false
+
+[lints.rust]
+unsafe_code = "forbid"
