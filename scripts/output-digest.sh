@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Run a command and print a bounded digest of its output instead of the whole
-# log. The raw output is kept in a local file and never rewritten; the digest
-# names that file, what it shows, what it leaves out, the exit code and the
+# log. A store-time-redacted capture is kept locally; the digest names that
+# file, what it shows, what it leaves out, the exit code and the
 # failure lines it recognised. Extraction is mechanical: no model call, and a
 # log no recogniser understands falls back to a bounded head and tail.
 
@@ -33,9 +33,11 @@ verification evidence: a verifier's input and receipt stay the raw output.
 
 Options:
   --max-bytes N   Budget for the shown lines. Default 4000 (256..1048576).
-                  Output that fits is shown whole.
+                  Fitting lines are shown; any transformation is marked.
   --head N        Leading lines to show when cutting. Default 10.
   --tail N        Trailing lines to show when cutting. Default 30.
+  --strategy MODE auto (default): try complete JSON tables or exact log runs;
+                  legacy: use the failure/head/tail view only. Both mark loss.
   --no-store      Do not keep the raw output (digest names no file).
   --json          Print the digest as JSON (schema 1, kind oms-output-digest).
   --file PATH     Digest this file instead of running a command.
@@ -48,6 +50,8 @@ pattern class, never the value); the exit code and the sha256 describe that
 stored file. If the scan cannot run the stored file is one marker line. If the
 shown lines still look like they carry a secret, they are withheld and only the
 counts, the exit code and the path are printed.
+Retained run captures include an oms_output_read reference for bounded MCP
+reads or literal searches. Missing/evicted captures never rerun the command.
 
 Exit: the command's exit code; 125 when this tool itself failed in run mode;
 with --file, 0 on success and 2 on a bad request.
@@ -66,11 +70,13 @@ STORE=1
 JSON=0
 FILE=""
 EXIT_CODE=""
+STRATEGY="auto"
+CAPTURE_REPO=""
 declare -a COMMAND=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --max-bytes|--head|--tail|--file|--exit-code)
+    --max-bytes|--head|--tail|--file|--exit-code|--strategy)
       [ "$#" -ge 2 ] || fail_usage "$1 needs a value"
       case "$1" in
         --max-bytes) MAX_BYTES="$2" ;;
@@ -78,6 +84,7 @@ while [ "$#" -gt 0 ]; do
         --tail) TAIL="$2" ;;
         --file) FILE="$2" ;;
         --exit-code) EXIT_CODE="$2" ;;
+        --strategy) STRATEGY="$2" ;;
       esac
       shift 2
       ;;
@@ -95,14 +102,16 @@ done
 [ "$MAX_BYTES" -ge 256 ] && [ "$MAX_BYTES" -le 1048576 ] || fail_usage "--max-bytes is 256..1048576"
 [ "$HEAD" -le 10000 ] && [ "$TAIL" -le 10000 ] || fail_usage "--head and --tail are 0..10000"
 case "$EXIT_CODE" in *[!0-9]*) fail_usage "--exit-code takes a whole number" ;; esac
+case "$STRATEGY" in auto|legacy) ;; *) fail_usage "--strategy must be auto or legacy" ;; esac
 
 # Print the digest of capture $1. $2 exit code or "", $3 ref or "", $4 duration or "".
 digest() {
   local capture="$1" code="$2" ref="$3" duration="$4" withhold="" probe rc=0
-  local -a base=(python3 "$ROOT_LIB/output_digest.py" "$capture" --max-bytes "$MAX_BYTES" --head "$HEAD" --tail "$TAIL")
+  local -a base=(python3 "$ROOT_LIB/output_digest.py" "$capture" --max-bytes "$MAX_BYTES" --head "$HEAD" --tail "$TAIL" --strategy "$STRATEGY")
   [ -z "$code" ] || base+=(--exit-code "$code")
   [ -z "$ref" ] || base+=(--ref "$ref")
   [ -z "$duration" ] || base+=(--duration "$duration")
+  [ -z "$CAPTURE_REPO" ] || base+=(--capture-repo "$CAPTURE_REPO")
   # What leaves this tool is the shown lines, so those are what is scanned.
   probe="$(mktemp)" || return 1
   if ! "${base[@]}" > "$probe" 2>/dev/null; then
@@ -140,6 +149,7 @@ capture=""
 ref=""
 if [ "$STORE" -eq 1 ]; then
   state_root="$(oms_state_root "$PWD" 2>/dev/null || oms_repo_root "$PWD")"
+  CAPTURE_REPO="$state_root"
   store="$state_root/.oms/artifacts/output-digest"
   if [ -L "$state_root/.oms" ] || [ -L "$state_root/.oms/artifacts" ] || [ -L "$store" ]; then
     echo "output-digest: refusing a symlinked capture store: $store" >&2

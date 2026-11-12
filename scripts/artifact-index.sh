@@ -34,6 +34,7 @@ SINCE=""
 UNTIL=""
 WASTE=0
 WASTE_TOP=""
+OUTPUTS=0
 
 usage() {
   cat <<'EOF'
@@ -88,6 +89,12 @@ Commands:
                  before applying N. WHEN is YYYY-MM-DD (the whole UTC day) or
                  an ISO-8601 time. The index is pruned, so this covers
                  retained rows only.
+  --outputs      telemetry: replay retained output-digest captures with auto
+                 and legacy strategies at the default 4000-byte text budget.
+                 Compare complete rendered response bytes and completeness;
+                 no model call, token estimate, or task-success inference.
+                 Default 20 captures, maximum 50; no index rows are needed.
+                 Cannot combine with --by, --waste, --since, --until or --file.
   resolve        Resolve the failed outcomes selected by --event-id, which may
                  be repeated to clear a triaged batch in one locked call.
   resolve-superseded
@@ -214,6 +221,10 @@ while [ "$#" -gt 0 ]; do
       WASTE=1
       shift
       ;;
+    --outputs)
+      OUTPUTS=1
+      shift
+      ;;
     --top)
       [ "$#" -ge 2 ] || fail "--top requires a number"
       WASTE_TOP="$2"
@@ -272,9 +283,14 @@ if [ "$ACTION" != "telemetry" ]; then
   [ -z "$USAGE_BY" ] || fail "--by is only valid with telemetry"
   [ -z "$SINCE$UNTIL" ] || fail "--since and --until are only valid with telemetry"
   [ "$WASTE" -eq 0 ] || fail "--waste is only valid with telemetry"
+  [ "$OUTPUTS" -eq 0 ] || fail "--outputs is only valid with telemetry"
 fi
 [ "$WASTE" -eq 1 ] || [ -z "$WASTE_TOP" ] || fail "--top is only valid with --waste"
 [ "$WASTE" -eq 0 ] || [ -z "$USAGE_BY" ] || fail "--waste cannot be combined with --by"
+if [ "$OUTPUTS" -eq 1 ]; then
+  [ "$WASTE" -eq 0 ] && [ -z "$USAGE_BY$SINCE$UNTIL$INDEX_FILE" ] ||
+    fail "--outputs cannot combine with --waste, --by, --since, --until or --file"
+fi
 case "$WASTE_TOP" in
   *[!0-9]*) fail "--top must be a whole number from 1 to 100" ;;
 esac
@@ -282,7 +298,7 @@ esac
   fail "--top must be a whole number from 1 to 100"
 if [ "$LIMIT_SET" -eq 0 ]; then
   case "$ACTION" in
-    prune|telemetry) LIMIT="1000" ;;
+    prune|telemetry) if [ "$OUTPUTS" -eq 1 ]; then LIMIT="20"; else LIMIT="1000"; fi ;;
     *) LIMIT="20" ;;
   esac
 fi
@@ -290,6 +306,7 @@ case "$LIMIT" in
   *[!0-9]*|"") fail "N must be a positive integer" ;;
 esac
 [ "$LIMIT" -gt 0 ] || fail "N must be a positive integer"
+[ "$OUTPUTS" -eq 0 ] || [ "$LIMIT" -le 50 ] || fail "--outputs N must be 1..50"
 
 # Anchor to the git worktree root so the index does not fork per subdirectory.
 REPO_INPUT="$(artifact_index_logical_repo_root "$REPO")" ||
@@ -297,8 +314,17 @@ REPO_INPUT="$(artifact_index_logical_repo_root "$REPO")" ||
 REPO="$(oms_repo_root "$REPO")"
 [ -d "$REPO" ] || fail "repo does not exist: $REPO"
 REPO="$(cd "$REPO" && pwd -P)" || fail "cannot resolve repo path"
-INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+if [ "$OUTPUTS" -eq 1 ]; then
+  # Capture writers follow a parent's managed scratch to its shared state root.
+  # Ordinary/child worktrees keep their own root, exactly as output-digest does.
+  output_repo="$(oms_state_root "$REPO")" || fail "cannot resolve output capture repository"
+  set -- --repo "$output_repo" --limit "$LIMIT"
+  [ "$AS_JSON" -eq 0 ] || set -- "$@" --json
+  python3 "$ROOT_LIB/output_telemetry.py" "$@" || exit 2
+  exit 0
+fi
+INDEX_FILE="${INDEX_FILE:-$REPO/.oms/artifacts/index.jsonl}"
 if ! INDEX_FILE="$(python3 "$STORE_HELPER" \
     canonical --repo "$REPO_INPUT" --index "$INDEX_FILE" 2>/dev/null)"; then
   INDEX_FILE="$(python3 "$STORE_HELPER" \
