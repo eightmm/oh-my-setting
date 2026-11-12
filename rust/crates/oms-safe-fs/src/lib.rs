@@ -21,6 +21,38 @@ pub enum Error {
     Changed,
 }
 
+/// Manifest-specific diagnostics captured during the descriptor-relative read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestError {
+    External,
+    Path,
+    Open(Error),
+    Policy,
+    InitialOversize,
+    Overflow,
+    Changed,
+}
+impl From<Error> for ManifestError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::InvalidPath => Self::Path,
+            Error::Changed => Self::Changed,
+            other => Self::Open(other),
+        }
+    }
+}
+impl ManifestError {
+    fn coarse(self) -> Error {
+        match self {
+            Self::External | Self::Path => Error::InvalidPath,
+            Self::Open(e) => e,
+            Self::Policy => Error::Unsafe,
+            Self::InitialOversize | Self::Overflow => Error::Oversize,
+            Self::Changed => Error::Changed,
+        }
+    }
+}
+
 /// Constraints on the opened file. `None` accepts any owner.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
@@ -108,28 +140,48 @@ impl Root {
     /// Read an explicit manifest using pathlib-style lexical normalization.
     /// Absolute paths must be under this root's captured physical spelling.
     pub fn read_manifest(&self, path: &Path, limit: usize) -> Result<Vec<u8>, Error> {
+        self.read_manifest_detailed(path, limit)
+            .map_err(ManifestError::coarse)
+    }
+
+    /// Reads a manifest while retaining the cause needed for legacy diagnostics.
+    pub fn read_manifest_detailed(
+        &self,
+        path: &Path,
+        limit: usize,
+    ) -> Result<Vec<u8>, ManifestError> {
         let raw = path.as_os_str().as_bytes();
         if raw.starts_with(b"//") && !raw.starts_with(b"///") {
-            return Err(Error::InvalidPath);
-        }
-        if path.components().any(|part| part == Component::ParentDir) {
-            return Err(Error::InvalidPath);
+            return Err(ManifestError::External);
         }
         let relative = if path.is_absolute() {
             path.strip_prefix(&self.path)
-                .map_err(|_| Error::InvalidPath)?
+                .map_err(|_| ManifestError::External)?
         } else {
             path
         };
+        if relative
+            .components()
+            .any(|part| part == Component::ParentDir)
+        {
+            return Err(ManifestError::Path);
+        }
         let mut normalized = PathBuf::new();
         for component in relative.components() {
             match component {
                 Component::Normal(part) => normalized.push(part),
                 Component::CurDir => {}
-                _ => return Err(Error::InvalidPath),
+                _ => return Err(ManifestError::Path),
             }
         }
-        self.read_path(&normalized, limit, Policy::manifest())
+        self.read_with_hooks_detailed(
+            normalized.as_os_str(),
+            limit,
+            Policy::manifest(),
+            || {},
+            || {},
+            |_| {},
+        )
     }
 
     /// Reads a slash-separated relative label without following links.
@@ -154,7 +206,7 @@ impl Root {
         policy: Policy,
         hook: impl FnOnce(),
     ) -> Result<Vec<u8>, Error> {
-        self.read_with_hooks(label, limit, policy, || {}, |_| hook())
+        self.read_with_hooks(label, limit, policy, || {}, || {}, |_| hook())
     }
 
     fn read_with_hooks(
@@ -163,15 +215,29 @@ impl Root {
         limit: usize,
         policy: Policy,
         before_open: impl FnOnce(),
+        before_read: impl FnOnce(),
         hook: impl FnOnce(&mut Vec<u8>),
     ) -> Result<Vec<u8>, Error> {
+        self.read_with_hooks_detailed(label, limit, policy, before_open, before_read, hook)
+            .map_err(ManifestError::coarse)
+    }
+
+    fn read_with_hooks_detailed(
+        &self,
+        label: impl AsRef<OsStr>,
+        limit: usize,
+        policy: Policy,
+        before_open: impl FnOnce(),
+        before_read: impl FnOnce(),
+        hook: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<Vec<u8>, ManifestError> {
         let parts: Vec<_> = label.as_ref().as_bytes().split(|b| *b == b'/').collect();
         if policy.max_components.is_some_and(|max| parts.len() > max)
             || parts
                 .iter()
                 .any(|p| p.is_empty() || *p == b"." || *p == b".." || p.contains(&0))
         {
-            return Err(Error::InvalidPath);
+            return Err(ManifestError::Path);
         }
         let mut dirs = Vec::new();
         for part in &parts[..parts.len() - 1] {
@@ -190,7 +256,13 @@ impl Root {
         let name = OsStr::from_bytes(parts[parts.len() - 1]);
         let named = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(map_open)?;
         if !valid_file(&named, policy) {
-            return Err(Error::Unsafe);
+            return Err(
+                if FileType::from_raw_mode(named.st_mode) == FileType::Symlink {
+                    ManifestError::Open(Error::Unsafe)
+                } else {
+                    ManifestError::Policy
+                },
+            );
         }
         before_open();
         let fd = fs::openat(
@@ -202,33 +274,36 @@ impl Root {
         .map_err(map_open)?;
         let before = fs::fstat(&fd).map_err(|_| Error::Unreadable)?;
         if !stable(&named, &before) {
-            return Err(Error::Changed);
+            return Err(ManifestError::Changed);
         }
         if !valid_file(&before, policy) {
-            return Err(Error::Unsafe);
+            return Err(ManifestError::Policy);
         }
         if before.st_size < 0 {
-            return Err(Error::Unsafe);
+            return Err(ManifestError::Policy);
         }
         if u64::try_from(before.st_size).map_err(|_| Error::Unsafe)? > limit as u64 {
-            return Err(Error::Oversize);
+            return Err(ManifestError::InitialOversize);
         }
+        before_read();
         let mut file = std::fs::File::from(fd);
         let mut bytes = Vec::new();
         let mut buf = [0u8; 65536];
+        let mut overflow = false;
         loop {
             let remaining = limit.saturating_sub(bytes.len());
             let count = buf.len().min(remaining.saturating_add(1));
             let n = match file.read(&mut buf[..count]) {
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(Error::Unreadable),
+                Err(_) => return Err(ManifestError::Open(Error::Unreadable)),
             };
             if n == 0 {
                 break;
             }
             if n > remaining {
-                return Err(Error::Oversize);
+                overflow = true;
+                break;
             }
             bytes.extend_from_slice(&buf[..n]);
         }
@@ -237,11 +312,11 @@ impl Root {
         let named_after =
             fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| Error::Changed)?;
         if !stable(&before, &after)
-            || !size_matches(&after, bytes.len())
+            || (!overflow && !size_matches(&after, bytes.len()))
             || !identity(&after, &named_after)
             || !valid_file(&named_after, policy)
         {
-            return Err(Error::Changed);
+            return Err(ManifestError::Changed);
         }
         let root_now =
             fs::open(&self.path, directory_flags(), Mode::empty()).map_err(|_| Error::Changed)?;
@@ -249,7 +324,7 @@ impl Root {
             &self.initial,
             &fs::fstat(root_now).map_err(|_| Error::Changed)?,
         ) {
-            return Err(Error::Changed);
+            return Err(ManifestError::Changed);
         }
         for (i, dir) in dirs.iter().enumerate() {
             let parent = if i == 0 { &self.fd } else { &dirs[i - 1] };
@@ -263,8 +338,11 @@ impl Root {
             if FileType::from_raw_mode(named.st_mode) != FileType::Directory
                 || !identity(&named, &opened)
             {
-                return Err(Error::Changed);
+                return Err(ManifestError::Changed);
             }
+        }
+        if overflow {
+            return Err(ManifestError::Overflow);
         }
         Ok(bytes)
     }
@@ -486,6 +564,24 @@ mod tests {
     }
 
     #[test]
+    fn changed_file_takes_precedence_over_read_overflow() {
+        let f = Fixture::new();
+        std::fs::write(f.0.join("file"), b"one").unwrap();
+        let root = Root::open(&f.0).unwrap();
+        let result = root.read_with_hooks(
+            "file",
+            3,
+            Policy::manifest(),
+            || {},
+            || {
+                std::fs::write(f.0.join("file"), b"longer").unwrap();
+            },
+            |_| {},
+        );
+        assert_eq!(result, Err(Error::Changed));
+    }
+
+    #[test]
     fn rejects_socket_as_unsafe() {
         let f = Fixture::new();
         let socket = std::os::unix::net::UnixListener::bind(f.0.join("socket"));
@@ -507,6 +603,38 @@ mod tests {
         std::fs::write(repo.join("dir/file"), b"{}").unwrap();
         let root = Root::open(&repo).unwrap();
         assert_eq!(root.physical_root(), std::fs::canonicalize(&repo).unwrap());
+        symlink("dir/file", repo.join("link")).unwrap();
+        std::fs::hard_link(repo.join("dir/file"), repo.join("hard")).unwrap();
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("link"), 2),
+            Err(ManifestError::Open(Error::Unsafe))
+        );
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("hard"), 2),
+            Err(ManifestError::Policy)
+        );
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("dir"), 2),
+            Err(ManifestError::Policy)
+        );
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("dir/file"), 1),
+            Err(ManifestError::Policy)
+        );
+        std::fs::remove_file(repo.join("hard")).unwrap();
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("dir/file"), 1),
+            Err(ManifestError::InitialOversize)
+        );
+        assert_eq!(
+            root.read_manifest_detailed(&f.0.join("outside"), 2),
+            Err(ManifestError::External)
+        );
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("dir/../file"), 2),
+            Err(ManifestError::Path)
+        );
+
         for path in [
             PathBuf::from("./dir//./file"),
             root.physical_root().join("dir/./file"),
@@ -550,7 +678,14 @@ mod tests {
         assert!(!size_matches(&stat, 2));
         assert!(!size_matches(&stat, 4));
         assert_eq!(
-            root.read_with_hooks("file", 8, Policy::source(), || {}, |body| body.clear()),
+            root.read_with_hooks(
+                "file",
+                8,
+                Policy::source(),
+                || {},
+                || {},
+                |body| body.clear()
+            ),
             Err(Error::Changed)
         );
         assert_eq!(
@@ -562,6 +697,7 @@ mod tests {
                     std::fs::rename(f.0.join("file"), f.0.join("old")).unwrap();
                     std::fs::write(f.0.join("file"), b"two").unwrap();
                 },
+                || {},
                 |_| {}
             ),
             Err(Error::Changed)
