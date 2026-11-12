@@ -415,6 +415,23 @@ for name in jobs:
     limit = re.search(r"^    timeout-minutes: ([0-9]+)$", job_body, re.M)
     steps = sum(int(v) for v in re.findall(r"^        timeout-minutes: ([0-9]+)$", job_body, re.M))
     assert limit and int(limit.group(1)) >= steps, (name, steps)
+    if name in {'lint', 'focused', 'operator_shard', 'smoke_shard', 'affected_verify'}:
+        assert 'OMS_CHECK_EVIDENCE_DIR: ${{ runner.temp }}/oms-check-evidence' in job_body, name
+        prepare = job_body.split('      - name: prepare failure evidence\n', 1)[1].split('      - name: upload failure evidence\n', 1)[0]
+        upload = job_body.split('      - name: upload failure evidence\n', 1)[1]
+        assert '        if: failure()\n' in prepare, name
+        assert 'scripts/lib/check_evidence.py publish' in prepare, name
+        assert "echo 'ready=true' >> \"$GITHUB_OUTPUT\"" in prepare, name
+        assert "if: failure() && steps.failure_evidence.outputs.ready == 'true'" in upload, name
+        assert 'uses: actions/upload-artifact@v7' in upload, name
+        assert 'path: ${{ runner.temp }}/oms-check-failure-evidence.json\n' in upload, name
+        assert 'retention-days: 7\n' in upload and 'include-hidden-files: false\n' in upload, name
+        assert 'if-no-files-found: error\n' in upload, name
+        assert '${{ github.job }}' in upload and '${{ github.run_attempt }}' in upload, name
+        if name == 'focused':
+            assert '${{ matrix.lane }}' in upload, name
+        if name in {'operator_shard', 'smoke_shard'}:
+            assert '${{ matrix.shard }}' in upload, name
 
 if "gate" not in jobs:
     raise SystemExit("workflow has no gate job")
@@ -596,7 +613,7 @@ with tempfile.TemporaryDirectory(prefix="oms-ci-plan-") as tmp:
             assert "mode=" + expected in output.read_text(), (event, base)
             assert "native=" + ("false" if invoked else "true") in output.read_text(), (event, base)
         assert log.read_text().splitlines() == (["invoked"] if invoked else []), (event, base, "repeated or missing selection")
-verify_script = verify_body.split("      - name: verify affected changes\n", 1)[1].split("        run: |\n", 1)[1]
+verify_script = verify_body.split("      - name: verify affected changes\n", 1)[1].split("\n      - ", 1)[0].split("        run: |\n", 1)[1]
 verify_script = "\n".join(line[10:] for line in verify_script.splitlines() if line.startswith("          "))
 with tempfile.TemporaryDirectory(prefix="oms-ci-verify-") as tmp:
     root = pathlib.Path(tmp)

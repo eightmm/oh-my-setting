@@ -52,6 +52,11 @@ CHECK_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/oms-check-runtime.XXXXXX")"
 # Nested fixtures must not append to the real job summary.
 CHECK_SUMMARY="${GITHUB_STEP_SUMMARY:-}"
 unset GITHUB_STEP_SUMMARY
+# Only the outer CI check owns this destination. A fixture's nested check must
+# not publish its deliberately failing probes as failures of the real job.
+CHECK_EVIDENCE_DIR="${OMS_CHECK_EVIDENCE_DIR:-}"
+export -n CHECK_EVIDENCE_DIR
+unset OMS_CHECK_EVIDENCE_DIR
 report_check() {
   [ "${LIST_STAGES:-0}" != 1 ] || return 0
   [ "${PRINT_AFFECTED_MODE:-0}" != 1 ] || return 0
@@ -368,7 +373,8 @@ if [ "$PARALLEL" = 1 ]; then
   if [ "$LIST_STAGES" != 1 ]; then
     # shellcheck source=scripts/lib/check-parallel.sh
     . "$ROOT/scripts/lib/check-parallel.sh"
-    oms_check_parallel "$ROOT/scripts/check.sh" "$CHECK_RUNTIME/parallel" "$SKIP_LINT"
+    OMS_CHECK_EVIDENCE_DIR="$CHECK_EVIDENCE_DIR" \
+      oms_check_parallel "$ROOT/scripts/check.sh" "$CHECK_RUNTIME/parallel" "$SKIP_LINT"
     # A skipped stage is not the complete gate; oms land installs only on the exact full markers.
     if [ "$SKIP_LINT" = 1 ]; then
       echo "check: ok (parallel gate without lint)"
@@ -658,6 +664,13 @@ stage() {  # stage NAME COMMAND...
   CHECK_STAGE_PID=""
   elapsed=$(( $(date +%s) - started ))
   printf '%s\tstage\t%s\n' "$elapsed" "$name" >> "$CHECK_RUNTIME/timings"
+  if [ "$rc" -ne 0 ] && [ -n "$CHECK_EVIDENCE_DIR" ]; then
+    python3 "$ROOT/scripts/lib/check_evidence.py" retain \
+      --directory "$CHECK_EVIDENCE_DIR" --log "$log" --stage "$name" \
+      --exit-code "$rc" --elapsed "$elapsed" --bash-version "$BASH_VERSION" \
+      --mode "$MODE" --lane "$FOCUSED_LANE" --shard "$SMOKE_SHARD" ||
+      echo 'check: failed stage exit preserved; CI evidence could not be retained' >&2
+  fi
   # Reuse the runner's bounded per-test timings before its successful log is
   # discarded. No extra test run or persistent timing database.
   awk '/^smoke-timing: [0-9]+s [A-Za-z0-9_]+$/ { sub(/s$/, "", $2); print $2 "\ttest\t" $3 }

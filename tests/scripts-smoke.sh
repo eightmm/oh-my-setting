@@ -21915,6 +21915,186 @@ EOF
     fail "refusal must name the cause: $out"
 }
 
+# The console digest cannot be the only surviving copy of a CI failure. This
+# covers the new publication boundary in the existing check-gate fixture family.
+test_check_failure_evidence_is_bounded_and_scrubbed() {
+  local probe="$TMP/check-evidence" out rc=0
+  mkdir -p "$probe"
+  cat > "$probe/linter" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ -z "${OMS_CHECK_EVIDENCE_DIR:-}" ] || exit 97
+if mkdir "$OMS_EVIDENCE_FIXTURE/once" 2>/dev/null; then
+  python3 - <<'PY'
+print('FAIL: test_retained (test_example.Suite.test_retained)')
+print('assertion-detail: ' + 'x' * 5000 + '-END-OF-ASSERTION')
+print('api' + '_key' + '=fixture-value-for-redaction')
+print('/ho' + 'me/fixture-user/private.py')
+PY
+fi
+exit 1
+SH
+  chmod +x "$probe/linter"
+  out="$(OMS_CHECK_EVIDENCE_DIR="$probe/retained" OMS_EVIDENCE_FIXTURE="$probe" \
+    OMS_SHELLCHECK_BIN="$probe/linter" OMS_LINT_JOBS_MAX=1 \
+    bash "$ROOT/scripts/check.sh" --lint-only 2>&1)" || rc=$?
+  [ "$rc" -ne 0 ] || fail "retention must not turn the failed stage green"
+  contains "$out" 'failure evidence retained (diagnostic only; log retained)' ||
+    fail "check.sh did not retain the failed stage: $out"
+  contains "$out" 'digest below' || fail "failure retention replaced the compact console digest"
+  python3 - "$ROOT" "$probe" <<'PY' || fail "failure evidence boundary failed"
+import argparse, json, os, pathlib, sys
+from unittest.mock import patch
+
+root, probe = map(pathlib.Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'scripts/lib'))
+import check_evidence as evidence
+
+rows = list((probe / 'retained').glob('failure-*.json'))
+assert len(rows) == 1, rows
+row = json.loads(rows[0].read_text())
+assert row['diagnostic_only'] is True and row['verification_evidence'] is False
+assert row['exit_code'] != 0 and row['scope'] == {'stage': 'shellcheck', 'mode': 'lint'}
+assert row['failure_selectors'] == ['test_example.Suite.test_retained']
+assert 'x' * 5000 + '-END-OF-ASSERTION' in row['log']['text']
+assert 'fixture-value-for-redaction' not in row['log']['text']
+assert '/ho' + 'me/fixture-user' not in row['log']['text']
+assert row['runtime']['python'] == '.'.join(map(str, sys.version_info[:3]))
+assert row['runtime']['bash'] != 'not recorded'
+assert set(row['runtime']) <= {'python', 'python_implementation', 'bash', 'coreutils_stat', 'os',
+                               'ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH'}
+assert 'environment' not in row and 'argv' not in row
+output = probe / 'published.json'
+evidence.publish(argparse.Namespace(directory=probe/'retained', output=output))
+assert json.loads(output.read_text())['failures'] == [row]
+assert output.stat().st_mode & 0o777 == 0o600
+
+source = probe / 'source.log'
+def retain(name, log=source):
+    args = argparse.Namespace(directory=probe/name, log=log, stage='fixture', exit_code=1,
+                              elapsed=0, bash_version='5.2', mode='focused', lane='1/4', shard='')
+    with patch.object(evidence, 'coreutils_version', return_value='not recorded'):
+        evidence.retain(args)
+    return [json.loads(p.read_text()) for p in (probe/name).glob('failure-*.json')]
+
+source.write_text('safe line\n')
+# Values from the actual environment are screened as well as known key syntax.
+value = 'SyntheticBareValue-93ABC'
+source.write_text(value + '\n')
+with patch.dict(os.environ, {'OMS_TEST_API_' + 'KEY': value}):
+    assert value not in retain('env-value')[0]['log']['text']
+escaped = '{"api_' + 'key":"opaque-fixture-value"}'
+for kind, text in [('quoted-log', json.dumps(escaped)),
+                   ('unicode-log', escaped.replace('api_', r'\u0061pi_'))]:
+    source.write_text(text)
+    retained = retain(kind)[0]['log']
+    assert retained['status'] == 'omitted' and retained['reason'] == 'scan-refused', kind
+source.write_text(r'{"message":"line one\nline two", "result":"passed"}')
+assert retain('safe-escaped-log')[0]['log']['text'] == source.read_text()
+source.write_text(r'{"message":"\ud83d\ude42"}')
+assert retain('safe-unicode-pair-log')[0]['log']['text'] == source.read_text()
+source.write_text(r'{"message":"\ud83d"}')
+assert retain('lone-unicode-surrogate-log')[0]['log']['status'] == 'omitted'
+source.write_bytes(b'x' * (evidence.LOG_BYTES + 1))
+large = retain('large')[0]['log']
+assert large['status'] == 'omitted' and large['reason'] == 'size-limit'
+assert large['source_bytes'] == evidence.LOG_BYTES + 1 and 'text' not in large
+source.write_text('safe line\n')
+linked = probe / 'linked.log'
+linked.symlink_to(source)
+assert retain('symlink-input', linked)[0]['log']['status'] == 'omitted'
+linked.unlink()
+os.link(source, linked)
+assert retain('hardlink-input', linked)[0]['log']['status'] == 'omitted'
+linked.unlink()
+os.mkfifo(linked)
+assert retain('fifo-input', linked)[0]['log']['status'] == 'omitted'
+linked.unlink()
+
+outside = probe / 'outside'
+outside.mkdir()
+(probe / 'unsafe-destination').symlink_to(outside, target_is_directory=True)
+try:
+    retain('unsafe-destination')
+except (OSError, evidence.Refused):
+    pass
+else:
+    raise AssertionError('symlink destination accepted')
+assert not list(outside.iterdir())
+with patch.object(evidence, 'scrub', side_effect=evidence.Refused('scan-unavailable')):
+    try:
+        retain('scanner-failed')
+    except evidence.Refused:
+        pass
+    else:
+        raise AssertionError('failed scan retained evidence')
+assert not (probe / 'scanner-failed').exists()
+
+with patch.object(evidence, 'MAX_RECORDS', 1):
+    retain('record-limit')
+    retain('record-limit')
+omission = json.loads((probe/'record-limit/omissions.json').read_text())
+assert omission['omitted_stages'] == 1 and omission['diagnostic_only'] is True
+with patch.object(evidence, 'TOTAL_BYTES', evidence.RESERVE_BYTES + 1):
+    assert retain('byte-limit') == []
+assert json.loads((probe/'byte-limit/omissions.json').read_text())['omitted_stages'] == 1
+
+# Keep the writer's complete record shape: screening serialized JSON alone
+# misses assignment syntax hidden behind escaped quotes or Unicode escapes.
+try:
+    evidence.scrub(escaped)
+except evidence.Refused:
+    pass
+else:
+    raise AssertionError('raw assignment was not screened')
+accepted = []
+for kind in ('escaped-assignment', 'unicode-escaped-assignment', 'quoted-log', 'unicode-log'):
+    altered = json.loads(json.dumps(row))
+    text = (json.dumps(escaped) if kind == 'quoted-log' else
+            escaped.replace('api_', r'\u0061pi_') if kind == 'unicode-log' else escaped)
+    altered['log'].update(text=text, retained_bytes=len(text.encode()),
+                          source_bytes=len(text.encode()), transformed=False)
+    altered['failure_selectors'] = []
+    wire = json.dumps(altered)
+    if kind.startswith('unicode-'):
+        wire = wire.replace('api_', r'\u0061pi_')
+    rows[0].write_text(wire)
+    target = probe / (kind + '.json')
+    try:
+        evidence.publish(argparse.Namespace(directory=probe/'retained', output=target))
+    except evidence.Refused:
+        assert not target.exists(), kind
+    else:
+        accepted.append(kind)
+assert not accepted, ('serialized diagnostic content bypassed publication scan', accepted)
+rows[0].write_text(json.dumps(row))
+
+# Publication rechecks retained files, not just the original capture. Nothing
+# unsafe may sneak into a later upload through a directory glob or hard link.
+unsafe = probe / 'retained' / 'unexpected.log'
+unsafe.write_text('unexpected content')
+for kind in ('unexpected', 'symlink', 'hardlink', 'changed-content'):
+    if kind != 'unexpected':
+        unsafe.unlink(missing_ok=True)
+        rows[0].unlink()
+        if kind == 'symlink':
+            rows[0].symlink_to(source)
+        elif kind == 'hardlink':
+            os.link(source, rows[0])
+        else:
+            rows[0].write_text(json.dumps({'diagnostic_only': True,
+                                          'log': 'api' + '_key' + '=new-private-value'}))
+    target = probe / ('refused-' + kind + '.json')
+    try:
+        evidence.publish(argparse.Namespace(directory=probe/'retained', output=target))
+    except (OSError, evidence.Refused):
+        pass
+    else:
+        raise AssertionError(kind)
+    assert not target.exists(), kind
+PY
+}
+
 # Every .sh here is linted; the Python helpers had nothing, and one of them now
 # decides what the installer may delete.
 # smoke-weight: 5
