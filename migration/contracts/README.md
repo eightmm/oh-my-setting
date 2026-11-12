@@ -1,7 +1,7 @@
 # Migration contract vectors
 
-These are frozen examples for the next implementation slice, not a claim that
-the Rust runtime already implements the corresponding behavior.
+These frozen examples are replayed by the native `oms-context` tests. They do
+not establish installed CLI, lifecycle or complete migration parity.
 
 ## Context manifest projection
 
@@ -22,12 +22,13 @@ error exit codes have their own contracts and must not be inferred from these
 JSON values.
 
 The preparation change generated and replayed these cases against the pinned
-reference module. The workspace's current Rust tests exercise the inventory
-tool; they do not execute these projection cases yet. M1 must wire these
-vectors into the Rust implementation's tests and extend the existing
-[`test_context_inspect.py`](../../tests/test_context_inspect.py) coverage for
-descriptor-relative reads, symlinks, ownership, duplicate JSON keys, byte
-limits and changed files. Five examples do not replace that coverage.
+reference module. The native `oms-context` suite now executes all five vectors
+alongside strict JSON, projection, comparison, encoding and bounds regressions.
+The separate `oms-safe-fs` suite exercises descriptor-relative reads, symlinks,
+ownership, hard links and change detection. M1 still requires public CLI and
+installed-selection coverage equivalent to
+[`test_context_inspect.py`](../../tests/test_context_inspect.py).
+Five examples do not replace that coverage.
 
 When intended behavior changes, update the specification and vectors in the
 same reviewed change. During a port, compare both implementations against the

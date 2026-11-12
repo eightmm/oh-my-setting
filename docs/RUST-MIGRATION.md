@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12. Status: preparation; production cutover has not started.
+Decision date: 2026-11-12. Status: native foundations implemented locally; production cutover remains pending.
 
 ## Decision and completion boundary
 
@@ -36,15 +36,20 @@ legacy implementation during transition; they are not the target runtime design.
 - A checked [legacy Python inventory](../migration/python-inventory.tsv),
   preventing unreviewed growth in the measured footprint.
 - Frozen [context projection vectors](../migration/contracts/README.md) for the
-  first native feature; they are reference data, not completed Rust parity tests.
+  first native feature, now replayed by native library tests.
 - The migration order, compatibility obligations, retirement criteria, and final
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-Preparation does not switch `oms`, MCP, hooks, installation, or state writers to
-Rust. The initial workspace contains a migration tool rather than empty
-production crates. Create the shared core and native command entry point when
-the first real feature is implemented.
+The workspace now also contains six implemented native libraries: context
+validation/session-byte input, descriptor-relative filesystem reads, domain JSON
+encodings, output selection, Shell graph extraction and context text reports.
+They have scoped native tests and independent review. The native compiler floor
+is 1.99.1; the preparation inventory tool separately retains its 1.85 minimum.
+Public CLI/session integration and Python graph extraction remain in progress.
+No installed command, MCP transport, hook, lifecycle operation or state writer
+has switched to Rust, and no legacy source domain has yet been deleted.
+Library counts and local commits do not satisfy M1 or M6 retirement gates.
 
 The inspected production baseline is commit
 `74f87f654a314961420be2aa8ab6dfc1999151e1`. Rebase implementation slices onto the
@@ -275,6 +280,24 @@ M4 owns retirement of this temporary growth: equivalent native cancellation,
 relocation, archive validation, contention and crash-recovery coverage must pass
 before deleting the legacy engine and its interpreter-dependent fixture driver.
 This recovery work remains preparation for the complete migration.
+
+### Native fixture footprint (2026-11-13)
+
+The first native Shell graph corpus adds five inert JSON fixture paths under
+`rust/crates/oms-graph-shell/tests/`: `fixtures.json`, `python_env.json`,
+`python_fragment.json`, `python_long.json` and `python_other.json`. Together they
+contain 31 conservatively counted Python-reference lines (24, 2, 2, 1 and 2).
+Native tests deserialize these source/expected-result records; they never execute
+the embedded Python text. Their exact projections were compared with the legacy
+parser. This is required Python-project input coverage owned by M3, not an
+additional interpreter invocation. Keep the records until the corresponding
+native corpus is replaced or a reviewed data-only classifier refinement proves
+those exact files inert; do not exclude `rust/` wholesale.
+
+The measured executable footprint remains 347 Python source files and 178,126
+physical lines. The reference inventory rises from 194 paths / 4,782 lines to
+199 paths / 4,813 lines only for those fixtures. No legacy deletion or M6 zero
+result is claimed. Future retirement batches must lower the baseline again.
 
 Two demonstrated legacy defects remain explicit native-port requirements:
 

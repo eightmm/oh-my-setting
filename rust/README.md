@@ -1,22 +1,28 @@
 # Rust migration workspace
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
-It currently contains `oms-migrate`, a development inventory tool. It does not
-replace the installed `oms` command, change existing state, or provision Python.
-Production core/CLI packages will be added with the first implemented native
-feature rather than as empty placeholders.
+It contains the development inventory tool `oms-migrate` and six native libraries:
+`oms-context` (manifest projections and lossless session JSON input), `oms-safe-fs`
+(descriptor-relative reads), `oms-json` (domain byte encodings), `oms-output`
+(digest selection), `oms-graph-shell` (source graph extraction), and
+`oms-context-report` (text reports). These are implemented foundations; the
+installed `oms` command still uses the legacy runtime. No legacy domain is retired.
+The native public CLI, complete session consumers and Python graph parser remain
+separate integration work.
 
 ## Toolchain and checks
 
-The preparation workspace pins the build toolchain to Rust **1.99.1**, uses
-edition **2024**, and declares Rust **1.85** as its tested minimum supported
-compiler. The initial tool uses only the Rust standard library and Git. The
+The workspace pins the build toolchain and native library minimum to Rust
+**1.99.1**, using edition **2024**. The dependency-free preparation tool
+`oms-migrate` separately retains its tested Rust **1.85** minimum; it uses only
+the Rust standard library and Git. The
 build toolchain pin does not establish the final binaries' glibc or macOS
 deployment requirements: those must be validated against the supported hosts,
 including the Ubuntu 20.04 floor. It does not prove runtime or cross-host
 readiness. Run these from the repository root:
 
 ```bash
+cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
 cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
 cargo +1.99.1 check --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets
 cargo +1.99.1 test --locked --offline --manifest-path rust/Cargo.toml --workspace
@@ -31,6 +37,8 @@ keeps the compiler choice clear. These are validation commands, not a statement
 that a particular development environment has already executed them.
 The compiler and its formatting/lint components must already be available;
 Cargo's `--offline` controls dependency access, not rustup toolchain installation.
+The explicit locked fetch seeds the dependency cache before the offline checks.
+A toolchain pin alone does not prove the Ubuntu 20.04 or macOS deployment floor.
 
 The existing [test workflow](../.github/workflows/test.yml) selects one Ubuntu
 Rust lane for Rust/migration changes or changes on the inventory's candidate

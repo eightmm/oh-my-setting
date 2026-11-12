@@ -328,6 +328,9 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
           rustc +1.99.1 --version
           cargo +1.99.1 --version
+      - name: fetch locked Rust dependencies
+        timeout-minutes: 5
+        run: cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked
       - name: Rust migration foundation
         timeout-minutes: 10
         run: |

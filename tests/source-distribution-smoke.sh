@@ -535,8 +535,10 @@ assert "    needs: affected_plan\n" in rust_body
 assert "    if: needs.affected_plan.outputs.rust == 'true'\n" in rust_body
 assert "rust: ${{ steps.rust_scope.outputs.required }}" in plan_body
 assert "continue-on-error" not in rust_body
-for command in ("fmt", "check", "clippy", "test", "run"):
+for command in ("fetch", "fmt", "check", "clippy", "test", "run"):
     assert "cargo +1.99.1 " + command + " --manifest-path rust/Cargo.toml" in rust_body, command
+assert "cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked" in rust_body
+assert rust_body.index("cargo +1.99.1 fetch") < rust_body.index("cargo +1.99.1 check")
 assert "--workspace --all-targets --locked --offline -- -D warnings" in rust_body
 assert "-p oms-migrate -- check --repo ." in rust_body
 toolchain = pathlib.Path(sys.argv[1]).parents[2] / "rust/rust-toolchain.toml"
