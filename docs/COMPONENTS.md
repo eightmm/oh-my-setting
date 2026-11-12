@@ -1212,7 +1212,7 @@ approval, and lineage outcome also converge.
 
 
 New native landing captures reserve a generation before writing payload bytes.
-`OMS_LANDING_CAPTURE_COUNT` (default 256) and `OMS_LANDING_CAPTURE_BYTES`
+`OMS_LANDING_CAPTURE_COUNT` (default 2048) and `OMS_LANDING_CAPTURE_BYTES`
 (default 134217728, 128 MiB) cap newly managed generations and their reserved
 peak payload bytes. Each input is limited to 16 MiB; the reservation charges both
 the private admission input and its separate publication copy. Hardlinked

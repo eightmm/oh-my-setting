@@ -1043,6 +1043,9 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Fixed
 
+- Managed landing captures default to 2048 entries (was 256). The 30-day GC
+  age held about 450 ordinary landings, so admission was refused with 85% of
+  the byte budget free; the 128 MiB byte cap still bounds disk use.
 - Plan completion accepts a main that swapped provider after its room rolled
   over: each room is checked against the swap chain at that point instead of
   the final provider.
@@ -1360,6 +1363,12 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Removed
 
+- `oms decide` (OpenAI Responses decision records) and the OpenTelemetry
+  GenAI field map with its lint are removed: no front-door caller used them.
+- `oms study` and its suite/run workflow are removed. They were a second
+  experiment schema beside run capsules and experiment-board. Stored
+  `.oms/studies` files stay as plain files, and `oms artifact-view` keeps
+  reading the `oms-study-results` format that capsules and remote views use.
 - Knobs and flags no caller reached: `oms plan-run --claimed-lease`,
   `oms apply-project-template --private`, `oms advise --no-role`,
   `oms panel --retry-delivery --result-id`, and the `OMS_DOCTOR_MAX_SCAN`,

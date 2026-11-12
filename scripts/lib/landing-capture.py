@@ -33,7 +33,9 @@ class QuotaError(ValueError):
     pass
 MAX_OBJECT = 16 * 1024 * 1024
 DEFAULT_BYTES = 128 * 1024 * 1024
-DEFAULT_COUNT = 256
+# Bytes bound disk use; the count only bounds entries. The 30-day GC age held about
+# 450 normal landings here (2026-11), so 256 refused admission with 85% of bytes free.
+DEFAULT_COUNT = 2048
 MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_REFERENCE_ENTRIES = 262144
 # The only places GC looks for capture references; a writer must publish inside them.
