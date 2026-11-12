@@ -48,6 +48,7 @@ Usage: fail-ledger.sh [--repo PATH] record --cmd CMD --exit N [--kind K] [--summ
        fail-ledger.sh [--repo PATH] list   [--unresolved] [--json] [--limit N]
        fail-ledger.sh [--repo PATH] list   --stalls [--json]
        fail-ledger.sh [--repo PATH] show   --fingerprint FP [--json]
+       fail-ledger.sh [--repo PATH] lessons [--json] [--limit N]
 
 Durable failure memory shared by Codex, Claude Code, and Antigravity.
 Fingerprint = short hash of the normalized command (whitespace collapsed,
@@ -85,6 +86,11 @@ list     One line per fingerprint (count, last exit, resolved); --unresolved
          _NO_EVIDENCE/_MAX_AGE (0 disables a rule).
 show     Print one fingerprint's full current row (state, count, exit, kind,
          last ts, cmd, summary, next, how); exit 1 for an unknown fingerprint.
+lessons  Read-only candidates from explicitly resolved failure episodes, with
+         recorded resolution, occurrence count and ledger source references.
+         Candidates remain unverified; a resolution note proves no success.
+         Newest resolution first; default 20, --limit 1..100 (0 uses default).
+         No memory or instruction writes; sensitive stored text is withheld.
 
 kind=hook rows are filed automatically for every failed shell command, so
 nothing ever resolves them by hand. They retire on a read-time TTL instead:
@@ -260,15 +266,16 @@ while [ "$#" -gt 0 ]; do
       case "$2" in ''|*[!0-9]*) fail "--limit must be a non-negative integer" ;; esac
       LIMIT="$2"; shift 2 ;;
     --ignore-state) IGNORE_STATE=1; shift ;;
-    record|check|resolve|list|show) ACTION="$1"; shift ;;
+    record|check|resolve|list|show|lessons) ACTION="$1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown argument: $1" ;;
   esac
 done
 
 ACTION="${ACTION:-list}"
-[ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || [ "$ACTION" = "show" ] || fail "--json is only supported by list and show"
-[ "$LIMIT" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--limit is only supported by list"
+[ "$AS_JSON" -eq 0 ] || [ "$ACTION" = "list" ] || [ "$ACTION" = "show" ] || [ "$ACTION" = "lessons" ] || fail "--json is only supported by list, show and lessons"
+[ "$LIMIT" -eq 0 ] || [ "$ACTION" = "list" ] || [ "$ACTION" = "lessons" ] || fail "--limit is only supported by list and lessons"
+[ "$ACTION" != "lessons" ] || [ "$UNRESOLVED_ONLY" -eq 0 ] || fail "lessons does not combine with --unresolved"
 [ "$ACTION" != "show" ] || [ -n "$FINGERPRINT" ] || fail "show requires --fingerprint"
 [ "$STALLS" -eq 0 ] || [ "$ACTION" = "list" ] || fail "--stalls is only supported by list"
 [ "$STALLS" -eq 0 ] || { [ "$UNRESOLVED_ONLY" -eq 0 ] && [ "$LIMIT" -eq 0 ]; } || fail "--stalls does not combine with --unresolved or --limit"
@@ -299,6 +306,12 @@ export OMS_HOOK_TTL="$HOOK_FAIL_TTL"
 [ -z "$HOW" ] || HOW="$(printf '%s' "$HOW" | agent_memory_normalize_machine_paths)"
 
 case "$ACTION" in
+  lessons)
+    lesson_args=()
+    [ "$AS_JSON" -eq 0 ] || lesson_args+=(--json)
+    python3 -X utf8 -I -B "$ROOT_LIB/failure_lessons.py" --ledger "$LEDGER" \
+      --limit "$LIMIT" ${lesson_args[@]+"${lesson_args[@]}"}
+    ;;
   record)
     [[ "$CMD" = *[![:space:]]* ]] || fail "record requires nonblank --cmd"
     case "$EXIT_CODE" in *[!0-9]*|"") fail "record requires --exit N (non-negative integer)" ;; esac

@@ -1364,6 +1364,21 @@ Project state lives under ignored `.oms/` paths:
 attention. `oms fail-ledger list`, `oms artifact-index unresolved`, and
 `oms thread list` expose the underlying records. Writers are append-oriented;
 use migration and GC commands instead of editing JSONL by hand.
+`oms fail-ledger lessons [--json] [--limit N]` reports candidate lessons from
+failure episodes followed by an explicitly recorded resolution with the same
+fingerprint. Each candidate retains original failure details, a count of
+recorded failure events, the recorded `--how` note, and line/SHA256 source
+references. Every candidate is **unverified**, with missing verification
+evidence: a resolution note does not prove that a fix succeeded. The last
+recorded status shows later recurrence as `open`, without evaluating hook
+expiry or Git-state retirement; duplicate resolutions add no observation.
+The default is the newest 20 candidates (maximum 100), with 1000 characters per
+text field and explicit truncation/omission counts. The reader accepts a regular
+non-symlink ledger up to 16 MiB and rejects malformed or oversized rows. The
+existing sensitive scanner checks original text before truncation; unsafe text
+or scanner failure withholds candidate text while preserving mechanical source
+references and status. The command is read-only: no model call, automatic
+memory promotion, instruction changes or ledger writes.
 `oms fail-ledger list --stalls [--json]` is a read-only loop check over the
 newest events (default window 20) of the failure ledger and the goal-drive
 progress log: the same failure 3 times in a row, two commands alternating for 6

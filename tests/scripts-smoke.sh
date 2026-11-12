@@ -29254,6 +29254,105 @@ assert row["how"] == "fixed the assertion", row
     fail "old rows without new fields must still list: $out"
   contains "$out" 'older command' ||
     fail "legacy rows without an explicit schema must still list: $out"
+
+  # Lessons joins only explicit failure -> resolution episodes. A second
+  # resolution adds no observation; a recurrence remains open in the ledger.
+  ( cd "$project" && "$SH" resolve --fingerprint "$fp" --how "duplicate resolution" &&
+    "$SH" record --cmd "bash broken.sh" --exit 1 --kind verify --summary "assertion returned" &&
+    "$SH" record --cmd "bash repeated.sh" --exit 1 --summary "missing fixture" &&
+    "$SH" record --cmd "bash repeated.sh" --exit 1 --summary "missing fixture" &&
+    "$SH" resolve --cmd "bash repeated.sh" --how "added fixture" &&
+    "$SH" resolve --cmd "bash repeated.sh" --how "added fixture again" ) >/dev/null 2>&1 || fail "lessons fixture"
+  # Stored legacy content must pass the same scanner on the read path, before
+  # truncation; scanner failure must also withhold it. Never echo rejected text.
+  printf '%s\n' \
+    '{"event":"resolved","fingerprint":"legacy-row"}' \
+    '{"event":"fail","fingerprint":"stored-lesson","cmd":"old command","summary":"old note","exit":1}' \
+    '{"event":"resolved","fingerprint":"stored-lesson","how":"used api_k''ey = s''k-abcdefghij1234567890"}' \
+    '{"event":"resolved","fingerprint":"orphan-row","how":"no original failure"}' \
+    '{"event":"fail","fingerprint":22}' \
+    '{"event":"fail","fingerprint":"malformed-lesson","summary":"bad \ud800"}' \
+    '{"event":"resolved","fingerprint":"malformed-lesson","how":"must not poison clean lessons"}' \
+    '{"event":"fail","fingerprint":"stale-hook","kind":"hook","cmd":"old hook command","ts":"2020-01-01T00:00:00Z"}' \
+    '{"event":"resolved","fingerprint":"stale-hook","how":"fixed old hook"}' \
+    '{"event":"fail","fingerprint":"stale-hook","kind":"hook","cmd":"old hook command","ts":"2020-01-02T00:00:00Z"}' \
+    >> "$project/.oms/failures.jsonl"
+  find "$project" -type f -exec cksum {} \; | sort > "$TMP/lessons-before"
+  "$SH" --repo "$project" lessons --json > "$TMP/lessons.json" || fail "lessons --json"
+  "$SH" --repo "$project" lessons --json > "$TMP/lessons-again.json" || fail "lessons repeat"
+  cmp -s "$TMP/lessons.json" "$TMP/lessons-again.json" || fail "lessons must be deterministic"
+  python3 - "$TMP/lessons.json" "$project/.oms/failures.jsonl" <<'PY' || fail "lessons evidence contract"
+import hashlib, json, sys
+doc = json.load(open(sys.argv[1]))
+raw = open(sys.argv[2], "rb").read().splitlines()
+rows = doc["candidates"]
+assert doc["schema"] == 1 and len(rows) == 5, doc
+assert doc["duplicate_resolutions"] == 2 and doc["unmatched_resolutions"] == 2, doc
+assert doc["invalid_rows"] == 2, doc
+assert [r["resolution"]["source"]["line"] for r in rows] == sorted(
+    (r["resolution"]["source"]["line"] for r in rows), reverse=True)
+for row in rows:
+    assert row["status"] == "candidate" and row["verification_status"] == "unverified", row
+    assert row["verification_evidence"] == "missing", row
+    assert row["status_basis"] == "last valid ledger event; hook TTL and Git state are not evaluated", row
+    assert "current_status" not in row and "current_source" not in row, row
+    for ref in (row["failure_source"], row["last_failure_source"], row["resolution"]["source"], row["last_recorded_source"]):
+        assert ref["source"] == "failure-ledger" and ref["status"] == "recorded", ref
+        assert hashlib.sha256(raw[ref["line"] - 1]).hexdigest() == ref["sha256"], ref
+by_cmd = {r["failure"]["cmd"]: r for r in rows}
+# An expired hook recurrence is only an event-history fact, not an active
+# failure assertion. Malformed Unicode must not withhold these clean lessons.
+stale = by_cmd["old hook command"]
+assert stale["last_recorded_status"] == "open" and stale["content_status"] == "recorded", stale
+assert all(r["failure"]["fingerprint"] != "malformed-lesson" for r in rows), rows
+original = by_cmd["bash broken.sh"]
+assert original["resolution"]["how"] == "fixed the assertion", original
+assert original["failure"]["kind"] == "verify" and original["last_recorded_status"] == "open", original
+repeated = by_cmd["bash repeated.sh"]
+assert repeated["occurrences"] == 2 and repeated["resolution"]["how"] == "added fixture", repeated
+assert repeated["failure"]["summary"] == "missing fixture" and repeated["last_recorded_status"] == "resolved", repeated
+assert by_cmd["old command"]["resolution"]["note_status"] == "missing", rows
+withheld = [r for r in rows if r["content_status"] == "withheld"]
+assert len(withheld) == 1 and withheld[0]["resolution"]["how"] is None, rows
+assert "abcdefghij" not in json.dumps(doc), doc
+assert all(r["failure"]["fingerprint"] != "implicit-schema-row" for r in rows), rows
+PY
+  out="$("$SH" --repo "$project" lessons --limit 1 --json)" || fail "limited lessons"
+  printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["candidates"]) == 1 and d["omitted"] == 4' ||
+    fail "lessons limit must name omissions"
+  out="$("$SH" --repo "$project" lessons)" || fail "text lessons"
+  contains "$out" 'candidate / unverified' || fail "text lessons must label uncertainty"
+  contains "$out" 'recorded resolution' || fail "text lessons must name recorded resolution"
+  contains "$out" 'last-recorded=open' || fail "text lessons must distinguish recorded status"
+  if "$SH" --repo "$project" lessons --limit 101 >/dev/null 2>&1; then
+    fail "lessons must enforce its maximum report count"
+  fi
+  python3 -B - "$ROOT/scripts/lib" "$project/.oms/failures.jsonl" <<'PY' || fail "lessons scanner failure must withhold text"
+import sys
+sys.path.insert(0, sys.argv[1])
+import failure_lessons
+def unavailable(_texts):
+    raise OSError("fixture scanner unavailable")
+failure_lessons.scan = unavailable
+rows = failure_lessons.report(sys.argv[2], 20)["candidates"]
+assert rows and all(r["content_status"] == "withheld" and r["failure"]["cmd"] is None
+                    and r["resolution"]["how"] is None for r in rows), rows
+PY
+  ln -s "$project/.oms/failures.jsonl" "$TMP/lessons-link"
+  if OMS_FAIL_LEDGER="$TMP/lessons-link" "$SH" --repo "$project" lessons --json >/dev/null 2>&1; then
+    fail "lessons must refuse a symlink ledger"
+  fi
+  find "$project" -type f -exec cksum {} \; | sort > "$TMP/lessons-after"
+  cmp -s "$TMP/lessons-before" "$TMP/lessons-after" || fail "lessons must never write project files"
+  if "$SH" --repo "$project" check --cmd "bash broken.sh" --ignore-state >/dev/null 2>&1; then
+    fail "reading lessons must not retire a recurrence"
+  fi
+  local missing="$TMP/lessons-missing"
+  mkdir -p "$missing"
+  out="$("$SH" --repo "$missing" lessons --json)" || fail "lessons without ledger"
+  printf '%s' "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["source_status"] == "missing" and not d["candidates"]' ||
+    fail "missing lessons evidence must be labeled"
+  [ ! -e "$missing/.oms" ] || fail "reading absent lessons must not create state"
 }
 
 test_ci_status_record_and_state() {
