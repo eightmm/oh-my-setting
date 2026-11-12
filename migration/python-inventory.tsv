@@ -74,7 +74,7 @@ scripts/lib/agent_memory_hygiene.py	python-source	331
 scripts/lib/agent_memory_promote.py	python-source	320
 scripts/lib/agent_memory_review.py	python-source	526
 scripts/lib/agent_memory_sources.py	python-source	177
-scripts/lib/agent_plan_core.py	python-source	2202
+scripts/lib/agent_plan_core.py	python-source	2280
 scripts/lib/agent_role_render.py	python-source	92
 scripts/lib/answer-quality.py	python-source	102
 scripts/lib/artifact-index-retention.py	python-source	241
@@ -503,7 +503,7 @@ tests/run-unittest-classes.py	python-source	63
 tests/runtime-core-integration-smoke.sh	python-reference	23
 tests/runtime-core-smoke.sh	python-reference	11
 tests/runtime_test_base.py	python-source	87
-tests/scripts-smoke.sh	python-reference	1047
+tests/scripts-smoke.sh	python-reference	1051
 tests/skill-lifecycle-smoke.sh	python-reference	22
 tests/source-distribution-smoke.sh	python-reference	34
 tests/state-surfaces-smoke.sh	python-reference	244

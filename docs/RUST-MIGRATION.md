@@ -256,6 +256,39 @@ do not hide executable paths behind broad exclusions or remove Python-project
 support to satisfy the counter. Dynamic and transitive requirements still need
 the clean-host evidence below.
 
+### Temporary recovery footprint (2026-11-12)
+
+The reviewed preparation baseline includes a bounded legacy recovery change:
+`oms agent-plan relocate-decision` moves a valid cancelled task's decision-file
+pointer to a separate copy of the already-bound bytes. It keeps parent authority,
+plan/task compare-and-set, link safety, live-worker checks, receipt digests and
+archived plans intact. Keep the old path valid until every active reference has
+moved; restore its historical bytes afterward. The command help gives the full
+required arguments. Changed old bytes still fail closed.
+
+This adds 78 physical Python lines in
+[agent_plan_core.py](../scripts/lib/agent_plan_core.py) (2202 to 2280) and four
+Python-reference lines in the existing
+[cancellation smoke fixture](../tests/scripts-smoke.sh) (1047 to 1051).
+The inventory has been reconciled to those measured values, with no new paths.
+M4 owns retirement of this temporary growth: equivalent native cancellation,
+relocation, archive validation, contention and crash-recovery coverage must pass
+before deleting the legacy engine and its interpreter-dependent fixture driver.
+This recovery work remains preparation for the complete migration.
+
+Two demonstrated legacy defects remain explicit native-port requirements:
+
+- [Artifact indexing](../scripts/lib/peer-common.sh) truncates the task goal with
+  `cut -c1-200`; splitting a valid UTF-8 character can create a lone surrogate
+  that the [index writer](../scripts/lib/artifact-index-store.py) cannot encode.
+  An ASCII task header is the temporary operational workaround. M2/M4 must
+  preserve the byte bound at a UTF-8 boundary and verify durable review receipts
+  for non-ASCII goals.
+- [Retirement validation](../scripts/lib/plan-retire.py), when reached through
+  [state-verify](../scripts/state-verify.sh) from another working directory, can
+  resolve archived decision paths against CWD rather than the supplied repository.
+  M4 must use the declared physical repository identity and test that invocation.
+
 ## Verification and final acceptance
 
 Use the existing affected-check policy throughout migration. A Rust job does
