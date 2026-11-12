@@ -9,5 +9,5 @@ unsafe_code = "forbid"
 
 [dependencies]
 serde = "=1.0.229"
-serde_json = { version = "=1.0.154", features = ["raw_value", "arbitrary_precision", "preserve_order", "unbounded_depth"] }
+serde_json = { version = "=1.0.154", features = ["raw_value", "preserve_order", "unbounded_depth"] }
 unicode-general-category = "=0.6.0"

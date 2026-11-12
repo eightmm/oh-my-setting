@@ -2,7 +2,7 @@
 
 use serde::de::{Deserialize, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::value::RawValue;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Mutex;
 
@@ -64,18 +64,25 @@ const DUPLICATE: &str = "invalid context manifest: duplicate JSON key";
 const NONFINITE: &str = "invalid context manifest: non-finite JSON value";
 
 enum Leaf {
+    Invalid,
     Text(Vec<u8>),
     Number(String),
-    Nonfinite,
+    Nonfinite(&'static str),
 }
 
 // Serde validates each leaf; every original string and number becomes an
 // arena reference, so no input string can impersonate one.
-fn adapt(input: &[u8]) -> Result<(Vec<u8>, Vec<Leaf>, usize), &'static str> {
-    if input.len() > 4 * 1024 * 1024 {
+fn adapt(
+    input: &[u8],
+    max_bytes: usize,
+    session: bool,
+) -> Result<(Vec<u8>, Vec<Leaf>, usize), &'static str> {
+    if input.len() > max_bytes {
         return Err("context manifest exceeds the read limit");
     }
-    std::str::from_utf8(input).map_err(|_| INVALID)?;
+    if !session {
+        std::str::from_utf8(input).map_err(|_| INVALID)?;
+    }
     let mut output = Vec::with_capacity(input.len());
     let mut leaves = Vec::new();
     let mut depth = 0usize;
@@ -89,19 +96,25 @@ fn adapt(input: &[u8]) -> Result<(Vec<u8>, Vec<Leaf>, usize), &'static str> {
             match stream.next() {
                 Some(Ok(Bytes(value))) => {
                     consumed = stream.byte_offset();
-                    Some(Leaf::Text(value))
+                    // deserialize_bytes preserves surrogate code points but also accepts
+                    // literal C0 bytes; JSON only permits escaped controls.
+                    Some(if input[i..i + consumed].iter().any(|b| *b < 0x20) {
+                        Leaf::Invalid
+                    } else {
+                        Leaf::Text(value)
+                    })
                 }
                 _ => None,
             }
         } else if input[i..].starts_with(b"NaN") {
             consumed = 3;
-            Some(Leaf::Nonfinite)
+            Some(Leaf::Nonfinite("NaN"))
         } else if input[i..].starts_with(b"Infinity") {
             consumed = 8;
-            Some(Leaf::Nonfinite)
+            Some(Leaf::Nonfinite("Infinity"))
         } else if input[i..].starts_with(b"-Infinity") {
             consumed = 9;
-            Some(Leaf::Nonfinite)
+            Some(Leaf::Nonfinite("-Infinity"))
         } else if matches!(b, b'-' | b'0'..=b'9') {
             let mut stream =
                 serde_json::Deserializer::from_slice(&input[i..]).into_iter::<&RawValue>();
@@ -146,6 +159,7 @@ fn adapt(input: &[u8]) -> Result<(Vec<u8>, Vec<Leaf>, usize), &'static str> {
 struct Seed<'a> {
     leaves: &'a [Leaf],
     key: bool,
+    session: bool,
 }
 impl<'de> DeserializeSeed<'de> for Seed<'_> {
     type Value = Json;
@@ -166,8 +180,17 @@ impl<'de> Visitor<'de> for Seed<'_> {
             .ok_or_else(|| E::custom(INVALID))?;
         match leaf {
             Leaf::Text(bytes) => Ok(Json::String(bytes.clone())),
-            Leaf::Number(n) if !self.key => Ok(Json::Number(n.clone())),
-            Leaf::Nonfinite if !self.key => Err(E::custom(NONFINITE)),
+            Leaf::Number(n) if !self.key => {
+                if self.session
+                    && !n.contains(['.', 'e', 'E'])
+                    && n.trim_start_matches('-').len() > 4300
+                {
+                    return Err(E::custom(INVALID));
+                }
+                Ok(Json::Number(n.clone()))
+            }
+            Leaf::Nonfinite(n) if !self.key && self.session => Ok(Json::Number((*n).into())),
+            Leaf::Nonfinite(_) if !self.key => Err(E::custom(NONFINITE)),
             _ => Err(E::custom(INVALID)),
         }
     }
@@ -190,6 +213,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
         while let Some(value) = seq.next_element_seed(Seed {
             leaves: self.leaves,
             key: false,
+            session: self.session,
         })? {
             values.push(value);
         }
@@ -200,6 +224,7 @@ impl<'de> Visitor<'de> for Seed<'_> {
         while let Some(key) = map.next_key_seed(Seed {
             leaves: self.leaves,
             key: true,
+            session: self.session,
         })? {
             let Json::String(ref key) = key else {
                 return Err(serde::de::Error::custom(INVALID));
@@ -207,51 +232,81 @@ impl<'de> Visitor<'de> for Seed<'_> {
             let value = map.next_value_seed(Seed {
                 leaves: self.leaves,
                 key: false,
+                session: self.session,
             })?;
             fields.push((key.clone(), value));
         }
-        let mut seen = HashSet::new();
-        if fields.iter().any(|(key, _)| !seen.insert(key)) {
-            return Err(serde::de::Error::custom(DUPLICATE));
+        if self.session {
+            let mut index: HashMap<Vec<u8>, usize> = HashMap::new();
+            let mut unique: Vec<(Vec<u8>, Json)> = Vec::new();
+            for (key, value) in fields {
+                if let Some(position) = index.get(&key) {
+                    unique[*position].1 = value;
+                } else {
+                    index.insert(key.clone(), unique.len());
+                    unique.push((key, value));
+                }
+            }
+            Ok(Json::Object(unique))
+        } else {
+            let mut seen = HashSet::new();
+            if fields.iter().any(|(key, _)| !seen.insert(key)) {
+                return Err(serde::de::Error::custom(DUPLICATE));
+            }
+            Ok(Json::Object(fields))
         }
-        Ok(Json::Object(fields))
     }
 }
-fn decode(adapted: &[u8], leaves: &[Leaf]) -> Result<Json, &'static str> {
+fn decode(adapted: &[u8], leaves: &[Leaf], session: bool) -> Result<Json, &'static str> {
     let mut de = serde_json::Deserializer::from_slice(adapted);
     de.disable_recursion_limit();
-    let value = Seed { leaves, key: false }
-        .deserialize(&mut de)
-        .map_err(|e| {
-            let e = e.to_string();
-            if e.starts_with(DUPLICATE) {
-                DUPLICATE
-            } else if e.starts_with(NONFINITE) {
-                NONFINITE
-            } else {
-                INVALID
-            }
-        })?;
+    let value = Seed {
+        leaves,
+        key: false,
+        session,
+    }
+    .deserialize(&mut de)
+    .map_err(|e| {
+        let e = e.to_string();
+        if e.starts_with(DUPLICATE) {
+            DUPLICATE
+        } else if e.starts_with(NONFINITE) {
+            NONFINITE
+        } else {
+            INVALID
+        }
+    })?;
     de.end().map_err(|_| INVALID)?;
     Ok(value)
 }
 /// Parse bounded raw JSON, retaining numeric spellings and WTF-8 strings.
 pub fn parse_json(input: &[u8]) -> Result<Json, &'static str> {
-    let (adapted, leaves, depth) = adapt(input)?;
+    parse_mode(input, false, 4 * 1024 * 1024).map_err(|e| {
+        if e == "parser infrastructure failure" {
+            INVALID
+        } else {
+            e
+        }
+    })
+}
+fn parse_mode(input: &[u8], session: bool, max_bytes: usize) -> Result<Json, &'static str> {
+    let (adapted, leaves, depth) = adapt(input, max_bytes, session)?;
     if depth <= 128 {
-        return decode(&adapted, &leaves);
+        return decode(&adapted, &leaves, session);
     }
     static DEEP_PARSE: Mutex<()> = Mutex::new(());
     let _guard = DEEP_PARSE.lock().unwrap_or_else(|e| e.into_inner());
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
-            .spawn_scoped(scope, || decode(&adapted, &leaves))
-            .map_err(|_| INVALID)?
+            .spawn_scoped(scope, || decode(&adapted, &leaves, session))
+            .map_err(|_| "parser infrastructure failure")?
             .join()
-            .map_err(|_| INVALID)?
+            .map_err(|_| "parser infrastructure failure")?
     })
 }
 
 mod manifest;
+mod session_json;
 pub use manifest::{compare_manifests, inspect_manifest};
+pub use session_json::{SessionJsonError, parse_session_json};
