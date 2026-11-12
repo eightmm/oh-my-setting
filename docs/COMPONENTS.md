@@ -3173,6 +3173,22 @@ Unlisted registered tools remain callable for existing clients: this setting
 reduces discovery overhead, not permissions. Schemas, annotations, UI resources,
 and protocol/Tasks negotiation are identical in both profiles.
 
+#### Conditional state reads
+
+`oms_inbox`, `oms_repo_state`, and `oms_approvals` accept an optional `after`.
+Omitting it preserves the original JSON response, including the approvals
+array. Pass `after: ""` to receive `{cursor, unchanged: false, data}`, then
+reuse the cursor to receive only `{cursor, unchanged: true}` when the entire
+projection is unchanged. A changed projection returns the full `data` again.
+An empty cursor always requests a fresh full snapshot in this envelope.
+
+Each call still runs the same read-only command. The cursor reduces repeated
+delivery, not collection work; it is bound to the physical repository and tool,
+has no acknowledgement or approval effect, and stores no server-side state.
+Every projected field participates, including time-derived status and ages:
+expiry, staleness, new mail, failures, and completion remain observable.
+Command failures and oversized output are never suppressed by a cursor.
+
 
 #### Peer operation results
 

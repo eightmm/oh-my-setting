@@ -233,6 +233,18 @@ GRAPH_PATH_PATTERN = r"^[^\x00-\x1f\x7f\\]{1,1024}$"
 # Affected planning accepts one base ref and always compares it with HEAD. Keep
 # revision operators agents commonly need, but not arbitrary revset syntax.
 GRAPH_REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]{0,255}$"
+STATE_READ_PROPERTIES = {
+    **REPO_PROPERTY,
+    "after": {
+        "type": "string",
+        "maxLength": 70,
+        "description": (
+            "Optional conditional read: pass an empty string for a full data snapshot"
+            " and cursor, then reuse that cursor to omit unchanged data. Omit this"
+            " argument for the original response. Every call checks fresh state."
+        ),
+    },
+}
 
 TOOLS = [
     {
@@ -242,7 +254,8 @@ TOOLS = [
             " harness state, with one exact next command per item."
         ),
         "argv": ["bash", "scripts/inbox.sh", "--json"],
-        "properties": REPO_PROPERTY,
+        "properties": STATE_READ_PROPERTIES,
+        "conditional_state": True,
         "annotations": READ_ONLY,
     },
     {
@@ -252,7 +265,8 @@ TOOLS = [
             " attempts, approvals, plans, runs, artifacts, CI, and recovery."
         ),
         "argv": ["bash", "scripts/state.sh", "--json"],
-        "properties": REPO_PROPERTY,
+        "properties": STATE_READ_PROPERTIES,
+        "conditional_state": True,
         "annotations": READ_ONLY,
     },
     {
@@ -277,7 +291,8 @@ TOOLS = [
             " and private hashes are never returned."
         ),
         "argv": ["bash", "scripts/approval-inbox.sh", "list", "--pending", "--json"],
-        "properties": REPO_PROPERTY,
+        "properties": STATE_READ_PROPERTIES,
+        "conditional_state": True,
         "annotations": READ_ONLY,
     },
     {
@@ -849,7 +864,35 @@ def check_positional(tool: dict, value: str) -> str:
     return ""
 
 
+def state_result_response(name: str, repo: Path, output: str, after: str) -> tuple[str, bool]:
+    """A stateless delivery cursor, never a cached read or approval receipt."""
+    try:
+        payload = json.loads(output)
+        if not isinstance(payload, (dict, list)):
+            raise ValueError("state must be an object or array")
+        # Include every projected value, even clocks: expiration, stale status,
+        # unread mail and future fields must never disappear behind a cursor.
+        identity = json.dumps([name, str(repo.resolve()), payload], sort_keys=True,
+                              ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        cursor = "state:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        result = {"cursor": cursor, "unchanged": after == cursor}
+        if not result["unchanged"]:
+            result["data"] = payload
+        rendered = json.dumps(result, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (OSError, ValueError, RuntimeError):
+        return "error: conditional state requires a valid JSON snapshot and repository identity", True
+    if len(rendered) > OUTPUT_LIMIT:
+        return ("error: conditional JSON output has %d characters; limit is %d."
+                % (len(rendered), OUTPUT_LIMIT)), True
+    return rendered, False
+
+
 def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
+    conditional = tool.get("conditional_state") and "after" in arguments
+    after = arguments.get("after")
+    if conditional and (not isinstance(after, str)
+                        or (after and not re.fullmatch(r"state:[0-9a-f]{64}", after))):
+        return "error: after must be empty or a cursor from a conditional state read", True
     repo_path, err = resolve_repo(arguments)
     if err:
         return err, True
@@ -895,6 +938,8 @@ def run_tool(tool: dict, arguments: dict) -> tuple[str, bool]:
                     % (len(output), OUTPUT_LIMIT, guidance)), True
         omitted = len(output) - OUTPUT_LIMIT
         output = output[:OUTPUT_LIMIT] + "\n[truncated: %d characters omitted]" % omitted
+    if conditional and proc.returncode == 0:
+        return state_result_response(tool["name"], repo_path, output, after)
     return output, proc.returncode != 0
 
 
