@@ -3,6 +3,8 @@ members = [
     "crates/oms-context",
     "crates/oms-context-report",
     "crates/oms-context-session",
+    "crates/oms-contract-markdown",
+    "crates/oms-failure",
     "crates/oms-graph-shell",
     "crates/oms-json",
     "crates/oms-migrate",

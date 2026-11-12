@@ -41,10 +41,11 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains seven implemented native libraries: context
+The workspace now also contains nine implemented native libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
 encodings, output selection, Shell graph extraction, context text reports and
-injection/session/timeline projections.
+injection/session/timeline projections, task/project Markdown contracts, and
+deterministic failure taxonomy.
 They have scoped native tests and independent review. The native compiler floor
 is 1.99.1; the preparation inventory tool separately retains its 1.85 minimum.
 Public CLI integration, safe session acquisition and Python graph extraction
@@ -72,6 +73,20 @@ lost behavior a performance improvement.
 | MCP and provider adapters | Transport, provider-specific framing, capability projection | Reuse the core; no separate interpretation of domain state |
 | Storage and supervision | Files, locks, journals, admission, children, recovery | Explicit ownership and platform behavior; one active writer per domain |
 | Development and distribution | Inventory, tests, evaluation, packaging, lifecycle | Rust-owned implementation; no interpreter bootstrap |
+
+The Python graph parser has one containment exception at the OS adapter boundary:
+a caller may start a private native parser worker once and reuse it for its graph
+session. The shared transformation core receives that session as a capability;
+individual transformations do not spawn CLI commands. The helper is a private
+libexec artifact, never a second PATH entry. Malformed source that aborts the
+third-party parser must produce an infrastructure error without aborting OMS.
+The adapter must bound framing, drain pipes, own cancellation/timeouts, and reap
+its child; crashes cannot silently become empty successful graphs. This design
+was selected after repeated malformed-input stack-abort reproductions and source
+inspection found recursive helpers outside Ruff's optional stack-growth guards.
+Implementation, portable resource guarantees and packaging remain subject to
+independent review and runtime verification. A source-only design decision does
+not establish M3 completion.
 
 These are logical boundaries, not a requirement to create five crates now.
 Start with the smallest useful package structure and extract packages when a real

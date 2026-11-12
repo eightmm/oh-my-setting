@@ -188,6 +188,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-contract-markdown"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "sha2",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "oms-failure"
+version = "0.1.0"
+dependencies = [
+ "oms-json",
+ "regex",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "oms-graph-shell"
 version = "0.1.0"
 dependencies = [
@@ -212,6 +230,8 @@ version = "0.1.0"
 name = "oms-output"
 version = "0.1.0"
 dependencies = [
+ "oms-json",
+ "oms-safe-fs",
  "regex",
  "serde",
  "serde_json",

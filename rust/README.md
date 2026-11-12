@@ -1,12 +1,16 @@
 # Rust migration workspace
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
-It contains the development inventory tool `oms-migrate` and seven native libraries:
+It contains the development inventory tool `oms-migrate` and nine native libraries:
 `oms-context` (manifest projections and lossless session JSON input), `oms-safe-fs`
 (descriptor-relative reads), `oms-json` (domain byte encodings), `oms-output`
-(digest selection), `oms-graph-shell` (source graph extraction), and
-`oms-context-report` (text reports), and `oms-context-session` (injection, session
-and timeline projections). These are implemented foundations; the
+(streaming digest selection, reversible reducers and scoped retrieval metadata),
+`oms-graph-shell` (source graph extraction),
+`oms-context-report` (text reports), `oms-context-session` (injection, session
+and timeline projections), and `oms-contract-markdown` (task/project Markdown
+contracts using Python 3.12 Unicode 15 semantics), and `oms-failure`
+(deterministic failure taxonomy and recovery metadata). These are implemented
+foundations; the
 installed `oms` command still uses the legacy runtime. No legacy domain is retired.
 The native public CLI, safe acquisition of session inputs and Python graph parser
 remain separate integration work.
