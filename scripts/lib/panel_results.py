@@ -73,11 +73,8 @@ def _query(repo, verb, *args):
     return json.loads(result.stdout)
 
 
-def _records(repo, full=False, _attempts=None, task_id=None):
-    attempts = (_query(repo, 'agent-events', 'list', *([] if full else ['--limit', '300']))
-                if _attempts is None else (_attempts if full else _attempts[-300:]))
-    if not isinstance(attempts, list):
-        raise ValueError('invalid result evidence')
+def _artifact_rows(repo):
+    """Read current, strictly validated artifact rows without a lifecycle query."""
     # The CLI's tail window cannot prove task coverage. Reuse its strict,
     # no-follow reader and select this task only after validating the snapshot.
     store = runpy.run_path(str(ROOT / 'scripts/lib/artifact-index-store.py'))
@@ -85,8 +82,16 @@ def _records(repo, full=False, _attempts=None, task_id=None):
         body = store['read_index'](str(repo), '.oms/artifacts/index.jsonl', missing_ok=True)
     except (OSError, ValueError, SystemExit) as error:
         raise ValueError('artifact evidence coverage incomplete: strict retained-index read failed') from error
+    return [json.loads(line) for line in body.splitlines()]
+
+
+def _records(repo, full=False, _attempts=None, task_id=None):
+    attempts = (_query(repo, 'agent-events', 'list', *([] if full else ['--limit', '300']))
+                if _attempts is None else (_attempts if full else _attempts[-300:]))
+    if not isinstance(attempts, list):
+        raise ValueError('invalid result evidence')
+    index = _artifact_rows(repo)
     linked = {a.get('attempt_id') for a in attempts if a.get('task_id') == task_id}
-    index = [json.loads(line) for line in body.splitlines()]
     # A whole-main result has no task attempt; keep its children's rows available.
     if task_id and linked:
         index = [r for r in index if not r.get('task_id') or r.get('task_id') == task_id
@@ -2445,7 +2450,7 @@ def outcomes(repo, task_ids, _shared=False, _tick=None, _current_only=False):
         from panel_cache import read_shared
         _, rows = read_shared(repo, 'result-records', lambda: _records(repo))
     else:
-        _, rows = _records(repo)
+        rows = _artifact_rows(repo)
     found = {}
     for ident in wanted:
         result_rows = [r for r in rows if r.get('task_id') == ident and r.get('kind') == 'panel-result']

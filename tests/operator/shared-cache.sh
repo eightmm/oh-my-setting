@@ -1389,7 +1389,7 @@ decision_source.insert(0, {'kind': 'panel-result', 'task_id': 'task-00', 'ts': d
 many = [json.loads(line) for line in retention['retained_lines'](
     [json.dumps(row).encode() + b'\n' for row in decision_source], 20)]
 assert len(many) >= 30 and any(row['task_id'] == 'task-00' and row['event_id'] == 'decision-00' for row in many)
-with patch.object(panel_results, '_records', return_value=([], many)), \
+with patch.object(panel_results, '_artifact_rows', return_value=many), \
         patch.object(panel_results, '_load_result', side_effect=lambda repo, row: {
             'outcome': 'completed' if row['event_id'] == 'decision-00' else 'rejected'}):
     assert panel_results.outcomes(project, {'task-00', 'task-29', 'missing', '../bad'}) == {
@@ -1410,7 +1410,7 @@ result_payloads = {
     'legacy-task': {'outcome': 'rejected'},
     'retired-task': {'outcome': 'completed', 'plan_binding': {'plan_id': 'retired-plan', 'task_sha256': 'gone'}},
 }
-with patch.object(panel_results, '_records', return_value=([], outcome_rows)), \
+with patch.object(panel_results, '_artifact_rows', return_value=outcome_rows), \
         patch.object(panel_results, '_plan_bindings', return_value={
             'reused-task': current_binding, 'same-task': current_binding}), \
         patch.object(panel_results, '_load_result', side_effect=lambda repo, row: result_payloads[row['task_id']]):
