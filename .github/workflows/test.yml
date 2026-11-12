@@ -325,17 +325,17 @@ jobs:
       - name: install pinned Rust toolchain
         timeout-minutes: 5
         run: |
-          rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
-          rustc +1.85.1 --version
-          cargo +1.85.1 --version
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustc +1.99.1 --version
+          cargo +1.99.1 --version
       - name: Rust migration foundation
         timeout-minutes: 10
         run: |
-          cargo +1.85.1 fmt --manifest-path rust/Cargo.toml --all -- --check
-          cargo +1.85.1 check --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
-          cargo +1.85.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
-          cargo +1.85.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
-          cargo +1.85.1 run --manifest-path rust/Cargo.toml --locked --offline -p oms-migrate -- check --repo .
+          cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
+          cargo +1.99.1 check --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.99.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
+          cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.99.1 run --manifest-path rust/Cargo.toml --locked --offline -p oms-migrate -- check --repo .
 
   # The affected selection defers operator-tools here: run 40167526634 spent
   # 1956 s in affected_plan with the suite competing against the other

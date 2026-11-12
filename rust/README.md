@@ -8,21 +8,25 @@ feature rather than as empty placeholders.
 
 ## Toolchain and checks
 
-The workspace pins Rust **1.85.1**, uses edition **2024**, and declares Rust
-**1.85** as the minimum supported compiler. The initial tool uses only the Rust
-standard library and Git. Run these from the repository root:
+The preparation workspace pins the build toolchain to Rust **1.99.1**, uses
+edition **2024**, and declares Rust **1.85** as its tested minimum supported
+compiler. The initial tool uses only the Rust standard library and Git. The
+build toolchain pin does not establish the final binaries' glibc or macOS
+deployment requirements: those must be validated against the supported hosts,
+including the Ubuntu 20.04 floor. It does not prove runtime or cross-host
+readiness. Run these from the repository root:
 
 ```bash
-cargo +1.85.1 fmt --manifest-path rust/Cargo.toml --all -- --check
-cargo +1.85.1 check --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets
-cargo +1.85.1 test --locked --offline --manifest-path rust/Cargo.toml --workspace
-cargo +1.85.1 clippy --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
-cargo +1.85.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo .
+cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
+cargo +1.99.1 check --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets
+cargo +1.99.1 test --locked --offline --manifest-path rust/Cargo.toml --workspace
+cargo +1.99.1 clippy --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo .
 ```
 
 Alternatively, change directory to `rust` so its toolchain file is selected and
 use `--repo ..`. Merely specifying `--manifest-path` from the repository root
-does not select the nested rustup toolchain file; the explicit `+1.85.1` above
+does not select the nested rustup toolchain file; the explicit `+1.99.1` above
 keeps the compiler choice clear. These are validation commands, not a statement
 that a particular development environment has already executed them.
 The compiler and its formatting/lint components must already be available;
@@ -38,8 +42,8 @@ it is not yet native-runtime or cross-platform compatibility evidence.
 ## Legacy Python inventory
 
 ```bash
-cargo +1.85.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- inventory --repo .
-cargo +1.85.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo .
+cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- inventory --repo .
+cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo .
 ```
 
 `inventory` prints deterministic TSV to stdout, with header
@@ -79,7 +83,7 @@ otherwise the old upper bound could permit a later reintroduction below that cap
 ## Strict zero check and its limits
 
 ```bash
-cargo +1.85.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo . --require-zero
+cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo . --require-zero
 ```
 
 The additional flag requires no inventory rows. It is expected to fail while

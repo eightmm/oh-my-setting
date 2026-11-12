@@ -536,11 +536,11 @@ assert "    if: needs.affected_plan.outputs.rust == 'true'\n" in rust_body
 assert "rust: ${{ steps.rust_scope.outputs.required }}" in plan_body
 assert "continue-on-error" not in rust_body
 for command in ("fmt", "check", "clippy", "test", "run"):
-    assert "cargo +1.85.1 " + command + " --manifest-path rust/Cargo.toml" in rust_body, command
+    assert "cargo +1.99.1 " + command + " --manifest-path rust/Cargo.toml" in rust_body, command
 assert "--workspace --all-targets --locked --offline -- -D warnings" in rust_body
 assert "-p oms-migrate -- check --repo ." in rust_body
 toolchain = pathlib.Path(sys.argv[1]).parents[2] / "rust/rust-toolchain.toml"
-assert 'channel = "1.85.1"' in toolchain.read_text(), "CI and the workspace toolchain diverged"
+assert 'channel = "1.99.1"' in toolchain.read_text(), "CI and the workspace toolchain diverged"
 rust_scope = plan_body.split("      - name: select Rust migration checks\n", 1)[1].split("      - name: select affected changes\n", 1)[0]
 rust_scope = rust_scope.split("        run: |\n", 1)[1]
 rust_scope = "\n".join(line[10:] for line in rust_scope.splitlines() if line.startswith("          "))
