@@ -1,0 +1,11 @@
+[package]
+name = "oms-context-report"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Human-readable OMS context projection reports"
+license = "MIT"
+
+[dependencies]
+serde_json = "1.0.154"
+unicode-general-category = "0.6.0"
