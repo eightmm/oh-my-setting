@@ -1163,15 +1163,27 @@ fn the_helper_runs_with_an_address_space_limit_and_bounded_memory() {
     // piped to a crash collector: /proc/<pid>/environ then belongs to root. The helper
     // refuses to serve if it cannot set and read back the attribute, so having
     // answered at all is the child-side proof; the owner check is the outside
-    // view, skipped when the tests themselves run as root.
+    // view, skipped when the tests share the mapped kernel-root owner.
     {
         use std::os::unix::fs::MetadataExt;
         let own = std::fs::metadata("/proc/self").expect("self").uid();
         let helper = std::fs::metadata(format!("/proc/{pid}/environ"))
             .expect("helper")
             .uid();
-        if own != 0 {
-            assert_eq!(helper, 0, "helper must be non-dumpable");
+        // Since Linux 4.11 a mapped namespace UID 0 owns non-dumpable
+        // proc files; otherwise global root is projected through our mapping.
+        let uid_map = std::fs::read_to_string("/proc/self/uid_map").expect("uid map");
+        let mapped_root = uid_map.lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields.len() == 3 && fields[0] == "0" && fields[2] != "0"
+        });
+        let dump_owner = if mapped_root {
+            0
+        } else {
+            std::fs::metadata("/proc").expect("proc root").uid()
+        };
+        if own != dump_owner {
+            assert_eq!(helper, dump_owner, "helper must be non-dumpable");
         }
     }
     let rss_kib = |pid: u32| -> u64 {
