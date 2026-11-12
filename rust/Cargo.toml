@@ -1,8 +1,10 @@
 [workspace]
 members = [
+    "crates/oms",
     "crates/oms-context",
     "crates/oms-context-report",
     "crates/oms-context-session",
+    "crates/oms-context-source",
     "crates/oms-contract-markdown",
     "crates/oms-failure",
     "crates/oms-graph-shell",
@@ -10,6 +12,7 @@ members = [
     "crates/oms-migrate",
     "crates/oms-output",
     "crates/oms-safe-fs",
+    "crates/oms-work-inspect",
 ]
 resolver = "3"
 

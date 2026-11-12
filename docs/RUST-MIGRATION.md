@@ -41,15 +41,18 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains nine implemented native libraries: context
+The workspace now also contains eleven implemented native libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
-encodings, output selection, Shell graph extraction, context text reports and
-injection/session/timeline projections, task/project Markdown contracts, and
-deterministic failure taxonomy.
-They have scoped native tests and independent review. The native compiler floor
-is 1.99.1; the preparation inventory tool separately retains its 1.85 minimum.
-Public CLI integration, safe session acquisition and Python graph extraction
-remain in progress.
+encodings, output selection, Shell graph extraction, context text reports,
+injection/session/timeline projections, task/project Markdown contracts,
+deterministic failure taxonomy, work projections with lossless timestamp
+handling, and bounded read-only ledger/transcript acquisition. A standalone
+native `oms runtime context-inspect` binary handles manifest inspection,
+comparison and current-file verification. These products have scoped native
+tests and independent review; they remain local integration work until release.
+The native compiler floor is 1.99.1; the preparation inventory tool separately
+retains its 1.85 minimum. Wiring session modes into the binary, lossless raw
+Read-label handling, and Python graph extraction remain in progress.
 No installed command, MCP transport, hook, lifecycle operation or state writer
 has switched to Rust, and no legacy source domain has yet been deleted.
 Library counts and local commits do not satisfy M1 or M6 retirement gates.
