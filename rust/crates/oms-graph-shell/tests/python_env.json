@@ -1,0 +1,121 @@
+{
+  "nodes": [
+    {
+      "id": "module:tests/example.sh",
+      "kind": "module",
+      "name": "example.sh",
+      "path": "tests/example.sh",
+      "language": "python",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "env:OMS_MODE",
+      "kind": "env",
+      "name": "OMS_MODE",
+      "language": "env",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    },
+    {
+      "id": "symbol:tests/example.sh::nested",
+      "kind": "function",
+      "name": "nested",
+      "path": "tests/example.sh",
+      "language": "python",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {
+        "signature": "def nested()",
+        "end_line": 4,
+        "qualname": "nested",
+        "line": 3
+      }
+    },
+    {
+      "id": "env:CODEX_MODE",
+      "kind": "env",
+      "name": "CODEX_MODE",
+      "language": "env",
+      "source_digest": "digest",
+      "summary": null,
+      "crux": null,
+      "metadata": {}
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:tests/example.sh",
+      "target": "module:tests/example.sh",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest"
+      }
+    },
+    {
+      "source": "file:tests/example.sh",
+      "target": "env:OMS_MODE",
+      "relation": "reads_env",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest",
+        "line": 2
+      }
+    },
+    {
+      "source": "file:tests/example.sh",
+      "target": "symbol:tests/example.sh::nested",
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest",
+        "line": 3
+      }
+    },
+    {
+      "source": "symbol:tests/example.sh::nested",
+      "target": "env:CODEX_MODE",
+      "relation": "reads_env",
+      "confidence": "EXTRACTED",
+      "evidence": {
+        "path": "tests/example.sh",
+        "source_digest": "digest",
+        "line": 4
+      }
+    }
+  ],
+  "refs": [
+    {
+      "from": "file:tests/example.sh",
+      "relation": "imports",
+      "kind": "module",
+      "value": "os",
+      "line": 1,
+      "binding": "os"
+    },
+    {
+      "from": "file:tests/example.sh",
+      "relation": "calls",
+      "kind": "name",
+      "value": "print",
+      "line": 2,
+      "scoped": true
+    },
+    {
+      "from": "symbol:tests/example.sh::nested",
+      "relation": "calls",
+      "kind": "name",
+      "value": "os.getenv",
+      "line": 4
+    }
+  ]
+}
