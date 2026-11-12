@@ -7,6 +7,7 @@ rust-version = "1.99.1"
 [dependencies]
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 oms-context = { path = "../oms-context" }
+oms-safe-fs = { path = "../oms-safe-fs" }
 sha2 = "=0.10.9"
 
 [lints.rust]

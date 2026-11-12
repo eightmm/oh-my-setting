@@ -328,3 +328,139 @@ fn pinned_reference_projection_corpus() {
         }
     }
 }
+
+#[test]
+fn real_capture_reads_and_rejects_unsafe_stores() {
+    use oms_output_capture::{
+        CaptureError, READ_CAP, RequestError, read_capture, read_stored_capture,
+    };
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    let path = std::env::temp_dir().join(format!(
+        "oms-capture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&path).unwrap();
+    let fixture = Fixture(path);
+    let root = oms_safe_fs::Root::open(&fixture.0).unwrap();
+    let dir = fixture.0.join(".oms/artifacts/output-digest");
+    std::fs::create_dir_all(&dir).unwrap();
+    let name = "20250102T030405Z-42.log";
+    let path = dir.join(name);
+    let data = b"hello \xff world hello";
+    std::fs::write(&path, data).unwrap();
+    let sha = format!("{:x}", Sha256::digest(data));
+    let reference = capture_reference(root.physical_root(), name, &sha).unwrap();
+    let args = |extra: Value| {
+        let mut a = json!({"capture_ref":reference});
+        a.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        parse_json(serde_json::to_vec(&a).unwrap().as_slice()).unwrap()
+    };
+    assert_eq!(read_stored_capture(&root, name, data.len()).unwrap(), data);
+    assert_eq!(
+        read_stored_capture(&root, name, data.len() - 1)
+            .unwrap_err()
+            .code,
+        "capture_too_large"
+    );
+    assert_eq!(
+        read_stored_capture(&root, "bad", 0).unwrap_err().code,
+        "invalid_reference"
+    );
+    assert_eq!(
+        read_stored_capture(&root, name, 0).unwrap_err().code,
+        "invalid_limit"
+    );
+    assert_eq!(
+        read_stored_capture(&root, name, READ_CAP + 1)
+            .unwrap_err()
+            .code,
+        "invalid_limit"
+    );
+    let page = read_capture(&root, &args(json!({"limit":4}))).unwrap();
+    assert_eq!(page["content"], "hell");
+    let hits = read_capture(
+        &root,
+        &args(json!({"compact":true,"queries":["hello","missing"]})),
+    )
+    .unwrap();
+    assert_eq!(hits["searches"][0]["matches"].as_array().unwrap().len(), 2);
+    let code = |r: Result<Value, RequestError>| match r.unwrap_err() {
+        RequestError::Capture(CaptureError { code, .. }) => code,
+        _ => panic!("unexpected repository error"),
+    };
+    assert_eq!(
+        code(read_capture(&root, &args(json!({"query":""})))),
+        "invalid_query"
+    );
+    let other_repo = fixture.0.join("other-repo");
+    std::fs::create_dir(&other_repo).unwrap();
+    let other_root = oms_safe_fs::Root::open(&other_repo).unwrap();
+    assert_eq!(
+        code(read_capture(&other_root, &args(json!({})))),
+        "capture_scope_mismatch"
+    );
+    assert_eq!(
+        code(read_capture(&root, &args(json!({"offset": true})))),
+        "invalid_range"
+    );
+    std::fs::write(&path, b"changed").unwrap();
+    assert_eq!(
+        code(read_capture(&root, &args(json!({})))),
+        "capture_hash_changed"
+    );
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        code(read_capture(&root, &args(json!({})))),
+        "capture_missing"
+    );
+    std::fs::write(&path, data).unwrap();
+    let other = dir.join("other");
+    std::fs::hard_link(&path, &other).unwrap();
+    assert_eq!(
+        code(read_capture(&root, &args(json!({})))),
+        "unsafe_capture"
+    );
+    std::fs::remove_file(other).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    symlink("missing", &path).unwrap();
+    assert_eq!(
+        code(read_capture(&root, &args(json!({})))),
+        "unsafe_capture"
+    );
+    std::fs::remove_file(&path).unwrap();
+    match std::os::unix::net::UnixListener::bind(&path) {
+        Ok(_socket) => {
+            assert_eq!(
+                code(read_capture(&root, &args(json!({})))),
+                "unsafe_capture"
+            );
+            std::fs::remove_file(&path).unwrap();
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            eprintln!("Unix socket fixture unavailable: {e}");
+        }
+        Err(e) => panic!("Unix socket fixture failed: {e}"),
+    }
+    std::fs::remove_dir(&dir).unwrap();
+    symlink("missing", &dir).unwrap();
+    assert_eq!(
+        code(read_capture(&root, &args(json!({})))),
+        "unsafe_capture"
+    );
+}

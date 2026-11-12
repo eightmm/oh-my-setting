@@ -498,3 +498,38 @@ impl From<SnapshotFailure> for CaptureError {
         }
     }
 }
+
+/// Read one bounded capture through the repository descriptor without following links.
+pub fn read_stored_capture(
+    root: &oms_safe_fs::Root,
+    name: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CaptureError> {
+    use oms_safe_fs::CaptureReadError as E;
+    validate_stored_capture(name, max_bytes)?;
+    root.read_capture(name, max_bytes)
+        .map_err(|failure| match failure {
+            E::InvalidPath => error("invalid_reference", "invalid capture filename"),
+            E::InvalidLimit => error(
+                "invalid_limit",
+                format!("max_bytes must be an integer from 1 to {READ_CAP}"),
+            ),
+            E::Missing => SnapshotFailure::Missing.into(),
+            E::Unreadable => SnapshotFailure::Unreadable.into(),
+            E::Unsafe => SnapshotFailure::Unsafe.into(),
+            E::InitialOversize => SnapshotFailure::InitialOversize { max_bytes }.into(),
+            E::ChangedBeforeRead => SnapshotFailure::ChangedBeforeRead.into(),
+            E::FileChanged => SnapshotFailure::ChangedDuringRead.into(),
+            E::PathChanged => SnapshotFailure::PathChanged.into(),
+            E::RootChanged => SnapshotFailure::RootChanged.into(),
+            E::UnsafeOpen => SnapshotFailure::UnsafeOpen.into(),
+        })
+}
+
+/// Validate the request, read one verified snapshot, then project it without rerunning a command.
+pub fn read_capture(root: &oms_safe_fs::Root, arguments: &Json) -> Result<Value, RequestError> {
+    let request = validate_request(root.physical_root(), arguments)?;
+    let data =
+        read_stored_capture(root, request.name(), READ_CAP).map_err(RequestError::Capture)?;
+    project_snapshot(&request, &data).map_err(RequestError::Capture)
+}
