@@ -1,0 +1,13 @@
+[package]
+name = "oms-output-capture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+oms-context = { path = "../oms-context" }
+sha2 = "=0.10.9"
+
+[lints.rust]
+unsafe_code = "forbid"
