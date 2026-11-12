@@ -3496,38 +3496,3 @@ its final-reply language guidance retains Claude's native engineering
 instructions. The repository `CLAUDE.md` imports `AGENTS.md`, avoiding a
 second copy of policy. Global rules remain in `rules/global-AGENTS.md`;
 provider system instructions and user-owned settings are not replaced.
-
-### Decisions API
-
-`oms decide --input TEXT --choice NAME --option VALUE=DESCRIPTION --option VALUE=DESCRIPTION --instructions TEXT`
-asks one choice question; `--predicate NAME --instructions TEXT` asks a predicate.
-For choice, predicate or score questions together, pass `--questions-file PATH`
-with a JSON array of question objects. Use `--input-file PATH` (or `-` for
-stdin) for text or a JSON message array. `--json` emits the answers array;
-otherwise each answer is a line. A refusal exits 3. `--dry-run` prints the
-request without sending it; `--timeout S` sets the request timeout.
-
-`oms decide --set-key` reads the dedicated key without echo on a terminal, or from
-stdin, and atomically stores it in
-`${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/openai-decisions.key` with mode 0600 in
-a user-owned, non-symlink directory, tightening its mode to 0700 when needed. Reads and
-status leave the directory mode unchanged. Non-regular, symlinked, non-owned or non-0600
-key files are refused. Keys must be a single token containing only ASCII letters,
-digits, dot, underscore or hyphen. `--key-status` shows its presence and mode without
-reading it; an unsafe mode or owner is reported with exit 1 and a suggested fix.
-
-The `OMS_OPENAI_DECISIONS_KEY` environment variable takes precedence over the file; the
-subscription authentication key is not used. Input is sent to OpenAI; only use data
-appropriate for that service. `OMS_OPENAI_BASE_URL` may override the API base only with
-the production `https://api.openai.com/v1` or HTTP/HTTPS loopback (`127.0.0.1`, `::1`,
-or `localhost`); environment proxies are ignored. Input and question files, including
-stdin, are limited to 4 MiB each; keys are limited to 4 KiB and serialized requests to 8
-MiB.
-
-A machine-local ledger in `$XDG_STATE_HOME/oh-my-setting` (default
-`~/.local/state/oh-my-setting`) reserves estimated input cost before a call and
-records reported uncached input usage afterwards. The daily cap estimates input cost only; its default is
-$1.00, configurable with `OMS_DECIDE_DAILY_USD`; exceeding it exits 4. The
-daily cap is a cooperative estimate: the state directory and
-`OMS_DECIDE_DAILY_USD` are caller-controlled. The pre-call estimate uses request bytes plus an allowance, so it is not a hard
-billing guarantee. Interrupted or failed requests retain their reservation.
