@@ -83,6 +83,180 @@ fn frozen_vectors_through_binary() {
         }
     }
 }
+
+#[test]
+fn session_and_injections_through_binary() {
+    let f = Fixture::new();
+    let repo = f.0.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(f.0.join("session"), b"{}\n").unwrap();
+    let call = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_oms"))
+            .current_dir(&f.0)
+            .args(["runtime", "--repo"])
+            .arg(&repo)
+            .arg("context-inspect")
+            .args(args)
+            .env_remove("OMS_HARNESS_CHILD")
+            .output()
+            .unwrap()
+    };
+    let session = call(&["--session", "session"]);
+    assert!(
+        session.status.success(),
+        "{}",
+        String::from_utf8_lossy(&session.stderr)
+    );
+    let expected = concat!(
+        r#"{"by_tool":{"items":[],"omitted":0,"total":0},"file_reads":{"distinct_in_repository":0,"outside_repository":0,"repeated":{"items":[],"omitted":0,"total":0}},"format":"unknown","kind":"oms-context-session","lines":1,"note":"Tool-result text as it was recorded, in bytes; the provider may have cleared or summarized it since. Not tokens, not a bill and not the current context window. Only Claude Code JSONL transcripts are read; any other file reports format unknown.","result_bytes":0,"schema":1,"tool_calls":0,"tool_results":0,"unit":"utf-8 bytes","unmatched_results":0,"unread_lines":0}"#,
+        "\n"
+    );
+    assert_eq!(session.stdout, expected.as_bytes());
+    assert!(session.stderr.is_empty());
+    let expanded = Command::new(env!("CARGO_BIN_EXE_oms"))
+        .current_dir(&f.0)
+        .env("HOME", &f.0)
+        .env_remove("OMS_HARNESS_CHILD")
+        .args(["runtime", "--repo"])
+        .arg(&repo)
+        .args(["context-inspect", "--session", "~/session"])
+        .output()
+        .unwrap();
+    assert_eq!(expanded.status.code(), Some(0));
+    assert_eq!(expanded.stdout, session.stdout);
+    assert!(expanded.stderr.is_empty());
+    let call_home = |home: &std::ffi::OsStr, path: &str| {
+        Command::new(env!("CARGO_BIN_EXE_oms"))
+            .current_dir(&f.0)
+            .env("HOME", home)
+            .env_remove("OMS_HARNESS_CHILD")
+            .args(["runtime", "--repo"])
+            .arg(&repo)
+            .args(["context-inspect", "--session", path])
+            .output()
+            .unwrap()
+    };
+    let file_home = f.0.join("session");
+    let slash = call_home(file_home.as_os_str(), "~/");
+    assert_eq!(slash.status.code(), Some(2));
+    assert!(slash.stdout.is_empty());
+    let trailing = format!("{}/", file_home.display());
+    let plain = call_home(std::ffi::OsStr::new(&trailing), "~");
+    assert_eq!(plain.status.code(), Some(0));
+    assert_eq!(plain.stdout, session.stdout);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&session.stdout).unwrap()["lines"],
+        1
+    );
+    let timeline = call(&["--session", "session", "--timeline"]);
+    assert!(timeline.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&timeline.stdout).unwrap()["kind"],
+        "oms-context-timeline"
+    );
+    let rows = b"{\"timestamp\":\"1969-12-31T23:59:59.5\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"Read\",\"input\":{\"file_path\":\"foo\"}}]}}\n{\"timestamp\":\"1970-01-01T01:00:00.5+01:00\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"a\",\"content\":\"ok\"}]}}\n";
+    std::fs::write(f.0.join("session"), rows).unwrap();
+    let timeline = call(&["--session", "session", "--timeline", "--limit", "0"]);
+    assert!(timeline.status.success());
+    let timeline_reference = concat!(
+        r#"{"errors":0,"first_error":null,"format":"claude-jsonl","kind":"oms-context-timeline","lines":2,"note":"Tool names, order, recorded timestamps and byte sizes only; arguments and outputs are not returned. `first_error` is the first result the provider flagged is_error, not a cause. Durations are the gap between the call row and its result row; null when not recorded. `repeat_of` names an earlier step with the same tool and identical arguments. Only Claude Code JSONL transcripts are read; any other file reports format unknown. Observation only, never verification or approval evidence.","pending":0,"schema":1,"steps":[{"argument_bytes":19,"duration_ms":1000,"error":false,"ok":true,"repeat_of":null,"result_bytes":2,"step":1,"tool":"Read"}],"steps_after_first_error":null,"steps_not_recorded":0,"steps_omitted":0,"steps_total":1,"unit":"utf-8 bytes","unmatched_results":0,"unread_lines":0}"#,
+        "\n"
+    );
+    assert_eq!(timeline.stdout, timeline_reference.as_bytes());
+    assert!(timeline.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&timeline.stdout).unwrap()["steps"][0]["duration_ms"],
+        1000
+    );
+    let hooks = repo.join(".oms/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(
+        hooks.join("events.jsonl"),
+        b"{\"action\":\"injection\",\"status\":\"resume\",\"bytes\":7,\"session\":\"s1\"}\n",
+    )
+    .unwrap();
+    let injections = call(&["--injections"]);
+    assert!(injections.status.success());
+    let injections_reference = concat!(
+        r#"{"by_hook":{"items":[{"bytes":7,"calls":1,"hook":"resume","largest":7}],"omitted":0,"total":1},"by_session":{"items":[{"bytes":7,"calls":1,"largest":7,"session":"s1"}],"omitted":0,"total":1},"by_session_start_source":{"items":[{"bytes":7,"calls":1,"largest":7,"source":"unrecorded"}],"omitted":0,"total":1},"bytes":7,"injections":1,"invalid_rows":0,"kind":"oms-context-injections","ledger":".oms/hooks/events.jsonl","not_counted":["skill-router state hints","fail-ledger hook advice","syntax-guard hook findings","git-move-guard refusals","provider-native context (rules, skills, tool output)"],"note":"Bytes OMS hooks printed for the model, recorded without their text. Not tokens, not a bill and not the provider's context window; rows older than the hook ledger's retention are gone.","schema":1,"session":null,"unit":"utf-8 bytes"}"#,
+        "\n"
+    );
+    assert_eq!(injections.stdout, injections_reference.as_bytes());
+    assert!(injections.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&injections.stdout).unwrap()["injections"],
+        1
+    );
+    let filtered = call(&["--injections", "--session-hash", "other"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&filtered.stdout).unwrap()["injections"],
+        0
+    );
+    let pretty = call(&["--injections", "--pretty"]);
+    assert!(pretty.status.success());
+    assert!(pretty.stdout.ends_with(b"\n"));
+    assert!(!pretty.stdout.ends_with(b"\n\n"));
+    for args in [
+        &["--injections", "--limit", "0"][..],
+        &["--session", "session", "--session-hash", "x"],
+        &["--injections", "--timeline"],
+        &["--injections", "--format", "text"],
+        &["--session", "missing"],
+    ] {
+        let out = call(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty());
+    }
+    for (args, message) in [
+        (
+            &["--injections", "--format", "text", "--pretty"][..],
+            "--pretty applies only to JSON output",
+        ),
+        (
+            &["--session", "session", "--compare", "missing"][..],
+            "context-inspect takes one of:",
+        ),
+        (
+            &["--injections", "--session-hash", "", "--limit", "100"][..],
+            "--session-hash must be a recorded session hash",
+        ),
+        (
+            &["--session", "", "--limit", "1"][..],
+            "--session needs a transcript path",
+        ),
+    ] {
+        let out = call(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(message),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let child = Command::new(env!("CARGO_BIN_EXE_oms"))
+        .args(["runtime", "--repo"])
+        .arg(f.0.join("missing-repo"))
+        .args(["context-inspect", "--session", "missing", "--timeline"])
+        .env("OMS_HARNESS_CHILD", "1")
+        .output()
+        .unwrap();
+    assert_eq!(child.status.code(), Some(2));
+    assert!(child.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&child.stderr)
+            .contains("a harness child may only use read-only runtime actions")
+    );
+    let row = br#"{"message":{"content":[{"type":"tool_use","id":"a","name":"Read","input":{"file_path":"\udc80"}}]}}"#;
+    std::fs::write(
+        f.0.join("session"),
+        [row.as_slice(), b"\n", row.as_slice()].concat(),
+    )
+    .unwrap();
+    let out = call(&["--session", "session"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
 #[test]
 fn compare_current_text_and_denials() {
     let f = Fixture::new();

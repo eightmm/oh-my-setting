@@ -414,6 +414,35 @@ fn expand_repo(
         home.join(OsStr::from_bytes(suffix))
     })
 }
+fn expand_session(
+    raw: &OsStr,
+    home: Option<OsString>,
+    lookup: impl FnOnce(&OsStr) -> Option<PathBuf>,
+    current: impl FnOnce() -> Option<PathBuf>,
+) -> PathBuf {
+    let bytes = raw.as_bytes();
+    if !bytes.starts_with(b"~") {
+        return PathBuf::from(raw);
+    }
+    let split = bytes.iter().position(|b| *b == b'/').unwrap_or(bytes.len());
+    let user = &bytes[1..split];
+    let selected = if user.is_empty() {
+        home.map(PathBuf::from).or_else(current)
+    } else {
+        lookup(OsStr::from_bytes(user))
+    };
+    let Some(home) = selected else {
+        return PathBuf::from(raw);
+    };
+    let home = home.as_os_str().as_bytes();
+    let end = home.iter().rposition(|b| *b != b'/').map_or(0, |i| i + 1);
+    let mut expanded = home[..end].to_vec();
+    expanded.extend_from_slice(&bytes[split..]);
+    if expanded.is_empty() {
+        expanded.push(b'/');
+    }
+    PathBuf::from(OsString::from_vec(expanded))
+}
 fn repo(raw: &OsStr, interrupted: &AtomicBool) -> Result<PathBuf, String> {
     use users::os::unix::UserExt;
     let path = expand_repo(
@@ -633,6 +662,7 @@ fn encode(v: &Value) -> Result<Encoded, String> {
     Ok(match v {
         Value::Null => Encoded::Null,
         Value::Bool(b) => Encoded::Bool(*b),
+        Value::Number(n) if n.is_f64() => Encoded::Float(n.as_f64().ok_or("invalid number")?),
         Value::Number(n) => Encoded::integer(&n.to_string()).map_err(|e| e.to_string())?,
         Value::String(s) => Encoded::String(PyString::from(s.as_str())),
         Value::Array(a) => Encoded::Array(a.iter().map(encode).collect::<Result<_, _>>()?),
@@ -679,17 +709,72 @@ fn execute(a: Args, interrupted: &AtomicBool) -> Result<Vec<u8>, String> {
     if a.timeline && a.session.is_none() {
         return Err("--timeline needs --session TRANSCRIPT".into());
     }
-    let Some(manifest) = a.manifest else {
-        return Err(
-            "native context-inspect session and injection modes are not implemented".into(),
-        );
-    };
+    let limit = usize::try_from(limit).unwrap_or(0);
+    if a.injections || a.session.is_some() {
+        let cancel = || interrupted.load(Ordering::SeqCst);
+        let value = if a.injections {
+            let session = a
+                .session_hash
+                .as_deref()
+                .map(|s| s.to_str().unwrap_or("\0"));
+            oms_context_source::inspect_injections(&repo, session, limit, cancel)
+        } else {
+            use users::os::unix::UserExt;
+            let raw = a.session.as_deref().unwrap();
+            let path = expand_session(
+                raw,
+                std::env::var_os("HOME"),
+                |name| users::get_user_by_name(name).map(|u| u.home_dir().to_path_buf()),
+                || {
+                    users::get_user_by_uid(users::get_current_uid())
+                        .map(|u| u.home_dir().to_path_buf())
+                },
+            );
+            if a.timeline {
+                oms_context_source::inspect_timeline(&path, 200, cancel)
+            } else {
+                oms_context_source::inspect_session(&repo, &path, limit, cancel)
+            }
+        }
+        .map_err(|e| {
+            use oms_context_source::Error;
+            let label = if a.injections {
+                "hook event ledger"
+            } else {
+                "transcript"
+            };
+            match e {
+                Error::Missing | Error::Unreadable => format!("{label} is missing or unreadable"),
+                Error::Unsafe => format!("{label} is not a safe regular file"),
+                Error::Oversize => format!(
+                    "{label} is larger than {} bytes",
+                    if a.injections {
+                        67_108_864
+                    } else {
+                        268_435_456
+                    }
+                ),
+                other => other.to_string(),
+            }
+        })?;
+        let value = encode(&value)?;
+        let mut bytes = if a.pretty {
+            oms_json::pretty_json(&value)
+        } else {
+            oms_json::canonical_json(&value)
+        }
+        .map_err(|e| e.to_string())?;
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        return Ok(bytes);
+    }
+    let manifest = a.manifest.expect("mode was validated");
     if a.compare.is_some() && a.current {
         return Err("--verify-current cannot be combined with --compare".into());
     }
     let root = Root::open(repo).map_err(|_| "cannot read a valid repo-local context manifest")?;
     let left = read_manifest(&root, &manifest)?;
-    let limit = usize::try_from(limit).unwrap_or(0);
     let mut value = if let Some(right) = a.compare {
         compare_manifests(&left, &read_manifest(&root, &right)?, limit)?
     } else {
@@ -782,6 +867,14 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
+    fn encodes_float_values_with_python_json_rules() {
+        let value = serde_json::json!([0.5, -0.0, 1e-7]);
+        assert_eq!(
+            oms_json::canonical_json(&encode(&value).unwrap()).unwrap(),
+            b"[0.5,-0.0,1e-07]"
+        );
+    }
+    #[test]
     fn git_output_is_bounded_and_normalizes_text() {
         use std::os::unix::ffi::OsStrExt;
         assert_eq!(normalize_git_output(b" \r\n").as_deref(), None);
@@ -846,6 +939,32 @@ mod tests {
             )
             .unwrap(),
             PathBuf::from("fallback")
+        );
+    }
+    #[test]
+    fn session_expansion_preserves_slashes_and_raw_users() {
+        let raw = OsStr::from_bytes(b"~name\xff/");
+        let value = expand_session(
+            raw,
+            None,
+            |name| {
+                assert_eq!(name.as_bytes(), b"name\xff");
+                Some(PathBuf::from(OsStr::from_bytes(b"/tmp/h\xfe//")))
+            },
+            || None,
+        );
+        assert_eq!(value.as_os_str().as_bytes(), b"/tmp/h\xfe/");
+        assert_eq!(
+            expand_session(OsStr::new("~unknown/"), None, |_| None, || None),
+            PathBuf::from("~unknown/")
+        );
+        assert_eq!(
+            expand_session(OsStr::new("~"), Some(OsString::new()), |_| None, || None),
+            PathBuf::from("/")
+        );
+        assert_eq!(
+            expand_session(OsStr::new(""), None, |_| None, || None),
+            PathBuf::new()
         );
     }
 }

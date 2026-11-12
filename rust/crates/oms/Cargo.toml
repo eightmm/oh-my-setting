@@ -10,6 +10,7 @@ unsafe_code = "forbid"
 [dependencies]
 oms-context = { path = "../oms-context" }
 oms-context-report = { path = "../oms-context-report" }
+oms-context-source = { path = "../oms-context-source" }
 oms-json = { path = "../oms-json" }
 oms-safe-fs = { path = "../oms-safe-fs" }
 serde_json = "=1.0.154"

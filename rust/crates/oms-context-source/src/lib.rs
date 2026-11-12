@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::os::fd::AsFd;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,8 +216,8 @@ fn transcript(path: &Path, cancel: &impl Fn() -> bool) -> Result<Vec<u8>, Error>
         cancel,
     )
 }
-/// Resolve a UTF-8 transcript label. OS paths used for acquisition remain raw; the core
-/// cannot represent surrogate/WTF-8 labels and non-UTF-8 resolved names are rejected.
+/// Resolve a UTF-8 transcript label, returning only UTF-8 labels. Session inspection
+/// separately retains surrogate-escaped filesystem names until display.
 /// This is a display label, not an access check; filesystem changes can race resolution.
 /// Unlike legacy `_repo_label`, non-directory roots and symlink loops are rejected.
 /// Expansion also fails closed after 16 MiB of cumulative candidate-path and link-target
@@ -230,13 +230,70 @@ pub fn repo_label(root: &Path, raw: &str) -> Option<String> {
     if !std::fs::metadata(&root).ok()?.is_dir() {
         return None;
     }
-    resolve_label(&root, raw, &|| false)
+    String::from_utf8(resolve_label(&root, raw.as_bytes(), &|| false)?).ok()
 }
-fn resolve_label(root: &Path, raw: &str, cancel: &impl Fn() -> bool) -> Option<String> {
-    if raw.is_empty() || raw.chars().count() > 4096 || raw.chars().any(|c| c < ' ') {
+fn path_bytes(raw: &[u8]) -> Option<OsString> {
+    let mut output = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == 0xed && i + 2 < raw.len() && (0xa0..=0xbf).contains(&raw[i + 1]) {
+            let second = raw[i + 1];
+            let third = raw[i + 2];
+            if !(0x80..=0xbf).contains(&third) || !(0xb2..=0xb3).contains(&second) {
+                return None;
+            }
+            output.push(if second == 0xb2 { third } else { third + 0x40 });
+            i += 3;
+        } else {
+            output.push(raw[i]);
+            i += 1;
+        }
+    }
+    Some(OsString::from_vec(output))
+}
+fn label_bytes(raw: &[u8]) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut remaining = raw;
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(_) => {
+                output.extend_from_slice(remaining);
+                break;
+            }
+            Err(e) => {
+                let n = e.valid_up_to();
+                output.extend_from_slice(&remaining[..n]);
+                let count = e.error_len().unwrap_or(remaining.len() - n);
+                for b in &remaining[n..n + count] {
+                    output.extend_from_slice(&[
+                        0xed,
+                        if *b < 0xc0 { 0xb2 } else { 0xb3 },
+                        0x80 | (*b & 0x3f),
+                    ]);
+                }
+                remaining = &remaining[n + count..];
+            }
+        }
+    }
+    output
+}
+fn missing_label_component(error: &std::io::Error, path: &Path, macos: bool) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    ) || (macos
+        && path.to_str().is_none()
+        && matches!(error.raw_os_error(), Some(code) if code == rustix::io::Errno::ILSEQ.raw_os_error() || code == rustix::io::Errno::INVAL.raw_os_error()))
+}
+fn resolve_label(root: &Path, raw: &[u8], cancel: &impl Fn() -> bool) -> Option<Vec<u8>> {
+    if raw.is_empty()
+        || raw.iter().filter(|b| **b & 0xc0 != 0x80).count() > 4096
+        || raw.iter().any(|c| *c < b' ')
+    {
         return None;
     }
-    let mut resolved = if Path::new(raw).is_absolute() {
+    let raw = path_bytes(raw)?;
+    let mut resolved = if Path::new(&raw).is_absolute() {
         PathBuf::from("/")
     } else {
         root.to_path_buf()
@@ -245,7 +302,7 @@ fn resolve_label(root: &Path, raw: &str, cancel: &impl Fn() -> bool) -> Option<S
         Part(OsString),
         End(PathBuf),
     }
-    let mut parts: VecDeque<Step> = Path::new(raw)
+    let mut parts: VecDeque<Step> = Path::new(&raw)
         .components()
         .filter_map(|c| match c {
             Component::Normal(s) => Some(Step::Part(s.to_owned())),
@@ -308,12 +365,7 @@ fn resolve_label(root: &Path, raw: &str, cancel: &impl Fn() -> bool) -> Option<S
                 parts = add;
             }
             Ok(_) => resolved.push(part),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
+            Err(e) if missing_label_component(&e, &candidate, cfg!(target_os = "macos")) => {
                 resolved.push(part)
             }
             Err(_) => return None,
@@ -321,13 +373,13 @@ fn resolve_label(root: &Path, raw: &str, cancel: &impl Fn() -> bool) -> Option<S
     }
     let rel = resolved.strip_prefix(root).ok()?;
     if rel.as_os_str().is_empty() {
-        return Some(".".into());
+        return Some(b".".to_vec());
     }
-    let label = rel.to_str()?;
-    if label.chars().any(|c| c < ' ') {
+    let label = rel.as_os_str().as_bytes();
+    if label.iter().any(|c| *c < b' ') {
         return None;
     }
-    Some(label.to_owned())
+    Some(label_bytes(label))
 }
 /// The callback returns true to cancel; it is checked before and during acquisition.
 pub fn inspect_injections(
@@ -369,7 +421,7 @@ pub fn inspect_session(
     let initial = fs::fstat(&fd).map_err(map)?;
     let data = transcript(path, &cancel)?;
     let cancelled = Cell::new(false);
-    let value = oms_context_session::inspect_session(&data, limit, |raw| {
+    let value = oms_context_session::inspect_session_lossless(&data, limit, |raw| {
         resolve_label(&physical, raw, &|| {
             let stopped = cancel();
             if stopped {
@@ -377,10 +429,11 @@ pub fn inspect_session(
             }
             stopped
         })
-    })?;
+    });
     if cancelled.get() || cancel() {
         return Err(Error::Cancelled);
     }
+    let value = value?;
     let current = std::fs::canonicalize(root).map_err(|_| Error::Changed)?;
     let now = fs::open(&current, dir_flags(), Mode::empty()).map_err(|_| Error::Changed)?;
     let now = fs::fstat(now).map_err(|_| Error::Changed)?;
@@ -397,4 +450,24 @@ pub fn inspect_timeline(
     oms_context_session::inspect_timeline(&[], rows)?;
     let data = transcript(path, &cancel)?;
     Ok(oms_context_session::inspect_timeline(&data, rows)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn macos_invalid_byte_metadata_errors_are_lexical() {
+        let raw = Path::new(OsStr::from_bytes(b"bad\x80"));
+        let valid = Path::new("valid");
+        for code in [rustix::io::Errno::ILSEQ, rustix::io::Errno::INVAL] {
+            let error = std::io::Error::from_raw_os_error(code.raw_os_error());
+            assert!(missing_label_component(&error, raw, true));
+            assert!(!missing_label_component(&error, valid, true));
+            assert!(!missing_label_component(&error, raw, false));
+        }
+        let denied = std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error());
+        assert!(!missing_label_component(&denied, raw, true));
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(missing_label_component(&missing, valid, false));
+    }
 }

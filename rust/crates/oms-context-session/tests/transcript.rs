@@ -193,3 +193,18 @@ fn deeply_nested_arguments_are_bounded() {
         1
     );
 }
+
+#[test]
+fn lossless_labels_only_fail_when_selected() {
+    use oms_context_session::{Error, inspect_session_lossless};
+    let one = br#"{"message":{"content":[{"type":"tool_use","id":"a","name":"Read","input":{"file_path":"\udc80"}}]}}"#;
+    let resolve = |raw: &[u8]| Some(raw.to_vec());
+    let value = inspect_session_lossless(one, 1, resolve).unwrap();
+    assert_eq!(value["file_reads"]["distinct_in_repository"], 1);
+    assert_eq!(value["file_reads"]["outside_repository"], 0);
+    let two = [one.as_slice(), b"\n", one.as_slice()].concat();
+    assert!(matches!(
+        inspect_session_lossless(&two, 1, resolve),
+        Err(Error::Encoding)
+    ));
+}

@@ -82,6 +82,55 @@ fn projections_and_boundaries() {
 }
 
 #[test]
+fn surrogate_paths_are_counted_before_display_encoding() {
+    use std::os::unix::ffi::OsStrExt;
+    let f = Fixture::new();
+    let raw = std::ffi::OsStr::from_bytes(b"\x80");
+    if let Err(e) = std::fs::write(f.0.join(raw), b"") {
+        assert!(
+            cfg!(target_os = "macos") && matches!(e.raw_os_error(), Some(22 | 92)),
+            "{e}"
+        );
+    }
+    let path = f.0.join("transcript");
+    let row = br#"{"message":{"content":[{"type":"tool_use","id":"a","name":"Read","input":{"file_path":"\udc80"}}]}}"#;
+    std::fs::write(&path, row).unwrap();
+    let value = inspect_session(&f.0, &path, 1, || false).unwrap();
+    assert_eq!(value["file_reads"]["distinct_in_repository"], 1);
+    assert_eq!(value["file_reads"]["outside_repository"], 0);
+    std::fs::write(&path, [row.as_slice(), b"\n", row.as_slice()].concat()).unwrap();
+    assert!(matches!(
+        inspect_session(&f.0, &path, 1, || false),
+        Err(Error::Projection(oms_context_session::Error::Encoding))
+    ));
+    let ordinary = br#"{"message":{"content":[{"type":"tool_use","id":"b","name":"Read","input":{"file_path":"?"}}]}}"#;
+    std::fs::write(
+        &path,
+        [
+            ordinary.as_slice(),
+            b"\n",
+            ordinary.as_slice(),
+            b"\n",
+            ordinary.as_slice(),
+            b"\n",
+            row.as_slice(),
+            b"\n",
+            row.as_slice(),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    let value = inspect_session(&f.0, &path, 1, || false).unwrap();
+    assert_eq!(value["file_reads"]["distinct_in_repository"], 2);
+    assert_eq!(value["file_reads"]["repeated"]["total"], 2);
+    assert_eq!(value["file_reads"]["repeated"]["items"][0]["path"], "?");
+    assert!(matches!(
+        inspect_session(&f.0, &path, 2, || false),
+        Err(Error::Projection(oms_context_session::Error::Encoding))
+    ));
+}
+
+#[test]
 fn reject_unsafe_inputs_and_observed_change() {
     use std::cell::Cell;
     use std::os::unix::fs::symlink;
@@ -427,6 +476,22 @@ fn label_resolution_observes_cancellation() {
         n >= 5
     });
     assert_eq!(value, Err(Error::Cancelled));
+}
+
+#[test]
+fn cancellation_precedes_unencodable_repeated_label() {
+    use std::cell::Cell;
+    let f = Fixture::new();
+    let path = f.0.join("t");
+    let row = br#"{"message":{"content":[{"type":"tool_use","id":"a","name":"Read","input":{"file_path":"\udc80"}},{"type":"tool_use","id":"b","name":"Read","input":{"file_path":"\udc80"}},{"type":"tool_use","id":"c","name":"Read","input":{"file_path":"next"}}]}}"#;
+    std::fs::write(&path, row).unwrap();
+    let calls = Cell::new(0);
+    let result = inspect_session(&f.0, &path, 1, || {
+        let n = calls.get();
+        calls.set(n + 1);
+        n >= 6
+    });
+    assert_eq!(result, Err(Error::Cancelled));
 }
 
 #[test]

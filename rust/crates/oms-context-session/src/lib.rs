@@ -12,12 +12,15 @@ pub enum Error {
     Invalid(&'static str),
     /// The parser or encoder could not process a valid row.
     Infrastructure,
+    /// A displayed path cannot be encoded as UTF-8.
+    Encoding,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Invalid(s) => f.write_str(s),
             Self::Infrastructure => f.write_str("session projection infrastructure failure"),
+            Self::Encoding => f.write_str("session label cannot be encoded as UTF-8"),
         }
     }
 }
@@ -302,13 +305,6 @@ fn result_bytes(value: &Json) -> usize {
     })
 }
 
-fn safe_relative_label(label: &str) -> bool {
-    !label.is_empty()
-        && !label.starts_with('/')
-        && !label.chars().any(|c| c < ' ')
-        && !label.split('/').any(|part| part == "..")
-}
-
 /// Account for transcript results. `resolve` must return the realpath-checked repository-relative
 /// display label, or None for invalid/outside paths. The caller must resolve symlinks and check
 /// containment; this function additionally rejects unsafe lexical labels returned by the caller.
@@ -318,12 +314,23 @@ pub fn inspect_session<F>(data: &[u8], limit: usize, resolve: F) -> Result<Value
 where
     F: Fn(&str) -> Option<String>,
 {
+    inspect_session_lossless(data, limit, |raw| {
+        resolve(std::str::from_utf8(raw).ok()?).map(String::into_bytes)
+    })
+}
+
+/// Like `inspect_session`, but the resolver receives and returns WTF-8 path bytes.
+/// Only displayed repeated paths must be representable as UTF-8.
+pub fn inspect_session_lossless<F>(data: &[u8], limit: usize, resolve: F) -> Result<Value, Error>
+where
+    F: Fn(&[u8]) -> Option<Vec<u8>>,
+{
     if !(1..=100).contains(&limit) {
         return Err(Error::Invalid("--limit must be between 1 and 100"));
     }
     let mut calls: BTreeMap<Vec<u8>, String> = BTreeMap::new();
     let mut tools: BTreeMap<String, Aggregate> = BTreeMap::new();
-    let mut reads: BTreeMap<String, usize> = BTreeMap::new();
+    let mut reads: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
     let (mut outside, mut lines, mut unread, mut results, mut unmatched) = (0, 0, 0, 0, 0);
     for row in transcript_rows(data)? {
         lines += 1;
@@ -347,7 +354,7 @@ where
                 if name == "Read" || name == "NotebookRead" {
                     let target = field(item, "input");
                     let file = field(target, "file_path");
-                    let raw = text(if truthy(file) {
+                    let raw = bytes(if truthy(file) {
                         file
                     } else {
                         field(target, "notebook_path")
@@ -355,11 +362,16 @@ where
                     let path = raw
                         .filter(|s| {
                             !s.is_empty()
-                                && s.chars().count() <= 4096
-                                && !s.chars().any(|c| c < ' ')
+                                && s.iter().filter(|b| **b & 0xc0 != 0x80).count() <= 4096
+                                && !s.iter().any(|b| *b < b' ')
                         })
                         .and_then(&resolve)
-                        .filter(|s| safe_relative_label(s));
+                        .filter(|s| {
+                            !s.is_empty()
+                                && !s.starts_with(b"/")
+                                && !s.iter().any(|b| *b < b' ')
+                                && !s.split(|b| *b == b'/').any(|part| part == b"..")
+                        });
                     if let Some(path) = path {
                         if reads.contains_key(&path) || reads.len() < MAX_KEYS {
                             *reads.entry(path).or_default() += 1;
@@ -390,8 +402,8 @@ where
     let repeated_items: Vec<_> = repeated
         .iter()
         .take(limit)
-        .map(|(path, count)| json!({"path":path,"reads":count}))
-        .collect();
+        .map(|(path, count)| Ok(json!({"path":std::str::from_utf8(path).map_err(|_| Error::Encoding)?,"reads":count})))
+        .collect::<Result<_, Error>>()?;
     let mut by_tool = ranked(&tools, "tool", limit);
     for item in by_tool["items"].as_array_mut().unwrap() {
         let calls = item.as_object_mut().unwrap().remove("calls").unwrap();
