@@ -1,0 +1,15 @@
+[package]
+name = "oms-graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+publish = false
+
+[dependencies]
+oms-graph-python = { path = "../oms-graph-python" }
+oms-graph-shell = { path = "../oms-graph-shell" }
+regex = "=1.13.1"
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+
+[lints.rust]
+unsafe_code = "forbid"
