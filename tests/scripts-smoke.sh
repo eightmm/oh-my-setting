@@ -11864,6 +11864,173 @@ PYBATCH
     fail "empty batch cancellation succeeded"
   fi
   cmp "$TMP/batch-after.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "empty batch rewrote plan"
+
+  # An archived plan and the active plan can bind one decision path to two
+  # byte versions. relocate-decision moves only the active receipt's pointer to
+  # a copy of the bound bytes, so the historical file can then be restored.
+  local rel="$TMP/agent-plan-relocate" rel_ledger rel_plan_sha rel_task_sha v1 v2 d1 d2 rel_args rel_case
+  make_committed_repo "$rel"
+  rel_ledger="$rel/.oms/plan/cancel-decision-relocations.jsonl"
+  sha_of() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1" | tr -d '\r'; }
+  task_sha_of() { "$plan" --repo "$rel" show --id "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_sha256"])' | tr -d '\r'; }
+  rel_cancel() {  # TASK DECISION_FILE
+    local csha
+    csha="$(sha_of "$rel/$2")"
+    "$plan" --repo "$rel" cancel --id "$1" --expected-plan-sha256 "$(sha_of "$rel/.oms/plan/tasks.json")" \
+      --expected-task-sha256 "$(task_sha_of "$1")" --expected-state ready --expected-lease-id none \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact "$2" \
+      --expected-decision-artifact-sha256 "$csha" >/dev/null || fail "setup cancel of $1 failed"
+  }
+  rel_run() {  # TASK NEW_PATH DIGEST [extra args]; plan/task CAS are the current ones
+    local id="$1" new="$2" digest="$3"
+    shift 3
+    "$ROOT/scripts/oms" agent-plan --repo "$rel" relocate-decision --id "$id" --expected-plan-sha256 "$rel_plan_sha" \
+      --expected-task-sha256 "$rel_task_sha" --operator-consent relocate-decision \
+      --reason "authority notes changed the shared decision file" --decision-artifact "$new" \
+      --expected-decision-artifact-sha256 "$digest" "$@"
+  }
+  printf 'historical decision\n' > "$rel/shared-decision.md"
+  v1="$TMP/relocate-v1"; cp "$rel/shared-decision.md" "$v1"; d1="$(sha_of "$v1")"
+  "$plan" --repo "$rel" init --goal old >/dev/null
+  "$plan" --repo "$rel" add --id old_task --title old >/dev/null
+  rel_cancel old_task shared-decision.md
+  "$plan" --repo "$rel" init --goal next >/dev/null || fail "setup replacement failed"
+  printf 'authority notes appended later\n' >> "$rel/shared-decision.md"
+  v2="$TMP/relocate-v2"; cp "$rel/shared-decision.md" "$v2"; d2="$(sha_of "$v2")"
+  for rel_case in cancelled_a cancelled_b open_task; do
+    "$plan" --repo "$rel" add --id "$rel_case" --title "$rel_case" >/dev/null
+  done
+  rel_cancel cancelled_a shared-decision.md
+  rel_cancel cancelled_b shared-decision.md
+  # Both byte versions are valid for exactly one reference each, so the full
+  # retirement ledger check cannot pass until the pointer moves.
+  rel_plan_sha="$(sha_of "$rel/.oms/plan/tasks.json")"
+  out="$("$plan" --repo "$rel" retire --apply --expected-plan-sha256 "$rel_plan_sha" --disposition superseded \
+    --reason "old plan closed" 2>&1)" && fail "retire passed with the archived decision bytes changed"
+  printf '%s\n' "$out" | grep -F 'decision artifact digest changed' >/dev/null ||
+    fail "retire did not stop on the archived decision digest: $out"
+  cp "$rel/shared-decision.md" "$rel/moved-decision.md"
+  cp "$v2" "$rel/different-decision.md"; printf 'x\n' >> "$rel/different-decision.md"
+  ln -s moved-decision.md "$rel/linked-decision.md"
+  mkdir -p "$rel/real-dir"; cp "$v2" "$rel/real-dir/copy.md"; ln -s real-dir "$rel/linked-dir"
+  cp "$v2" "$rel/hardlink-source.md"
+  ln "$rel/hardlink-source.md" "$rel/hardlinked-decision.md"
+  rel_task_sha="$(task_sha_of cancelled_a)"
+  cp "$rel/.oms/plan/tasks.json" "$TMP/relocate-before.json"
+  printf 'unexpected change\n' >> "$rel/shared-decision.md"
+  if rel_run cancelled_a moved-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted changed old decision bytes"
+  fi
+  grep -F 'decision artifact digest changed' "$rel/relocate-error" >/dev/null ||
+    fail "changed old decision did not fail closed"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "changed old decision mutated the plan or ledger"
+  cp "$v2" "$rel/shared-decision.md"
+  rel_args=(
+    "moved-decision.md|$(printf '%064d' 0)|the digest is not the bound digest"
+    "moved-decision.md|$d1|the digest is the other byte version"
+    "different-decision.md|$d2|destination bytes differ from the bound digest"
+    "shared-decision.md|$d2|destination is the receipt's current path"
+    "linked-decision.md|$d2|destination is a symlink"
+    "linked-dir/copy.md|$d2|destination parent is a symlink"
+    "../relocated-outside.md|$d2|destination traverses out"
+    "/tmp/absolute-destination.md|$d2|destination is absolute"
+    "missing-decision.md|$d2|destination is missing"
+    "real-dir|$d2|destination is a directory"
+  )
+  for rel_case in "${rel_args[@]}"; do
+    if rel_run cancelled_a "${rel_case%%|*}" "$(printf '%s' "${rel_case#*|}" | cut -d'|' -f1)" >/dev/null 2>&1; then
+      fail "relocation accepted: ${rel_case##*|}"
+    fi
+    cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+      fail "refused relocation mutated state: ${rel_case##*|}"
+  done
+  if rel_run cancelled_a hardlinked-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted a hard-linked destination"
+  fi
+  grep -F 'relocated decision artifact must be a regular non-symlink, non-hard-linked file' "$rel/relocate-error" >/dev/null ||
+    fail "hard-linked destination did not reach the link guard"
+  rm -f "$rel/hardlinked-decision.md"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "hard-linked destination mutated the plan or ledger"
+  # Wrong CAS, state, consent and authority refuse without touching the plan.
+  if "$plan" --repo "$rel" relocate-decision --id cancelled_a --expected-plan-sha256 "$(printf '%064d' 0)" \
+      --expected-task-sha256 "$rel_task_sha" --operator-consent relocate-decision --reason r \
+      --decision-artifact moved-decision.md --expected-decision-artifact-sha256 "$d2" >/dev/null 2>&1; then
+    fail "relocation accepted a stale plan CAS"
+  fi
+  if "$plan" --repo "$rel" relocate-decision --id cancelled_a --expected-plan-sha256 "$rel_plan_sha" \
+      --expected-task-sha256 "$(printf '%064d' 0)" --operator-consent relocate-decision --reason r \
+      --decision-artifact moved-decision.md --expected-decision-artifact-sha256 "$d2" >/dev/null 2>&1; then
+    fail "relocation accepted a stale task CAS"
+  fi
+  rel_task_sha="$(task_sha_of open_task)"
+  if rel_run open_task moved-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted a task that is not cancelled"
+  fi
+  grep -F 'task open_task is ready; relocation requires a cancelled task' "$rel/relocate-error" >/dev/null ||
+    fail "open task did not reach the state guard"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "open task refusal mutated the plan or ledger"
+  rel_task_sha="$(task_sha_of cancelled_a)"
+  for rel_case in "--operator-consent cancel" "--reason ''" "--expected-state cancelled" "--expected-lease-id none"; do
+    if eval "rel_run cancelled_a moved-decision.md \"$d2\" $rel_case" >/dev/null 2>&1; then
+      fail "relocation accepted option: $rel_case"
+    fi
+  done
+  if OMS_HARNESS_CHILD=1 rel_run cancelled_a moved-decision.md "$d2" >/dev/null 2>&1 ||
+      OMS_HARNESS_DELEGATE_DEPTH=1 rel_run cancelled_a moved-decision.md "$d2" >/dev/null 2>&1; then
+    fail "a harness child relocated a decision artifact"
+  fi
+  mkdir -p "$rel/.oms/delegations"
+  python3 - "$rel/.oms/delegations/active.json" <<'PY'
+import json, os, sys
+json.dump({"schema": 1, "id": "active", "task_id": "cancelled_a",
+           "lease_id": "", "pid": os.getppid()}, open(sys.argv[1], "w"))
+PY
+  if rel_run cancelled_a moved-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted a task with a live worker marker"
+  fi
+  grep -F 'live worker marker prevents relocation: cancelled_a' "$rel/relocate-error" >/dev/null ||
+    fail "live marker did not reach the worker guard"
+  rm -f "$rel/.oms/delegations/active.json"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "a refused relocation mutated the plan or wrote a row"
+
+  out="$(rel_run cancelled_a moved-decision.md "$d2")" || fail "valid relocation failed: $out"
+  python3 - "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" "$rel_ledger" "$rel_plan_sha" "$rel_task_sha" "$d2" <<'PY' || fail "relocation changed more than the receipt pointer or lacks its typed row"
+import hashlib, json, sys
+before, after = [json.load(open(p, encoding="utf-8")) for p in sys.argv[1:3]]
+rows = [json.loads(line) for line in open(sys.argv[3], encoding="utf-8")]
+assert before["tasks"]["cancelled_a"]["cancellation"].pop("decision_artifact") == "shared-decision.md"
+assert after["tasks"]["cancelled_a"]["cancellation"].pop("decision_artifact") == "moved-decision.md"
+assert before == after, "only the receipt pointer may change"
+assert after["tasks"]["cancelled_a"]["cancellation"]["decision_artifact_sha256"] == sys.argv[6]
+assert len(rows) == 1, rows
+row = rows[0]
+assert row["kind"] == "cancellation-decision-relocation" and row["task_id"] == "cancelled_a", row
+assert (row["old_decision_artifact"], row["new_decision_artifact"]) == ("shared-decision.md", "moved-decision.md"), row
+assert row["decision_artifact_sha256"] == sys.argv[6], row
+assert row["reviewed_plan_sha256"] == sys.argv[4] and row["reviewed_task_sha256"] == sys.argv[5], row
+assert row["resulting_plan_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), row
+PY
+  # A second call with the same reviewed CAS sees a changed plan.
+  if rel_run cancelled_a moved-decision.md "$d2" >/dev/null 2>&1; then
+    fail "relocation replay accepted a stale plan CAS"
+  fi
+  [ "$(wc -l < "$rel_ledger" | tr -d ' ')" = 1 ] || fail "refused replay appended a row"
+  rel_plan_sha="$(sha_of "$rel/.oms/plan/tasks.json")"
+  rel_task_sha="$(task_sha_of cancelled_b)"
+  rel_run cancelled_b moved-decision.md "$d2" >/dev/null || fail "second relocation failed"
+  [ "$(wc -l < "$rel_ledger" | tr -d ' ')" = 2 ] || fail "second relocation did not append its row"
+  # With every active pointer moved, the historical bytes can return.
+  cp "$v1" "$rel/shared-decision.md"
+  [ "$(sha_of "$rel/shared-decision.md")" = "$d1" ] || fail "historical decision bytes were not restored"
+  "$plan" --repo "$rel" status --json >/dev/null || fail "active plan rejected the restored historical decision"
+  rel_cancel open_task shared-decision.md
+  rel_plan_sha="$(sha_of "$rel/.oms/plan/tasks.json")"
+  "$plan" --repo "$rel" retire --apply --expected-plan-sha256 "$rel_plan_sha" --disposition superseded \
+    --reason "old plan closed" >/dev/null || fail "complete retirement validation failed after the repair"
 }
 
 # smoke-weight: 12

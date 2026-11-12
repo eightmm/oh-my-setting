@@ -170,6 +170,17 @@ Commands:
                                      recomputed from the landed tree; all
                                      other entries keep their frozen hashes,
                                      and each refreeze appends a typed row.
+         --id ID --landed-commit SHA  Complete reviewed work integrated by
+                                     commit. Requires an exact-SHA oms land
+                                     receipt with passed gate/push/CI and
+                                     reachability from its local target ref,
+                                     the task's current lease when one is
+                                     given, and, for a task with allowed
+                                     paths, a landed range (previous pushed
+                                     receipt..SHA) that touches them.
+                                     --artifact/--patch supply evidence a
+                                     review lacked. Typed patch-land remains
+                                     the default for single patches.
   amend --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
         [--allowed "p1,p2"] [--verify CMD] --reason TEXT
                                      Parent-only amendment of an inactive task.
@@ -186,17 +197,19 @@ Commands:
          --reason TEXT --decision-artifact REPO_RELATIVE_FILE
          --expected-decision-artifact-sha256 SHA
                                      Cancel unleased ready/blocked tasks in one write.
-         --id ID --landed-commit SHA  Complete reviewed work integrated by
-                                     commit. Requires an exact-SHA oms land
-                                     receipt with passed gate/push/CI and
-                                     reachability from its local target ref,
-                                     the task's current lease when one is
-                                     given, and, for a task with allowed
-                                     paths, a landed range (previous pushed
-                                     receipt..SHA) that touches them.
-                                     --artifact/--patch supply evidence a
-                                     review lacked. Typed patch-land remains
-                                     the default for single patches.
+  relocate-decision --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
+         --operator-consent relocate-decision --reason TEXT
+         --decision-artifact NEW_REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only proactive move of one valid
+                                     cancelled task's decision file pointer. The
+                                     old file must still match its bound digest.
+                                     Moves only the receipt's path to a
+                                     different no-link regular file whose bytes hash
+                                     to the digest ALREADY bound there (SHA must
+                                     equal it); the digest, task, state, lease and
+                                     archives stay unchanged. Appends a typed row to
+                                     .oms/plan/cancel-decision-relocations.jsonl.
   accept-research|approve-main-research|accept-main-research|satisfy --id ID --lease-id TOKEN --expected-state STATE
          --expected-plan-sha256 SHA256 --expected-task-sha256 SHA256
          --completion-bundle REPO_RELATIVE_FILE
@@ -290,7 +303,11 @@ repair moves review -> claimed without minting a lease. Any -> blocked (block);
 blocked -> ready (reopen); claimed/running/review -> ready (release).
 Parent cancellation moves an inactive ready/blocked task to cancelled with
 the exact plan/task and decision-artifact digests. Cancelled tasks are closed,
-not verified, and never satisfy dependencies.
+not verified, and never satisfy dependencies. To restore historical bytes at a
+shared decision path, keep its current bound bytes valid while copying them to
+a new path and relocating every active task that references it. The destination
+must match the bound digest. Restore the historical bytes only after all moves.
+If the old file already differs, the active plan fails closed.
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 
 A claim whose last heartbeat (claimed_at, refreshed by touch) is older than
@@ -425,7 +442,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|discovered|status|next|brief|accept|lint-verify|cancel|amend|retro)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|discovered|status|next|brief|accept|lint-verify|cancel|relocate-decision|amend|retro)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -500,6 +517,24 @@ case "$ACTION" in
     [ "${#REASON}" -le 500 ] || fail "cancellation reason exceeds 500 characters"
     [ "$PLAN_FILE_SET" = 0 ] || fail "cancel is valid only for the canonical repo-local plan"
     ;;
+  relocate-decision)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
+      fail "relocate-decision is parent-only"
+    [ -n "$ID" ] && [ -n "$EXPECTED_PLAN_SHA256" ] && [ "$EXPECTED_TASK_SHA256_SET" = 1 ] &&
+      [ "$OPERATOR_CONSENT" = relocate-decision ] && [ -n "$REASON" ] &&
+      [ -n "$DECISION_ARTIFACT" ] && [ -n "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
+      fail "relocate-decision requires --id, plan/task CAS, --operator-consent relocate-decision, --reason, --decision-artifact and its digest"
+    [ "$CANCEL_STATE_SET" = 0 ] && [ "$EXPECTED_CANCEL_LEASE_SET" = 0 ] &&
+      [ -z "$COMPLETION_BUNDLE$EXPECTED_COMPLETION_BUNDLE_SHA256" ] &&
+      [ "$CANCEL_OTHER_OPTION" = 0 ] ||
+      fail "relocate-decision options cannot be mixed with cancel state/lease, completion or unrelated options"
+    for digest in "$EXPECTED_PLAN_SHA256" "$EXPECTED_TASK_SHA256" "$EXPECTED_DECISION_ARTIFACT_SHA256"; do
+      [ "${#digest}" -eq 64 ] && [ "${digest#*[!0-9a-f]}" = "$digest" ] ||
+        fail "relocate-decision requires lowercase plan, task and decision-artifact SHA-256 values"
+    done
+    [ "${#REASON}" -le 500 ] || fail "relocation reason exceeds 500 characters"
+    [ "$PLAN_FILE_SET" = 0 ] || fail "relocate-decision is valid only for the canonical repo-local plan"
+    ;;
   *) [ "$COMPLETION_OPTION_SET" = 0 ] ||
        fail "completion options require accept-research, accept-main-research or satisfy" ;;
 esac
@@ -537,7 +572,7 @@ reject_sensitive_text() {  # TEXT MESSAGE
   fi
   rm -f "$scan"
 }
-if [ "$ACTION" = cancel ] || [ "$ACTION" = amend ]; then
+if [ "$ACTION" = cancel ] || [ "$ACTION" = amend ] || [ "$ACTION" = relocate-decision ]; then
   [ "$PLAN_FILE" = "$STATE_REPO/.oms/plan/tasks.json" ] ||
     fail "$ACTION is valid only for the canonical repo-local plan"
   [ -f "$PLAN_FILE" ] && [ ! -L "$PLAN_FILE" ] ||
@@ -593,7 +628,7 @@ if [ "$ACTION" = retro ]; then
 fi
 
 case "$ACTION" in
-  init|retire|apply-proposal|add|cancel|amend)
+  init|retire|apply-proposal|add|cancel|relocate-decision|amend)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] ||
       fail "$ACTION is parent-only; a harness child cannot change plan topology"
     ;;
@@ -937,7 +972,7 @@ if stat.S_ISLNK(target_info.st_mode) or not stat.S_ISREG(target_info.st_mode):
     raise SystemExit(2)
 PY
     fail "acceptance requires a safe repo-local plan file"
-elif [ "$ACTION" != retire ] && [ "$ACTION" != cancel ] && [ "$ACTION" != amend ] && [ "$PLAN_READ_ONLY" = 0 ]; then
+elif [ "$ACTION" != retire ] && [ "$ACTION" != cancel ] && [ "$ACTION" != relocate-decision ] && [ "$ACTION" != amend ] && [ "$PLAN_READ_ONLY" = 0 ]; then
   mkdir -p "$(dirname "$PLAN_FILE")"
   agent_memory_ensure_oms_ignore_for_path "$PLAN_FILE" 2>/dev/null || true
 fi
@@ -1444,7 +1479,7 @@ case "$ACTION" in
       plan_run
     fi
     ;;
-  recover-lease|recover-owner|cancel|amend)
+  recover-lease|recover-owner|cancel|relocate-decision|amend)
     plan_run_with_marker_and_plan_locks
     ;;
   *) plan_run_with_plan_lock ;;
