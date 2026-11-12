@@ -1035,9 +1035,10 @@ BUNDLE_REPO="$TMP/bundle-repo"
 new_repo "$BUNDLE_REPO"
 bundle_attempt="$($EVENTS --repo "$BUNDLE_REPO" start --provider claude --tool delegate \
   --then starting:b-start --then working:b-work)" || fail "bundle attempt start failed"
+# Stamp rows before the terminal transition so a second boundary never puts them after the window.
+bundle_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 $EVENTS --repo "$BUNDLE_REPO" transition --attempt "$bundle_attempt" --state failed \
   --reason-code verification_failed >/dev/null || fail "bundle attempt failure transition failed"
-bundle_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p "$BUNDLE_REPO/.oms/artifacts"
 leaky="gh""p_$(printf 'a%.0s' $(seq 1 30))"
 printf '{"schema":1,"event_id":"evt_b1","ts":"%s","kind":"delegate","provider":"claude","exit":1,"attempt_id":"%s","role":"implementer","prompt_sha256":"%s","result_lint":["no-test"],"selected_model":"%s"}\n{"schema":1,"event_id":"evt_b2","ts":"%s","kind":"patch-admit","provider":"claude","exit":0,"parent_event_id":"evt_b1","review":{"seats":[{"verdict":"reject"}]},"task_id":"other"}\n{"schema":1,"event_id":"evt_b3","ts":"%s","kind":"call","provider":"claude","exit":0,"attempt_id":"att_unrelated"}\n' \
