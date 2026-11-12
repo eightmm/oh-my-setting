@@ -1,0 +1,15 @@
+[package]
+name = "oms-output"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+regex = "=1.13.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.10.9"
+unicode-general-category = "=0.6.0"
+
+[lints.rust]
+unsafe_code = "forbid"
