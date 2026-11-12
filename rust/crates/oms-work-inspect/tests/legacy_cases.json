@@ -1,0 +1,2391 @@
+[
+  {
+    "current": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "before": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "limit": 20,
+    "reports": [
+      {
+        "schema": 1,
+        "kind": "oms-evidence-matrix",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "criteria": {
+          "total": 1,
+          "items": [
+            {
+              "criterion_id": "req1",
+              "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+              "status": "missing",
+              "task_id": "t1",
+              "link": "plan-task-lineage",
+              "task_state": "ready",
+              "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "evidence": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              }
+            }
+          ],
+          "omitted": 0
+        },
+        "status_counts": {
+          "missing": 1
+        },
+        "filter_task": null,
+        "total_declared_criteria": 1,
+        "tasks_without_criterion_link": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "plan_acceptance_not_landing": true,
+        "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-action-inbox",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "tasks": {
+          "total": 1,
+          "items": [
+            {
+              "task_id": "t1",
+              "title": "\uad6c\ud604 t1",
+              "state": "ready",
+              "canonical_actionable": true,
+              "conflicting_projection": false,
+              "depends_waiting": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              },
+              "reasons": [
+                {
+                  "code": "ready",
+                  "detail": "Recorded task state; not a completion receipt."
+                }
+              ],
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "actions": {
+          "total": 1,
+          "items": [
+            {
+              "id": "execute_ready_task",
+              "priority": 80,
+              "authority": "worktree_write",
+              "reason": "one task ready",
+              "command": "oms plan-run --next",
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "filter_task": null,
+        "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-return-brief",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "baseline": "compared",
+        "history_complete": false,
+        "current": {
+          "schema": 1,
+          "kind": "oms-evidence-matrix",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "criteria": {
+            "total": 1,
+            "items": [
+              {
+                "criterion_id": "req1",
+                "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+                "status": "missing",
+                "task_id": "t1",
+                "link": "plan-task-lineage",
+                "task_state": "ready",
+                "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "evidence": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                }
+              }
+            ],
+            "omitted": 0
+          },
+          "status_counts": {
+            "missing": 1
+          },
+          "filter_task": null,
+          "total_declared_criteria": 1,
+          "tasks_without_criterion_link": {
+            "total": 0,
+            "items": [],
+            "omitted": 0
+          },
+          "plan_acceptance_not_landing": true,
+          "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+        },
+        "inbox": {
+          "schema": 1,
+          "kind": "oms-action-inbox",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "tasks": {
+            "total": 1,
+            "items": [
+              {
+                "task_id": "t1",
+                "title": "\uad6c\ud604 t1",
+                "state": "ready",
+                "canonical_actionable": true,
+                "conflicting_projection": false,
+                "depends_waiting": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                },
+                "reasons": [
+                  {
+                    "code": "ready",
+                    "detail": "Recorded task state; not a completion receipt."
+                  }
+                ],
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "actions": {
+            "total": 1,
+            "items": [
+              {
+                "id": "execute_ready_task",
+                "priority": 80,
+                "authority": "worktree_write",
+                "reason": "one task ready",
+                "command": "oms plan-run --next",
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "filter_task": null,
+          "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+        },
+        "limitation": "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.",
+        "baseline_at": "2026-11-10T00:00:00Z",
+        "baseline_state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_scope_matches": true,
+        "mismatch_reasons": [],
+        "head_changed": false,
+        "source_changes": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "same_snapshot_digest": true,
+        "changes": {
+          "tasks": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          },
+          "criteria": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          }
+        }
+      }
+    ],
+    "texts": [
+      "oms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=t1 link=plan-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 0 (0 shown)\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n",
+      "oms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n",
+      "oms-return-brief\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nbaseline: compared; event history: incomplete\nscope: same recorded lineage\ntasks\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\ncriteria\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\nsource changes omitted: 0\n\noms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=t1 link=plan-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 0 (0 shown)\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n\n\noms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n\nSnapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.\n"
+    ]
+  },
+  {
+    "current": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\ud55c\uae00\u001b\u202e",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "foreign",
+          "plan_task_id": "t1",
+          "evidence": [
+            {
+              "evidence_ref": "e1"
+            },
+            {
+              "evidence_ref": "e2"
+            }
+          ]
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "before": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "limit": 1,
+    "reports": [
+      {
+        "schema": 1,
+        "kind": "oms-evidence-matrix",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "criteria": {
+          "total": 1,
+          "items": [
+            {
+              "criterion_id": "req1",
+              "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+              "status": "missing",
+              "task_id": null,
+              "link": "unrecorded",
+              "task_state": null,
+              "verify_digest": null,
+              "evidence": {
+                "total": 2,
+                "items": [
+                  {
+                    "evidence_ref": "e1",
+                    "kind": "",
+                    "status": "",
+                    "signal": "",
+                    "source": "",
+                    "support": "",
+                    "ts": ""
+                  }
+                ],
+                "omitted": 1
+              }
+            }
+          ],
+          "omitted": 0
+        },
+        "status_counts": {
+          "missing": 1
+        },
+        "filter_task": null,
+        "total_declared_criteria": 1,
+        "tasks_without_criterion_link": {
+          "total": 1,
+          "items": [
+            "t1"
+          ],
+          "omitted": 0
+        },
+        "plan_acceptance_not_landing": true,
+        "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-action-inbox",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "tasks": {
+          "total": 1,
+          "items": [
+            {
+              "task_id": "t1",
+              "title": "\ud55c\uae00??",
+              "state": "ready",
+              "canonical_actionable": true,
+              "conflicting_projection": false,
+              "depends_waiting": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              },
+              "reasons": [
+                {
+                  "code": "ready",
+                  "detail": "Recorded task state; not a completion receipt."
+                }
+              ],
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "actions": {
+          "total": 1,
+          "items": [
+            {
+              "id": "execute_ready_task",
+              "priority": 80,
+              "authority": "worktree_write",
+              "reason": "one task ready",
+              "command": "oms plan-run --next",
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "filter_task": null,
+        "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-return-brief",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "baseline": "compared",
+        "history_complete": false,
+        "current": {
+          "schema": 1,
+          "kind": "oms-evidence-matrix",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "criteria": {
+            "total": 1,
+            "items": [
+              {
+                "criterion_id": "req1",
+                "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+                "status": "missing",
+                "task_id": null,
+                "link": "unrecorded",
+                "task_state": null,
+                "verify_digest": null,
+                "evidence": {
+                  "total": 2,
+                  "items": [
+                    {
+                      "evidence_ref": "e1",
+                      "kind": "",
+                      "status": "",
+                      "signal": "",
+                      "source": "",
+                      "support": "",
+                      "ts": ""
+                    }
+                  ],
+                  "omitted": 1
+                }
+              }
+            ],
+            "omitted": 0
+          },
+          "status_counts": {
+            "missing": 1
+          },
+          "filter_task": null,
+          "total_declared_criteria": 1,
+          "tasks_without_criterion_link": {
+            "total": 1,
+            "items": [
+              "t1"
+            ],
+            "omitted": 0
+          },
+          "plan_acceptance_not_landing": true,
+          "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+        },
+        "inbox": {
+          "schema": 1,
+          "kind": "oms-action-inbox",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "tasks": {
+            "total": 1,
+            "items": [
+              {
+                "task_id": "t1",
+                "title": "\ud55c\uae00??",
+                "state": "ready",
+                "canonical_actionable": true,
+                "conflicting_projection": false,
+                "depends_waiting": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                },
+                "reasons": [
+                  {
+                    "code": "ready",
+                    "detail": "Recorded task state; not a completion receipt."
+                  }
+                ],
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "actions": {
+            "total": 1,
+            "items": [
+              {
+                "id": "execute_ready_task",
+                "priority": 80,
+                "authority": "worktree_write",
+                "reason": "one task ready",
+                "command": "oms plan-run --next",
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "filter_task": null,
+          "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+        },
+        "limitation": "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.",
+        "baseline_at": "2026-11-10T00:00:00Z",
+        "baseline_state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_scope_matches": true,
+        "mismatch_reasons": [],
+        "head_changed": false,
+        "source_changes": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "same_snapshot_digest": true,
+        "changes": {
+          "tasks": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 1,
+              "items": [
+                {
+                  "id": "t1",
+                  "before": "ready",
+                  "after": "ready",
+                  "changed_fields": [
+                    "title"
+                  ]
+                }
+              ],
+              "omitted": 0
+            }
+          },
+          "criteria": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 1,
+              "items": [
+                {
+                  "id": "req1",
+                  "before": "missing",
+                  "after": "missing",
+                  "changed_fields": [
+                    "evidence"
+                  ]
+                }
+              ],
+              "omitted": 0
+            }
+          }
+        }
+      }
+    ],
+    "texts": [
+      "oms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=unknown link=unrecorded\n  \ud655\uc778\ud560 \uae30\uc900\n  evidence: e1 [] \n  evidence omitted: 1\ntasks without recorded link: 1 (1 shown)\n  t1\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n",
+      "oms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \ud55c\uae00??\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n",
+      "oms-return-brief\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nbaseline: compared; event history: incomplete\nscope: same recorded lineage\ntasks\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  t1: ready -> ready (title)\n  changed omitted: 0\ncriteria\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  req1: missing -> missing (evidence)\n  changed omitted: 0\nsource changes omitted: 0\n\noms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=unknown link=unrecorded\n  \ud655\uc778\ud560 \uae30\uc900\n  evidence: e1 [] \n  evidence omitted: 1\ntasks without recorded link: 1 (1 shown)\n  t1\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n\n\noms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \ud55c\uae00??\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n\nSnapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.\n"
+    ]
+  },
+  {
+    "current": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [
+              "gone"
+            ],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": false,
+          "blocker": "blocked"
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "before": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "limit": 20,
+    "reports": [
+      {
+        "schema": 1,
+        "kind": "oms-evidence-matrix",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "criteria": {
+          "total": 1,
+          "items": [
+            {
+              "criterion_id": "req1",
+              "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+              "status": "missing",
+              "task_id": "t1",
+              "link": "plan-task-lineage",
+              "task_state": "ready",
+              "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "evidence": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              }
+            }
+          ],
+          "omitted": 0
+        },
+        "status_counts": {
+          "missing": 1
+        },
+        "filter_task": null,
+        "total_declared_criteria": 1,
+        "tasks_without_criterion_link": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "plan_acceptance_not_landing": true,
+        "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-action-inbox",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "tasks": {
+          "total": 1,
+          "items": [
+            {
+              "task_id": "t1",
+              "title": "\uad6c\ud604 t1",
+              "state": "ready",
+              "canonical_actionable": true,
+              "conflicting_projection": true,
+              "depends_waiting": {
+                "total": 1,
+                "items": [
+                  {
+                    "task_id": "gone",
+                    "state": "unknown",
+                    "reason": "dependency-missing"
+                  }
+                ],
+                "omitted": 0
+              },
+              "reasons": [
+                {
+                  "code": "plan-contract-blocked",
+                  "detail": "blocked"
+                },
+                {
+                  "code": "dependencies-unfinished",
+                  "detail": "Cancelled tasks do not satisfy dependencies."
+                },
+                {
+                  "code": "conflicting-projection",
+                  "detail": "Re-read canonical plan state before acting."
+                }
+              ],
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "actions": {
+          "total": 1,
+          "items": [
+            {
+              "id": "execute_ready_task",
+              "priority": 80,
+              "authority": "worktree_write",
+              "reason": "one task ready",
+              "command": "oms plan-run --next",
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "filter_task": null,
+        "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-return-brief",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "baseline": "compared",
+        "history_complete": false,
+        "current": {
+          "schema": 1,
+          "kind": "oms-evidence-matrix",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "criteria": {
+            "total": 1,
+            "items": [
+              {
+                "criterion_id": "req1",
+                "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+                "status": "missing",
+                "task_id": "t1",
+                "link": "plan-task-lineage",
+                "task_state": "ready",
+                "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "evidence": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                }
+              }
+            ],
+            "omitted": 0
+          },
+          "status_counts": {
+            "missing": 1
+          },
+          "filter_task": null,
+          "total_declared_criteria": 1,
+          "tasks_without_criterion_link": {
+            "total": 0,
+            "items": [],
+            "omitted": 0
+          },
+          "plan_acceptance_not_landing": true,
+          "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+        },
+        "inbox": {
+          "schema": 1,
+          "kind": "oms-action-inbox",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "tasks": {
+            "total": 1,
+            "items": [
+              {
+                "task_id": "t1",
+                "title": "\uad6c\ud604 t1",
+                "state": "ready",
+                "canonical_actionable": true,
+                "conflicting_projection": true,
+                "depends_waiting": {
+                  "total": 1,
+                  "items": [
+                    {
+                      "task_id": "gone",
+                      "state": "unknown",
+                      "reason": "dependency-missing"
+                    }
+                  ],
+                  "omitted": 0
+                },
+                "reasons": [
+                  {
+                    "code": "plan-contract-blocked",
+                    "detail": "blocked"
+                  },
+                  {
+                    "code": "dependencies-unfinished",
+                    "detail": "Cancelled tasks do not satisfy dependencies."
+                  },
+                  {
+                    "code": "conflicting-projection",
+                    "detail": "Re-read canonical plan state before acting."
+                  }
+                ],
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "actions": {
+            "total": 1,
+            "items": [
+              {
+                "id": "execute_ready_task",
+                "priority": 80,
+                "authority": "worktree_write",
+                "reason": "one task ready",
+                "command": "oms plan-run --next",
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "filter_task": null,
+          "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+        },
+        "limitation": "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.",
+        "baseline_at": "2026-11-10T00:00:00Z",
+        "baseline_state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_scope_matches": true,
+        "mismatch_reasons": [],
+        "head_changed": false,
+        "source_changes": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "same_snapshot_digest": true,
+        "changes": {
+          "tasks": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          },
+          "criteria": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          }
+        }
+      }
+    ],
+    "texts": [
+      "oms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=t1 link=plan-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 0 (0 shown)\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n",
+      "oms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  plan-contract-blocked: blocked\n  dependencies-unfinished: Cancelled tasks do not satisfy dependencies.\n  conflicting-projection: Re-read canonical plan state before acting.\n  waits: gone [unknown]\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n",
+      "oms-return-brief\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nbaseline: compared; event history: incomplete\nscope: same recorded lineage\ntasks\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\ncriteria\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\nsource changes omitted: 0\n\noms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=t1 link=plan-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 0 (0 shown)\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n\n\noms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  plan-contract-blocked: blocked\n  dependencies-unfinished: Cancelled tasks do not satisfy dependencies.\n  conflicting-projection: Re-read canonical plan state before acting.\n  waits: gone [unknown]\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n\nSnapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.\n"
+    ]
+  },
+  {
+    "current": {
+      "schema": 2,
+      "generated_at": "2026-11-10T09:00:00+09:00",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "stale",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "before": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "limit": 20,
+    "reports": [
+      {
+        "schema": 1,
+        "kind": "oms-evidence-matrix",
+        "generated_at": "2026-11-10T09:00:00+09:00",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "criteria": {
+          "total": 1,
+          "items": [
+            {
+              "criterion_id": "req1",
+              "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+              "status": "stale",
+              "task_id": "t1",
+              "link": "plan-task-lineage",
+              "task_state": "ready",
+              "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "evidence": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              }
+            }
+          ],
+          "omitted": 0
+        },
+        "status_counts": {
+          "stale": 1
+        },
+        "filter_task": null,
+        "total_declared_criteria": 1,
+        "tasks_without_criterion_link": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "plan_acceptance_not_landing": true,
+        "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-action-inbox",
+        "generated_at": "2026-11-10T09:00:00+09:00",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "tasks": {
+          "total": 1,
+          "items": [
+            {
+              "task_id": "t1",
+              "title": "\uad6c\ud604 t1",
+              "state": "ready",
+              "canonical_actionable": true,
+              "conflicting_projection": false,
+              "depends_waiting": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              },
+              "reasons": [
+                {
+                  "code": "ready",
+                  "detail": "Recorded task state; not a completion receipt."
+                }
+              ],
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "actions": {
+          "total": 1,
+          "items": [
+            {
+              "id": "execute_ready_task",
+              "priority": 80,
+              "authority": "worktree_write",
+              "reason": "one task ready",
+              "command": "oms plan-run --next",
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "filter_task": null,
+        "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-return-brief",
+        "generated_at": "2026-11-10T09:00:00+09:00",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "baseline": "compared",
+        "history_complete": false,
+        "current": {
+          "schema": 1,
+          "kind": "oms-evidence-matrix",
+          "generated_at": "2026-11-10T09:00:00+09:00",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "criteria": {
+            "total": 1,
+            "items": [
+              {
+                "criterion_id": "req1",
+                "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+                "status": "stale",
+                "task_id": "t1",
+                "link": "plan-task-lineage",
+                "task_state": "ready",
+                "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "evidence": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                }
+              }
+            ],
+            "omitted": 0
+          },
+          "status_counts": {
+            "stale": 1
+          },
+          "filter_task": null,
+          "total_declared_criteria": 1,
+          "tasks_without_criterion_link": {
+            "total": 0,
+            "items": [],
+            "omitted": 0
+          },
+          "plan_acceptance_not_landing": true,
+          "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+        },
+        "inbox": {
+          "schema": 1,
+          "kind": "oms-action-inbox",
+          "generated_at": "2026-11-10T09:00:00+09:00",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "tasks": {
+            "total": 1,
+            "items": [
+              {
+                "task_id": "t1",
+                "title": "\uad6c\ud604 t1",
+                "state": "ready",
+                "canonical_actionable": true,
+                "conflicting_projection": false,
+                "depends_waiting": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                },
+                "reasons": [
+                  {
+                    "code": "ready",
+                    "detail": "Recorded task state; not a completion receipt."
+                  }
+                ],
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "actions": {
+            "total": 1,
+            "items": [
+              {
+                "id": "execute_ready_task",
+                "priority": 80,
+                "authority": "worktree_write",
+                "reason": "one task ready",
+                "command": "oms plan-run --next",
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "filter_task": null,
+          "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+        },
+        "limitation": "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.",
+        "baseline_at": "2026-11-10T00:00:00Z",
+        "baseline_state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_scope_matches": true,
+        "mismatch_reasons": [],
+        "head_changed": false,
+        "source_changes": {
+          "total": 1,
+          "items": [
+            {
+              "path": "PROJECT.md",
+              "before": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "after": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "omitted": 0
+        },
+        "same_snapshot_digest": true,
+        "changes": {
+          "tasks": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          },
+          "criteria": {
+            "transitions_suppressed": false,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 1,
+              "items": [
+                {
+                  "id": "req1",
+                  "before": "missing",
+                  "after": "stale",
+                  "changed_fields": [
+                    "status"
+                  ]
+                }
+              ],
+              "omitted": 0
+            }
+          }
+        }
+      }
+    ],
+    "texts": [
+      "oms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [stale] task=t1 link=plan-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 0 (0 shown)\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n",
+      "oms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n",
+      "oms-return-brief\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nbaseline: compared; event history: incomplete\nscope: same recorded lineage\ntasks\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\ncriteria\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  req1: missing -> stale (status)\n  changed omitted: 0\nsource changed: PROJECT.md\nsource changes omitted: 0\n\noms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [stale] task=t1 link=plan-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 0 (0 shown)\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n\n\noms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n\nSnapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.\n"
+    ]
+  },
+  {
+    "current": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_changed",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "done",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "before": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "limit": 20,
+    "reports": [
+      {
+        "schema": 1,
+        "kind": "oms-evidence-matrix",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_changed",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "criteria": {
+          "total": 1,
+          "items": [
+            {
+              "criterion_id": "req1",
+              "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+              "status": "missing",
+              "task_id": null,
+              "link": "unrecorded",
+              "task_state": null,
+              "verify_digest": null,
+              "evidence": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              }
+            }
+          ],
+          "omitted": 0
+        },
+        "status_counts": {
+          "missing": 1
+        },
+        "filter_task": null,
+        "total_declared_criteria": 1,
+        "tasks_without_criterion_link": {
+          "total": 1,
+          "items": [
+            "t1"
+          ],
+          "omitted": 0
+        },
+        "plan_acceptance_not_landing": true,
+        "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-action-inbox",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_changed",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "tasks": {
+          "total": 1,
+          "items": [
+            {
+              "task_id": "t1",
+              "title": "\uad6c\ud604 t1",
+              "state": "done",
+              "canonical_actionable": true,
+              "conflicting_projection": true,
+              "depends_waiting": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              },
+              "reasons": [
+                {
+                  "code": "conflicting-projection",
+                  "detail": "Re-read canonical plan state before acting."
+                }
+              ],
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "actions": {
+          "total": 1,
+          "items": [
+            {
+              "id": "execute_ready_task",
+              "priority": 80,
+              "authority": "worktree_write",
+              "reason": "one task ready",
+              "command": "oms plan-run --next",
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "filter_task": null,
+        "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-return-brief",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_changed",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "baseline": "compared",
+        "history_complete": false,
+        "current": {
+          "schema": 1,
+          "kind": "oms-evidence-matrix",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_changed",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "criteria": {
+            "total": 1,
+            "items": [
+              {
+                "criterion_id": "req1",
+                "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+                "status": "missing",
+                "task_id": null,
+                "link": "unrecorded",
+                "task_state": null,
+                "verify_digest": null,
+                "evidence": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                }
+              }
+            ],
+            "omitted": 0
+          },
+          "status_counts": {
+            "missing": 1
+          },
+          "filter_task": null,
+          "total_declared_criteria": 1,
+          "tasks_without_criterion_link": {
+            "total": 1,
+            "items": [
+              "t1"
+            ],
+            "omitted": 0
+          },
+          "plan_acceptance_not_landing": true,
+          "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+        },
+        "inbox": {
+          "schema": 1,
+          "kind": "oms-action-inbox",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_changed",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "tasks": {
+            "total": 1,
+            "items": [
+              {
+                "task_id": "t1",
+                "title": "\uad6c\ud604 t1",
+                "state": "done",
+                "canonical_actionable": true,
+                "conflicting_projection": true,
+                "depends_waiting": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                },
+                "reasons": [
+                  {
+                    "code": "conflicting-projection",
+                    "detail": "Re-read canonical plan state before acting."
+                  }
+                ],
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "actions": {
+            "total": 1,
+            "items": [
+              {
+                "id": "execute_ready_task",
+                "priority": 80,
+                "authority": "worktree_write",
+                "reason": "one task ready",
+                "command": "oms plan-run --next",
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "filter_task": null,
+          "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+        },
+        "limitation": "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.",
+        "baseline_at": "2026-11-10T00:00:00Z",
+        "baseline_state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_scope_matches": false,
+        "mismatch_reasons": [
+          "plan-lineage-changed"
+        ],
+        "head_changed": false,
+        "source_changes": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "same_snapshot_digest": true,
+        "changes": {
+          "tasks": {
+            "transitions_suppressed": true,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          },
+          "criteria": {
+            "transitions_suppressed": true,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          }
+        }
+      }
+    ],
+    "texts": [
+      "oms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=unknown link=unrecorded\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 1 (1 shown)\n  t1\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n",
+      "oms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [done]: \uad6c\ud604 t1\n  conflicting-projection: Re-read canonical plan state before acting.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n",
+      "oms-return-brief\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nbaseline: compared; event history: incomplete\nscope: plan-lineage-changed\ntasks (transitions suppressed)\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\ncriteria (transitions suppressed)\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\nsource changes omitted: 0\n\noms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=unknown link=unrecorded\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 1 (1 shown)\n  t1\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n\n\noms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [done]: \uad6c\ud604 t1\n  conflicting-projection: Re-read canonical plan state before acting.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n\nSnapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.\n"
+    ]
+  },
+  {
+    "current": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false,
+        "task_id": "active2"
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "",
+          "evidence": [],
+          "active_task_id": "active2"
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "before": {
+      "schema": 2,
+      "generated_at": "2026-11-10T00:00:00Z",
+      "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "branch": "fixture"
+      },
+      "task": {
+        "present": false
+      },
+      "plan": {
+        "present": true,
+        "plan_id": "plan_11111111111111111111111111111111",
+        "tasks": [
+          {
+            "id": "t1",
+            "title": "\uad6c\ud604 t1",
+            "state": "ready",
+            "depends": [],
+            "verify_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "verify_present": true
+          }
+        ],
+        "actionable": [
+          "t1"
+        ],
+        "contract": {
+          "bound": true,
+          "satisfied": true
+        }
+      },
+      "criteria": [
+        {
+          "id": "req1",
+          "text": "\ud655\uc778\ud560 \uae30\uc900",
+          "status": "missing",
+          "source": "plan-task",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "plan_task_id": "t1",
+          "evidence": []
+        }
+      ],
+      "sources": [
+        {
+          "path": "PROJECT.md",
+          "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      ],
+      "next_actions": [
+        {
+          "id": "execute_ready_task",
+          "priority": 80,
+          "authority": "worktree_write",
+          "reason": "one task ready",
+          "command": "oms plan-run --next"
+        }
+      ]
+    },
+    "limit": 20,
+    "reports": [
+      {
+        "schema": 1,
+        "kind": "oms-evidence-matrix",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "criteria": {
+          "total": 1,
+          "items": [
+            {
+              "criterion_id": "req1",
+              "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+              "status": "missing",
+              "task_id": "active2",
+              "link": "active-task-lineage",
+              "task_state": null,
+              "verify_digest": null,
+              "evidence": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              }
+            }
+          ],
+          "omitted": 0
+        },
+        "status_counts": {
+          "missing": 1
+        },
+        "filter_task": null,
+        "total_declared_criteria": 1,
+        "tasks_without_criterion_link": {
+          "total": 1,
+          "items": [
+            "t1"
+          ],
+          "omitted": 0
+        },
+        "plan_acceptance_not_landing": true,
+        "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-action-inbox",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "tasks": {
+          "total": 1,
+          "items": [
+            {
+              "task_id": "t1",
+              "title": "\uad6c\ud604 t1",
+              "state": "ready",
+              "canonical_actionable": true,
+              "conflicting_projection": false,
+              "depends_waiting": {
+                "total": 0,
+                "items": [],
+                "omitted": 0
+              },
+              "reasons": [
+                {
+                  "code": "ready",
+                  "detail": "Recorded task state; not a completion receipt."
+                }
+              ],
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "actions": {
+          "total": 1,
+          "items": [
+            {
+              "id": "execute_ready_task",
+              "priority": 80,
+              "authority": "worktree_write",
+              "reason": "one task ready",
+              "command": "oms plan-run --next",
+              "next_actor": "parent-controller",
+              "human_decision_required": null
+            }
+          ],
+          "omitted": 0
+        },
+        "filter_task": null,
+        "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+      },
+      {
+        "schema": 1,
+        "kind": "oms-return-brief",
+        "generated_at": "2026-11-10T00:00:00Z",
+        "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_id": "plan_11111111111111111111111111111111",
+        "read_only": true,
+        "authoritative": false,
+        "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+        "baseline": "compared",
+        "history_complete": false,
+        "current": {
+          "schema": 1,
+          "kind": "oms-evidence-matrix",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "criteria": {
+            "total": 1,
+            "items": [
+              {
+                "criterion_id": "req1",
+                "criterion": "\ud655\uc778\ud560 \uae30\uc900",
+                "status": "missing",
+                "task_id": "active2",
+                "link": "active-task-lineage",
+                "task_state": null,
+                "verify_digest": null,
+                "evidence": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                }
+              }
+            ],
+            "omitted": 0
+          },
+          "status_counts": {
+            "missing": 1
+          },
+          "filter_task": null,
+          "total_declared_criteria": 1,
+          "tasks_without_criterion_link": {
+            "total": 1,
+            "items": [
+              "t1"
+            ],
+            "omitted": 0
+          },
+          "plan_acceptance_not_landing": true,
+          "limitation": "No new covers mappings or landed-commit links are invented; existing evidence decides criterion status."
+        },
+        "inbox": {
+          "schema": 1,
+          "kind": "oms-action-inbox",
+          "generated_at": "2026-11-10T00:00:00Z",
+          "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "plan_id": "plan_11111111111111111111111111111111",
+          "read_only": true,
+          "authoritative": false,
+          "note": "Read-time projection only. Commands are text, not execution or permission. Missing links are not inferred.",
+          "tasks": {
+            "total": 1,
+            "items": [
+              {
+                "task_id": "t1",
+                "title": "\uad6c\ud604 t1",
+                "state": "ready",
+                "canonical_actionable": true,
+                "conflicting_projection": false,
+                "depends_waiting": {
+                  "total": 0,
+                  "items": [],
+                  "omitted": 0
+                },
+                "reasons": [
+                  {
+                    "code": "ready",
+                    "detail": "Recorded task state; not a completion receipt."
+                  }
+                ],
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "actions": {
+            "total": 1,
+            "items": [
+              {
+                "id": "execute_ready_task",
+                "priority": 80,
+                "authority": "worktree_write",
+                "reason": "one task ready",
+                "command": "oms plan-run --next",
+                "next_actor": "parent-controller",
+                "human_decision_required": null
+              }
+            ],
+            "omitted": 0
+          },
+          "filter_task": null,
+          "limitation": "Authority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs."
+        },
+        "limitation": "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.",
+        "baseline_at": "2026-11-10T00:00:00Z",
+        "baseline_state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "recorded_scope_matches": false,
+        "mismatch_reasons": [
+          "active-task-changed"
+        ],
+        "head_changed": false,
+        "source_changes": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "same_snapshot_digest": true,
+        "changes": {
+          "tasks": {
+            "transitions_suppressed": true,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          },
+          "criteria": {
+            "transitions_suppressed": true,
+            "added": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "removed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            },
+            "changed": {
+              "total": 0,
+              "items": [],
+              "omitted": 0
+            }
+          }
+        }
+      }
+    ],
+    "texts": [
+      "oms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=active2 link=active-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 1 (1 shown)\n  t1\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n",
+      "oms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n",
+      "oms-return-brief\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nbaseline: compared; event history: incomplete\nscope: active-task-changed\ntasks (transitions suppressed)\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\ncriteria (transitions suppressed)\n  added: none; 0 omitted\n  removed: none; 0 omitted\n  changed omitted: 0\nsource changes omitted: 0\n\noms-evidence-matrix\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\ncriteria: 1 shown / 1; 0 omitted\nreq1 [missing] task=active2 link=active-task-lineage\n  \ud655\uc778\ud560 \uae30\uc900\ntasks without recorded link: 1 (1 shown)\n  t1\nNo new covers mappings or landed-commit links are invented; existing evidence decides criterion status.\n\n\noms-action-inbox\nread-only; no approval or verification is created\nRead-time projection only. Commands are text, not execution or permission. Missing links are not inferred.\nt1 [ready]: \uad6c\ud604 t1\n  ready: Recorded task state; not a completion receipt.\ntasks omitted: 0\nCanonical suggested actions (not executed):\n  execute_ready_task [worktree_write]: one task ready -> oms plan-run --next\nactions omitted: 0\nAuthority labels do not identify a human. No inferred root cause, claim, retry, dispatch or approval occurs.\n\nSnapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed.\n"
+    ]
+  }
+]
