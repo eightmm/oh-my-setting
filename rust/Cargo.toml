@@ -2,6 +2,7 @@
 members = [
     "crates/oms-context",
     "crates/oms-context-report",
+    "crates/oms-context-session",
     "crates/oms-graph-shell",
     "crates/oms-json",
     "crates/oms-migrate",

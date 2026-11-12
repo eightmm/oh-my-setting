@@ -41,12 +41,14 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains six implemented native libraries: context
+The workspace now also contains seven implemented native libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
-encodings, output selection, Shell graph extraction and context text reports.
+encodings, output selection, Shell graph extraction, context text reports and
+injection/session/timeline projections.
 They have scoped native tests and independent review. The native compiler floor
 is 1.99.1; the preparation inventory tool separately retains its 1.85 minimum.
-Public CLI/session integration and Python graph extraction remain in progress.
+Public CLI integration, safe session acquisition and Python graph extraction
+remain in progress.
 No installed command, MCP transport, hook, lifecycle operation or state writer
 has switched to Rust, and no legacy source domain has yet been deleted.
 Library counts and local commits do not satisfy M1 or M6 retirement gates.

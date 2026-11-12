@@ -1,14 +1,15 @@
 # Rust migration workspace
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
-It contains the development inventory tool `oms-migrate` and six native libraries:
+It contains the development inventory tool `oms-migrate` and seven native libraries:
 `oms-context` (manifest projections and lossless session JSON input), `oms-safe-fs`
 (descriptor-relative reads), `oms-json` (domain byte encodings), `oms-output`
 (digest selection), `oms-graph-shell` (source graph extraction), and
-`oms-context-report` (text reports). These are implemented foundations; the
+`oms-context-report` (text reports), and `oms-context-session` (injection, session
+and timeline projections). These are implemented foundations; the
 installed `oms` command still uses the legacy runtime. No legacy domain is retired.
-The native public CLI, complete session consumers and Python graph parser remain
-separate integration work.
+The native public CLI, safe acquisition of session inputs and Python graph parser
+remain separate integration work.
 
 ## Toolchain and checks
 
@@ -40,12 +41,14 @@ Cargo's `--offline` controls dependency access, not rustup toolchain installatio
 The explicit locked fetch seeds the dependency cache before the offline checks.
 A toolchain pin alone does not prove the Ubuntu 20.04 or macOS deployment floor.
 
-The existing [test workflow](../.github/workflows/test.yml) selects one Ubuntu
-Rust lane for Rust/migration changes or changes on the inventory's candidate
+The existing [test workflow](../.github/workflows/test.yml) selects one scoped
+Ubuntu/macOS Rust matrix for Rust/migration changes or changes on the inventory's candidate
 surfaces. Scheduled/manual runs and an unknown comparison base also select it.
 The stable gate requires this lane to pass when selected and permits a skip only
-when the scope decision excludes it. This supplements existing legacy checks;
-it is not yet native-runtime or cross-platform compatibility evidence.
+when the scope decision excludes it. This supplements existing
+legacy checks and executes native filesystem tests on both host families when
+selected. A local configuration change is not a completed
+CI run or proof of the oldest supported deployment targets.
 
 ## Legacy Python inventory
 
