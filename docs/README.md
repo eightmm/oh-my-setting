@@ -27,6 +27,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 |---|---|
 | [Contributing](../CONTRIBUTING.md) | Scoped checks, publication, style and compatibility |
 | [OMS runtime](OMS-RUNTIME.md) | Typed contracts, backends, evidence and adapters |
+| [Rust migration](RUST-MIGRATION.md) | Full Rust target, temporary legacy boundaries, cutover and removal criteria |
 | [Graph engineering](GRAPH-ENGINEERING.md) | Schemas, lifecycle, validation and CLI |
 | [Stabilization plan](STABILIZATION-PLAN.md) | Prioritized reliability work and bounded offline verification |
 | [Control-plane evolution](CONTROL-PLANE-EVOLUTION.md) | Proposed panel/observation work, acceptance criteria and implementation slices |

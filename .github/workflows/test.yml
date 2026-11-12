@@ -127,16 +127,46 @@ jobs:
   # affected_operator starts right after this selection.
   affected_plan:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 16
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       native: ${{ steps.plan.outputs.native }}
       python: ${{ steps.plan.outputs.python }}
       operator: ${{ steps.plan.outputs.operator }}
+      rust: ${{ steps.rust_scope.outputs.required }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: select Rust migration checks
+        id: rust_scope
+        timeout-minutes: 1
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          required=true
+          if { [ "$EVENT_NAME" = pull_request ] || [ "$EVENT_NAME" = push ]; } && \
+              git rev-parse --verify "$DIFF_BASE^{tree}" >/dev/null 2>&1; then
+            git diff --no-renames --name-only -z "$DIFF_BASE" HEAD > "$RUNNER_TEMP/oms-rust-paths"
+            required=false
+            while IFS= read -r -d '' path; do
+              case "${path,,}" in
+                rust/*|migration/*|*.py|*.pyw|*.sh|*.bash|*.zsh|*.fish|*.js|*.mjs|*.cjs|*.json|*.yaml|*.yml|*.toml)
+                  required=true ;;
+                *)
+                  name="${path##*/}"
+                  # A leading dot alone is not a filename extension.
+                  case "${name#.}" in
+                    *.) required=true ;;
+                    *.*) ;;
+                    *) required=true ;;
+                  esac
+                  ;;
+              esac
+            done < "$RUNNER_TEMP/oms-rust-paths"
+          fi
+          printf 'required=%s\n' "$required" >> "$GITHUB_OUTPUT"
       - name: select affected changes
         id: plan
         timeout-minutes: 10
@@ -283,6 +313,30 @@ jobs:
           bash tests/install-profile-smoke.sh
           bash tests/codex-hud-config-smoke.sh
 
+  # The legacy footprint guard must also run when Python-bearing source or
+  # configuration changes. Rust-only path selection would miss new dependencies.
+  rust:
+    needs: affected_plan
+    if: needs.affected_plan.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: install pinned Rust toolchain
+        timeout-minutes: 5
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
+          rustc +1.85.1 --version
+          cargo +1.85.1 --version
+      - name: Rust migration foundation
+        timeout-minutes: 10
+        run: |
+          cargo +1.85.1 fmt --manifest-path rust/Cargo.toml --all -- --check
+          cargo +1.85.1 check --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.85.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
+          cargo +1.85.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.85.1 run --manifest-path rust/Cargo.toml --locked --offline -p oms-migrate -- check --repo .
+
   # The affected selection defers operator-tools here: run 40167526634 spent
   # 1956 s in affected_plan with the suite competing against the other
   # selected stages on one 4 vCPU runner, versus about 605 s when run alone.
@@ -310,7 +364,7 @@ jobs:
   # are accepted; missing, failed, and cancelled required jobs fail closed.
   gate:
     if: always()
-    needs: [lint, focused, smoke_shard, operator_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311]
+    needs: [lint, focused, smoke_shard, operator_shard, affected_plan, affected_verify, affected_operator, install_e2e, python311, rust]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -326,10 +380,12 @@ jobs:
           AFFECTED_MODE: ${{ needs.affected_plan.outputs.mode }}
           AFFECTED_NATIVE: ${{ needs.affected_plan.outputs.native }}
           AFFECTED_PYTHON: ${{ needs.affected_plan.outputs.python }}
+          AFFECTED_RUST: ${{ needs.affected_plan.outputs.rust }}
           AFFECTED_OPERATOR: ${{ needs.affected_plan.outputs.operator }}
           AFFECTED_OPERATOR_RESULT: ${{ needs.affected_operator.result }}
           INSTALL_E2E_RESULT: ${{ needs.install_e2e.result }}
           PYTHON311_RESULT: ${{ needs.python311.result }}
+          RUST_RESULT: ${{ needs.rust.result }}
         run: |
           status=0
           [ "$AFFECTED_PLAN_RESULT" = success ] || status=1
@@ -375,7 +431,13 @@ jobs:
             *) python_expected=invalid; status=1 ;;
           esac
           [ "$PYTHON311_RESULT" = "$python_expected" ] || status=1
+          case "$AFFECTED_RUST" in
+            true) rust_expected=success ;;
+            false) rust_expected=skipped ;;
+            *) rust_expected=invalid; status=1 ;;
+          esac
+          [ "$RUST_RESULT" = "$rust_expected" ] || status=1
           if [ "$status" -ne 0 ]; then
-            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT operator_shards=$OPERATOR_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT" >&2
+            echo "scope results: plan=$AFFECTED_PLAN_RESULT/$AFFECTED_MODE focused=$FOCUSED_RESULT smoke=$SMOKE_SHARD_RESULT operator_shards=$OPERATOR_SHARD_RESULT verify=$AFFECTED_VERIFY_RESULT operator=$AFFECTED_OPERATOR_RESULT rust=$RUST_RESULT/$AFFECTED_RUST" >&2
           fi
           exit "$status"

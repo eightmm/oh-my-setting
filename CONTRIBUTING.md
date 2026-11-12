@@ -56,6 +56,24 @@ scenario until it has conformance scenarios of its own.
 
 ## Style
 
+### Rust migration
+
+The accepted target is a fully Rust OMS with no OMS-owned Python requirement
+for runtime, installation, builds, tests, parsers or evaluation. Existing
+Python and substantive Bash implementations are temporary migration sources;
+the current host and provider contracts still apply until each cutover.
+See the [migration decision and removal plan](docs/RUST-MIGRATION.md) and
+[Rust development commands](rust/README.md).
+
+The preparation workspace does not replace the installed `oms` command.
+Its inventory check rejects new or increased recorded Python footprint;
+removals and reductions are allowed. An intentional baseline increase needs
+a PR explanation, the affected migration milestone and a removal condition.
+Do not regenerate the baseline as an automatic CI fix. The lexical inventory
+is a migration aid; passing it does not establish a Python-free runtime.
+
+### Current source conventions
+
 - Bash 5.0+, `set -euo pipefail`, GNU/BSD-compatible on Linux, WSL2 and macOS.
   Only the prelude of `install.sh` above its Bash 5 check stays parseable by
   Bash 3.2, so macOS's system Bash can find a newer Bash or print the hint.

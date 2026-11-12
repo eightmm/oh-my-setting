@@ -466,7 +466,7 @@ import os
 import subprocess
 script = body.split("        run: |\n", 1)[1]
 script = "\n".join(line[10:] for line in script.splitlines())
-full_jobs = required - {"affected_plan", "affected_verify", "affected_operator"}
+full_jobs = required - {"affected_plan", "affected_verify", "affected_operator", "rust"}
 operator_job = workflow_text.split("\n  affected_operator:\n", 1)[1].split("\n  #", 1)[0]
 operator_job = re.split(r"\n  [A-Za-z0-9_-]+:\n", operator_job, maxsplit=1)[0]
 assert "    needs: affected_plan\n" in operator_job
@@ -480,8 +480,9 @@ for mode in ("full", "affected"):
   for operator in ("", "section-shell", "all"):
    for native in ("true", "false"):
     for python in ("true", "false"):
+      for rust in ("true", "false"):
         env = dict(os.environ, AFFECTED_MODE=mode, AFFECTED_NATIVE=native, AFFECTED_PYTHON=python,
-                   AFFECTED_PLAN_RESULT="success",
+                   AFFECTED_PLAN_RESULT="success", AFFECTED_RUST=rust,
                    AFFECTED_OPERATOR=operator)
         env["AFFECTED_OPERATOR_RESULT"] = "success" if mode == "affected" and operator else "skipped"
         env["AFFECTED_VERIFY_RESULT"] = "success" if mode == "affected" else "skipped"
@@ -489,6 +490,7 @@ for mode in ("full", "affected"):
                     for name in full_jobs})
         env["PYTHON311_RESULT"] = "success" if python == "true" or mode == "full" else "skipped"
         env["INSTALL_E2E_RESULT"] = "success" if native == "true" or mode == "full" else "skipped"
+        env["RUST_RESULT"] = "success" if rust == "true" else "skipped"
         def passes(values):
             return subprocess.run(["bash", "-eu", "-c", script], env=values,
                                   capture_output=True).returncode == 0
@@ -502,6 +504,7 @@ for mode in ("full", "affected"):
         for invalid in ("", "unknown"):
             assert not passes(dict(env, AFFECTED_NATIVE=invalid))
             assert not passes(dict(env, AFFECTED_PYTHON=invalid))
+            assert not passes(dict(env, AFFECTED_RUST=invalid))
 
 # Execute the native matrix alternatives as data and pin the plan expression.
 import json
@@ -527,6 +530,67 @@ for name in full_jobs:
     assert "    if: %s\n" % condition in job, name
 plan_body = workflow_text.split("\n  affected_plan:\n", 1)[1].split("\n  install_e2e:\n", 1)[0]
 plan_body, verify_body = plan_body.split("\n  affected_verify:\n", 1)
+rust_body = workflow_text.split("\n  rust:\n", 1)[1].split("\n  #", 1)[0]
+assert "    needs: affected_plan\n" in rust_body
+assert "    if: needs.affected_plan.outputs.rust == 'true'\n" in rust_body
+assert "rust: ${{ steps.rust_scope.outputs.required }}" in plan_body
+assert "continue-on-error" not in rust_body
+for command in ("fmt", "check", "clippy", "test", "run"):
+    assert "cargo +1.85.1 " + command + " --manifest-path rust/Cargo.toml" in rust_body, command
+assert "--workspace --all-targets --locked --offline -- -D warnings" in rust_body
+assert "-p oms-migrate -- check --repo ." in rust_body
+toolchain = pathlib.Path(sys.argv[1]).parents[2] / "rust/rust-toolchain.toml"
+assert 'channel = "1.85.1"' in toolchain.read_text(), "CI and the workspace toolchain diverged"
+rust_scope = plan_body.split("      - name: select Rust migration checks\n", 1)[1].split("      - name: select affected changes\n", 1)[0]
+rust_scope = rust_scope.split("        run: |\n", 1)[1]
+rust_scope = "\n".join(line[10:] for line in rust_scope.splitlines() if line.startswith("          "))
+subprocess.run(["bash", "-n"], input=rust_scope, text=True, check=True)
+with tempfile.TemporaryDirectory(prefix="oms-rust-scope-") as tmp:
+    root = pathlib.Path(tmp)
+    repo = root / "repo"
+    repo.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+                                        "-c", "core.hooksPath=/dev/null", *args], cwd=repo, text=True).strip()
+    git("init", "-q")
+    (repo / "README.md").write_text("baseline\n")
+    (repo / "old.py").write_text("pass\n")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    base = git("rev-parse", "HEAD")
+    output = root / "output"
+    def selection(event="pull_request", revision=base, prefix=""):
+        output.write_text("")
+        env = dict(os.environ, EVENT_NAME=event, DIFF_BASE=revision,
+                   RUNNER_TEMP=tmp, GITHUB_OUTPUT=str(output))
+        result = subprocess.run(["bash", "-eu", "-c", prefix + rust_scope], cwd=repo, env=env, capture_output=True)
+        return result.returncode, output.read_text()
+    for path, expected in (("docs/note.md", False), ("docs/note.rst", False),
+                           ("source.py", True), ("source.pyw", True),
+                           ("script.sh", True), ("script.bash", True), ("script.zsh", True), ("script.fish", True),
+                           ("source.js", True), ("source.mjs", True), ("source.cjs", True),
+                           ("config.json", True), ("config.yml", True), ("config.yaml", True), ("config.toml", True),
+                           ("rust/README.md", True), ("migration/python-inventory.tsv", True),
+                           (".gitignore", True), ("bin/tool", True), ("tool.", True),
+                           ("scripts/space and\nnewline.sh", True), ("UPPER.PY", True)):
+        file = repo / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("fixture\n")
+        git("add", "--", path)
+        git("commit", "-qm", "scope")
+        assert selection() == (0, "required=%s\n" % str(expected).lower()), path
+        git("reset", "--hard", "-q", base)
+    git("mv", "README.md", "renamed.py")
+    git("commit", "-qm", "rename to source")
+    assert selection() == (0, "required=true\n"), "rename hid a new Python path"
+    git("reset", "--hard", "-q", base)
+    git("rm", "-q", "old.py")
+    git("commit", "-qm", "remove source")
+    assert selection() == (0, "required=true\n"), "deletion bypassed inventory validation"
+    for event in ("schedule", "workflow_dispatch"):
+        assert selection(event=event) == (0, "required=true\n"), event
+    assert selection(revision="missing-base") == (0, "required=true\n")
+    assert selection(prefix='git() { [ "$1" = rev-parse ]; };\n')[0] != 0, "failed diff became a valid skip"
 assert "    needs: affected_plan\n" in verify_body
 assert "    if: needs.affected_plan.outputs.mode == 'affected'\n" in verify_body
 assert "    name: affected checks\n" in verify_body
