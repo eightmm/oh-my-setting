@@ -106,27 +106,12 @@ case "$STRATEGY" in auto|legacy) ;; *) fail_usage "--strategy must be auto or le
 
 # Print the digest of capture $1. $2 exit code or "", $3 ref or "", $4 duration or "".
 digest() {
-  local capture="$1" code="$2" ref="$3" duration="$4" withhold="" probe rc=0
-  local -a base=(python3 "$ROOT_LIB/output_digest.py" "$capture" --max-bytes "$MAX_BYTES" --head "$HEAD" --tail "$TAIL" --strategy "$STRATEGY")
+  local capture="$1" code="$2" ref="$3" duration="$4"
+  local -a base=(python3 "$ROOT_LIB/output_digest.py" "$capture" --max-bytes "$MAX_BYTES" --head "$HEAD" --tail "$TAIL" --strategy "$STRATEGY" --scan-output)
   [ -z "$code" ] || base+=(--exit-code "$code")
   [ -z "$ref" ] || base+=(--ref "$ref")
   [ -z "$duration" ] || base+=(--duration "$duration")
   [ -z "$CAPTURE_REPO" ] || base+=(--capture-repo "$CAPTURE_REPO")
-  # What leaves this tool is the shown lines, so those are what is scanned.
-  probe="$(mktemp)" || return 1
-  if ! "${base[@]}" > "$probe" 2>/dev/null; then
-    rm -f "$probe"
-    "${base[@]}" >/dev/null   # print the reader's own error
-    return 1
-  fi
-  agent_memory_file_secret_status "$probe" 2>/dev/null || rc=$?
-  rm -f "$probe"
-  case "$rc" in
-    1) ;;
-    0) withhold="the lines look like they carry a secret, so they are withheld; read the raw file yourself" ;;
-    *) withhold="the secret scan could not run, so the lines are withheld; read the raw file yourself" ;;
-  esac
-  [ -z "$withhold" ] || base+=(--withhold "$withhold")
   [ "$JSON" -eq 0 ] || base+=(--json)
   "${base[@]}"
 }

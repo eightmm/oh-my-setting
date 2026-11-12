@@ -42,7 +42,7 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from oms_graph import render as graph_render
-from output_capture import CaptureError, PAGE_BYTES, READ_CAP, read_capture
+from output_capture import COMPACT_RESPONSE_BYTES, CaptureError, PAGE_BYTES, READ_CAP, read_capture
 from peer_artifacts import artifact_sections, artifact_sections_stream, bounded_answer, tail_lines
 from peer_cancellation import valid_receipt
 
@@ -532,6 +532,9 @@ TOOLS = [
             "limit": {"type": "integer", "minimum": 4, "maximum": PAGE_BYTES,
                       "description": "Maximum content bytes, default 16384; never splits a character."},
             "query": {"type": "string", "description": "Case-sensitive literal, 1-256 UTF-8 bytes; up to 8 matches from offset. No regex; incompatible with limit."},
+            "compact": {"type": "boolean", "description": "Opt in to compact-v1: one read_base for all results. Merge next_read/next_search into read_base, or add offset=match.read_offset. Default false preserves the existing response."},
+            "queries": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string"},
+                        "description": "compact=true only: 1-8 literal queries, each 1-256 UTF-8 bytes and 1024 total. One verified snapshot; at most 8 hits total, shared across queries. No query or limit. Each search carries its continuation."},
         },
         "required": ["capture_ref"],
         "annotations": READ_ONLY,
@@ -1954,7 +1957,7 @@ def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
 
 
 def output_read(arguments: dict) -> tuple[str, bool]:
-    if set(arguments) - {"repo", "capture_ref", "offset", "limit", "query"}:
+    if set(arguments) - {"repo", "capture_ref", "offset", "limit", "query", "compact", "queries"}:
         return "error: unsupported output read argument", True
     repo, err = resolve_repo(arguments)
     if err:
@@ -1965,6 +1968,12 @@ def output_read(arguments: dict) -> tuple[str, bool]:
         return json.dumps({"error": exc.code, "message": str(exc)}), True
     except (OSError, ValueError, RuntimeError):
         return "error: capture store is unavailable", True
+    if arguments.get("compact"):
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(text.encode("utf-8")) > COMPACT_RESPONSE_BYTES:
+            return json.dumps({"error": "response_too_large", "message":
+                               "compact response exceeds 65536 bytes; lower limit or request fewer queries"}), True
+        return text, False
     return json.dumps(payload, ensure_ascii=False, indent=2), False
 
 
