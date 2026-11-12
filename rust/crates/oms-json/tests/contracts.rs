@@ -5,6 +5,25 @@ use oms_json::{
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+// Ambiguity arises at compile time if a recursive trait is added to Value.
+macro_rules! assert_not_implemented {
+    ($trait:path) => {{
+        trait AmbiguousIfImplemented<A> {
+            fn marker() {}
+        }
+        impl<T: ?Sized> AmbiguousIfImplemented<()> for T {}
+        impl<T: ?Sized + $trait> AmbiguousIfImplemented<u8> for T {}
+        let _ = <Value as AmbiguousIfImplemented<_>>::marker;
+    }};
+}
+
+#[test]
+fn value_has_no_recursive_derived_traits() {
+    assert_not_implemented!(Clone);
+    assert_not_implemented!(std::fmt::Debug);
+    assert_not_implemented!(PartialEq);
+}
+
 #[test]
 fn python_contracts() {
     let mut map = BTreeMap::new();
@@ -110,6 +129,94 @@ fn edges_and_errors() {
         projection_cache_digest(&Value::String("\u{7f}".into())).unwrap(),
         "226453a6508483054f1ddc449c26b45077f5a45d993034f0f5f04f3f9801c32c"
     );
+}
+
+#[test]
+fn integer_encoding_limit() {
+    for sign in ["", "-"] {
+        let edge = format!("{sign}{}", "9".repeat(4300));
+        let over = format!("{sign}{}", "9".repeat(4301));
+        let good = Value::integer(&edge).unwrap();
+        let bad = Value::integer(&over).unwrap();
+        for encode in [
+            canonical_json,
+            pretty_json,
+            agent_event_json_bytes,
+            session_call_key_json_bytes,
+        ] {
+            assert!(encode(&good).unwrap().starts_with(edge.as_bytes()));
+            assert_eq!(
+                format!("{:?}", encode(&bad).unwrap_err()),
+                "IntegerDigitLimit"
+            );
+        }
+        assert!(projection_cache_digest(&good).is_ok());
+        assert_eq!(
+            format!("{:?}", projection_cache_digest(&bad).unwrap_err()),
+            "IntegerDigitLimit"
+        );
+    }
+}
+
+#[test]
+fn depth_bound_and_deep_drop() {
+    fn nested(depth: usize) -> Value {
+        let mut v = Value::Null;
+        for i in 0..depth {
+            v = if i % 2 == 0 {
+                Value::Array(vec![v])
+            } else {
+                Value::Object([(PyString::from("x"), v)].into())
+            };
+        }
+        v
+    }
+    let at_limit = nested(1024);
+    let over = nested(1025);
+    for encode in [
+        canonical_json,
+        pretty_json,
+        agent_event_json_bytes,
+        session_call_key_json_bytes,
+    ] {
+        assert!(encode(&at_limit).is_ok());
+        assert_eq!(format!("{:?}", encode(&over).unwrap_err()), "DepthLimit");
+    }
+    assert!(projection_cache_digest(&at_limit).is_ok());
+    assert_eq!(
+        format!("{:?}", projection_cache_digest(&over).unwrap_err()),
+        "DepthLimit"
+    );
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(|| {
+            let v = nested(50_000);
+            assert!(canonical_json(&v).is_err());
+            drop(v);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn deep_drop_without_encoding() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024)
+        .spawn(|| {
+            let mut value = Value::Null;
+            for i in 0..50_000 {
+                value = if i % 2 == 0 {
+                    Value::Array(vec![value])
+                } else {
+                    Value::Object([(PyString::from("x"), value)].into())
+                };
+            }
+            drop(value);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

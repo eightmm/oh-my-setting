@@ -2,6 +2,9 @@
 //!
 //! Objects have string keys, as in JSON records and decoded transcripts. This
 //! API does not encode arbitrary Python dictionaries with non-string keys.
+//! Serialization accepts at most 1024 nested containers and 4300 digits per
+//! integer (excluding its sign). Integer construction itself has no digit limit.
+//! Encoding failures return an error and never return partial bytes.
 #![forbid(unsafe_code)]
 
 use sha2::{Digest, Sha256};
@@ -43,7 +46,9 @@ impl From<&str> for PyString {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// JSON value for the domain encoders. It intentionally does not implement
+/// `Clone`, `Debug`, or `PartialEq`: their derived implementations recurse
+/// without a depth bound. Consumers can borrow values and use the encoders.
 pub enum Value {
     Null,
     Bool(bool),
@@ -52,6 +57,23 @@ pub enum Value {
     String(PyString),
     Array(Vec<Value>),
     Object(BTreeMap<PyString, Value>),
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        fn drain(value: &mut Value, pending: &mut Vec<Value>) {
+            match value {
+                Value::Array(items) => pending.append(items),
+                Value::Object(items) => pending.extend(std::mem::take(items).into_values()),
+                _ => {}
+            }
+        }
+        drain(self, &mut pending);
+        while let Some(mut value) = pending.pop() {
+            drain(&mut value, &mut pending);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +100,10 @@ pub enum Error {
     InvalidInteger,
     NonFiniteFloat,
     LoneSurrogate,
+    /// The value contains more than 1024 nested arrays or objects.
+    DepthLimit,
+    /// An integer has more than 4300 decimal digits, excluding its sign.
+    IntegerDigitLimit,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -190,62 +216,93 @@ fn emit(
     value: &Value,
     ascii: bool,
     pretty: bool,
-    depth: usize,
     session: bool,
 ) -> Result<(), Error> {
-    match value {
-        Value::Null => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Integer(n) => out.push_str(&n.0),
-        Value::Float(n) if session && !n.is_finite() => out.push_str(if n.is_nan() {
-            "NaN"
-        } else if n.is_sign_negative() {
-            "-Infinity"
-        } else {
-            "Infinity"
-        }),
-        Value::Float(n) => out.push_str(&float(*n)?),
-        Value::String(s) => string(out, s, ascii, session)?,
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                if pretty {
-                    out.push('\n');
-                    out.push_str(&"  ".repeat(depth + 1));
-                }
-                emit(out, item, ascii, pretty, depth + 1, session)?;
-            }
-            if pretty && !items.is_empty() {
-                out.push('\n');
-                out.push_str(&"  ".repeat(depth));
-            }
-            out.push(']');
+    enum Frame<'a> {
+        Node(&'a Value, usize),
+        Array(std::slice::Iter<'a, Value>, usize, bool),
+        Object(
+            std::collections::btree_map::Iter<'a, PyString, Value>,
+            usize,
+            bool,
+        ),
+    }
+    fn separator(out: &mut String, first: bool, pretty: bool, depth: usize) {
+        if !first {
+            out.push(',');
         }
-        Value::Object(items) => {
-            out.push('{');
-            for (i, (key, item)) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
+        if pretty {
+            out.push('\n');
+            out.push_str(&"  ".repeat(depth));
+        }
+    }
+    let mut stack = vec![Frame::Node(value, 0)];
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Node(value, depth) => match value {
+                Value::Null => out.push_str("null"),
+                Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+                Value::Integer(n) => {
+                    if n.0.trim_start_matches('-').len() > 4300 {
+                        return Err(Error::IntegerDigitLimit);
+                    }
+                    out.push_str(&n.0);
                 }
-                if pretty {
-                    out.push('\n');
-                    out.push_str(&"  ".repeat(depth + 1));
+                Value::Float(n) if session && !n.is_finite() => out.push_str(if n.is_nan() {
+                    "NaN"
+                } else if n.is_sign_negative() {
+                    "-Infinity"
+                } else {
+                    "Infinity"
+                }),
+                Value::Float(n) => out.push_str(&float(*n)?),
+                Value::String(s) => string(out, s, ascii, session)?,
+                Value::Array(items) => {
+                    if depth >= 1024 {
+                        return Err(Error::DepthLimit);
+                    }
+                    out.push('[');
+                    stack.push(Frame::Array(items.iter(), depth, true));
                 }
-                string(out, key, ascii, session)?;
-                out.push(':');
-                if pretty {
-                    out.push(' ');
+                Value::Object(items) => {
+                    if depth >= 1024 {
+                        return Err(Error::DepthLimit);
+                    }
+                    out.push('{');
+                    stack.push(Frame::Object(items.iter(), depth, true));
                 }
-                emit(out, item, ascii, pretty, depth + 1, session)?;
+            },
+            Frame::Array(mut items, depth, first) => {
+                if let Some(item) = items.next() {
+                    separator(out, first, pretty, depth + 1);
+                    stack.push(Frame::Array(items, depth, false));
+                    stack.push(Frame::Node(item, depth + 1));
+                } else {
+                    if pretty && !first {
+                        out.push('\n');
+                        out.push_str(&"  ".repeat(depth));
+                    }
+                    out.push(']');
+                }
             }
-            if pretty && !items.is_empty() {
-                out.push('\n');
-                out.push_str(&"  ".repeat(depth));
+            Frame::Object(mut items, depth, first) => {
+                if let Some((key, item)) = items.next() {
+                    separator(out, first, pretty, depth + 1);
+                    string(out, key, ascii, session)?;
+                    out.push(':');
+                    if pretty {
+                        out.push(' ');
+                    }
+                    stack.push(Frame::Object(items, depth, false));
+                    stack.push(Frame::Node(item, depth + 1));
+                } else {
+                    if pretty && !first {
+                        out.push('\n');
+                        out.push_str(&"  ".repeat(depth));
+                    }
+                    out.push('}');
+                }
             }
-            out.push('}');
         }
     }
     Ok(())
@@ -253,7 +310,7 @@ fn emit(
 
 fn encode(value: &Value, ascii: bool, pretty: bool, session: bool) -> Result<Vec<u8>, Error> {
     let mut out = String::new();
-    emit(&mut out, value, ascii, pretty, 0, session)?;
+    emit(&mut out, value, ascii, pretty, session)?;
     if pretty {
         out.push('\n');
     }
