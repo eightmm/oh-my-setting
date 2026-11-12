@@ -2,7 +2,7 @@
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
 It contains the development inventory tool `oms-migrate`, a standalone native
-`oms` binary, and eleven native libraries: `oms-context` (manifest projections
+`oms` binary, and thirteen native libraries: `oms-context` (manifest projections
 and lossless session JSON input), `oms-safe-fs` (descriptor-relative reads),
 `oms-json` (domain byte encodings), `oms-output` (streaming digest selection,
 reversible reducers and scoped retrieval metadata), `oms-graph-shell` (source
@@ -10,15 +10,23 @@ graph extraction), `oms-context-report` (text reports), `oms-context-session`
 (injection, session and timeline projections), `oms-contract-markdown`
 (task/project Markdown contracts using Python 3.12 Unicode 15 semantics),
 `oms-failure` (deterministic failure taxonomy and recovery metadata),
-`oms-work-inspect` (work projections with lossless timestamp handling), and
-`oms-context-source` (bounded read-only ledger/transcript acquisition).
+`oms-work-inspect` (work projections with lossless timestamp handling),
+`oms-context-source` (bounded read-only ledger/transcript acquisition),
+`oms-graph-python` (native extraction through one private persistent helper),
+and `oms-output-capture` (pure retained-output validation, paging and search).
 
 The standalone binary currently implements manifest inspection, comparison and
 current-file verification through `oms runtime context-inspect`. Session modes
 are separate consumer integration work; the acquisition/projection libraries
 are present but not yet wired into that binary. Raw session Read-label support
-and Python graph extraction also remain in progress. The installed `oms` command
-still uses the legacy runtime. No legacy domain is retired.
+and descriptor-backed capture retrieval also remain in progress. The installed
+`oms` command still uses the legacy runtime. No legacy domain is retired.
+
+The graph helper is a private libexec artifact, not another PATH command. Its
+malformed-input crashes are contained on Linux; macOS memory and dump-collector
+guarantees remain limited. Packaging must exclude the test-only
+`oms-graph-python-fixture` executable. Capture projection is a gated pure stage;
+its filesystem adapter is still pending and the retrieval task remains active.
 
 ## Toolchain and checks
 

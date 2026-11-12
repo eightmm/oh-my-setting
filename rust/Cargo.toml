@@ -7,10 +7,12 @@ members = [
     "crates/oms-context-source",
     "crates/oms-contract-markdown",
     "crates/oms-failure",
+    "crates/oms-graph-python",
     "crates/oms-graph-shell",
     "crates/oms-json",
     "crates/oms-migrate",
     "crates/oms-output",
+    "crates/oms-output-capture",
     "crates/oms-safe-fs",
     "crates/oms-work-inspect",
 ]

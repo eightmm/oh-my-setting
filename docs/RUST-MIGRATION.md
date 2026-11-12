@@ -41,18 +41,21 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains eleven implemented native libraries: context
+The workspace now also contains thirteen implemented native libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
 encodings, output selection, Shell graph extraction, context text reports,
 injection/session/timeline projections, task/project Markdown contracts,
 deterministic failure taxonomy, work projections with lossless timestamp
-handling, and bounded read-only ledger/transcript acquisition. A standalone
+handling, bounded read-only ledger/transcript acquisition, native Python graph
+extraction through a persistent private helper, and pure retained-output
+validation/paging/search. A standalone
 native `oms runtime context-inspect` binary handles manifest inspection,
 comparison and current-file verification. These products have scoped native
 tests and independent review; they remain local integration work until release.
 The native compiler floor is 1.99.1; the preparation inventory tool separately
 retains its 1.85 minimum. Wiring session modes into the binary, lossless raw
-Read-label handling, and Python graph extraction remain in progress.
+Read-label handling, descriptor-backed capture retrieval and graph pipeline
+consumers remain in progress.
 No installed command, MCP transport, hook, lifecycle operation or state writer
 has switched to Rust, and no legacy source domain has yet been deleted.
 Library counts and local commits do not satisfy M1 or M6 retirement gates.
@@ -314,10 +317,22 @@ additional interpreter invocation. Keep the records until the corresponding
 native corpus is replaced or a reviewed data-only classifier refinement proves
 those exact files inert; do not exclude `rust/` wholesale.
 
+The native Python parser adds three further reference rows: its workspace
+member (1 line), its Cargo manifest (8 lines naming native parser dependencies
+and helper targets), and its 149-case JSON corpus (149 lines). The corpus is
+deserialized by native tests; embedded Python source is parsed by the native
+helper and never executed. M3 owns these 158 reference lines. Retain them until
+the corpus is replaced or an M3/M6 classifier review proves these exact
+dependency names and fixture records inert; no blanket Rust-tree exemption is
+permitted. The helper is private and packaging must exclude its test fixture
+binary. No Python interpreter or per-transform process fallback was added.
+
 The measured executable footprint remains 347 Python source files and 178,126
-physical lines. The reference inventory rises from 194 paths / 4,782 lines to
-199 paths / 4,813 lines only for those fixtures. No legacy deletion or M6 zero
-result is claimed. Future retirement batches must lower the baseline again.
+physical lines. The conservative reference inventory rises from the original
+194 paths / 4,782 lines to 202 paths / 4,971 lines for the Shell corpus and native
+Python-parser names/data. The combined inventory now has 549 rows. No legacy
+deletion or M6 zero result is claimed. Future retirement batches must lower the
+baseline again.
 
 Two demonstrated legacy defects remain explicit native-port requirements:
 

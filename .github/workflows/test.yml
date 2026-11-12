@@ -342,6 +342,7 @@ jobs:
           cargo +1.99.1 check --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
           cargo +1.99.1 clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline -- -D warnings
           cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --all-targets --locked --offline
+          cargo +1.99.1 test --manifest-path rust/Cargo.toml --workspace --doc --locked --offline
           cargo +1.99.1 run --manifest-path rust/Cargo.toml --locked --offline -p oms-migrate -- check --repo .
 
   # The affected selection defers operator-tools here: run 40167526634 spent
