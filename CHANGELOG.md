@@ -526,6 +526,11 @@ follows [Keep a Changelog](https://keepachangelog.com/); versions track the
 
 ### Changed
 
+- Worker orientation builds its graph context pack in a private candidate
+  directory, reuses the parent's cache entries by content key and publishes
+  with an atomic rename, so a cold pack takes seconds instead of hitting the
+  25s bound; a fallback names its reason (`context_fallback: timeout`,
+  `invalid` or `empty`) in the artifact header.
 - `oms land` takes its install proof from a CI run that executed the full
   selection for exactly the landed SHA: the push run when it was full,
   otherwise a dispatched `test.yml` run, which `--ci-full` requests once
