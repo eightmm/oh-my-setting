@@ -8,12 +8,16 @@ digest. A log no recogniser understands falls back to a bounded head and tail.
 
 import argparse
 import bisect
+from collections import deque
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 
 from output_reducers import reduce_output
 
@@ -63,20 +67,35 @@ def clean(line):
 
 
 def read(path):
-    size = os.path.getsize(path)
+    size = buffered = 0
     sha = hashlib.sha256()
+    chunks = deque()
     with open(path, "rb") as handle:
+        before = os.fstat(handle.fileno())
         for block in iter(lambda: handle.read(1 << 20), b""):
             sha.update(block)
-    skipped = 0
-    with open(path, "rb") as handle:
-        if size > READ_CAP:
-            # A capture past the cap is read from its end: the ending is where a run says how it went.
-            skipped = size - READ_CAP
-            handle.seek(skipped)
-            handle.readline()
-            skipped = handle.tell()
-        data = handle.read()
+            size += len(block)
+            chunks.append(block)
+            buffered += len(block)
+            while buffered > READ_CAP:
+                first = chunks.popleft()
+                remove = min(len(first), buffered - READ_CAP)
+                if remove < len(first):
+                    chunks.appendleft(first[remove:])
+                buffered -= remove
+        after = os.fstat(handle.fileno())
+    if (before.st_size != size or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+        raise OSError(errno.ESTALE, "capture changed while reading")
+    data = b"".join(chunks)
+    chunks.clear()
+    skipped = size - len(data)
+    if skipped:
+        # Retain only complete lines from the bounded tail of the same hashed snapshot.
+        ending = data.find(b"\n")
+        discard = len(data) if ending == -1 else ending + 1
+        skipped += discard
+        data = data[discard:]
     return _record(data, size, sha.hexdigest(), skipped)
 
 
@@ -303,6 +322,74 @@ def _by(fails):
     return ", ".join("%s=%d" % item for item in sorted(fails["by_recogniser"].items()))
 
 
+def _serialize(doc, json_mode):
+    if not json_mode:
+        return render(doc)
+    doc = dict(doc, size={
+        "raw_bytes": doc["raw"]["bytes"], "digest_text_bytes": len(doc["text"].encode("utf-8")),
+        "estimate": {"method": "bytes/4 (a heuristic, not a tokenizer)",
+                     "raw": doc["raw"]["bytes"] // 4,
+                     "digest_text": len(doc["text"].encode("utf-8")) // 4}})
+    return json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+
+
+def _semantic_scan_text(doc):
+    """Keep source assignments visible when complete reducers separate or escape them."""
+    parts = [render(doc)]
+    algorithm = doc["representation"]["algorithm"]
+    if algorithm == "json-table":
+        table = json.loads(doc["text"])
+        # This table has already round-tripped every source scalar. Scan its
+        # decoded relationships as well as the frame, without another capture read.
+        for row in table["rows"]:
+            for key, value in zip(table["keys"], row):
+                if value != []:
+                    parts.append(key + "=" + (value if isinstance(value, str) else json.dumps(value)))
+    elif algorithm == "repeated-lines":
+        parts.extend(line for _count, line in json.loads(doc["text"])["runs"])
+    return "\n".join(parts)
+
+
+def _scan_output(output, *, semantic_text=None):
+    """Scan delivery and unescaped text from one snapshot; any failure withholds."""
+    script = '. "$1" || exit 2; agent_memory_file_secret_status "$2"'
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as probe:
+            probe.write(output)
+            if semantic_text is not None:
+                # JSON escaping must not hide a credential-shaped assignment that
+                # the existing text-view scan would have refused.
+                probe.write("\n" + semantic_text)
+            probe.flush()
+            status = subprocess.run(
+                ["bash", "-c", script, "oms-output-scan",
+                 str(Path(__file__).with_name("agent-memory-common.sh")), probe.name],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=30, check=False).returncode
+    except (OSError, subprocess.SubprocessError):
+        status = 2
+    if status == 1:
+        return None
+    if status == 0:
+        return "the lines look like they carry a secret, so they are withheld; read the raw file yourself"
+    return "the secret scan could not run, so the lines are withheld; read the raw file yourself"
+
+
+def _withhold(doc, reason):
+    doc["withheld"] = reason
+    doc["shown"] = {"mode": "withheld", "lines": 0,
+                    "omitted_lines": doc["raw"]["lines"], "omitted_bytes": doc["raw"]["bytes"]}
+    doc["failures"]["shown"] = 0
+    doc["text"] = ""
+    doc["representation"] = {"algorithm": "none", "version": 1, "lossless": False,
+                             "source_bytes_lossless": False}
+    doc["transformations"] = {key: False if key == "json_formatting" else 0
+                              for key in doc["transformations"]}
+    for key in ("capture_ref", "capture_sha256", "read_tool", "read_arguments",
+                "read_unavailable_reason", "read_max_bytes"):
+        doc["raw"].pop(key, None)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="output_digest")
     parser.add_argument("path")
@@ -316,6 +403,7 @@ def main(argv=None):
     parser.add_argument("--strategy", choices=("auto", "legacy"), default="auto")
     # Internal wrapper argument: only actually retained run captures are advertised.
     parser.add_argument("--capture-repo", help=argparse.SUPPRESS)
+    parser.add_argument("--scan-output", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if not 256 <= args.max_bytes <= 1048576 or not 0 <= args.head <= 10000 or not 0 <= args.tail <= 10000:
@@ -340,15 +428,13 @@ def main(argv=None):
     except ValueError as error:
         print("output-digest: %s" % error, file=sys.stderr)
         return 2
-    if args.json:
-        doc["size"] = {"raw_bytes": doc["raw"]["bytes"], "digest_text_bytes": len(doc["text"].encode("utf-8")),
-                       "estimate": {"method": "bytes/4 (a heuristic, not a tokenizer)",
-                                    "raw": doc["raw"]["bytes"] // 4,
-                                    "digest_text": len(doc["text"].encode("utf-8")) // 4}}
-        json.dump(doc, sys.stdout, ensure_ascii=False, indent=2)
-        sys.stdout.write("\n")
-    else:
-        sys.stdout.write(render(doc))
+    output = _serialize(doc, args.json)
+    if args.scan_output and not doc["withheld"]:
+        reason = _scan_output(output, semantic_text=_semantic_scan_text(doc))
+        if reason:
+            _withhold(doc, reason)
+            output = _serialize(doc, args.json)
+    sys.stdout.write(output)
     return 0
 
 

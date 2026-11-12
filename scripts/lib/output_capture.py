@@ -16,6 +16,9 @@ CAPTURE_NAME_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9]+\.log\Z")
 SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 READ_CAP = 64 * 1024 * 1024
 PAGE_BYTES = 16 * 1024
+COMPACT_RESPONSE_BYTES = 64 * 1024
+BATCH_QUERY_BYTES = 1024
+SEARCH_HITS = 8
 
 
 def capture_reference(repo: Path, name: str, sha256: str) -> str:
@@ -97,6 +100,41 @@ def read_stored_capture(repo: Path, name: str, *, max_bytes: int = READ_CAP) -> 
             os.close(descriptor)
 
 
+def _query_bytes(query):
+    try:
+        needle = query.encode("utf-8") if isinstance(query, str) else b""
+    except UnicodeEncodeError:
+        needle = b""
+    if not 1 <= len(needle) <= 256:
+        raise CaptureError("invalid_query", "each query requires 1-256 UTF-8 bytes")
+    return needle
+
+
+def _search(raw, query, needle, offset, allowance, base_args, compact):
+    matches = []
+    position = raw.find(needle, offset)
+    end = offset
+    while position >= 0 and len(matches) < allowance:
+        start = max(0, position - 128)
+        while start < position and raw[start] & 0xC0 == 0x80:
+            start += 1
+        end = position + len(needle)
+        snippet = raw[start:end + 128].decode("utf-8", errors="ignore")
+        match = {"offset": position, "end": end, "context": snippet}
+        if compact:
+            match["read_offset"] = start
+        else:
+            match["read_arguments"] = {**base_args, "offset": start}
+        matches.append(match)
+        position = raw.find(needle, end)
+    result = {"matches": matches, "end": end, "has_more": position >= 0}
+    if result["has_more"]:
+        next_search = {"offset": end, "query": query}
+        result["next_search" if compact else "next_search_arguments"] = (
+            next_search if compact else {**base_args, **next_search})
+    return result
+
+
 def read_capture(repo: Path, arguments: dict) -> dict:
     ref = arguments.get("capture_ref")
     parts = ref.split(":") if isinstance(ref, str) else []
@@ -106,18 +144,26 @@ def read_capture(repo: Path, arguments: dict) -> dict:
     name, sha256 = parts[1:3]
     if ref != capture_reference(repo, name, sha256):
         raise CaptureError("capture_scope_mismatch", "capture reference belongs to another repository or was altered")
+    compact = arguments.get("compact", False)
+    if type(compact) is not bool:
+        raise CaptureError("invalid_representation", "compact must be a boolean")
     offset, limit = arguments.get("offset", 0), arguments.get("limit", PAGE_BYTES)
     for label, value, low, high in (("offset", offset, 0, READ_CAP * 3), ("limit", limit, 4, PAGE_BYTES)):
         if type(value) is not int or not low <= value <= high:
             raise CaptureError("invalid_range", "%s must be an integer from %d to %d" % (label, low, high))
-    if "query" in arguments:
-        query = arguments["query"]
-        try:
-            needle = query.encode("utf-8") if isinstance(query, str) else b""
-        except UnicodeEncodeError:
-            needle = b""
-        if not 1 <= len(needle) <= 256 or "limit" in arguments:
-            raise CaptureError("invalid_query", "query requires 1-256 UTF-8 bytes and cannot accompany limit")
+    queries = []
+    if "queries" in arguments:
+        requested = arguments["queries"]
+        if (not compact or "query" in arguments or "limit" in arguments
+                or not isinstance(requested, list) or not 1 <= len(requested) <= SEARCH_HITS):
+            raise CaptureError("invalid_query", "queries requires compact=true and 1-8 literals; no query or limit")
+        queries = [(query, _query_bytes(query)) for query in requested]
+        if sum(len(needle) for _query, needle in queries) > BATCH_QUERY_BYTES:
+            raise CaptureError("invalid_query", "queries exceeds the 1024-byte total UTF-8 limit")
+    elif "query" in arguments:
+        if "limit" in arguments:
+            raise CaptureError("invalid_query", "query cannot accompany limit")
+        queries = [(arguments["query"], _query_bytes(arguments["query"]))]
     data = read_stored_capture(repo, name)
     if hashlib.sha256(data).hexdigest() != sha256:
         raise CaptureError("capture_hash_changed", "stored capture SHA-256 changed; reference is stale")
@@ -129,26 +175,26 @@ def read_capture(repo: Path, arguments: dict) -> dict:
                "content_bytes": len(raw), "offset": offset,
                "encoding": "utf-8 (invalid bytes replaced)",
                "provenance": "stored redacted capture; not verification evidence"}
-    if "query" in arguments:
-        matches = []
-        position = raw.find(needle, offset)
-        end = offset
-        while position >= 0 and len(matches) < 8:
-            start = max(0, position - 128)
-            while start < position and raw[start] & 0xC0 == 0x80:
-                start += 1
-            end = position + len(needle)
-            snippet = raw[start:end + 128].decode("utf-8", errors="ignore")
-            matches.append({"offset": position, "end": end, "context": snippet,
-                            "read_arguments": {**base_args, "offset": start}})
-            position = raw.find(needle, end)
-        payload.update(matches=matches, end=end, has_more=position >= 0)
-        if payload["has_more"]:
-            payload["next_search_arguments"] = {**base_args, "offset": end, "query": query}
+    if compact:
+        payload.pop("capture_ref")
+        payload.update(representation="compact-v1", read_base={**base_args, "compact": True})
+    if "queries" in arguments:
+        searches, used = [], 0
+        for index, (query, needle) in enumerate(queries):
+            allowance = (SEARCH_HITS - used) // (len(queries) - index)
+            result = _search(raw, query, needle, offset, allowance, base_args, True)
+            used += len(result["matches"])
+            searches.append({"query": query, **result})
+        payload.update(searches=searches, has_more=any(result["has_more"] for result in searches))
+    elif queries:
+        query, needle = queries[0]
+        payload.update(_search(raw, query, needle, offset, SEARCH_HITS, base_args, compact))
     else:
         page = raw[offset:offset + limit].decode("utf-8", errors="ignore")
         end = offset + len(page.encode("utf-8"))
         payload.update(content=page, end=end, has_more=end < len(raw))
         if payload["has_more"]:
-            payload["next_read_arguments"] = {**base_args, "offset": end, "limit": limit}
+            next_read = {"offset": end, "limit": limit}
+            payload["next_read" if compact else "next_read_arguments"] = (
+                next_read if compact else {**base_args, **next_read})
     return payload

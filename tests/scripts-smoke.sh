@@ -1777,6 +1777,7 @@ assert read_capture(Path(args["repo"]), args)["content"] == "hello\n한글 줄\n
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -1787,6 +1788,82 @@ import output_digest as digest
 import output_capture as stored_capture
 
 root, directory = Path(sys.argv[1]), Path(sys.argv[2])
+
+# The inspected snapshot is also the delivered snapshot, including JSON-only
+# fields; a source rewrite during the outbound scan must not replace it.
+snapshot_path = directory / "snapshot.log"
+snapshot = "one retained observation 근거\n"
+for json_mode in (False, True):
+    snapshot_path.write_text(snapshot, encoding="utf-8")
+    scanned = []
+    def scan_snapshot(text, *, semantic_text=None):
+        scanned.append(text)
+        if json_mode:
+            assert json.loads(text)["kind"] == "oms-output-digest"
+            assert snapshot.rstrip() in semantic_text
+        snapshot_path.write_text("changed after scan\n", encoding="utf-8")
+        return None
+    output = StringIO()
+    with patch.object(digest, "_scan_output", side_effect=scan_snapshot), redirect_stdout(output):
+        assert digest.main([str(snapshot_path), "--scan-output"] + (["--json"] if json_mode else [])) == 0
+    assert scanned == [output.getvalue()], "scan and delivery must use the same complete response"
+    assert "changed after scan" not in output.getvalue()
+    assert hashlib.sha256(snapshot.encode()).hexdigest() in output.getvalue()
+
+blocked_repo = directory / "blocked"
+blocked_path = blocked_repo / stored_capture.CAPTURE_ROOT / "20261112T123456Z-2.log"
+blocked_path.parent.mkdir(parents=True)
+blocked_path.write_text(snapshot, encoding="utf-8")
+for scan_failure in ("blocked output", "the secret scan could not run"):
+    output = StringIO()
+    def refuse_snapshot(text, **kwargs):
+        assert json.loads(text)["raw"]["read_tool"] == "oms_output_read"
+        return scan_failure
+    with patch.object(digest, "_scan_output", side_effect=refuse_snapshot), redirect_stdout(output):
+        assert digest.main([str(blocked_path), "--capture-repo", str(blocked_repo), "--scan-output", "--json"]) == 0
+    withheld = json.loads(output.getvalue())
+    assert withheld["shown"]["mode"] == "withheld" and not withheld["text"]
+    assert not withheld["representation"]["lossless"]
+    assert "read_tool" not in withheld["raw"]
+
+scan_text = "outbound JSON or text snapshot\n"
+def inspect_scan(argv, **kwargs):
+    assert Path(argv[-1]).read_text(encoding="utf-8") == scan_text
+    return subprocess.CompletedProcess(argv, 1)
+with patch.object(digest.subprocess, "run", side_effect=inspect_scan):
+    assert digest._scan_output(scan_text) is None
+for status in (0, 2, 127):
+    with patch.object(digest.subprocess, "run", return_value=subprocess.CompletedProcess([], status)):
+        assert digest._scan_output(scan_text)
+with patch.object(digest.subprocess, "run", side_effect=OSError("scanner unavailable")):
+    assert digest._scan_output(scan_text)
+
+sensitive_key = "api_" + "key"
+fixture_value = "opaque-fixture-value"
+rows = [{sensitive_key: fixture_value, "description": "ordinary measurement field"} for _ in range(50)]
+table_source = json.dumps(rows, indent=2)
+escaped_source = table_source.replace(sensitive_key, sensitive_key.replace("_", "\\u005f"))
+run_source = ("INFO " + json.dumps({sensitive_key: fixture_value}) + "\n") * 120
+for source, algorithm in ((json.dumps({sensitive_key: fixture_value}), "none"),
+                          (table_source, "json-table"), (escaped_source, "json-table"),
+                          (run_source, "repeated-lines")):
+    snapshot_path.write_text(source, encoding="utf-8")
+    assert digest.build(snapshot_path)["representation"]["algorithm"] == algorithm
+    for json_mode in (False, True):
+        result = subprocess.run([str(root / "scripts/output-digest.sh"), "--file", str(snapshot_path)]
+                                + (["--json"] if json_mode else []),
+                                text=True, capture_output=True, check=True)
+        if json_mode:
+            assert json.loads(result.stdout)["shown"]["mode"] == "withheld"
+        else:
+            assert "shown: nothing" in result.stdout
+        assert fixture_value not in result.stdout, "structured output must not hide source assignments from the scan"
+for source, algorithm in ((table_source, "json-table"), (run_source, "repeated-lines")):
+    snapshot_path.write_text(source.replace(sensitive_key, "measurement_identifier"), encoding="utf-8")
+    result = subprocess.run([str(root / "scripts/output-digest.sh"), "--file", str(snapshot_path), "--json"],
+                            text=True, capture_output=True, check=True)
+    scanned = json.loads(result.stdout)
+    assert not scanned["withheld"] and scanned["representation"]["algorithm"] == algorithm
 
 def capture(name, text, **kwargs):
     path = directory / name

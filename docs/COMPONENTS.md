@@ -900,6 +900,21 @@ symlinked stores/files, hardlinks and stale hashes are refused. Missing or
 evicted captures fail explicitly and never rerun the command. `--file`,
 `--no-store`, harness-child and withheld views advertise no capture reader.
 
+`oms_output_read` preserves its existing response by default. With
+`compact=true`, `representation=compact-v1` carries the repository and reference
+once in `read_base`. Merge `next_read` or `next_search` into `read_base` for
+continuation; for a search hit, merge `offset=match.read_offset`. The stored SHA,
+content sizes, encoding and provenance remain explicit. A compact response is
+limited to 64 KiB including its JSON frame; an oversized escaped page fails
+explicitly and can be retried with a smaller `limit`.
+
+Compact reads also accept `queries` instead of `query`: 1–8 case-sensitive
+literals, each 1–256 UTF-8 bytes and at most 1024 bytes combined, with no explicit
+`limit`. All searches share one verified capture snapshot and at most eight hits
+in total. The available hits are divided among the remaining queries in order;
+each entry in `searches` retains its own `has_more` and `next_search`. A batch
+does not weaken file/hash validation or write a cache or telemetry record.
+
 No model is called. Before the capture is kept, every line the shared secret
 scan flags (the outbound scrubber's pattern and env-value check, no second
 list) is replaced by `[oms-redacted:CLASS]`, CLASS being the scrubber's pattern
@@ -909,6 +924,14 @@ line. The stored file is therefore the command's output minus those lines, and
 the digest a derived view of it. A verifier's input and receipt stay the
 command's own output, not this file, and the byte counts are measured bytes; the JSON's token figure is a
 labelled bytes/4 heuristic, not a tokenizer and not a quota or billing saving.
+The digest hashes and retains its bounded source tail in one file pass. Its
+single built snapshot supplies both the exact outbound text/JSON security scan
+and the final response; scanning never causes a second read or digest build.
+Complete tables also scan decoded key/value assignments, and compressed log
+runs scan their unescaped lines, so the representation cannot hide source
+relationships or literal values from the shared scanner.
+If scanning fails or flags the response, that snapshot becomes a withheld view
+without retrieval arguments. Store-time redaction remains independent.
 The tool is opt-in: no hook rewrites a command to use it. The one built-in
 caller is `scripts/check.sh`: a failing stage whose output exceeds 4000 bytes
 prints this digest (`--file`, the stage's exit code) and names the retained

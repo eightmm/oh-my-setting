@@ -644,6 +644,42 @@ more = call(found["next_search_arguments"])
 assert len(more["matches"]) == 5 and not more["has_more"]
 assert not call(dict(args, query="middle evidence"))["matches"]
 assert not call(dict(args, query=".*"))["matches"], "queries must be literal"
+
+compact_args = dict(args, compact=True)
+compact = call(dict(compact_args, query="근거🙂"))
+assert "capture_ref" not in compact and compact["read_base"] == compact_args
+assert "read_arguments" not in compact["matches"][0]
+assert "근거🙂" in call(dict(compact["read_base"], offset=compact["matches"][0]["read_offset"]))["content"]
+assert len(call({**compact["read_base"], **compact["next_search"]})["matches"]) == 5
+legacy_text, _ = m.output_read(dict(args, query="근거🙂"))
+compact_text, _ = m.output_read(dict(compact_args, query="근거🙂"))
+assert len(compact_text.encode()) < len(legacy_text.encode())
+compact_pages, current = [], dict(compact_args, limit=4096)
+while True:
+    page = call(current)
+    compact_pages.append(page["content"])
+    if not page["has_more"]:
+        break
+    current = {**page["read_base"], **page["next_read"]}
+assert "".join(compact_pages) == content
+with patch.object(capture, "read_stored_capture", wraps=capture.read_stored_capture) as read_once:
+    batch = call(dict(compact_args, queries=["MIDDLE EVIDENCE", "근거🙂", "absent literal"]))
+assert read_once.call_count == 1, "one batch must validate one capture snapshot"
+assert len(batch["searches"]) == 3
+assert sum(len(search["matches"]) for search in batch["searches"]) <= 8
+assert batch["searches"][0]["matches"][0]["offset"] == middle
+assert not batch["searches"][0]["has_more"]
+assert batch["searches"][1]["has_more"] and not batch["searches"][2]["matches"]
+assert call({**batch["read_base"], **batch["searches"][1]["next_search"]})["matches"]
+for compact_value in (None, 0, 1, "true"):
+    call(dict(args, compact=compact_value), "invalid_representation")
+with patch.object(capture, "read_stored_capture", side_effect=AssertionError("invalid batch read the file")):
+    for queries in (None, "literal", [], ["a"] * 9, [""], [True], ["\ud800"],
+                    ["a" * 257], [chr(97 + n) * 256 for n in range(5)]):
+        call(dict(compact_args, queries=queries), "invalid_query")
+    call(dict(args, queries=["a"]), "invalid_query")
+    call(dict(compact_args, queries=["a"], query="b"), "invalid_query")
+    call(dict(compact_args, queries=["a"], limit=8), "invalid_query")
 for extra in ({"offset": -1}, {"offset": True}, {"offset": "1"}, {"offset": 6},
               {"offset": len(raw) + 1}, {"limit": 16385}, {"limit": 3}, {"limit": True}):
     call(dict(args, **extra), "invalid_range")
@@ -663,6 +699,7 @@ after = {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_fi
 assert before == after, "reads must not modify state or stored captures"
 path.write_bytes(raw.replace(b"MIDDLE", b"ALTER!"))
 call(args, "capture_hash_changed")
+call(dict(compact_args, queries=["MIDDLE"]), "capture_hash_changed")
 path.unlink()
 call(args, "capture_missing")
 path.write_bytes(raw)
@@ -671,6 +708,7 @@ for link in (os.symlink, os.link):
     path.rename(target)
     link(target, path)
     call(args, "unsafe_capture")
+    call(dict(compact_args, queries=["MIDDLE"]), "unsafe_capture")
     path.unlink()
     target.rename(path)
 for directory in (store, store.parent, store.parent.parent):
@@ -704,6 +742,10 @@ invalid_args = capture.capture_metadata(repo, path.name, hashlib.sha256(path.rea
 result = call(invalid_args)
 assert result["content"] == "first\ufffdlast" and result["capture_bytes"] == 10
 assert result["content_bytes"] == len(result["content"].encode())
+path.write_bytes(b"\x01" * 16384)
+escaped_args = capture.capture_metadata(repo, path.name, hashlib.sha256(path.read_bytes()).hexdigest())["read_arguments"]
+call(dict(escaped_args, compact=True), "response_too_large")
+assert call(dict(escaped_args, compact=True, limit=1024))["content"] == "\x01" * 1024
 path.write_bytes(b"")
 empty_args = capture.capture_metadata(repo, path.name, hashlib.sha256(b"").hexdigest())["read_arguments"]
 assert call(empty_args)["content"] == "" and not call(empty_args)["has_more"]
