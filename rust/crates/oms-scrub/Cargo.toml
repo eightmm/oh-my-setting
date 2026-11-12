@@ -1,0 +1,12 @@
+[package]
+name = "oms-scrub"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+regex = "=1.13.1"
+aho-corasick = "=1.1.5"
+
+[lints.rust]
+unsafe_code = "forbid"
