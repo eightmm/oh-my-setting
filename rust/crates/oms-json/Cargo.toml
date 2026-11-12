@@ -1,0 +1,12 @@
+[package]
+name = "oms-json"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+ryu = "=1.0.23"
+sha2 = "=0.10.9"
+
+[lints.rust]
+unsafe_code = "forbid"
