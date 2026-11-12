@@ -53,6 +53,90 @@ impl ManifestError {
     }
 }
 
+/// Path-free diagnostics for a stored output capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureReadError {
+    InvalidPath,
+    InvalidLimit,
+    Missing,
+    Unreadable,
+    Unsafe,
+    InitialOversize,
+    ChangedBeforeRead,
+    FileChanged,
+    PathChanged,
+    RootChanged,
+    UnsafeOpen,
+}
+
+#[derive(Debug)]
+enum ReadDetail {
+    Manifest(ManifestError),
+    Open(Error),
+    PostIo(Error),
+    ChangedBeforeRead,
+    FileChanged,
+    PathChanged,
+    RootChanged,
+}
+impl From<ManifestError> for ReadDetail {
+    fn from(value: ManifestError) -> Self {
+        Self::Manifest(value)
+    }
+}
+impl From<Error> for ReadDetail {
+    fn from(value: Error) -> Self {
+        Self::Manifest(value.into())
+    }
+}
+impl ReadDetail {
+    fn manifest(self) -> ManifestError {
+        match self {
+            Self::Manifest(e) => e,
+            Self::Open(e) => ManifestError::Open(e),
+            Self::PostIo(_)
+            | Self::ChangedBeforeRead
+            | Self::FileChanged
+            | Self::PathChanged
+            | Self::RootChanged => ManifestError::Changed,
+        }
+    }
+    fn capture(self) -> CaptureReadError {
+        match self {
+            Self::FileChanged
+            | Self::Manifest(ManifestError::Changed | ManifestError::Overflow) => {
+                CaptureReadError::FileChanged
+            }
+            Self::ChangedBeforeRead => CaptureReadError::ChangedBeforeRead,
+            Self::PathChanged => CaptureReadError::PathChanged,
+            Self::RootChanged => CaptureReadError::RootChanged,
+            Self::Open(Error::Unsafe) | Self::PostIo(Error::Unsafe) => CaptureReadError::UnsafeOpen,
+            Self::Open(Error::Missing) | Self::PostIo(Error::Missing) => CaptureReadError::Missing,
+            Self::Open(_) | Self::PostIo(_) => CaptureReadError::Unreadable,
+            Self::Manifest(ManifestError::InitialOversize) => CaptureReadError::InitialOversize,
+            Self::Manifest(ManifestError::Open(Error::Missing)) => CaptureReadError::Missing,
+            Self::Manifest(ManifestError::Open(Error::Unreadable)) => CaptureReadError::Unreadable,
+            Self::Manifest(
+                ManifestError::External
+                | ManifestError::Path
+                | ManifestError::Open(Error::InvalidPath),
+            ) => CaptureReadError::InvalidPath,
+            Self::Manifest(_) => CaptureReadError::Unsafe,
+        }
+    }
+}
+
+fn valid_capture_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() >= 22
+        && b[0..8].iter().all(u8::is_ascii_digit)
+        && b[8] == b'T'
+        && b[9..15].iter().all(u8::is_ascii_digit)
+        && b[15..17] == *b"Z-"
+        && b.ends_with(b".log")
+        && b[17..b.len() - 4].iter().all(u8::is_ascii_digit)
+}
+
 /// Constraints on the opened file. `None` accepts any owner.
 #[derive(Debug, Clone, Copy)]
 pub struct Policy {
@@ -184,6 +268,47 @@ impl Root {
         )
     }
 
+    /// Reads a named capture beneath the fixed output directory. Observed changes
+    /// fail closed; this does not provide an atomic snapshot against writers.
+    /// Metadata stability and single-link rechecks intentionally reject more
+    /// changes than the legacy capture reader.
+    pub fn read_capture(&self, name: &str, max_bytes: usize) -> Result<Vec<u8>, CaptureReadError> {
+        if !valid_capture_name(name) {
+            return Err(CaptureReadError::InvalidPath);
+        }
+        if !(1..=64 * 1024 * 1024).contains(&max_bytes) {
+            return Err(CaptureReadError::InvalidLimit);
+        }
+        self.read_capture_with_hooks(name, max_bytes, || {}, || {}, |_| {})
+    }
+
+    fn read_capture_with_hooks(
+        &self,
+        name: &str,
+        limit: usize,
+        before_open: impl FnOnce(),
+        before_read: impl FnOnce(),
+        hook: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<Vec<u8>, CaptureReadError> {
+        let label = format!(".oms/artifacts/output-digest/{name}");
+        self.read_detail(
+            &label,
+            limit,
+            (
+                Policy {
+                    single_link: true,
+                    owner: None,
+                    max_components: None,
+                },
+                true,
+            ),
+            before_open,
+            before_read,
+            hook,
+        )
+        .map_err(ReadDetail::capture)
+    }
+
     /// Reads a slash-separated relative label without following links.
     pub fn read(&self, label: &str, limit: usize, policy: Policy) -> Result<Vec<u8>, Error> {
         self.read_os(OsStr::new(label), limit, policy)
@@ -231,26 +356,58 @@ impl Root {
         before_read: impl FnOnce(),
         hook: impl FnOnce(&mut Vec<u8>),
     ) -> Result<Vec<u8>, ManifestError> {
+        self.read_detail(
+            label,
+            limit,
+            (policy, false),
+            before_open,
+            before_read,
+            hook,
+        )
+        .map_err(ReadDetail::manifest)
+    }
+
+    fn read_detail(
+        &self,
+        label: impl AsRef<OsStr>,
+        limit: usize,
+        options: (Policy, bool),
+        before_open: impl FnOnce(),
+        before_read: impl FnOnce(),
+        hook: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<Vec<u8>, ReadDetail> {
+        let (policy, capture) = options;
         let parts: Vec<_> = label.as_ref().as_bytes().split(|b| *b == b'/').collect();
         if policy.max_components.is_some_and(|max| parts.len() > max)
             || parts
                 .iter()
                 .any(|p| p.is_empty() || *p == b"." || *p == b".." || p.contains(&0))
         {
-            return Err(ManifestError::Path);
+            return Err(ManifestError::Path.into());
         }
         let mut dirs = Vec::new();
         for part in &parts[..parts.len() - 1] {
             let parent = dirs.last().unwrap_or(&self.fd);
-            dirs.push(
-                fs::openat(
-                    parent,
-                    OsStr::from_bytes(part),
-                    directory_flags(),
-                    Mode::empty(),
-                )
-                .map_err(map_open)?,
-            );
+            let component = OsStr::from_bytes(part);
+            let named_dir = if capture {
+                let stat = fs::statat(parent, component, AtFlags::SYMLINK_NOFOLLOW)
+                    .map_err(|e| ReadDetail::Open(map_open(e)))?;
+                if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+                    return Err(ManifestError::Policy.into());
+                }
+                Some(stat)
+            } else {
+                None
+            };
+            let dir = fs::openat(parent, component, directory_flags(), Mode::empty())
+                .map_err(|e| ReadDetail::Open(map_open(e)))?;
+            if let Some(named_dir) = named_dir {
+                let opened = fs::fstat(&dir).map_err(|_| Error::Unreadable)?;
+                if !identity(&named_dir, &opened) {
+                    return Err(ReadDetail::ChangedBeforeRead);
+                }
+            }
+            dirs.push(dir);
         }
         let parent = dirs.last().unwrap_or(&self.fd);
         let name = OsStr::from_bytes(parts[parts.len() - 1]);
@@ -261,8 +418,12 @@ impl Root {
                     ManifestError::Open(Error::Unsafe)
                 } else {
                     ManifestError::Policy
-                },
+                }
+                .into(),
             );
+        }
+        if capture && named.st_size >= 0 && named.st_size as u64 > limit as u64 {
+            return Err(ManifestError::InitialOversize.into());
         }
         before_open();
         let fd = fs::openat(
@@ -271,19 +432,19 @@ impl Root {
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
             Mode::empty(),
         )
-        .map_err(map_open)?;
+        .map_err(|e| ReadDetail::Open(map_open(e)))?;
         let before = fs::fstat(&fd).map_err(|_| Error::Unreadable)?;
         if !stable(&named, &before) {
-            return Err(ManifestError::Changed);
+            return Err(ReadDetail::ChangedBeforeRead);
         }
         if !valid_file(&before, policy) {
-            return Err(ManifestError::Policy);
+            return Err(ManifestError::Policy.into());
         }
         if before.st_size < 0 {
-            return Err(ManifestError::Policy);
+            return Err(ManifestError::Policy.into());
         }
         if u64::try_from(before.st_size).map_err(|_| Error::Unsafe)? > limit as u64 {
-            return Err(ManifestError::InitialOversize);
+            return Err(ManifestError::InitialOversize.into());
         }
         before_read();
         let mut file = std::fs::File::from(fd);
@@ -296,7 +457,7 @@ impl Root {
             let n = match file.read(&mut buf[..count]) {
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(ManifestError::Open(Error::Unreadable)),
+                Err(_) => return Err(ManifestError::Open(Error::Unreadable).into()),
             };
             if n == 0 {
                 break;
@@ -308,23 +469,12 @@ impl Root {
             bytes.extend_from_slice(&buf[..n]);
         }
         hook(&mut bytes);
-        let after = fs::fstat(&file).map_err(|_| Error::Changed)?;
-        let named_after =
-            fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| Error::Changed)?;
-        if !stable(&before, &after)
-            || (!overflow && !size_matches(&after, bytes.len()))
-            || !identity(&after, &named_after)
-            || !valid_file(&named_after, policy)
-        {
-            return Err(ManifestError::Changed);
+        let after = fs::fstat(&file).map_err(|e| ReadDetail::PostIo(map_open(e)))?;
+        if !stable(&before, &after) || (!overflow && !size_matches(&after, bytes.len())) {
+            return Err(ReadDetail::FileChanged);
         }
-        let root_now =
-            fs::open(&self.path, directory_flags(), Mode::empty()).map_err(|_| Error::Changed)?;
-        if !identity(
-            &self.initial,
-            &fs::fstat(root_now).map_err(|_| Error::Changed)?,
-        ) {
-            return Err(ManifestError::Changed);
+        if capture && overflow {
+            return Err(ReadDetail::FileChanged);
         }
         for (i, dir) in dirs.iter().enumerate() {
             let parent = if i == 0 { &self.fd } else { &dirs[i - 1] };
@@ -333,16 +483,32 @@ impl Root {
                 OsStr::from_bytes(parts[i]),
                 AtFlags::SYMLINK_NOFOLLOW,
             )
-            .map_err(|_| Error::Changed)?;
-            let opened = fs::fstat(dir).map_err(|_| Error::Changed)?;
+            .map_err(|e| ReadDetail::PostIo(map_open(e)))?;
+            let opened = fs::fstat(dir).map_err(|e| ReadDetail::PostIo(map_open(e)))?;
             if FileType::from_raw_mode(named.st_mode) != FileType::Directory
                 || !identity(&named, &opened)
             {
-                return Err(ManifestError::Changed);
+                return Err(ReadDetail::PathChanged);
             }
         }
+        let named_after = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| ReadDetail::PostIo(map_open(e)))?;
+        if !identity(&after, &named_after) {
+            return Err(ReadDetail::PathChanged);
+        }
+        if !valid_file(&named_after, policy) {
+            return Err(ReadDetail::PathChanged);
+        }
+        let root_now = fs::open(&self.path, directory_flags(), Mode::empty())
+            .map_err(|e| ReadDetail::PostIo(map_open(e)))?;
+        if !identity(
+            &self.initial,
+            &fs::fstat(root_now).map_err(|e| ReadDetail::PostIo(map_open(e)))?,
+        ) {
+            return Err(ReadDetail::RootChanged);
+        }
         if overflow {
-            return Err(ManifestError::Overflow);
+            return Err(ManifestError::Overflow.into());
         }
         Ok(bytes)
     }
@@ -702,5 +868,323 @@ mod tests {
             ),
             Err(Error::Changed)
         );
+    }
+    #[test]
+    fn capture_public_validation_and_policy() {
+        let f = Fixture::new();
+        let dir = f.0.join(".oms/artifacts/output-digest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "20260101T123456Z-1.log";
+        let path = dir.join(name);
+        std::fs::write(&path, b"body").unwrap();
+        let root = Root::open(&f.0).unwrap();
+        assert_eq!(root.read_capture(name, 4).unwrap(), b"body");
+        assert_eq!(root.read_capture(name, 64 * 1024 * 1024).unwrap(), b"body");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0)).unwrap();
+        assert_eq!(
+            root.read_capture(name, 3),
+            Err(CaptureReadError::InitialOversize)
+        );
+        if rustix::process::getuid().as_raw() != 0 {
+            assert_eq!(
+                root.read_capture(name, 4),
+                Err(CaptureReadError::Unreadable)
+            );
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            root.read_capture(name, 3),
+            Err(CaptureReadError::InitialOversize)
+        );
+        assert_eq!(
+            root.read_capture(name, 0),
+            Err(CaptureReadError::InvalidLimit)
+        );
+        assert_eq!(
+            root.read_capture(name, 64 * 1024 * 1024 + 1),
+            Err(CaptureReadError::InvalidLimit)
+        );
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "x\0y",
+            "20260101T123456Z-.log",
+        ] {
+            assert_eq!(
+                root.read_capture(bad, 0),
+                Err(CaptureReadError::InvalidPath)
+            );
+        }
+        assert_eq!(
+            root.read_capture("20260101T123456Z-2.log", 1),
+            Err(CaptureReadError::Missing)
+        );
+        std::fs::hard_link(&path, dir.join("hard")).unwrap();
+        assert_eq!(root.read_capture(name, 4), Err(CaptureReadError::Unsafe));
+        std::fs::remove_file(dir.join("hard")).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink("missing", &path).unwrap();
+        assert_eq!(root.read_capture(name, 4), Err(CaptureReadError::Unsafe));
+    }
+
+    #[test]
+    fn capture_change_stages_and_special_files() {
+        let f = Fixture::new();
+        let repo = f.0.join("repo");
+        let dir = repo.join(".oms/artifacts/output-digest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "20260101T123456Z-1.log";
+        let path = dir.join(name);
+        std::fs::write(&path, b"one").unwrap();
+        let root = Root::open(&repo).unwrap();
+        assert_eq!(
+            root.read_capture_with_hooks(
+                name,
+                3,
+                || {},
+                || std::fs::write(&path, b"longer").unwrap(),
+                |_| {}
+            ),
+            Err(CaptureReadError::FileChanged)
+        );
+        std::fs::write(&path, b"one").unwrap();
+        assert_eq!(
+            root.read_capture_with_hooks(name, 3, || {}, || {}, |body: &mut Vec<u8>| body.clear()),
+            Err(CaptureReadError::FileChanged)
+        );
+        assert_eq!(
+            root.read_capture_with_hooks(
+                name,
+                3,
+                || {
+                    std::fs::rename(&path, dir.join("old")).unwrap();
+                    std::fs::write(&path, b"two").unwrap();
+                },
+                || {},
+                |_| {}
+            ),
+            Err(CaptureReadError::ChangedBeforeRead)
+        );
+        use std::os::unix::fs::MetadataExt;
+        let observed_file = std::fs::File::open(&path).unwrap();
+        let before_rename = std::cell::Cell::new(None);
+        let source_metadata = |stat: std::fs::Metadata| {
+            (
+                stat.size(),
+                stat.nlink(),
+                stat.mtime(),
+                stat.mtime_nsec(),
+                stat.ctime(),
+                stat.ctime_nsec(),
+            )
+        };
+        let result = root.read_capture_with_hooks(
+            name,
+            3,
+            || {},
+            || before_rename.set(Some(source_metadata(observed_file.metadata().unwrap()))),
+            |_| {
+                std::fs::rename(&path, dir.join("old2")).unwrap();
+                std::fs::write(&path, b"two").unwrap();
+            },
+        );
+        let changed =
+            before_rename.get().unwrap() != source_metadata(observed_file.metadata().unwrap());
+        assert_eq!(
+            result,
+            Err(if changed {
+                CaptureReadError::FileChanged
+            } else {
+                CaptureReadError::PathChanged
+            })
+        );
+        use std::os::unix::fs::PermissionsExt;
+        let result = root.read_capture_with_hooks(
+            name,
+            3,
+            || {},
+            || {},
+            |_| {
+                std::fs::rename(&dir, repo.join("moved")).unwrap();
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::set_permissions(
+                    repo.join("moved"),
+                    std::fs::Permissions::from_mode(0o000),
+                )
+                .unwrap();
+            },
+        );
+        std::fs::set_permissions(repo.join("moved"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert_eq!(result, Err(CaptureReadError::PathChanged));
+        std::fs::remove_dir(&dir).unwrap();
+        std::fs::rename(repo.join("moved"), &dir).unwrap();
+        assert_eq!(
+            root.read_capture_with_hooks(
+                name,
+                3,
+                || {},
+                || {},
+                |_| {
+                    std::fs::rename(&dir, repo.join("moved")).unwrap();
+                    std::fs::create_dir(&dir).unwrap();
+                    std::fs::rename(&repo, f.0.join("old-repo")).unwrap();
+                    std::fs::create_dir(&repo).unwrap();
+                }
+            ),
+            Err(CaptureReadError::PathChanged)
+        );
+        std::fs::remove_dir(&repo).unwrap();
+        std::fs::rename(f.0.join("old-repo"), &repo).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        std::fs::rename(repo.join("moved"), &dir).unwrap();
+        assert_eq!(
+            root.read_capture_with_hooks(
+                name,
+                3,
+                || {},
+                || {},
+                |_| {
+                    std::fs::rename(&repo, f.0.join("old-repo")).unwrap();
+                    std::fs::create_dir(&repo).unwrap();
+                }
+            ),
+            Err(CaptureReadError::RootChanged)
+        );
+    }
+
+    #[test]
+    fn capture_rejects_parent_links_fifo_and_socket() {
+        let f = Fixture::new();
+        let dir = f.0.join(".oms/artifacts/output-digest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("20260101T123456Z-1.log");
+        let root = Root::open(&f.0).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            root.read_capture("20260101T123456Z-1.log", 1),
+            Err(CaptureReadError::Unsafe)
+        );
+        std::fs::remove_file(&path).unwrap();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let socket_absolute = f.0.canonicalize().unwrap().join("s");
+        let cwd_parts: Vec<_> = cwd.components().collect();
+        let socket_parts: Vec<_> = socket_absolute.components().collect();
+        let common = cwd_parts
+            .iter()
+            .zip(&socket_parts)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut socket_path = PathBuf::new();
+        for _ in common..cwd_parts.len() {
+            socket_path.push("..");
+        }
+        for part in &socket_parts[common..] {
+            socket_path.push(part.as_os_str());
+        }
+        if socket_absolute.as_os_str().as_bytes().len() < socket_path.as_os_str().as_bytes().len() {
+            socket_path = socket_absolute;
+        }
+        match std::os::unix::net::UnixListener::bind(&socket_path) {
+            Ok(socket) => {
+                std::fs::rename(&socket_path, &path).unwrap();
+                assert_eq!(
+                    root.read_capture("20260101T123456Z-1.log", 1),
+                    Err(CaptureReadError::Unsafe)
+                );
+                drop(socket);
+                std::fs::remove_file(&path).unwrap();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("socket fixture unavailable: permission denied");
+            }
+            Err(e) => panic!("socket fixture failed: {e}"),
+        }
+        std::fs::remove_dir(&dir).unwrap();
+        symlink("missing", &dir).unwrap();
+        assert_eq!(
+            root.read_capture("20260101T123456Z-1.log", 1),
+            Err(CaptureReadError::Unsafe)
+        );
+    }
+    #[test]
+    fn capture_open_and_postcheck_io_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let dir = f.0.join(".oms/artifacts/output-digest");
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "20260101T123456Z-1.log";
+        let path = dir.join(name);
+        std::fs::write(&path, b"one").unwrap();
+        let root = Root::open(&f.0).unwrap();
+        assert_eq!(
+            root.read_capture_with_hooks(
+                name,
+                3,
+                || {
+                    std::fs::remove_file(&path).unwrap();
+                    symlink("target", &path).unwrap();
+                },
+                || {},
+                |_| {}
+            ),
+            Err(CaptureReadError::UnsafeOpen)
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, b"one").unwrap();
+        assert_eq!(
+            root.read_capture_with_hooks(
+                name,
+                3,
+                || {},
+                || {},
+                |_| {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::write(&path, b"one").unwrap();
+                }
+            ),
+            Err(CaptureReadError::FileChanged)
+        );
+        let repo = f.0.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let inside = repo.join(".oms/artifacts/output-digest");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::write(inside.join(name), b"one").unwrap();
+        let moved_root = Root::open(&repo).unwrap();
+        assert_eq!(
+            moved_root.read_capture_with_hooks(
+                name,
+                3,
+                || {},
+                || {},
+                |_| {
+                    std::fs::rename(&repo, f.0.join("gone")).unwrap();
+                }
+            ),
+            Err(CaptureReadError::Missing)
+        );
+        if rustix::process::getuid().as_raw() != 0 {
+            let result = root.read_capture_with_hooks(
+                name,
+                3,
+                || {},
+                || {},
+                |_| {
+                    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+                },
+            );
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(result, Err(CaptureReadError::Unreadable));
+        }
     }
 }
