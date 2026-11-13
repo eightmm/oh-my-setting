@@ -20,6 +20,7 @@ members = [
     "crates/oms-graph-resolve",
     "crates/oms-graph-shell",
     "crates/oms-json",
+    "crates/oms-lock",
     "crates/oms-migrate",
     "crates/oms-output",
     "crates/oms-output-capture",

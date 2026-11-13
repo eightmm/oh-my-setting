@@ -596,6 +596,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-lock"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+]
+
+[[package]]
 name = "oms-migrate"
 version = "0.1.0"
 

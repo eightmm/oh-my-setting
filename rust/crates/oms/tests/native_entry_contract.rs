@@ -88,6 +88,7 @@ impl Fixture {
             "agent-role.sh",
             "input.sh",
             "agent-events.sh",
+            "job-digest.sh",
             "lib/python-runtime.sh",
         ] {
             std::fs::copy(
@@ -1304,7 +1305,6 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
     for argv in [
         vec![""],
         vec!["artifact-index.sh", "telemetry"],
-        vec!["job-digest", "--help"],
         vec!["artifact-index", "telemetry", "--waste"],
         vec!["artifact-index", "list"],
         vec!["agent-events", "show", "--attempt", "missing"],
@@ -1344,6 +1344,7 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
         b"",
     );
     for argv in [
+        vec!["job-digest", "123", "missing.log"],
         vec!["artifact-index", "telemetry", "--repo", "absent"],
         vec!["artifact-index", "telemetry", "--by", "bad"],
         vec!["agent-role", "init", "--name", "never-created"],
@@ -1605,5 +1606,106 @@ fn public_experiment_modes_preserve_root_forwarding_and_precedence() {
     let mut expected = before;
     expected.insert(PathBuf::from("template.json"), bytes);
     assert_eq!(files(&data), expected);
+    assert!(!f.0.join("preflight").exists());
+}
+
+#[test]
+fn public_job_digest_routes_all_leaf_arguments_without_python_or_writes() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    fn stable_output(bytes: &[u8]) -> Vec<u8> {
+        let prefix = b"# Job digest\n\n- generated: ";
+        let Some(rest) = bytes.strip_prefix(prefix) else {
+            return bytes.to_vec();
+        };
+        let end = rest.iter().position(|b| *b == b'\n').unwrap();
+        let stamp = &rest[..end];
+        assert_eq!(stamp.len(), 20);
+        for (i, byte) in stamp.iter().enumerate() {
+            match i {
+                4 | 7 => assert_eq!(*byte, b'-'),
+                10 => assert_eq!(*byte, b'T'),
+                13 | 16 => assert_eq!(*byte, b':'),
+                19 => assert_eq!(*byte, b'Z'),
+                _ => assert!(byte.is_ascii_digit()),
+            }
+        }
+        let mut output = prefix.to_vec();
+        output.extend_from_slice(b"<generated>");
+        output.extend_from_slice(&rest[end..]);
+        output
+    }
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    let data = f.0.join("data");
+    std::fs::write(data.join("run.log"), b"ok\nERROR fixture\nlast\n").unwrap();
+    std::fs::write(
+        data.join("metrics.jsonl"),
+        b"{\"step\":1,\"name\":\"loss\",\"value\":2}\n{\"step\":2,\"name\":\"loss\",\"value\":1}\n",
+    )
+    .unwrap();
+    let before = files(&data);
+    for args in [
+        vec!["--help"],
+        vec![],
+        vec!["--tail"],
+        vec!["--metrics"],
+        vec!["--max-bytes", "511", "run.log"],
+        vec!["--wait-timeout", "0", "123"],
+        vec!["missing.log"],
+        vec!["--tail", "1", "--patterns", "1", "run.log"],
+        vec!["--metrics", "metrics.jsonl"],
+        vec!["--metrics", "metrics.jsonl", "--tail", "1", "run.log"],
+    ] {
+        let argv: Vec<_> = args.iter().map(OsString::from).collect();
+        let (code, expected, mut error) =
+            oms_command_job_digest::run(&argv, &data, &std::sync::atomic::AtomicBool::new(false));
+        if code == 2 {
+            error.extend_from_slice(b"hint: run `oms job-digest --help` for usage\n");
+        }
+        for child in ["0", "1"] {
+            let mut output = f
+                .public(&bin)
+                .arg("job-digest")
+                .args(&args)
+                .env("OMS_HARNESS_CHILD", child)
+                .output()
+                .unwrap();
+            output.stdout = stable_output(&output.stdout);
+            exact(output, code, &stable_output(&expected), &error);
+        }
+        assert_eq!(files(&data), before);
+    }
+    let raw = OsString::from_vec(b"raw-\xff.log".to_vec());
+    std::fs::write(data.join(&raw), b"ERROR \xfe\n").unwrap();
+    let before = files(&data);
+    let (code, expected, error) = oms_command_job_digest::run(
+        std::slice::from_ref(&raw),
+        &data,
+        &std::sync::atomic::AtomicBool::new(false),
+    );
+    let mut output = f
+        .public(&bin)
+        .args([OsString::from("job-digest"), raw])
+        .output()
+        .unwrap();
+    assert!(
+        output
+            .stdout
+            .windows(b"- log: raw-\xff.log".len())
+            .any(|part| part == b"- log: raw-\xff.log")
+    );
+    output.stdout = stable_output(&output.stdout);
+    exact(output, code, &stable_output(&expected), &error);
+    exact(
+        f.private(&bin, "--oms-select")
+            .args(["job-digest", "123", "missing.log"])
+            .output()
+            .unwrap(),
+        0,
+        b"",
+        b"",
+    );
+    assert_eq!(files(&data), before);
     assert!(!f.0.join("preflight").exists());
 }

@@ -1016,8 +1016,9 @@ fn main() {
         source_root = Some(PathBuf::from(&argv[1]));
         argv.drain(..4);
     }
-    if let Some(tool @ ("artifact-index" | "agent-role" | "input" | "agent-events")) =
-        argv.first().and_then(|v| v.to_str())
+    if let Some(
+        tool @ ("artifact-index" | "agent-role" | "input" | "agent-events" | "job-digest"),
+    ) = argv.first().and_then(|v| v.to_str())
     {
         let local = &argv[1..];
         let owned = match tool {
@@ -1031,6 +1032,7 @@ fn main() {
                 !child && oms_command_input::owns(local)
             }
             "agent-events" => oms_command_attempt_bundle::owns(local),
+            "job-digest" => oms_command_job_digest::owns(local),
             _ => unreachable!(),
         };
         if !owned {
@@ -1060,6 +1062,7 @@ fn main() {
             ),
             "input" => oms_command_input::run(local, &cwd, &interrupted),
             "agent-events" => oms_command_attempt_bundle::run(local, &cwd, &interrupted),
+            "job-digest" => oms_command_job_digest::run(local, &cwd, &interrupted),
             _ => unreachable!(),
         };
         command_exit(tool, result);
