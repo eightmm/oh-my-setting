@@ -612,6 +612,11 @@ fn missing_or_malformed_preexecution_checksum_fails_closed() {
 #[test]
 fn public_failure_namespace_runs_without_python_and_preserves_caller_directory() {
     let cases: &[(&[&str], i32, &str)] = &[
+        (
+            &["runtime", "--foo bar", "failure", "catalog"],
+            2,
+            "argument command: invalid choice: '--foo bar'",
+        ),
         (&["runtime", "failure", "catalog"], 0, "provider_capacity"),
         (
             &["runtime", "failure", "classify", "-fail now"],

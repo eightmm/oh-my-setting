@@ -166,6 +166,12 @@ fn argument_repr(value: &str) -> String {
     result.push(quote);
     result
 }
+fn invalid_command(arg: &OsStr) -> String {
+    format!(
+        "argument command: invalid choice: '{}' (choose from envelope, evidence, next, brief, failure, context, context-inspect, profile, release, capsule, backend, experiment, benchmark, doctor)",
+        arg.to_string_lossy()
+    )
+}
 fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Result<Args, String> {
     let mut a = Args::default();
     let mut it = args.into_iter().peekable();
@@ -240,6 +246,15 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                     .collect()
             };
             if matches.is_empty() {
+                if bytes.contains(&b' ') {
+                    if !command {
+                        return Err(invalid_command(&arg));
+                    }
+                    if a.manifest.is_none() {
+                        a.manifest = Some(arg);
+                        continue;
+                    }
+                }
                 unknown.push(arg);
                 continue;
             }
@@ -388,10 +403,7 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                 b"doctor",
             ]
             .contains(&bytes);
-            return Err(format!(
-                "argument command: invalid choice: '{}' (choose from envelope, evidence, next, brief, failure, context, context-inspect, profile, release, capsule, backend, experiment, benchmark, doctor)",
-                arg.to_string_lossy()
-            ));
+            return Err(invalid_command(&arg));
         } else {
             unknown.push(arg);
         }
@@ -1040,6 +1052,20 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unknown_double_dash_argument_with_space_is_root_positional() {
+        let argv = ["runtime", "--foo bar", "failure", "catalog"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let mut command = false;
+        let mut legacy = false;
+        let error = parse(argv, &mut command, &mut legacy)
+            .err()
+            .expect("invalid root command");
+        assert!(error.starts_with("argument command: invalid choice: '--foo bar'"));
+        assert!(!command && !legacy);
+    }
     #[test]
     fn encodes_float_values_with_python_json_rules() {
         let value = serde_json::json!([0.5, -0.0, 1e-7]);
