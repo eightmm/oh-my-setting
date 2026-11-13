@@ -1,8 +1,10 @@
 //! Pure OMS Markdown helpers. Scope paths are descriptive, never authorization.
-//! Inputs are UTF-8 Rust strings; Python's arbitrary objects and surrogate strings
-//! require conversion or explicit rejection by callers before using this API.
+//! Markdown inputs are UTF-8 Rust strings; Python's arbitrary objects and surrogate
+//! strings require explicit conversion or rejection. The [`scope`] module also
+//! accepts raw OS bytes and Python codepoints for changed-path classification.
 //! Limits are nonnegative `usize`; callers migrating negative Python limits must
 //! handle them before calling (Python returns an ellipsis for any negative limit).
+pub mod scope;
 mod unicode15;
 
 use regex::Regex;
