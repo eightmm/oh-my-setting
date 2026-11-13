@@ -8,6 +8,7 @@ plugins/oh-my-setting/scripts/harness-hook.sh	python-reference	7
 rust/Cargo.toml	python-reference	1
 rust/crates/oms-graph-python/Cargo.toml	python-reference	8
 rust/crates/oms-graph-python/tests/fixtures/legacy_cases.json	python-reference	149
+rust/crates/oms-graph-resolve/tests/legacy_fixture.json	python-reference	37
 rust/crates/oms-graph-shell/tests/fixtures.json	python-reference	24
 rust/crates/oms-graph-shell/tests/python_env.json	python-reference	2
 rust/crates/oms-graph-shell/tests/python_fragment.json	python-reference	2

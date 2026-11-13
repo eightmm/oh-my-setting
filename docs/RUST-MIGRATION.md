@@ -41,30 +41,37 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains fourteen implemented native libraries: context
+The workspace now also contains seventeen implemented native libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
 encodings, output selection, Shell graph extraction, context text reports,
 injection/session/timeline projections, task/project Markdown contracts,
 deterministic failure taxonomy, work projections with lossless timestamp
 handling, bounded read-only ledger/transcript acquisition, native Python graph
-extraction through a persistent private helper, and pure retained-output
-validation/paging/search, and graph parser selection with Config/Markdown
-extraction and shared-helper Python/Shell routing. A standalone native
+extraction through a persistent private helper, retained-output validation,
+acquisition, paging and search, graph parser selection with
+Config/Markdown extraction and shared-helper Python/Shell routing, ordered graph
+resolution, experiment validation/normalization/digests, and bounded secret
+scanning with retained-output redaction. A standalone native
 `oms runtime context-inspect` binary handles manifest inspection, comparison,
 current-file verification, injections, session reports and timelines. These
 products have scoped native tests and independent review; they remain local
 integration work until release.
 The native compiler floor is 1.99.1; the preparation inventory tool separately
 retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
-capture read producer are implemented. Capture projection acquisition, notebook
-parsing and graph pipeline consumers remain in progress.
+capture read producer and projection adapter are implemented. Notebook parsing,
+experiment comparison and graph pipeline consumers remain in progress.
 
 Parent runtime probes verified SIGINT delivered on the real transcript read
 syscall returns exit 130 with empty stdout, actual socket rejection, and readable
 capture acceptance across file owners. A host-built native CLI failed the
-Ubuntu 20.04 runtime probe on newer glibc requirements; floor-native builds and
-exact-artifact runtime checks are required before installation. Darwin target
-checks do not establish native macOS runtime compatibility.
+Ubuntu 20.04 runtime probe on newer glibc requirements. A subsequent floor-native
+build of exact baseline `9a5fcafa347a11f28dbb9111d073c4296c2e07c1` passed CLI
+help, session, timeline, NSS root expansion and child denial in an Ubuntu 20.04
+image with Python and PATH tools absent; the production helper passed a framed
+parse. Required glibc maxima were 2.17 for the CLI and 2.16 for the helper.
+These are baseline artifacts, not release binaries; the final changed artifacts
+must repeat this proof. The host kernel was newer than the Ubuntu 20.04 kernel.
+Darwin target checks do not establish native macOS runtime compatibility.
 No installed command, MCP transport, hook, lifecycle operation or state writer
 has switched to Rust, and no legacy source domain has yet been deleted.
 Library counts and local commits do not satisfy M1 or M6 retirement gates.
@@ -341,10 +348,15 @@ native Python parser (1 line). M3 owns this inert dependency-name reference unti
 a reviewed exact-path classifier refinement or dependency replacement removes
 it. This is not an interpreter invocation.
 
+The graph resolver adds one further inert native JSON corpus row containing 37
+Python-reference lines. Native tests deserialize graph records and expected
+edges; no embedded source is executed. M3 owns this coverage until equivalent
+corpus replacement or a reviewed exact-path data classifier removes the row.
+
 The measured executable footprint remains 347 Python source files and 178,126
 physical lines. The conservative reference inventory rises from the original
-194 paths / 4,782 lines to 203 paths / 4,972 lines for the Shell corpus and native
-Python-parser names/data. The combined inventory now has 550 rows. No legacy
+194 paths / 4,782 lines to 204 paths / 5,009 lines for the Shell corpus and native
+Python-parser names/data. The combined inventory now has 551 rows. No legacy
 deletion or M6 zero result is claimed. Future retirement batches must lower the
 baseline again.
 

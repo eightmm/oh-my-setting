@@ -2,7 +2,7 @@
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
 It contains the development inventory tool `oms-migrate`, a standalone native
-`oms` binary, and fourteen native libraries: `oms-context` (manifest projections
+`oms` binary, and seventeen native libraries: `oms-context` (manifest projections
 and lossless session JSON input), `oms-safe-fs` (descriptor-relative reads),
 `oms-json` (domain byte encodings), `oms-output` (streaming digest selection,
 reversible reducers and scoped retrieval metadata), `oms-graph-shell` (source
@@ -13,23 +13,27 @@ graph extraction), `oms-context-report` (text reports), `oms-context-session`
 `oms-work-inspect` (work projections with lossless timestamp handling),
 `oms-context-source` (bounded read-only ledger/transcript acquisition),
 `oms-graph-python` (native extraction through one private persistent helper),
-`oms-output-capture` (pure retained-output validation, paging and search), and
+`oms-output-capture` (retained-output validation, safe capture acquisition, paging
+and search),
 `oms-graph` (parser selection, Config/Markdown extraction, and shared-helper
-Python/Shell routing).
+Python/Shell routing), `oms-graph-resolve` (ordered graph resolution),
+`oms-experiment` (scenario validation, normalization and canonical digests), and
+`oms-scrub` (bounded secret scanning and retained-output redaction).
 
 The standalone binary implements manifest inspection, comparison and current-file
 verification, plus injections, session reports and timelines, through
 `oms runtime context-inspect`. It preserves raw OS paths and lossless session
-Read labels. Descriptor-backed capture acquisition is available in `oms-safe-fs`;
-its capture projection adapter is still in progress. The graph facade explicitly
+Read labels. Descriptor-backed capture acquisition in `oms-safe-fs` is connected
+to the retained-output projection adapter. The graph facade explicitly
 rejects notebooks until their native parser is integrated. The installed `oms`
 command still uses the legacy runtime. No legacy domain is retired.
 
 The graph helper is a private libexec artifact, not another PATH command. Its
 malformed-input crashes are contained on Linux; macOS memory and dump-collector
 guarantees remain limited. Packaging must exclude the test-only
-`oms-graph-python-fixture` executable. Capture projection is a gated pure stage;
-its filesystem adapter is still pending and the retrieval task remains active.
+`oms-graph-python-fixture` executable. Capture acquisition and projections are
+locally integrated; their public CLI and MCP consumers still use the legacy
+implementation. Experiment comparison and notebook parsing remain incomplete.
 
 ## Toolchain and checks
 
@@ -40,7 +44,11 @@ the Rust standard library and Git. The
 build toolchain pin does not establish the final binaries' glibc or macOS
 deployment requirements: those must be validated against the supported hosts,
 including the Ubuntu 20.04 floor. It does not prove runtime or cross-host
-readiness. Run these from the repository root:
+readiness. An exact baseline CLI and production helper were built in an Ubuntu
+20.04 image and executed there with no Python or PATH tools. This proves those
+two artifacts only; changed release binaries must repeat the checks. Native
+macOS, WSL2 and installed lifecycle evidence remain pending. Run these from the
+repository root:
 
 ```bash
 cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked

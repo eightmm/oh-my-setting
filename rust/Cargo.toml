@@ -6,15 +6,18 @@ members = [
     "crates/oms-context-session",
     "crates/oms-context-source",
     "crates/oms-contract-markdown",
+    "crates/oms-experiment",
     "crates/oms-failure",
     "crates/oms-graph",
     "crates/oms-graph-python",
+    "crates/oms-graph-resolve",
     "crates/oms-graph-shell",
     "crates/oms-json",
     "crates/oms-migrate",
     "crates/oms-output",
     "crates/oms-output-capture",
     "crates/oms-safe-fs",
+    "crates/oms-scrub",
     "crates/oms-work-inspect",
 ]
 resolver = "3"

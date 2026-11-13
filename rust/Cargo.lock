@@ -446,6 +446,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-experiment"
+version = "0.1.0"
+dependencies = [
+ "oms-context",
+ "oms-json",
+ "sha2",
+]
+
+[[package]]
 name = "oms-failure"
 version = "0.1.0"
 dependencies = [
@@ -476,6 +485,13 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-general-category",
+]
+
+[[package]]
+name = "oms-graph-resolve"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -517,6 +533,7 @@ name = "oms-output-capture"
 version = "0.1.0"
 dependencies = [
  "oms-context",
+ "oms-safe-fs",
  "serde_json",
  "sha2",
 ]
@@ -526,6 +543,14 @@ name = "oms-safe-fs"
 version = "0.1.0"
 dependencies = [
  "rustix",
+]
+
+[[package]]
+name = "oms-scrub"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "regex",
 ]
 
 [[package]]
