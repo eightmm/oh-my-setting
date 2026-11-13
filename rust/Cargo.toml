@@ -1,7 +1,12 @@
 [workspace]
 members = [
     "crates/oms",
+    "crates/oms-command-agent-role",
+    "crates/oms-command-attempt-bundle",
+    "crates/oms-command-experiment",
     "crates/oms-command-failure",
+    "crates/oms-command-input",
+    "crates/oms-command-telemetry",
     "crates/oms-context",
     "crates/oms-context-report",
     "crates/oms-context-session",

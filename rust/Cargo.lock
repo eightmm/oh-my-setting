@@ -384,7 +384,12 @@ name = "oms"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "oms-command-agent-role",
+ "oms-command-attempt-bundle",
+ "oms-command-experiment",
  "oms-command-failure",
+ "oms-command-input",
+ "oms-command-telemetry",
  "oms-context",
  "oms-context-report",
  "oms-context-source",
@@ -399,12 +404,69 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-agent-role"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "rustix",
+ "serde_json",
+]
+
+[[package]]
+name = "oms-command-attempt-bundle"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-context",
+ "oms-context-source",
+ "oms-json",
+ "oms-safe-fs",
+ "oms-scrub",
+ "regex",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "oms-command-experiment"
+version = "0.1.0"
+dependencies = [
+ "oms-context",
+ "oms-experiment",
+ "users",
+]
+
+[[package]]
 name = "oms-command-failure"
 version = "0.1.0"
 dependencies = [
  "oms-failure",
  "oms-json",
  "users",
+]
+
+[[package]]
+name = "oms-command-input"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-context",
+ "oms-json",
+ "oms-safe-fs",
+ "regex",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
+name = "oms-command-telemetry"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-context",
+ "oms-json",
+ "oms-safe-fs",
+ "regex",
+ "rustix",
 ]
 
 [[package]]
@@ -462,6 +524,7 @@ dependencies = [
  "oms-context",
  "oms-json",
  "sha2",
+ "unicode-general-category",
 ]
 
 [[package]]

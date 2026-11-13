@@ -58,8 +58,11 @@ products have scoped native tests and independent review; they remain local
 integration work until release.
 The native compiler floor is 1.99.1; the preparation inventory tool separately
 retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
-capture read producer and projection adapter are implemented. Notebook parsing,
-experiment comparison and graph pipeline consumers remain in progress.
+capture read producer and projection adapter are implemented. Experiment template/validate/compare, normal/grouped artifact telemetry, role
+commands, parent input attachments and attempt bundles now have locally reviewed
+native handlers. These handlers are registered in the native workspace; public routing is
+separate. Notebook parsing and graph pipeline consumers remain in
+progress.
 
 Parent runtime probes verified SIGINT delivered on the real transcript read
 syscall returns exit 130 with empty stdout, actual socket rejection, and readable
@@ -85,6 +88,65 @@ processing contracts. They are not dependencies of this preparation change;
 their accepted behavior must be incorporated before that domain's parity baseline
 is frozen. Do not recreate an older digest implementation in Rust and call the
 lost behavior a performance improvement.
+
+## Current context evidence (2026-11-13)
+
+[PR #223](https://github.com/eightmm/oh-my-setting/pull/223) is frozen at
+`32f8517653d5c6cb41e6d7f40a6dcaee66e739e6`; its production reference is
+`74f87f654a314961420be2aa8ab6dfc1999151e1`. The
+[handoff](RUST-CONTEXT-HANDOFF.md) and [corpus guide](../migration/contracts/README.md)
+remain unchanged verification inputs. Local native tests now consume all 40
+inspection, 12 comparison and 12 raw-read cases, preserving per-case arguments,
+JSON types, expected-null presence and verbatim hex input bytes. The source digest
+and all three corpus blobs were independently checked. Native binary tests also
+exercise the 39 inspection and 11 comparison cases representable as CLI options;
+the two Boolean JSON-limit cases belong to the native typed boundary.
+
+| Public context-inspect surface | Local implementation evidence | Retirement status |
+|---|---|---|
+| Manifest, --limit, JSON | Native 40-case library corpus and 39 applicable binary cases | Native-comparable; Python retained |
+| --compare | Native 12-case library corpus and 11 applicable binary cases | Native-comparable; Python retained |
+| --verify-current | Existing native current-source status/path tests | Native-comparable; filesystem gaps remain |
+| --format text, --pretty | Existing native report and public binary cases | Native-comparable; complete frozen comparison pending |
+| --injections, --session-hash | Native acquisition/projection and binary cases | Native-comparable; complete frozen comparison pending |
+| --session, --timeline | Native acquisition/projection, child denial and binary cases | Native-comparable; complete frozen comparison pending |
+| Invalid combinations and child policy | Native parser/binary cases; transcript denial precedes sensitive reads | Native-comparable; no whole-command retirement |
+
+Native-comparable identifies implemented native paths and scoped matching tests;
+it does not mean every public combination or installation path is accepted.
+The separate frozen reference suite passed 27 methods. Its first candidate run
+stopped at a stale root Cargo.lock under --locked, before producing a binary.
+This batch reconciles that lock and workspace membership without changing the
+external package versions/checksums. The candidate comparison must run again from
+the unchanged reference checkout; its reference guard is not relaxed.
+
+Existing source/symlink/rendered-copy fixtures with Python hidden are additional
+regression evidence. They do not substitute for actual disposable installations,
+inspection of the older copied-dispatcher receipt bootstrap, a Python-free host,
+or dependency/build-helper audit on the exact current artifact. All remain
+required. No production context Python implementation or temporary comparison
+runner has been removed. The 34-line inventory reduction here is only PR #223's
+replacement of duplicate Python test methods with shared corpus replay.
+
+## HPC I/O work
+
+The target includes busy XFS HDD storage shared over NFS to Slurm nodes. No
+particular OMS hotspot was measured on that system. Prefer one snapshot/read per
+command for derived reports, streaming bounded log/metrics processing and
+immutable configuration reuse; avoid extra small-file metadata probes. Mutable
+authority, approvals, delivery receipts and locks must still be revalidated at
+action boundaries, with existing durability and crash guarantees retained.
+
+A local unoptimized 41,288,816-byte debug artifact produced matching public and
+private outputs for failure catalog and 100/12,000-row injection/session fixtures.
+Two warm elapsed observations per case showed roughly half a second of extra
+public-entry time. These observations do not isolate disk cost or prove an NFS
+speedup. The worker could not collect syscall counts because ptrace was refused;
+zero syscall fields in its raw records are placeholders, not measurements.
+Source inspection identifies three executable hashing passes in the transitional
+entry. Removing checks is not an authorized optimization. Native job-digest work
+is eliminating the remaining full log rescan and adding streaming cancellation;
+its final I/O and integration evidence is still pending.
 
 ## Target architecture
 
@@ -353,7 +415,7 @@ Python-reference lines. Native tests deserialize graph records and expected
 edges; no embedded source is executed. M3 owns this coverage until equivalent
 corpus replacement or a reviewed exact-path data classifier removes the row.
 
-The measured executable footprint is now 347 Python source files and 178,155
+The measured executable footprint is now 347 Python source files and 178,121
 physical lines, including the bounded 29-line M5 transition below. The conservative reference inventory rises from the original
 194 paths / 4,782 lines to 204 paths / 5,026 lines for the Shell corpus and native
 Python-parser names/data. The combined inventory now has 551 rows. No legacy
