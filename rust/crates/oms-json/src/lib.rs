@@ -23,6 +23,11 @@ impl PyString {
         Ok(Self(points))
     }
 
+    /// Borrow the original Python code points, including surrogates.
+    pub fn codepoints(&self) -> &[u32] {
+        &self.0
+    }
+
     /// Encode like Python's UTF-8 codec with `errors="replace"`.
     pub fn utf8_with_replacement(&self) -> Vec<u8> {
         self.0

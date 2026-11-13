@@ -1,0 +1,13 @@
+[package]
+name = "oms-command-failure"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[dependencies]
+oms-failure = { path = "../oms-failure" }
+oms-json = { path = "../oms-json" }
+users = { version = "=0.11.0", default-features = false }
+
+[lints.rust]
+unsafe_code = "forbid"

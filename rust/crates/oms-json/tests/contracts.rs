@@ -236,3 +236,10 @@ fn python_float_corpus() {
         );
     }
 }
+
+#[test]
+fn codepoints_preserve_surrogates() {
+    let text = PyString::from_codepoints(vec![0x61, 0xdcff, 0x1f600]).unwrap();
+    assert_eq!(text.codepoints(), &[0x61, 0xdcff, 0x1f600]);
+    assert!(canonical_json(&Value::String(text)).is_err());
+}
