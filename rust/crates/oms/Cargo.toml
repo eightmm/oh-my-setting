@@ -8,6 +8,7 @@ rust-version = "1.99.1"
 unsafe_code = "forbid"
 
 [dependencies]
+oms-command-failure = { path = "../oms-command-failure" }
 oms-context = { path = "../oms-context" }
 oms-context-report = { path = "../oms-context-report" }
 oms-context-source = { path = "../oms-context-source" }

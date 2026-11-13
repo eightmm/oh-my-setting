@@ -608,3 +608,76 @@ fn missing_or_malformed_preexecution_checksum_fails_closed() {
     assert_eq!(out.status.code(), Some(2));
     assert!(out.stdout.is_empty());
 }
+
+#[test]
+fn public_failure_namespace_runs_without_python_and_preserves_caller_directory() {
+    let cases: &[(&[&str], i32, &str)] = &[
+        (&["runtime", "failure", "catalog"], 0, "provider_capacity"),
+        (
+            &["runtime", "failure", "classify", "-fail now"],
+            0,
+            "unknown_failure",
+        ),
+        (
+            &[
+                "runtime", "--repo", "chosen", "--pretty", "failure", "catalog",
+            ],
+            0,
+            "\n  ",
+        ),
+        (
+            &[
+                "runtime", "--repo", "missing", "failure", "--repo", "chosen", "catalog",
+            ],
+            0,
+            "provider_capacity",
+        ),
+        (
+            &["runtime", "--repo", "-a b", "failure", "catalog"],
+            2,
+            "repository path is not a directory: -a b",
+        ),
+        (
+            &["runtime", "--bogus", "failure", "classify", "text"],
+            2,
+            "unrecognized arguments: --bogus",
+        ),
+        (&["runtime", "failure", "unknown"], 2, "invalid choice"),
+    ];
+    for (argv, status, fragment) in cases {
+        let f = Fixture::new();
+        let bin = f.tool_path();
+        let data = f.0.join("data");
+        std::fs::create_dir_all(data.join("chosen")).unwrap();
+        let output = Command::new(bin.join("bash"))
+            .arg(f.0.join("scripts/oms"))
+            .args(*argv)
+            .current_dir(&data)
+            .env("PATH", &bin)
+            .env("OMS_PYTHON_RUNTIME_ROOT", f.0.join("missing-python"))
+            .env("OMS_HARNESS_CHILD", "1")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(*status),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = if *status == 0 {
+            &output.stdout
+        } else {
+            &output.stderr
+        };
+        assert!(
+            String::from_utf8_lossy(bytes).contains(fragment),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(bytes)
+        );
+        if *status == 0 {
+            assert!(output.stderr.is_empty());
+        } else {
+            assert!(output.stdout.is_empty());
+        }
+    }
+}

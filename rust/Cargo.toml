@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/oms",
+    "crates/oms-command-failure",
     "crates/oms-context",
     "crates/oms-context-report",
     "crates/oms-context-session",

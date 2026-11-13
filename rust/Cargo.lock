@@ -384,6 +384,7 @@ name = "oms"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "oms-command-failure",
  "oms-context",
  "oms-context-report",
  "oms-context-source",
@@ -394,6 +395,15 @@ dependencies = [
  "sha2",
  "signal-hook",
  "unicode-general-category",
+ "users",
+]
+
+[[package]]
+name = "oms-command-failure"
+version = "0.1.0"
+dependencies = [
+ "oms-failure",
+ "oms-json",
  "users",
 ]
 

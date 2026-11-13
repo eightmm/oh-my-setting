@@ -50,6 +50,7 @@ const USAGE: &str = "usage: oms runtime context-inspect [-h] [--repo REPO] [--pr
 const HELP: &str = "positional arguments:\n  manifest              existing manifest inside the selected repository\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO           project repository or directory\n  --pretty              pretty-print JSON\n  --injections          instead of a manifest: bytes OMS hooks injected into\n                        sessions, from the hook event ledger\n  --session-hash SESSION_HASH\n                        with --injections: one recorded session hash\n  --session TRANSCRIPT  instead of a manifest: per-tool result bytes and\n                        repeated reads in one Claude Code JSONL transcript\n  --timeline            with --session: ordered tool calls (name, recorded\n                        duration, error flag, byte sizes, first error row); no\n                        arguments or outputs; up to 200 steps, --limit does\n                        not apply\n  --compare COMPARE     compare with another saved manifest; never run either\n                        pack\n  --verify-current      compare current source hashes (incompatible with\n                        --compare)\n  --limit LIMIT         rows per displayed list, 1..100 (default: 10)\n  --format {json,text}  output format (default: json); text is a read-only\n                        report";
 #[derive(Default)]
 struct Args {
+    failure_argv: Option<Vec<OsString>>,
     repo: Option<OsString>,
     pretty: bool,
     manifest: Option<OsString>,
@@ -239,7 +240,7 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                     .collect()
             };
             if matches.is_empty() {
-                unknown.push(arg.to_string_lossy().into_owned());
+                unknown.push(arg);
                 continue;
             }
             if matches.len() > 1 {
@@ -306,7 +307,11 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                 .or_else(|| {
                     let next = it.peek()?;
                     let bytes = next.as_bytes();
-                    if bytes.len() > 1 && bytes.starts_with(b"-") && !negative_number(bytes) {
+                    if bytes.len() > 1
+                        && bytes.starts_with(b"-")
+                        && !bytes.contains(&b' ')
+                        && !negative_number(bytes)
+                    {
                         None
                     } else {
                         it.next()
@@ -347,12 +352,26 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
         } else if !positional
             && bytes.len() > 1
             && bytes.starts_with(b"-")
+            && !bytes.contains(&b' ')
             && !negative_number(bytes)
         {
-            unknown.push(arg.to_string_lossy().into_owned());
+            unknown.push(arg);
         } else if command && a.manifest.is_none() {
             a.manifest = Some(arg);
         } else if !command {
+            if bytes == b"failure" {
+                let mut forwarded = Vec::new();
+                if let Some(value) = a.repo.take() {
+                    forwarded.extend([OsString::from("--repo"), value]);
+                }
+                if a.pretty {
+                    forwarded.push(OsString::from("--pretty"));
+                }
+                forwarded.extend(unknown);
+                forwarded.extend(it);
+                a.failure_argv = Some(forwarded);
+                return Ok(a);
+            }
             *legacy = [
                 b"envelope".as_slice(),
                 b"evidence",
@@ -374,7 +393,7 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                 arg.to_string_lossy()
             ));
         } else {
-            unknown.push(arg.to_string_lossy().into_owned());
+            unknown.push(arg);
         }
     }
     if !command {
@@ -383,7 +402,11 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
     if !unknown.is_empty() {
         return Err(format!(
             "\u{1}unrecognized arguments: {}",
-            unknown.join(" ")
+            unknown
+                .iter()
+                .map(|v| v.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
         ));
     }
     Ok(a)
@@ -978,6 +1001,23 @@ fn main() {
             std::process::exit(2)
         }
     };
+    if let Some(argv) = args.failure_argv {
+        let cwd = match std::env::current_dir() {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                eprintln!("runtime-core: cannot resolve current directory: {error}");
+                std::process::exit(2);
+            }
+        };
+        let (code, output, error) = oms_command_failure::run(&argv, &cwd, &interrupted);
+        use std::io::Write;
+        if std::io::stdout().write_all(&output).is_err()
+            || std::io::stderr().write_all(&error).is_err()
+        {
+            std::process::exit(1);
+        }
+        std::process::exit(code);
+    }
     let result = execute(args, &interrupted);
     if interrupted.load(Ordering::SeqCst) {
         eprintln!("runtime-core: interrupted");
