@@ -23,13 +23,13 @@ members = [
     "crates/oms-json",
     "crates/oms-lock",
     "crates/oms-mcp-server",
-    "crates/oms-migrate",
     "crates/oms-output",
     "crates/oms-output-capture",
     "crates/oms-safe-fs",
     "crates/oms-scrub",
     "crates/oms-work-inspect",
 ]
+exclude = ["crates/oms-migrate"]
 resolver = "3"
 
 [workspace.package]

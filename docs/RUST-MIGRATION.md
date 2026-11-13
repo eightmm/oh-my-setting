@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native core components and partial public routing integrated locally through de3e4ef7; deployment and legacy retirement remain pending.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native core components and partial public routing integrated locally through ec0ace7f; deployment and legacy retirement remain pending.
 
 ## Decision and completion boundary
 
@@ -69,7 +69,8 @@ The native compiler floor is 1.99.1; the preparation inventory tool separately
 retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
 capture read producer and projection adapter are implemented. Experiment template/validate/compare, normal/grouped artifact telemetry, role
 commands, parent input attachments and attempt bundles now have locally reviewed
-native handlers. The registered workspace has 29 packages. Public routing now
+native handlers. The production workspace has 28 packages; the separately locked development
+checker makes 29 packages in total. Public routing now
 selects native context/failure/experiment modes under runtime, normal/grouped
 artifact-index telemetry, all agent-role modes, parent input attachments,
 agent-events attempt-bundle reads and job-digest. Other modes retain their
@@ -120,9 +121,9 @@ the two Boolean JSON-limit cases belong to the native typed boundary.
 | Manifest, --limit, JSON | Native 40-case library corpus and 39 applicable binary cases | Native-comparable; Python retained |
 | --compare | Native 12-case library corpus and 11 applicable binary cases | Native-comparable; Python retained |
 | --verify-current | Existing native current-source status/path tests | Native-comparable; filesystem gaps remain |
-| --format text, --pretty | Existing native report and public binary cases | Native-comparable; complete frozen comparison pending |
-| --injections, --session-hash | Native acquisition/projection and binary cases | Native-comparable; complete frozen comparison pending |
-| --session, --timeline | Native acquisition/projection, child denial and binary cases | Native-comparable; complete frozen comparison pending |
+| --format text, --pretty | Existing native report and public binary cases | Frozen 27-method CLI comparison passed at ec0ace7f; broader gaps remain |
+| --injections, --session-hash | Native acquisition/projection and binary cases | Frozen 27-method CLI comparison passed at ec0ace7f; broader gaps remain |
+| --session, --timeline | Native acquisition/projection, child denial and binary cases | Frozen 27-method CLI comparison passed at ec0ace7f; broader gaps remain |
 | Invalid combinations and child policy | Native parser/binary cases; transcript denial precedes sensitive reads | Native-comparable; no whole-command retirement |
 
 Native-comparable identifies implemented native paths and scoped matching tests;
@@ -135,8 +136,18 @@ Native corpus validation order was subsequently corrected in 11a80f48; the exact
 proof establishes the newest artifact: repeat the candidate comparison after
 integration from the unchanged reference checkout. Its guard is not relaxed.
 The actual 27-package locked workspace passed formatting, check, Clippy, tests
-and inventory verification at de3e4ef7; external locked package versions,
-sources and checksums were preserved.
+and inventory verification at de3e4ef7; all 29 packages passed at ec0ace7f before
+the checker was isolated. External locked versions, sources and checksums were
+preserved.
+
+The parent repeated both frozen-reference commands against exact source ec0ace7f
+with Python 3.11: all 27 reference methods passed in 2.420 seconds, and all 27
+candidate methods passed in 44.934 seconds. The dev ELF SHA-256 was
+93f6a2272c71e425b4eec5833ced8c16852b7e3793f578e1c08e8c43cd129061.
+Canonical retained output-digest logs are 20261113T093001Z-927046 and
+20261113T093004Z-928990, with full decoded stdout/stderr, exit and unchanged-input
+checks. The slow debug wrapper result establishes compatibility for those cases,
+not speedup, current installations, interpreter absence or final-artifact proof.
 
 Existing source/symlink/rendered-copy fixtures with Python hidden are additional
 regression evidence. They do not substitute for actual disposable installations,
@@ -170,7 +181,8 @@ consistent script/snapshot, never executes the script or invokes Slurm. Raw OS
 labels are preserved; the legacy interpreter's locale-dependent encoding errors
 are not claimed equivalent across all locales.
 
-Both packages are registered in the 29-package locked workspace. Existing
+Both packages are registered in the 28-package locked production workspace;
+the separate development checker keeps the combined count at 29. Existing
 external versions, sources and checksums are preserved; approved num-bigint 0.4.6
 and shlex 1.3.0 add their num-integer 0.1.47 dependency. Public Slurm selection,
 native MCP entry/owner packaging and exact-artifact installation remain pending.
@@ -550,6 +562,36 @@ The demonstrated legacy defect and temporary repair remain explicit native-port 
   resolve archived decision paths against CWD rather than the supplied repository.
   The temporary repair above passes the declared repository explicitly and tests
   that invocation; M4 must preserve it in the native replacement.
+
+## Frozen verifier boundary
+
+The inventory checker has its own workspace and lockfile at
+`rust/crates/oms-migrate`. Its std-only sources and explicit targets can be bound
+as acceptance inputs without freezing the mutable production Cargo manifest,
+lockfile, CLI router or inventory budget. Existing CLI behavior and all six
+checker tests are retained, including the Rust 1.85 minimum; root CI runs the
+standalone package separately within its existing Rust job. No new CI job or
+matrix is added.
+
+A complete migration acceptance still needs the whole functional and platform
+criteria below. In particular, literal markers inside native Rust dependency
+names and inert parser corpora are not executable programs. Any final exception
+must bind the exact reviewed data or literal dependency lines, retain those
+fixtures and Python-project support, reject arbitrary remaining executable
+references, and remain distinct from the checker's unchanged strict
+`--require-zero` result. Never freeze an unreachable lexical target and then
+weaken its checker during a live campaign.
+
+The proposed complete-migration verifier permits at most twelve existing data
+rows (231 conservative marker lines): nine native JSON fixture files and the
+literal marker lines in three native Cargo manifests. It requires the exact
+path, row kind and count, plus a frozen SHA-256 of each raw JSON file or literal
+TOML marker-line sequence. Every source row and every other reference refuses.
+Changed fixture bytes, substituted dependency lines and extra invocations also
+refuse. This preserves the existing parser/MCP oracles and dependency names;
+it does not add a blanket Rust-tree exemption or change inventory CLI semantics.
+The current tree still has 348 executable Python sources, so this proposed
+zero-executable condition remains unmet.
 
 ## Verification and final acceptance
 

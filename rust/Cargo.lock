@@ -646,10 +646,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oms-migrate"
-version = "0.1.0"
-
-[[package]]
 name = "oms-output"
 version = "0.1.0"
 dependencies = [

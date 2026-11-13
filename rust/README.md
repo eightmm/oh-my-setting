@@ -1,8 +1,8 @@
 # Rust migration workspace
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
-It contains the development inventory tool `oms-migrate`, a standalone native
-`oms` binary, and eighteen native core libraries: `oms-context` (manifest projections
+The production workspace contains a standalone native
+`oms` binary and eighteen native core libraries: `oms-context` (manifest projections
 and lossless session JSON input), `oms-safe-fs` (descriptor-relative reads),
 `oms-json` (domain byte encodings), `oms-output` (streaming digest selection,
 reversible reducers and scoped retrieval metadata), `oms-graph-shell` (source
@@ -22,7 +22,10 @@ Python/Shell routing), `oms-graph-resolve` (ordered graph resolution),
 `oms-lock` (canonical cross-implementation lock protocol, without a public writer
 cutover). Eight command libraries provide failure, experiment, telemetry, role,
 input, attempt-bundle, job and static Slurm handlers. The native MCP transport
-and peer-owner package is also registered. The workspace has 29 packages.
+and peer-owner package is also registered. The production workspace has 28
+packages. The development inventory tool
+`oms-migrate` is a separate, dependency-free workspace at
+`rust/crates/oms-migrate`; the combined package count remains 29.
 
 Rust is the default for all OMS code. The shared state, plan/task, evidence,
 authority, lock, execution/admission, context and graph core has priority.
@@ -73,11 +76,14 @@ cargo +1.99.1 fmt --manifest-path rust/Cargo.toml --all -- --check
 cargo +1.99.1 check --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets
 cargo +1.99.1 test --locked --offline --manifest-path rust/Cargo.toml --workspace
 cargo +1.99.1 clippy --locked --offline --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
-cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo .
+cargo +1.99.1 test --locked --offline --manifest-path rust/crates/oms-migrate/Cargo.toml
+cargo +1.85.1 test --locked --offline --manifest-path rust/crates/oms-migrate/Cargo.toml
+cargo +1.99.1 run --locked --offline --manifest-path rust/crates/oms-migrate/Cargo.toml -- check --repo .
 ```
 
-Alternatively, change directory to `rust` so its toolchain file is selected and
-use `--repo ..`. Merely specifying `--manifest-path` from the repository root
+For inventory commands, `--repo` is relative to the current directory, so use
+`--repo ..` after changing directory to `rust`. Its toolchain file then selects
+the compiler. Merely specifying `--manifest-path` from the repository root
 does not select the nested rustup toolchain file; the explicit `+1.99.1` above
 keeps the compiler choice clear. These are validation commands, not a statement
 that a particular development environment has already executed them.
@@ -98,11 +104,19 @@ contract. The Rust job reuses the lifecycle job's macOS Homebrew Bash setup; its
 native checks. No extra job or matrix is added. A local configuration change is
 not a completed CI run or proof of the oldest supported deployment targets.
 
+The standalone checker explicitly declares its library, binary and inventory test,
+disables implicit target/build-script discovery, and has its own lockfile. Its
+source and manifest can be frozen for migration acceptance while production
+workspace membership, the runtime entry and inventory budget remain mutable.
+Cargo configuration still follows the caller directory and environment; an
+isolated acceptance runner must control those separately. Workspace isolation
+alone does not make external tools or the host hermetic.
+
 ## Legacy Python inventory
 
 ```bash
-cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- inventory --repo .
-cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo .
+cargo +1.99.1 run --locked --offline --manifest-path rust/crates/oms-migrate/Cargo.toml -- inventory --repo .
+cargo +1.99.1 run --locked --offline --manifest-path rust/crates/oms-migrate/Cargo.toml -- check --repo .
 ```
 
 `inventory` prints deterministic TSV to stdout, with header
@@ -142,7 +156,7 @@ otherwise the old upper bound could permit a later reintroduction below that cap
 ## Strict zero check and its limits
 
 ```bash
-cargo +1.99.1 run --locked --offline --manifest-path rust/Cargo.toml -p oms-migrate -- check --repo . --require-zero
+cargo +1.99.1 run --locked --offline --manifest-path rust/crates/oms-migrate/Cargo.toml -- check --repo . --require-zero
 ```
 
 The additional flag requires no inventory rows. It is expected to fail while

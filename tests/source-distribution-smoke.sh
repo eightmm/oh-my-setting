@@ -537,12 +537,15 @@ assert "rust: ${{ steps.rust_scope.outputs.required }}" in plan_body
 assert "continue-on-error" not in rust_body
 assert "    runs-on: ${{ matrix.os }}\n" in rust_body
 assert "        os: [ubuntu-24.04, macos-latest]\n" in rust_body
-for command in ("fetch", "fmt", "check", "clippy", "test", "run"):
+for command in ("fetch", "fmt", "check", "clippy", "test"):
     assert "cargo +1.99.1 " + command + " --manifest-path rust/Cargo.toml" in rust_body, command
 assert "cargo +1.99.1 fetch --manifest-path rust/Cargo.toml --locked" in rust_body
 assert rust_body.index("cargo +1.99.1 fetch") < rust_body.index("cargo +1.99.1 check")
 assert "--workspace --all-targets --locked --offline -- -D warnings" in rust_body
-assert "-p oms-migrate -- check --repo ." in rust_body
+for command in ("fmt", "check", "clippy", "test", "run"):
+    assert "cargo +1.99.1 " + command + " --manifest-path rust/crates/oms-migrate/Cargo.toml" in rust_body, command
+assert "--manifest-path rust/crates/oms-migrate/Cargo.toml --locked --offline -- check --repo ." in rust_body
+assert "--manifest-path rust/crates/oms-migrate/Cargo.toml --all-targets --locked --offline" in rust_body
 toolchain = pathlib.Path(sys.argv[1]).parents[2] / "rust/rust-toolchain.toml"
 assert 'channel = "1.99.1"' in toolchain.read_text(), "CI and the workspace toolchain diverged"
 rust_scope = plan_body.split("      - name: select Rust migration checks\n", 1)[1].split("      - name: select affected changes\n", 1)[0]
