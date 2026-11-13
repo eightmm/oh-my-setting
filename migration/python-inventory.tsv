@@ -511,7 +511,7 @@ tests/supervisor-smoke.sh	python-reference	24
 tests/terminal-control-smoke.sh	python-reference	3
 tests/test_artifact_view.py	python-source	305
 tests/test_codex_harness.py	python-source	428
-tests/test_context_inspect.py	python-source	664
+tests/test_context_inspect.py	python-source	630
 tests/test_inputs.py	python-source	320
 tests/test_intent_source.py	python-source	394
 tests/test_oms_graph_adapter.py	python-source	543
