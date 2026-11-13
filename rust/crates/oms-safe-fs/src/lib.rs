@@ -699,6 +699,36 @@ mod tests {
         );
     }
     #[test]
+    fn manifest_limit_and_permission_boundary() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let path = f.0.join("manifest");
+        let limit = 4 * 1024 * 1024;
+        let root = Root::open(&f.0).unwrap();
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("manifest"), 0),
+            Ok(vec![])
+        );
+        std::fs::write(&path, vec![b' '; limit]).unwrap();
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("manifest"), limit)
+                .unwrap()
+                .len(),
+            limit
+        );
+        assert_eq!(
+            root.read_manifest_detailed(Path::new("manifest"), limit - 1),
+            Err(ManifestError::InitialOversize)
+        );
+        if rustix::process::getuid().as_raw() != 0 {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let result = root.read_manifest_detailed(Path::new("manifest"), limit);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(result, Err(ManifestError::Open(Error::Unreadable)));
+        }
+    }
+    #[test]
     fn detects_changes_and_replacements() {
         let f = Fixture::new();
         std::fs::write(f.0.join("file"), b"one").unwrap();
