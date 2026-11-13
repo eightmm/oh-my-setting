@@ -1,7 +1,310 @@
 //! Frozen from CPython 3.12.15 / Unicode 15.0.0 at f2dbaeb93522fb155e87f87c4f784a8d2c488c5d.
 //! Reference: scripts/lib/path_scope.py (all 469 lines), scheduler.py (scope functions 1-91).
-//! Native tests never start Python. File readers and CLI adapters are outside this API.
+//! Native tests never start Python. Stream adapters use in-memory readers and
+//! writers; file opening, metadata checks and public CLI activation stay outside.
 use oms_contract_markdown::scope::*;
+use std::io::{self, BufReader, Cursor, Read, Write};
+
+#[test]
+fn scope_stream_rule_rows() {
+    let classifier = read_rules(
+        b"repo\tignored\tmetadata\r\n\r\nallow\t./src/*.rs/\r\ndeny\tsrc/private*.rs".as_slice(),
+    )
+    .unwrap();
+    assert_eq!(classifier.classify("src/a.rs"), Classification::Allowed);
+    assert_eq!(
+        classifier.classify("src/private.rs"),
+        Classification::Forbidden
+    );
+    assert_eq!(classifier.classify("docs/a.rs"), Classification::Outside);
+    for raw in [b"".as_slice(), b"\n\r\n", b"Allow\ta\nunknown\t\t\n"] {
+        assert_eq!(
+            read_rules(raw).unwrap().classify("anything"),
+            Classification::Allowed
+        );
+    }
+    assert_eq!(
+        read_rules(b"allow\t \r\n".as_slice())
+            .unwrap()
+            .classify("anything"),
+        Classification::Allowed
+    );
+    for (raw, message) in [
+        (b"allow".as_slice(), "scope rule row is malformed"),
+        (b"deny\t", "scope rule row is malformed"),
+        (b"allow\ta\tb", "scope rule row is malformed"),
+        (
+            b"allow\t../a\ndeny\n",
+            "scope rule must be a normalized repo-relative path",
+        ),
+        (
+            b"allow\t[z-a]\ndeny\t../a\n",
+            "scope rule must be a normalized repo-relative path",
+        ),
+        (b"allow\t[z-a]\ndeny\n", "scope rule row is malformed"),
+        (b"deny\t../a\n\xff", "scope rule file must be UTF-8"),
+        (
+            b"allow\nignored\0",
+            "scope rule file is invalid or too large",
+        ),
+        (b"\xff\0", "scope rule file is invalid or too large"),
+        (
+            b"allow\ta\r\r\n",
+            "scope rule contains a control or format character",
+        ),
+    ] {
+        assert_eq!(read_rules(raw).unwrap_err().to_string(), message);
+    }
+    assert!(
+        read_rules(b"deny\t[[:bogus:]]\nallow\t[z-a]\n".as_slice())
+            .unwrap_err()
+            .to_string()
+            .contains("descending")
+    );
+    assert!(read_rules(b"deny\t[z-a]".as_slice()).is_err());
+}
+
+#[test]
+fn scope_stream_rule_bounds() {
+    let mut bytes = b"allow\ta\n".to_vec();
+    bytes.resize(MAX_RULE_FILE_BYTES, b'x');
+    let mut input = Cursor::new(bytes);
+    assert_eq!(
+        read_rules(&mut input).unwrap().classify("b"),
+        Classification::Outside
+    );
+    assert_eq!(input.position() as usize, MAX_RULE_FILE_BYTES);
+    input.get_mut().extend_from_slice(b"extra unread bytes");
+    input.set_position(0);
+    assert_eq!(
+        read_rules(&mut input).unwrap_err().to_string(),
+        "scope rule file is invalid or too large"
+    );
+    assert_eq!(input.position() as usize, MAX_RULE_FILE_BYTES + 1);
+
+    let mut rows = b"allow\ta\n".repeat(MAX_RULES);
+    rows.extend_from_slice(b"ignored\t\t\n");
+    assert!(read_rules(rows.as_slice()).is_ok());
+    for (extra, message) in [
+        (
+            b"allow\ta\n".as_slice(),
+            "scope rule file has too many rules",
+        ),
+        (b"deny\t../a\n", "scope rule file has too many rules"),
+        (b"deny\t\n", "scope rule row is malformed"),
+    ] {
+        let mut oversized = rows.clone();
+        oversized.extend_from_slice(extra);
+        assert_eq!(
+            read_rules(oversized.as_slice()).unwrap_err().to_string(),
+            message
+        );
+    }
+}
+
+#[test]
+fn scope_stream_raw_rows_and_partial_output() {
+    let classifier = read_rules(b"allow\tsrc/*\ndeny\tsrc/private*\n".as_slice()).unwrap();
+    let paths = b"\n\r\nsrc/a\r\nsrc/private\n./src/a\nsrc\\a\nsrc/\xff\0\t\rsuffix\nlast\r";
+    let expected = b"allowed\tsrc/a\nforbidden\tsrc/private\noutside\t./src/a\noutside\tsrc\\a\nallowed\tsrc/\xff\0\t\rsuffix\noutside\tlast\n";
+    for capacity in [1, 2, 3, 4096] {
+        let input = BufReader::with_capacity(capacity, paths.as_slice());
+        let mut output = Vec::new();
+        assert_eq!(classifier.classify_stream(input, &mut output).unwrap(), 6);
+        assert_eq!(output, expected);
+    }
+    let classifier = Classifier::new(&["?"], &[]).unwrap();
+    for (raw, class) in [
+        (b"\xff".as_slice(), "allowed"),
+        (b"\xed\xa0\x80", "outside"),
+        ("é".as_bytes(), "allowed"),
+        (b"\xf0\x80\x80\x80", "outside"),
+        ("\u{fffd}".as_bytes(), "allowed"),
+    ] {
+        let mut output = Vec::new();
+        let input = BufReader::with_capacity(1, raw);
+        assert_eq!(classifier.classify_stream(input, &mut output).unwrap(), 1);
+        let mut expected = format!("{class}\t").into_bytes();
+        expected.extend_from_slice(raw);
+        expected.push(b'\n');
+        assert_eq!(output, expected);
+    }
+    let classifier = Classifier::new(&[], &[]).unwrap();
+    for raw in [b"".as_slice(), b"\n\r\n\r"] {
+        let mut output = Vec::new();
+        assert_eq!(classifier.classify_stream(raw, &mut output).unwrap(), 0);
+        assert!(output.is_empty());
+    }
+    for path in [
+        vec![b'a'; MAX_SCOPE_ITEM_BYTES],
+        "é".repeat(2048).into_bytes(),
+        {
+            let mut raw = vec![255; 1365];
+            raw.push(b'a');
+            raw
+        },
+    ] {
+        let mut input = path.clone();
+        input.extend_from_slice(b"\r\n");
+        let mut output = Vec::new();
+        assert_eq!(
+            classifier
+                .classify_stream(input.as_slice(), &mut output)
+                .unwrap(),
+            1
+        );
+        let mut expected = b"allowed\t".to_vec();
+        expected.extend_from_slice(&path);
+        expected.push(b'\n');
+        assert_eq!(output, expected);
+    }
+    for oversized in [vec![b'a'; MAX_SCOPE_ITEM_BYTES + 10000], vec![255; 1366]] {
+        let mut input = b"ok\n".to_vec();
+        input.extend_from_slice(&oversized);
+        let mut input = Cursor::new(input);
+        let mut output = Vec::new();
+        let err = classifier
+            .classify_stream(&mut input, &mut output)
+            .unwrap_err();
+        assert!(matches!(err, ScopeStreamError::Scope(_)));
+        assert!(std::error::Error::source(&err).is_some());
+        assert_eq!(
+            err.to_string(),
+            "changed path exceeds the 4096-byte UTF-8 limit"
+        );
+        assert_eq!(output, b"allowed\tok\n");
+        assert!(input.position() as usize <= 3 + MAX_SCOPE_ITEM_BYTES + 3);
+    }
+}
+
+#[test]
+fn scope_stream_path_count() {
+    let classifier = Classifier::new(&[], &[]).unwrap();
+    let mut input = b"a\n".repeat(MAX_CLASSIFY_PATHS);
+    input.extend_from_slice(b"\n\r\n");
+    assert_eq!(
+        classifier
+            .classify_stream(input.as_slice(), io::sink())
+            .unwrap(),
+        MAX_CLASSIFY_PATHS
+    );
+    for extra in [b"a".to_vec(), vec![b'a'; MAX_SCOPE_ITEM_BYTES + 3]] {
+        let mut oversized = input.clone();
+        oversized.extend_from_slice(&extra);
+        let mut output = Vec::new();
+        assert_eq!(
+            classifier
+                .classify_stream(oversized.as_slice(), &mut output)
+                .unwrap_err()
+                .to_string(),
+            "scope path stream has too many entries"
+        );
+        assert_eq!(output.len(), b"allowed\ta\n".len() * MAX_CLASSIFY_PATHS);
+        assert!(
+            output
+                .as_chunks::<{ b"allowed\ta\n".len() }>()
+                .0
+                .iter()
+                .all(|row| row == b"allowed\ta\n")
+        );
+    }
+}
+
+#[test]
+fn scope_stream_io_failures() {
+    struct Broken;
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("test read failure"))
+        }
+    }
+    assert_eq!(
+        read_rules(Broken).unwrap_err().to_string(),
+        "cannot read scope rule file"
+    );
+    assert_eq!(
+        read_rules(b"allow\ta\n".as_slice().chain(Broken))
+            .unwrap_err()
+            .to_string(),
+        "cannot read scope rule file"
+    );
+    let classifier = Classifier::new(&[], &[]).unwrap();
+    let input = BufReader::with_capacity(1, b"a\n".as_slice().chain(Broken));
+    let mut output = Vec::new();
+    let err = classifier.classify_stream(input, &mut output).unwrap_err();
+    assert!(matches!(&err, ScopeStreamError::Io(inner) if inner.kind() == io::ErrorKind::Other));
+    assert_eq!(err.to_string(), "test read failure");
+    assert!(std::error::Error::source(&err).is_some());
+    assert_eq!(output, b"allowed\ta\n");
+
+    struct ShortWriter {
+        bytes: Vec<u8>,
+        remaining: usize,
+    }
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "test write failure",
+                ));
+            }
+            let size = bytes.len().min(self.remaining).min(2);
+            self.bytes.extend_from_slice(&bytes[..size]);
+            self.remaining -= size;
+            Ok(size)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            panic!("flushing belongs to the consumer");
+        }
+    }
+    for remaining in [0, 10, 13, 20] {
+        let mut output = ShortWriter {
+            bytes: Vec::new(),
+            remaining,
+        };
+        let mut input = Cursor::new(b"a\nb\nc\n");
+        let err = classifier
+            .classify_stream(&mut input, &mut output)
+            .unwrap_err();
+        assert!(
+            matches!(&err, ScopeStreamError::Io(inner) if inner.kind() == io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(err.to_string(), "test write failure");
+        assert!(std::error::Error::source(&err).is_some());
+        assert_eq!(
+            output.bytes,
+            b"allowed\ta\nallowed\tb\nallowed\tc\n"[..remaining]
+        );
+        assert_eq!(
+            input.position(),
+            if remaining < 10 {
+                2
+            } else if remaining < 20 {
+                4
+            } else {
+                6
+            }
+        );
+    }
+    let mut output = ShortWriter {
+        bytes: Vec::new(),
+        remaining: 30,
+    };
+    assert_eq!(
+        classifier
+            .classify_stream(b"a\nb\nc\n".as_slice(), &mut output)
+            .unwrap(),
+        3
+    );
+    assert_eq!(output.bytes, b"allowed\ta\nallowed\tb\nallowed\tc\n");
+    let err = classifier
+        .classify_stream(b"a\n".as_slice(), Cursor::new([]))
+        .unwrap_err();
+    assert!(
+        matches!(&err, ScopeStreamError::Io(inner) if inner.kind() == io::ErrorKind::WriteZero)
+    );
+}
 
 #[test]
 fn byte_bounds_controls_and_codepoints() {

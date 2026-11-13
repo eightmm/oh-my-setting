@@ -1,4 +1,4 @@
-//! Pure repository scope contracts, ported from `scripts/lib/path_scope.py`.
+//! Repository scope contracts and bounded streams, ported from `scripts/lib/path_scope.py`.
 //!
 //! Declarations must pass [`normalize`] before storage. Pattern validation alone
 //! deliberately does not normalize or reject controls, matching the reference.
@@ -8,11 +8,14 @@
 //!
 //! [`Classifier::classify_changed_path`] accepts original OS bytes and decodes
 //! UTF-8 with Python's surrogateescape semantics. It never normalizes the path or
-//! substitutes replacement characters. Rule-file parsing and stream I/O belong
-//! to consumers; this module only validates supplied rules and paths.
+//! substitutes replacement characters. [`read_rules`] and
+//! [`Classifier::classify_stream`] supply bounded adapters for the pending
+//! `change-guard` cutover. File opening, regular-file checks and flushing belong
+//! to consumers; these helpers never open files or mutate repository state.
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::io::{self, BufRead, Read, Write};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 pub const MAX_SCOPE_ITEM_BYTES: usize = 4096;
@@ -21,6 +24,7 @@ pub const MAX_BRACKET_EXPANSION: usize = 4096;
 pub const MAX_BRACKET_ITEMS: usize = 4096;
 pub const MAX_PATTERN_EXPANSION: usize = 4096;
 pub const MAX_PATTERN_REGEX_OUTPUT: usize = 16384;
+pub const MAX_RULE_FILE_BYTES: usize = 1024 * 1024;
 pub const MAX_RULES: usize = 8192;
 pub const MAX_CLASSIFY_PATHS: usize = 100000;
 
@@ -34,6 +38,44 @@ impl fmt::Display for ScopeError {
 }
 
 impl std::error::Error for ScopeError {}
+
+/// Streaming may fail after emitting earlier rows. I/O failures retain their
+/// original kind and source so consumers can handle a broken pipe separately.
+#[derive(Debug)]
+pub enum ScopeStreamError {
+    Scope(ScopeError),
+    Io(io::Error),
+}
+
+impl fmt::Display for ScopeStreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scope(err) => err.fmt(f),
+            Self::Io(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ScopeStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Scope(err) => Some(err),
+            Self::Io(err) => Some(err),
+        }
+    }
+}
+
+impl From<ScopeError> for ScopeStreamError {
+    fn from(err: ScopeError) -> Self {
+        Self::Scope(err)
+    }
+}
+
+impl From<io::Error> for ScopeStreamError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
 
 fn error(message: impl Into<String>) -> ScopeError {
     ScopeError(message.into())
@@ -500,7 +542,8 @@ impl Classifier {
     /// One raw input line: removes at most one LF and then one CR, skips an
     /// empty result, and otherwise preserves every original byte. This function
     /// does not implement a stream-entry limit; [`Self::classify_changed_paths`]
-    /// enforces that limit over a supplied batch. Use [`changed_line`] to borrow
+    /// enforces that limit over a supplied batch; [`Self::classify_stream`]
+    /// enforces it while writing rows. Use [`changed_line`] to borrow
     /// the exact cleaned path bytes when echoing a classified path.
     pub fn classify_changed_path(&self, raw: &[u8]) -> Result<Option<Classification>, ScopeError> {
         let path = changed_line(raw);
@@ -531,6 +574,53 @@ impl Classifier {
             result.push((class, path));
         }
         Ok(result)
+    }
+
+    /// Emits `classification\tpath\n` for each nonempty LF-delimited input row,
+    /// preserving original bytes after [`changed_line`] cleanup. Unlike batch
+    /// classification, earlier rows remain on a later validation or I/O error.
+    /// Memory is bounded by one path and one output row, even without input LF.
+    /// The count limit precedes the path-size limit. Surrogateescaped bytes are
+    /// charged as three UTF-8 bytes, exactly as in single-path classification.
+    ///
+    /// Returns the emitted row count. The caller owns flushing, including on
+    /// error, and serialization of shared output: a failed or interrupted write
+    /// may leave a partial final row. This method does not retry whole rows.
+    pub fn classify_stream(
+        &self,
+        mut input: impl BufRead,
+        mut output: impl Write,
+    ) -> Result<usize, ScopeStreamError> {
+        let mut line = Vec::new();
+        let mut row = Vec::new();
+        let mut count = 0;
+        loop {
+            line.clear();
+            // Two suffix bytes may be removed; the next byte proves oversize.
+            if input
+                .by_ref()
+                .take((MAX_SCOPE_ITEM_BYTES + 3) as u64)
+                .read_until(b'\n', &mut line)?
+                == 0
+            {
+                return Ok(count);
+            }
+            let path = changed_line(&line);
+            if path.is_empty() {
+                continue;
+            }
+            if count >= MAX_CLASSIFY_PATHS {
+                return Err(error("scope path stream has too many entries").into());
+            }
+            let class = self.classify_changed_path(&line)?.expect("nonempty path");
+            row.clear();
+            row.extend_from_slice(class.as_str().as_bytes());
+            row.push(b'\t');
+            row.extend_from_slice(path);
+            row.push(b'\n');
+            output.write_all(&row)?;
+            count += 1;
+        }
     }
 }
 
@@ -577,9 +667,16 @@ pub struct Rule<'a> {
 /// errors precede grammar validation; allowed grammar precedes forbidden grammar.
 /// File type, encoding, byte budget, and row syntax remain the reader's contract.
 pub fn validate_rules(rules: &[Rule<'_>]) -> Result<Classifier, ScopeError> {
+    classifier_from_rules(rules.iter().copied().map(Ok))
+}
+
+fn classifier_from_rules<'a>(
+    rules: impl IntoIterator<Item = Result<Rule<'a>, ScopeError>>,
+) -> Result<Classifier, ScopeError> {
     let mut allowed = Vec::new();
     let mut forbidden = Vec::new();
-    for (i, rule) in rules.iter().enumerate() {
+    for (i, rule) in rules.into_iter().enumerate() {
+        let rule = rule?;
         if i >= MAX_RULES {
             return Err(error("scope rule file has too many rules"));
         }
@@ -593,6 +690,40 @@ pub fn validate_rules(rules: &[Rule<'_>]) -> Result<Classifier, ScopeError> {
         &allowed.iter().map(String::as_str).collect::<Vec<_>>(),
         &forbidden.iter().map(String::as_str).collect::<Vec<_>>(),
     )
+}
+
+/// Reads at most [`MAX_RULE_FILE_BYTES`] plus one byte before parsing stored
+/// `allow`/`deny` TSV rows. NUL and UTF-8 checks precede row validation, unknown
+/// row kinds are ignored, and all declarations validate even for an empty path
+/// stream. Normalization errors precede grammar errors, with allowed grammar
+/// validated first. The bounded payload is discarded after compilation.
+///
+/// The caller must open and check the regular file and its metadata size before
+/// calling, matching the reference's distinct pre-read error. This reader also
+/// enforces the byte budget in case the file grows after that check.
+pub fn read_rules(input: impl Read) -> Result<Classifier, ScopeError> {
+    let mut payload = Vec::new();
+    input
+        .take((MAX_RULE_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut payload)
+        .map_err(|_| error("cannot read scope rule file"))?;
+    if payload.len() > MAX_RULE_FILE_BYTES || payload.contains(&0) {
+        return Err(error("scope rule file is invalid or too large"));
+    }
+    let text = std::str::from_utf8(&payload).map_err(|_| error("scope rule file must be UTF-8"))?;
+    classifier_from_rules(text.split('\n').filter_map(|raw| {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let mut fields = line.split('\t');
+        let kind = match fields.next() {
+            Some("allow") => RuleKind::Allow,
+            Some("deny") => RuleKind::Deny,
+            _ => return None,
+        };
+        Some(match fields.next() {
+            Some(path) if !path.is_empty() && fields.next().is_none() => Ok(Rule { kind, path }),
+            _ => Err(error("scope rule row is malformed")),
+        })
+    }))
 }
 
 pub fn normalize_list(text: &str) -> Result<Vec<String>, ScopeError> {
