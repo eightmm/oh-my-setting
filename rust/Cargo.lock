@@ -389,6 +389,7 @@ dependencies = [
  "oms-command-experiment",
  "oms-command-failure",
  "oms-command-input",
+ "oms-command-job-digest",
  "oms-command-telemetry",
  "oms-context",
  "oms-context-report",
@@ -455,6 +456,16 @@ dependencies = [
  "regex",
  "rustix",
  "sha2",
+]
+
+[[package]]
+name = "oms-command-job-digest"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nix",
+ "regex",
+ "serde_json",
 ]
 
 [[package]]

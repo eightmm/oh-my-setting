@@ -6,6 +6,7 @@ members = [
     "crates/oms-command-experiment",
     "crates/oms-command-failure",
     "crates/oms-command-input",
+    "crates/oms-command-job-digest",
     "crates/oms-command-telemetry",
     "crates/oms-context",
     "crates/oms-context-report",
