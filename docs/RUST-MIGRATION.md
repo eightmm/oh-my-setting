@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12. Status: preparation; production cutover has not started.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: preparation plus bounded legacy decision-proof recovery; native production cutover has not started.
 
 ## Decision and completion boundary
 
@@ -17,6 +17,13 @@ or executing the old code through a Rust-hosted interpreter does not complete
 the migration. Substantive Bash orchestration also moves into Rust. A minimal
 platform bootstrap may download, verify, and execute the native binary; it
 must not contain OMS state logic or provision Python.
+
+Rust is the default for all OMS code, including CLI and panel implementation.
+The important shared core moves completely to Rust first: state, plans/tasks,
+evidence, authority/approvals, locks, execution/admission, context and graph.
+CLI, panel, MCP and provider adapters use those same core APIs and canonical
+records. TypeScript may serve presentation when useful. This priority changes
+work order without narrowing the complete migration boundary.
 
 This boundary concerns OMS itself. A user's Python project, an explicitly
 requested project test command, or an independently installed provider may use
@@ -255,6 +262,42 @@ specific classifier improvement and evidence that the content is not executed;
 do not hide executable paths behind broad exclusions or remove Python-project
 support to satisfy the counter. Dynamic and transitive requirements still need
 the clean-host evidence below.
+
+### Temporary decision-proof recovery footprint (2026-11-13)
+
+Migration supervision encountered archived cancellations that pin different
+historical versions at the same decision path. Overwriting that path to repair
+one version would invalidate another. The bounded legacy compatibility repair
+adds parent-only `oms agent-plan snapshot-decision --decision-artifact PATH
+--expected-decision-artifact-sha256 SHA`. It captures fresh raw bytes (at most
+64 KiB), returns JSON `snapshot_path`, `sha256`, `created` with exit 0, and refuses
+unsafe or mismatched input with exit 2. It changes no task, approval or receipt.
+
+New cancellations capture the fresh reviewed source durably before saving the
+plan. Historical validation may resolve only its exact pinned digest from the
+private 0700/0600 `.oms/plan/decision-artifacts-v1/<sha256>` catalog if the source
+changed or its final leaf is missing. Unsafe ancestors, links, ownership, modes,
+oversize or corrupt bytes remain errors. A stale snapshot cannot authorize a new
+cancellation. Legacy records without an authentic snapshot still refuse changed
+bytes. Existing parent-only relocation preserves CAS, live-worker and original
+task/lease evidence while moving a still-valid active decision pointer.
+
+Publication uses an exclusive temporary file, fsync, exclusive link, temporary
+unlink, exact readback and directory fsync. A crash between link and unlink leaves
+two links and fails closed; orphan cleanup is not automatic. A later-refused
+cancellation can leave a non-authoritative valid blob. Cache invalidation tracks
+only referenced original and exact digest paths, including missing leaves; no
+catalog scan or cached mutation authority is added. Retirement validation uses
+the declared physical repository even when invoked from another directory.
+
+The measured baseline becomes 348 Python source files / 178,366 physical lines
+and 194 conservative reference paths / 4,788 lines: 542 rows. The new source
+`scripts/lib/plan_decisions.py` has 220 lines; existing cancellation, retirement,
+cache and canonical fixtures also grow. This explicit temporary increase is owned
+by M4, not a permanent Python backend or a native migration result. Remove it
+when native cancellation, immutable proof/relocation/archive validation, cache
+invalidation, contention and crash recovery replace these consumers and tests.
+The inventory guard remains unchanged and is never auto-refreshed by CI.
 
 ## Verification and final acceptance
 

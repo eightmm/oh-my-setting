@@ -46,6 +46,7 @@ def state_repo():
     return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
 
 _completion_module = None
+_decision_module = None
 _unverified_completions = set()
 _settled_completion_leases = set()
 
@@ -54,6 +55,13 @@ def completion_module():
     if _completion_module is None:
         _completion_module = _load(os.path.join(os.path.dirname(__file__), "plan-completion.py"))
     return _completion_module
+
+
+def decision_module():
+    global _decision_module
+    if _decision_module is None:
+        _decision_module = _load(os.path.join(os.path.dirname(__file__), "plan_decisions.py"))
+    return _decision_module
 
 
 def load():
@@ -178,12 +186,11 @@ def validate_cancellation(repo_root, task_id, task):
     if (not isinstance(rel, str) or not rel or len(rel) > 240 or rel.startswith("/") or
             "\\" in rel or any(part in ("", ".", "..") for part in rel.split("/"))):
         die("task %s has an invalid cancellation decision-artifact path" % task_id)
-    filename = os.path.join(repo_root, *rel.split("/"))
-    if not same_absolute_path(os.path.realpath(filename), filename):
-        die("task %s cancellation decision artifact traverses a symlink" % task_id)
-    raw = read_regular_bytes(filename, "cancellation decision artifact", 64 * 1024)
-    if hashlib.sha256(raw).hexdigest() != receipt["decision_artifact_sha256"]:
-        die("task %s cancellation decision artifact digest changed" % task_id)
+    try:
+        decision_module()["historical_bytes"](
+            repo_root, rel, receipt["decision_artifact_sha256"])
+    except (ValueError, OSError) as exc:
+        die("task %s cancellation decision artifact: %s" % (task_id, exc))
 
 def split_list(s):
     return [x.strip() for x in re.split(r"[,\s]+", s) if x.strip()]
@@ -1419,6 +1426,91 @@ if act == "add":
         tasks[i]["discovered_from"] = found_in
     save(d); print("plan: added %s (%s)" % (i, title)); sys.exit(0)
 
+def refuse_live_worker_authority(selected, noun):
+    markers = load_worker_markers()
+    if any(not worker_marker_is_typed(marker) for marker in markers):
+        die("worker marker set is malformed or unproven; %s refused" % noun)
+    for marker in markers:
+        marker_task = marker.get("task_id")
+        if (marker_task in selected or
+                (not marker_task and marker.get("access") != "read")) and marker_pid_alive(marker):
+            die("live worker marker prevents %s: %s" % (noun, marker_task or "unidentified"))
+
+if act == "relocate-decision":
+    # Move a valid receipt before restoring historical bytes at its old path.
+    # The old file must remain valid through every active pointer move; load()
+    # fails closed if it already differs. The destination holds the bound bytes.
+    # No digest, task evidence, state, lease, time or archived plan changes.
+    if env("OMS_HARNESS_CHILD") == "1" or env("OMS_HARNESS_DELEGATE_DEPTH") not in ("", "0"):
+        die("relocate-decision is parent-only")
+    if env("OMS_OPERATOR_CONSENT") != "relocate-decision":
+        die("relocate-decision requires explicit operator consent")
+    reason = env("OMS_REASON")
+    reject_controls(reason, "relocation reason")
+    if not reason or len(reason) > 500:
+        die("relocation reason must be 1..500 characters")
+    i = require_id()
+    t = get_task(i)
+    expected_plan = env("OMS_EXPECTED_PLAN_SHA256")
+    expected_task = env("OMS_EXPECTED_TASK_SHA256")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_plan) or not re.fullmatch(r"[0-9a-f]{64}", expected_task):
+        die("relocate-decision requires exact lowercase plan and task SHA-256 values")
+    repo_root = require_canonical_plan("cancellation", "relocate-decision")
+    raw_plan = read_regular_bytes(path, "active plan", 1024 * 1024)
+    if hashlib.sha256(raw_plan).hexdigest() != expected_plan:
+        die("active plan changed after relocation was reviewed")
+    if exact_task_sha256(t) != expected_task:
+        die("task changed after relocation was reviewed")
+    if t.get("state") != "cancelled":
+        die("task %s is %s; relocation requires a cancelled task" % (i, t.get("state")))
+    # load() has already rebuilt this receipt's original task, so only the
+    # artifact pointer is left to move.
+    receipt = t["cancellation"]
+    bound_sha = receipt["decision_artifact_sha256"]
+    old_rel = receipt["decision_artifact"]
+    new_rel = env("OMS_DECISION_ARTIFACT")
+    if not isinstance(new_rel, str) or not new_rel or len(new_rel) > 240:
+        die("decision artifact path must be a bounded repo-relative path")
+    new_rel = clean_rel(new_rel, "decision artifact path")
+    if new_rel == old_rel:
+        die("relocation target is the receipt's current decision artifact path")
+    if env("OMS_EXPECTED_DECISION_ARTIFACT_SHA256") != bound_sha:
+        die("reviewed decision-artifact digest is not the digest bound in the cancellation receipt")
+    new_path = os.path.join(repo_root, *new_rel.split("/"))
+    if not same_absolute_path(os.path.realpath(new_path), new_path):
+        die("decision artifact path must not traverse a symlink")
+    new_raw = _load(os.path.join(os.path.dirname(__file__), "durable-jsonl.py"))["read_no_follow"](
+        repo_root, new_rel, "relocated decision artifact", max_bytes=64 * 1024)
+    if hashlib.sha256(new_raw).hexdigest() != bound_sha:
+        die("relocated decision artifact does not match the digest bound in the cancellation receipt")
+    refuse_live_worker_authority({i}, "relocation")
+    receipt["decision_artifact"] = new_rel
+    resulting_plan = hashlib.sha256(
+        json.dumps(d, ensure_ascii=False, indent=2).encode("utf-8")).hexdigest()
+    row = {
+        "schema": 1, "kind": "cancellation-decision-relocation", "ts": ts,
+        "operator_consent": "relocate-decision", "reason": reason, "task_id": i,
+        "old_decision_artifact": old_rel, "new_decision_artifact": new_rel,
+        "decision_artifact_sha256": bound_sha,
+        "reviewed_plan_sha256": expected_plan, "reviewed_task_sha256": expected_task,
+        "resulting_plan_sha256": resulting_plan,
+        "resulting_task_sha256": exact_task_sha256(t),
+    }
+    # The row precedes the plan write: a kill between them leaves a row whose
+    # resulting_plan_sha256 never became active, never an unrecorded move.
+    completed = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(__file__), "durable-jsonl.py"),
+         "--label", "cancel-decision-relocations.jsonl", "append",
+         os.path.join(os.path.dirname(path), "cancel-decision-relocations.jsonl")],
+        input=json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n",
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if completed.returncode != 0:
+        die("cannot durably append the relocation row; plan unchanged: %s" % completed.stderr.strip()[:300])
+    save(d)
+    print("plan: relocated %s decision artifact %s -> %s (plan sha256 %s)" %
+          (i, old_rel, new_rel, resulting_plan))
+    sys.exit(0)
+
 if act in ("claim", "start", "finish", "review", "repair", "land", "block", "release", "recover-lease", "reopen", "show", "evidence-snapshot", "touch", "cancel"):
     batch_cancel = act == "cancel" and env("OMS_CANCEL_ALL_INACTIVE") == "1"
     i = "" if batch_cancel else require_id()
@@ -1490,23 +1582,13 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if not isinstance(decision_rel, str) or len(decision_rel) > 240:
             die("decision artifact path must be a bounded repo-relative path")
         decision_rel = clean_rel(decision_rel, "decision artifact path")
-        decision_path = os.path.join(repo_root, *decision_rel.split("/"))
-        if not same_absolute_path(os.path.realpath(decision_path), decision_path):
-            die("decision artifact path must not traverse a symlink")
-        decision_raw = read_regular_bytes(decision_path, "decision artifact", 64 * 1024)
-        decision_sha = hashlib.sha256(decision_raw).hexdigest()
-        expected_decision_sha = env("OMS_EXPECTED_DECISION_ARTIFACT_SHA256")
-        if (not re.fullmatch(r"[0-9a-f]{64}", expected_decision_sha) or
-                decision_sha != expected_decision_sha):
-            die("decision artifact digest changed or is not the reviewed SHA-256")
-        markers = load_worker_markers()
-        if any(not worker_marker_is_typed(marker) for marker in markers):
-            die("worker marker set is malformed or unproven; cancellation refused")
-        for marker in markers:
-            marker_task = marker.get("task_id")
-            if (marker_task in selected or
-                    (not marker_task and marker.get("access") != "read")) and marker_pid_alive(marker):
-                die("live worker marker prevents cancellation: %s" % (marker_task or "unidentified"))
+        refuse_live_worker_authority(selected, "cancellation")
+        try:
+            proof = decision_module()["snapshot_decision"](
+                repo_root, decision_rel, env("OMS_EXPECTED_DECISION_ARTIFACT_SHA256"))
+        except (ValueError, OSError) as exc:
+            die(str(exc))
+        decision_sha = proof["sha256"]
         for task in selected.values():
             task_state = task["state"]
             task_lease = task.get("lease_id", "")

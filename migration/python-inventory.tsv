@@ -8,7 +8,7 @@ plugins/oh-my-setting/scripts/harness-hook.sh	python-reference	7
 scripts/agent-events.sh	python-reference	1
 scripts/agent-memory.sh	python-reference	6
 scripts/agent-ml-context.sh	python-reference	7
-scripts/agent-plan.sh	python-reference	32
+scripts/agent-plan.sh	python-reference	33
 scripts/agent-role.sh	python-reference	4
 scripts/agent-supervisor.sh	python-reference	1
 scripts/agent-task.sh	python-reference	4
@@ -74,7 +74,7 @@ scripts/lib/agent_memory_hygiene.py	python-source	331
 scripts/lib/agent_memory_promote.py	python-source	320
 scripts/lib/agent_memory_review.py	python-source	526
 scripts/lib/agent_memory_sources.py	python-source	177
-scripts/lib/agent_plan_core.py	python-source	2202
+scripts/lib/agent_plan_core.py	python-source	2284
 scripts/lib/agent_role_render.py	python-source	92
 scripts/lib/answer-quality.py	python-source	102
 scripts/lib/artifact-index-retention.py	python-source	241
@@ -260,7 +260,7 @@ scripts/lib/output_digest.py	python-source	239
 scripts/lib/panel_activity.py	python-source	1123
 scripts/lib/panel_attention_read.py	python-source	115
 scripts/lib/panel_background.py	python-source	265
-scripts/lib/panel_cache.py	python-source	745
+scripts/lib/panel_cache.py	python-source	752
 scripts/lib/panel_chats.py	python-source	973
 scripts/lib/panel_compare.py	python-source	213
 scripts/lib/panel_controls.py	python-source	356
@@ -308,7 +308,8 @@ scripts/lib/pending_conflicts.py	python-source	310
 scripts/lib/pi-oms-extension.mjs	python-reference	1
 scripts/lib/plan-completion.py	python-source	2405
 scripts/lib/plan-receipt.py	python-source	39
-scripts/lib/plan-retire.py	python-source	970
+scripts/lib/plan-retire.py	python-source	979
+scripts/lib/plan_decisions.py	python-source	220
 scripts/lib/plan_retro.py	python-source	197
 scripts/lib/plan_size.py	python-source	61
 scripts/lib/plan_waves.py	python-source	68
@@ -503,7 +504,7 @@ tests/run-unittest-classes.py	python-source	63
 tests/runtime-core-integration-smoke.sh	python-reference	23
 tests/runtime-core-smoke.sh	python-reference	11
 tests/runtime_test_base.py	python-source	87
-tests/scripts-smoke.sh	python-reference	1047
+tests/scripts-smoke.sh	python-reference	1056
 tests/skill-lifecycle-smoke.sh	python-reference	22
 tests/source-distribution-smoke.sh	python-reference	34
 tests/state-surfaces-smoke.sh	python-reference	244

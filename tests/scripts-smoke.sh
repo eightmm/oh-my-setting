@@ -11623,6 +11623,24 @@ assert task.get('history', []) == [] and task['artifact'] == '' and task['patch'
 PY
   cp "$plan_file" "$TMP/agent-plan-cancel-valid-plan"
   cp "$decision" "$TMP/agent-plan-cancel-valid-decision"
+  printf 'later decision notes\n' >> "$decision"
+  "$ROOT/scripts/oms" agent-plan --repo "$project" status --json >/dev/null ||
+    fail "appending decision notes invalidated an immutable cancellation proof"
+  cp "$TMP/agent-plan-cancel-valid-decision" "$decision"
+  python3 - "$project" <<'PY' || fail "cancellation did not publish an exact private proof before state"
+import hashlib, pathlib, stat, sys
+repo = pathlib.Path(sys.argv[1])
+raw = (repo / 'decision.md').read_bytes()
+store = repo / '.oms/plan/decision-artifacts-v1'
+blob = store / hashlib.sha256(raw).hexdigest()
+assert blob.read_bytes() == raw
+assert stat.S_IMODE(store.stat().st_mode) == 0o700
+assert stat.S_IMODE(blob.stat().st_mode) == 0o600 and blob.stat().st_nlink == 1
+PY
+  rm "$decision"
+  "$ROOT/scripts/oms" agent-plan --repo "$project" status --json >/dev/null ||
+    fail "removing the original decision file erased its historical proof"
+  cp "$TMP/agent-plan-cancel-valid-decision" "$decision"
   for tamper in original-field receipt-state lease task-digest extra-receipt; do
     cp "$TMP/agent-plan-cancel-valid-plan" "$plan_file"
     python3 - "$plan_file" "$tamper" <<'PY'
@@ -11643,11 +11661,17 @@ PY
     fi
   done
   cp "$TMP/agent-plan-cancel-valid-plan" "$plan_file"
+  # Keep the legacy missing-snapshot refusal, as well as the new archive path.
+  local proof_sha proof_store
+  proof_sha="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$decision")"
+  proof_store="$project/.oms/plan/decision-artifacts-v1"
+  mv "$proof_store/$proof_sha" "$TMP/cancel-proof"
   printf 'tampered decision bytes\n' >> "$decision"
   if "$plan" --repo "$project" status --json >/dev/null 2>&1; then
     fail "active status accepted changed cancellation decision bytes"
   fi
   cp "$TMP/agent-plan-cancel-valid-decision" "$decision"
+  mv "$TMP/cancel-proof" "$proof_store/$proof_sha"
   out="$("$plan" --repo "$project" status --json)"
   printf '%s' "$out" | python3 -c '
 import json, sys
@@ -11864,6 +11888,446 @@ PYBATCH
     fail "empty batch cancellation succeeded"
   fi
   cmp "$TMP/batch-after.json" "$batch/.oms/plan/tasks.json" >/dev/null || fail "empty batch rewrote plan"
+
+  local snapshot_project="$TMP/agent-plan-decision-snapshots"
+  make_committed_repo "$snapshot_project"
+  "$plan" --repo "$snapshot_project" init --goal snapshots >/dev/null
+  "$plan" --repo "$snapshot_project" add --id pending --title pending >/dev/null
+  python3 - "$ROOT/scripts/oms" "$snapshot_project" "$TMP" <<'PYSNAP' || fail "public decision snapshot safety contract failed"
+import concurrent.futures, hashlib, json, os, pathlib, signal, stat, subprocess, sys
+cli, project, scratch = sys.argv[1:]
+repo = pathlib.Path(project)
+source = repo / 'decision.md'
+store = repo / '.oms/plan/decision-artifacts-v1'
+plan = repo / '.oms/plan/tasks.json'
+before = plan.read_bytes()
+timeout = int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+def sha(raw): return hashlib.sha256(raw).hexdigest()
+def call(*args, env=None):
+    return subprocess.run([cli, 'agent-plan', '--repo', project, *args],
+                          capture_output=True, env=env, timeout=timeout)
+def snapshot(rel='decision.md', expected=None, env=None, extra=()):
+    return call('snapshot-decision', '--decision-artifact', rel,
+                '--expected-decision-artifact-sha256', expected or sha(source.read_bytes()),
+                *extra, env=env)
+def refused(result):
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+    assert plan.read_bytes() == before, 'snapshot refusal changed authority'
+def good(result):
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    row = json.loads(result.stdout)
+    assert set(row) == {'snapshot_path', 'sha256', 'created'} and type(row['created']) is bool
+    assert row['snapshot_path'] == '.oms/plan/decision-artifacts-v1/' + row['sha256']
+    blob = repo / row['snapshot_path']
+    assert blob.read_bytes() == source.read_bytes() and sha(blob.read_bytes()) == row['sha256']
+    assert stat.S_IMODE(blob.stat().st_mode) == 0o600 and blob.stat().st_nlink == 1
+    assert stat.S_IMODE(store.stat().st_mode) == 0o700
+    assert plan.read_bytes() == before
+    return row
+
+# Exact raw bytes include empty files and the inclusive 64 KiB boundary.
+for raw in (b'', b'\x00\xff\r\n', b'x' * (64 * 1024)):
+    source.write_bytes(raw)
+    row = good(snapshot())
+    assert row['created'] is True
+    blob = repo / row['snapshot_path']
+    generation = blob.stat().st_ino
+    assert good(snapshot())['created'] is False
+    assert blob.stat().st_ino == generation
+source.write_bytes(b'x' * (64 * 1024 + 1))
+refused(snapshot())
+assert not (store / sha(source.read_bytes())).exists()
+source.write_bytes(b'reviewed current decision\n')
+digest = sha(source.read_bytes())
+for invalid in ('', '0', '0' * 64, '0' * 65, 'A' * 64, 'g' * 64):
+    refused(call('snapshot-decision', '--decision-artifact', 'decision.md',
+                 '--expected-decision-artifact-sha256', invalid))
+for rel in ('', '../outside.md', '/outside.md', './decision.md', 'a//b', 'a/../b',
+            'a\\b', 'a\nb', 'a' * 241, 'missing.md', 'missing/decision.md', '.oms'):
+    refused(snapshot(rel, digest))
+for extra in (('--file', str(plan)), ('--operator-consent', 'cancel'), ('--id', 'pending')):
+    refused(snapshot(expected=digest, extra=extra))
+for variable in ('OMS_HARNESS_CHILD', 'OMS_HARNESS_DELEGATE_DEPTH'):
+    refused(snapshot(env=dict(os.environ, **{variable: '1'})))
+long_rel = 'v' * 240
+(repo / long_rel).write_bytes(source.read_bytes())
+good(snapshot(long_rel, digest))
+source.rename(repo / 'actual.md')
+source.symlink_to('actual.md')
+refused(snapshot(expected=digest))
+source.unlink()
+os.link(repo / 'actual.md', source)
+refused(snapshot(expected=digest))
+source.unlink()
+(repo / 'actual.md').rename(source)
+(repo / 'linked').symlink_to('.', target_is_directory=True)
+refused(snapshot('linked/decision.md', digest))
+for mode in (0o666, 0o000):
+    source.chmod(mode)
+    refused(snapshot(expected=digest))
+source.chmod(0o600)
+
+# Concurrent exclusive publication creates one inode, then verifies exact replay.
+(store / digest).unlink()
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    results = list(pool.map(lambda _: snapshot(), range(2)))
+rows = [good(result) for result in results if result.returncode == 0]
+assert rows and sum(row['created'] for row in rows) == 1
+for result in results:
+    if result.returncode != 0: refused(result)
+assert good(snapshot())['created'] is False
+blob = store / digest
+raw = source.read_bytes()
+blob.write_bytes(b'corrupt')
+refused(snapshot())
+assert blob.read_bytes() == b'corrupt'
+blob.write_bytes(raw)
+blob.write_bytes(b'x' * (64 * 1024 + 1))
+refused(snapshot())
+blob.write_bytes(raw)
+for mode in (0o644, 0o000):
+    blob.chmod(mode)
+    refused(snapshot())
+blob.chmod(0o600)
+blob.rename(store / 'saved')
+blob.symlink_to('saved')
+refused(snapshot())
+blob.unlink()
+os.link(store / 'saved', blob)
+refused(snapshot())
+blob.unlink()
+(store / 'saved').rename(blob)
+for mode in (0o755, 0o000):
+    store.chmod(mode)
+    refused(snapshot())
+store.chmod(0o700)
+store.rename(repo / '.oms/plan/saved-store')
+store.symlink_to('saved-store', target_is_directory=True)
+refused(snapshot())
+store.unlink()
+(repo / '.oms/plan/saved-store').rename(store)
+parent = repo / '.oms/plan'
+parent.chmod(0o777)
+refused(snapshot())
+parent.chmod(0o755)
+parent.rename(repo / '.oms/plan-away')
+try:
+    assert snapshot(expected=digest).returncode == 2
+    assert not parent.exists(), 'snapshot created a missing authority parent'
+    assert (repo / '.oms/plan-away/tasks.json').read_bytes() == before
+finally:
+    (repo / '.oms/plan-away').rename(parent)
+if os.geteuid() == 0:
+    for target in (source, blob, store, parent):
+        os.chown(target, 1, -1)
+        refused(snapshot(expected=digest))
+        os.chown(target, 0, -1)
+
+# Process-local fault injection into public commands: no production fault switch.
+injection = pathlib.Path(scratch) / 'decision-snapshot-injection'
+injection.mkdir()
+(injection / 'sitecustomize.py').write_text('''
+import os, pathlib, signal, stat
+root = pathlib.Path(os.environ['DECISION_TEST_REPO'])
+mode = os.environ['DECISION_TEST_FAULT']
+original_fstat = os.fstat
+if mode == 'foreign':
+    foreign = os.stat(os.environ['DECISION_TEST_FOREIGN'])
+    def foreign_fstat(fd):
+        info = original_fstat(fd)
+        if (info.st_dev, info.st_ino) == (foreign.st_dev, foreign.st_ino):
+            fields = list(info)
+            fields[4] = info.st_uid + 1
+            return os.stat_result(fields)
+        return info
+    os.fstat = foreign_fstat
+link = os.link
+replace = os.replace
+sync = os.fsync
+trace = root / 'sync-trace'
+def tracked_sync(fd):
+    if mode == 'sync-failure' and stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError(5, 'synthetic durability failure')
+    sync(fd)
+    with trace.open('a') as output:
+        output.write(('dir' if stat.S_ISDIR(os.fstat(fd).st_mode) else 'file') + '\\n')
+def killed_link(src, dst, *args, **kwargs):
+    if mode == 'before-link': os.kill(os.getpid(), signal.SIGKILL)
+    result = link(src, dst, *args, **kwargs)
+    if mode == 'after-link': os.kill(os.getpid(), signal.SIGKILL)
+    return result
+def killed_replace(src, dst, *args, **kwargs):
+    if str(dst) == str(root / '.oms/plan/tasks.json'):
+        events = trace.read_text().splitlines()
+        assert 'file' in events and 'dir' in events[events.index('file') + 1:]
+        os.kill(os.getpid(), signal.SIGKILL)
+    return replace(src, dst, *args, **kwargs)
+os.fsync = tracked_sync
+os.link = killed_link
+os.replace = killed_replace
+''')
+def injected(mode):
+    return dict(os.environ, PYTHONPATH=str(injection), DECISION_TEST_REPO=project,
+                DECISION_TEST_FAULT=mode)
+for target in (source, blob, store, parent):
+    refused(snapshot(env=dict(injected('foreign'), DECISION_TEST_FOREIGN=str(target))))
+source.write_bytes(b'durability failure proof')
+refused(snapshot(env=injected('sync-failure')))
+assert not (store / sha(source.read_bytes())).exists()
+for mode in ('before-link', 'after-link'):
+    source.write_bytes(mode.encode())
+    digest = sha(source.read_bytes())
+    result = snapshot(env=injected(mode))
+    assert result.returncode != 0 and plan.read_bytes() == before
+    if mode == 'before-link':
+        assert not (store / digest).exists()
+        good(snapshot())
+    else:
+        assert (store / digest).stat().st_nlink == 2
+        refused(snapshot())
+        # Ambiguous link pairs are refused, never silently repaired.
+        for item in store.iterdir():
+            if item.stat().st_ino == (store / digest).stat().st_ino and item.name != digest:
+                item.unlink()
+        good(snapshot())
+source.write_bytes(b'fresh cancellation proof')
+digest = sha(source.read_bytes())
+task = json.loads(call('show', '--id', 'pending').stdout)
+cancel = ('cancel', '--id', 'pending', '--expected-plan-sha256', sha(before),
+          '--expected-task-sha256', task['task_sha256'], '--expected-state', 'ready',
+          '--expected-lease-id', 'none', '--operator-consent', 'cancel', '--reason', 'reviewed',
+          '--decision-artifact', 'decision.md', '--expected-decision-artifact-sha256', digest)
+# Store failure must precede any cancellation state change.
+good(snapshot())
+(store / digest).write_bytes(b'corrupt')
+refused(call(*cancel))
+assert (store / digest).read_bytes() == b'corrupt'
+(store / digest).unlink()
+(repo / 'sync-trace').unlink()
+result = call(*cancel, env=injected('before-plan'))
+assert result.returncode != 0 and plan.read_bytes() == before
+assert (store / digest).read_bytes() == source.read_bytes()
+# An authentic stale blob must never authorize cancellation from changed/missing bytes.
+source.write_bytes(b'new unreviewed bytes')
+refused(call(*cancel))
+source.unlink()
+refused(call(*cancel))
+source.write_bytes(b'fresh cancellation proof')
+assert call(*cancel).returncode == 0
+cancelled = plan.read_bytes()
+source.write_bytes(b'new notes')
+assert call('status', '--json').returncode == 0
+(store / digest).write_bytes(b'bad historical blob')
+assert call('status', '--json').returncode == 2
+(store / digest).write_bytes(b'fresh cancellation proof')
+for mode in ('symlink', 'hardlink', 'permissions', 'parent-link', 'store-link', 'store-mode'):
+    if mode == 'symlink':
+        source.unlink(); source.symlink_to('file.txt')
+    elif mode == 'hardlink':
+        source.unlink(); os.link(repo / 'file.txt', source)
+    elif mode == 'permissions': source.chmod(0o666)
+    elif mode == 'parent-link':
+        parent.rename(repo / '.oms/plan-away')
+        parent.symlink_to('plan-away', target_is_directory=True)
+    elif mode == 'store-link':
+        store.rename(parent / 'saved-store')
+        store.symlink_to('saved-store', target_is_directory=True)
+    else: store.chmod(0o755)
+    assert call('status', '--json').returncode == 2, mode
+    if mode == 'parent-link':
+        parent.unlink(); (repo / '.oms/plan-away').rename(parent)
+    elif mode == 'store-link':
+        store.unlink(); (parent / 'saved-store').rename(store)
+    elif mode == 'store-mode': store.chmod(0o700)
+    else:
+        source.unlink(); source.write_bytes(b'new notes')
+assert plan.read_bytes() == cancelled
+source_dir = repo / 'source-dir'
+source_dir.mkdir()
+nested = source_dir / 'decision.md'
+nested.write_bytes(b'nested reviewed proof')
+assert call('add', '--id', 'nested', '--title', 'nested').returncode == 0
+task = json.loads(call('show', '--id', 'nested').stdout)
+result = call('cancel', '--id', 'nested', '--expected-plan-sha256', sha(plan.read_bytes()),
+              '--expected-task-sha256', task['task_sha256'], '--expected-state', 'ready',
+              '--expected-lease-id', 'none', '--operator-consent', 'cancel', '--reason', 'reviewed',
+              '--decision-artifact', 'source-dir/decision.md',
+              '--expected-decision-artifact-sha256', sha(nested.read_bytes()))
+assert result.returncode == 0, result.stderr
+source_dir.rename(repo / 'source-away')
+assert call('status', '--json').returncode == 2, 'missing ancestor bypassed by snapshot'
+(repo / 'source-away').rename(source_dir)
+assert call('status', '--json').returncode == 0
+PYSNAP
+
+  # An archived plan and the active plan can bind one decision path to two
+  # byte versions. relocate-decision moves only the active receipt's pointer to
+  # a copy of the bound bytes, so the historical file can then be restored.
+  local rel="$TMP/agent-plan-relocate" rel_ledger rel_plan_sha rel_task_sha v1 v2 d1 d2 rel_args rel_case
+  make_committed_repo "$rel"
+  rel_ledger="$rel/.oms/plan/cancel-decision-relocations.jsonl"
+  sha_of() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1" | tr -d '\r'; }
+  task_sha_of() { "$plan" --repo "$rel" show --id "$1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_sha256"])' | tr -d '\r'; }
+  rel_cancel() {  # TASK DECISION_FILE
+    local csha
+    csha="$(sha_of "$rel/$2")"
+    "$plan" --repo "$rel" cancel --id "$1" --expected-plan-sha256 "$(sha_of "$rel/.oms/plan/tasks.json")" \
+      --expected-task-sha256 "$(task_sha_of "$1")" --expected-state ready --expected-lease-id none \
+      --operator-consent cancel --reason "reviewed rejection" --decision-artifact "$2" \
+      --expected-decision-artifact-sha256 "$csha" >/dev/null || fail "setup cancel of $1 failed"
+    # These pre-existing relocation cases exercise legacy plans without blobs.
+    rm -f "$rel/.oms/plan/decision-artifacts-v1/$csha"
+  }
+  rel_run() {  # TASK NEW_PATH DIGEST [extra args]; plan/task CAS are the current ones
+    local id="$1" new="$2" digest="$3"
+    shift 3
+    "$ROOT/scripts/oms" agent-plan --repo "$rel" relocate-decision --id "$id" --expected-plan-sha256 "$rel_plan_sha" \
+      --expected-task-sha256 "$rel_task_sha" --operator-consent relocate-decision \
+      --reason "authority notes changed the shared decision file" --decision-artifact "$new" \
+      --expected-decision-artifact-sha256 "$digest" "$@"
+  }
+  printf 'historical decision\n' > "$rel/shared-decision.md"
+  v1="$TMP/relocate-v1"; cp "$rel/shared-decision.md" "$v1"; d1="$(sha_of "$v1")"
+  "$plan" --repo "$rel" init --goal old >/dev/null
+  "$plan" --repo "$rel" add --id old_task --title old >/dev/null
+  rel_cancel old_task shared-decision.md
+  "$plan" --repo "$rel" init --goal next >/dev/null || fail "setup replacement failed"
+  printf 'authority notes appended later\n' >> "$rel/shared-decision.md"
+  v2="$TMP/relocate-v2"; cp "$rel/shared-decision.md" "$v2"; d2="$(sha_of "$v2")"
+  for rel_case in cancelled_a cancelled_b open_task; do
+    "$plan" --repo "$rel" add --id "$rel_case" --title "$rel_case" >/dev/null
+  done
+  rel_cancel cancelled_a shared-decision.md
+  rel_cancel cancelled_b shared-decision.md
+  # Both byte versions are valid for exactly one reference each, so the full
+  # retirement ledger check cannot pass until the pointer moves.
+  rel_plan_sha="$(sha_of "$rel/.oms/plan/tasks.json")"
+  out="$("$plan" --repo "$rel" retire --apply --expected-plan-sha256 "$rel_plan_sha" --disposition superseded \
+    --reason "old plan closed" 2>&1)" && fail "retire passed with the archived decision bytes changed"
+  printf '%s\n' "$out" | grep -F 'decision artifact digest changed' >/dev/null ||
+    fail "retire did not stop on the archived decision digest: $out"
+  cp "$rel/shared-decision.md" "$rel/moved-decision.md"
+  cp "$v2" "$rel/different-decision.md"; printf 'x\n' >> "$rel/different-decision.md"
+  ln -s moved-decision.md "$rel/linked-decision.md"
+  mkdir -p "$rel/real-dir"; cp "$v2" "$rel/real-dir/copy.md"; ln -s real-dir "$rel/linked-dir"
+  cp "$v2" "$rel/hardlink-source.md"
+  ln "$rel/hardlink-source.md" "$rel/hardlinked-decision.md"
+  rel_task_sha="$(task_sha_of cancelled_a)"
+  cp "$rel/.oms/plan/tasks.json" "$TMP/relocate-before.json"
+  printf 'unexpected change\n' >> "$rel/shared-decision.md"
+  if rel_run cancelled_a moved-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted changed old decision bytes"
+  fi
+  grep -F 'decision artifact digest changed' "$rel/relocate-error" >/dev/null ||
+    fail "changed old decision did not fail closed"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "changed old decision mutated the plan or ledger"
+  cp "$v2" "$rel/shared-decision.md"
+  rel_args=(
+    "moved-decision.md|$(printf '%064d' 0)|the digest is not the bound digest"
+    "moved-decision.md|$d1|the digest is the other byte version"
+    "different-decision.md|$d2|destination bytes differ from the bound digest"
+    "shared-decision.md|$d2|destination is the receipt's current path"
+    "linked-decision.md|$d2|destination is a symlink"
+    "linked-dir/copy.md|$d2|destination parent is a symlink"
+    "../relocated-outside.md|$d2|destination traverses out"
+    "/tmp/absolute-destination.md|$d2|destination is absolute"
+    "missing-decision.md|$d2|destination is missing"
+    "real-dir|$d2|destination is a directory"
+  )
+  for rel_case in "${rel_args[@]}"; do
+    if rel_run cancelled_a "${rel_case%%|*}" "$(printf '%s' "${rel_case#*|}" | cut -d'|' -f1)" >/dev/null 2>&1; then
+      fail "relocation accepted: ${rel_case##*|}"
+    fi
+    cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+      fail "refused relocation mutated state: ${rel_case##*|}"
+  done
+  if rel_run cancelled_a hardlinked-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted a hard-linked destination"
+  fi
+  grep -F 'relocated decision artifact must be a regular non-symlink, non-hard-linked file' "$rel/relocate-error" >/dev/null ||
+    fail "hard-linked destination did not reach the link guard"
+  rm -f "$rel/hardlinked-decision.md"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "hard-linked destination mutated the plan or ledger"
+  # Wrong CAS, state, consent and authority refuse without touching the plan.
+  if "$plan" --repo "$rel" relocate-decision --id cancelled_a --expected-plan-sha256 "$(printf '%064d' 0)" \
+      --expected-task-sha256 "$rel_task_sha" --operator-consent relocate-decision --reason r \
+      --decision-artifact moved-decision.md --expected-decision-artifact-sha256 "$d2" >/dev/null 2>&1; then
+    fail "relocation accepted a stale plan CAS"
+  fi
+  if "$plan" --repo "$rel" relocate-decision --id cancelled_a --expected-plan-sha256 "$rel_plan_sha" \
+      --expected-task-sha256 "$(printf '%064d' 0)" --operator-consent relocate-decision --reason r \
+      --decision-artifact moved-decision.md --expected-decision-artifact-sha256 "$d2" >/dev/null 2>&1; then
+    fail "relocation accepted a stale task CAS"
+  fi
+  rel_task_sha="$(task_sha_of open_task)"
+  if rel_run open_task moved-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted a task that is not cancelled"
+  fi
+  grep -F 'task open_task is ready; relocation requires a cancelled task' "$rel/relocate-error" >/dev/null ||
+    fail "open task did not reach the state guard"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "open task refusal mutated the plan or ledger"
+  rel_task_sha="$(task_sha_of cancelled_a)"
+  for rel_case in "--operator-consent cancel" "--reason ''" "--expected-state cancelled" "--expected-lease-id none"; do
+    if eval "rel_run cancelled_a moved-decision.md \"$d2\" $rel_case" >/dev/null 2>&1; then
+      fail "relocation accepted option: $rel_case"
+    fi
+  done
+  if OMS_HARNESS_CHILD=1 rel_run cancelled_a moved-decision.md "$d2" >/dev/null 2>&1 ||
+      OMS_HARNESS_DELEGATE_DEPTH=1 rel_run cancelled_a moved-decision.md "$d2" >/dev/null 2>&1; then
+    fail "a harness child relocated a decision artifact"
+  fi
+  mkdir -p "$rel/.oms/delegations"
+  python3 - "$rel/.oms/delegations/active.json" <<'PY'
+import json, os, sys
+json.dump({"schema": 1, "id": "active", "task_id": "cancelled_a",
+           "lease_id": "", "pid": os.getppid()}, open(sys.argv[1], "w"))
+PY
+  if rel_run cancelled_a moved-decision.md "$d2" >"$rel/relocate-error" 2>&1; then
+    fail "relocation accepted a task with a live worker marker"
+  fi
+  grep -F 'live worker marker prevents relocation: cancelled_a' "$rel/relocate-error" >/dev/null ||
+    fail "live marker did not reach the worker guard"
+  rm -f "$rel/.oms/delegations/active.json"
+  cmp -s "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" && [ ! -e "$rel_ledger" ] ||
+    fail "a refused relocation mutated the plan or wrote a row"
+
+  out="$(rel_run cancelled_a moved-decision.md "$d2")" || fail "valid relocation failed: $out"
+  python3 - "$TMP/relocate-before.json" "$rel/.oms/plan/tasks.json" "$rel_ledger" "$rel_plan_sha" "$rel_task_sha" "$d2" <<'PY' || fail "relocation changed more than the receipt pointer or lacks its typed row"
+import hashlib, json, sys
+before, after = [json.load(open(p, encoding="utf-8")) for p in sys.argv[1:3]]
+rows = [json.loads(line) for line in open(sys.argv[3], encoding="utf-8")]
+assert before["tasks"]["cancelled_a"]["cancellation"].pop("decision_artifact") == "shared-decision.md"
+assert after["tasks"]["cancelled_a"]["cancellation"].pop("decision_artifact") == "moved-decision.md"
+assert before == after, "only the receipt pointer may change"
+assert after["tasks"]["cancelled_a"]["cancellation"]["decision_artifact_sha256"] == sys.argv[6]
+assert len(rows) == 1, rows
+row = rows[0]
+assert row["kind"] == "cancellation-decision-relocation" and row["task_id"] == "cancelled_a", row
+assert (row["old_decision_artifact"], row["new_decision_artifact"]) == ("shared-decision.md", "moved-decision.md"), row
+assert row["decision_artifact_sha256"] == sys.argv[6], row
+assert row["reviewed_plan_sha256"] == sys.argv[4] and row["reviewed_task_sha256"] == sys.argv[5], row
+assert row["resulting_plan_sha256"] == hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest(), row
+PY
+  # A second call with the same reviewed CAS sees a changed plan.
+  if rel_run cancelled_a moved-decision.md "$d2" >/dev/null 2>&1; then
+    fail "relocation replay accepted a stale plan CAS"
+  fi
+  [ "$(wc -l < "$rel_ledger" | tr -d ' ')" = 1 ] || fail "refused replay appended a row"
+  rel_plan_sha="$(sha_of "$rel/.oms/plan/tasks.json")"
+  rel_task_sha="$(task_sha_of cancelled_b)"
+  rel_run cancelled_b moved-decision.md "$d2" >/dev/null || fail "second relocation failed"
+  [ "$(wc -l < "$rel_ledger" | tr -d ' ')" = 2 ] || fail "second relocation did not append its row"
+  # With every active pointer moved, the historical bytes can return.
+  cp "$v1" "$rel/shared-decision.md"
+  [ "$(sha_of "$rel/shared-decision.md")" = "$d1" ] || fail "historical decision bytes were not restored"
+  "$plan" --repo "$rel" status --json >/dev/null || fail "active plan rejected the restored historical decision"
+  rel_cancel open_task shared-decision.md
+  rel_plan_sha="$(sha_of "$rel/.oms/plan/tasks.json")"
+  "$plan" --repo "$rel" retire --apply --expected-plan-sha256 "$rel_plan_sha" --disposition superseded \
+    --reason "old plan closed" >/dev/null || fail "complete retirement validation failed after the repair"
 }
 
 # smoke-weight: 12
@@ -12318,6 +12782,12 @@ PY
     "$superseded_project/.oms/plan/tasks.$plan_sha.archive.json" ||
     fail "superseded retirement did not preserve cancellation evidence bytes"
   cp "$superseded_project/decision.md" "$TMP/agent-plan-retire-cancelled-decision"
+  printf 'later notes after retirement\n' >> "$superseded_project/decision.md"
+  out="$(OMS_REPO="$superseded_project" "$ROOT/scripts/oms" state-verify --repo "$superseded_project" --json)" ||
+    fail "historical cancellation lost its proof when decision notes changed: $out"
+  cp "$TMP/agent-plan-retire-cancelled-decision" "$superseded_project/decision.md"
+  # Retain the historical no-snapshot digest refusal for legacy archives.
+  rm -f "$superseded_project/.oms/plan/decision-artifacts-v1/$decision_sha"
   printf 'tampered after retirement\n' >> "$superseded_project/decision.md"
   rc=0
   out="$("$ROOT/scripts/state-verify.sh" --repo "$superseded_project" --json 2>&1)" || rc=$?
@@ -12331,6 +12801,80 @@ assert row["disposition"] == "superseded", row
 assert row["acceptance_verified"] is False, row
 assert row["task_landings_claimed"] is False, row
 assert "acceptance" not in row, row
+PY
+  python3 - "$ROOT/scripts/oms" "$superseded_project" <<'PY' || fail "two-version historical proof recovery failed"
+import hashlib, json, os, pathlib, subprocess, sys
+cli, project = sys.argv[1:]
+repo = pathlib.Path(project)
+parent = repo / '.oms/plan'
+source = repo / 'decision.md'
+timeout = int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120'))
+def sha(raw): return hashlib.sha256(raw).hexdigest()
+def call(*args, ok=True):
+    result = subprocess.run([cli, 'agent-plan', '--repo', project, *args],
+                            capture_output=True, timeout=timeout)
+    assert result.returncode == (0 if ok else 2), (args, result.stdout, result.stderr)
+    return result
+def snapshot(rel, raw):
+    return call('snapshot-decision', '--decision-artifact', rel,
+                '--expected-decision-artifact-sha256', sha(raw))
+old = source.read_bytes()
+(repo / 'old-proof.md').write_bytes(old)
+snapshot('old-proof.md', old)
+call('init', '--goal', 'current')
+for name in ('a', 'b', 'c'):
+    call('add', '--id', name, '--title', name)
+source.write_bytes(old + b'additional reviewed decisions\n')
+current = source.read_bytes()
+plan = parent / 'tasks.json'
+call('cancel', '--all-inactive', '--expected-plan-sha256', sha(plan.read_bytes()),
+     '--operator-consent', 'cancel', '--reason', 'reviewed current decisions',
+     '--decision-artifact', 'decision.md', '--expected-decision-artifact-sha256', sha(current))
+snapshot('decision.md', current)
+(parent / 'decision-artifacts-v1' / sha(old)).unlink()
+unchanged = {p: p.read_bytes() for p in parent.iterdir() if p.is_file()}
+call('retire')  # The read-only check inspects the active plan, not the ledger.
+call('retire', '--apply', '--expected-plan-sha256', sha(plan.read_bytes()),
+     '--disposition', 'superseded', '--reason', 'reviewed replacement', ok=False)
+# Recovery stores authentic A while current original bytes remain B, even with
+# broken global history. It rewrites no old plan or retirement record.
+snapshot('old-proof.md', old)
+assert all(p.read_bytes() == raw for p, raw in unchanged.items())
+assert source.read_bytes() == current
+call('status', '--json')
+call('retire', '--apply', '--expected-plan-sha256', sha(plan.read_bytes()),
+     '--disposition', 'superseded', '--reason', 'reviewed replacement')
+for raw in (old, current):
+    assert (parent / 'decision-artifacts-v1' / sha(raw)).read_bytes() == raw
+for p, raw in unchanged.items():
+    if p.name not in ('tasks.json', 'retirements.jsonl'):
+        assert p.read_bytes() == raw
+assert (parent / 'retirements.jsonl').read_bytes().startswith(unchanged[parent / 'retirements.jsonl'])
+spec = repo / 'PROJECT.md'
+spec.write_bytes(b'# Project\n\n## Status\n\n- State: confirmed\n')
+head = subprocess.check_output(['git', '-C', project, 'rev-parse', 'HEAD']).decode().strip()
+proposal = repo / 'proposal.json'
+proposal.write_text(json.dumps({
+    'schema': 1, 'kind': 'agent-plan-proposal', 'spec_sha256': sha(spec.read_bytes()),
+    'plan_sha256': 'absent', 'base_sha': head, 'id_prefix': '',
+    'allowed_envelope': ['.'], 'acceptance_files': [],
+    'tasks': [{'id': 'replacement', 'title': 'replacement', 'allowed': ['.'],
+               'verify': 'true', 'depends': []}],
+}))
+call('apply-proposal', '--proposal', str(proposal), '--expected-proposal-sha256', sha(proposal.read_bytes()),
+     '--expected-plan-sha256', 'absent', '--allowed-envelope', '.', '--goal', 'replacement', '--accept', 'true')
+call('status', '--json')
+result = subprocess.run([cli, 'state-verify', '--repo', project, '--json'],
+                        capture_output=True, timeout=timeout)
+assert result.returncode == 0, (result.stdout, result.stderr)
+for target, original in ((parent / 'decision-artifacts-v1' / sha(old), old), (source, current)):
+    target.write_bytes(b'x' * (64 * 1024 + 1))
+    try:
+        result = subprocess.run([cli, 'state-verify', '--repo', project, '--json'],
+                                capture_output=True, timeout=timeout)
+        assert result.returncode == 1 and b'exceeds 65536' in result.stdout, (result.stdout, result.stderr)
+    finally:
+        target.write_bytes(original)
 PY
 }
 

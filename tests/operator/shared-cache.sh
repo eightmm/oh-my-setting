@@ -461,6 +461,7 @@ provenance = core['capture_prefixes'](str(closed), room_id)
 namespace = core['namespace'](str(closed))
 (closed / 'verify.sh').write_text(':\n', encoding='utf-8')
 (closed / 'decision.md').write_text('Reviewed cancellation.\n', encoding='utf-8')
+decision_bytes = (closed / 'decision.md').read_bytes()
 plan_id = 'plan_' + '1' * 32
 closed_tasks, index_rows = {}, []
 stamp = '2026-10-11T00:00:00Z'
@@ -652,7 +653,8 @@ for changed in (closed / 'decision.md', closed / '.oms/artifacts/closed-000.md',
 (closed / 'decision.md').write_text('Changed decision bytes!\n', encoding='utf-8')
 def collect_closed():
     result = real_run(['bash', str(root / 'scripts/oms'), 'agent-plan', '--repo', str(closed), 'list', '--json'],
-                      capture_output=True, text=True, timeout=15, env=fixture_env)
+                      capture_output=True, text=True,
+                      timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')), env=fixture_env)
     if result.returncode:
         raise ValueError(result.stderr)
     return json.loads(result.stdout)
@@ -663,6 +665,126 @@ for tick in range(2):
         assert 'cancellation decision artifact digest changed' in str(error), error
     else:
         raise AssertionError('changed decision bypassed actual validation')
+
+# Keep legacy refusals above; snapshots preserve the same receipt after its
+# source evolves. Only the referenced digest may invalidate this projection.
+full_plan = closed_plan.read_bytes()
+changed_decision = (closed / 'decision.md').read_bytes()
+decision_sha = sha(decision_bytes)
+decision_store = closed / '.oms/plan/decision-artifacts-v1'
+decision_blob = decision_store / decision_sha
+proof_reads = []
+def public_snapshot(rel, raw):
+    result = real_run(['bash', str(root / 'scripts/oms'), 'agent-plan', '--repo', str(closed),
+                       'snapshot-decision', '--decision-artifact', rel,
+                       '--expected-decision-artifact-sha256', sha(raw)],
+                      capture_output=True, text=True,
+                      timeout=int(os.environ.get('OMS_TEST_CALL_TIMEOUT', '120')), env=fixture_env)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    return json.loads(result.stdout)
+def proof_collect():
+    proof_reads.append(None)
+    return collect_closed()
+def proof_cached():
+    return cache.read_plan_list(closed, proof_collect)
+def proof_refused():
+    count = len(proof_reads)
+    for tick in range(2):
+        try:
+            proof_cached()
+        except ValueError as error:
+            assert 'cancellation decision artifact' in str(error), error
+        else:
+            raise AssertionError('unsafe/missing snapshot reused a successful proof projection')
+    assert len(proof_reads) == count + 2, 'failed proof collection was cached'
+try:
+    # Pre-create the catalog with an unrelated authentic version. Creating A
+    # must invalidate even when no plan/source/ancestor identity has changed.
+    other = public_snapshot('decision.md', changed_decision)
+    other_blob = closed / other['snapshot_path']
+    (closed / 'decision.md').write_bytes(decision_bytes)
+    subset = {'schema': 3, 'plan_id': plan_id, 'tasks': {'closed-125': closed_tasks['closed-125']}}
+    closed_plan.write_bytes(encoded(subset))
+    plan_bytes = closed_plan.read_bytes()
+    proof_cached()
+    count = len(proof_reads)
+    assert proof_cached()['tasks'][0]['state'] == 'cancelled' and len(proof_reads) == count
+    row = public_snapshot('decision.md', decision_bytes)
+    assert row['created'] is True and decision_blob.read_bytes() == decision_bytes
+    proof_cached()
+    assert len(proof_reads) == count + 1, 'snapshot creation was missed by the plan cache'
+    dependencies = cache._plan_inputs(closed)
+    paths = {item[0] for item in dependencies}
+    assert str(decision_blob) in paths and str(closed / 'decision.md') in paths
+    assert str(other_blob) not in paths, 'unreferenced catalog objects were scanned'
+    os.utime(other_blob, ns=(other_blob.stat().st_atime_ns, other_blob.stat().st_mtime_ns + 1_000_000))
+    count = len(proof_reads)
+    with patch.object(cache, '_plan_inputs', side_effect=AssertionError('dependencies reread on a hit')), \
+            patch.object(Path, 'iterdir', side_effect=AssertionError('catalog walked on a hit')):
+        proof_cached()
+    assert len(proof_reads) == count, 'unreferenced snapshot metadata invalidated the projection'
+    os.utime(decision_blob, ns=(decision_blob.stat().st_atime_ns, decision_blob.stat().st_mtime_ns + 1_000_000))
+    count = len(proof_reads)
+    proof_cached()
+    assert len(proof_reads) == count + 1, 'snapshot metadata change was missed'
+    (closed / 'decision.md').write_bytes(changed_decision)
+    proof_cached()
+    (closed / 'historical-decision.md').write_bytes(decision_bytes)
+    for variant in ('corrupt', 'missing', 'symlink', 'hardlink', 'mode', 'store-mode', 'store-link'):
+        proof_cached()
+        if variant == 'corrupt': decision_blob.write_bytes(b'x' * len(decision_bytes))
+        elif variant == 'missing': decision_blob.unlink()
+        elif variant == 'symlink':
+            decision_blob.unlink()
+            decision_blob.symlink_to(closed / 'historical-decision.md')
+        elif variant == 'hardlink': os.link(decision_blob, decision_store / 'extra-link')
+        elif variant == 'mode': decision_blob.chmod(0o644)
+        elif variant == 'store-mode': decision_store.chmod(0o755)
+        else:
+            decision_store.rename(decision_store.with_name('decision-store-away'))
+            decision_store.symlink_to('decision-store-away', target_is_directory=True)
+        proof_refused()
+        if variant == 'hardlink': (decision_store / 'extra-link').unlink()
+        elif variant == 'mode': decision_blob.chmod(0o600)
+        elif variant == 'store-mode': decision_store.chmod(0o700)
+        elif variant == 'store-link':
+            decision_store.unlink()
+            decision_store.with_name('decision-store-away').rename(decision_store)
+        else:
+            decision_blob.unlink(missing_ok=True)
+            public_snapshot('historical-decision.md', decision_bytes)
+        proof_cached()
+    assert closed_plan.read_bytes() == plan_bytes and other_blob.read_bytes() == changed_decision
+    for invalid in ('', 0, '0', 'A' * 64, 'a' * 65, '../outside'):
+        altered = json.loads(plan_bytes)
+        altered['tasks']['closed-125']['cancellation']['decision_artifact_sha256'] = invalid
+        closed_plan.write_bytes(encoded(altered))
+        try:
+            cache._plan_inputs(closed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('malformed snapshot digest became a cache dependency')
+    for invalid in ('', '../outside', '/outside', 'a\\b', 'a\nb', 'a' * 241):
+        altered = json.loads(plan_bytes)
+        altered['tasks']['closed-125']['cancellation']['decision_artifact'] = invalid
+        closed_plan.write_bytes(encoded(altered))
+        try:
+            cache._plan_inputs(closed)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('unsafe original decision path became a cache dependency')
+    altered['tasks']['closed-125']['cancellation']['decision_artifact'] = 'a' * 240
+    altered['tasks']['closed-125']['cancellation']['decision_artifact_sha256'] = '0' * 64
+    closed_plan.write_bytes(encoded(altered))
+    paths = {item[0] for item in cache._plan_inputs(closed)}
+    assert str(closed / ('a' * 240)) in paths
+    assert str(decision_store / ('0' * 64)) in paths, 'valid missing digest identity was not stamped'
+finally:
+    closed_plan.write_bytes(full_plan)
+    (closed / 'decision.md').write_bytes(changed_decision)
+    decision_blob.unlink(missing_ok=True)
 
 # The managed patch reader's private certificate/anchor are validation inputs,
 # even though their bytes live outside the repository. Probe dependency discovery

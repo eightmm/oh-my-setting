@@ -26,6 +26,15 @@ KNOWN_STATES = {"ready", "claimed", "running", "review", "landing", "blocked", "
 PLAN_ID_RE = re.compile(r"plan_[0-9a-f]{32}")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 MAX_JSONL_ROW = 1024 * 1024
+_decision_module = None
+
+
+def decision_module():
+    global _decision_module
+    if _decision_module is None:
+        _decision_module = __import__("runpy").run_path(
+            os.path.join(os.path.dirname(__file__), "plan_decisions.py"))
+    return _decision_module
 
 
 def env(name):
@@ -136,7 +145,7 @@ def fsync_directory(directory):
     _FSYNC_DIR(directory, "plan retirement")
 
 
-def plan_from_payload(payload):
+def plan_from_payload(payload, repo_root=None):
     try:
         value = json.loads(payload.decode("utf-8"))
     except (UnicodeError, ValueError):
@@ -190,13 +199,13 @@ def plan_from_payload(payload):
                     hashlib.sha256(str(original.get("lease_id", "")).encode("utf-8")).hexdigest() != cancellation["lease_id_sha256"] or
                     hashlib.sha256(original_raw).hexdigest() != cancellation["task_sha256"]):
                 die("plan task %s cancellation evidence does not reconstruct its original task" % task_id)
-            repo_root = CONTEXT.get("repo_root") or os.path.realpath(env("OMS_REPO"))
-            decision_path = os.path.join(repo_root, *cancellation["decision_artifact"].split("/"))
-            if not same_absolute_path(os.path.realpath(decision_path), decision_path):
-                die("plan task %s cancellation decision artifact traverses a symlink" % task_id)
-            decision_raw, _ = bounded_regular(decision_path, "cancellation decision artifact", 64 * 1024)
-            if hashlib.sha256(decision_raw).hexdigest() != cancellation["decision_artifact_sha256"]:
-                die("plan task %s cancellation decision artifact digest changed" % task_id)
+            decision_repo = repo_root or CONTEXT.get("repo_root") or os.path.realpath(env("OMS_REPO"))
+            try:
+                decision_module()["historical_bytes"](
+                    decision_repo, cancellation["decision_artifact"],
+                    cancellation["decision_artifact_sha256"])
+            except (ValueError, OSError) as exc:
+                die("plan task %s cancellation decision artifact: %s" % (task_id, exc))
         elif cancellation is not None:
             die("plan task %s has cancellation evidence without cancelled state" % task_id)
     return value, task_rows
@@ -534,7 +543,7 @@ def validate_receipt_authority(row, repo_root):
                                       absent_ok=True)
         if archived is None or hashlib.sha256(archived).hexdigest() != plan_sha:
             die("replacement receipt does not have its exact content-addressed archive")
-        plan, tasks = plan_from_payload(archived)
+        plan, tasks = plan_from_payload(archived, repo_root=repo_root)
         actual = sorted(task_id for task_id, task in tasks.items()
                         if task.get("state", "ready") not in {"done", "cancelled"})
         if plan.get("plan_id", "") != plan_id or actual != task_ids:
@@ -584,7 +593,7 @@ def validate_receipt_authority(row, repo_root):
                                   absent_ok=True)
     if archived is None or hashlib.sha256(archived).hexdigest() != plan_sha:
         die("retirement receipt does not have its exact content-addressed archive")
-    plan, tasks = plan_from_payload(archived)
+    plan, tasks = plan_from_payload(archived, repo_root=repo_root)
     actual_states = dict(sorted(collections.Counter(
         task.get("state", "ready") for task in tasks.values()).items()))
     if actual_states != task_states or plan.get("plan_id", "") != plan_id:
@@ -681,7 +690,7 @@ def cleanup_completed_retirement(context):
     if active_payload is not None and active_generation == prior.get("plan_generation"):
         die("exact retired plan generation still requires retire replay")
     if active_payload is not None:
-        active_plan, _ = plan_from_payload(active_payload)
+        active_plan, _ = plan_from_payload(active_payload, repo_root=repo_root)
         active_plan_id = active_plan.get("plan_id", "")
         if not active_plan_id or active_plan_id == prior.get("plan_id"):
             die("active plan lineage still requires exact retire replay")
@@ -696,7 +705,7 @@ def validate_active_retirement_lineage(repo_root, rows):
     payload, _ = bounded_regular(active, "active plan", 1024 * 1024, absent_ok=True)
     if payload is None:
         return
-    plan, _ = plan_from_payload(payload)
+    plan, _ = plan_from_payload(payload, repo_root=repo_root)
     active_id = plan.get("plan_id", "")
     active_sha = hashlib.sha256(payload).hexdigest()
     for row in rows:
@@ -719,7 +728,7 @@ def archive_replacement(context):
                                  absent_ok=True)
     if payload is None:
         return ""
-    plan, tasks = plan_from_payload(payload)
+    plan, tasks = plan_from_payload(payload, repo_root=repo_root)
     plan_sha = hashlib.sha256(payload).hexdigest()
     rows = validate_retirement_ledger(repo_root)
     prior = next((row for row in rows if row.get("plan_sha256") == plan_sha), None)
@@ -774,7 +783,7 @@ def run(context):
     if phase == "check":
         if active_payload is None:
             die("no active plan to retire")
-        _, tasks = plan_from_payload(active_payload)
+        _, tasks = plan_from_payload(active_payload, repo_root=repo_root)
         active = sorted(task_id for task_id, task in tasks.items()
                         if task.get("state", "ready") in
                         {"claimed", "running", "review", "landing"})
@@ -827,7 +836,7 @@ def run(context):
     if prior is not None and (active_payload is None or
             active_generation != prior.get("plan_generation")):
         if active_payload is not None:
-            active_plan, _ = plan_from_payload(active_payload)
+            active_plan, _ = plan_from_payload(active_payload, repo_root=repo_root)
             if (active_sha == expected_sha or
                     active_plan.get("plan_id", "") == prior.get("plan_id")):
                 die("active plan still belongs to the retired lineage; exact replay is required")
@@ -847,7 +856,7 @@ def run(context):
         die("retirement is incomplete but its original active plan is missing")
     if active_sha != expected_sha:
         die("active plan changed after the retirement CAS was reviewed")
-    plan, tasks = plan_from_payload(active_payload)
+    plan, tasks = plan_from_payload(active_payload, repo_root=repo_root)
     acceptance = plan.get("accept", "")
     if disposition == "completed-external" and (
             not isinstance(acceptance, str) or not acceptance):
