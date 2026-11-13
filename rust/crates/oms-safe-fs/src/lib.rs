@@ -1,7 +1,13 @@
 #![forbid(unsafe_code)]
 
-//! Descriptor-relative, bounded reads for Unix repositories.
+//! Descriptor-relative, bounded byte storage for Unix repositories.
 //! This detects observed changes; it cannot provide an atomic filesystem snapshot.
+
+mod atomic_bytes;
+pub use atomic_bytes::{
+    ByteError, ByteReadOptions, MutationDisposition, MutationError, MutationOptions,
+    MutationOutcome, MutationPhase,
+};
 
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use std::ffi::OsStr;
@@ -195,7 +201,7 @@ fn size_matches(stat: &Stat, count: usize) -> bool {
     u64::try_from(stat.st_size).ok() == u64::try_from(count).ok()
 }
 
-/// Holds a physical repository directory open across reads.
+/// Holds a physical repository directory open across byte operations.
 pub struct Root {
     path: PathBuf,
     fd: OwnedFd,
@@ -522,9 +528,9 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    struct Fixture(PathBuf);
+    pub(super) struct Fixture(pub(super) PathBuf);
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "oms-safe-fs-{}-{}",
                 std::process::id(),
