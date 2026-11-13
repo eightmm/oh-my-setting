@@ -269,3 +269,22 @@ fn literal_controls_are_invalid_but_escaped_controls_remain_valid() {
         );
     }
 }
+
+#[test]
+fn experiment_string_dialect_and_bounds() {
+    use oms_context::{Json, parse_experiment_json};
+    let input = br#"{"a":1,"a":2,"n":NaN}"#;
+    let parsed = parse_experiment_json(input, input.len()).unwrap();
+    if let Json::Object(ref fields) = parsed {
+        assert_eq!(fields.len(), 2);
+        assert!(matches!(&fields[0].1, Json::Number(n) if n == "2"));
+        assert!(matches!(&fields[1].1, Json::Number(n) if n == "NaN"));
+    } else {
+        panic!("expected object");
+    }
+    assert!(parse_experiment_json(input, input.len() - 1).is_err());
+    assert!(parse_experiment_json(b"", 0).is_err());
+    assert!(parse_experiment_json(b"{", 8).is_err());
+    assert!(parse_experiment_json(b"\xef\xbb\xbf{}", 8).is_err());
+    assert!(oms_context::parse_json(input).is_err());
+}

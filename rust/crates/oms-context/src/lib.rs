@@ -289,6 +289,11 @@ pub fn parse_json(input: &[u8]) -> Result<Json, &'static str> {
         }
     })
 }
+/// Parse Python string JSON without byte encoding detection.
+/// Duplicate object keys keep their last value and non-finite constants are accepted.
+pub fn parse_experiment_json(input: &[u8], limit: usize) -> Result<Json, &'static str> {
+    parse_mode(input, true, limit)
+}
 fn parse_mode(input: &[u8], session: bool, max_bytes: usize) -> Result<Json, &'static str> {
     let (adapted, leaves, depth) = adapt(input, max_bytes, session)?;
     if depth <= 128 {

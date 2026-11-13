@@ -11,6 +11,7 @@ pub enum Error {
     /// A contract error containing WTF-8 code points that cannot be encoded as UTF-8.
     InvalidWtf8(Vec<u8>),
     MalformedNumber,
+    Value(String),
     Type(String),
     Overflow(String),
     Encoding(oms_json::Error),
@@ -18,7 +19,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(s) | Self::Type(s) | Self::Overflow(s) => f.write_str(s),
+            Self::Invalid(s) | Self::Value(s) | Self::Type(s) | Self::Overflow(s) => f.write_str(s),
             Self::MalformedNumber => f.write_str("invalid JSON number"),
             Self::InvalidWtf8(_) => f.write_str("contract error contains an unencodable surrogate"),
             Self::Encoding(e) => e.fmt(f),
@@ -740,4 +741,18 @@ pub fn validate(raw: &Json) -> Result<Report, Error> {
         source_bytes,
         digest,
     })
+}
+
+mod compare;
+pub use compare::compare;
+
+/// Encode a typed JSON value with the shared canonical codec.
+pub fn encode_json(input: &Json, pretty: bool) -> Result<Vec<u8>, Error> {
+    check_strings(input)?;
+    let v = value(input)?;
+    if pretty {
+        oms_json::pretty_json(&v).map_err(Error::Encoding)
+    } else {
+        canonical_json(&v).map_err(Error::Encoding)
+    }
 }
