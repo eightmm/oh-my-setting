@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native core components and partial public routing integrated locally through ec0ace7f; deployment and legacy retirement remain pending.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native core components and partial public routing integrated locally through 6fe9d74f; deployment and legacy retirement remain pending.
 
 ## Decision and completion boundary
 
@@ -93,8 +93,10 @@ No installed command, MCP transport, hook, lifecycle operation or state writer
 has switched to Rust, and no legacy source domain has yet been deleted.
 Library counts and local commits do not satisfy M1 or M6 retirement gates.
 
-The inspected production baseline is commit
-`74f87f654a314961420be2aa8ab6dfc1999151e1`. Rebase implementation slices onto the
+The frozen context comparison baseline is commit
+`74f87f654a314961420be2aa8ab6dfc1999151e1`. The installed production entry
+advanced separately to `c9919a1021dfb610a5a0d71b3d733d752e9bdd13` after full CI
+43407339809; that plan-proof bootstrap does not deploy the native migration. Rebase implementation slices onto the
 then-current main and record the actual comparison revision. In particular,
 [PR #216](https://github.com/eightmm/oh-my-setting/pull/216) and
 [PR #220](https://github.com/eightmm/oh-my-setting/pull/220) change output
@@ -194,6 +196,51 @@ corpus replacement or an exact reviewed data-only classifier refinement.
 The measured baseline is now 348 Python source files / 178,361 lines and 206
 reference paths / 5,036 lines: 554 rows. No executable source was retired, no
 blanket Rust exemption was added, and no Python-free installation is claimed.
+
+## Native scope and byte-storage core (2026-11-13)
+
+Two shared-core slices extend existing packages without adding dependencies,
+changing operational writers, or activating public commands:
+
+- `oms-contract-markdown::scope` implements normalized declarations, bounded
+  Unicode-aware patterns, deny-first classification, raw-path matching and
+  conservative overlap. Its borrowed `changed_line` helper preserves exact input
+  bytes for future streaming CLI consumers. All 18 package tests and Clippy
+  passed after integration. Exactly two malformed glob/glob comparisons become
+  conservative conflicts: `src/[z-a]` or `src/[[:bogus:]]` against `docs/*`
+  return true natively where the frozen Python baseline returns false. Unknown
+  declarations must remain unknown; consumers must validate stored rules and
+  preserve legacy partial stdout when a later streamed line fails. The batch
+  classification API itself returns no partial result.
+- `oms-safe-fs::Root` adds bounded no-follow byte reads and atomic mutation with
+  explicit prepublication, uncertain-publication and published failure phases.
+  An ancestor or leaf disappearing after observation returns an error even
+  when initial absence would be allowed. Thirty-one package tests and Clippy
+  passed. Replacement permissions retain ordinary and sticky bits but strip
+  setuid/setgid, an intentional security refinement from the frozen reference.
+  Failed permission copying retains restrictive creation permissions, following
+  the existing best-effort behavior.
+
+Consumers must hold the canonical external lock for mutation, rebase benign
+logical root aliases, verify any required permission postcondition, and
+reconcile uncertain publication from durable state. An unchanged retry does not
+perform a new fsync and cannot establish durability after an earlier error.
+Mutation errors must be interpreted with their phase and fresh durable state;
+`Missing` from a failed write probe is still a refusal, not permission to treat
+the input as empty or blindly retry. Adapters must also bound untrusted path
+depth before acquiring one descriptor per component.
+The generic byte API imposes no manifest-owner policy; each domain adapter must
+supply its existing owner and encoding contract. Scope declarations and byte
+storage remain reusable core APIs, not independent operational state owners.
+
+The owner inspected the cumulative patches, obtained independent security gates,
+admitted the exact bytes and reran focused tests after integration. These are
+Linux nonprivileged component checks. Foreign-owner privileged branches,
+macOS/WSL2, NFS fault injection and power-loss behavior remain unproven. The
+panel's automatic Antigravity review returned quota exhaustion without a verdict;
+manual gates are recorded separately and do not imply automatic acceptance.
+No Python source or whole public tool is retired by these additive components.
+No disk-I/O reduction or HPC speedup has been measured for these slices.
 
 ## HPC I/O work
 
