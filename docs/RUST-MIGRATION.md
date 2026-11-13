@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12. Status: staged native context entry implemented locally; production deployment and legacy retirement remain pending.
+Decision date: 2026-11-12; priority confirmed 2026-11-13. Status: native core components and partial public routing integrated locally through de3e4ef7; deployment and legacy retirement remain pending.
 
 ## Decision and completion boundary
 
@@ -17,6 +17,13 @@ or executing the old code through a Rust-hosted interpreter does not complete
 the migration. Substantive Bash orchestration also moves into Rust. A minimal
 platform bootstrap may download, verify, and execute the native binary; it
 must not contain OMS state logic or provision Python.
+
+Rust is the default for all OMS code, including CLI and panel implementation.
+TypeScript is permitted for presentation when useful. The important shared core
+moves completely to Rust first: state, plans/tasks, evidence, authority/approvals,
+locks, execution/admission, context and graph. CLI, panel, MCP and provider
+adapters use those same core APIs and canonical records. This priority changes
+the work order, not the complete migration boundary or acceptance criteria.
 
 This boundary concerns OMS itself. A user's Python project, an explicitly
 requested project test command, or an independently installed provider may use
@@ -41,7 +48,7 @@ legacy implementation during transition; they are not the target runtime design.
   acceptance requirements in this document.
 - Focused Rust validation alongside the existing repository checks.
 
-The workspace now also contains seventeen implemented native libraries: context
+The workspace now also contains eighteen implemented native core libraries: context
 validation/session-byte input, descriptor-relative filesystem reads, domain JSON
 encodings, output selection, Shell graph extraction, context text reports,
 injection/session/timeline projections, task/project Markdown contracts,
@@ -51,7 +58,9 @@ extraction through a persistent private helper, retained-output validation,
 acquisition, paging and search, graph parser selection with
 Config/Markdown extraction and shared-helper Python/Shell routing, ordered graph
 resolution, experiment validation/normalization/digests, and bounded secret
-scanning with retained-output redaction. A standalone native
+scanning with retained-output redaction, plus the canonical lock protocol. Seven
+command libraries connect failure, experiment, telemetry, role, input, attempt
+and job features. A standalone native
 `oms runtime context-inspect` binary handles manifest inspection, comparison,
 current-file verification, injections, session reports and timelines. These
 products have scoped native tests and independent review; they remain local
@@ -60,9 +69,13 @@ The native compiler floor is 1.99.1; the preparation inventory tool separately
 retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
 capture read producer and projection adapter are implemented. Experiment template/validate/compare, normal/grouped artifact telemetry, role
 commands, parent input attachments and attempt bundles now have locally reviewed
-native handlers. These handlers are registered in the native workspace; public routing is
-separate. Notebook parsing and graph pipeline consumers remain in
-progress.
+native handlers. The registered workspace has 27 packages. Public routing now
+selects native context/failure/experiment modes under runtime, normal/grouped
+artifact-index telemetry, all agent-role modes, parent input attachments,
+agent-events attempt-bundle reads and job-digest. Other modes retain their
+explicit transitional selection. Notebook parsing and graph pipeline consumers
+remain in progress. The lock library is registered but has no public writer
+cutover. Partial routing does not retire any of the 82 whole public tools.
 
 Parent runtime probes verified SIGINT delivered on the real transcript read
 syscall returns exit 130 with empty stdout, actual socket rejection, and readable
@@ -114,11 +127,16 @@ the two Boolean JSON-limit cases belong to the native typed boundary.
 
 Native-comparable identifies implemented native paths and scoped matching tests;
 it does not mean every public combination or installation path is accepted.
-The separate frozen reference suite passed 27 methods. Its first candidate run
-stopped at a stale root Cargo.lock under --locked, before producing a binary.
-This batch reconciles that lock and workspace membership without changing the
-external package versions/checksums. The candidate comparison must run again from
-the unchanged reference checkout; its reference guard is not relaxed.
+The separate frozen reference and candidate suites each passed all 27 methods
+for candidate source f9d5f37ecb5c5ad5ee67d6feef67cbe24bd95aac and executable
+SHA-256 bf9230867f6efb4b01d250f75d001a5d981ecc5ff7e10eb33a029a0a375522e3.
+Native corpus validation order was subsequently corrected in 11a80f48; the exact
+64-case corpus remains unchanged. Neither earlier comparison nor earlier host
+proof establishes the newest artifact: repeat the candidate comparison after
+integration from the unchanged reference checkout. Its guard is not relaxed.
+The actual 27-package locked workspace passed formatting, check, Clippy, tests
+and inventory verification at de3e4ef7; external locked package versions,
+sources and checksums were preserved.
 
 Existing source/symlink/rendered-copy fixtures with Python hidden are additional
 regression evidence. They do not substitute for actual disposable installations,
@@ -144,9 +162,10 @@ public-entry time. These observations do not isolate disk cost or prove an NFS
 speedup. The worker could not collect syscall counts because ptrace was refused;
 zero syscall fields in its raw records are placeholders, not measurements.
 Source inspection identifies three executable hashing passes in the transitional
-entry. Removing checks is not an authorized optimization. Native job-digest work
-is eliminating the remaining full log rescan and adding streaming cancellation;
-its final I/O and integration evidence is still pending.
+entry. Removing checks is not an authorized optimization. Native job-digest is now integrated at the public entry and uses one-pass log
+and metric processing with cancellation. Those functional checks do not establish
+physical disk savings; syscall measurements and actual HPC performance remain
+pending.
 
 ## Target architecture
 
@@ -382,6 +401,41 @@ relocation, archive validation, contention and crash-recovery coverage must pass
 before deleting the legacy engine and its interpreter-dependent fixture driver.
 This recovery work remains preparation for the complete migration.
 
+### Temporary immutable decision proof footprint (2026-11-13)
+
+Legacy archived cancellations can pin different historical bytes at the same
+decision path. Restoring one version in place would break another. The bounded
+compatibility repair adds parent-only `oms agent-plan snapshot-decision` with
+an exact reviewed SHA-256, exit 0/2 and JSON `snapshot_path`, `sha256`, `created`.
+It captures fresh raw bytes, at most 64 KiB, in private
+`.oms/plan/decision-artifacts-v1/<sha256>` storage. It does not cancel a task,
+grant approval, change pinned digests or rewrite history.
+
+New cancellations always read the declared source afresh and capture it durably
+before saving the plan. Historical validation may use only an exact immutable
+snapshot when the original changes or its final leaf is missing; unsafe
+ancestors, links, permissions, ownership, corrupt bytes or incomplete publication
+still refuse. A cancellation refused after capture can leave a valid blob with
+no authority. A crash between publication and temporary-link removal leaves two
+links and refuses further use; recovery is not automatic deletion. Legacy
+records without a valid snapshot still refuse changed original bytes.
+
+The cache tracks only validated referenced original paths and exact blob paths,
+including missing leaves; unrelated catalog entries are not scanned on hits.
+Mutations retain fresh validation. Retirement validation now receives the
+declared physical repository explicitly, including state-verify from another CWD.
+
+This adds the 220-line `scripts/lib/plan_decisions.py` helper and changes existing
+physical Python lines: agent_plan_core 2280 to 2284, panel_cache 745 to 752,
+plan-retire 970 to 979. Python-reference counts change in agent-plan 32 to 33
+and scripts-smoke 1051 to 1056. The measured baseline is 348 Python source
+files / 178,361 lines and 204 reference paths / 5,032 lines, 552 rows total.
+This is an explicit temporary increase, not retirement or a zero-inventory result.
+M4 / RUST-STATE owns removal: native plan cancellation, immutable proof capture,
+archive validation, cache invalidation, contention and crash fixtures must
+replace this helper and its Python consumers before deletion. No live evidence
+repair or deployment is implied by these local checks.
+
 ### Native fixture footprint (2026-11-13)
 
 The first native Shell graph corpus adds five inert JSON fixture paths under
@@ -415,10 +469,12 @@ Python-reference lines. Native tests deserialize graph records and expected
 edges; no embedded source is executed. M3 owns this coverage until equivalent
 corpus replacement or a reviewed exact-path data classifier removes the row.
 
-The measured executable footprint is now 347 Python source files and 178,121
-physical lines, including the bounded 29-line M5 transition below. The conservative reference inventory rises from the original
+Before the immutable decision-proof repair above, the measured executable
+footprint was 347 Python source files and 178,121 physical lines, including the
+bounded 29-line M5 transition below. The conservative reference inventory rises from the original
 194 paths / 4,782 lines to 204 paths / 5,026 lines for the Shell corpus and native
-Python-parser names/data. The combined inventory now has 551 rows. No legacy
+Python-parser names/data. That preparation baseline had 551 rows; the decision-proof repair above raises
+it explicitly to 552. No legacy
 deletion or M6 zero result is claimed. Future retirement batches must lower the
 baseline again.
 
@@ -441,10 +497,10 @@ invalid payload. Foreign or uninspectable content remains in place.
 
 M5 owns removing this transition code after native installation, ownership,
 repair, rollback and equivalent fixtures are accepted. The parent adjusts these
-measured rows explicitly; CI never regenerates its own budget. The combined
-inventory remains 551 rows. No Python deletion or M6 zero result is claimed.
+measured rows explicitly; CI never regenerates its own budget. This lifecycle transition kept the preparation inventory at 551 rows; the
+decision-proof repair above raises it explicitly to 552. No Python deletion or M6 zero result is claimed.
 
-Two demonstrated legacy defects remain explicit native-port requirements:
+The demonstrated legacy defect and temporary repair remain explicit native-port requirements:
 
 - [Artifact indexing](../scripts/lib/peer-common.sh) truncates the task goal with
   `cut -c1-200`; splitting a valid UTF-8 character can create a lone surrogate
@@ -455,7 +511,8 @@ Two demonstrated legacy defects remain explicit native-port requirements:
 - [Retirement validation](../scripts/lib/plan-retire.py), when reached through
   [state-verify](../scripts/state-verify.sh) from another working directory, can
   resolve archived decision paths against CWD rather than the supplied repository.
-  M4 must use the declared physical repository identity and test that invocation.
+  The temporary repair above passes the declared repository explicitly and tests
+  that invocation; M4 must preserve it in the native replacement.
 
 ## Verification and final acceptance
 

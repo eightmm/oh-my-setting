@@ -46,6 +46,7 @@ def state_repo():
     return os.path.realpath(env("OMS_STATE_REPO") or env("OMS_REPO"))
 
 _completion_module = None
+_decision_module = None
 _unverified_completions = set()
 _settled_completion_leases = set()
 
@@ -54,6 +55,13 @@ def completion_module():
     if _completion_module is None:
         _completion_module = _load(os.path.join(os.path.dirname(__file__), "plan-completion.py"))
     return _completion_module
+
+
+def decision_module():
+    global _decision_module
+    if _decision_module is None:
+        _decision_module = _load(os.path.join(os.path.dirname(__file__), "plan_decisions.py"))
+    return _decision_module
 
 
 def load():
@@ -178,12 +186,11 @@ def validate_cancellation(repo_root, task_id, task):
     if (not isinstance(rel, str) or not rel or len(rel) > 240 or rel.startswith("/") or
             "\\" in rel or any(part in ("", ".", "..") for part in rel.split("/"))):
         die("task %s has an invalid cancellation decision-artifact path" % task_id)
-    filename = os.path.join(repo_root, *rel.split("/"))
-    if not same_absolute_path(os.path.realpath(filename), filename):
-        die("task %s cancellation decision artifact traverses a symlink" % task_id)
-    raw = read_regular_bytes(filename, "cancellation decision artifact", 64 * 1024)
-    if hashlib.sha256(raw).hexdigest() != receipt["decision_artifact_sha256"]:
-        die("task %s cancellation decision artifact digest changed" % task_id)
+    try:
+        decision_module()["historical_bytes"](
+            repo_root, rel, receipt["decision_artifact_sha256"])
+    except (ValueError, OSError) as exc:
+        die("task %s cancellation decision artifact: %s" % (task_id, exc))
 
 def split_list(s):
     return [x.strip() for x in re.split(r"[,\s]+", s) if x.strip()]
@@ -1575,16 +1582,13 @@ if act in ("claim", "start", "finish", "review", "repair", "land", "block", "rel
         if not isinstance(decision_rel, str) or len(decision_rel) > 240:
             die("decision artifact path must be a bounded repo-relative path")
         decision_rel = clean_rel(decision_rel, "decision artifact path")
-        decision_path = os.path.join(repo_root, *decision_rel.split("/"))
-        if not same_absolute_path(os.path.realpath(decision_path), decision_path):
-            die("decision artifact path must not traverse a symlink")
-        decision_raw = read_regular_bytes(decision_path, "decision artifact", 64 * 1024)
-        decision_sha = hashlib.sha256(decision_raw).hexdigest()
-        expected_decision_sha = env("OMS_EXPECTED_DECISION_ARTIFACT_SHA256")
-        if (not re.fullmatch(r"[0-9a-f]{64}", expected_decision_sha) or
-                decision_sha != expected_decision_sha):
-            die("decision artifact digest changed or is not the reviewed SHA-256")
         refuse_live_worker_authority(selected, "cancellation")
+        try:
+            proof = decision_module()["snapshot_decision"](
+                repo_root, decision_rel, env("OMS_EXPECTED_DECISION_ARTIFACT_SHA256"))
+        except (ValueError, OSError) as exc:
+            die(str(exc))
+        decision_sha = proof["sha256"]
         for task in selected.values():
             task_state = task["state"]
             task_lease = task.get("lease_id", "")

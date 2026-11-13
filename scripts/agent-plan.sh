@@ -102,6 +102,7 @@ APPLY=0
 DISPOSITION=""
 COMPLETION_OTHER_OPTION=0
 CANCEL_OTHER_OPTION=0
+SNAPSHOT_OTHER_OPTION=0
 DISCOVERED_FROM=""
 LIMIT=""
 
@@ -110,6 +111,14 @@ usage() {
 Usage: agent-plan.sh [--repo PATH] [--file PATH] <command> [options]
 
 Commands:
+  snapshot-decision --decision-artifact REPO_RELATIVE_FILE
+         --expected-decision-artifact-sha256 SHA
+                                     Parent-only capture of fresh reviewed raw
+                                     bytes (at most 64 KiB) into the immutable
+                                     private .oms/plan/decision-artifacts-v1/SHA
+                                     catalog. No task or approval changes.
+                                     Prints snapshot_path, sha256, created JSON;
+                                     exits 0 on success, 2 on refusal/error.
   init   --goal TEXT [--accept CMD]  Create/replace the plan with a goal and an
                                      optional goal-level acceptance command —
                                      the executable definition of done.
@@ -303,11 +312,17 @@ repair moves review -> claimed without minting a lease. Any -> blocked (block);
 blocked -> ready (reopen); claimed/running/review -> ready (release).
 Parent cancellation moves an inactive ready/blocked task to cancelled with
 the exact plan/task and decision-artifact digests. Cancelled tasks are closed,
-not verified, and never satisfy dependencies. To restore historical bytes at a
+not verified, and never satisfy dependencies. Before saving cancellation it
+durably captures the freshly read reviewed decision bytes. Historical validation
+can resolve that exact digest from the private catalog when the original file
+changes or is removed; unsafe paths, links and permissions still fail closed.
+snapshot-decision can preserve authentic historical versions without loading or
+editing broken plan history. A stored version never authorizes a new cancel.
+For legacy plans without a snapshot, to restore historical bytes at a
 shared decision path, keep its current bound bytes valid while copying them to
 a new path and relocating every active task that references it. The destination
 must match the bound digest. Restore the historical bytes only after all moves.
-If the old file already differs, the active plan fails closed.
+Without an exact snapshot, changed old bytes still fail closed.
 Tasks are stored in REPO/.oms/plan/tasks.json (override with --file).
 
 A claim whose last heartbeat (claimed_at, refreshed by touch) is older than
@@ -327,6 +342,10 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 # Parse: first non-option token is the command.
 while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --repo|--decision-artifact|--expected-decision-artifact-sha256|--json) ;;
+    -*) SNAPSHOT_OTHER_OPTION=1 ;;
+  esac
   case "$1" in
     --repo|--file|--id|--lease-id|--expected-state|--expected-lease-id|--expected-plan-sha256|--expected-task-sha256|--completion-bundle|--expected-completion-bundle-sha256|--approve-reviewed-bundle|--main-review-approval|--expected-main-review-approval-sha256|--json|--operator-consent|--decision-artifact|--expected-decision-artifact-sha256) ;;
     --*) COMPLETION_OTHER_OPTION=1 ;;
@@ -442,7 +461,7 @@ while [ "$#" -gt 0 ]; do
     --include-review) INCLUDE_REVIEW=1; shift ;;
     --json) AS_JSON=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|discovered|status|next|brief|accept|lint-verify|cancel|relocate-decision|amend|retro)
+    accept-research|approve-main-research|accept-main-research|satisfy|init|ensure-lineage|retire|apply-proposal|add|claim|start|touch|review|repair|land|finish|block|release|recover-lease|recover-owner|reclaim|reopen|show|evidence-snapshot|list|ready|discovered|status|next|brief|accept|lint-verify|cancel|relocate-decision|snapshot-decision|amend|retro)
       [ -z "$ACTION" ] || fail "multiple commands: $ACTION, $1"; ACTION="$1"; shift ;;
     *) fail "unknown argument: $1" ;;
   esac
@@ -463,6 +482,13 @@ if [ -n "$LANDED_COMMIT" ]; then
     fail "--landed-commit cannot be combined with typed patch-land finish options"
 fi
 case "$ACTION" in
+  snapshot-decision)
+    [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
+      fail "snapshot-decision is parent-only"
+    [ "$SNAPSHOT_OTHER_OPTION" = 0 ] && [ -n "$DECISION_ARTIFACT" ] &&
+      [ -n "$EXPECTED_DECISION_ARTIFACT_SHA256" ] ||
+      fail "snapshot-decision requires only --decision-artifact and --expected-decision-artifact-sha256"
+    ;;
   accept-research|approve-main-research|accept-main-research|satisfy)
     [ "${OMS_HARNESS_CHILD:-0}" != 1 ] && [ "${OMS_HARNESS_DELEGATE_DEPTH:-0}" = 0 ] ||
       fail "$ACTION is parent-only"
@@ -596,6 +622,12 @@ resolve_physical_path() {  # PATH
 
 PY_REPO="$(resolve_physical_path "$REPO")" || fail "cannot normalize repository path for Python"
 PY_STATE_REPO="$(resolve_physical_path "$STATE_REPO")" || fail "cannot normalize repository path for Python"
+if [ "$ACTION" = snapshot-decision ]; then
+  # Recovery captures bytes without loading or changing broken plan history.
+  exec python3 "$ROOT/scripts/lib/plan_decisions.py" --repo "$PY_STATE_REPO" \
+    --decision-artifact "$DECISION_ARTIFACT" \
+    --expected-decision-artifact-sha256 "$EXPECTED_DECISION_ARTIFACT_SHA256"
+fi
 if [ -n "$LANDED_COMMIT" ] || [ "$ACTION" = satisfy ]; then
   # Match land.sh's shared-worktree state directory.
   LAND_RECEIPTS_DIR="$(oms_land_state_dir "$REPO")" || fail "cannot resolve land state directory"

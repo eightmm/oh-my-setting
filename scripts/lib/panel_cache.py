@@ -15,6 +15,7 @@ import stat
 import time
 
 from panel_results import DURABLE, _lock
+from plan_decisions import CATALOG as DECISION_CATALOG, digest as decision_digest, relative as decision_relative
 from room_repository import harness_residue_parent
 
 # Clock-only refreshes need multiple watch ticks to amortize the full collectors.
@@ -399,6 +400,8 @@ def _plan_inputs(repo):
     including captured streams and approval snapshots. The artifact index and
     patch-land log are the only live streams used by validate_done. Git-backed
     proofs additionally guard the bounded local Git namespace and object store.
+    Cancellation references guard both their original path and exact optional
+    snapshot, including missing leaves; unrelated catalog entries are not read.
     """
     inputs = {}
     landing_paths = set()
@@ -452,7 +455,11 @@ def _plan_inputs(repo):
     def references(value):
         if isinstance(value, dict):
             for key, item in value.items():
-                if key in ('path', 'artifact', 'patch', 'decision_artifact') and isinstance(item, str) and item:
+                if key == 'decision_artifact':
+                    relative(decision_relative(item))
+                    expected = decision_digest(value.get('decision_artifact_sha256'))
+                    relative(DECISION_CATALOG + '/' + expected)
+                elif key in ('path', 'artifact', 'patch') and isinstance(item, str) and item:
                     relative(item)
                 else:
                     references(item)
@@ -472,7 +479,7 @@ def _plan_inputs(repo):
     tasks = plan.get('tasks', {})
     for task in tasks.values() if isinstance(tasks, dict) else tasks:
         if task.get('cancellation'):
-            relative(task['cancellation']['decision_artifact'])
+            references(task['cancellation'])
         if task.get('completion_receipt'):
             receipt = metadata(task['completion_receipt']['path'])
             references(receipt)
@@ -642,7 +649,7 @@ def read_plan_list(repo, collect):
                      ROOT / 'scripts/lib/agent-plan-engine.py',
                      ROOT / 'scripts/lib/task-assignment.py', ROOT / 'scripts/lib/project-state.py',
                      *(ROOT / 'scripts/lib' / name for name in (
-                         'plan-completion.py', 'plan-receipt.py', 'durable-jsonl.py',
+                         'plan-completion.py', 'plan-receipt.py', 'plan_decisions.py', 'durable-jsonl.py',
                          'path_scope.py', 'landing-capture.py', 'main_reviewer.py',
                          'process_liveness.py', 'verify-floor-lint.py', 'plan-retire.py',
                          'agent-memory-common.sh', 'oms-common.sh', 'provider-registry.sh',

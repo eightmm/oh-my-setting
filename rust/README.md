@@ -2,7 +2,7 @@
 
 This workspace prepares the [complete Rust migration](../docs/RUST-MIGRATION.md).
 It contains the development inventory tool `oms-migrate`, a standalone native
-`oms` binary, and seventeen native libraries: `oms-context` (manifest projections
+`oms` binary, and eighteen native core libraries: `oms-context` (manifest projections
 and lossless session JSON input), `oms-safe-fs` (descriptor-relative reads),
 `oms-json` (domain byte encodings), `oms-output` (streaming digest selection,
 reversible reducers and scoped retrieval metadata), `oms-graph-shell` (source
@@ -18,7 +18,15 @@ and search),
 `oms-graph` (parser selection, Config/Markdown extraction, and shared-helper
 Python/Shell routing), `oms-graph-resolve` (ordered graph resolution),
 `oms-experiment` (scenario validation, normalization and canonical digests), and
-`oms-scrub` (bounded secret scanning and retained-output redaction).
+`oms-scrub` (bounded secret scanning and retained-output redaction), and
+`oms-lock` (canonical cross-implementation lock protocol, without a public writer
+cutover). Seven command libraries provide failure, experiment, telemetry, role,
+input, attempt-bundle and job handlers. The workspace has 27 packages.
+
+Rust is the default for all OMS code. The shared state, plan/task, evidence,
+authority, lock, execution/admission, context and graph core has priority.
+CLI, panel, MCP and provider adapters use the same core; TypeScript may serve
+presentation where useful. The complete migration scope remains unchanged.
 
 The standalone binary implements manifest inspection, comparison and current-file
 verification, plus injections, session reports and timelines, through
@@ -27,15 +35,19 @@ Read labels. Descriptor-backed capture acquisition in `oms-safe-fs` is connected
 to the retained-output projection adapter. The graph facade explicitly
 rejects notebooks until their native parser is integrated. The installed `oms`
 command uses a staged native context payload when the trusted owner supplies
-the exact-revision artifacts before Python activation. Missing current payloads
-retain transitional legacy selection. No legacy domain is retired.
+the exact-revision artifacts before Python activation. The public selector also
+owns runtime failure/experiment modes, normal/grouped artifact telemetry, all
+agent-role modes, parent input attachments, agent-events attempt-bundle reads and
+job-digest. Missing current payloads retain transitional legacy selection.
+No whole legacy domain is retired.
 
 The graph helper is a private libexec artifact, not another PATH command. Its
 malformed-input crashes are contained on Linux; macOS memory and dump-collector
 guarantees remain limited. Packaging must exclude the test-only
 `oms-graph-python-fixture` executable. Capture acquisition and projections are
 locally integrated; their public CLI and MCP consumers still use the legacy
-implementation. Experiment comparison and notebook parsing remain incomplete.
+implementation. Experiment template/validate/compare is connected to the native public entry;
+notebook parsing and other experiment modes remain incomplete.
 
 ## Toolchain and checks
 
