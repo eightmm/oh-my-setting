@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-//! Pure read-only projections of canonical schema-2 work envelopes.
-use oms_context::{Json, parse_json};
+//! Read-only canonical status validation and schema-2 work envelope projections.
+use oms_context::{Json, parse_experiment_json, parse_json};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -32,6 +32,183 @@ fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     } else {
         &NULL
     }
+}
+
+fn status_payload(raw: &[u8], message: &str) -> Result<Json> {
+    // Status commands use Python's JSON dialect, including last-key-wins and
+    // lossless surrogate strings. Keep unknown fields for the envelope adapter.
+    let payload = parse_experiment_json(raw, 4 * 1024 * 1024).map_err(|_| err(message))?;
+    if !matches!(payload, Json::Object(_))
+        || status_number(field(&payload, "schema")).as_deref() != Some("1")
+        || !matches!(field(&payload, "present"), Json::Bool(true))
+    {
+        return Err(err(message));
+    }
+    Ok(payload)
+}
+
+fn status_count(value: &Json) -> Option<&str> {
+    match value {
+        Json::Number(n) if n == "-0" => Some("0"),
+        Json::Number(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => Some(n),
+        _ => None,
+    }
+}
+
+fn status_number(value: &Json) -> Option<String> {
+    if let Some(n) = status_count(value) {
+        return Some(n.to_owned());
+    }
+    match value {
+        Json::Bool(b) => Some(u8::from(*b).to_string()),
+        Json::Number(n) if n.contains(['.', 'e', 'E']) => {
+            let number = n.parse::<f64>().ok()?;
+            (number.is_finite() && number >= 0.0 && number.fract() == 0.0).then(|| {
+                if number == 0.0 {
+                    "0".into()
+                } else {
+                    format!("{number:.0}")
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+fn status_sum(left: &str, right: &str) -> String {
+    // Counts are Python integers: arithmetic must not narrow them to u64.
+    let mut a = left.bytes().rev();
+    let mut b = right.bytes().rev();
+    let mut carry = 0;
+    let mut sum = Vec::new();
+    loop {
+        let (x, y) = (a.next(), b.next());
+        if x.is_none() && y.is_none() && carry == 0 {
+            break;
+        }
+        let digit = x.map_or(0, |n| n - b'0') + y.map_or(0, |n| n - b'0') + carry;
+        sum.push(b'0' + digit % 10);
+        carry = digit / 10;
+    }
+    sum.reverse();
+    String::from_utf8(sum).unwrap()
+}
+
+/// Validate a present `agent-task status --json` snapshot for a native envelope.
+/// Preserves unknown fields, number spellings and WTF-8 strings. Status and
+/// verification strings are not enums here; the envelope adapter normalizes them.
+/// Input uses the canonical JSON dialect, bounded to 4 MiB and 1024 nesting levels.
+/// Absence, malformed input and invalid field types are errors, never empty state.
+pub fn task_status_snapshot(raw: &[u8]) -> Result<Json> {
+    let message = "canonical task status projection is unavailable or invalid";
+    let payload = status_payload(raw, message)?;
+    if !matches!(field(&payload, "status"), Json::String(_))
+        || !matches!(field(&payload, "verification"), Json::String(_))
+        || !matches!(field(&payload, "stale"), Json::Bool(_))
+    {
+        return Err(err(message));
+    }
+    Ok(payload)
+}
+
+/// Validate a present `agent-plan status --json` snapshot against the physical
+/// plan's projected task IDs. Counts and actionable membership must agree;
+/// cancelled tasks close work but do not establish verified completion.
+/// Preserves unknown fields and uses the same bounded JSON dialect as
+/// [`task_status_snapshot`]. This validates data, not freshness or authority.
+pub fn plan_status_snapshot(raw: &[u8], task_ids: &[&str]) -> Result<Json> {
+    let message = "canonical plan status projection is unavailable or invalid";
+    let payload = status_payload(raw, message)?;
+    let counts = [
+        "task_count",
+        "verified_count",
+        "cancelled_count",
+        "closed_count",
+        "unfinished_count",
+    ]
+    .map(|key| status_count(field(&payload, key)).ok_or_else(|| err(message)));
+    let [total, verified, cancelled, closed, unfinished] = counts;
+    let (total, verified, cancelled, closed, unfinished) =
+        (total?, verified?, cancelled?, closed?, unfinished?);
+    for key in ["nonempty", "all_done", "all_closed", "has_unfinished"] {
+        if !matches!(field(&payload, key), Json::Bool(_)) {
+            return Err(err(message));
+        }
+    }
+    let by_state = field(&payload, "by_state");
+    let contract = field(&payload, "contract");
+    if !matches!(by_state, Json::Object(_)) || !matches!(contract, Json::Object(_)) {
+        return Err(err(message));
+    }
+    for key in ["bound", "satisfied", "project_present", "project_healthy"] {
+        if !matches!(field(contract, key), Json::Bool(_)) {
+            return Err(err(message));
+        }
+    }
+    for key in [
+        "project_state",
+        "blocker",
+        "expected_spec_sha256",
+        "current_spec_sha256",
+    ] {
+        if !matches!(field(contract, key), Json::String(_)) {
+            return Err(err(message));
+        }
+    }
+    for key in ["actionable", "stale", "stale_review"] {
+        if !matches!(field(&payload, key), Json::Array(_)) {
+            return Err(err(message));
+        }
+    }
+    let Json::Array(actionable) = field(&payload, "actionable") else {
+        unreachable!()
+    };
+    let mut seen = BTreeSet::new();
+    for item in actionable {
+        if let Json::String(id) = item {
+            if !seen.insert(id) {
+                return Err(err(message));
+            }
+        } else {
+            return Err(err(message));
+        }
+    }
+    let state_count = |key: &str| {
+        if let Json::Object(fields) = by_state
+            && !fields.iter().any(|(name, _)| name == key.as_bytes())
+        {
+            Some("0".to_owned())
+        } else {
+            status_number(field(by_state, key))
+        }
+    };
+    if state_count("done").as_deref() != Some(verified)
+        || state_count("cancelled").as_deref() != Some(cancelled)
+        || status_sum(verified, cancelled) != closed
+        || status_sum(unfinished, closed) != total
+        || field(&payload, "all_done") != &Json::Bool(total != "0" && verified == total)
+        || field(&payload, "all_closed") != &Json::Bool(total != "0" && unfinished == "0")
+        || field(&payload, "has_unfinished") != &Json::Bool(unfinished != "0")
+    {
+        return Err(err("canonical plan status counts are inconsistent"));
+    }
+    if total != task_ids.len().to_string()
+        || field(&payload, "nonempty") != &Json::Bool(!task_ids.is_empty())
+    {
+        return Err(err(
+            "canonical plan status disagrees with the physical plan task set",
+        ));
+    }
+    let ids = task_ids
+        .iter()
+        .map(|id| id.as_bytes())
+        .collect::<BTreeSet<_>>();
+    if seen.iter().any(|id| !ids.contains(id.as_slice())) {
+        return Err(err(
+            "canonical plan status names an unknown actionable task",
+        ));
+    }
+    Ok(payload)
 }
 fn object<'a>(v: &'a Json, name: &str) -> Result<&'a Json> {
     if matches!(v, Json::Object(_)) {

@@ -6,6 +6,300 @@ fn fixture() -> Value {
 fn bytes(v: &Value) -> Vec<u8> {
     serde_json::to_vec(v).unwrap()
 }
+
+fn status_fixture(done: u64, cancelled: u64, unfinished: u64) -> Value {
+    let total = done + cancelled + unfinished;
+    json!({
+        "schema": 1, "present": true, "task_count": total, "nonempty": total > 0,
+        "all_done": total > 0 && done == total,
+        "all_closed": total > 0 && unfinished == 0, "has_unfinished": unfinished > 0,
+        "verified_count": done, "cancelled_count": cancelled,
+        "closed_count": done + cancelled, "unfinished_count": unfinished,
+        "by_state": {"done": done, "cancelled": cancelled, "ready": unfinished},
+        "actionable": [], "stale": [], "stale_review": [],
+        "contract": {"bound": false, "satisfied": false, "project_present": false,
+            "project_healthy": false, "project_state": "", "blocker": "",
+            "expected_spec_sha256": "", "current_spec_sha256": ""}
+    })
+}
+
+#[test]
+fn task_status_snapshot_contract() {
+    use oms_work_inspect::task_status_snapshot;
+    let valid = json!({"schema": 1, "present": true, "status": "future-status",
+        "verification": "future-verification", "stale": false, "extension": [42, "한글"]});
+    let raw = bytes(&valid);
+    assert_eq!(
+        task_status_snapshot(&raw).unwrap(),
+        oms_context::parse_json(&raw).unwrap()
+    );
+    for key in ["schema", "present", "status", "verification", "stale"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert!(task_status_snapshot(&bytes(&missing)).is_err(), "{key}");
+        let bad_values = match key {
+            "schema" => vec![json!(0), json!(2), json!("1"), Value::Null],
+            "present" => vec![json!(false), json!(1), Value::Null],
+            "stale" => vec![json!(0), json!("false"), Value::Null],
+            _ => vec![json!(0), json!(false), Value::Null],
+        };
+        for bad in bad_values {
+            let mut invalid = valid.clone();
+            invalid[key] = bad;
+            assert_eq!(
+                task_status_snapshot(&bytes(&invalid))
+                    .unwrap_err()
+                    .to_string(),
+                "canonical task status projection is unavailable or invalid",
+                "{key}"
+            );
+        }
+    }
+    let mut empty = valid.clone();
+    empty["status"] = json!("");
+    empty["verification"] = json!("");
+    empty["stale"] = json!(true);
+    assert!(task_status_snapshot(&bytes(&empty)).is_ok());
+    for raw in [b"".as_slice(), b"{", b"[]", b"null", b"{}", b"0"] {
+        assert!(task_status_snapshot(raw).is_err());
+    }
+}
+
+#[test]
+fn plan_status_snapshot_field_contract() {
+    use oms_work_inspect::plan_status_snapshot;
+    let valid = status_fixture(0, 0, 1);
+    for (key, value) in valid.as_object().unwrap() {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert!(
+            plan_status_snapshot(&bytes(&missing), &["t1"]).is_err(),
+            "missing {key}"
+        );
+        let mut invalid = valid.clone();
+        invalid[key] = Value::Null;
+        assert!(
+            plan_status_snapshot(&bytes(&invalid), &["t1"]).is_err(),
+            "null {key}"
+        );
+        if value.is_u64() && key != "schema" {
+            for bad in [json!(-1), json!(true), json!(1.0), json!("1")] {
+                invalid[key] = bad;
+                assert!(
+                    plan_status_snapshot(&bytes(&invalid), &["t1"]).is_err(),
+                    "{key}"
+                );
+            }
+        } else if value.is_boolean() {
+            invalid[key] = json!(1);
+            assert!(
+                plan_status_snapshot(&bytes(&invalid), &["t1"]).is_err(),
+                "{key}"
+            );
+        }
+    }
+    for (key, value) in valid["contract"].as_object().unwrap() {
+        for bad in [
+            Value::Null,
+            if value.is_boolean() {
+                json!(0)
+            } else {
+                json!(false)
+            },
+        ] {
+            let mut invalid = valid.clone();
+            invalid["contract"][key] = bad;
+            assert!(
+                plan_status_snapshot(&bytes(&invalid), &["t1"]).is_err(),
+                "{key}"
+            );
+        }
+        let mut missing = valid.clone();
+        missing["contract"].as_object_mut().unwrap().remove(key);
+        assert!(
+            plan_status_snapshot(&bytes(&missing), &["t1"]).is_err(),
+            "{key}"
+        );
+    }
+    for bad in [
+        json!(["t1", "t1"]),
+        json!([null]),
+        json!([1]),
+        json!([true]),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["actionable"] = bad;
+        assert_eq!(
+            plan_status_snapshot(&bytes(&invalid), &["t1"])
+                .unwrap_err()
+                .to_string(),
+            "canonical plan status projection is unavailable or invalid"
+        );
+    }
+    for raw in [b"".as_slice(), b"{", b"[]", b"null", b"{}", b"0"] {
+        assert!(plan_status_snapshot(raw, &[]).is_err());
+    }
+}
+
+#[test]
+fn plan_status_snapshot_counts_and_membership() {
+    use oms_work_inspect::plan_status_snapshot;
+    for (done, cancelled, unfinished) in [
+        (0, 0, 0),
+        (1, 0, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+        (1, 1, 1),
+        (9, 1, 0),
+    ] {
+        let mut valid = status_fixture(done, cancelled, unfinished);
+        let ids = vec!["t1"; (done + cancelled + unfinished) as usize];
+        // State histograms are not reconstructed: the canonical producer owns them.
+        valid["by_state"]["future-state"] = json!({"opaque": true});
+        valid["stale"] = json!([{"id": "t1", "age": 5}]);
+        valid["stale_review"] = json!(["future-format"]);
+        let raw = bytes(&valid);
+        assert_eq!(
+            plan_status_snapshot(&raw, &ids).unwrap(),
+            oms_context::parse_json(&raw).unwrap()
+        );
+        for key in ["all_done", "all_closed", "has_unfinished"] {
+            let mut invalid = valid.clone();
+            invalid[key] = json!(!valid[key].as_bool().unwrap());
+            assert_eq!(
+                plan_status_snapshot(&bytes(&invalid), &ids)
+                    .unwrap_err()
+                    .to_string(),
+                "canonical plan status counts are inconsistent",
+                "{key}"
+            );
+        }
+        for key in [
+            "task_count",
+            "verified_count",
+            "cancelled_count",
+            "closed_count",
+            "unfinished_count",
+        ] {
+            let mut invalid = valid.clone();
+            invalid[key] = json!(valid[key].as_u64().unwrap() + 1);
+            assert_eq!(
+                plan_status_snapshot(&bytes(&invalid), &ids)
+                    .unwrap_err()
+                    .to_string(),
+                "canonical plan status counts are inconsistent",
+                "{key}"
+            );
+        }
+    }
+    let mut valid = status_fixture(0, 0, 1);
+    valid["by_state"] = json!({});
+    valid["actionable"] = json!(["t1"]);
+    assert!(plan_status_snapshot(&bytes(&valid), &["t1"]).is_ok());
+    assert_eq!(
+        plan_status_snapshot(&bytes(&valid), &[])
+            .unwrap_err()
+            .to_string(),
+        "canonical plan status disagrees with the physical plan task set"
+    );
+    valid["nonempty"] = json!(false);
+    assert_eq!(
+        plan_status_snapshot(&bytes(&valid), &["t1"])
+            .unwrap_err()
+            .to_string(),
+        "canonical plan status disagrees with the physical plan task set"
+    );
+    valid["nonempty"] = json!(true);
+    assert_eq!(
+        plan_status_snapshot(&bytes(&valid), &["t2"])
+            .unwrap_err()
+            .to_string(),
+        "canonical plan status names an unknown actionable task"
+    );
+    for bad in [Value::Null, json!("0"), json!(-1), json!(0.5), json!(1)] {
+        valid["by_state"]["done"] = bad;
+        assert_eq!(
+            plan_status_snapshot(&bytes(&valid), &["t1"])
+                .unwrap_err()
+                .to_string(),
+            "canonical plan status counts are inconsistent"
+        );
+    }
+    let mut huge = String::from_utf8(bytes(&status_fixture(1, 1, 0))).unwrap();
+    for key in ["task_count", "closed_count"] {
+        huge = huge.replace(
+            &format!("\"{key}\":2"),
+            &format!("\"{key}\":20000000000000000000000000000000000000000"),
+        );
+    }
+    huge = huge.replace(":1", ":10000000000000000000000000000000000000000");
+    // Restore schema after replacing count literals.
+    huge = huge.replace(
+        "\"schema\":10000000000000000000000000000000000000000",
+        "\"schema\":1",
+    );
+    assert_eq!(
+        plan_status_snapshot(huge.as_bytes(), &["t1", "t2"])
+            .unwrap_err()
+            .to_string(),
+        "canonical plan status disagrees with the physical plan task set"
+    );
+}
+
+#[test]
+fn status_snapshot_lossless_dialect_and_bounds() {
+    use oms_work_inspect::{plan_status_snapshot, task_status_snapshot};
+    let task = br#"{"schema":true,"present":true,"status":"old","status":"\ud800","verification":"","stale":false,"future":[NaN,Infinity,-Infinity,123456789012345678901234567890]}"#;
+    assert_eq!(
+        task_status_snapshot(task).unwrap(),
+        oms_context::parse_experiment_json(task, task.len()).unwrap()
+    );
+    let mut plan = String::from_utf8(bytes(&status_fixture(1, 0, 0))).unwrap();
+    plan = plan
+        .replace("\"schema\":1", "\"schema\":1e0")
+        .replace("\"done\":1", "\"done\":1.0");
+    assert!(plan_status_snapshot(plan.as_bytes(), &["t1"]).is_ok());
+    plan = plan.replace("\"done\":1.0", "\"done\":true");
+    assert!(plan_status_snapshot(plan.as_bytes(), &["t1"]).is_ok());
+    for bad in ["NaN", "Infinity", "-Infinity", "1e400", "-0.5"] {
+        let invalid = plan.replace("\"done\":true", &format!("\"done\":{bad}"));
+        assert_eq!(
+            plan_status_snapshot(invalid.as_bytes(), &["t1"])
+                .unwrap_err()
+                .to_string(),
+            "canonical plan status counts are inconsistent"
+        );
+    }
+    let zero = String::from_utf8(bytes(&status_fixture(0, 0, 0))).unwrap();
+    let signed_zero = zero
+        .replace(":0", ":-0")
+        .replace("\"done\":-0", "\"done\":-0.0");
+    assert!(plan_status_snapshot(signed_zero.as_bytes(), &[]).is_ok());
+    let unicode_id = "한글\n";
+    let mut unicode_plan = status_fixture(0, 0, 1);
+    unicode_plan["actionable"] = json!([unicode_id]);
+    assert!(plan_status_snapshot(&bytes(&unicode_plan), &[unicode_id]).is_ok());
+    let limit = 4 * 1024 * 1024;
+    let mut at_limit = task.to_vec();
+    at_limit.resize(limit, b' ');
+    assert!(task_status_snapshot(&at_limit).is_ok());
+    at_limit.push(b' ');
+    assert!(task_status_snapshot(&at_limit).is_err());
+    let base = String::from_utf8(bytes(&status_fixture(0, 0, 0))).unwrap();
+    let mut at_limit = base.into_bytes();
+    at_limit.resize(limit, b' ');
+    assert!(plan_status_snapshot(&at_limit, &[]).is_ok());
+    at_limit.push(b' ');
+    assert!(plan_status_snapshot(&at_limit, &[]).is_err());
+    for (depth, valid) in [(1023, true), (1024, false)] {
+        let raw = format!(
+            "{{\"schema\":1,\"present\":true,\"status\":\"\",\"verification\":\"\",\"stale\":false,\"future\":{}0{}}}",
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        assert_eq!(task_status_snapshot(raw.as_bytes()).is_ok(), valid);
+    }
+}
 #[test]
 fn views_and_render() {
     let v = fixture();
