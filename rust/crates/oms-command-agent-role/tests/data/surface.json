@@ -1,0 +1,185 @@
+{
+  "schema": 1,
+  "roles": [
+    {
+      "role": "advisor",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "analysis-worker",
+      "read_only": true,
+      "writes": "scratch",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "architect",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "builder",
+      "read_only": false,
+      "writes": "assigned-paths",
+      "belt": "default",
+      "tools": null,
+      "mcp": true,
+      "delegate_default": "write"
+    },
+    {
+      "role": "critic",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "decision-advisor",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "documenter",
+      "read_only": false,
+      "writes": "assigned-docs",
+      "belt": "default",
+      "tools": null,
+      "mcp": true,
+      "delegate_default": "write"
+    },
+    {
+      "role": "implementation-worker",
+      "read_only": false,
+      "writes": "assigned-paths",
+      "belt": "default",
+      "tools": null,
+      "mcp": true,
+      "delegate_default": "write"
+    },
+    {
+      "role": "integrator",
+      "read_only": false,
+      "writes": "integration-paths",
+      "belt": "default",
+      "tools": null,
+      "mcp": true,
+      "delegate_default": "write"
+    },
+    {
+      "role": "patch-reviewer",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "performance-engineer",
+      "read_only": false,
+      "writes": "assigned-paths",
+      "belt": "default",
+      "tools": null,
+      "mcp": true,
+      "delegate_default": "write"
+    },
+    {
+      "role": "refactorer",
+      "read_only": false,
+      "writes": "assigned-paths",
+      "belt": "default",
+      "tools": null,
+      "mcp": true,
+      "delegate_default": "write"
+    },
+    {
+      "role": "release-engineer",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "repo-auditor",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "researcher",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read+web",
+      "tools": 6,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "reviewer",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "scholar",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "security-auditor",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "test-designer",
+      "read_only": true,
+      "writes": "none",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    },
+    {
+      "role": "verifier",
+      "read_only": true,
+      "writes": "scratch",
+      "belt": "read",
+      "tools": 4,
+      "mcp": false,
+      "delegate_default": "read"
+    }
+  ]
+}

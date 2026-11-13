@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "auto_review": true,
+  "council": {"extra": [{"provider": "antigravity", "model": "gemini-4-carbon-high", "effort": "high"}]},
+  "tie_band": {"gap": 15},
+  "main": {
+    "codex": {"provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
+    "claude": {"provider": "claude", "model": "claude-opus-5-5", "effort": "high"}
+  },
+  "tiers": {
+    "light": [{"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "low", "public_only": true},
+              {"provider": "claude", "model": "claude-haiku-5-5", "effort": "low"},
+              {"provider": "codex", "model": "gpt-6-luna", "effort": "low"}],
+    "routine": [{"provider": "pi", "model": "openrouter/thinkingmachines/inkling:free", "effort": "medium", "public_only": true},
+                {"provider": "claude", "model": "claude-sonnet-5-5", "effort": "medium"},
+                {"provider": "codex", "model": "gpt-6.1-terra", "effort": "medium"}],
+    "deep": [{"provider": "claude", "model": "claude-opus-5-5", "effort": "high"},
+             {"provider": "codex", "model": "gpt-6.1-sol", "effort": "high"},
+             {"provider": "antigravity", "model": "gemini-4-carbon-high", "effort": "high", "access": "read"}],
+    "frontier": [{"provider": "claude", "model": "claude-fable-5-1", "effort": "high"},
+                 {"provider": "codex", "model": "gpt-6-astra", "effort": "high"},
+                 {"provider": "antigravity", "model": "gemini-4-carbon-high", "effort": "high", "access": "read"}]
+  },
+  "roles": {
+    "researcher": {"tier": "light"},
+    "scholar": {"tier": "deep"},
+    "worker": {"tier": "routine"},
+    "builder": {"tier": "routine"},
+    "refactorer": {"tier": "routine"},
+    "documenter": {"tier": "light"},
+    "release-engineer": {"tier": "routine"},
+    "reviewer": {"tier": "deep"},
+    "verifier": {"tier": "deep"},
+    "security-auditor": {"tier": "frontier"},
+    "architect": {"tier": "deep"},
+    "critic": {"tier": "deep"},
+    "integrator": {"tier": "deep"},
+    "performance-engineer": {"tier": "deep"},
+    "advisor": {"tier": "deep"}
+  }
+}
