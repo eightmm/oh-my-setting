@@ -58,9 +58,9 @@ extraction through a persistent private helper, retained-output validation,
 acquisition, paging and search, graph parser selection with
 Config/Markdown extraction and shared-helper Python/Shell routing, ordered graph
 resolution, experiment validation/normalization/digests, and bounded secret
-scanning with retained-output redaction, plus the canonical lock protocol. Seven
-command libraries connect failure, experiment, telemetry, role, input, attempt
-and job features. A standalone native
+scanning with retained-output redaction, plus the canonical lock protocol. Eight
+command libraries connect failure, experiment, telemetry, role, input, attempt,
+job and static Slurm features; MCP transport/peer ownership is a separate adapter. A standalone native
 `oms runtime context-inspect` binary handles manifest inspection, comparison,
 current-file verification, injections, session reports and timelines. These
 products have scoped native tests and independent review; they remain local
@@ -69,7 +69,7 @@ The native compiler floor is 1.99.1; the preparation inventory tool separately
 retains its 1.85 minimum. Lossless raw Read-label handling and the descriptor-backed
 capture read producer and projection adapter are implemented. Experiment template/validate/compare, normal/grouped artifact telemetry, role
 commands, parent input attachments and attempt bundles now have locally reviewed
-native handlers. The registered workspace has 27 packages. Public routing now
+native handlers. The registered workspace has 29 packages. Public routing now
 selects native context/failure/experiment modes under runtime, normal/grouped
 artifact-index telemetry, all agent-role modes, parent input attachments,
 agent-events attempt-bundle reads and job-digest. Other modes retain their
@@ -145,6 +145,43 @@ or dependency/build-helper audit on the exact current artifact. All remain
 required. No production context Python implementation or temporary comparison
 runner has been removed. The 34-line inventory reduction here is only PR #223's
 replacement of duplicate Python test methods with shared corpus replay.
+
+## Native MCP and static Slurm components (2026-11-13)
+
+The native MCP component was admitted in ffea0093 after independent whole-change
+review of its complete 536,167-byte patch. Its 20 compiled scenarios and two helper
+tests cover 126 protocol exchanges, 70 parser exchanges, fixed tool/peer argv,
+lossless values and raw paths. The existing native 64-case context corpus passed
+with the additive parser API. Default context/session/experiment depth stays 1024;
+MCP freezes the CPython 3.12.15 reference at 9997 containers, rejecting 9998.
+The explicit API caps the budget at 16384. Frozen 3.11 extreme-depth behavior
+differs; no simultaneous parity claim is made for those conflicting limits.
+
+Parent source checks resolved the review's positional-anchor and absolute-repo
+questions: canonical validation uses re.fullmatch, and canonical repository
+selection already permits absolute paths. The recorded PID-reuse/orphan-owner
+limitations remain explicit M4 process-ownership work. Fixed downstream OMS calls
+may still run Python/Bash; M5 must replace those consumers before MCP retirement.
+
+Static Slurm lint/preview/template was admitted in dde4cedf with 20 native tests
+and independent whole-change review. Existing tests now cover the repaired empty
+QOS and Unicode day-field cases with canonical red/green evidence. It reads one
+consistent script/snapshot, never executes the script or invokes Slurm. Raw OS
+labels are preserved; the legacy interpreter's locale-dependent encoding errors
+are not claimed equivalent across all locales.
+
+Both packages are registered in the 29-package locked workspace. Existing
+external versions, sources and checksums are preserved; approved num-bigint 0.4.6
+and shlex 1.3.0 add their num-integer 0.1.47 dependency. Public Slurm selection,
+native MCP entry/owner packaging and exact-artifact installation remain pending.
+
+Two inert native MCP corpus paths add four conservative Python-reference lines:
+parser-reference.json (3) and value-reference.json (1). Native tests deserialize
+them without invoking Python. M5 owns these data references until equivalent
+corpus replacement or an exact reviewed data-only classifier refinement.
+The measured baseline is now 348 Python source files / 178,361 lines and 206
+reference paths / 5,036 lines: 554 rows. No executable source was retired, no
+blanket Rust exemption was added, and no Python-free installation is claimed.
 
 ## HPC I/O work
 

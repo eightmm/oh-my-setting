@@ -20,8 +20,9 @@ Python/Shell routing), `oms-graph-resolve` (ordered graph resolution),
 `oms-experiment` (scenario validation, normalization and canonical digests), and
 `oms-scrub` (bounded secret scanning and retained-output redaction), and
 `oms-lock` (canonical cross-implementation lock protocol, without a public writer
-cutover). Seven command libraries provide failure, experiment, telemetry, role,
-input, attempt-bundle and job handlers. The workspace has 27 packages.
+cutover). Eight command libraries provide failure, experiment, telemetry, role,
+input, attempt-bundle, job and static Slurm handlers. The native MCP transport
+and peer-owner package is also registered. The workspace has 29 packages.
 
 Rust is the default for all OMS code. The shared state, plan/task, evidence,
 authority, lock, execution/admission, context and graph core has priority.
@@ -39,6 +40,8 @@ the exact-revision artifacts before Python activation. The public selector also
 owns runtime failure/experiment modes, normal/grouped artifact telemetry, all
 agent-role modes, parent input attachments, agent-events attempt-bundle reads and
 job-digest. Missing current payloads retain transitional legacy selection.
+The newly registered Slurm and MCP components still need public/install
+selection and packaging; registration alone does not activate them.
 No whole legacy domain is retired.
 
 The graph helper is a private libexec artifact, not another PATH command. Its
