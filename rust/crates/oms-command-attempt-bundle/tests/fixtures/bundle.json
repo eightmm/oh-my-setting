@@ -1,0 +1,156 @@
+{
+  "artifact_rows": {
+    "readable": true,
+    "rows": [
+      {
+        "event_id": "artifact1",
+        "exit": 1,
+        "kind": "delegate",
+        "linked_by": "attempt_id",
+        "provider": "claude",
+        "result_lint": [
+          "no-test"
+        ],
+        "selected_model": "model1",
+        "ts": "2026-01-01T00:00:01Z"
+      },
+      {
+        "event_id": "artifact2",
+        "exit": 0,
+        "kind": "patch-admit",
+        "linked_by": "answers parent_event_id",
+        "parent_event_id": "artifact1",
+        "review": {
+          "seat_verdicts": [
+            "reject"
+          ],
+          "seats": 1
+        },
+        "ts": "2026-01-01T00:00:02Z"
+      }
+    ],
+    "rows_omitted": 0,
+    "rows_total": 2,
+    "source": ".oms/artifacts/index.jsonl"
+  },
+  "attempt_id": "attempt1",
+  "fail_ledger": {
+    "match": "rows stamped inside the attempt's time window; the ledger records no attempt id, so these may belong to other work",
+    "readable": true,
+    "rows": [
+      {
+        "exit": 1,
+        "fingerprint": "abc123",
+        "kind": "cmd",
+        "line": 1,
+        "ts": "2026-01-01T00:00:01Z"
+      }
+    ],
+    "rows_omitted": 0,
+    "rows_total": 1,
+    "source": ".oms/failures.jsonl"
+  },
+  "kind": "oms-attempt-bundle",
+  "lifecycle": {
+    "created_at": "2026-01-01T00:00:00Z",
+    "events": [
+      {
+        "event_id": "event1",
+        "event_type": "attempt.created",
+        "ref_names": [
+          "panel_room_participant"
+        ],
+        "seq": 1,
+        "to_state": "queued",
+        "ts": "2026-01-01T00:00:00Z"
+      },
+      {
+        "event_id": "event2",
+        "event_type": "attempt.state_changed",
+        "from_state": "queued",
+        "seq": 2,
+        "to_state": "starting",
+        "ts": "2026-01-01T00:00:01Z"
+      },
+      {
+        "event_id": "event3",
+        "event_type": "attempt.state_changed",
+        "from_state": "starting",
+        "seq": 3,
+        "to_state": "working",
+        "ts": "2026-01-01T00:00:02Z"
+      },
+      {
+        "event_id": "event4",
+        "event_type": "attempt.state_changed",
+        "from_state": "working",
+        "reason_code": "verification_failed",
+        "seq": 4,
+        "to_state": "failed",
+        "ts": "2026-01-01T00:00:03Z"
+      }
+    ],
+    "events_omitted": 0,
+    "events_total": 4,
+    "longest_gap_s": 1,
+    "reason_code": "verification_failed",
+    "ref_names": [
+      "panel_room_participant"
+    ],
+    "source": ".oms/lifecycle/events.jsonl",
+    "state": "failed",
+    "terminal": true,
+    "updated_at": "2026-01-01T00:00:03Z",
+    "usage": {
+      "cost_microusd": 0,
+      "duration_ms": 0,
+      "tokens": 0
+    }
+  },
+  "notice": "Observation only: recorded facts and pointers, no commands, prompts, answers or tool output. Never verification, approval or a statement of cause.",
+  "provider": "claude",
+  "run_id": "run1",
+  "schema": 1,
+  "task_id": "task1",
+  "tool": "delegate",
+  "transcript_timeline": {
+    "available": true,
+    "errors": 1,
+    "first_error": {
+      "argument_bytes": 29,
+      "duration_ms": 2000,
+      "error": true,
+      "ok": false,
+      "repeat_of": null,
+      "result_bytes": 14,
+      "step": 1,
+      "tool": "Bash"
+    },
+    "format": "claude-jsonl",
+    "kind": "oms-context-timeline",
+    "lines": 2,
+    "note": "Tool names, order, recorded timestamps and byte sizes only; arguments and outputs are not returned. `first_error` is the first result the provider flagged is_error, not a cause. Durations are the gap between the call row and its result row; null when not recorded. `repeat_of` names an earlier step with the same tool and identical arguments. Only Claude Code JSONL transcripts are read; any other file reports format unknown. Observation only, never verification or approval evidence.",
+    "pending": 0,
+    "schema": 1,
+    "source": "--transcript",
+    "steps": [
+      {
+        "argument_bytes": 29,
+        "duration_ms": 2000,
+        "error": true,
+        "ok": false,
+        "repeat_of": null,
+        "result_bytes": 14,
+        "step": 1,
+        "tool": "Bash"
+      }
+    ],
+    "steps_after_first_error": 0,
+    "steps_not_recorded": 0,
+    "steps_omitted": 0,
+    "steps_total": 1,
+    "unit": "utf-8 bytes",
+    "unmatched_results": 0,
+    "unread_lines": 0
+  }
+}

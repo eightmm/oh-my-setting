@@ -1,0 +1,3 @@
+{"attempt_id": "attempt1", "event_id": "artifact1", "ts": "2026-01-01T00:00:01Z", "kind": "delegate", "provider": "claude", "exit": 1, "selected_model": "model1", "result_lint": ["no-test"]}
+{"event_id": "artifact2", "ts": "2026-01-01T00:00:02Z", "kind": "patch-admit", "parent_event_id": "artifact1", "review": {"seats": [{"verdict": "reject"}]}, "exit": 0}
+{"event_id": "unrelated", "attempt_id": "other"}

@@ -1,0 +1,12 @@
+usage: agent-events.sh show [-h] --attempt ATTEMPT [--json] [--bundle]
+                            [--transcript PATH]
+
+options:
+  -h, --help         show this help message and exit
+  --attempt ATTEMPT
+  --json
+  --bundle           read-only post-mortem: lifecycle events, artifact-index
+                     rows, fail-ledger rows and the tool-call timeline, as
+                     short facts with their source files
+  --transcript PATH  with --bundle: Claude Code JSONL transcript when none is
+                     recorded for the attempt

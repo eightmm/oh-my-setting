@@ -1,0 +1,2 @@
+{"type": "assistant", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "private-command"}}]}}
+{"type": "user", "timestamp": "2026-01-01T00:00:02Z", "message": {"content": [{"type": "tool_result", "tool_use_id": "a", "is_error": true, "content": "private-output"}]}}
