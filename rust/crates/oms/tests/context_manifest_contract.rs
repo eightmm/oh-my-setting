@@ -33,7 +33,7 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn vectors() -> Value {
+fn corpus(kind: &str) -> Value {
     let root = std::env::var_os("OMS_CONTRACT_REPO")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -47,21 +47,107 @@ fn vectors() -> Value {
                 .to_path_buf()
         });
     serde_json::from_slice(
-        &std::fs::read(root.join("migration/contracts/context-inspect-v1.json")).unwrap(),
+        &std::fs::read(root.join(format!("migration/contracts/context-{kind}-v1.json"))).unwrap(),
     )
     .unwrap()
+}
+fn vectors() -> Value {
+    corpus("inspect")
+}
+
+fn decoded(value: &oms_context::Json) -> Value {
+    use oms_context::Json;
+    match value {
+        Json::Null => Value::Null,
+        Json::Bool(v) => (*v).into(),
+        Json::Number(v) => serde_json::from_str(v).unwrap(),
+        Json::String(v) => String::from_utf8(v.clone()).unwrap().into(),
+        Json::Array(v) => v.iter().map(decoded).collect(),
+        Json::Object(v) => v
+            .iter()
+            .map(|(k, v)| (String::from_utf8(k.clone()).unwrap(), decoded(v)))
+            .collect(),
+    }
+}
+
+#[test]
+fn frozen_raw_read_vectors() {
+    let data = corpus("read");
+    assert_eq!(data["fixture_schema"], 1);
+    assert_eq!(data["reference"]["entrypoint"], "read_manifest");
+    assert_eq!(
+        data["reference"]["commit"],
+        "74f87f654a314961420be2aa8ab6dfc1999151e1"
+    );
+    assert_eq!(
+        data["reference"]["source"],
+        "scripts/lib/oms_runtime/context_inspect.py"
+    );
+    assert_eq!(
+        data["reference"]["source_sha256"],
+        "1b3bad09517f4f6abd1269481b95986ffb62e84c811e6dfb4555691663742da8"
+    );
+    assert_eq!(data["reference"]["arguments"], serde_json::json!({}));
+    let cases = data["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 12);
+    let mut names = std::collections::HashSet::new();
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        assert!(names.insert(name));
+        assert_ne!(
+            case.get("expected").is_some(),
+            case.get("expected_error").is_some(),
+            "{name}"
+        );
+        let hex = case["input_hex"].as_str().unwrap().as_bytes();
+        assert_eq!(hex.len() % 2, 0);
+        let bytes: Vec<u8> = hex
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+            .collect();
+        let f = Fixture::new();
+        std::fs::write(f.0.join("pack.json"), bytes).unwrap();
+        let root = oms_safe_fs::Root::open(&f.0).unwrap();
+        let raw = root
+            .read_manifest_detailed(Path::new("pack.json"), 4 * 1024 * 1024)
+            .unwrap();
+        let result = oms_context::parse_json(&raw);
+        if let Some(expected) = case.get("expected") {
+            assert_eq!(decoded(&result.unwrap()), *expected, "{name}");
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                case["expected_error"].as_str().unwrap(),
+                "{name}"
+            );
+        }
+    }
 }
 #[test]
 fn frozen_vectors_through_binary() {
     let f = Fixture::new();
-    for case in vectors()["cases"].as_array().unwrap() {
+    let data = vectors();
+    assert_eq!(data["cases"].as_array().unwrap().len(), 40);
+    for case in data["cases"].as_array().unwrap() {
         std::fs::write(
             f.0.join("pack.json"),
             serde_json::to_vec(&case["input"]).unwrap(),
         )
         .unwrap();
+        // Boolean JSON arguments have no corresponding typed CLI option.
+        let limit = case
+            .get("arguments")
+            .and_then(|a| a.get("limit"))
+            .unwrap_or(&serde_json::json!(10))
+            .clone();
+        if limit.is_boolean() {
+            continue;
+        }
+        let limit = limit.to_string();
         for child in [false, true] {
-            let out = f.call(&["pack.json"], child);
+            let out = f.call(&["pack.json", "--limit", &limit], child);
             if let Some(expected) = case.get("expected") {
                 assert!(
                     out.status.success(),
@@ -81,6 +167,53 @@ fn frozen_vectors_through_binary() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn frozen_comparisons_through_binary() {
+    let data = corpus("compare");
+    let f = Fixture::new();
+    for case in data["cases"].as_array().unwrap() {
+        let limit = case
+            .get("arguments")
+            .and_then(|a| a.get("limit"))
+            .unwrap_or(&data["reference"]["arguments"]["limit"]);
+        if limit.is_boolean() {
+            continue;
+        }
+        std::fs::write(
+            f.0.join("left.json"),
+            serde_json::to_vec(&case["left"]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            f.0.join("right.json"),
+            serde_json::to_vec(&case["right"]).unwrap(),
+        )
+        .unwrap();
+        let out = f.call(
+            &[
+                "left.json",
+                "--compare",
+                "right.json",
+                "--limit",
+                &limit.to_string(),
+            ],
+            false,
+        );
+        assert!(
+            out.status.success(),
+            "{}: {}",
+            case["name"],
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+            case["expected"],
+            "{}",
+            case["name"]
+        );
     }
 }
 

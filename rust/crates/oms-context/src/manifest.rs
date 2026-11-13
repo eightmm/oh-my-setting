@@ -338,6 +338,15 @@ fn check_limit(limit: usize) -> Result<()> {
         Err("limit must be an integer from 1 to 100".into())
     }
 }
+/// Validate a JSON inspection limit before accessing a manifest.
+pub fn inspection_limit(value: &Value) -> Result<usize> {
+    let limit = value
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| "limit must be an integer from 1 to 100".to_string())?;
+    check_limit(limit)?;
+    Ok(limit)
+}
 /// Validate and project a raw JSON manifest without filesystem access.
 pub fn inspect_manifest(raw: &[u8], limit: usize) -> Result<Value> {
     check_limit(limit)?;

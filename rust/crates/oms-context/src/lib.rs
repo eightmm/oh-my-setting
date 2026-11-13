@@ -313,5 +313,5 @@ fn parse_mode(input: &[u8], session: bool, max_bytes: usize) -> Result<Json, &'s
 
 mod manifest;
 mod session_json;
-pub use manifest::{compare_manifests, inspect_manifest};
+pub use manifest::{compare_manifests, inspect_manifest, inspection_limit};
 pub use session_json::{SessionJsonError, parse_session_json};

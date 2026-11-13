@@ -2,7 +2,7 @@ use oms_context::{compare_manifests, inspect_manifest};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-fn vectors() -> Value {
+fn corpus(kind: &str) -> Value {
     let root = std::env::var_os("OMS_CONTRACT_REPO")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -15,28 +15,91 @@ fn vectors() -> Value {
                 .expect("repository root")
                 .to_path_buf()
         });
-    serde_json::from_slice(
-        &std::fs::read(root.join("migration/contracts/context-inspect-v1.json")).unwrap(),
-    )
-    .unwrap()
+    let path = root.join(format!("migration/contracts/context-{kind}-v1.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+fn vectors() -> Value {
+    corpus("inspect")
 }
 fn raw(v: &Value) -> Vec<u8> {
     serde_json::to_vec(v).unwrap()
 }
 #[test]
 fn frozen_vectors() {
-    for case in vectors()["cases"].as_array().unwrap() {
-        let result = inspect_manifest(&raw(&case["input"]), 10);
-        if let Some(expected) = case.get("expected") {
-            assert_eq!(result.unwrap(), *expected, "{}", case["name"]);
-        } else {
-            assert_eq!(
-                result.unwrap_err(),
-                case["expected_error"].as_str().unwrap(),
-                "{}",
-                case["name"]
+    for (kind, entry, count) in [
+        ("inspect", "inspect_manifest", 40),
+        ("compare", "compare_manifests", 12),
+    ] {
+        let data = corpus(kind);
+        assert_eq!(data["fixture_schema"], 1);
+        assert_eq!(data["reference"]["entrypoint"], entry);
+        assert_eq!(
+            data["reference"]["commit"],
+            "74f87f654a314961420be2aa8ab6dfc1999151e1"
+        );
+        assert_eq!(
+            data["reference"]["source"],
+            "scripts/lib/oms_runtime/context_inspect.py"
+        );
+        assert_eq!(
+            data["reference"]["source_sha256"],
+            "1b3bad09517f4f6abd1269481b95986ffb62e84c811e6dfb4555691663742da8"
+        );
+        assert_eq!(data["reference"]["arguments"], json!({"limit":10}));
+        let cases = data["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), count);
+        let mut names = std::collections::HashSet::new();
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            assert!(names.insert(name));
+            assert_ne!(
+                case.get("expected").is_some(),
+                case.get("expected_error").is_some(),
+                "{name}"
             );
+            let mut args = data["reference"]["arguments"].as_object().unwrap().clone();
+            if let Some(overrides) = case.get("arguments") {
+                args.extend(overrides.as_object().unwrap().clone());
+            }
+            let result = oms_context::inspection_limit(&args["limit"]).and_then(|limit| {
+                if kind == "inspect" {
+                    inspect_manifest(&raw(&case["input"]), limit)
+                } else {
+                    compare_manifests(&raw(&case["left"]), &raw(&case["right"]), limit)
+                }
+            });
+            if let Some(expected) = case.get("expected") {
+                assert_eq!(result.unwrap(), *expected, "{name}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    case["expected_error"].as_str().unwrap(),
+                    "{name}"
+                );
+            }
         }
+    }
+}
+#[test]
+fn json_limit_boundary() {
+    for value in [
+        json!(null),
+        json!(true),
+        json!(false),
+        json!(0),
+        json!(101),
+        json!(-1),
+        json!(1.0),
+        json!("1"),
+        json!([]),
+    ] {
+        assert_eq!(
+            oms_context::inspection_limit(&value).unwrap_err(),
+            "limit must be an integer from 1 to 100"
+        );
+    }
+    for n in [1, 100] {
+        assert_eq!(oms_context::inspection_limit(&json!(n)).unwrap(), n);
     }
 }
 #[test]

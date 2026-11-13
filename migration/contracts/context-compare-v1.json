@@ -1,0 +1,1272 @@
+{
+  "fixture_schema": 1,
+  "reference": {
+    "commit": "74f87f654a314961420be2aa8ab6dfc1999151e1",
+    "source": "scripts/lib/oms_runtime/context_inspect.py",
+    "source_sha256": "1b3bad09517f4f6abd1269481b95986ffb62e84c811e6dfb4555691663742da8",
+    "entrypoint": "compare_manifests",
+    "arguments": {
+      "limit": 10
+    }
+  },
+  "cases": [
+    {
+      "name": "identical-legacy-pack",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": true,
+        "scope_mismatch_reasons": [],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      }
+    },
+    {
+      "name": "unknown-contract-identity",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": null,
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": null,
+        "bundle_path": "missing-bundle.txt"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "contract-identity-unavailable"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      }
+    },
+    {
+      "name": "scope-and-selection-changes-forward",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "review",
+        "budget_bytes": 1000,
+        "selected_bytes": 180,
+        "remaining_bytes": 820,
+        "targets": [
+          "added.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "required context",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          },
+          {
+            "path": "added.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 3,
+            "bytes_selected": 3,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "different-phase",
+          "different-targets",
+          "different-contract-state"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 40,
+          "remaining_bytes": -40,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 1,
+          "items": [
+            "added.py"
+          ],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 1,
+          "items": [
+            {
+              "path": "src.py",
+              "changed_fields": [
+                "reason"
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      }
+    },
+    {
+      "name": "scope-and-selection-changes-reverse",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "review",
+        "budget_bytes": 1000,
+        "selected_bytes": 180,
+        "remaining_bytes": 820,
+        "targets": [
+          "added.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "required context",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          },
+          {
+            "path": "added.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 3,
+            "bytes_selected": 3,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "different-phase",
+          "different-targets",
+          "different-contract-state"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": -40,
+          "remaining_bytes": 40,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 1,
+          "items": [
+            "added.py"
+          ],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 1,
+          "items": [
+            {
+              "path": "src.py",
+              "changed_fields": [
+                "reason"
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      }
+    },
+    {
+      "name": "same-recorded-phase-rules",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": true,
+        "scope_mismatch_reasons": [],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "phase_rules": {
+          "left": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "right": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "status": "same-recorded-digest"
+        }
+      }
+    },
+    {
+      "name": "different-recorded-phase-rules-forward",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "different-phase-rules"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "phase_rules": {
+          "left": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "right": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "status": "different-recorded-digest"
+        }
+      }
+    },
+    {
+      "name": "different-recorded-phase-rules-reverse",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "different-phase-rules"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "phase_rules": {
+          "left": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "right": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "status": "different-recorded-digest"
+        }
+      }
+    },
+    {
+      "name": "legacy-left-phase-rules-unknown",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "phase-rules-identity-unavailable"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "phase_rules": {
+          "left": null,
+          "right": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "status": "unknown"
+        }
+      }
+    },
+    {
+      "name": "legacy-right-phase-rules-unknown",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt",
+        "phase_rules_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": false,
+        "scope_mismatch_reasons": [
+          "phase-rules-identity-unavailable"
+        ],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "phase_rules": {
+          "left": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "right": null,
+          "status": "unknown"
+        }
+      }
+    },
+    {
+      "name": "changed-fields-and-list-bounds",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 250,
+        "remaining_bytes": 750,
+        "targets": [],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          },
+          {
+            "path": "gone.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 300,
+        "remaining_bytes": 700,
+        "targets": [],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "bounded context",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 75,
+            "omitted_bytes": 60,
+            "selection": "head",
+            "sha256": "56846f2db153afa893bd18d0c0bf6e026d9cd3fa0bfa941976b17ff14d3e217a"
+          },
+          {
+            "path": "added-a.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          },
+          {
+            "path": "added-b.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "arguments": {
+        "limit": 1
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": true,
+        "scope_mismatch_reasons": [],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 50,
+          "remaining_bytes": -50,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 2,
+          "items": [
+            "added-a.py"
+          ],
+          "omitted": 1
+        },
+        "removed": {
+          "total": 1,
+          "items": [
+            "gone.py"
+          ],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 1,
+          "items": [
+            {
+              "path": "src.py",
+              "changed_fields": [
+                "sha256",
+                "bytes_selected",
+                "selection",
+                "omitted_bytes",
+                "reason"
+              ]
+            }
+          ],
+          "omitted": 0
+        }
+      }
+    },
+    {
+      "name": "target-set-order-is-not-scope-change",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 250,
+        "remaining_bytes": 750,
+        "targets": [
+          "src.py",
+          "other.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          },
+          {
+            "path": "other.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 250,
+        "remaining_bytes": 750,
+        "targets": [
+          "other.py",
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          },
+          {
+            "path": "other.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "expected": {
+        "schema": 1,
+        "kind": "oms-context-comparison",
+        "validation": "recorded-metadata-only",
+        "recorded_scope_matches": true,
+        "scope_mismatch_reasons": [],
+        "note": "Deltas describe saved metadata, not quality, current validity, cost savings or a winning run.",
+        "delta": {
+          "budget_bytes": 0,
+          "selected_bytes": 0,
+          "remaining_bytes": 0,
+          "context_debt": 0
+        },
+        "added": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "removed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        },
+        "changed": {
+          "total": 0,
+          "items": [],
+          "omitted": 0
+        }
+      }
+    },
+    {
+      "name": "boolean-comparison-limit-rejected",
+      "left": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "right": {
+        "schema": 1,
+        "generated_at": "2026-11-09T00:00:00Z",
+        "phase": "implementation",
+        "budget_bytes": 1000,
+        "selected_bytes": 140,
+        "remaining_bytes": 860,
+        "targets": [
+          "src.py"
+        ],
+        "selected": [
+          {
+            "path": "src.py",
+            "reason": "direct target",
+            "priority": 120,
+            "bytes_before": 100,
+            "bytes_selected": 100,
+            "omitted_bytes": 0,
+            "selection": "full",
+            "sha256": "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8"
+          }
+        ],
+        "omitted": [],
+        "context_debt": 0,
+        "missing_required": [],
+        "truncated_required": [],
+        "sufficient": true,
+        "bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contract_state_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "bundle_path": "missing-bundle.txt"
+      },
+      "arguments": {
+        "limit": true
+      },
+      "expected_error": "limit must be an integer from 1 to 100"
+    }
+  ]
+}
