@@ -80,7 +80,7 @@ if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
   . "$SCRIPTS_DIR/lib/platform.sh"
   oms_bash_enter
 fi
-if [ "${1:-}" = runtime ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; }; then
+if [[ "${1:-}" =~ ^(runtime|artifact-index|agent-role|input|agent-events)$ ]] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; }; then
   for native_dir in "$ROOT/rust" "$ROOT/rust/target" "$ROOT/rust/target/oms-native"; do
     if [ -L "$native_dir" ] || [ ! -d "$native_dir" ]; then
       echo "error: foreign native payload directory: $native_dir" >&2

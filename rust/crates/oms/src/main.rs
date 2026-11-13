@@ -51,6 +51,7 @@ const HELP: &str = "positional arguments:\n  manifest              existing mani
 #[derive(Default)]
 struct Args {
     failure_argv: Option<Vec<OsString>>,
+    experiment_argv: Option<Vec<OsString>>,
     repo: Option<OsString>,
     pretty: bool,
     manifest: Option<OsString>,
@@ -374,7 +375,7 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
         } else if command && a.manifest.is_none() {
             a.manifest = Some(arg);
         } else if !command {
-            if bytes == b"failure" {
+            if bytes == b"failure" || bytes == b"experiment" {
                 let mut forwarded = Vec::new();
                 if let Some(value) = a.repo.take() {
                     forwarded.extend([OsString::from("--repo"), value]);
@@ -382,10 +383,24 @@ fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Re
                 if a.pretty {
                     forwarded.push(OsString::from("--pretty"));
                 }
-                forwarded.extend(unknown);
-                forwarded.extend(it);
-                a.failure_argv = Some(forwarded);
-                return Ok(a);
+                if bytes == b"failure" {
+                    forwarded.extend(unknown);
+                    forwarded.extend(it);
+                    a.failure_argv = Some(forwarded);
+                    return Ok(a);
+                }
+                let mut tail: Vec<_> = it.collect();
+                if oms_command_experiment::owns(&tail) {
+                    // Keep root unknowns ahead of leaf unknowns, but after the
+                    // action so the handler's pure ownership parser sees it.
+                    let action_end = (1..=tail.len())
+                        .find(|&end| oms_command_experiment::owns(&tail[..end]))
+                        .expect("owned experiment action");
+                    tail.splice(action_end..action_end, unknown);
+                    forwarded.extend(tail);
+                    a.experiment_argv = Some(forwarded);
+                    return Ok(a);
+                }
             }
             *legacy = [
                 b"envelope".as_slice(),
@@ -858,6 +873,31 @@ fn write_stdout(bytes: &[u8]) {
         std::process::exit(1);
     }
 }
+fn command_exit(tool: &str, (code, output, mut error): (i32, Vec<u8>, Vec<u8>)) -> ! {
+    use std::io::Write;
+    if code == 2 {
+        error.extend_from_slice(format!("hint: run `oms {tool} --help` for usage\n").as_bytes());
+    }
+    if std::io::stdout().write_all(&output).is_err() || std::io::stderr().write_all(&error).is_err()
+    {
+        std::process::exit(1);
+    }
+    // Ownership was decided before execution. In particular, an action's 75
+    // is a final status, never permission to retry it through the legacy path.
+    std::process::exit(code);
+}
+fn caller_cwd(tool: &str) -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|error| {
+        command_exit(
+            tool,
+            (
+                2,
+                vec![],
+                format!("runtime-core: cannot resolve current directory: {error}\n").into_bytes(),
+            ),
+        )
+    })
+}
 fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
@@ -961,6 +1001,7 @@ fn main() {
     let mut argv: Vec<_> = std::env::args_os().skip(1).collect();
     let select = argv.first().is_some_and(|v| v == "--oms-select");
     let dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
+    let mut source_root = None;
     if dispatch {
         if argv.len() < 5 || argv[3] != "--" {
             eprintln!("runtime-core: invalid private dispatch invocation");
@@ -972,7 +1013,59 @@ fn main() {
             );
             std::process::exit(2);
         }
+        source_root = Some(PathBuf::from(&argv[1]));
         argv.drain(..4);
+    }
+    if let Some(tool @ ("artifact-index" | "agent-role" | "input" | "agent-events")) =
+        argv.first().and_then(|v| v.to_str())
+    {
+        let local = &argv[1..];
+        let owned = match tool {
+            "artifact-index" => oms_command_telemetry::owns(local),
+            "agent-role" => oms_command_agent_role::owns(local),
+            "input" => {
+                // Native input lacks sealed-room receipt verification. Keep
+                // every child invocation on the canonical legacy guard path.
+                let child = std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1")
+                    || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| v != "0");
+                !child && oms_command_input::owns(local)
+            }
+            "agent-events" => oms_command_attempt_bundle::owns(local),
+            _ => unreachable!(),
+        };
+        if !owned {
+            std::process::exit(75);
+        }
+        if select {
+            return;
+        }
+        if tool == "agent-role" && source_root.is_none() {
+            command_exit(
+                tool,
+                (
+                    2,
+                    vec![],
+                    b"error: agent-role requires validated native source metadata\n".to_vec(),
+                ),
+            );
+        }
+        let cwd = caller_cwd(tool);
+        let result = match tool {
+            "artifact-index" => oms_command_telemetry::run(local, &cwd, &interrupted),
+            "agent-role" => oms_command_agent_role::run_with_source(
+                local,
+                &cwd,
+                source_root.as_deref().expect("validated source metadata"),
+                &interrupted,
+            ),
+            "input" => oms_command_input::run(local, &cwd, &interrupted),
+            "agent-events" => oms_command_attempt_bundle::run(local, &cwd, &interrupted),
+            _ => unreachable!(),
+        };
+        command_exit(tool, result);
+    }
+    if dispatch && argv.first().is_none_or(|v| v != "runtime") {
+        std::process::exit(75);
     }
     let mut subcommand = false;
     let mut legacy = false;
@@ -1014,21 +1107,18 @@ fn main() {
         }
     };
     if let Some(argv) = args.failure_argv {
-        let cwd = match std::env::current_dir() {
-            Ok(cwd) => cwd,
-            Err(error) => {
-                eprintln!("runtime-core: cannot resolve current directory: {error}");
-                std::process::exit(2);
-            }
-        };
-        let (code, output, error) = oms_command_failure::run(&argv, &cwd, &interrupted);
-        use std::io::Write;
-        if std::io::stdout().write_all(&output).is_err()
-            || std::io::stderr().write_all(&error).is_err()
-        {
-            std::process::exit(1);
-        }
-        std::process::exit(code);
+        let cwd = caller_cwd("runtime");
+        command_exit(
+            "runtime",
+            oms_command_failure::run(&argv, &cwd, &interrupted),
+        );
+    }
+    if let Some(argv) = args.experiment_argv {
+        let cwd = caller_cwd("runtime");
+        command_exit(
+            "runtime",
+            oms_command_experiment::run(&argv, &cwd, &interrupted),
+        );
     }
     let result = execute(args, &interrupted);
     if interrupted.load(Ordering::SeqCst) {
