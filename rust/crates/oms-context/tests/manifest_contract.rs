@@ -61,13 +61,12 @@ fn frozen_vectors() {
             if let Some(overrides) = case.get("arguments") {
                 args.extend(overrides.as_object().unwrap().clone());
             }
-            let result = oms_context::inspection_limit(&args["limit"]).and_then(|limit| {
-                if kind == "inspect" {
-                    inspect_manifest(&raw(&case["input"]), limit)
-                } else {
-                    compare_manifests(&raw(&case["left"]), &raw(&case["right"]), limit)
-                }
-            });
+            let limit = oms_context::inspection_limit_value(&args["limit"]);
+            let result = if kind == "inspect" {
+                inspect_manifest(&raw(&case["input"]), limit)
+            } else {
+                compare_manifests(&raw(&case["left"]), &raw(&case["right"]), limit)
+            };
             if let Some(expected) = case.get("expected") {
                 assert_eq!(result.unwrap(), *expected, "{name}");
             } else {
@@ -86,20 +85,40 @@ fn json_limit_boundary() {
         json!(null),
         json!(true),
         json!(false),
-        json!(0),
-        json!(101),
         json!(-1),
         json!(1.0),
         json!("1"),
         json!([]),
+        json!({}),
+        json!(1e100),
     ] {
-        assert_eq!(
-            oms_context::inspection_limit(&value).unwrap_err(),
-            "limit must be an integer from 1 to 100"
-        );
+        assert_eq!(oms_context::inspection_limit_value(&value), 0);
     }
-    for n in [1, 100] {
-        assert_eq!(oms_context::inspection_limit(&json!(n)).unwrap(), n);
+    for n in [0, 1, 100, 101] {
+        assert_eq!(oms_context::inspection_limit_value(&json!(n)), n);
+    }
+}
+#[test]
+fn mixed_invalid_limit_and_schema_precedence() {
+    let good = vectors()["cases"][0]["input"].clone();
+    let mut bad = good.clone();
+    bad["schema"] = json!(2);
+    for value in [json!(0), json!(101), json!(true)] {
+        let n = oms_context::inspection_limit_value(&value);
+        let error = "limit must be an integer from 1 to 100";
+        assert_eq!(inspect_manifest(&raw(&bad), n).unwrap_err(), error);
+        assert_eq!(
+            compare_manifests(&raw(&good), &raw(&good), n).unwrap_err(),
+            error
+        );
+        assert_eq!(
+            compare_manifests(&raw(&bad), &raw(&good), n).unwrap_err(),
+            "unsupported context manifest schema"
+        );
+        assert_eq!(
+            compare_manifests(&raw(&good), &raw(&bad), n).unwrap_err(),
+            "unsupported context manifest schema"
+        );
     }
 }
 #[test]

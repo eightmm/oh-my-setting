@@ -140,7 +140,7 @@ fn frozen_vectors_through_binary() {
         let limit = case
             .get("arguments")
             .and_then(|a| a.get("limit"))
-            .unwrap_or(&serde_json::json!(10))
+            .unwrap_or(&data["reference"]["arguments"]["limit"])
             .clone();
         if limit.is_boolean() {
             continue;
@@ -192,28 +192,40 @@ fn frozen_comparisons_through_binary() {
             serde_json::to_vec(&case["right"]).unwrap(),
         )
         .unwrap();
-        let out = f.call(
-            &[
-                "left.json",
-                "--compare",
-                "right.json",
-                "--limit",
-                &limit.to_string(),
-            ],
-            false,
-        );
-        assert!(
-            out.status.success(),
-            "{}: {}",
-            case["name"],
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&out.stdout).unwrap(),
-            case["expected"],
-            "{}",
-            case["name"]
-        );
+        for child in [false, true] {
+            let out = f.call(
+                &[
+                    "left.json",
+                    "--compare",
+                    "right.json",
+                    "--limit",
+                    &limit.to_string(),
+                ],
+                child,
+            );
+            if let Some(expected) = case.get("expected") {
+                assert!(
+                    out.status.success(),
+                    "{}: {}",
+                    case["name"],
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(out.stderr.is_empty());
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&out.stdout).unwrap(),
+                    *expected,
+                    "{}",
+                    case["name"]
+                );
+            } else {
+                assert_eq!(out.status.code(), Some(2), "{}", case["name"]);
+                assert!(out.stdout.is_empty());
+                assert!(String::from_utf8_lossy(&out.stderr).contains(&format!(
+                    "runtime-core: {}\n",
+                    case["expected_error"].as_str().unwrap()
+                )));
+            }
+        }
     }
 }
 
@@ -639,6 +651,20 @@ fn argv_boundaries_and_parse_precedence() {
         serde_json::to_vec(&vectors()["cases"][0]["input"]).unwrap(),
     )
     .unwrap();
+    for child in [false, true] {
+        for args in [
+            &["missing", "--limit", "0"][..],
+            &["./-2026.json", "--compare", "missing", "--limit", "0"][..],
+        ] {
+            let out = f.call(args, child);
+            assert_eq!(out.status.code(), Some(2));
+            assert!(out.stdout.is_empty());
+            assert!(
+                String::from_utf8_lossy(&out.stderr)
+                    .contains("runtime-core: cannot read a valid repo-local context manifest\n")
+            );
+        }
+    }
     let rejected = f.call(&["-2026.json"], false);
     assert!(rejected.stdout.is_empty());
     assert!(
