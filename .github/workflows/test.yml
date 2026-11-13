@@ -323,9 +323,19 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Bash 5 on macOS
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          prefix="$(brew --prefix)"
+          if ! "$prefix/bin/bash" -c "[ \${BASH_VERSINFO[0]} -ge 5 ]" 2>/dev/null; then
+            brew install bash
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/bash" --version | head -n 1
       - name: install pinned Rust toolchain
         timeout-minutes: 5
         run: |

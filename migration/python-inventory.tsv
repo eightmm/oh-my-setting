@@ -151,7 +151,7 @@ scripts/lib/hidden_text.py	python-source	59
 scripts/lib/hook_repo.py	python-source	71
 scripts/lib/hook_state.py	python-source	3311
 scripts/lib/inbox_projection.py	python-source	476
-scripts/lib/install-contract.sh	python-reference	15
+scripts/lib/install-contract.sh	python-reference	18
 scripts/lib/install-fingerprint.py	python-source	153
 scripts/lib/instruction-budget.py	python-source	325
 scripts/lib/intent-amend.py	python-source	277
@@ -164,7 +164,7 @@ scripts/lib/landing-capture.py	python-source	1743
 scripts/lib/landing-reference.py	python-source	606
 scripts/lib/literature.py	python-source	286
 scripts/lib/main_reviewer.py	python-source	745
-scripts/lib/managed-target.py	python-source	246
+scripts/lib/managed-target.py	python-source	275
 scripts/lib/model-capability.sh	python-reference	5
 scripts/lib/model-routing.sh	python-reference	2
 scripts/lib/notebook_hygiene.py	python-source	87
@@ -384,7 +384,7 @@ scripts/lib/work_discovery.py	python-source	722
 scripts/lib/work_journal.py	python-source	5113
 scripts/lib/worker-guard-details.py	python-source	85
 scripts/lib/worker-state-transients.py	python-source	99
-scripts/link.sh	python-reference	1
+scripts/link.sh	python-reference	2
 scripts/model-doctor.sh	python-reference	2
 scripts/models.sh	python-reference	3
 scripts/oms	python-reference	24
@@ -470,7 +470,7 @@ tests/harness-enhancements-smoke.sh	python-reference	41
 tests/harness-eval-baseline.json	python-reference	4
 tests/harness-eval-smoke.sh	python-reference	36
 tests/harness-residue-boundary-smoke.sh	python-reference	10
-tests/install-lifecycle-smoke.sh	python-reference	83
+tests/install-lifecycle-smoke.sh	python-reference	96
 tests/install-profile-smoke.sh	python-reference	6
 tests/land-smoke.sh	python-reference	95
 tests/lifecycle-events-smoke.sh	python-reference	27

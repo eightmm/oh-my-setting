@@ -1,6 +1,6 @@
 # Complete Rust migration
 
-Decision date: 2026-11-12. Status: native foundations implemented locally; production cutover remains pending.
+Decision date: 2026-11-12. Status: staged native context entry implemented locally; production deployment and legacy retirement remain pending.
 
 ## Decision and completion boundary
 
@@ -353,12 +353,34 @@ Python-reference lines. Native tests deserialize graph records and expected
 edges; no embedded source is executed. M3 owns this coverage until equivalent
 corpus replacement or a reviewed exact-path data classifier removes the row.
 
-The measured executable footprint remains 347 Python source files and 178,126
-physical lines. The conservative reference inventory rises from the original
-194 paths / 4,782 lines to 204 paths / 5,009 lines for the Shell corpus and native
+The measured executable footprint is now 347 Python source files and 178,155
+physical lines, including the bounded 29-line M5 transition below. The conservative reference inventory rises from the original
+194 paths / 4,782 lines to 204 paths / 5,026 lines for the Shell corpus and native
 Python-parser names/data. The combined inventory now has 551 rows. No legacy
 deletion or M6 zero result is claimed. Future retirement batches must lower the
 baseline again.
+
+### Temporary native-entry lifecycle footprint (2026-11-13)
+
+The context command can now enter its staged native payload before Python
+activation through source, symlink and rendered-copy entries. The trusted owner
+stages an exact-revision manifest and fixed-size checksum; corruption fails
+before executable dispatch. An absent current-revision payload keeps the
+transitional legacy selection. This is not installed deployment or retirement.
+
+Reversible copies add 29 physical lines to existing
+[managed-target.py](../scripts/lib/managed-target.py) (246 to 275), with no new
+Python source path. The optional schema-1 source hash keeps rendered copies
+recognizable by older ownership readers. Existing shell/fixture reference rows
+increase by 17 lines: install-contract 15 to 18, link 1 to 2, and lifecycle smoke
+83 to 96. The install contract also contains temporary validator code for safe
+native-cache quarantine; validator execution failure is distinct from a proven
+invalid payload. Foreign or uninspectable content remains in place.
+
+M5 owns removing this transition code after native installation, ownership,
+repair, rollback and equivalent fixtures are accepted. The parent adjusts these
+measured rows explicitly; CI never regenerates its own budget. The combined
+inventory remains 551 rows. No Python deletion or M6 zero result is claimed.
 
 Two demonstrated legacy defects remain explicit native-port requirements:
 

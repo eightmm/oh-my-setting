@@ -120,6 +120,105 @@ else
 fi
 OMS_MANAGED_TARGET_HELPER="$OMS_INSTALL_CONTRACT_LIB_DIR/managed-target.py"
 
+# Quarantine only a fixed-shape, non-symlinked current-revision cache entry.
+# The rename preserves its contents for inspection and leaves legacy dispatch usable.
+oms_install_repair_native_cache() (
+  local root="$1" cache="$1/rust/target/oms-native" revision entry item quarantine status
+  [ -e "$cache" ] || [ -L "$cache" ] || return 0
+  for item in "$root/rust" "$root/rust/target" "$cache"; do
+    if [ -L "$item" ] || [ ! -d "$item" ]; then
+      echo "error: cannot repair foreign native cache path: $item" >&2
+      return 1
+    fi
+  done
+  revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || return 1
+  case "$revision" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#revision}" = 40 ] || return 1
+  entry="$cache/$revision"
+  [ -e "$entry" ] || [ -L "$entry" ] || return 0
+  if [ -L "$entry" ] || [ ! -d "$entry" ]; then
+    echo "error: cannot repair foreign native cache entry: $entry" >&2
+    return 1
+  fi
+  if [ ! -r "$entry" ] || [ ! -x "$entry" ]; then
+    echo "error: cannot inspect native cache entry: $entry" >&2
+    return 1
+  fi
+  shopt -s dotglob nullglob
+  for item in "$entry"/*; do
+    case "${item##*/}" in oms|oms.sha256|manifest.json|oms-graph-python-helper) ;; *)
+      echo "error: cannot repair native cache with foreign content: $entry" >&2; return 1 ;;
+    esac
+    if [ -L "$item" ] || [ ! -f "$item" ]; then
+      echo "error: cannot repair foreign native cache content: $item" >&2
+      return 1
+    fi
+  done
+  if python3 - "$entry" "$revision" <<'PY_NATIVE_REPAIR'
+import hashlib, json, pathlib, re, sys
+entry, revision = pathlib.Path(sys.argv[1]), sys.argv[2]
+class InvalidCache(Exception):
+    pass
+try:
+    manifest_path = entry / 'manifest.json'
+    if manifest_path.stat().st_size > 4 * 1024 * 1024:
+        raise InvalidCache('manifest size')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise InvalidCache('duplicate key')
+            result[key] = value
+        return result
+    def reject_constant(_value):
+        raise InvalidCache('nonfinite number')
+    row = json.loads(manifest_path.read_bytes(), object_pairs_hook=unique,
+                     parse_constant=reject_constant)
+    artifacts = row['artifacts']
+    if type(row['schema']) is not int or row['schema'] != 1 or row['source_commit'] != revision:
+        raise InvalidCache('identity')
+    if not isinstance(artifacts, dict) or 'oms' not in artifacts or set(artifacts) - {'oms', 'oms-graph-python-helper'}:
+        raise InvalidCache('artifacts')
+    checksum_path = entry / 'oms.sha256'
+    if checksum_path.stat().st_size != 65:
+        raise InvalidCache('checksum size')
+    checksum = checksum_path.read_bytes()
+    if not re.fullmatch(b'[0-9a-f]{64}\n', checksum) or checksum[:-1].decode() != artifacts['oms']:
+        raise InvalidCache('checksum')
+    for name, expected in artifacts.items():
+        if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected):
+            raise InvalidCache('digest')
+        path = entry / name
+        if not path.stat().st_mode & 0o111:
+            raise InvalidCache('executable')
+        digest = hashlib.sha256()
+        with path.open('rb') as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise InvalidCache('digest mismatch')
+except (FileNotFoundError, InvalidCache, json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError):
+    raise SystemExit(3)
+except OSError:
+    raise SystemExit(1)
+PY_NATIVE_REPAIR
+  then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 3 ]; then
+    echo "error: could not validate native cache entry: $entry" >&2
+    return "$status"
+  fi
+  quarantine="$(mktemp -d "$cache/.oms-quarantine.XXXXXX")" || return 1
+  if ! mv "$entry" "$quarantine/payload"; then
+    rmdir "$quarantine" 2>/dev/null || true
+    return 1
+  fi
+  echo "quarantined invalid native cache entry: $quarantine/payload"
+)
+
 oms_install_marker_path() {
   local target="$1"
   local parent

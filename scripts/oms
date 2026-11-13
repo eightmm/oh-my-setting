@@ -80,6 +80,60 @@ if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
   . "$SCRIPTS_DIR/lib/platform.sh"
   oms_bash_enter
 fi
+if [ "${1:-}" = runtime ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; }; then
+  for native_dir in "$ROOT/rust" "$ROOT/rust/target" "$ROOT/rust/target/oms-native"; do
+    if [ -L "$native_dir" ] || [ ! -d "$native_dir" ]; then
+      echo "error: foreign native payload directory: $native_dir" >&2
+      exit 2
+    fi
+  done
+  native_revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)" || {
+    echo 'error: cannot determine native payload revision' >&2
+    exit 2
+  }
+  case "$native_revision" in *[!0-9a-f]*|'') echo 'error: invalid native payload revision' >&2; exit 2 ;; esac
+  [ "${#native_revision}" = 40 ] || { echo 'error: invalid native payload revision' >&2; exit 2; }
+  native_binary="$ROOT/rust/target/oms-native/$native_revision/oms"
+  if [ -e "${native_binary%/*}" ] || [ -L "${native_binary%/*}" ]; then
+  if [ -L "${native_binary%/*}" ] || [ ! -d "${native_binary%/*}" ] || [ -L "$native_binary" ]; then
+    echo "error: foreign native payload entry: ${native_binary%/*}" >&2
+    exit 2
+  fi
+  if [ ! -f "$native_binary" ] || [ ! -x "$native_binary" ]; then
+    echo 'error: native payload unavailable; run oms doctor --repair' >&2
+    exit 2
+  fi
+  # The staging writer binds this fixed-size checksum to the reviewed artifact.
+  # Verify before either private invocation; self-validation cannot authenticate
+  # an executable that has already started. Same-UID code replacement is outside
+  # the checkout's trust boundary.
+  native_checksum="${native_binary%/*}/oms.sha256"
+  native_expected=""
+  if [ -L "$native_checksum" ]; then
+    echo "error: foreign native checksum: $native_checksum" >&2
+    exit 2
+  fi
+  if [ ! -f "$native_checksum" ] ||
+     [ "$(LC_ALL=C wc -c < "$native_checksum")" -ne 65 ] ||
+     ! IFS= read -r native_expected < "$native_checksum"; then
+    echo 'error: native executable checksum unavailable; run oms doctor --repair' >&2
+    exit 2
+  fi
+  case "$native_expected" in *[!0-9a-f]*|'') echo 'error: invalid native executable checksum' >&2; exit 2 ;; esac
+  if [ "${#native_expected}" -ne 64 ] ||
+     ! native_actual="$(oms_sha256_file "$native_binary")" ||
+     [ "$native_actual" != "$native_expected" ]; then
+    echo 'error: native executable checksum mismatch; run oms doctor --repair' >&2
+    exit 2
+  fi
+  native_status=0
+  "$native_binary" --oms-select "$ROOT" "$native_revision" -- "$@" || native_status=$?
+  if [ "$native_status" = 0 ]; then
+    exec "$native_binary" --oms-dispatch "$ROOT" "$native_revision" -- "$@"
+  fi
+  [ "$native_status" = 75 ] || exit "$native_status"
+  fi
+fi
 if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
   . "$SCRIPTS_DIR/lib/python-runtime.sh"

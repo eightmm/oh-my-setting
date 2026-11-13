@@ -75,6 +75,15 @@ def read_marker(target: Path) -> Optional[dict[str, object]]:
         or row.get("kind") not in {"file", "directory"}
         or not isinstance(row.get("source"), str)
         or not isinstance(row.get("sha256"), str)
+        or (
+            "source_sha256" in row
+            and (
+                row.get("kind") != "file"
+                or not isinstance(row["source_sha256"], str)
+                or len(row["source_sha256"]) != 64
+                or any(ch not in "0123456789abcdef" for ch in row["source_sha256"])
+            )
+        )
     ):
         return None
     return row
@@ -102,7 +111,9 @@ def inspect_copy(source: Path, target: Path) -> str:
         source_kind, source_digest = path_hash(source)
     except (FileNotFoundError, OSError, ValueError):
         return "owned"
-    if source_kind == row["kind"] and source_digest == row["sha256"]:
+    if source_kind == row["kind"] and source_digest == row.get(
+        "source_sha256", row["sha256"]
+    ):
         return "current"
     return "owned"
 
@@ -120,7 +131,10 @@ def owned_source_under(root: Path, target: Path) -> Optional[str]:
     return None
 
 
-def write_marker(source: Path, target: Path, kind: str, digest: str) -> None:
+def write_marker(
+    source: Path, target: Path, kind: str, digest: str,
+    source_digest: Optional[str] = None,
+) -> None:
     marker = marker_path(target)
     marker.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
@@ -128,17 +142,15 @@ def write_marker(source: Path, target: Path, kind: str, digest: str) -> None:
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "schema": SCHEMA,
-                    "source": canonical(source),
-                    "kind": kind,
-                    "sha256": digest,
-                },
-                handle,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+            row = {
+                "schema": SCHEMA,
+                "source": canonical(source),
+                "kind": kind,
+                "sha256": digest,
+            }
+            if source_digest is not None:
+                row["source_sha256"] = source_digest
+            json.dump(row, handle, ensure_ascii=False, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -151,10 +163,14 @@ def write_marker(source: Path, target: Path, kind: str, digest: str) -> None:
         raise
 
 
-def install_copy(source: Path, target: Path) -> None:
+def install_copy(source: Path, target: Path, rendered: Optional[Path] = None) -> None:
     if target.exists() or target.is_symlink():
         raise FileExistsError(f"managed copy target already exists: {target}")
     source_kind, source_digest = path_hash(source)
+    payload = source if rendered is None else rendered
+    payload_kind, payload_digest = path_hash(payload)
+    if rendered is not None and (source_kind != "file" or payload_kind != "file"):
+        raise ValueError("rendered copies require files")
     target.parent.mkdir(parents=True, exist_ok=True)
 
     if source_kind == "directory":
@@ -174,7 +190,7 @@ def install_copy(source: Path, target: Path) -> None:
         os.close(fd)
         temp = Path(temp_name)
         try:
-            shutil.copy2(source, temp)
+            shutil.copy2(payload, temp)
             os.replace(temp, target)
         except Exception:
             try:
@@ -184,7 +200,10 @@ def install_copy(source: Path, target: Path) -> None:
             raise
 
     try:
-        write_marker(source, target, source_kind, source_digest)
+        write_marker(
+            source, target, payload_kind, payload_digest,
+            source_digest if rendered is not None else None,
+        )
     except Exception:
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
@@ -206,7 +225,7 @@ def remove_marker(target: Path) -> None:
 def usage() -> None:
     print(
         "usage: managed-target.py "
-        "{inspect|source-under|copy|remove-marker} ...",
+        "{inspect|source-under|copy|copy-rendered|rendered|remove-marker} ...",
         file=sys.stderr,
     )
 
@@ -229,6 +248,16 @@ def main(argv: list[str]) -> int:
         if command == "copy" and len(argv) == 4:
             install_copy(Path(argv[2]), Path(argv[3]))
             return 0
+        if command == "copy-rendered" and len(argv) == 5:
+            install_copy(Path(argv[2]), Path(argv[3]), Path(argv[4]))
+            return 0
+        if command == "rendered" and len(argv) == 5:
+            row = read_marker(Path(argv[3]))
+            if row and "source_sha256" in row:
+                expected = hashlib.sha256(b"file\0" + os.fsencode(argv[4])).hexdigest()
+                if row["sha256"] == expected and inspect_copy(Path(argv[2]), Path(argv[3])) == "current":
+                    return 0
+            return 1
         if command == "remove-marker" and len(argv) == 3:
             remove_marker(Path(argv[2]))
             return 0

@@ -321,6 +321,176 @@ finally:
 print('panel-update-deferral: ok')
 PY_PANEL
 )
+test_native_copy_launcher() (
+  local home="$TMP/copy home" target
+  export HOME="$home" XDG_CONFIG_HOME="$home/.config" OH_MY_SETTING_LINK_MODE=copy
+  unset OMS_INSTALL_RECEIPT CODEX_HOME CLAUDE_CONFIG_DIR
+  target="$home/.local/bin/oms"
+  mkdir -p "$home"
+  "$BASH" "$ROOT/scripts/link.sh" > "$TMP/copy-link.out" 2>&1 || fail "copy link failed"
+  grep -Fq 'exec "${BASH:-bash}" ' "$target" || fail "copy dispatcher is not a launcher"
+  [ "$(python3 "$ROOT/scripts/lib/managed-target.py" inspect "$ROOT/scripts/oms" "$target")" = current ] || fail "launcher ownership not current"
+  # Freeze the pre-rendered schema-1 ownership comparison without requiring Git
+  # history; after landing, HEAD contains the new reader rather than the old one.
+  python3 - "$ROOT/scripts/oms" "$target" <<'PY_LEGACY_COPY'
+import hashlib, json, sys
+from pathlib import Path
+source, target = map(Path, sys.argv[1:])
+row = json.loads((target.parent / ("." + target.name + ".oh-my-setting-managed.json")).read_text())
+assert row["schema"] == 1 and row["kind"] == "file"
+assert Path(row["source"]).resolve() == source.resolve()
+assert row["sha256"] == hashlib.sha256(b"file\0" + target.read_bytes()).hexdigest()
+assert row["sha256"] != hashlib.sha256(b"file\0" + source.read_bytes()).hexdigest()
+PY_LEGACY_COPY
+  "$target" --help > "$TMP/copy-help.out" || fail "copy launcher failed"
+  mkdir -p "$TMP/old-bash"
+  printf '#!/bin/sh\nexit 81\n' > "$TMP/old-bash/bash"
+  chmod +x "$TMP/old-bash/bash"
+  PATH="$TMP/old-bash:$PATH" "$BASH" "$target" --help > "$TMP/copy-bash.out" || fail "copy launcher did not preserve Bash"
+  cp "$target" "$TMP/current-launcher"
+  ln "$target" "$TMP/current-launcher-link"
+  "$BASH" "$ROOT/scripts/link.sh" > "$TMP/copy-relink.out" 2>&1 || fail "copy relink failed"
+  cmp -s "$target" "$TMP/current-launcher" || fail "current launcher changed"
+  [ "$target" -ef "$TMP/current-launcher-link" ] || fail "current launcher was replaced"
+  python3 - "$target" <<'PY_STALE'
+import hashlib, json, sys
+from pathlib import Path
+target = Path(sys.argv[1])
+marker = target.parent / ("." + target.name + ".oh-my-setting-managed.json")
+row = json.loads(marker.read_text())
+target.write_text('#!/usr/bin/env bash\nexit 73\n')
+row['sha256'] = hashlib.sha256(b'file\0' + target.read_bytes()).hexdigest()
+marker.write_text(json.dumps(row))
+PY_STALE
+  "$BASH" "$ROOT/scripts/link.sh" > "$TMP/copy-upgrade.out" 2>&1 || fail "stale launcher relink failed"
+  cmp -s "$target" "$TMP/current-launcher" || fail "stale launcher was not replaced"
+  printf 'user dispatcher\n' > "$target"
+  "$BASH" "$ROOT/scripts/unlink.sh" > "$TMP/copy-unlink.out" 2>&1 || fail "copy unlink failed"
+  grep -Fxq 'user dispatcher' "$target" || fail "unlink removed modified launcher"
+  "$BASH" "$ROOT/scripts/link.sh" > "$TMP/copy-modified-relink.out" 2>&1 || fail "modified launcher relink failed"
+  "$BASH" "$ROOT/scripts/unlink.sh" > "$TMP/copy-restore.out" 2>&1 || fail "copy backup restore failed"
+  grep -Fxq 'user dispatcher' "$target" || fail "relink did not restore modified dispatcher"
+)
+test_native_cache_repair() (
+  local root="$TMP/native-repair" revision entry saved
+  revision=1111111111111111111111111111111111111111
+  mkdir -p "$root"
+  git -C "$root" init -q
+  printf '%s\n' "$revision" > "$root/.git/HEAD"
+  entry="$root/rust/target/oms-native/$revision"
+  mkdir -p "$entry"
+  printf '#!/bin/sh\nexit 0\n' > "$entry/oms"
+  chmod +x "$entry/oms"
+  python3 - "$entry" "$revision" <<'PY_NATIVE_FIXTURE'
+import hashlib, json, pathlib, sys
+entry, revision = pathlib.Path(sys.argv[1]), sys.argv[2]
+digest = hashlib.sha256((entry / 'oms').read_bytes()).hexdigest()
+(entry / 'oms.sha256').write_text(digest + '\n')
+(entry / 'manifest.json').write_text(json.dumps({'schema': 1, 'source_commit': revision, 'artifacts': {'oms': digest}}))
+PY_NATIVE_FIXTURE
+  . "$ROOT/scripts/lib/install-contract.sh"
+  oms_install_repair_native_cache "$root" || fail "valid native cache repair failed"
+  [ -f "$entry/oms" ] || fail "repair moved valid native cache"
+  mkdir -p "$TMP/native-runner"
+  cp "$entry/oms" "$TMP/native-before-oms"
+  cp "$entry/manifest.json" "$TMP/native-before-manifest"
+  cp "$entry/oms.sha256" "$TMP/native-before-checksum"
+  mkdir -p "$TMP/native-no-python"
+  ln -s "$(command -v git)" "$TMP/native-no-python/git"
+  if PATH="$TMP/native-no-python" oms_install_repair_native_cache "$root" > "$TMP/native-missing-runner.out" 2>&1; then
+    fail "repair accepted missing validator"
+  fi
+  cmp -s "$entry/oms" "$TMP/native-before-oms" && cmp -s "$entry/manifest.json" "$TMP/native-before-manifest" && cmp -s "$entry/oms.sha256" "$TMP/native-before-checksum" || fail "missing validator changed cache"
+  for rc in 127 130 1; do
+    printf '#!/bin/sh\nexit %s\n' "$rc" > "$TMP/native-runner/python3"
+    chmod +x "$TMP/native-runner/python3"
+    if PATH="$TMP/native-runner:$PATH" oms_install_repair_native_cache "$root" > "$TMP/native-runner.out" 2>&1; then
+      fail "repair accepted failed validator $rc"
+    fi
+    [ -f "$entry/oms" ] && [ -f "$entry/manifest.json" ] || fail "repair moved cache after validator failure $rc"
+    cmp -s "$entry/oms" "$TMP/native-before-oms" && cmp -s "$entry/manifest.json" "$TMP/native-before-manifest" && cmp -s "$entry/oms.sha256" "$TMP/native-before-checksum" || fail "validator failure changed cache bytes"
+  done
+  printf '#!/bin/sh\nkill -TERM $$\n' > "$TMP/native-runner/python3"
+  if PATH="$TMP/native-runner:$PATH" oms_install_repair_native_cache "$root" > "$TMP/native-interrupted.out" 2>&1; then
+    fail "repair accepted interrupted validator"
+  fi
+  cmp -s "$entry/oms" "$TMP/native-before-oms" && cmp -s "$entry/manifest.json" "$TMP/native-before-manifest" && cmp -s "$entry/oms.sha256" "$TMP/native-before-checksum" || fail "interrupted validator changed cache"
+  printf 'foreign\n' > "$entry/unreadable-foreign"
+  ln -s "$TMP/native-before-oms" "$entry/unreadable-link"
+  chmod 000 "$entry"
+  if [ "$(id -u)" -ne 0 ]; then
+    if oms_install_repair_native_cache "$root" > "$TMP/native-unreadable.out" 2>&1; then
+      chmod 700 "$entry"
+      fail "repair accepted unreadable cache"
+    fi
+  fi
+  chmod 700 "$entry"
+  [ -f "$entry/unreadable-foreign" ] && [ -L "$entry/unreadable-link" ] || fail "repair moved unreadable foreign cache"
+  rm "$entry/unreadable-foreign" "$entry/unreadable-link"
+  chmod 000 "$entry/oms.sha256"
+  if [ "$(id -u)" -ne 0 ]; then
+    if oms_install_repair_native_cache "$root" > "$TMP/native-unreadable-file.out" 2>&1; then
+      chmod 600 "$entry/oms.sha256"
+      fail "repair accepted unreadable cache file"
+    fi
+  fi
+  chmod 600 "$entry/oms.sha256"
+  cmp -s "$entry/oms" "$TMP/native-before-oms" && cmp -s "$entry/manifest.json" "$TMP/native-before-manifest" && cmp -s "$entry/oms.sha256" "$TMP/native-before-checksum" || fail "unreadable cache file changed cache"
+  python3 - "$entry/manifest.json" "$TMP/native-before-manifest" <<'PY_LARGE_INTEGER'
+from pathlib import Path
+import sys
+data = Path(sys.argv[2]).read_text()
+Path(sys.argv[1]).write_text(data[:-1] + ', "extra": ' + '9' * 5000 + '}')
+PY_LARGE_INTEGER
+  if PYTHONINTMAXSTRDIGITS=4300 oms_install_repair_native_cache "$root" > "$TMP/native-large-integer.out" 2>&1; then
+    fail "repair accepted a validator integer limit failure"
+  fi
+  [ -f "$entry/manifest.json" ] || fail "validator integer limit moved cache"
+  cp "$TMP/native-before-manifest" "$entry/manifest.json"
+  cp "$entry/manifest.json" "$TMP/native-valid-manifest"
+  for constant in NaN Infinity -Infinity; do
+    python3 - "$entry/manifest.json" "$TMP/native-valid-manifest" "$constant" <<'PY_NONFINITE'
+from pathlib import Path
+import sys
+data = Path(sys.argv[2]).read_text()
+Path(sys.argv[1]).write_text(data[:-1] + ', "extra": ' + sys.argv[3] + '}')
+PY_NONFINITE
+    oms_install_repair_native_cache "$root" > "$TMP/native-constant.out" || fail "nonfinite cache repair failed"
+    [ ! -e "$entry" ] || fail "repair accepted nonfinite manifest"
+    saved="$(find "$root/rust/target/oms-native" -name manifest.json -print)"
+    mv "${saved%/*}" "$entry"
+    cp "$TMP/native-valid-manifest" "$entry/manifest.json"
+  done
+  printf 'modified\n' > "$entry/oms.sha256"
+  printf 'foreign\n' > "$entry/user-file"
+  if oms_install_repair_native_cache "$root" > "$TMP/native-foreign.out" 2>&1; then
+    fail "repair accepted foreign cache content"
+  fi
+  [ -f "$entry/user-file" ] || fail "repair moved foreign cache content"
+  rm "$entry/user-file"
+  mv "$entry/oms" "$TMP/native-real"
+  ln -s "$TMP/native-real" "$entry/oms"
+  if oms_install_repair_native_cache "$root" > "$TMP/native-symlink.out" 2>&1; then
+    fail "repair accepted native cache symlink"
+  fi
+  [ -L "$entry/oms" ] && [ -f "$TMP/native-real" ] || fail "repair changed symlinked cache"
+  rm "$entry/oms"
+  mv "$TMP/native-real" "$entry/oms"
+  oms_install_repair_native_cache "$root" > "$TMP/native-repair.out" || fail "native cache quarantine failed"
+  [ ! -e "$entry" ] || fail "invalid native cache not quarantined"
+  saved="$(find "$root/rust/target/oms-native" -name oms.sha256 -print)"
+  [ "$(cat "$saved")" = modified ] || fail "quarantine lost native cache data"
+  oms_install_repair_native_cache "$root" || fail "repeated native cache repair failed"
+)
+if [ "${1:-}" = --native-repair-only ]; then
+  test_native_cache_repair
+  exit
+fi
+if [ "${1:-}" = --native-copy-only ]; then
+  test_native_copy_launcher
+  test_native_cache_repair
+  exit
+fi
 if [ "${1:-}" = --panel-update-only ]; then
   test_update_defers_live_panel_calls
   exit
@@ -331,6 +501,8 @@ if [ "${1:-}" = --legacy-python-only ]; then
 fi
 test_uninstall_with_old_python
 test_update_defers_live_panel_calls
+test_native_copy_launcher
+test_native_cache_repair
 
 # Count external path tools across the lifecycle. Each shim appends one short
 # line, including when independent children run at the same time.

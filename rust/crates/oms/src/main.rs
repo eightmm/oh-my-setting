@@ -165,7 +165,7 @@ fn argument_repr(value: &str) -> String {
     result.push(quote);
     result
 }
-fn parse(args: Vec<OsString>, command_state: &mut bool) -> Result<Args, String> {
+fn parse(args: Vec<OsString>, command_state: &mut bool, legacy: &mut bool) -> Result<Args, String> {
     let mut a = Args::default();
     let mut it = args.into_iter().peekable();
     if it.next().as_deref() != Some(OsStr::new("runtime")) {
@@ -353,6 +353,22 @@ fn parse(args: Vec<OsString>, command_state: &mut bool) -> Result<Args, String> 
         } else if command && a.manifest.is_none() {
             a.manifest = Some(arg);
         } else if !command {
+            *legacy = [
+                b"envelope".as_slice(),
+                b"evidence",
+                b"next",
+                b"brief",
+                b"failure",
+                b"context",
+                b"profile",
+                b"release",
+                b"capsule",
+                b"backend",
+                b"experiment",
+                b"benchmark",
+                b"doctor",
+            ]
+            .contains(&bytes);
             return Err(format!(
                 "argument command: invalid choice: '{}' (choose from envelope, evidence, next, brief, failure, context, context-inspect, profile, release, capsule, backend, experiment, benchmark, doctor)",
                 arg.to_string_lossy()
@@ -807,6 +823,98 @@ fn write_stdout(bytes: &[u8]) {
         std::process::exit(1);
     }
 }
+fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    let commit = commit.to_str().ok_or("invalid native source revision")?;
+    if commit.len() != 40
+        || !commit
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("invalid native source revision".into());
+    }
+    let dir = root.join("rust/target/oms-native").join(commit);
+    let executable = dir.join("oms");
+    if std::fs::canonicalize(
+        std::env::current_exe().map_err(|_| "cannot identify native executable")?,
+    )
+    .map_err(|_| "cannot identify native executable")?
+        != std::fs::canonicalize(&executable).map_err(|_| "native executable unavailable")?
+    {
+        return Err("native executable does not belong to this checkout".into());
+    }
+    let manifest_path = dir.join("manifest.json");
+    let manifest_meta =
+        std::fs::symlink_metadata(&manifest_path).map_err(|_| "native manifest unavailable")?;
+    if !manifest_meta.is_file() || manifest_meta.len() > 4 * 1024 * 1024 {
+        return Err("invalid native manifest file".into());
+    }
+    let mut manifest = Vec::new();
+    std::fs::File::open(&manifest_path)
+        .map_err(|_| "cannot read native manifest")?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut manifest)
+        .map_err(|_| "cannot read native manifest")?;
+    if manifest.len() > 4 * 1024 * 1024 {
+        return Err("invalid native manifest file".into());
+    }
+    let manifest = parse_json(&manifest).map_err(|_| "invalid native manifest")?;
+    if get(&manifest, b"schema") != Some(&Json::Number("1".into()))
+        || get(&manifest, b"source_commit") != Some(&Json::String(commit.as_bytes().to_vec()))
+    {
+        return Err("native manifest revision mismatch".into());
+    }
+    let artifacts = get(&manifest, b"artifacts").ok_or("missing native artifacts")?;
+    let Json::Object(entries) = artifacts else {
+        return Err("invalid native artifacts".into());
+    };
+    if entries
+        .iter()
+        .any(|(name, _)| name != b"oms" && name != b"oms-graph-python-helper")
+    {
+        return Err("invalid native artifact name".into());
+    }
+    for name in ["oms", "oms-graph-python-helper"] {
+        let Some(value) = get(artifacts, name.as_bytes()) else {
+            if name == "oms" {
+                return Err("missing native executable digest".into());
+            }
+            continue;
+        };
+        let Json::String(expected) = value else {
+            return Err("invalid native digest".into());
+        };
+        if expected.len() != 64
+            || !expected
+                .iter()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err("invalid native digest".into());
+        }
+        let path = dir.join(name);
+        let meta = std::fs::symlink_metadata(&path).map_err(|_| "native artifact unavailable")?;
+        if !meta.file_type().is_file() || meta.permissions().mode() & 0o111 == 0 {
+            return Err("invalid native artifact".into());
+        }
+        let mut file = std::fs::File::open(path).map_err(|_| "cannot read native artifact")?;
+        let mut hash = Sha256::new();
+        let mut buf = [0; 32768];
+        loop {
+            let n = file
+                .read(&mut buf)
+                .map_err(|_| "cannot read native artifact")?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buf[..n]);
+        }
+        if format!("{:x}", hash.finalize()).as_bytes() != expected {
+            return Err("native artifact digest mismatch".into());
+        }
+    }
+    Ok(())
+}
 fn main() {
     let interrupted = Arc::new(AtomicBool::new(false));
     if let Err(e) =
@@ -815,9 +923,35 @@ fn main() {
         eprintln!("runtime-core: cannot install interrupt handler: {e}\n{HINT}");
         std::process::exit(2);
     }
-    let argv: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut argv: Vec<_> = std::env::args_os().skip(1).collect();
+    let select = argv.first().is_some_and(|v| v == "--oms-select");
+    let dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
+    if dispatch {
+        if argv.len() < 5 || argv[3] != "--" {
+            eprintln!("runtime-core: invalid private dispatch invocation");
+            std::process::exit(2);
+        }
+        if let Err(e) = validate_payload(Path::new(&argv[1]), &argv[2]) {
+            eprintln!(
+                "runtime-core: {e}\nhint: run `oms doctor --repair` to check the native cache"
+            );
+            std::process::exit(2);
+        }
+        argv.drain(..4);
+    }
     let mut subcommand = false;
-    let args = match parse(argv, &mut subcommand) {
+    let mut legacy = false;
+    let parsed = parse(argv, &mut subcommand, &mut legacy);
+    if dispatch
+        && (legacy
+            || matches!(&parsed, Err(e) if e == "root help requested" || e == "version requested"))
+    {
+        std::process::exit(75);
+    }
+    if select {
+        return;
+    }
+    let args = match parsed {
         Ok(v) => v,
         Err(e) if e == "version requested" => {
             write_stdout(b"0.7.0\n");

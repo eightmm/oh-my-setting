@@ -161,6 +161,43 @@ The permission adjustment applies only to these reviewed, secret-free copied
 outputs, allowing the capability-dropped runtime to traverse a private output
 directory and execute the files. It does not alter the container artifacts.
 
+## Transitional checkout staging contract
+
+The current native context entry is a staged rollout. The sole PATH command
+remains the existing managed `oms` entry; copy installations use a safely quoted
+launcher bound to the logical checkout dispatcher. A missing payload for the
+current checkout revision is not evidence that the legacy domain is retired.
+No build or download occurs during a context invocation.
+
+The trusted integration/release owner stages only reviewed, floor-tested
+artifacts under the checkout's ignored `rust/target/oms-native/<SOURCE_COMMIT>/`.
+`SOURCE_COMMIT` is the exact lowercase 40-hex checkout revision. Prepare the
+complete directory privately before making it available; do not replace files
+inside a live revision entry. Include exactly these runtime metadata contracts:
+
+- `oms`: the reviewed executable, never a PATH-discovered program.
+- `oms.sha256`: exactly the executable's 64 lowercase raw SHA-256 hex digits
+  followed by one LF, for a total of 65 bytes. The public bootstrap uses the
+  existing portable SHA-256 helper to compare bytes **before** invoking either
+  native private entry. Missing, malformed, symlinked or mismatched checksum
+  records fail closed for a present payload.
+- `manifest.json`: schema `1`, `source_commit` equal to `SOURCE_COMMIT`, and
+  `artifacts` mapping the fixed basename `oms` to its raw SHA-256 digest. The
+  only additional supported artifact name is `oms-graph-python-helper`, whose
+  value is its own raw SHA-256 digest. No paths or download URLs are accepted.
+  Native validation checks this manifest before context data access.
+- `oms-graph-python-helper`, when listed in the manifest: the reviewed private
+  production helper. Never stage the test-only fixture executable.
+
+The checksum is integrity metadata written by the trusted stager, not a
+signature or protection against a malicious same-UID owner replacing all code
+and metadata. Its consumers are `scripts/oms`, the native public-entry fixtures
+and this owner staging procedure; manifest validation is consumed by the native
+selector/dispatcher. Metadata and artifacts must come from the same reviewed
+source and build receipt. Record their hashes with the build/runtime evidence.
+This recipe does not automatically distribute or install those artifacts;
+release/lifecycle integration and exact-SHA CI proof are still required.
+
 ## Floor runtime check
 
 Run the selected artifacts in the same reviewed Ubuntu 20.04 base, with the

@@ -136,15 +136,27 @@ link_target() {
   local source="$1"
   local target="$2"
   local desired_mode
-  local state
+  local state rendered rendered_content helper_usage can_render=0
 
   [ "$LINK_PLAN" = 1 ] || mkdir -p "${target%/*}"
   desired_mode="$(oms_install_link_mode)" || return
+  if [ "$desired_mode" = copy ] && [ "$source" = "$ROOT/scripts/oms" ]; then
+    helper_usage="$(python3 "$OMS_MANAGED_TARGET_HELPER" 2>&1 || true)"
+    case "$helper_usage" in *copy-rendered*) can_render=1 ;; esac
+    printf -v rendered_content '#!/usr/bin/env bash\nexec "${BASH:-bash}" %q "$@"\n' "$source"
+  fi
   state="$(oms_install_target_state "$source" "$target")" || return
   case "$desired_mode:$state" in
-    symlink:symlink-current|copy:copy-current)
+    symlink:symlink-current)
       echo "$desired_mode current: $target"
       return 0
+      ;;
+    copy:copy-current)
+      if [ "$can_render" = 0 ] ||
+         oms_install_managed_target rendered "$source" "$target" "$rendered_content"; then
+        echo "$desired_mode current: $target"
+        return 0
+      fi
       ;;
   esac
   backup_if_needed "$target" "$source" "$state"
@@ -156,7 +168,18 @@ link_target() {
     fi
     return 0
   fi
-  oms_install_materialize "$source" "$target"
+  if [ "$can_render" = 1 ]; then
+    rendered="$(mktemp "${TMPDIR:-/tmp}/oms-launcher.XXXXXX")" || return
+    printf '%s' "$rendered_content" > "$rendered"
+    chmod 755 "$rendered"
+    if ! oms_install_managed_target copy-rendered "$source" "$target" "$rendered"; then
+      rm -f "$rendered"
+      return 1
+    fi
+    rm -f "$rendered"
+  else
+    oms_install_materialize "$source" "$target"
+  fi
   if [ "$desired_mode" = copy ]; then
     echo "copied $source -> $target"
   else

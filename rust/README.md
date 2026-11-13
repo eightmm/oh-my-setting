@@ -26,7 +26,9 @@ verification, plus injections, session reports and timelines, through
 Read labels. Descriptor-backed capture acquisition in `oms-safe-fs` is connected
 to the retained-output projection adapter. The graph facade explicitly
 rejects notebooks until their native parser is integrated. The installed `oms`
-command still uses the legacy runtime. No legacy domain is retired.
+command uses a staged native context payload when the trusted owner supplies
+the exact-revision artifacts before Python activation. Missing current payloads
+retain transitional legacy selection. No legacy domain is retired.
 
 The graph helper is a private libexec artifact, not another PATH command. Its
 malformed-input crashes are contained on Linux; macOS memory and dump-collector
@@ -75,8 +77,11 @@ surfaces. Scheduled/manual runs and an unknown comparison base also select it.
 The stable gate requires this lane to pass when selected and permits a skip only
 when the scope decision excludes it. This supplements existing
 legacy checks and executes native filesystem tests on both host families when
-selected. A local configuration change is not a completed
-CI run or proof of the oldest supported deployment targets.
+selected. The native public-entry tests also require the existing Bash 5
+contract. The Rust job reuses the lifecycle job's macOS Homebrew Bash setup; its
+30-minute budget covers that bounded setup plus toolchain, dependency fetch and
+native checks. No extra job or matrix is added. A local configuration change is
+not a completed CI run or proof of the oldest supported deployment targets.
 
 ## Legacy Python inventory
 

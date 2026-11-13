@@ -95,6 +95,8 @@ doctor runs automatically when a provider CLI is installed. --live-models
 adds bounded account-visible catalog probes, while --strict-diversity requires
 at least two usable independent model families. An invalid or unavailable
 receipt owner is never replaced automatically.
+An invalid native cache entry with only regular staged files is quarantined;
+foreign or symlinked cache contents are left in place.
 Registered Codex account homes, shared links, login presence and model-cache
 presence are checked locally; account health issues only warn.
 Missing registered homes and receipt homes absent from the registry include
@@ -1232,7 +1234,7 @@ hydrate_repair_from_receipt() {
 
 repair_install() {
   local repair_root="$INSTALL_ROOT"
-  local plugin_mode
+  local plugin_mode native_repair_failed=0
 
   if [ "$RECEIPT_STATE" = "invalid" ]; then
     echo "error: refusing repair with invalid install receipt: $RECEIPT" >&2
@@ -1249,6 +1251,7 @@ repair_install() {
     echo "error: could not hydrate repair settings from install receipt: $RECEIPT" >&2
     return 1
   }
+  oms_install_repair_native_cache "$repair_root" || native_repair_failed=1
   plugin_mode="${OH_MY_SETTING_CODEX_PLUGIN:-auto}"
   echo "repairing canonical links from: $repair_root"
   "$repair_root/scripts/link.sh"
@@ -1282,6 +1285,7 @@ repair_install() {
       "$repair_root/scripts/install-codex-plugin.sh" --remove
     fi
   fi
+  return "$native_repair_failed"
 }
 
 if [ "$REPAIR" = "1" ]; then
