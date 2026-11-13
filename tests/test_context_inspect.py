@@ -1,4 +1,4 @@
-"""Context manifest inspector contracts; --cli also exercises the canonical runtime."""
+"""Context contracts; --cli optionally compares an explicit candidate OMS entry point."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 LIB = ROOT / "scripts/lib/oms_runtime"
+REFERENCE_COMMIT = "74f87f654a314961420be2aa8ab6dfc1999151e1"
 
 
 def load(name):
@@ -31,9 +32,59 @@ sys.path.insert(0, str(ROOT / "scripts/lib"))
 from oms_runtime import context_session as session_view  # noqa: E402  (a package import: it shares the inspector's errors)
 reporter = load("context_report")
 ERROR = inspector.InspectionError
-CLI = "--cli" in sys.argv
-if CLI:
-    sys.argv.remove("--cli")
+runner = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+runner.add_argument("--cli", action="store_true")
+runner.add_argument("--candidate-oms")
+options, remaining = runner.parse_known_args()
+CLI = options.cli
+CANDIDATE = os.path.abspath(options.candidate_oms) if options.candidate_oms else None
+if CANDIDATE and not CLI:
+    runner.error("--candidate-oms requires --cli")
+if CANDIDATE and (not Path(CANDIDATE).is_file() or not os.access(CANDIDATE, os.X_OK)):
+    runner.error("--candidate-oms must name an executable file")
+if CANDIDATE:
+    # Run from the reference checkout: a migrated dispatcher cannot be its own oracle.
+    try:
+        pinned = subprocess.run(["git", "-C", str(ROOT), "diff", "--quiet", "--no-ext-diff",
+                                 "--no-textconv", REFERENCE_COMMIT, "--", "scripts", "config",
+                                 "rules", "roles", "templates"], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        runner.error("cannot verify the frozen reference tree")
+    if pinned.returncode != 0:
+        runner.error("candidate comparison requires production paths at the frozen reference commit; "
+                     "run this suite from its separate reference checkout")
+sys.argv[1:] = remaining
+
+
+def contract_cases(test, name, entrypoint):
+    suite = json.loads((ROOT / "migration/contracts" / name).read_text(encoding="utf-8"))
+    test.assertEqual(suite["fixture_schema"], 1)
+    reference = suite["reference"]
+    test.assertEqual(reference["commit"], REFERENCE_COMMIT)
+    test.assertEqual(reference["source"], "scripts/lib/oms_runtime/context_inspect.py")
+    test.assertEqual(reference["entrypoint"], entrypoint)
+    test.assertEqual(hashlib.sha256((LIB / "context_inspect.py").read_bytes()).hexdigest(),
+                     reference["source_sha256"], "reference changed; review the contract before refreshing fixtures")
+    names = [case["name"] for case in suite["cases"]]
+    test.assertTrue(names)
+    test.assertEqual(len(names), len(set(names)))
+    for case in suite["cases"]:
+        test.assertNotEqual("expected" in case, "expected_error" in case, case["name"])
+        if "expected_error" in case:
+            test.assertIsInstance(case["expected_error"], str)
+        yield case, dict(reference["arguments"], **case.get("arguments", {}))
+
+
+def check_result(test, case, action):
+    if "expected_error" in case:
+        with test.assertRaises(ERROR) as caught:
+            action()
+        test.assertEqual(str(caught.exception), case["expected_error"])
+    else:
+        # JSON value comparison preserves booleans and numeric types, unlike Python's ==.
+        canonical = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False)
+        test.assertEqual(canonical(action()), canonical(case["expected"]))
 
 
 def source(path="src.py", data=b"x" * 100):
@@ -57,55 +108,17 @@ def tree_bytes(root):
 
 
 class ProjectionTests(unittest.TestCase):
-    def test_budget_is_bytes_not_tokens_or_proof(self):
-        value = inspector.inspect_manifest(manifest())
-        self.assertEqual(value["budget"], {"bytes": 1000, "used_bytes": 140,
-                         "remaining_bytes": 860, "source_payload_bytes": 100, "framing_bytes": 40})
-        self.assertEqual(value["validation"], "recorded-metadata-only")
-        self.assertIsNone(value["sources_current"])
-        self.assertFalse(value["bundle_verified"])
-        self.assertNotIn("tokens", value)
-        self.assertNotIn("winner", value)
-
-    def test_partial_source_and_required_debt_are_preserved(self):
-        data = manifest()
-        data["selected"][0].update(bytes_selected=75, omitted_bytes=60, selection="head")
-        data.update(context_debt=2, missing_required=["src.py", "required.md"],
-                    truncated_required=["src.py"], sufficient=False)
-        data["omitted"] = [{"path": "required.md", "reason": "budget exhausted", "bytes": 300}]
-        value = inspector.inspect_manifest(data)
-        self.assertEqual(value["debt"]["reported"], 2)
-        self.assertFalse(value["debt"]["reported_sufficient"])
-        self.assertEqual(value["sources"]["items"][0]["bytes_selected"], 75)
-        self.assertEqual(value["omissions"]["items"][0]["reason"], "budget exhausted")
-
-    def test_zero_length_source_and_empty_pack(self):
-        data = manifest()
-        data.update(selected=[], targets=[], selected_bytes=0, remaining_bytes=1000)
-        self.assertEqual(inspector.inspect_manifest(data)["sources"]["total"], 0)
-        data.update(selected=[source(data=b"")], targets=["src.py"], selected_bytes=40, remaining_bytes=960)
-        self.assertEqual(inspector.inspect_manifest(data)["repeated_source_digests"]["total"], 0)
-
-    def test_duplicate_hashes_are_candidates_and_lists_are_bounded(self):
-        data = manifest()
-        data["selected"] += [source("other.py"), source("third.py", b"z" * 200)]
-        data.update(selected_bytes=500, remaining_bytes=500)
-        value = inspector.inspect_manifest(data, limit=1)
-        self.assertEqual(value["sources"]["items"][0]["path"], "third.py")
-        self.assertEqual(value["sources"]["omitted"], 2)
-        group = value["repeated_source_digests"]["items"][0]
-        self.assertEqual(group["paths"]["total"], 2)
-        self.assertEqual(group["paths"]["omitted"], 1)
-        self.assertNotIn("saved_tokens", value)
-
-    def test_untrusted_display_strings_are_not_terminal_controls(self):
-        data = manifest()
-        data["selected"][0]["reason"] = "reason\x1b[31m\n\u202e hidden"
-        value = inspector.inspect_manifest(data)
-        text = value["sources"]["items"][0]["reason"]
-        self.assertNotIn("\x1b", text)
-        self.assertNotIn("\u202e", text)
-        self.assertNotIn("\n", text)
+    def test_frozen_projection_contracts(self):
+        for filename, entrypoint, fields in (
+                ("context-inspect-v1.json", "inspect_manifest", ("input",)),
+                ("context-compare-v1.json", "compare_manifests", ("left", "right"))):
+            for case, arguments in contract_cases(self, filename, entrypoint):
+                inputs = [deepcopy(case[field]) for field in fields]
+                before = deepcopy(inputs)
+                with self.subTest(suite=filename, case=case["name"]):
+                    with patch.object(inspector.os, "open", side_effect=AssertionError("unexpected I/O")):
+                        check_result(self, case, lambda: getattr(inspector, entrypoint)(*inputs, **arguments))
+                    self.assertEqual(inputs, before)
 
     def test_bad_manifests_fail_instead_of_looking_empty(self):
         variants = []
@@ -164,74 +177,6 @@ class ProjectionTests(unittest.TestCase):
         data = manifest(); data["omitted"] = [{}] * (inspector.MAX_ROWS + 1)
         with self.assertRaises(ERROR):
             inspector.inspect_manifest(data)
-
-    def test_compare_changes_preserves_scope_mismatches(self):
-        left, right = manifest(), manifest()
-        right["selected"][0]["reason"] = "required context"
-        right["selected"].append(source("added.py", b"new"))
-        right.update(selected_bytes=180, remaining_bytes=820, phase="review", targets=["added.py"],
-                     contract_state_digest="c" * 64)
-        value = inspector.compare_manifests(left, right)
-        self.assertFalse(value["recorded_scope_matches"])
-        self.assertEqual(set(value["scope_mismatch_reasons"]),
-                         {"different-phase", "different-targets", "different-contract-state"})
-        self.assertEqual(value["added"]["items"], ["added.py"])
-        self.assertEqual(value["changed"]["items"], [{"path": "src.py", "changed_fields": ["reason"]}])
-        self.assertEqual(value["delta"]["selected_bytes"], 40)
-        self.assertNotIn("winner", value)
-        self.assertEqual(inspector.compare_manifests(right, left)["removed"]["items"], ["added.py"])
-
-    def test_unknown_contract_and_identical_pack(self):
-        data = manifest()
-        self.assertTrue(inspector.compare_manifests(data, data)["recorded_scope_matches"])
-        data["contract_state_digest"] = None
-        value = inspector.compare_manifests(data, data)
-        self.assertFalse(value["recorded_scope_matches"])
-        self.assertIn("contract-identity-unavailable", value["scope_mismatch_reasons"])
-
-    def test_recorded_phase_rules_are_visible_without_reading_them(self):
-        data = manifest()
-        data["phase_rules_sha256"] = "c" * 64
-        before = deepcopy(data)
-        with patch.object(inspector.os, "open", side_effect=AssertionError("unexpected I/O")):
-            report = inspector.inspect_manifest(data)
-            compared = inspector.compare_manifests(data, data)
-        self.assertEqual(report["phase_rules_sha256"], "c" * 64)
-        self.assertTrue(compared["recorded_scope_matches"])
-        self.assertEqual(compared["phase_rules"], {"left": "c" * 64, "right": "c" * 64,
-                                                "status": "same-recorded-digest"})
-        self.assertIsNone(report["sources_current"])
-        self.assertEqual(data, before)
-
-    def test_changed_phase_rules_disagree_even_with_identical_sources(self):
-        left, right = manifest(), manifest()
-        left["phase_rules_sha256"], right["phase_rules_sha256"] = "c" * 64, "d" * 64
-        for a, b in ((left, right), (right, left)):
-            with self.subTest(left=a["phase_rules_sha256"]):
-                result = inspector.compare_manifests(a, b)
-                self.assertFalse(result["recorded_scope_matches"])
-                self.assertEqual(result["scope_mismatch_reasons"], ["different-phase-rules"])
-                self.assertEqual(result["changed"]["total"], 0)
-                self.assertEqual(result["phase_rules"]["status"], "different-recorded-digest")
-
-    def test_one_legacy_pack_cannot_prove_matching_phase_rules(self):
-        legacy, current = manifest(), manifest()
-        current["phase_rules_sha256"] = "d" * 64
-        for left, right in ((legacy, current), (current, legacy)):
-            with self.subTest(left_is_legacy=left is legacy):
-                result = inspector.compare_manifests(left, right)
-                self.assertFalse(result["recorded_scope_matches"])
-                self.assertEqual(result["scope_mismatch_reasons"], ["phase-rules-identity-unavailable"])
-                self.assertEqual(result["phase_rules"]["status"], "unknown")
-                self.assertIn(None, (result["phase_rules"]["left"], result["phase_rules"]["right"]))
-
-    def test_legacy_phase_rules_keep_the_existing_projection_shape(self):
-        data = manifest()
-        self.assertNotIn("phase_rules_sha256", inspector.inspect_manifest(data))
-        result = inspector.compare_manifests(data, data)
-        self.assertNotIn("phase_rules", result)
-        self.assertTrue(result["recorded_scope_matches"])
-        self.assertEqual(result["scope_mismatch_reasons"], [])
 
     def test_explicit_invalid_phase_rule_digest_is_not_silently_ignored(self):
         for digest in (None, "", True, [], {}, 4, "x" * 64, "A" * 64, "a" * 63, "a" * 65):
@@ -424,9 +369,14 @@ class FilesystemTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ERROR):
                 inspector.inspect_files(self.repo, path)
 
-    def test_invalid_json_nonfinite_duplicates_and_oversize(self):
-        for raw in (b'{"schema":1,"schema":1}', b'{"x":NaN}', b'{"x":Infinity}',
-                    b'\xff', b'{invalid}', b'[' * 2000, b' ' * (inspector.MAX_MANIFEST_BYTES + 1)):
+    def test_frozen_raw_manifest_contracts(self):
+        for case, arguments in contract_cases(self, "context-read-v1.json", "read_manifest"):
+            with self.subTest(case=case["name"]):
+                self.file.write_bytes(bytes.fromhex(case["input_hex"]))
+                check_result(self, case, lambda: inspector.read_manifest(self.repo, "pack.json", **arguments))
+
+    def test_deeply_nested_and_oversize_json_is_rejected(self):
+        for raw in (b'[' * 2000, b' ' * (inspector.MAX_MANIFEST_BYTES + 1)):
             self.file.write_bytes(raw)
             with self.subTest(length=len(raw)), self.assertRaises(ERROR):
                 inspector.inspect_files(self.repo, "pack.json")
@@ -577,9 +527,25 @@ if CLI:
                 env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
                 env.pop("OMS_HARNESS_CHILD", None)
                 def call(*args, child=False):
-                    return subprocess.run(["bash", str(script), "--repo", str(repo), *args],
-                                          env=dict(env, **({"OMS_HARNESS_CHILD": "1"} if child else {})),
-                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=90)
+                    environment = dict(env, **({"OMS_HARNESS_CHILD": "1"} if child else {}))
+                    compare = CANDIDATE is not None and args[0] == "context-inspect"
+                    before_call = tree_bytes(repo) if compare else None
+                    command = (["bash", str(ROOT / "scripts/oms"), "runtime"] if compare
+                               else ["bash", str(script)])
+                    reference = subprocess.run([*command, "--repo", str(repo), *args],
+                                               env=environment, stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, text=True, timeout=90)
+                    if not compare:
+                        return reference
+                    self.assertEqual(tree_bytes(repo), before_call, "reference inspection wrote fixture state")
+                    candidate = subprocess.run([CANDIDATE, "runtime", "--repo", str(repo), *args],
+                                               env=environment, stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, text=True, timeout=90)
+                    self.assertEqual(tree_bytes(repo), before_call, "candidate inspection wrote fixture state")
+                    self.assertEqual(candidate.returncode, reference.returncode, (args, candidate.stderr))
+                    self.assertEqual(candidate.stdout, reference.stdout, (args, "stdout differs"))
+                    self.assertEqual(candidate.stderr, reference.stderr, (args, "stderr differs"))
+                    return candidate
                 compiled = call("context", "--target", "src.py", "--manifest", "pack.json", "--bundle", "pack.txt")
                 self.assertEqual(compiled.returncode, 0, compiled.stderr)
                 (repo / "src.py").unlink()
