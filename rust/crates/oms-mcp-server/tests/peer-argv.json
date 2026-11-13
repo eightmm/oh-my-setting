@@ -1,0 +1,199 @@
+[
+  {
+    "kind": "consult",
+    "context": {},
+    "rounds": 0,
+    "argv": [
+      "consult",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--thread",
+      "active",
+      "--prompt-file",
+      "__RUN__/prompt.txt",
+      "--to",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "consult",
+    "context": {
+      "include_memory": true,
+      "include_task": true
+    },
+    "rounds": 0,
+    "argv": [
+      "consult",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--memory",
+      "--thread",
+      "active",
+      "--prompt-file",
+      "__RUN__/prompt.txt",
+      "--to",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "consult",
+    "context": {
+      "include_memory": false,
+      "include_task": false
+    },
+    "rounds": 0,
+    "argv": [
+      "consult",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--no-memory",
+      "--no-task",
+      "--thread",
+      "active",
+      "--prompt-file",
+      "__RUN__/prompt.txt",
+      "--to",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "advise",
+    "context": {},
+    "rounds": 0,
+    "argv": [
+      "advise",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--thread",
+      "active",
+      "--prompt-file",
+      "__RUN__/prompt.txt",
+      "--to",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "advise",
+    "context": {
+      "include_memory": true,
+      "include_task": true
+    },
+    "rounds": 0,
+    "argv": [
+      "advise",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--memory",
+      "--task",
+      "--thread",
+      "active",
+      "--prompt-file",
+      "__RUN__/prompt.txt",
+      "--to",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "advise",
+    "context": {
+      "include_memory": false,
+      "include_task": false
+    },
+    "rounds": 0,
+    "argv": [
+      "advise",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--no-memory",
+      "--no-task",
+      "--thread",
+      "active",
+      "--prompt-file",
+      "__RUN__/prompt.txt",
+      "--to",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "ask",
+    "context": {},
+    "rounds": 2,
+    "argv": [
+      "peer-ask",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--thread",
+      "active",
+      "--prompt",
+      "Context probe",
+      "--debate",
+      "2",
+      "--providers",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "ask",
+    "context": {
+      "include_memory": true,
+      "include_task": true
+    },
+    "rounds": 2,
+    "argv": [
+      "peer-ask",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--memory",
+      "--task",
+      "--thread",
+      "active",
+      "--prompt",
+      "Context probe",
+      "--debate",
+      "2",
+      "--providers",
+      "codex:model=fixture"
+    ]
+  },
+  {
+    "kind": "ask",
+    "context": {
+      "include_memory": false,
+      "include_task": false
+    },
+    "rounds": 2,
+    "argv": [
+      "peer-ask",
+      "--repo",
+      "__REPO__",
+      "--artifact-dir",
+      "__RUN__/answers",
+      "--no-memory",
+      "--no-task",
+      "--thread",
+      "active",
+      "--prompt",
+      "Context probe",
+      "--debate",
+      "2",
+      "--providers",
+      "codex:model=fixture"
+    ]
+  }
+]

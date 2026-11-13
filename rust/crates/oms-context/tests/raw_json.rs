@@ -288,3 +288,35 @@ fn experiment_string_dialect_and_bounds() {
     assert!(parse_experiment_json(b"\xef\xbb\xbf{}", 8).is_err());
     assert!(oms_context::parse_json(input).is_err());
 }
+
+#[test]
+fn explicit_python_string_depth_preserves_default_contracts() {
+    use oms_context::{
+        parse_experiment_json, parse_experiment_json_with_depth, parse_session_json,
+    };
+    for depth in [0, 1, 1024, 1025, 9997, 9998] {
+        let raw = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+        assert_eq!(
+            parse_experiment_json_with_depth(raw.as_bytes(), raw.len(), 9997).is_ok(),
+            depth <= 9997
+        );
+        assert_eq!(
+            parse_experiment_json(raw.as_bytes(), raw.len()).is_ok(),
+            depth <= 1024
+        );
+        assert_eq!(parse_json(raw.as_bytes()).is_ok(), depth <= 1024);
+        assert_eq!(parse_session_json(raw.as_bytes()).is_ok(), depth <= 1024);
+    }
+    assert!(parse_experiment_json_with_depth(b"0", 1, 0).is_ok());
+    assert!(parse_experiment_json_with_depth(b"[]", 2, 0).is_err());
+    assert!(parse_experiment_json_with_depth(b"0", 0, 1).is_err());
+    assert!(parse_experiment_json_with_depth(b"", 0, 0).is_err());
+    assert!(parse_experiment_json_with_depth(b"{", 1, 9997).is_err());
+    assert!(parse_experiment_json_with_depth(b"0", 1, 16384).is_ok());
+    assert!(parse_experiment_json_with_depth(b"0", 1, 16385).is_err());
+    assert!(parse_experiment_json_with_depth(b"\xef\xbb\xbf{}", 8, 9997).is_err());
+    let raw = br#"{"a":1,"a":2,"n":NaN,"s":"\ud800"}"#;
+    assert!(parse_experiment_json_with_depth(raw, raw.len(), 9997).is_ok());
+    assert!(parse_experiment_json_with_depth("1".repeat(4300).as_bytes(), 5000, 9997).is_ok());
+    assert!(parse_experiment_json_with_depth("1".repeat(4301).as_bytes(), 5000, 9997).is_err());
+}

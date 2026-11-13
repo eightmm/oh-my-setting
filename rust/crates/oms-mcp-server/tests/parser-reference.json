@@ -1,0 +1,980 @@
+{
+  "reference_sha256": "1316d7197dc9d9a758e60f3afd8ee2f2891ff7b5bb346762f2419b4382c1cefd",
+  "runtime": "CPython 3.12.15",
+  "max_request_bytes": 262144,
+  "max_containers": 9997,
+  "original_adversarial_cases": 43,
+  "cases": [
+    {
+      "name": "depth-0",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":0}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-1",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[0]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-125",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-126",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-127",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-128",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-129",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-500",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "depth-990",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          990
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          990
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "8c6ccecca1b5f7cb6039f33047ae5ab47409f485592849c4b21281573f4ba49d",
+      "request_bytes": 2015
+    },
+    {
+      "name": "depth-994",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          994
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          994
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "0aef740624a0f261c477bf57c269717077e4b8bfdeb392a5847a46c2e1410dc3",
+      "request_bytes": 2023
+    },
+    {
+      "name": "depth-995",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          995
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          995
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "b94de5b92f10b2053391ddd3871e0aae34c24e540b26464c0db0e6b2b6a03b95",
+      "request_bytes": 2025
+    },
+    {
+      "name": "depth-996",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          996
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          996
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "063b38f3a71853c4d81493f1de8c74ddf443c50fab867a8b4d2a69e6ac9f7bdf",
+      "request_bytes": 2027
+    },
+    {
+      "name": "depth-997",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          997
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          997
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "9d655738a67e332583eb5380e707dbedf6c9ac31a6e186d16b0c270f7e3d8017",
+      "request_bytes": 2029
+    },
+    {
+      "name": "depth-998",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          998
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          998
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "eeff210892d1991efd00994db509973dc62a7a0dbd52c1e74ba64be4617607c9",
+      "request_bytes": 2031
+    },
+    {
+      "name": "depth-999",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          999
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          999
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "67c2fa41634526ece0ae71d5a1aa13020ff897d69af01fe2bb2a0a477e3703d2",
+      "request_bytes": 2033
+    },
+    {
+      "name": "depth-1000",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          1000
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1000
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "181b8ae760a884fbff5d16c45376cde1379675726a8357419eeeb94a3e2ee028",
+      "request_bytes": 2035
+    },
+    {
+      "name": "depth-1024",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          1024
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1024
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "c9ffe39609b055890d93acd01f3006b99afabcbaa55a0ff4606efdab305077a1",
+      "request_bytes": 2083
+    },
+    {
+      "name": "depth-1025",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          1025
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1025
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "25681c62dc57d591be2a3bd75c1b3ad13ae036e9d64a80b29ac453042f8bf0fd",
+      "request_bytes": 2085
+    },
+    {
+      "name": "surrogate-id",
+      "request": "{\"id\":1,\"method\":\"ping\",\"id\":\"\\ud800\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32600, \"message\": \"invalid request: invalid id\"}}"
+    },
+    {
+      "name": "surrogate-method",
+      "request": "{\"id\":1,\"method\":\"ping\",\"method\":\"\\ud800\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32600, \"message\": \"invalid request: invalid method\"}}"
+    },
+    {
+      "name": "surrogate-unused",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":\"\\ud800\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "number-NaN",
+      "request": "{\"id\":NaN,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": NaN, \"result\": {}}"
+    },
+    {
+      "name": "number-Infinity",
+      "request": "{\"id\":Infinity,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": Infinity, \"result\": {}}"
+    },
+    {
+      "name": "number--Infinity",
+      "request": "{\"id\":-Infinity,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": -Infinity, \"result\": {}}"
+    },
+    {
+      "name": "number-1e999",
+      "request": "{\"id\":1e999,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": Infinity, \"result\": {}}"
+    },
+    {
+      "name": "number--0.0",
+      "request": "{\"id\":-0.0,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": -0.0, \"result\": {}}"
+    },
+    {
+      "name": "number-1.234567890123456789",
+      "request": "{\"id\":1.234567890123456789,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1.2345678901234567, \"result\": {}}"
+    },
+    {
+      "name": "number-4300digits",
+      "request": "{\"id\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111, \"result\": {}}"
+    },
+    {
+      "name": "number-4301digits",
+      "request": "{\"id\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}"
+    },
+    {
+      "name": "ignored-NaN",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":NaN}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "ignored-Infinity",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":Infinity}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "ignored--Infinity",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":-Infinity}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "ignored-1e999",
+      "request": "{\"id\":1,\"method\":\"ping\",\"unused\":1e999}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "argument-surrogate-repo",
+      "request": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"oms_handoff_show\",\"arguments\":{\"file\":\"../refused\",\"repo\":\"\\ud800\"}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"error: repo must be valid UTF-8 text\"}], \"isError\": true}}"
+    },
+    {
+      "name": "argument-surrogate-file",
+      "request": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"oms_handoff_show\",\"arguments\":{\"file\":\"../refused\",\"file\":\"\\ud800\"}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"error: file must be valid UTF-8 text\"}], \"isError\": true}}"
+    },
+    {
+      "name": "protocol-surrogate",
+      "request": "{\"id\":1,\"method\":\"ping\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"\\ud800\"}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32022, \"message\": \"Unsupported protocol version\", \"data\": {\"supported\": [\"2026-07-28\", \"2025-06-18\", \"2025-03-26\"], \"requested\": \"\\ud800\"}}}"
+    },
+    {
+      "name": "null-id-malformed-method",
+      "request": "{\"id\":null,\"method\":\"\\ud800\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32600, \"message\": \"invalid request: invalid method\"}}"
+    },
+    {
+      "name": "surrogate-ignored-null-id",
+      "request": "{\"id\":null,\"method\":\"ping\",\"unused\":\"\\ud800\"}",
+      "response": ""
+    },
+    {
+      "name": "surrogate-read-resource",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"\\ud800\"}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: '\\\\ud800'\"}}"
+    },
+    {
+      "name": "nonfinite-resource",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":NaN}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: nan\"}}"
+    },
+    {
+      "name": "nonfinite-list-params",
+      "request": "{\"id\":1,\"method\":\"tools/list\",\"params\":NaN}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {\"tools\": [{\"name\": \"oms_inbox\", \"description\": \"Prioritized read-only attention queue derived from all shared harness state, with one exact next command per item.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_repo_state\", \"description\": \"Complete read-only repository control-plane projection, including attempts, approvals, plans, runs, artifacts, CI, and recovery.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_agent_operations\", \"description\": \"Durable lifecycle projection of recent supervised and direct agent attempts (most recent 40), including state, usage, lineage, and budgets.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_approvals\", \"description\": \"Public projection of pending one-time approvals; grant secrets and private hashes are never returned.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_task_state\", \"description\": \"Current task packet of the repository: id, status, last activity, staleness, and whether verification ran.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_fail_ledger\", \"description\": \"Recorded command failures keyed by fingerprint, with resolved state \\u2014 what already failed here, so it is not retried blind. The 30 most recently active fingerprints; the JSON says how many older ones were omitted.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_handoffs\", \"description\": \"Captured session-handoff digests for the repository, newest first (most recent 40, with omitted count; read a digest with oms_handoff_show).\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_handoff_show\", \"description\": \"Content of one captured handoff digest by file name.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"file\": {\"type\": \"string\", \"description\": \"Digest file name or path from oms_handoffs.\"}}, \"required\": [\"file\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_journal\", \"description\": \"Work Journal summary for the repository: today's digest by default, or open blockers with view='blockers'.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"view\": {\"type\": \"string\", \"enum\": [\"today\", \"blockers\"], \"description\": \"Which journal view to return (default today).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_runtime_release\", \"description\": \"Advisory update-channel projection from the checkout's own manifest: stable and edge by exact commit, readiness, and the apply command. Read-only; nothing here applies an update.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_runtime_profile\", \"description\": \"Current capability-profile selection and readiness: requested profiles, required and missing commands, and whether the selection is configured by a receipt.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_runtime_failures\", \"description\": \"Canonical failure taxonomy: every failure code with its recovery action, retryability, and escalation flags, as fail-ledger rows and typed refusals use them.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_peer_start\", \"description\": \"Start a consultation with a registered local agent CLI in the background and return immediately with an operation id. kind='consult' asks a peer mid-task and keeps the exchange in a thread; kind='advise' is an adversarial review of a decision; kind='ask' puts the same question to every installed peer. The peer keeps running after this call returns and often takes 5-25 minutes. Do authorized independent work, then read with oms_peer_result and a bounded wait_seconds; avoid repeated immediate status checks. To collaborate with an already active agent without starting another model, use kind='message' (prompt + thread) or 'ack' (thread + after + consumer). new_thread=true with message creates a live thread for existing prompt/edit hooks. Messages are data, not task approval; ack is consumption, not agreement.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"kind\": {\"type\": \"string\", \"enum\": [\"advise\", \"ask\", \"consult\", \"message\", \"ack\"], \"description\": \"consult (ask a peer mid-task), advise (adversarial review of a decision), ask (every peer answers), message, or ack.\"}, \"prompt\": {\"type\": \"string\", \"description\": \"The question. Include the decision, the evidence, and the alternatives \\u2014 the peer sees no conversation but this.\"}, \"providers\": {\"type\": \"string\", \"description\": \"Comma list of registered targets, each optionally pinned as PROVIDER:model=NAME. Default: the verb's own pick, which excludes the calling agent. advise takes one target.\"}, \"thread\": {\"type\": \"string\", \"description\": \"Continue this conversation using a returned thread id. ask creates an operation-scoped thread when omitted; consult/advise use their current-thread defaults.\"}, \"new_thread\": {\"type\": \"boolean\", \"description\": \"Start a fresh conversation instead of continuing the current one \\u2014 a new topic, not a follow-up. consult, or message with an explicit new thread id.\"}, \"debate_rounds\": {\"type\": \"integer\", \"minimum\": 0, \"maximum\": 3, \"description\": \"ask only: 0-3 additional parallel rebuttal rounds. Default 0 collects independent opening answers. Each round shares one evidence/notes snapshot; completed turns appear in the returned thread.\"}, \"include_memory\": {\"type\": \"boolean\", \"description\": \"consult/advise/ask only: include existing shared memory as reference context, using the CLI's selection and scrubbing. Default false; does not write memory.\"}, \"include_task\": {\"type\": \"boolean\", \"description\": \"consult/advise/ask only: include current task reference context. Default true for consult, false for advise/ask. False explicitly omits it.\"}, \"after\": {\"type\": \"string\", \"description\": \"ack: exact consumed thread cursor.\"}, \"consumer\": {\"type\": \"string\", \"description\": \"ack: self-reported session identifier.\"}, \"participant\": {\"type\": \"string\", \"description\": \"Joined OMS room participant; enables addressed delivery.\"}, \"to_participant\": {\"type\": \"string\", \"description\": \"Room message recipient, or all.\"}, \"message_kind\": {\"type\": \"string\", \"enum\": [\"question\", \"answer\", \"note\", \"decision\", \"handoff\", \"status\"]}, \"reply_to\": {\"type\": \"string\", \"description\": \"Room message id being answered.\"}, \"message_id\": {\"type\": \"string\", \"description\": \"Optional stable room message id for idempotent sends.\"}, \"message_ids\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}, \"minItems\": 1, \"maxItems\": 200, \"description\": \"Room ack: exact consumed message ids; no approval.\"}}, \"required\": [\"kind\"]}, \"annotations\": {\"readOnlyHint\": false, \"destructiveHint\": false, \"idempotentHint\": false, \"openWorldHint\": true}}, {\"name\": \"oms_peer_result\", \"description\": \"Read a consultation started by oms_peer_start. While the peer is still working this returns status='running' with the tail of its log; when it finishes, status='done' with the answer, the exit code, the artifact paths, and the thread id to continue from. status='stalled' means the run's process is gone without an exit: no answer is coming. For an operation, wait_seconds (0-50) waits for completion without repeated model turns; default 0 is an immediate read. Use authorized independent work or a bounded wait, not repeated status-only calls. Reuse the returned cursor as after to omit unchanged answer/log bodies; omit after when you need the full bounded result again. Large answers retain start/end previews with answer_details (normalized answer byte sizes and SHA-256). Use a detail's read_arguments for byte-range retrieval of operation-owned answers; legacy artifacts require direct file access. A digest is not verification. Alternatively pass thread and optional after cursor (no operation) for new complete messages/acks. Retain cursor and page has_more; reading never acknowledges.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"operation\": {\"type\": \"string\", \"description\": \"Operation id returned by oms_peer_start.\"}, \"thread\": {\"type\": \"string\", \"description\": \"Existing thread id for incremental delivery.\"}, \"participant\": {\"type\": \"string\", \"description\": \"Joined OMS room participant; returns only addressed messages, excluding own sends.\"}, \"after\": {\"type\": \"string\", \"description\": \"Cursor from the previous read of this operation or thread; omit for initial delivery.\"}, \"wait_seconds\": {\"type\": \"integer\", \"minimum\": 0, \"maximum\": 50, \"description\": \"Operation only: bounded completion wait; keep below the host tool timeout. Default 0. Expiry never cancels or restarts the peer.\"}, \"answer_ref\": {\"type\": \"string\", \"description\": \"Use returned read_arguments to read one completed answer snapshot; no arbitrary paths. Incompatible with thread, after, or a positive wait_seconds.\"}, \"answer_offset\": {\"type\": \"integer\", \"minimum\": 0, \"maximum\": 8388608, \"description\": \"answer_ref only: UTF-8 byte offset in the normalized answer. Default 0; reuse next_read_arguments for continuation.\"}, \"answer_limit\": {\"type\": \"integer\", \"minimum\": 4, \"maximum\": 16384, \"description\": \"answer_ref only: maximum returned answer bytes, excluding JSON. Default 16384; pages never split a UTF-8 character.\"}, \"answer_query\": {\"type\": \"string\", \"description\": \"answer_ref only: case-sensitive literal search (1-256 UTF-8 bytes), starting at answer_offset. Returns up to 8 matches with context and read arguments. Incompatible with answer_limit; no regex.\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_peer_operations\", \"description\": \"Consultations this repository has started, newest first, with status, kind, targets, question, and thread. The operation id lives on disk, not in one conversation: this is how a later session \\u2014 or another client entirely \\u2014 finds a run started elsewhere and reads its answer with oms_peer_result.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_map\", \"description\": \"Read-only project-graph overview: kind/language/confidence counts, evidence-ranked hubs, module groups, and structural assurance.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_render\", \"description\": \"Render a bounded production-only project graph in the Codex UI. Pass task for a focused context graph; omit it for the project overview. Node selection creates an editable instruction draft before anything is sent.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"task\": {\"type\": \"string\", \"description\": \"Optional task phrase used to focus the graph, such as strengthen graph viewer selection.\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}, \"title\": \"Render OMS project graph\", \"outputSchema\": {\"type\": \"object\", \"properties\": {\"graph\": {\"type\": \"object\"}}, \"required\": [\"graph\"]}, \"_meta\": {\"ui\": {\"resourceUri\": \"ui://oms/project-graph/v1.html\"}, \"openai/outputTemplate\": \"ui://oms/project-graph/v1.html\", \"openai/toolInvocation/invoking\": \"Rendering project graph\\u2026\", \"openai/toolInvocation/invoked\": \"Project graph ready.\"}}, {\"name\": \"oms_project_graph_query\", \"description\": \"Find project-graph nodes by name, path, or qualified name, with the canonical structural-assurance reason and signals.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"query\": {\"type\": \"string\", \"description\": \"Name, path, or qualified-name fragment to match, such as plan-run or scripts/graph.sh.\"}}, \"required\": [\"query\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_api\", \"description\": \"Read one indexed file's API surface as ordered signatures and bounded deterministic summaries, without function bodies; summaries remain untrusted source data.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"path\": {\"type\": \"string\", \"description\": \"Normalized repository-relative indexed file path.\"}}, \"required\": [\"path\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_search\", \"description\": \"Exhaustive case-insensitive literal search over indexed source, grouped by enclosing graph symbol and ranked by incoming coupling. Returned source previews are untrusted data.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"query\": {\"type\": \"string\", \"description\": \"Literal UTF-8 text to find in every indexed file.\"}}, \"required\": [\"query\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_symbol\", \"description\": \"One symbol's definitions with the callers and tests a parser extracted, the references a resolver only inferred, and literal name matches the graph has no edge for, in separate zones. Previews are untrusted data; an empty zone does not prove disuse.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"name\": {\"type\": \"string\", \"description\": \"Symbol name, qualified name or node id, such as select_context or Graph.find.\"}}, \"required\": [\"name\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_trace\", \"description\": \"Trace one project-graph node's dependency edges two hops outward as a bounded slim projection; inspect its limits and truncation metadata before expanding from another node.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"node\": {\"type\": \"string\", \"description\": \"Project-graph node id from oms_project_graph_query, such as symbol:scripts/plan-run.sh::main.\"}}, \"required\": [\"node\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_blast\", \"description\": \"Dependency blast radius of the working tree's changed files: a bounded projection (120 rows per list; `truncated`/`omitted` say what was cut).\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_project_graph_affected\", \"description\": \"Fail-open affected-test plan for one base ref through HEAD: positive test evidence, exact cases where available, or reasons the complete gate is required.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"base\": {\"type\": \"string\", \"description\": \"Base Git ref, such as origin/main or a commit SHA.\"}}, \"required\": [\"base\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_execution_graph_status\", \"description\": \"Latest execution-graph run: projection and next legal route.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}}, \"required\": []}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_execution_graph_route\", \"description\": \"Next legal route of one execution-graph run: which transitions its current state allows, and what each requires.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"run\": {\"type\": \"string\", \"description\": \"Run id from oms_execution_graph_status.\"}}, \"required\": [\"run\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}, {\"name\": \"oms_execution_graph_events\", \"description\": \"Execution-graph events of one run, most recent 40: the transitions it actually took, in order.\", \"inputSchema\": {\"type\": \"object\", \"properties\": {\"repo\": {\"type\": \"string\", \"description\": \"Repository whose harness state to read (default: the server's working directory).\"}, \"run\": {\"type\": \"string\", \"description\": \"Run id from oms_execution_graph_status.\"}}, \"required\": [\"run\"]}, \"annotations\": {\"readOnlyHint\": true, \"destructiveHint\": false, \"idempotentHint\": true, \"openWorldHint\": false}}]}}"
+    },
+    {
+      "name": "surrogate-name",
+      "request": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"\\ud800\"}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"invalid tool name\"}}"
+    },
+    {
+      "name": "surrogate-task-id",
+      "request": "{\"id\":1,\"method\":\"tasks/cancel\",\"params\":{\"taskId\":\"\\ud800\",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{\"extensions\":{\"io.modelcontextprotocol/tasks\":{}}}}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"taskId must be an operation id returned by oms_peer_start\"}}"
+    },
+    {
+      "name": "array-1025",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          1025
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1025
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "25681c62dc57d591be2a3bd75c1b3ad13ae036e9d64a80b29ac453042f8bf0fd",
+      "request_bytes": 2085
+    },
+    {
+      "name": "array-9996",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          9996
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          9996
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "56f31f28309ab2d2077d12f415115155b69d20ccf64cf1441ab1888d5cfdc049",
+      "request_bytes": 20027
+    },
+    {
+      "name": "array-9997",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[",
+          9997
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          9997
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "424b4d9c39a0cb03a522d180a75fc1102e7d66ca62dfb08d0023e5402082bc3f",
+      "request_bytes": 20029
+    },
+    {
+      "name": "object-1025",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "{\"x\":",
+          1025
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "}",
+          1025
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "20368e4f66a3f58e274a020a8238b9beea9c3d22f80a29fbd753665305d3304e",
+      "request_bytes": 6185
+    },
+    {
+      "name": "object-9996",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "{\"x\":",
+          9996
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "}",
+          9996
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "7c0ae64ab77f57a571bee442f0393055d561f73989e5d9c200c7efe00308faff",
+      "request_bytes": 60011
+    },
+    {
+      "name": "object-9997",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "{\"x\":",
+          9997
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "}",
+          9997
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "b823016556b095810fbb246a35c88327559f5de25e687d1d296ef856561c823f",
+      "request_bytes": 60017
+    },
+    {
+      "name": "mixed-1025",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[{\"x\":",
+          512
+        ],
+        [
+          "[",
+          1
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1
+        ],
+        [
+          "}]",
+          512
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "67b4c05e6bc50cabc2e5045b453329f092346a5ae815d5f4c23924af30e5a328",
+      "request_bytes": 4133
+    },
+    {
+      "name": "mixed-9996",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[{\"x\":",
+          4998
+        ],
+        [
+          "[",
+          0
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          0
+        ],
+        [
+          "}]",
+          4998
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "826c3a088cf3b4e268c51bb7bb984ec43d589bbfd940035ac22fc205f8d503a3",
+      "request_bytes": 40019
+    },
+    {
+      "name": "mixed-9997",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"ping\",\"unused\":",
+          1
+        ],
+        [
+          "[{\"x\":",
+          4998
+        ],
+        [
+          "[",
+          1
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1
+        ],
+        [
+          "}]",
+          4998
+        ],
+        [
+          "}",
+          1
+        ]
+      ],
+      "request_sha256": "99f3bca6dc24cb1ff71e909b140d62d0cf1f169821edb07e0087cf22c91d0092",
+      "request_bytes": 40021
+    },
+    {
+      "name": "bom",
+      "request": "\ufeff{\"id\":1,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}"
+    },
+    {
+      "name": "duplicate",
+      "request": "{\"id\":2,\"id\":1,\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "empty",
+      "request": "",
+      "response": ""
+    },
+    {
+      "name": "null",
+      "request": "null",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32600, \"message\": \"invalid request: expected object\"}}"
+    },
+    {
+      "name": "zero",
+      "request": "0",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32600, \"message\": \"invalid request: expected object\"}}"
+    },
+    {
+      "name": "bad",
+      "request": "{",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}"
+    },
+    {
+      "name": "utf8",
+      "request": "{\"id\":\"\ud83d\ude42\",\"method\":\"ping\"}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": \"\\ud83d\\ude42\", \"result\": {}}"
+    },
+    {
+      "name": "ignored-key",
+      "request": "{\"id\":1,\"method\":\"ping\",\"\\ud800\":1}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"result\": {}}"
+    },
+    {
+      "name": "surrogate-query",
+      "request": "{\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"oms_peer_result\",\"arguments\":{\"answer_ref\":\"a.md:0000000000000000000000000000000000000000000000000000000000000000\",\"answer_query\":\"\\ud800\"}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"invalid or oversized request field\"}}"
+    },
+    {
+      "name": "repr-array-1099",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\"}}"
+    },
+    {
+      "name": "repr-array-1100",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\"}}"
+    },
+    {
+      "name": "repr-object-1099",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': 0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}\"}}"
+    },
+    {
+      "name": "repr-object-1100",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":{\"x\":0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': {'x': 0}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}\"}}"
+    },
+    {
+      "name": "repr-mixed-1099",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[0]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [0]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]\"}}"
+    },
+    {
+      "name": "repr-mixed-1100",
+      "request": "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":[{\"x\":0}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}",
+      "response": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': [{'x': 0}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]\"}}"
+    },
+    {
+      "name": "repr-array-bound",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":",
+          1
+        ],
+        [
+          "[",
+          9995
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          9995
+        ],
+        [
+          "}}",
+          1
+        ]
+      ],
+      "request_sha256": "def0c6a6b5dd898a4e46520dd39157ca7a991871464070762308a9111561bf07",
+      "request_bytes": 20043,
+      "response_chunks": [
+        [
+          "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: ",
+          1
+        ],
+        [
+          "[",
+          9995
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          9995
+        ],
+        [
+          "\"}}",
+          1
+        ]
+      ],
+      "response_sha256": "1f577cc223a4b5397cdf57e89fb2af309772ef921f36970ab0469a7a77c24a6c",
+      "response_bytes": 20078
+    },
+    {
+      "name": "repr-object-bound",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":",
+          1
+        ],
+        [
+          "{\"x\":",
+          9995
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "}",
+          9995
+        ],
+        [
+          "}}",
+          1
+        ]
+      ],
+      "request_sha256": "e8fcca22fa544e0a5c286c6a8355cfff8bcdb5a86d0408197a3bd146a4b3cb47",
+      "request_bytes": 60023,
+      "response_chunks": [
+        [
+          "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: ",
+          1
+        ],
+        [
+          "{'x': ",
+          9995
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "}",
+          9995
+        ],
+        [
+          "\"}}",
+          1
+        ]
+      ],
+      "response_sha256": "07ae28b316b6c5f4992328922f7c31b4341f174164d3c0f6168c8699f4f79191",
+      "response_bytes": 70053
+    },
+    {
+      "name": "repr-mixed-bound",
+      "request_chunks": [
+        [
+          "{\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":",
+          1
+        ],
+        [
+          "[{\"x\":",
+          4997
+        ],
+        [
+          "[",
+          1
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1
+        ],
+        [
+          "}]",
+          4997
+        ],
+        [
+          "}}",
+          1
+        ]
+      ],
+      "request_sha256": "3656cd376e8b9babede7d4099e6d9e1273ae031c082b7de9edf7d88dba659f48",
+      "request_bytes": 40031,
+      "response_chunks": [
+        [
+          "{\"jsonrpc\": \"2.0\", \"id\": 1, \"error\": {\"code\": -32602, \"message\": \"unknown resource: ",
+          1
+        ],
+        [
+          "[{'x': ",
+          4997
+        ],
+        [
+          "[",
+          1
+        ],
+        [
+          "0",
+          1
+        ],
+        [
+          "]",
+          1
+        ],
+        [
+          "}]",
+          4997
+        ],
+        [
+          "\"}}",
+          1
+        ]
+      ],
+      "response_sha256": "cfbb1a749dfe26c6cea33033e790409621b96ad89b173e1af83c7201b6c3ffc7",
+      "response_bytes": 45063
+    }
+  ],
+  "python_311_probe": {
+    "runtime": "Python 3.11.15",
+    "depth_1025": "{\"jsonrpc\": \"2.0\", \"id\": null, \"error\": {\"code\": -32700, \"message\": \"parse error\"}}"
+  },
+  "fixture_encoding": "UTF-8; repeated chunks expand byte-for-byte to frozen requests; SHA-256 binds each expansion",
+  "reference_source_revision": "06fa2cbe015681600633944bcf71e94f60285c83"
+}

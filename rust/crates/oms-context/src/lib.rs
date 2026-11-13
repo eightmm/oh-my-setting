@@ -76,6 +76,7 @@ fn adapt(
     input: &[u8],
     max_bytes: usize,
     session: bool,
+    depth_limit: usize,
 ) -> Result<(Vec<u8>, Vec<Leaf>, usize), &'static str> {
     if input.len() > max_bytes {
         return Err("context manifest exceeds the read limit");
@@ -142,7 +143,7 @@ fn adapt(
             if matches!(b, b'[' | b'{') {
                 depth += 1;
                 max_depth = max_depth.max(depth);
-                if depth > 1024 {
+                if depth > depth_limit {
                     return Err(INVALID);
                 }
             }
@@ -294,8 +295,29 @@ pub fn parse_json(input: &[u8]) -> Result<Json, &'static str> {
 pub fn parse_experiment_json(input: &[u8], limit: usize) -> Result<Json, &'static str> {
     parse_mode(input, true, limit)
 }
+/// Parse the Python string dialect with an explicit container-depth budget.
+/// Existing entrypoints retain 1024. Zero allows scalars only; the maximum
+/// supported budget is 16384, keeping decoder stack reservations bounded.
+pub fn parse_experiment_json_with_depth(
+    input: &[u8],
+    limit: usize,
+    max_depth: usize,
+) -> Result<Json, &'static str> {
+    if max_depth > 16384 {
+        return Err(INVALID);
+    }
+    parse_mode_depth(input, true, limit, max_depth)
+}
 fn parse_mode(input: &[u8], session: bool, max_bytes: usize) -> Result<Json, &'static str> {
-    let (adapted, leaves, depth) = adapt(input, max_bytes, session)?;
+    parse_mode_depth(input, session, max_bytes, 1024)
+}
+fn parse_mode_depth(
+    input: &[u8],
+    session: bool,
+    max_bytes: usize,
+    depth_limit: usize,
+) -> Result<Json, &'static str> {
+    let (adapted, leaves, depth) = adapt(input, max_bytes, session, depth_limit)?;
     if depth <= 128 {
         return decode(&adapted, &leaves, session);
     }
@@ -303,7 +325,7 @@ fn parse_mode(input: &[u8], session: bool, max_bytes: usize) -> Result<Json, &'s
     let _guard = DEEP_PARSE.lock().unwrap_or_else(|e| e.into_inner());
     std::thread::scope(|scope| {
         std::thread::Builder::new()
-            .stack_size(16 * 1024 * 1024)
+            .stack_size((16 * 1024 * 1024).max(depth * 16 * 1024))
             .spawn_scoped(scope, || decode(&adapted, &leaves, session))
             .map_err(|_| "parser infrastructure failure")?
             .join()

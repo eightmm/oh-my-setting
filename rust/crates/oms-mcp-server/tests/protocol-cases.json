@@ -1,0 +1,2100 @@
+[
+  {
+    "request": null,
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: expected object"
+      }
+    }
+  },
+  {
+    "request": false,
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: expected object"
+      }
+    }
+  },
+  {
+    "request": 1,
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: expected object"
+      }
+    }
+  },
+  {
+    "request": "text",
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: expected object"
+      }
+    }
+  },
+  {
+    "request": [],
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: expected object"
+      }
+    }
+  },
+  {
+    "request": {},
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: method must be a string"
+      }
+    }
+  },
+  {
+    "request": {
+      "method": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: method must be a string"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: method must be a string"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": true,
+      "method": "ping"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: invalid id"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": {},
+      "method": "ping"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: invalid id"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": [],
+      "method": "ping"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: invalid id"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "method": "ping"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": null,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: id is too long"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32600,
+        "message": "invalid request: method is too long"
+      }
+    }
+  },
+  {
+    "request": {
+      "method": "ping"
+    },
+    "expected": null
+  },
+  {
+    "request": {
+      "id": null,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2026-07-28"
+      }
+    },
+    "expected": null
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "server/discover",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete",
+        "supportedVersions": [
+          "2026-07-28",
+          "2025-06-18",
+          "2025-03-26"
+        ],
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          },
+          "extensions": {
+            "io.modelcontextprotocol/tasks": {}
+          }
+        },
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "oh-my-setting",
+            "version": "fixture"
+          }
+        },
+        "ttlMs": 300000,
+        "cacheScope": "private"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "server/discover",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "server/discover",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "server/discover",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "server/discover",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "server/discover",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete",
+        "supportedVersions": [
+          "2026-07-28",
+          "2025-06-18",
+          "2025-03-26"
+        ],
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          },
+          "extensions": {
+            "io.modelcontextprotocol/tasks": {}
+          }
+        },
+        "_meta": {
+          "io.modelcontextprotocol/serverInfo": {
+            "name": "oh-my-setting",
+            "version": "fixture"
+          }
+        },
+        "ttlMs": 300000,
+        "cacheScope": "private"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "oh-my-setting",
+          "version": "fixture"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "oh-my-setting",
+          "version": "fixture"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/list",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resources": [
+          {
+            "uri": "ui://oms/project-graph/v1.html",
+            "name": "oms-project-graph",
+            "title": "OMS Project Graph",
+            "description": "Interactive bounded project graph with editable Codex instruction drafts.",
+            "mimeType": "text/html;profile=mcp-app"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/list",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/list",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/list",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/list",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/list",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resources": [
+          {
+            "uri": "ui://oms/project-graph/v1.html",
+            "name": "oms-project-graph",
+            "title": "OMS Project Graph",
+            "description": "Interactive bounded project graph with editable Codex instruction drafts.",
+            "mimeType": "text/html;profile=mcp-app"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: None"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid params: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/get"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/get"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/get"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/get"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/get"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/get"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/update",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/update"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/update",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/update"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/update",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/update"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/update",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/update"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/update",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/update"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/update",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/update"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/cancel",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/cancel"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/cancel",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/cancel"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/cancel",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/cancel"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/cancel",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/cancel"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/cancel",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/cancel"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/cancel",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/cancel"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/result",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/result"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/result",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/result"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/result",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/result"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/result",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/result"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/result",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/result"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/result",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: tasks/result"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/templates/list",
+      "params": null
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: resources/templates/list"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/templates/list",
+      "params": false
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: resources/templates/list"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/templates/list",
+      "params": 7
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: resources/templates/list"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/templates/list",
+      "params": "text"
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: resources/templates/list"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/templates/list",
+      "params": []
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: resources/templates/list"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/templates/list",
+      "params": {}
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32601,
+        "message": "method not found: resources/templates/list"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": null
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: None"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": false
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: False"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": 7
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: 7"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": "text"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: 'text'"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": []
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: []"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": {}
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: {}"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": "a'b"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: \"a'b\""
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "resources/read",
+      "params": {
+        "uri": "a\u001cb"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown resource: 'a\\x1cb'"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": null
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": false
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": 7
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": []
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": {}
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "unknown"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "unknown tool: 'unknown'"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid tool name"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "oms_inbox",
+        "arguments": false
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid arguments: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "oms_inbox",
+        "arguments": 7
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid arguments: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "oms_inbox",
+        "arguments": "text"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid arguments: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "oms_inbox",
+        "arguments": []
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "invalid arguments: expected object"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "unknown"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "oh-my-setting",
+          "version": "fixture"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": null
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {}
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "future"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+        "data": {
+          "supported": [
+            "2026-07-28",
+            "2025-06-18",
+            "2025-03-26"
+          ],
+          "requested": "future"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": 7
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2026-07-28"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete",
+        "protocolVersion": "2026-07-28",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          },
+          "extensions": {
+            "io.modelcontextprotocol/tasks": {}
+          }
+        },
+        "serverInfo": {
+          "name": "oh-my-setting",
+          "version": "fixture"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": null
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {}
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "future"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+        "data": {
+          "supported": [
+            "2026-07-28",
+            "2025-06-18",
+            "2025-03-26"
+          ],
+          "requested": "future"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": 7
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-03-26"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "oh-my-setting",
+          "version": "fixture"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": null
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {}
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "future"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+        "data": {
+          "supported": [
+            "2026-07-28",
+            "2025-06-18",
+            "2025-03-26"
+          ],
+          "requested": "future"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": 7
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": "2025-06-18"
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          },
+          "resources": {
+            "subscribe": false,
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "oh-my-setting",
+          "version": "fixture"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": null
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {}
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "resultType": "complete"
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "future"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32022,
+        "message": "Unsupported protocol version",
+        "data": {
+          "supported": [
+            "2026-07-28",
+            "2025-06-18",
+            "2025-03-26"
+          ],
+          "requested": "future"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "ping",
+      "params": {
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": 7
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {}
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": {
+        "taskId": "../invalid",
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32021,
+        "message": "missing required client capability: io.modelcontextprotocol/tasks",
+        "data": {
+          "requiredCapabilities": {
+            "extensions": {
+              "io.modelcontextprotocol/tasks": {}
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "id": 1,
+      "method": "tasks/get",
+      "params": {
+        "taskId": "../invalid",
+        "_meta": {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {
+            "extensions": {
+              "io.modelcontextprotocol/tasks": {}
+            }
+          }
+        }
+      }
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "error": {
+        "code": -32602,
+        "message": "taskId must be an operation id returned by oms_peer_start"
+      }
+    }
+  }
+]

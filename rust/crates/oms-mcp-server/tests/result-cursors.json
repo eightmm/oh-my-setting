@@ -1,0 +1,108 @@
+[
+  {
+    "payload": {
+      "status": "running",
+      "log_tail": "근거🙂",
+      "elapsed_seconds": 4
+    },
+    "after": "",
+    "expected": {
+      "status": "running",
+      "log_tail": "근거🙂",
+      "elapsed_seconds": 4,
+      "cursor": "result:7f2c69a0854b0108aefe8121c3a2e1e038842d9192287d0d963153413e5362b7",
+      "unchanged": false
+    }
+  },
+  {
+    "payload": {
+      "status": "running",
+      "log_tail": "근거🙂",
+      "elapsed_seconds": 999
+    },
+    "after": "result:7f2c69a0854b0108aefe8121c3a2e1e038842d9192287d0d963153413e5362b7",
+    "expected": {
+      "status": "running",
+      "elapsed_seconds": 999,
+      "next": "Visible result unchanged. Do not immediately recheck; omit after to retrieve the body again.",
+      "cursor": "result:7f2c69a0854b0108aefe8121c3a2e1e038842d9192287d0d963153413e5362b7",
+      "unchanged": true
+    }
+  },
+  {
+    "payload": {
+      "status": "done",
+      "answer": "HEAD\nTAIL",
+      "artifacts": [
+        "seat.md"
+      ],
+      "exit": 0
+    },
+    "after": "",
+    "expected": {
+      "status": "done",
+      "answer": "HEAD\nTAIL",
+      "artifacts": [
+        "seat.md"
+      ],
+      "exit": 0,
+      "cursor": "result:de75ec2a8525c959de4e0dd298666fe25e95fa066103f73381e7421b747e90b6",
+      "unchanged": false
+    }
+  },
+  {
+    "payload": {
+      "status": "done",
+      "answer": "HEAD\nTAIL",
+      "artifacts": [
+        "seat.md"
+      ],
+      "exit": 0,
+      "elapsed_seconds": 999
+    },
+    "after": "result:de75ec2a8525c959de4e0dd298666fe25e95fa066103f73381e7421b747e90b6",
+    "expected": {
+      "status": "done",
+      "artifacts": [
+        "seat.md"
+      ],
+      "exit": 0,
+      "elapsed_seconds": 999,
+      "next": "Visible result unchanged. Do not immediately recheck; omit after to retrieve the body again.",
+      "cursor": "result:de75ec2a8525c959de4e0dd298666fe25e95fa066103f73381e7421b747e90b6",
+      "unchanged": true
+    }
+  },
+  {
+    "payload": {
+      "status": "stalled",
+      "log_tail": "x",
+      "cancellation_requested": true
+    },
+    "after": "",
+    "expected": {
+      "status": "stalled",
+      "log_tail": "x",
+      "cancellation_requested": true,
+      "cursor": "result:40ded878ff579c74ff1440eb02bd3b6e7f141b2dd5b773bb16c01f803051fd71",
+      "unchanged": false
+    }
+  },
+  {
+    "payload": {
+      "status": "stalled",
+      "log_tail": "x",
+      "cancellation_requested": true,
+      "elapsed_seconds": 999
+    },
+    "after": "result:40ded878ff579c74ff1440eb02bd3b6e7f141b2dd5b773bb16c01f803051fd71",
+    "expected": {
+      "status": "stalled",
+      "cancellation_requested": true,
+      "elapsed_seconds": 999,
+      "next": "Visible result unchanged. Do not immediately recheck; omit after to retrieve the body again.",
+      "cursor": "result:40ded878ff579c74ff1440eb02bd3b6e7f141b2dd5b773bb16c01f803051fd71",
+      "unchanged": true
+    }
+  }
+]
