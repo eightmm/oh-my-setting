@@ -1,0 +1,33 @@
+Usage: slurm-submit.sh [--key KEY] [--dry-run] [--force-resubmit --reason TEXT] -- sbatch ARGS... SCRIPT
+
+Run `sbatch ARGS... SCRIPT` once per request key and record it in
+.oms/slurm-submits.jsonl (append-only, under the repo file lock).
+
+Default key: sha256 over the job script's content digest, the sbatch
+arguments in order, the repo-relative working directory and the current
+commit (HEAD). --key supplies your own (for example a sweep cell id);
+SCRIPT is then optional (--wrap jobs).
+
+Rows: `intent` (key, time, script path and digest, argument digest; raw
+arguments only when they pass the sensitive scan) is written before sbatch
+runs; then `submitted` (job id) or `failed` (exit code). A failed submission
+does not block a retry.
+
+A repeat of a submitted key prints the earlier job id and time and how to
+check it (oms run-reconcile list), runs nothing, and exits 3. An intent with
+no result (OMS died, or a concurrent submit is running) prints `unknown: an
+earlier submission with this key may have gone through` and exits 3. Both can
+be overridden with --force-resubmit --reason TEXT (recorded).
+
+Unless a comment is already set (command line or #SBATCH --comment), sbatch
+gets `--comment oms-key=<12 chars>` so an unknown attempt can be found with
+squeue/sacct.
+
+--dry-run prints the key and what would run; nothing is run or written.
+oms slurm-lint runs first as advice; its warnings never block.
+
+Duplicate detection inside this repository's .oms only: not exactly-once
+across machines or clones.
+
+Exit: 0 submitted (or dry run), 3 refused as duplicate/unknown, 2 usage,
+otherwise sbatch's own exit status (3 is reported as 1).

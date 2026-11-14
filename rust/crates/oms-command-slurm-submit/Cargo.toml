@@ -1,0 +1,22 @@
+[package]
+name = "oms-command-slurm-submit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[workspace]
+
+[dependencies]
+oms-command-slurm-lint = { path = "../oms-command-slurm-lint" }
+oms-context = { path = "../oms-context" }
+oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+rustix = { version = "=1.1.6", features = ["fs", "process", "termios"] }
+regex = "=1.13.1"
+
+[lints.rust]
+unsafe_code = "forbid"
