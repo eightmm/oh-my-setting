@@ -632,6 +632,32 @@ pub fn dispatch(
             serde_json::to_string(&context).map_err(Error::new)?.into(),
         ));
     }
+    if request.continue_task.is_some() {
+        let parents = crate::control::lineage(
+            repo,
+            array(&attempts),
+            request.main_attempt.as_deref().unwrap(),
+            service,
+            stop,
+            false,
+        )?;
+        let previous = array(&attempts)
+            .iter()
+            .filter(|v| {
+                v["task_id"] == request.task_id
+                    && v["refs"]["panel_role"] == "worker"
+                    && parents.contains(&text(v, "parent_attempt_id"))
+            })
+            .max_by_key(|v| (text(v, "created_at"), text(v, "attempt_id")))
+            .ok_or_else(|| Error::new("continuation predecessor unavailable"))?;
+        execution_request
+            .environment
+            .retain(|(name, _)| name != "OMS_PANEL_CONTINUES");
+        execution_request.environment.push((
+            "OMS_PANEL_CONTINUES".into(),
+            text(previous, "attempt_id").into(),
+        ));
+    }
     if let Some(main) = &request.main_attempt {
         execution_request
             .environment
@@ -699,16 +725,23 @@ pub fn continuation(
         .main_attempt
         .as_deref()
         .ok_or_else(|| Error::new("continue requires the owning main attempt"))?;
-    let earlier = array(attempts)
+    let parents = crate::control::lineage(repo, array(attempts), main, service, stop, false)?;
+    let mut earlier = array(attempts)
         .iter()
         .filter(|v| {
             v["task_id"] == request.task_id
-                && v["parent_attempt_id"] == main
+                && parents.contains(&text(v, "parent_attempt_id"))
                 && v["refs"]["panel_role"] == "worker"
         })
         .collect::<Vec<_>>();
+    earlier.sort_by_key(|v| (text(v, "created_at"), text(v, "attempt_id")));
     require(
-        !earlier.is_empty() && earlier.iter().all(|v| v["terminal"] == true),
+        !earlier.is_empty()
+            && earlier.iter().all(|v| {
+                v["terminal"] == true
+                    || (v["state"] == "review"
+                        && crate::control::stopped(repo, v, array(attempts)).is_ok())
+            }),
         "prior worker absent or termination unconfirmed",
     )?;
     let last = earlier[earlier.len() - 1];
@@ -735,7 +768,7 @@ pub fn continuation(
             Some(meta)
         } else {
             require(
-                crate::salvage::empty_provenance(&store, &request.task_id, &attempt)?,
+                crate::salvage::verified_empty(repo, last, array(attempts), service, stop)?,
                 "stopped write work is not transferred by --continue; salvage and inspect the stopped attempt first",
             )?;
             None

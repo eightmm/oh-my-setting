@@ -35,6 +35,13 @@ fn preflight<S: Services + ?Sized>(
             && main["terminal"] == false,
         "accept requires the current owning main",
     )?;
+    let parents = crate::control::swap_parents(
+        repo,
+        array(&attempts),
+        &request.main_attempt_id,
+        service,
+        stop,
+    )?;
     let participant = text(&main["refs"], "panel_room_participant");
     let room_id = text(&main["refs"], "panel_room_id");
     crate::identifier(&participant)?;
@@ -64,7 +71,9 @@ fn preflight<S: Services + ?Sized>(
     require(
         task["id"] == request.task_id
             && task["claimed_by_participant"] == participant
-            && task["provider"] == request.owner
+            && array(&attempts).iter().any(|v| {
+                parents.contains(&text(v, "attempt_id")) && v["provider"] == task["provider"]
+            })
             && lease
                 .strip_prefix("lease_")
                 .is_some_and(|v| crate::hex(v, 32))
@@ -74,7 +83,8 @@ fn preflight<S: Services + ?Sized>(
         "plan task owner/lease does not match the current main",
     )?;
     require(
-        ["claimed", "running"].contains(&text(&task, "state").as_str()),
+        ["claimed", "running"].contains(&text(&task, "state").as_str())
+            || (applied && ["review", "done"].contains(&text(&task, "state").as_str())),
         "accept requires a claimed/running task; reconcile prior acceptance before retry",
     )?;
     require(
@@ -87,25 +97,40 @@ fn preflight<S: Services + ?Sized>(
         .filter(|v| v["task_id"] == request.task_id && v["tool"] != "panel-main")
         .collect::<Vec<_>>();
     require(
-        !related.is_empty() && related.iter().all(|v| v["terminal"] == true),
+        !related.is_empty()
+            && related.iter().all(|v| {
+                v["terminal"] == true
+                    || (v["state"] == "review"
+                        && crate::control::stopped(repo, v, array(&attempts)).is_ok())
+            }),
         "task has live or unconfirmed attempts",
     )?;
-    let workers = related
-        .iter()
-        .filter(|v| v["refs"]["panel_role"] == "worker" && v["refs"]["panel_access"] == "write")
-        .collect::<Vec<_>>();
+    let rows = index_rows(repo)?;
+    let selection = crate::control::select(
+        repo,
+        related
+            .iter()
+            .filter(|v| v["refs"]["panel_role"] == "worker" && v["refs"]["panel_access"] == "write")
+            .map(|v| (*v).clone())
+            .collect(),
+        array(&attempts),
+        &rows,
+        Some(&request.main_attempt_id),
+        service,
+        stop,
+    )?;
+    let workers = selection.workers;
     require(
         workers.len() == 1,
         "accept requires one unique worker candidate for this task",
     )?;
-    let worker = *workers[0];
+    let worker = &workers[0];
     require(
-        worker["parent_attempt_id"] == request.main_attempt_id
+        parents.contains(&text(worker, "parent_attempt_id"))
             && worker["refs"]["panel_lease_id"] == lease
             && worker["refs"]["panel_purpose"] != "investigate",
         "candidate worker is not bound to this main/lease or is report-only",
     )?;
-    let rows = index_rows(repo)?;
     let candidates = rows
         .iter()
         .filter(|v| {
@@ -195,14 +220,7 @@ fn preflight<S: Services + ?Sized>(
         })
         .collect::<Result<Vec<_>>>()?;
     require(!scopes.is_empty(), "worker scope declaration is empty")?;
-    let allowed = array(&task["allowed_paths"])
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| Error::new("malformed allowed paths"))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let allowed = crate::control::effective_paths(repo, &task, array(&attempts))?;
     let forbidden = array(&task["forbidden_paths"])
         .iter()
         .map(|v| {
@@ -228,7 +246,7 @@ fn preflight<S: Services + ?Sized>(
     }
     let gate = serde_json::json!({"event_id":review["event_id"],"patch_sha256":candidate["patch_sha256"],"exit":review["exit"],"gate_verify_exit":review["review"]["gate_verify_exit"],"seat_verdicts":seats.iter().map(|v| &v["verdict"]).collect::<Vec<_>>()});
     Ok(
-        serde_json::json!({"task":task,"candidate":candidate,"worker":{"attempt_id":worker["attempt_id"],"task_id":worker["task_id"],"parent_attempt_id":worker["parent_attempt_id"],"refs":worker["refs"]},"review_gate":gate,"allowed_paths":allowed}),
+        serde_json::json!({"task":task,"candidate":candidate,"worker":{"attempt_id":worker["attempt_id"],"task_id":worker["task_id"],"parent_attempt_id":worker["parent_attempt_id"],"refs":worker["refs"]},"review_gate":gate,"allowed_paths":allowed,"superseded_attempts":selection.superseded}),
     )
 }
 fn recheck<S: Services + ?Sized>(
@@ -472,6 +490,7 @@ pub(crate) fn run<S: Services + ?Sized>(
         &format!("panel-accept-{}", &digest[..24]),
         Duration::from_secs(10),
     )?;
+    crate::control::review_readers(repo, &execution)?;
     let base = crate::git::text(service, &execution, &["rev-parse", "HEAD"], stop)?;
     require(
         crate::git::bytes(
@@ -527,7 +546,7 @@ pub(crate) fn run<S: Services + ?Sized>(
             .is_none(),
         "acceptance recovery record exists; preserve state, inspect it and never reapply blindly",
     )?;
-    let mut recovery = serde_json::json!({"schema":1,"task_id":request.task_id,"execution_repo":execution,"snapshot":snapshot,"base":base,"tree":tree,"stage":"application","commit":null});
+    let mut recovery = serde_json::json!({"schema":1,"task_id":request.task_id,"execution_repo":execution,"snapshot":snapshot,"base":base,"tree":tree,"stage":"application","commit":null,"message":request.message,"verify":request.verify});
     tx.write_json(Path::new(&record_path), &recovery, true, MAX_RESULT)?;
     let outcome = (|| -> Result<Value> {
         let fence = serde_json::json!({"snapshot":snapshot,"owner":request.owner,"task_id":request.task_id,"base":base});
@@ -609,54 +628,598 @@ pub(crate) fn run<S: Services + ?Sized>(
             "committed tree or HEAD differs from reviewed application",
         )?;
         recheck(repo, request, &snapshot, service, stop)?;
-        let record = serde_json::json!({"schema":1,"task_id":request.task_id,"plan_id":snapshot["task"]["plan_id"],"lease_id":snapshot["task"]["lease_id"],"candidate_event_id":candidate["event_id"],"candidate_attempt_id":snapshot["worker"]["attempt_id"],"patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],"commit":commit,"tree":tree,"base":base,"review_gate":snapshot["review_gate"]});
-        let mut review = ExecutionRequest::new(
-            args(&[
-                "review",
-                "--id",
-                &request.task_id,
-                "--lease-id",
-                &text(&snapshot["task"], "lease_id"),
-                "--artifact",
-                &text(candidate, "artifact"),
-                "--patch",
-                &text(candidate, "patch"),
-            ]),
-            &execution,
-        );
-        review.environment.push((
-            "OMS_PANEL_ACCEPT_RECORD_JSON".into(),
-            serde_json::to_string(&record).map_err(Error::new)?.into(),
-        ));
-        service
-            .command_context(NativeCommand::Plan, &review, stop)?
-            .success()?;
+        complete(
+            repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
+        )?;
         recovery["stage"] = "recorded".into();
-        recovery["acceptance"] = record;
         tx.write_json(Path::new(&record_path), &recovery, false, MAX_RESULT)?;
-        let mut registration = oms_command_telemetry::store::AppendArtifactRequest {
-            kind: "panel-accept".into(),
-            provider: request.owner.clone(),
-            patch: Some(store.repo().join(text(candidate, "patch"))),
-            task_id: Some(request.task_id.clone()),
-            inherit_env: false,
-            ..Default::default()
-        };
-        for (name, value) in [
-            ("OMS_INDEX_PLAN_ID", text(&snapshot["task"], "plan_id")),
-            (
-                "OMS_INDEX_ATTEMPT_ID",
-                text(&snapshot["worker"], "attempt_id"),
-            ),
-            ("OMS_INDEX_BASE_SHA", commit.clone()),
-        ] {
-            registration.env_overrides.insert(name.into(), value);
-        }
-        oms_command_telemetry::store::append_artifact_index(repo, &registration, stop)
-            .map_err(crate::services::telemetry_error)?;
         Ok(
             serde_json::json!({"sha":commit,"task_id":request.task_id,"patch_sha256":candidate["patch_sha256"]}),
         )
     })();
     outcome.map_err(|e| Error { publication_uncertain:true,..Error::new(format!("accept {} failed; preserve state, never reapply blindly; reconcile {record_path} and patch-land --recover: {}",text(&recovery,"stage"),e.message)) })
+}
+
+fn complete<S: Services + ?Sized>(
+    repo: &Path,
+    execution: &Path,
+    request: &AcceptRequest,
+    snapshot: &Value,
+    base: &str,
+    tree: &str,
+    commit: &str,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let store = Store::open(repo)?;
+    let candidate = &snapshot["candidate"];
+    let record = serde_json::json!({"schema":1,"task_id":request.task_id,"plan_id":snapshot["task"]["plan_id"],"lease_id":snapshot["task"]["lease_id"],"candidate_event_id":candidate["event_id"],"candidate_attempt_id":snapshot["worker"]["attempt_id"],"patch_sha256":candidate["patch_sha256"],"artifact":candidate["artifact"],"patch":candidate["patch"],"commit":commit,"tree":tree,"base":base,"review_gate":snapshot["review_gate"]});
+    let mut review = ExecutionRequest::new(
+        args(&[
+            "review",
+            "--id",
+            &request.task_id,
+            "--lease-id",
+            &text(&snapshot["task"], "lease_id"),
+            "--artifact",
+            &text(candidate, "artifact"),
+            "--patch",
+            &text(candidate, "patch"),
+        ]),
+        &execution,
+    );
+    review.environment.push((
+        "OMS_PANEL_ACCEPT_RECORD_JSON".into(),
+        serde_json::to_string(&record).map_err(Error::new)?.into(),
+    ));
+    if ["claimed", "running"].contains(&text(&snapshot["task"], "state").as_str()) {
+        service
+            .command_context(NativeCommand::Plan, &review, stop)?
+            .success()?;
+        let plan = store
+            .json(Path::new(".oms/plan/tasks.json"), 4 * MAX_RESULT, false)?
+            .unwrap();
+        let task = &plan["tasks"][&request.task_id];
+        require(
+            task["panel_accept"] == record
+                && task["state"] == "review"
+                && task["review_lease_id"] == snapshot["task"]["lease_id"],
+            "native plan review did not record the exact acceptance",
+        )?;
+    } else {
+        require(
+            snapshot["task"]["panel_accept"] == record
+                && snapshot["task"]["review_lease_id"] == snapshot["task"]["lease_id"],
+            "plan review does not match interrupted acceptance",
+        )?;
+    }
+    if index_rows(repo)?.iter().any(|v| {
+        v["kind"] == "panel-accept"
+            && v["task_id"] == request.task_id
+            && v["patch_sha256"] == candidate["patch_sha256"]
+            && v["base_sha"] == commit
+            && v["exit"] == 0
+    }) {
+        return Ok(());
+    }
+    let mut registration = oms_command_telemetry::store::AppendArtifactRequest {
+        kind: "panel-accept".into(),
+        provider: request.owner.clone(),
+        patch: Some(store.repo().join(text(candidate, "patch"))),
+        task_id: Some(request.task_id.clone()),
+        inherit_env: false,
+        ..Default::default()
+    };
+    for (name, value) in [
+        ("OMS_INDEX_PLAN_ID", text(&snapshot["task"], "plan_id")),
+        (
+            "OMS_INDEX_ATTEMPT_ID",
+            text(&snapshot["worker"], "attempt_id"),
+        ),
+        ("OMS_INDEX_BASE_SHA", commit.to_owned()),
+    ] {
+        registration.env_overrides.insert(name.into(), value);
+    }
+    oms_command_telemetry::store::append_artifact_index(repo, &registration, stop)
+        .map_err(crate::services::telemetry_error)?;
+    Ok(())
+}
+
+fn replay<S: Services + ?Sized>(
+    execution: &Path,
+    base: &str,
+    patch: &[u8],
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<String> {
+    let scratch = crate::git::Scratch::new()?;
+    let index = scratch.0.join("index");
+    crate::git::bytes(
+        service,
+        execution,
+        &["read-tree", base],
+        None,
+        Some(&index),
+        stop,
+    )?;
+    crate::git::bytes(
+        service,
+        execution,
+        &["apply", "--cached", "--binary", "-"],
+        Some(patch),
+        Some(&index),
+        stop,
+    )?;
+    String::from_utf8(crate::git::bytes(
+        service,
+        execution,
+        &["write-tree"],
+        None,
+        Some(&index),
+        stop,
+    )?)
+    .map(|v| v.trim().to_owned())
+    .map_err(Error::new)
+}
+
+pub(crate) fn recover<S: Services + ?Sized>(
+    repo: &Path,
+    request: &AcceptRequest,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::parent_only()?;
+    let digest = request
+        .expected_patch_sha256
+        .as_deref()
+        .ok_or_else(|| Error::new("recovery requires the exact saved patch digest"))?;
+    let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
+    let store = Store::open(repo)?;
+    let key = crate::digest(execution.as_os_str().as_encoded_bytes());
+    let tx = store.transaction(
+        &format!("panel-accept-{}", &key[..24]),
+        Duration::from_secs(10),
+    )?;
+    crate::control::review_readers(repo, &execution)?;
+    let path = format!(".oms/panel/acceptances/{}-{digest}.json", request.task_id);
+    let mut saved = tx
+        .json(Path::new(&path), MAX_RESULT, false)?
+        .ok_or_else(|| Error::new("acceptance recovery record unavailable"))?;
+    require(
+        saved["schema"] == 1
+            && saved["task_id"] == request.task_id
+            && saved["execution_repo"] == execution.to_string_lossy().as_ref()
+            && saved["message"] == request.message
+            && saved["verify"] == request.verify,
+        "acceptance recovery request differs from saved intent",
+    )?;
+    let snapshot = preflight(repo, request, service, stop, true)?;
+    for field in [
+        "candidate",
+        "worker",
+        "review_gate",
+        "allowed_paths",
+        "superseded_attempts",
+    ] {
+        require(
+            snapshot[field] == saved["snapshot"][field],
+            "acceptance authority changed before recovery",
+        )?;
+    }
+    let mut prior_task = saved["snapshot"]["task"].clone();
+    let mut current_task = snapshot["task"].clone();
+    for field in [
+        "state",
+        "artifact",
+        "patch",
+        "review_lease_id",
+        "panel_accept",
+        "updated_at",
+    ] {
+        prior_task
+            .as_object_mut()
+            .ok_or_else(|| Error::new("saved task unavailable"))?
+            .remove(field);
+        current_task
+            .as_object_mut()
+            .ok_or_else(|| Error::new("current task unavailable"))?
+            .remove(field);
+    }
+    require(
+        prior_task == current_task,
+        "task contract changed before recovery",
+    )?;
+    let base = text(&saved, "base");
+    let tree = text(&saved, "tree");
+    require(
+        [&base, &tree]
+            .iter()
+            .all(|v| crate::hex(v, 40) || crate::hex(v, 64)),
+        "malformed saved Git identity",
+    )?;
+    let patch = verified_patch(&store, &snapshot["candidate"])?;
+    require(
+        replay(&execution, &base, &patch, service, stop)? == tree,
+        "saved tree differs from reviewed patch",
+    )?;
+    require(
+        crate::git::text(service, &execution, &["write-tree"], stop)? == tree
+            && crate::git::bytes(
+                service,
+                &execution,
+                &["diff", "--name-only"],
+                None,
+                None,
+                stop,
+            )?
+            .is_empty()
+            && crate::git::bytes(
+                service,
+                &execution,
+                &["ls-files", "--others", "--exclude-standard"],
+                None,
+                None,
+                stop,
+            )?
+            .is_empty(),
+        "recovery index or worktree differs from reviewed tree",
+    )?;
+    let head = crate::git::text(service, &execution, &["rev-parse", "HEAD"], stop)?;
+    let commit = if head == base {
+        require(
+            saved["commit"].is_null(),
+            "saved acceptance commit no longer names HEAD",
+        )?;
+        exact_commit(
+            repo, &execution, request, &snapshot, &base, &tree, service, stop,
+        )?
+    } else {
+        require(
+            saved["commit"].is_null() || saved["commit"] == head,
+            "saved acceptance commit differs from HEAD",
+        )?;
+        require(
+            crate::git::text(service, &execution, &["rev-parse", "HEAD^"], stop)? == base
+                && crate::git::text(service, &execution, &["rev-parse", "HEAD^{tree}"], stop)?
+                    == tree,
+            "HEAD is not the exact interrupted acceptance",
+        )?;
+        if saved["commit"].is_null() {
+            require(
+                crate::git::text(
+                    service,
+                    &execution,
+                    &["show", "-s", "--format=%B", "HEAD"],
+                    stop,
+                )?
+                .trim()
+                    == request.message.trim(),
+                "unrecorded acceptance commit message differs from saved intent",
+            )?;
+        }
+        head
+    };
+    saved["commit"] = commit.clone().into();
+    saved["stage"] = "plan review".into();
+    tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
+    recheck(repo, request, &snapshot, service, stop)?;
+    complete(
+        repo, &execution, request, &snapshot, &base, &tree, &commit, service, stop,
+    )
+    .map_err(|e| Error {
+        publication_uncertain: true,
+        ..e
+    })?;
+    saved["stage"] = "recorded".into();
+    tx.write_json(Path::new(&path), &saved, false, MAX_RESULT)?;
+    Ok(
+        serde_json::json!({"sha":commit,"task_id":request.task_id,"patch_sha256":digest,"recovered":true}),
+    )
+}
+
+pub(crate) fn validate_landed<S: Services + ?Sized>(
+    repo: &Path,
+    request: &crate::results::FinalizeRequest,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    let commit = request
+        .landed_commit
+        .as_deref()
+        .ok_or_else(|| Error::new("landed commit missing"))?;
+    let verify = request
+        .verify
+        .clone()
+        .ok_or_else(|| Error::new("landed acceptance verifier missing"))?;
+    let accept = AcceptRequest {
+        owner: request.owner.clone(),
+        task_id: request.task_id.clone(),
+        main_attempt_id: request.main_attempt_id.clone(),
+        message: "reconcile publication".into(),
+        verify,
+        execution_repo: request.execution_repo.clone(),
+        expected_patch_sha256: None,
+        allow_verifier_change: false,
+        allow_floor_change: None,
+    };
+    let snapshot = preflight(repo, &accept, service, stop, true)?;
+    let task = &snapshot["task"];
+    let candidate = &snapshot["candidate"];
+    let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
+    let store = Store::open(repo)?;
+    let patch = verified_patch(&store, candidate)?;
+    let record = &task["panel_accept"];
+    let finished = task["state"] == "done" && task["landing"]["sha"] == commit;
+    require(
+        ["claimed", "running", "review"].contains(&text(task, "state").as_str()) || finished,
+        "landing does not match current task state",
+    )?;
+    if ["review", "done"].contains(&text(task, "state").as_str()) {
+        require(
+            task["review_lease_id"] == task["lease_id"]
+                && task["artifact"] == candidate["artifact"]
+                && task["patch"] == candidate["patch"],
+            "reviewed task lease or candidate changed",
+        )?;
+    }
+    if record.is_object() {
+        require(
+            record["schema"] == 1
+                && record["task_id"] == request.task_id
+                && ["plan_id", "lease_id"]
+                    .iter()
+                    .all(|key| record[*key] == task[*key])
+                && record["candidate_event_id"] == candidate["event_id"]
+                && record["candidate_attempt_id"] == snapshot["worker"]["attempt_id"]
+                && ["patch_sha256", "artifact", "patch"]
+                    .iter()
+                    .all(|key| record[*key] == candidate[*key])
+                && record["review_gate"] == snapshot["review_gate"],
+            "stored acceptance identity changed",
+        )?;
+        let base = text(record, "base");
+        let tree = text(record, "tree");
+        let accepted = text(record, "commit");
+        require(
+            [&base, &tree, &accepted]
+                .iter()
+                .all(|v| crate::hex(v, 40) || crate::hex(v, 64)),
+            "malformed accepted Git identity",
+        )?;
+        require(
+            replay(&execution, &base, &patch, service, stop)? == tree,
+            "accepted tree differs from reviewed patch",
+        )?;
+        if crate::git::run(
+            service,
+            &execution,
+            &["cat-file", "-e", &format!("{accepted}^{{commit}}")],
+            None,
+            None,
+            stop,
+        )?
+        .code
+            == 0
+        {
+            require(
+                crate::git::text(
+                    service,
+                    &execution,
+                    &["rev-parse", &format!("{accepted}^")],
+                    stop,
+                )? == base
+                    && crate::git::text(
+                        service,
+                        &execution,
+                        &["rev-parse", &format!("{accepted}^{{tree}}")],
+                        stop,
+                    )? == tree,
+                "accepted commit differs from recorded tree/base",
+            )?;
+        }
+    }
+    // Exercise the native finish proof against a private plan before moving the
+    // canonical task. The native domain owns publication receipt authentication.
+    let mut shadow = store
+        .json(Path::new(".oms/plan/tasks.json"), 4 * MAX_RESULT, false)?
+        .unwrap();
+    let mut shadow_task = shadow["tasks"][&request.task_id].clone();
+    shadow_task["state"] = "review".into();
+    shadow_task["review_lease_id"] = task["lease_id"].clone();
+    shadow_task["artifact"] = candidate["artifact"].clone();
+    shadow_task["patch"] = candidate["patch"].clone();
+    shadow["tasks"] = serde_json::json!({request.task_id.clone():shadow_task});
+    let scratch = crate::git::Scratch::new()?;
+    let shadow_store = Store::open(&scratch.0)?;
+    shadow_store
+        .lock_at(Path::new("lock"), Duration::from_secs(3))?
+        .write_json(Path::new("tasks.json"), &shadow, false, 4 * MAX_RESULT)?;
+    let shadow_path = scratch.0.join("tasks.json");
+    let mut finish = args(&["finish", "--file"]);
+    finish.push(shadow_path.into_os_string());
+    finish.extend(args(&[
+        "--id",
+        &request.task_id,
+        "--lease-id",
+        &text(task, "lease_id"),
+        "--landed-commit",
+        commit,
+        "--artifact",
+        &text(candidate, "artifact"),
+        "--patch",
+        &text(candidate, "patch"),
+    ]));
+    service
+        .command(NativeCommand::Plan, &execution, &finish, stop)?
+        .success()?;
+    let proof = shadow_store
+        .json(Path::new("tasks.json"), 4 * MAX_RESULT, false)?
+        .unwrap();
+    let landing = &proof["tasks"][&request.task_id]["landing"];
+    require(
+        proof["tasks"][&request.task_id]["state"] == "done" && landing["sha"] == commit,
+        "native finish did not return a validated publication",
+    )?;
+    let receipt = service.publication_receipt(
+        repo,
+        &execution,
+        commit,
+        &text(landing, "receipt_sha256"),
+        stop,
+    )?;
+    require(
+        crate::digest(&receipt) == landing["receipt_sha256"],
+        "publication receipt changed",
+    )?;
+    let receipt = crate::decode(&receipt, MAX_RESULT)?;
+    let base = text(&receipt["push"], "base");
+    require(
+        (crate::hex(&base, 40) || crate::hex(&base, 64)) && base != commit,
+        "exact replay requires a nonempty publication push base",
+    )?;
+    publication_contains(&execution, commit, record, &base, &patch, service, stop)?;
+    Ok(snapshot)
+}
+
+fn publication_contains<S: Services + ?Sized>(
+    execution: &Path,
+    commit: &str,
+    record: &Value,
+    base: &str,
+    patch: &[u8],
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    if let Some(accepted) = record["commit"].as_str() {
+        let ancestor = crate::git::run(
+            service,
+            execution,
+            &["merge-base", "--is-ancestor", accepted, commit],
+            None,
+            None,
+            stop,
+        )?;
+        require(
+            ancestor.cleanup_complete && ancestor.output_complete && !ancestor.limited,
+            "publication ancestry probe incomplete",
+        )?;
+        if ancestor.code == 0 {
+            return Ok(());
+        }
+    }
+    let paths = crate::files::patch_paths(patch)?;
+    require(!paths.is_empty(), "reviewed patch has no publication paths")?;
+    let range = if record.is_object() {
+        commit.to_owned()
+    } else {
+        format!("{base}..{commit}")
+    };
+    let mut argv = vec![
+        "--literal-pathspecs",
+        "log",
+        "--no-merges",
+        "--format=%H",
+        "--max-count=10000",
+        &range,
+        "--",
+    ];
+    argv.extend(paths.iter().map(String::as_str));
+    let history = crate::git::text(service, execution, &argv, stop)?;
+    require(
+        history.lines().count() < 10000,
+        "publication replay history exceeds bound",
+    )?;
+    for sha in history.lines() {
+        let parent =
+            crate::git::text(service, execution, &["rev-parse", &format!("{sha}^")], stop)?;
+        let tree = crate::git::text(
+            service,
+            execution,
+            &["rev-parse", &format!("{sha}^{{tree}}")],
+            stop,
+        )?;
+        let Ok(replayed) = replay(execution, &parent, patch, service, stop) else {
+            continue;
+        };
+        if record.is_object() && replayed == tree {
+            return Ok(());
+        }
+        if record.is_null() {
+            let changes = |left: &str, right: &str| -> Result<Vec<u8>> {
+                let mut argv = vec![
+                    "--literal-pathspecs",
+                    "diff",
+                    "--no-ext-diff",
+                    "--raw",
+                    left,
+                    right,
+                    "--",
+                ];
+                argv.extend(paths.iter().map(String::as_str));
+                crate::git::bytes(service, execution, &argv, None, None, stop)
+            };
+            if !changes(&parent, &tree)?.is_empty()
+                && changes(&replayed, &tree)?.is_empty()
+                && changes(&replayed, commit)?.is_empty()
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err(Error::new(
+        "published SHA does not contain an exact replay of the reviewed patch",
+    ))
+}
+
+pub(crate) fn finish_landed<S: Services + ?Sized>(
+    repo: &Path,
+    request: &crate::results::FinalizeRequest,
+    before: &Value,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
+    let store = Store::open(repo)?;
+    let key = crate::digest(execution.as_os_str().as_encoded_bytes());
+    let _tx = store.transaction(
+        &format!("panel-accept-{}", &key[..24]),
+        Duration::from_secs(10),
+    )?;
+    let snapshot = validate_landed(repo, request, service, stop)?;
+    let mut task = snapshot["task"].clone();
+    task.as_object_mut().unwrap().remove("plan_id");
+    require(
+        task == before["task"],
+        "landed task authority changed during verification",
+    )?;
+    if task["state"] == "done" {
+        return Ok(());
+    }
+    for verb in if task["state"] == "claimed" || task["state"] == "running" {
+        &["review", "finish"][..]
+    } else {
+        &["finish"][..]
+    } {
+        let mut argv = args(&[
+            verb,
+            "--id",
+            &request.task_id,
+            "--lease-id",
+            &text(&task, "lease_id"),
+            "--artifact",
+            &text(&snapshot["candidate"], "artifact"),
+            "--patch",
+            &text(&snapshot["candidate"], "patch"),
+        ]);
+        if *verb == "finish" {
+            argv.extend(args(&[
+                "--landed-commit",
+                request.landed_commit.as_deref().unwrap(),
+            ]));
+        }
+        service
+            .command(NativeCommand::Plan, &execution, &argv, stop)?
+            .success()?;
+    }
+    Ok(())
 }

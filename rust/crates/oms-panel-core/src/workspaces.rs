@@ -6,6 +6,62 @@ use std::sync::atomic::AtomicBool;
 pub fn list_workspaces(repo: &Path, archived: bool) -> Result<Vec<Value>> {
     PrivateStore::open(repo, "workspaces", archived, false)?.list()
 }
+pub fn workspace_gone(
+    repo: &Path,
+    row: &Value,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    require(
+        row["repo"]
+            == std::fs::canonicalize(repo)
+                .map_err(Error::new)?
+                .to_string_lossy()
+                .as_ref()
+            && row["kind"] == "workspace"
+            && crate::terminals::target_id(&row["session"], '$'),
+        "invalid workspace binding",
+    )?;
+    let origin: SessionProof =
+        serde_json::from_value(row["origin_proof"].clone()).map_err(Error::new)?;
+    if !crate::terminals::server_present(repo, &origin, service, stop)? {
+        return Ok(true);
+    }
+    require(
+        session_proof(service, repo, &origin.session, stop)? == origin,
+        "workspace origin ownership changed",
+    )?;
+    let mut request = crate::services::ExecutionRequest::new(
+        crate::services::args(&[
+            "tmux",
+            "has-session",
+            "-t",
+            row["session"].as_str().unwrap(),
+        ]),
+        repo,
+    );
+    request.timeout = std::time::Duration::from_secs(3);
+    let output = service.execute(&request, stop)?;
+    require(
+        output.cleanup_complete && output.output_complete && !output.limited,
+        "workspace absence probe incomplete",
+    )?;
+    Ok(output.code != 0 && String::from_utf8_lossy(&output.stderr).contains("can't find"))
+}
+pub fn forget_workspace(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::history::forget_record(
+        repo,
+        "workspaces",
+        ident,
+        |row| workspace_gone(repo, row, service, stop),
+        &["record"],
+    )
+}
 pub fn workspace_proof(
     repo: &Path,
     row: &Value,

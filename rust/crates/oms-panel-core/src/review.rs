@@ -420,11 +420,10 @@ pub fn council_plan(
     let thread = if let Some(thread) = &request.thread {
         crate::identifier(thread)?;
         thread.clone()
+    } else if request.lenses.is_some() {
+        "panel-council".into()
     } else {
-        format!(
-            "panel-council-{}",
-            &crate::digest(request.task_id.as_bytes())[..24]
-        )
+        format!("panel-council-{}", &url_uuid_v5(&request.task_id)[..24])
     };
     let thread = if request.lenses.is_some() {
         format!(
@@ -466,6 +465,81 @@ pub fn council_plan(
     Ok(
         serde_json::json!({"schema":1,"kind":"oms-panel-council-plan","argv":argv,"thread":thread,"seats":seats.len(),"seat_routes":seats,"families":seats.iter().map(|v| &v.provider).collect::<std::collections::BTreeSet<_>>().len(),"primary_calls":primary,"max_format_repairs":primary,"max_calls":primary*2,"skipped":skipped,"executes":false}),
     )
+}
+
+/// RFC 4122 URL namespace UUID, using RFC 3174 SHA-1 only for name identity.
+fn url_uuid_v5(name: &str) -> String {
+    let mut bytes = vec![
+        0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
+        0xc8,
+    ];
+    bytes.extend_from_slice(name.as_bytes());
+    let bits = (bytes.len() as u64).wrapping_mul(8);
+    bytes.push(0x80);
+    while bytes.len() % 64 != 56 {
+        bytes.push(0);
+    }
+    bytes.extend_from_slice(&bits.to_be_bytes());
+    let mut state = [
+        0x67452301u32,
+        0xefcdab89,
+        0x98badcfe,
+        0x10325476,
+        0xc3d2e1f0,
+    ];
+    for block in bytes.chunks_exact(64) {
+        let mut words = [0u32; 80];
+        for (slot, chunk) in words.iter_mut().zip(block.chunks_exact(4)) {
+            *slot = u32::from_be_bytes(chunk.try_into().unwrap());
+        }
+        for i in 16..80 {
+            words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e] = state;
+        for (i, word) in words.into_iter().enumerate() {
+            let (f, k) = match i {
+                0..20 => ((b & c) | ((!b) & d), 0x5a827999),
+                20..40 => (b ^ c ^ d, 0x6ed9eba1),
+                40..60 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                _ => (b ^ c ^ d, 0xca62c1d6),
+            };
+            let next = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(word);
+            (a, b, c, d, e) = (next, a, b.rotate_left(30), c, d);
+        }
+        for (slot, value) in state.iter_mut().zip([a, b, c, d, e]) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
+    let mut uuid = [0u8; 16];
+    for (chunk, word) in uuid.chunks_exact_mut(4).zip(state) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    uuid[6] = (uuid[6] & 0x0f) | 0x50;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+    uuid.iter().map(|v| format!("{v:02x}")).collect()
+}
+
+#[cfg(test)]
+mod uuid_tests {
+    #[test]
+    fn url_namespace_vectors() {
+        for (name, expected) in [
+            ("", "1b4db7eb40575ddf91e036dec72071f5"),
+            ("python.org", "7af94e2b4dd950f09c9a8a48519bdef0"),
+            (
+                "https://www.widgets.com",
+                "423435676fc35a6a80a283d9a01cadaa",
+            ),
+            ("한글", "518e75929d3c5384be103e828da44b67"),
+        ] {
+            assert_eq!(super::url_uuid_v5(name), expected);
+        }
+    }
 }
 pub fn council_execute(
     repo: &Path,

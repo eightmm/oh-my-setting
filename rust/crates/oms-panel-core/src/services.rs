@@ -85,6 +85,7 @@ pub struct ActivityHeartbeat {
 pub struct ExecutionRequest {
     pub argv: Vec<OsString>,
     pub cwd: PathBuf,
+    /// Explicit values override ambient removals of the same name.
     pub environment: Vec<(OsString, OsString)>,
     pub remove_environment: Vec<OsString>,
     pub stdin: Option<Vec<u8>>,
@@ -116,6 +117,70 @@ pub trait PeerExecutor {
 }
 /// Only these domain services may produce authority. Display snapshots confer none.
 pub trait Services: PeerExecutor {
+    /// Native host handshake: fence the pane generation, obtain a bounded
+    /// handoff, confirm old-native exit, append Room::swap_main under its native
+    /// operations read guard, and start the replacement in that same pane.
+    /// The adapter owns interrupted-host reconciliation and must never replay
+    /// an unconfirmed input/launch. Core independently checks lifecycle/room proof.
+    /// Called with the panel main start/session locks held; do not reacquire them.
+    fn swap_main_host(
+        &self,
+        _repo: &Path,
+        _request: &crate::release::MainSwapRequest,
+        _main: &Value,
+        _stop: &AtomicBool,
+    ) -> Result<Value> {
+        Err(Error::new("native main swap host adapter unavailable"))
+    }
+    /// Lossless Unicode normalization/transliteration inspection belongs to the
+    /// native encoding producer. ASCII patches need no Unicode adapter.
+    fn patch_encoding_warnings(&self, patch: &[u8]) -> Result<Vec<Value>> {
+        require(
+            patch.is_ascii(),
+            "native Unicode patch inspection adapter unavailable",
+        )?;
+        Ok(vec![])
+    }
+    /// Raw canonical publication receipt selected by the native plan's finish
+    /// proof. The core rechecks its digest and exact replay base. Never return
+    /// a synthesized success receipt or infer one from a Git commit alone.
+    fn publication_receipt(
+        &self,
+        _repo: &Path,
+        _execution: &Path,
+        _commit: &str,
+        _receipt_sha256: &str,
+        _stop: &AtomicBool,
+    ) -> Result<Vec<u8>> {
+        Err(Error::new("native publication receipt adapter unavailable"))
+    }
+    /// Complete canonical room history, oldest sealed predecessor first. Display
+    /// projections and lifecycle refs cannot authenticate main swaps.
+    fn room_history(&self, repo: &Path, room_id: &str, stop: &AtomicBool) -> Result<Vec<Value>> {
+        let local = oms_command_room::LocalServices;
+        let room = oms_command_room::Room::open(
+            repo,
+            oms_command_room::Session::from_env(),
+            &local,
+            stop,
+            false,
+            true,
+        )
+        .map_err(Error::new)?;
+        let head = room.resolve(room_id).map_err(Error::new)?;
+        let mut rooms = room.sealed_predecessors(&head).map_err(Error::new)?;
+        rooms.reverse();
+        rooms.push(head);
+        let mut output = Vec::new();
+        for ident in rooms {
+            for row in room.records(&ident).map_err(Error::new)? {
+                let bytes =
+                    oms_command_room::value::encode(&row, false, true).map_err(Error::new)?;
+                output.push(crate::decode(&bytes, oms_command_room::MAX_ROW)?);
+            }
+        }
+        Ok(output)
+    }
     /// Parent app integration returns its durable delivery receipt. Unavailable
     /// delivery leaves the core's pending intent and requires an explicit retry.
     fn deliver_result(
@@ -231,7 +296,12 @@ impl PeerExecutor for SubcommandServices {
         child.cwd = Some(std::fs::canonicalize(&request.cwd).map_err(Error::new)?);
         child.stdin = request.stdin.clone();
         child.environment = request.environment.clone();
-        child.remove_environment = request.remove_environment.clone();
+        child.remove_environment = request
+            .remove_environment
+            .iter()
+            .filter(|name| !request.environment.iter().any(|(key, _)| key == *name))
+            .cloned()
+            .collect();
         child.streams = Streams::Separate;
         child.capture.max_bytes = request.output_limit;
         child.deadline = Some(Instant::now() + request.timeout);

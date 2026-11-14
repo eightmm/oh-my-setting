@@ -62,6 +62,9 @@ pub(crate) fn run<S: Services + ?Sized>(
     ];
     if let Some(index) = index {
         request
+            .remove_environment
+            .retain(|name| name != "GIT_INDEX_FILE");
+        request
             .environment
             .push(("GIT_INDEX_FILE".into(), index.into()));
     }

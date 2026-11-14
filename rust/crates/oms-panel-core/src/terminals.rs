@@ -299,6 +299,101 @@ pub struct SessionProof {
     pub server_birth: String,
     pub socket_digest: String,
 }
+pub(crate) fn target_id(value: &Value, prefix: char) -> bool {
+    value
+        .as_str()
+        .and_then(|v| v.strip_prefix(prefix))
+        .is_some_and(|v| !v.is_empty() && v.bytes().all(|v| v.is_ascii_digit()))
+}
+/// Probe the recorded server independently of a session that may be gone.
+pub(crate) fn server_present(
+    repo: &Path,
+    proof: &SessionProof,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    require(
+        proof.server_pid > 0
+            && !proof.server_birth.is_empty()
+            && crate::hex(&proof.socket_digest, 64),
+        "invalid server proof",
+    )?;
+    let owner = Owner {
+        pid: proof.server_pid,
+        birth: proof.server_birth.clone(),
+        uid: rustix::process::getuid().as_raw(),
+    };
+    if process_gone(&owner) {
+        return Ok(false);
+    }
+    let output = tmux(
+        service,
+        repo,
+        &crate::services::args(&["display-message", "-p", "#{pid}\t#{socket_path}"]),
+        stop,
+    )?;
+    let fields: Vec<_> = output.split('\t').collect();
+    require(
+        fields.len() == 2
+            && fields[0] == proof.server_pid.to_string()
+            && crate::digest(fields[1].as_bytes()) == proof.socket_digest
+            && process(proof.server_pid)? == owner,
+        "server identity changed",
+    )?;
+    Ok(true)
+}
+/// Positive global pane disappearance on the recorded, repository-owned host.
+pub fn terminal_gone(
+    repo: &Path,
+    row: &Value,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    require(
+        row["repo"]
+            == std::fs::canonicalize(repo)
+                .map_err(Error::new)?
+                .to_string_lossy()
+                .as_ref()
+            && row["kind"] == "shell"
+            && target_id(&row["pane"], '%'),
+        "invalid terminal binding",
+    )?;
+    let proof: SessionProof =
+        serde_json::from_value(row["session_proof"].clone()).map_err(Error::new)?;
+    if !server_present(repo, &proof, service, stop)? {
+        return Ok(true);
+    }
+    require(
+        session_proof(service, repo, &proof.session, stop)? == proof,
+        "terminal host ownership changed",
+    )?;
+    let panes = tmux(
+        service,
+        repo,
+        &crate::services::args(&["list-panes", "-a", "-F", "#{pane_id}"]),
+        stop,
+    )?;
+    require(
+        panes.lines().all(|v| target_id(&v.into(), '%')),
+        "invalid pane inventory",
+    )?;
+    Ok(!panes.lines().any(|v| row["pane"] == v))
+}
+pub fn forget_terminal(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::history::forget_record(
+        repo,
+        "terminals",
+        ident,
+        |row| terminal_gone(repo, row, service, stop),
+        &["record"],
+    )
+}
 pub fn session_proof(
     service: &dyn Services,
     repo: &Path,

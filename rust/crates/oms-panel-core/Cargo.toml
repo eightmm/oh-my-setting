@@ -7,6 +7,10 @@ rust-version = "1.99.1"
 [workspace]
 resolver = "3"
 
+[[test]]
+name = "parity"
+harness = false
+
 [dependencies]
 oms-work-inspect = { path = "../oms-work-inspect" }
 oms-command-plan = { path = "../oms-command-plan" }

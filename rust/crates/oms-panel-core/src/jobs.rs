@@ -20,9 +20,10 @@ impl Jobs {
     /// Requires exclusive Linux subreaper ownership. A second reactor is refused.
     pub fn open(repo: &Path) -> Result<Self> {
         crate::parent_only()?;
+        let store = PrivateStore::open(repo, "jobs", false, true)?;
         let reactor = Reactor::dedicated().map_err(Error::new)?;
         Ok(Self {
-            store: PrivateStore::open(repo, "jobs", false, true)?,
+            store,
             reactor,
             owned: BTreeMap::new(),
         })
@@ -148,6 +149,143 @@ impl Jobs {
         }
         Ok(row)
     }
+    pub fn restart_job(&mut self, ident: &str, generation: u64) -> Result<Value> {
+        crate::parent_only()?;
+        require(generation >= 1, "exact job generation required")?;
+        require(
+            !self.owned.contains_key(ident),
+            "job is still owned by this reactor",
+        )?;
+        let tx = self
+            .store
+            .store
+            .lock_at(Path::new("lock"), Duration::from_secs(3))?;
+        let old = self.store.record(ident)?;
+        let _record = self
+            .store
+            .store
+            .lock_at(&PathBuf::from(ident).join("lock"), Duration::from_secs(3))?;
+        require(
+            self.store.record(ident)? == old,
+            "job generation changed before record lock",
+        )?;
+        require(
+            old["archived"] != true
+                && old["kind"] == "job"
+                && old["generation"].as_u64() == Some(generation)
+                && archivable(&old),
+            "restart requires the confirmed exited generation",
+        )?;
+        let next = generation
+            .checked_add(1)
+            .ok_or_else(|| Error::new("job generation exhausted"))?;
+        let recipe_bytes = tx.read(&PathBuf::from(ident).join("recipe"), MAX_RECORD, false)?;
+        require(
+            old["recipe_sha256"] == crate::digest(&recipe_bytes),
+            "job recipe digest changed",
+        )?;
+        let recipe = crate::decode(&recipe_bytes, MAX_RECORD)?;
+        require(
+            recipe["repo"] == self.store.repo.to_string_lossy().as_ref()
+                && recipe["uid"].as_u64() == Some(u64::from(rustix::process::getuid().as_raw())),
+            "job recipe binding changed",
+        )?;
+        let cwd = Path::new(
+            recipe["cwd"]
+                .as_str()
+                .ok_or_else(|| Error::new("job cwd missing"))?,
+        );
+        let physical = std::fs::canonicalize(cwd).map_err(Error::new)?;
+        require(
+            cwd.is_absolute() && physical == cwd && physical.is_dir(),
+            "job cwd is not canonical",
+        )?;
+        let values = recipe["argv"]
+            .as_array()
+            .ok_or_else(|| Error::new("job argv missing"))?;
+        require(
+            !values.is_empty() && values.len() <= 256,
+            "invalid job argv count",
+        )?;
+        let argv = values
+            .iter()
+            .map(|v| {
+                let value = v
+                    .as_str()
+                    .ok_or_else(|| Error::new("job argv must be strings"))?;
+                require(!value.contains('\0'), "job argv contains NUL")?;
+                Ok(OsString::from(value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        require(!argv[0].is_empty(), "job executable is empty")?;
+        let output_path = PathBuf::from(ident).join("output");
+        let record_path = PathBuf::from(ident).join("record");
+        let previous = tx.read(&output_path, LOG_LIMIT, false)?;
+        let mut row = old.clone();
+        for key in [
+            "exit",
+            "completion",
+            "leader_pid",
+            "supervisor_pid",
+            "supervisor_identity",
+            "request",
+        ] {
+            row.as_object_mut().unwrap().remove(key);
+        }
+        row["generation"] = next.into();
+        row["state"] = "starting".into();
+        row["log_truncated"] = false.into();
+        row["updated_at"] = crate::now().into();
+        let owner = crate::terminals::process(std::process::id())?;
+        row["supervisor_pid"] = owner.pid.into();
+        row["supervisor_identity"] = owner.birth.into();
+        let prepare = (|| -> Result<_> {
+            tx.write_json(&record_path, &row, false, MAX_RECORD)?;
+            tx.write(&output_path, b"", false, LOG_LIMIT)?;
+            let mut request = Request::new(argv);
+            request.cwd = Some(physical);
+            request.scope = Scope::WholeTree;
+            request.streams = Streams::Merged;
+            request.capture.max_bytes = LOG_LIMIT;
+            request.clear_environment = true;
+            request.environment = crate::terminals::ordinary_environment();
+            self.reactor.start(request).map_err(Error::new)
+        })();
+        let job = match prepare {
+            Ok(job) => job,
+            Err(error) => {
+                let restored = (|| -> Result<()> {
+                    tx.write(&output_path, &previous, false, LOG_LIMIT)?;
+                    tx.write_json(&record_path, &old, false, MAX_RECORD)?;
+                    Ok(())
+                })();
+                return Err(match restored {
+                    Ok(()) => error,
+                    Err(restore) => Error {
+                        publication_uncertain: true,
+                        ..Error::new(format!(
+                            "restart failed: {error}; rollback incomplete: {restore}"
+                        ))
+                    },
+                });
+            }
+        };
+        self.owned.insert(
+            ident.into(),
+            Owned {
+                job,
+                row: row.clone(),
+            },
+        );
+        row["state"] = "running".into();
+        tx.write_json(&record_path, &row, false, MAX_RECORD)
+            .map_err(|e| Error {
+                publication_uncertain: true,
+                ..e
+            })?;
+        self.owned.get_mut(ident).unwrap().row = row.clone();
+        Ok(row)
+    }
     pub fn interrupt_job(&mut self, ident: &str) -> Result<()> {
         self.signal(ident, 2)
     }
@@ -195,4 +333,14 @@ pub fn job_logs(repo: &Path, ident: &str, maximum: usize) -> Result<Value> {
 }
 pub fn archivable(row: &Value) -> bool {
     row["state"] == "exited" && row["completion"] == "reaped-all-children"
+}
+pub fn forget_job(repo: &Path, ident: &str, generation: u64) -> Result<Value> {
+    require(generation >= 1, "exact job generation required")?;
+    crate::history::forget_record(
+        repo,
+        "jobs",
+        ident,
+        |row| Ok(row["generation"].as_u64() == Some(generation) && archivable(row)),
+        &["record", "recipe", "output"],
+    )
 }

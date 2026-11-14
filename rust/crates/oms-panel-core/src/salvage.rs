@@ -139,14 +139,14 @@ pub fn managed(repo: &Path, kept: &Path) -> Result<(PathBuf, PathBuf, String)> {
     )?;
     Ok((physical, expected_common, head))
 }
-struct Git<'a> {
+struct Git<'a, S: Services + ?Sized> {
     scratch: &'a Path,
     kept: &'a Path,
     common: &'a Path,
-    service: &'a dyn Services,
+    service: &'a S,
     stop: &'a AtomicBool,
 }
-impl Git<'_> {
+impl<S: Services + ?Sized> Git<'_, S> {
     fn run(&self, args: &[OsString], data: Option<Vec<u8>>) -> Result<Vec<u8>> {
         let mut argv: Vec<OsString> = vec![
             "git".into(),
@@ -196,12 +196,12 @@ pub struct Capture {
     pub encoding_warnings: Vec<Value>,
     pub base: String,
 }
-pub fn capture(
+pub fn capture<S: Services + ?Sized>(
     kept: &Path,
     common: &Path,
     base: &str,
     head: &str,
-    service: &dyn Services,
+    service: &S,
     stop: &AtomicBool,
 ) -> Result<Capture> {
     require(
@@ -378,6 +378,7 @@ pub fn capture(
         patch.len() <= crate::results::PATCH_MAX,
         "salvage patch exceeds byte limit",
     )?;
+    warnings.extend(service.patch_encoding_warnings(&patch)?);
     Ok(Capture {
         patch,
         files,
@@ -461,50 +462,168 @@ pub fn salvage(
     crate::identifier(&request.task_id)?;
     crate::identifier(&request.attempt_id)?;
     crate::identifier(&request.member)?;
-    let control = crate::terminals::controller_store(repo, false)?;
-    let receipt = control
-        .json(
-            &PathBuf::from(&request.member).join(format!("{}-supervisor.json", request.member)),
-            65536,
-            false,
-        )?
-        .ok_or_else(|| Error::new("private supervisor receipt unavailable"))?;
-    let receipt = receipt.get("record").unwrap_or(&receipt);
     require(
-        receipt["cleanup_complete"] == true && receipt["member"] == request.member,
-        "supervisor cleanup is unproven",
+        crate::hex(&request.base, 40) || crate::hex(&request.base, 64),
+        "salvage base must be a full commit SHA",
     )?;
-    let identity = managed(&request.execution_repo, &request.kept)?;
-    let captured = capture(
-        &identity.0,
-        &identity.1,
-        &request.base,
-        &identity.2,
+    let attempts = crate::services::query(
         service,
+        crate::NativeCommand::Events,
+        repo,
+        &["list", "--json"],
         stop,
     )?;
+    let worker = crate::value::array(&attempts)
+        .iter()
+        .find(|v| {
+            v["attempt_id"] == request.attempt_id
+                && v["task_id"] == request.task_id
+                && v["refs"]["panel_room_participant"] == request.member
+        })
+        .ok_or_else(|| Error::new("salvage attempt binding unavailable"))?;
+    crate::control::stopped(repo, worker, crate::value::array(&attempts))?;
+    let anchor = crate::control::private_record(repo, &request.member, "launch")?;
+    let execution = std::fs::canonicalize(&request.execution_repo).map_err(Error::new)?;
     require(
-        managed(&request.execution_repo, &request.kept)? == identity,
-        "kept worktree identity moved during capture",
+        anchor["execution_repo"]
+            .as_str()
+            .is_some_and(|v| std::fs::canonicalize(v).ok().as_ref() == Some(&execution)),
+        "salvage execution repository differs from private launch",
     )?;
+    let rows = crate::results::index_rows(repo)?;
+    let indexed = rows.iter().rev().find(|v| {
+        v["kind"] == "delegate"
+            && v["task_id"] == request.task_id
+            && v["attempt_id"] == request.attempt_id
+    });
+    require(
+        recorded_kept(repo, worker, indexed)? == request.kept,
+        "requested kept worktree differs from recorded delegate evidence",
+    )?;
+    let recorded_base = indexed.and_then(|v| v["base_sha"].as_str());
+    if let Some(base) = recorded_base {
+        require(
+            (7..=64).contains(&base.len()) && crate::hex(base, base.len()),
+            "invalid recorded salvage base",
+        )?;
+        require(
+            crate::git::text(
+                service,
+                &request.execution_repo,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                stop,
+            )? == request.base,
+            "salvage base differs from delegate launch base",
+        )?;
+    }
+    let missing = match std::fs::symlink_metadata(&request.kept) {
+        Ok(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => return Err(Error::new(e)),
+    };
+    let captured = if missing {
+        let location = crate::value::text(&worker["refs"], "panel_location");
+        let relative = location
+            .strip_prefix("worktree:")
+            .ok_or_else(|| Error::new("missing worktree has no delegate location"))?;
+        crate::storage::path(Path::new(relative))?;
+        require(
+            relative.starts_with("oh-my-setting-delegate."),
+            "missing worktree is not a recorded delegate",
+        )?;
+        let root = std::env::var_os("OMS_DELEGATE_WORKTREE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("XDG_CACHE_HOME")
+                    .map(PathBuf::from)
+                    .map(|v| v.join("oh-my-setting/worktrees"))
+            })
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|v| v.join(".cache/oh-my-setting/worktrees"))
+            })
+            .ok_or_else(|| Error::new("delegate root unavailable"))?;
+        require(
+            std::fs::canonicalize(root)
+                .map_err(Error::new)?
+                .join(relative)
+                == request.kept,
+            "missing worktree differs from recorded delegate location",
+        )?;
+        let body = if let Some(indexed) = indexed.filter(|v| {
+            v.get("patch").is_some()
+                || v.get("patch_sha256").is_some()
+                || v.get("patch_external").is_some()
+        }) {
+            require(
+                recorded_base.is_some(),
+                "missing delegate has no recorded launch base",
+            )?;
+            crate::results::verified_patch(&Store::open(repo)?, indexed)?
+        } else {
+            vec![]
+        };
+        let paths = crate::files::patch_paths(&body)?;
+        require(
+            body.is_empty() || !paths.is_empty(),
+            "indexed recovery patch has no file changes",
+        )?;
+        let warnings = service.patch_encoding_warnings(&body)?;
+        Capture {
+            patch: body,
+            files: paths
+                .into_iter()
+                .map(|v| serde_json::json!({"path":v,"before_bytes":null,"after_bytes":null}))
+                .collect(),
+            encoding_warnings: warnings,
+            base: request.base.clone(),
+        }
+    } else {
+        let identity = managed(&request.execution_repo, &request.kept)?;
+        require(
+            recorded_base.is_some() || request.base == identity.2,
+            "unindexed salvage must capture against the kept HEAD",
+        )?;
+        let captured = capture(
+            &identity.0,
+            &identity.1,
+            &request.base,
+            &identity.2,
+            service,
+            stop,
+        )?;
+        require(
+            managed(&request.execution_repo, &request.kept)? == identity,
+            "kept worktree identity moved during capture",
+        )?;
+        require(
+            !captured.patch.is_empty() || recorded_base.is_some(),
+            "empty kept worktree has no recorded launch base",
+        )?;
+        captured
+    };
     let store = Store::open(repo)?;
     if captured.patch.is_empty() {
-        let rows = crate::results::index_rows(repo)?;
         require(
-            !rows.iter().any(|v| {
-                v["task_id"] == request.task_id
-                    && v["attempt_id"] == request.attempt_id
-                    && v["patch"].as_str().is_some_and(|p| !p.is_empty())
-            }),
+            rows.iter()
+                .filter(|v| {
+                    v["task_id"] == request.task_id
+                        && v["attempt_id"] == request.attempt_id
+                        && v["patch"].is_string()
+                })
+                .all(|v| crate::results::verified_patch(&store, v).is_ok_and(|v| v.is_empty())),
             "indexed recovery evidence prevents empty salvage",
         )?;
+        registered_empty(request, service, stop)?;
         require(
             continuation_patch(&store, &request.task_id, &request.attempt_id)?.is_none(),
             "published salvage prevents an empty recovery receipt",
         )?;
+        no_unindexed_recovery(&store, request, worker, &rows)?;
         let sha = empty_identity(&request.task_id, &request.attempt_id)?;
         let relative = format!(".oms/salvage-provenance/empty-{sha}.json");
-        let proof = serde_json::json!({"schema":1,"payload_sha256":sha,"records":[{"salvaged_from":{"task":request.task_id,"attempt":request.attempt_id,"outcome":"nothing_to_recover","reason":"registered stopped worktree captured against recorded base"},"base_sha":captured.base,"encoding_warnings":[]}]});
+        let proof = serde_json::json!({"schema":1,"payload_sha256":sha,"records":[{"salvaged_from":{"task":request.task_id,"attempt":request.attempt_id,"outcome":"nothing_to_recover","reason":"stopped delegate recovery inventory was empty"},"base_sha":captured.base,"encoding_warnings":[]}]});
         store
             .transaction("panel-salvage", Duration::from_secs(10))?
             .write_json(Path::new(&relative), &proof, true, MAX_EVIDENCE)?;
@@ -515,6 +634,10 @@ pub fn salvage(
     let mut metadata = serde_json::json!({"schema":1,"kind":"oms-salvaged-patch","base_sha":captured.base,"salvaged_at":salvaged_at()?,
         "salvaged_from":{"task":request.task_id,"attempt":request.attempt_id,"kept_path":request.kept,"stop_reason":"confirmed-stopped"},
         "files":captured.files,"encoding_warnings":captured.encoding_warnings,"payload_sha256":crate::digest(&payload(&captured.patch))});
+    if missing {
+        metadata["salvaged_from"]["recovered_from_artifact"] = true.into();
+        metadata["recovered_artifact"] = indexed.unwrap()["patch"].clone();
+    }
     metadata["provenance"] = record_provenance(&store, &metadata)?.into();
     let mut body = PREFIX.as_bytes().to_vec();
     body.extend(crate::value::encoded(&metadata)?);
@@ -567,6 +690,254 @@ fn empty_identity(task: &str, attempt: &str) -> Result<String> {
     Ok(crate::digest(
         &serde_json::to_vec(&[task, attempt]).map_err(Error::new)?,
     ))
+}
+
+fn recorded_kept(repo: &Path, worker: &Value, indexed: Option<&Value>) -> Result<PathBuf> {
+    let mut paths = std::collections::BTreeSet::new();
+    let location = crate::value::text(&worker["refs"], "panel_location");
+    if let Some(relative) = location.strip_prefix("worktree:") {
+        crate::storage::path(Path::new(relative))?;
+        require(
+            relative.starts_with("oh-my-setting-delegate."),
+            "unmanaged delegate location",
+        )?;
+        let root = std::env::var_os("OMS_DELEGATE_WORKTREE_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("XDG_CACHE_HOME")
+                    .map(PathBuf::from)
+                    .map(|v| v.join("oh-my-setting/worktrees"))
+            })
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|v| v.join(".cache/oh-my-setting/worktrees"))
+            })
+            .ok_or_else(|| Error::new("delegate root unavailable"))?;
+        paths.insert(
+            std::fs::canonicalize(root)
+                .map_err(Error::new)?
+                .join(relative),
+        );
+    }
+    if let Some(row) = indexed.filter(|v| v["artifact"].is_string()) {
+        let body = crate::results::indexed_artifact(&Store::open(repo)?, row)?;
+        let body = std::str::from_utf8(&body).map_err(Error::new)?;
+        for line in body.lines() {
+            if let Some(path) = [
+                "worktree kept at ",
+                "worktree kept: ",
+                "error: worktree kept at ",
+                "error: worktree kept: ",
+                "- worktree: ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            {
+                let path = PathBuf::from(path);
+                require(
+                    path.is_absolute()
+                        && !path
+                            .components()
+                            .any(|v| matches!(v, std::path::Component::ParentDir)),
+                    "invalid recorded kept worktree path",
+                )?;
+                paths.insert(path);
+            }
+        }
+    }
+    require(
+        paths.len() == 1,
+        "kept worktree evidence is missing or conflicting",
+    )?;
+    Ok(paths.into_iter().next().unwrap())
+}
+
+pub(crate) fn verified_empty<S: Services + ?Sized>(
+    repo: &Path,
+    worker: &Value,
+    attempts: &[Value],
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    let task = crate::value::text(worker, "task_id");
+    let attempt = crate::value::text(worker, "attempt_id");
+    let store = Store::open(repo)?;
+    if !empty_provenance(&store, &task, &attempt)? {
+        return Ok(false);
+    }
+    crate::control::stopped(repo, worker, attempts)?;
+    let member = crate::value::text(&worker["refs"], "panel_room_participant");
+    let anchor = crate::control::private_record(repo, &member, "launch")?;
+    let execution = PathBuf::from(
+        anchor["execution_repo"]
+            .as_str()
+            .ok_or_else(|| Error::new("empty salvage execution unavailable"))?,
+    );
+    let rows = crate::results::index_rows(repo)?;
+    let indexed = rows
+        .iter()
+        .rev()
+        .find(|v| v["kind"] == "delegate" && v["task_id"] == task && v["attempt_id"] == attempt);
+    let kept = recorded_kept(repo, worker, indexed)?;
+    let base = if let Some(base) = indexed.and_then(|v| v["base_sha"].as_str()) {
+        require(
+            (7..=64).contains(&base.len()) && crate::hex(base, base.len()),
+            "invalid empty salvage launch base",
+        )?;
+        crate::git::text(
+            service,
+            &execution,
+            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+            stop,
+        )?
+    } else {
+        crate::git::text(service, &execution, &["rev-parse", "HEAD"], stop)?
+    };
+    require(
+        rows.iter()
+            .filter(|v| {
+                v["task_id"] == task && v["attempt_id"] == attempt && v["patch"].is_string()
+            })
+            .all(|v| crate::results::verified_patch(&store, v).is_ok_and(|v| v.is_empty())),
+        "empty salvage has indexed recovery bytes",
+    )?;
+    match std::fs::symlink_metadata(&kept) {
+        Ok(_) => {
+            require(
+                indexed.and_then(|v| v["base_sha"].as_str()).is_some(),
+                "kept worktree has no launch base",
+            )?;
+            let identity = managed(&execution, &kept)?;
+            require(
+                capture(&identity.0, &identity.1, &base, &identity.2, service, stop)?
+                    .patch
+                    .is_empty()
+                    && managed(&execution, &kept)? == identity,
+                "empty salvage worktree has changed",
+            )?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::new(e)),
+    }
+    let request = SalvageRequest {
+        task_id: task,
+        attempt_id: attempt,
+        member,
+        kept,
+        execution_repo: execution,
+        base,
+    };
+    registered_empty(&request, service, stop)?;
+    no_unindexed_recovery(&store, &request, worker, &rows)?;
+    Ok(true)
+}
+
+fn no_unindexed_recovery(
+    store: &Store,
+    request: &SalvageRequest,
+    worker: &Value,
+    rows: &[Value],
+) -> Result<()> {
+    let provenance = Path::new(".oms/salvage-provenance");
+    match std::fs::read_dir(store.repo().join(provenance)) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(Error::new)?;
+                let name = entry.file_name();
+                if name
+                    .to_str()
+                    .is_none_or(|v| !v.ends_with(".json") || v.starts_with("empty-"))
+                {
+                    continue;
+                }
+                let Ok(Some(value)) = store.json(&provenance.join(name), MAX_EVIDENCE, false)
+                else {
+                    continue;
+                };
+                require(
+                    !crate::value::array(&value["records"]).iter().any(|v| {
+                        v["salvaged_from"]["task"] == request.task_id
+                            && v["salvaged_from"]["attempt"] == request.attempt_id
+                    }),
+                    "retained recovery provenance prevents empty salvage",
+                )?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::new(e)),
+    }
+    if rows.iter().any(|v| {
+        v["task_id"] == request.task_id
+            && v["attempt_id"] == request.attempt_id
+            && v["patch"].is_string()
+    }) {
+        return Ok(());
+    }
+    let provider = worker["refs"]["panel_provider"]
+        .as_str()
+        .or_else(|| worker["provider"].as_str())
+        .unwrap_or_default();
+    require(
+        !provider.is_empty()
+            && provider
+                .bytes()
+                .all(|v| v.is_ascii_lowercase() || v.is_ascii_digit() || b"_-".contains(&v)),
+        "unindexed delegate provider unavailable",
+    )?;
+    let slug = regex::Regex::new("[^a-z0-9]+")
+        .map_err(Error::new)?
+        .replace_all(&request.task_id.to_ascii_lowercase(), "-")
+        .trim_matches('-')
+        .chars()
+        .take(48)
+        .collect::<String>();
+    let pattern = regex::Regex::new(&format!(
+        "^{}-{}-(\\d{{8}}T\\d{{6}}Z)-\\d+\\.patch$",
+        regex::escape(provider),
+        regex::escape(&slug)
+    ))
+    .map_err(Error::new)?;
+    let created = chrono::NaiveDateTime::parse_from_str(
+        &crate::value::text(worker, "created_at"),
+        "%Y-%m-%dT%H:%M:%SZ",
+    )
+    .map_err(|_| Error::new("unindexed delegate creation evidence unavailable"))?;
+    let directory = Path::new(".oms/artifacts/delegate");
+    match std::fs::read_dir(store.repo().join(directory)) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(Error::new)?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                let Some(captures) = pattern.captures(name) else {
+                    continue;
+                };
+                let stamp = chrono::NaiveDateTime::parse_from_str(&captures[1], "%Y%m%dT%H%M%SZ")
+                    .map_err(Error::new)?;
+                let path = directory.join(name);
+                if (stamp - created).num_seconds().unsigned_abs() > 300
+                    || rows.iter().any(|v| {
+                        v["attempt_id"] != request.attempt_id
+                            && v["patch"] == path.to_string_lossy().as_ref()
+                    })
+                {
+                    continue;
+                }
+                require(
+                    store
+                        .read(&path, crate::results::PATCH_MAX, false)?
+                        .is_empty(),
+                    "unindexed delegate patch prevents empty salvage",
+                )?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::new(e)),
+    }
+    Ok(())
 }
 pub fn empty_provenance(store: &Store, task: &str, attempt: &str) -> Result<bool> {
     let sha = empty_identity(task, attempt)?;
@@ -724,4 +1095,46 @@ fn salvaged_at() -> Result<String> {
     )
     .ok_or_else(|| Error::new("salvage timestamp unavailable"))?;
     Ok(stamp.format("%Y-%m-%dT%H:%M:%S.%6fZ").to_string())
+}
+
+fn registered_empty<S: Services + ?Sized>(
+    request: &SalvageRequest,
+    service: &S,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let worktrees = crate::git::text(
+        service,
+        &request.execution_repo,
+        &["worktree", "list", "--porcelain"],
+        stop,
+    )?;
+    for line in worktrees
+        .lines()
+        .filter_map(|v| v.strip_prefix("worktree "))
+    {
+        let path = Path::new(line);
+        if path == request.kept
+            || path.file_name() != request.kept.file_name()
+            || path.parent().and_then(Path::file_name)
+                != request.kept.parent().and_then(Path::file_name)
+        {
+            continue;
+        }
+        let identity = managed(&request.execution_repo, path)?;
+        require(
+            capture(
+                &identity.0,
+                &identity.1,
+                &request.base,
+                &identity.2,
+                service,
+                stop,
+            )?
+            .patch
+            .is_empty()
+                && managed(&request.execution_repo, path)? == identity,
+            "registered worktree retains recovery data",
+        )?;
+    }
+    Ok(())
 }
