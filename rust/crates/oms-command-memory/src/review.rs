@@ -515,7 +515,7 @@ pub(crate) fn import(
         Vec::new(),
     ))
 }
-pub(crate) fn capture(s: &Store, flag: &AtomicBool) -> Result<Output> {
+pub(crate) fn capture(s: &Store, stdin: Option<&[u8]>, flag: &AtomicBool) -> Result<Output> {
     let silent = || Ok((0, Vec::new(), Vec::new()));
     if std::env::var("OMS_LESSON_CAPTURE").as_deref() != Ok("1")
         || crate::cli::child()
@@ -524,7 +524,12 @@ pub(crate) fn capture(s: &Store, flag: &AtomicBool) -> Result<Output> {
         return silent();
     }
     let mut raw = Vec::new();
-    if std::io::stdin().take(65537).read_to_end(&mut raw).is_err() || raw.len() > 65536 {
+    if let Some(bytes) = stdin {
+        if bytes.len() > 65536 {
+            return silent();
+        }
+        raw.extend_from_slice(bytes);
+    } else if std::io::stdin().take(65537).read_to_end(&mut raw).is_err() || raw.len() > 65536 {
         return silent();
     }
     let Some(payload) = parse_json(&raw) else {

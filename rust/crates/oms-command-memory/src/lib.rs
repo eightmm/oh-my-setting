@@ -5,7 +5,9 @@ mod adapter;
 mod carry;
 mod cli;
 mod os;
-pub use adapter::{append_project_note, provider_context, run_database, run_review};
+pub use adapter::{
+    append_project_note, provider_context, run_database, run_review, run_review_with_stdin,
+};
 mod conflicts;
 mod db;
 mod diagnostics;
@@ -60,7 +62,20 @@ pub fn run_with_source(
     source_root: &Path,
     interrupted: &AtomicBool,
 ) -> Output {
-    match cli::execute(args, cwd, source_root, interrupted) {
+    match cli::execute(args, cwd, source_root, None, interrupted) {
+        Ok(v) => v,
+        Err(Error(code, message)) => (code, Vec::new(), format!("error: {message}\n").into_bytes()),
+    }
+}
+/// Same as [`run_with_source`], reading `--stdin` inputs from `stdin` instead of process stdin.
+pub fn run_with_source_and_stdin(
+    args: &[OsString],
+    cwd: &Path,
+    source_root: &Path,
+    stdin: &[u8],
+    interrupted: &AtomicBool,
+) -> Output {
+    match cli::execute(args, cwd, source_root, Some(stdin), interrupted) {
         Ok(v) => v,
         Err(Error(code, message)) => (code, Vec::new(), format!("error: {message}\n").into_bytes()),
     }

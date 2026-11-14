@@ -203,6 +203,20 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
         return empty();
     };
     let mut output = String::from_utf8_lossy(&lifecycle::journal(&repo, true, ctx)).into_owned();
+    if env("OMS_LESSON_CAPTURE") == "1" && adopted(&repo) {
+        let capture_args = [
+            OsString::from("capture"),
+            OsString::from("--repo"),
+            repo.as_os_str().to_os_string(),
+        ];
+        let _ = oms_command_memory::run_review_with_stdin(
+            &capture_args,
+            &repo,
+            ctx.source,
+            raw,
+            ctx.interrupted,
+        );
+    }
     if on("OMS_STATE_HINTS") && adopted(&repo) {
         let hint = state_hint(&v, &repo, ctx);
         if !hint.is_empty() {

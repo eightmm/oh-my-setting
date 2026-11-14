@@ -33,6 +33,23 @@ pub fn run_review(
         args,
         cwd,
         source_root,
+        None,
+        interrupted,
+    ))
+}
+/// Same as [`run_review`], passing `stdin` explicitly (e.g. for `capture` payloads).
+pub fn run_review_with_stdin(
+    args: &[OsString],
+    cwd: &Path,
+    source_root: &Path,
+    stdin: &[u8],
+    interrupted: &AtomicBool,
+) -> Output {
+    finish(crate::cli::execute_review(
+        args,
+        cwd,
+        source_root,
+        Some(stdin),
         interrupted,
     ))
 }

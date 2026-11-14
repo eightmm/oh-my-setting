@@ -8,12 +8,13 @@ pub(crate) fn execute(
     o: &Options,
     author: &str,
     cwd: &Path,
+    stdin: Option<&[u8]>,
     flag: &AtomicBool,
 ) -> Result<Output> {
     match o.mode.as_str() {
         "import" => crate::review::import(s, o, author, cwd, flag),
         "review" => crate::review::review(s, o, author, flag),
-        "capture" => crate::review::capture(s, flag),
+        "capture" => crate::review::capture(s, stdin, flag),
         "promote" | "graduate" => crate::carry::carry(s, o, author, flag),
         "recall" if o.has("--all-repos") => crate::carry::recall_all(o, cwd, flag),
         "hygiene" => crate::hygiene::run(s, o),

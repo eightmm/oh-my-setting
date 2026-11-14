@@ -74,9 +74,6 @@ Remaining integration/parity gaps:
 - Automatic `/clear`/resume/background-lineage room rebinding, secondary
   coordination-room delivery and the complete legacy panel reminder/idle/status
   hint set are not implemented. Changed consumers remain withheld.
-- `OMS_LESSON_CAPTURE` cannot use the existing memory capture adapter from
-  supplied bytes: that adapter consumes process stdin internally. It needs a
-  shared input-injection API; the hook does not write a second memory store.
 - Detached context capture, Stop-triggered cross-app notifications and deferred
   journal/CI publishing need a host-owned asynchronous service. Current capture
   runs synchronously with cooperative cancellation; direct notification APIs

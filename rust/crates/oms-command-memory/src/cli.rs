@@ -327,22 +327,25 @@ pub(crate) fn execute(
     args: &[OsString],
     cwd: &Path,
     _source: &Path,
+    stdin: Option<&[u8]>,
     flag: &AtomicBool,
 ) -> Result<Output> {
-    execute_inner(args, cwd, _source, flag, false)
+    execute_inner(args, cwd, _source, stdin, flag, false)
 }
 pub(crate) fn execute_review(
     args: &[OsString],
     cwd: &Path,
     source: &Path,
+    stdin: Option<&[u8]>,
     flag: &AtomicBool,
 ) -> Result<Output> {
-    execute_inner(args, cwd, source, flag, true)
+    execute_inner(args, cwd, source, stdin, flag, true)
 }
 fn execute_inner(
     args: &[OsString],
     cwd: &Path,
     _source: &Path,
+    stdin: Option<&[u8]>,
     flag: &AtomicBool,
     review_adapter: bool,
 ) -> Result<Output> {
@@ -395,7 +398,7 @@ fn execute_inner(
         o.value("--agent")
     };
     if special {
-        return s.with_warnings(workflows::execute(&s, &o, &author, cwd, flag));
+        return s.with_warnings(workflows::execute(&s, &o, &author, cwd, stdin, flag));
     }
     let mut note = o.value("--text");
     for w in &o.words {
@@ -497,7 +500,11 @@ fn execute_inner(
     if ["append", "pin", "supersede"].contains(&o.mode.as_str()) {
         if o.has("--stdin") {
             let mut data = Vec::new();
-            std::io::stdin().read_to_end(&mut data)?;
+            if let Some(bytes) = stdin {
+                data.extend_from_slice(bytes);
+            } else {
+                std::io::stdin().read_to_end(&mut data)?;
+            }
             note = String::from_utf8_lossy(&data).into_owned();
             raw_note = data;
         } else if note.is_empty() {
