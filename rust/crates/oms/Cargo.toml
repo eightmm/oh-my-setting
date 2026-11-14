@@ -8,6 +8,28 @@ rust-version = "1.99.1"
 unsafe_code = "forbid"
 
 [dependencies]
+oms-bootstrap = { path = "../oms-bootstrap" }
+oms-command-autonomy = { path = "../oms-command-autonomy" }
+oms-command-graph = { path = "../oms-command-graph" }
+oms-command-hooks = { path = "../oms-command-hooks" }
+oms-command-journal = { path = "../oms-command-journal" }
+oms-command-landing = { path = "../oms-command-landing" }
+oms-command-lifecycle = { path = "../oms-command-lifecycle" }
+oms-command-panel = { path = "../oms-command-panel" }
+oms-command-peer = { path = "../oms-command-peer" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-command-providers-skills = { path = "../oms-command-providers-skills" }
+oms-command-room = { path = "../oms-command-room" }
+oms-command-runs = { path = "../oms-command-runs" }
+oms-command-slurm-submit = { path = "../oms-command-slurm-submit" }
+oms-command-state = { path = "../oms-command-state" }
+oms-command-task = { path = "../oms-command-task" }
+oms-lock = { path = "../oms-lock" }
+oms-mcp-server = { path = "../oms-mcp-server" }
+oms-panel-core = { path = "../oms-panel-core" }
+oms-reference = { path = "../oms-reference" }
+oms-runtime = { path = "../oms-runtime" }
+oms-supervisor = { path = "../oms-supervisor" }
 oms-command-agent-role = { path = "../oms-command-agent-role" }
 oms-command-attempt-bundle = { path = "../oms-command-attempt-bundle" }
 oms-command-experiment = { path = "../oms-command-experiment" }
