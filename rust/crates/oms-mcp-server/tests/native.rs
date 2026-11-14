@@ -1547,6 +1547,143 @@ fn peer_start_threads() {
     );
     good(&worker.tool("oms_peer_start",json!({"kind":"message","thread":"active","participant":"member","prompt":"note","to_participant":"owner"})));
 }
+fn peer_exchange_repo_argv() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo().canonicalize().unwrap();
+    let physical = repo.join("physical/child");
+    std::fs::create_dir_all(&physical).unwrap();
+    let alias = repo.join("alias");
+    std::os::unix::fs::symlink(&physical, &alias).unwrap();
+    let spaced = repo.join("space λ");
+    std::fs::create_dir(&spaced).unwrap();
+    let raw_repo = t.0.join(OsString::from_vec(b"raw-\xff".to_vec()));
+    std::fs::create_dir(&raw_repo).unwrap();
+    std::os::unix::fs::symlink(&raw_repo, repo.join("raw-alias")).unwrap();
+    std::fs::write(repo.join("file"), "fixture").unwrap();
+    let mut c = Client::new(&source, &repo, false, true, false);
+    let exchanges = [
+        ("oms_peer_start", json!({"kind":"message","prompt":"note"})),
+        (
+            "oms_peer_start",
+            json!({"kind":"message","prompt":"topic","new_thread":true}),
+        ),
+        (
+            "oms_peer_start",
+            json!({"kind":"ack","after":"cursor","consumer":"reader"}),
+        ),
+        ("oms_peer_result", json!({"after":"cursor"})),
+        (
+            "oms_peer_start",
+            json!({"kind":"message","participant":"member","prompt":"note"}),
+        ),
+        (
+            "oms_peer_start",
+            json!({"kind":"ack","participant":"member","message_ids":["msg-one"]}),
+        ),
+        (
+            "oms_peer_result",
+            json!({"participant":"member","after":"cursor"}),
+        ),
+    ];
+    let mut paths = vec![
+        (None, repo.as_os_str().to_owned()),
+        (Some(Value::Null), repo.as_os_str().to_owned()),
+        (Some(json!("")), repo.as_os_str().to_owned()),
+        (Some(json!(".")), OsString::from(".")),
+        (Some(json!("././")), OsString::from(".")),
+        (Some(json!("alias")), OsString::from("alias")),
+        (Some(json!("./alias//./")), OsString::from("alias")),
+        (Some(json!("alias/../")), OsString::from("alias/..")),
+        (Some(json!("space λ/")), OsString::from("space λ")),
+        (Some(json!("raw-alias")), OsString::from("raw-alias")),
+        (Some(json!(alias)), alias.as_os_str().to_owned()),
+        (Some(json!("/")), OsString::from("/")),
+        (Some(json!("//")), OsString::from("//")),
+        (Some(json!("///")), OsString::from("/")),
+        (Some(json!("/".repeat(4095))), OsString::from("/")),
+        (Some(json!("/".repeat(4096))), OsString::from("/")),
+    ];
+    let suffix = alias.strip_prefix("/").unwrap().to_str().unwrap();
+    for (prefix, root) in [("/", "/"), ("//", "//"), ("///", "/")] {
+        paths.push((
+            Some(json!(format!("{prefix}{suffix}//./"))),
+            OsString::from(format!("{root}{suffix}")),
+        ));
+    }
+    for (raw, expected) in paths {
+        for (tool, exchange) in &exchanges {
+            let mut args = exchange.clone();
+            args["thread"] = json!("active");
+            if let Some(raw) = &raw {
+                args["repo"] = raw.clone();
+            }
+            good(&c.tool(tool, args.clone()));
+            let call = record(&source);
+            assert_eq!(call["argv_bytes"][2], json!(expected.as_bytes()), "{args}");
+            assert_eq!(call["cwd_bytes"], json!(repo.as_os_str().as_bytes()));
+            assert_eq!(
+                call["argv"][0],
+                if args["participant"].is_string() {
+                    "room"
+                } else {
+                    "thread"
+                }
+            );
+        }
+    }
+    let before = std::fs::read(source.join("last-call.json")).unwrap();
+    for (raw, message) in [
+        (json!(0), "repo must be a string"),
+        (json!(false), "repo must be a string"),
+        (json!("\0"), "repo contains a NUL byte"),
+        (json!("missing"), "no such repository directory"),
+        (json!("file"), "no such repository directory"),
+        (json!("x".repeat(4097)), "repo exceeds 4096-byte limit"),
+        (json!("/".repeat(4097)), "repo exceeds 4096-byte limit"),
+    ] {
+        for (tool, exchange) in &exchanges {
+            let mut args = exchange.clone();
+            args["thread"] = json!("active");
+            args["repo"] = raw.clone();
+            bad(&c.tool(tool, args), message);
+            assert_eq!(
+                std::fs::read(source.join("last-call.json")).unwrap(),
+                before
+            );
+        }
+    }
+    let raw_repo = raw_repo.canonicalize().unwrap();
+    let mut raw = Client::new(&source, &raw_repo, false, true, false);
+    for (tool, exchange) in &exchanges {
+        let mut args = exchange.clone();
+        args["thread"] = json!("active");
+        good(&raw.tool(tool, args));
+        assert_eq!(
+            record(&source)["argv_bytes"][2],
+            json!(raw_repo.as_os_str().as_bytes())
+        );
+        assert_eq!(
+            record(&source)["cwd_bytes"],
+            json!(raw_repo.as_os_str().as_bytes())
+        );
+    }
+    std::fs::write(
+        source.join("fixture.json"),
+        json!({"exit":7,"stderr":"exchange failed"}).to_string(),
+    )
+    .unwrap();
+    bad(
+        &c.tool("oms_peer_result", json!({"repo":"alias","thread":"active"})),
+        "exchange failed",
+    );
+    assert_eq!(record(&source)["argv"][2], "alias");
+    assert!(!repo.join(".oms").exists());
+    assert!(!raw_repo.join(".oms").exists());
+}
 fn peer_argv_goldens() {
     let t = Temp::new();
     let source = t.source();
@@ -1965,7 +2102,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 20] = [
+    let cases: [(&str, fn()); 21] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -1985,6 +2122,7 @@ fn main() {
         ("peer_reading", peer_reading),
         ("peer_status_tasks", peer_status_tasks),
         ("peer_start_threads", peer_start_threads),
+        ("peer_exchange_repo_argv", peer_exchange_repo_argv),
         ("peer_detached_cancel", peer_detached_cancel),
     ];
     let mut failed = 0;

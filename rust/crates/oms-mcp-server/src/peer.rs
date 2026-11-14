@@ -287,8 +287,42 @@ fn result_response(mut payload: Value, after: &str) -> ToolResult {
     Ok(pretty(&payload))
 }
 impl Server<'_> {
+    fn peer_repo(&self, args: &Value) -> Result<(PathBuf, OsString), crate::ToolError> {
+        let raw = text(args, "repo", 4096)?;
+        // Match Path(raw)'s spelling at the canonical thread/room boundary:
+        // collapse separators and dots, but preserve symlinks and parent steps.
+        let spelling = if raw.is_empty() {
+            String::new()
+        } else {
+            let root = if raw.starts_with("//") && !raw.starts_with("///") {
+                "//"
+            } else if raw.starts_with('/') {
+                "/"
+            } else {
+                ""
+            };
+            let parts = raw
+                .split('/')
+                .filter(|part| !part.is_empty() && *part != ".")
+                .collect::<Vec<_>>()
+                .join("/");
+            let path = format!("{root}{parts}");
+            if path.is_empty() {
+                ".".to_owned()
+            } else {
+                path
+            }
+        };
+        let resolved = self.repo(&json!({"repo":spelling}))?;
+        let repo: OsString = if raw.is_empty() {
+            resolved.as_os_str().to_owned()
+        } else {
+            spelling.into()
+        };
+        Ok((resolved, repo))
+    }
     pub(crate) fn thread_exchange(&self, args: &Value, action: &str) -> ToolResult {
-        let repo = self.repo(args)?;
+        let (_, repo) = self.peer_repo(args)?;
         let thread = text(args, "thread", 128)?;
         if !thread_id(thread) {
             return Err("error: an explicit valid thread id is required".into());
@@ -313,7 +347,7 @@ impl Server<'_> {
                 "room".into()
             },
             "--repo".into(),
-            repo.as_os_str().to_owned(),
+            repo,
             "--id".into(),
             thread.into(),
         ];
@@ -427,7 +461,7 @@ impl Server<'_> {
         {
             return Err("error: a delegated worker cannot start peer consultations; recursive delegation is the owner's decision — report the need in your answer instead".into());
         }
-        let repo = self.repo(args)?;
+        let (repo, _) = self.peer_repo(args)?;
         let kind = text(args, "kind", 64)?;
         let rounds = integer(args, "debate_rounds", 0, 0, 3).map_err(
             |_| "error: debate_rounds must be an integer 0-3; positive values require kind='ask'",
