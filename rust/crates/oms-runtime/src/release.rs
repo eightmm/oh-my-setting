@@ -123,6 +123,7 @@ pub fn apply(
         ("target", target),
         ("exit", number(result.exit)),
         ("applied", b(result.exit == 0)),
+        // Wave 4 will migrate this legacy compatibility label.
         ("transaction", string("scripts/update.sh")),
     ]);
     Ok((receipt, result))

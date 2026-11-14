@@ -298,6 +298,7 @@ pub fn install_plan(rt: &Runtime<'_>, names: &[String], primary: &str) -> Result
         ("managed_tools", list(managed.iter().map(String::as_str))),
         ("notion_optional", b(!expanded.contains(&"notion".into()))),
         ("github_optional", b(!expanded.contains(&"github".into()))),
+        // Wave 4 will migrate this legacy compatibility label.
         ("selective_installer", string("scripts/install-profile.sh")),
         ("command", a(command)),
     ]))

@@ -414,7 +414,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 )?;
                 matches.first().copied().unwrap_or(requested)
             };
-            if matches!(name, "help" | "version") {
+            if name == "help" || name == "version" && !selected {
                 require(
                     explicit.is_none(),
                     format!(

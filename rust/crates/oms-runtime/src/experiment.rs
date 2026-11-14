@@ -333,6 +333,19 @@ pub fn budget_status(rt: &Runtime<'_>, contract: &Value, experiment_id: &str) ->
     }
     Ok(out)
 }
+fn budget_refusal(runs: &Value) -> Result<String> {
+    let held = runs.get("reserved").int()?;
+    let count = runs.get("used").int()? + held;
+    let limit = runs.get("limit").int()?;
+    let detail = if held == 0 {
+        "recorded for this contract".to_owned()
+    } else {
+        format!("recorded or reserved for this contract ({held} reserved by a run in progress)")
+    };
+    Ok(format!(
+        "run budget spent: {count} of {limit} run(s) {detail}; pass --reason to run past it"
+    ))
+}
 fn reserve(
     rt: &Runtime<'_>,
     contract: &Value,
@@ -351,15 +364,7 @@ fn reserve(
     let runs = budget.get("runs");
     let mut override_reason = String::new();
     if runs.get("exceeded").truth() {
-        require(
-            !reason.trim().is_empty(),
-            format!(
-                "run budget spent: {} of {} run(s) recorded or reserved for this contract ({} reserved by a run in progress); pass --reason to run past it",
-                runs.get("used").int()? + runs.get("reserved").int()?,
-                runs.get("limit").int()?,
-                runs.get("reserved").int()?
-            ),
-        )?;
+        require(!reason.trim().is_empty(), budget_refusal(runs)?)?;
         override_reason = bounded(reason, 300);
     }
     let mut row = object([
@@ -1159,7 +1164,7 @@ pub fn launch(rt: &Runtime<'_>, r: &Request) -> Result<crate::router::Response> 
         if state.get("runs").get("exceeded").truth() {
             require(
                 !r.text("reason", "")?.trim().is_empty(),
-                "run budget spent; pass --reason to run past it",
+                budget_refusal(state.get("runs"))?,
             )?;
             warning = format!(
                 "experiment launch: past the contract run budget ({})\n",
@@ -1169,10 +1174,8 @@ pub fn launch(rt: &Runtime<'_>, r: &Request) -> Result<crate::router::Response> 
     }
     if r.has("dry-run") {
         let mut argv = vec![
-            std::ffi::OsString::from("bash"),
-            rt.install_root
-                .join("scripts/run-ledger.sh")
-                .into_os_string(),
+            std::ffi::OsString::from("oms"),
+            "run-ledger".into(),
             "--note".into(),
             note.clone().into(),
         ];
