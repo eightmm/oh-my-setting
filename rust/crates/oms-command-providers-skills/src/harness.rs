@@ -104,11 +104,7 @@ fn materialize(dir: &Path) -> Result<()> {
 fn lock_settings(anchor: &Path, target: &Path) -> oms_lock::Settings {
     let get = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
     let seconds = |name: &str, default: u64| {
-        std::time::Duration::from_secs(
-            get(name)
-                .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
-                .unwrap_or(default),
-        )
+        std::time::Duration::from_secs(oms_lock::legacy_seconds(get(name).as_deref(), default))
     };
     oms_lock::Settings {
         mode: oms_lock::Mode::LegacyAuto,
@@ -132,18 +128,7 @@ fn lock_settings(anchor: &Path, target: &Path) -> oms_lock::Settings {
     }
 }
 
-/// A legacy source tree still ships `pi-oms-extension.mjs` together with the Python hook helper
-/// it drives, and `oms` there has no `harness-hook` yet, so that pair is used as-is. Wave 3 drops
-/// this guard once `oms harness-hook` is wired into `rust/crates/oms`; every other host runs the
-/// embedded copy, which calls the native `oms`.
-fn extension_path(file: &str, extensions: &Path, source: &Path) -> PathBuf {
-    let legacy = source.join("scripts/lib");
-    if file == "pi-oms-extension.mjs"
-        && legacy.join(file).is_file()
-        && legacy.join("hook_state.py").is_file()
-    {
-        return legacy.join(file);
-    }
+fn extension_path(file: &str, extensions: &Path, _source: &Path) -> PathBuf {
     extensions.join(file)
 }
 
@@ -613,10 +598,7 @@ mod tests {
             "needs the helper too"
         );
         std::fs::write(src.join("scripts/lib/hook_state.py"), "x").unwrap();
-        assert_eq!(
-            extension_path(name, ext, &src),
-            src.join("scripts/lib").join(name)
-        );
+        assert_eq!(extension_path(name, ext, &src), ext.join(name));
         let other = "pi-codex-extension.mjs";
         assert_eq!(extension_path(other, ext, &src), ext.join(other));
 

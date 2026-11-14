@@ -798,14 +798,7 @@ fn harness_dry_run_is_pure_and_refused_in_workers() {
         out.contains("pi-codex-extension.mjs") && out.contains("oh-my-setting/harness/"),
         "{out}"
     );
-    // A legacy source tree (extension + Python helper) keeps its own pi-oms extension until
-    // `oms harness-hook` is wired; the codex extension is always the embedded copy.
-    let legacy = oms_source().join("scripts/lib/hook_state.py").is_file();
-    assert_eq!(
-        out.contains("scripts/lib/pi-oms-extension.mjs"),
-        legacy,
-        "{out}"
-    );
+    assert!(!out.contains("scripts/lib/pi-oms-extension.mjs"), "{out}");
     assert!(!out.contains("scripts/lib/pi-codex-extension.mjs"), "{out}");
     let (code, out, err) = isolated("harness", &PI_ARGS, tmp.path(), tmp.path(), &env);
     assert_eq!(code, 0, "{err}");

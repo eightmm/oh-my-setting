@@ -969,7 +969,11 @@ fn prune(
         let survivors = kept.len();
         let keep = survivors.max(1);
         let refs: Vec<_> = kept.iter().map(|i| source[*i]).collect();
-        let body = bounded(root.physical_root(), &refs, keep, &[])?;
+        let body = if survivors == before {
+            snapshot.to_vec()
+        } else {
+            bounded(root.physical_root(), &refs, keep, &[])?
+        };
         let after = lines(&body)?.len();
         let stale = before - survivors;
         if stale == 0 {

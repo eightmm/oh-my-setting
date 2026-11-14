@@ -695,6 +695,7 @@ fn context_and_execute_agree_when_cwd_is_not_the_process_cwd() {
     let rs = r.to_str().unwrap();
     assert_eq!(go(&tmp.0, &["--repo", rs, "init", "--goal", "g"]).0, 0);
     let target = tmp.0.join("target");
+    fs::create_dir_all(r.join("src")).unwrap();
     fs::create_dir_all(&target).unwrap();
     std::os::unix::fs::symlink(&target, tmp.0.join("link")).unwrap();
     let stop = AtomicBool::new(false);
@@ -757,6 +758,7 @@ fn context_and_execute_agree_when_cwd_is_not_the_process_cwd() {
             .code,
         0
     );
+    fs::create_dir_all(b.join("newdir")).unwrap();
     for file in ["A/link/../plan.json", "A/link/../newdir/../plan.json"] {
         let req = Request::parse(&args(&["--repo", "A/link/..", "--file", file, "list"])).unwrap();
         let ctx = Context::from_environment_at(&req, &tmp.0, &tmp.0, None).unwrap();
@@ -806,4 +808,29 @@ fn context_and_execute_agree_when_cwd_is_not_the_process_cwd() {
         &["--repo", &format!("../../..{}", r.display()), "list"],
     );
     assert_eq!(c, 0, "{e}");
+}
+
+#[test]
+fn invalid_parent_traversal_and_relative_cwd() {
+    if isolated("invalid_parent_traversal_and_relative_cwd") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    fs::write(r.join("file"), "x").unwrap();
+    std::os::unix::fs::symlink(r.join("absent"), r.join("dangling")).unwrap();
+    for part in ["file", "dangling", "missing"] {
+        let path = format!("{part}/..");
+        assert_ne!(go(&r, &["--repo", &path, "list"]).0, 0, "{part}");
+    }
+    let process = std::env::current_dir().unwrap();
+    assert_eq!(
+        go(
+            Path::new("."),
+            &["--repo", process.to_str().unwrap(), "list"]
+        )
+        .0,
+        0
+    );
+    assert_ne!(go(Path::new("missing-cwd-for-plan"), &["list"]).0, 0);
 }

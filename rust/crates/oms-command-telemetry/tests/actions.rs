@@ -645,3 +645,18 @@ fn waste_absence_zero_and_malformed_ledger_are_not_estimates() {
     ));
     compare(&root, &["telemetry", "--waste", "--json"]);
 }
+
+#[test]
+fn stale_prune_without_drops_preserves_index() {
+    let root = Temp::new();
+    let bytes = b"{ \"kind\": \"call\" }\r\n";
+    root.index(bytes);
+    let path = root.0.join(".oms/artifacts/index.jsonl");
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_ok(&native(&root, &["prune", "--stale"]));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        before
+    );
+}

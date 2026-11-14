@@ -117,6 +117,13 @@ fn repository(options: &Options, caller: &Path) -> Result<(PathBuf, PathBuf), St
         return Err("cannot resolve logical repo path".into());
     }
     let root = std::process::Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_PREFIX")
         .arg("-C")
         .arg(&physical)
         .args(["rev-parse", "--show-toplevel"])

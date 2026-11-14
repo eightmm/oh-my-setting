@@ -101,7 +101,7 @@ fn scan(args: &[OsString]) -> crate::Result<Scan> {
 /// Absolute physical directory spelling (`pwd -P` semantics). Components are
 /// resolved left to right: each existing one is canonicalized at once, so a
 /// following `..` steps out of the symlink's physical target, never out of its
-/// spelling. `..` clamps at the root; a not-yet-existing tail folds lexically.
+/// spelling. Unresolved components are preserved so traversal cannot bypass them.
 pub(crate) fn physical_dir(cwd: &Path, path: &OsStr) -> PathBuf {
     let joined = cwd.join(path);
     if !joined.is_absolute() {
@@ -117,8 +117,10 @@ pub(crate) fn physical_dir(cwd: &Path, path: &OsStr) -> PathBuf {
             }
             Component::CurDir => {}
             Component::ParentDir => {
-                if missing.pop().is_none() {
+                if missing.is_empty() && base.is_dir() {
                     base = base.parent().unwrap_or(&base).to_path_buf();
+                } else {
+                    missing.push(OsString::from(".."));
                 }
             }
             Component::Normal(seg) => {
@@ -216,6 +218,8 @@ fn dispatch(
 ) -> crate::Result<Response> {
     require(!interrupted.load(Ordering::SeqCst), "interrupted")?;
     let req = Request::parse(args)?;
+    let cwd = std::fs::canonicalize(cwd).map_err(|_| error("cannot resolve current directory"))?;
+    let cwd = cwd.as_path();
     // The shell default is `${OMS_STATE_REPO:-$PWD}`; the context normalises it.
     let default_repo = std::env::var_os("OMS_STATE_REPO")
         .filter(|s| !s.is_empty())

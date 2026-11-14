@@ -338,7 +338,9 @@ fn outputs(root: &Root, top: usize) -> Result<V, String> {
     };
     let mut items = Vec::new();
     for name in dir.names(65536).map_err(|e| e.to_string())? {
-        let info = dir.stat(&name).map_err(|e| e.to_string())?;
+        let Ok(info) = dir.stat(&name) else {
+            continue;
+        };
         if rustix::fs::FileType::from_raw_mode(info.st_mode) != rustix::fs::FileType::RegularFile
             || info.st_size < 0
         {
