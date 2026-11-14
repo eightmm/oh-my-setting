@@ -5,15 +5,18 @@ into production panel mutations yet.** The standalone crate compiles, but that
 is not a claim that the Python panel can be retired or that every contract in
 its approximately 17,700 lines has been ported.
 
-The implementation stopped at the brief's missing-native-API condition. Result
-registration needs the canonical artifact-index writer. The only public
-`oms-command-telemetry` entrypoints are `owns` and `run`; `run` explicitly owns a
-read-only report. The reference writer is
-[`panel_results._register`](../../../scripts/lib/panel_results.py), which calls
-`ma_append_artifact_index` from Bash. No nonexistent `artifact-index emit`
-command is invoked by this crate. `Services::register_result` refuses until the
-owner provides the native writer. `Services::accept` also refuses until the
-reviewed-publication producer is wired.
+The canonical telemetry writer is now wired in process. Finalization registers
+results with `register_panel_result`, then resolves prior schema-1 failed events
+with the canonical writer's compare-and-set append. Durable notification intents
+and explicit retry are implemented; the parent must inject app delivery through
+`Services::deliver_result`.
+
+`Services::accept` now runs a native acceptance workflow: owner/main/room/lease
+and candidate/review preflight, an isolated product index, `patch-land
+--panel-accept`, exact-tree commit plumbing, HEAD compare-and-set, plan review
+compare-and-set, and recovery records. This has only compile verification and
+conservatively refuses several legacy cases listed below. It is not a claim of
+full Python acceptance parity or permission to enable production mutations.
 
 The package is an isolated workspace with resolver 3, edition 2024, Rust 1.99.1,
 forbidden unsafe code and the existing pinned external versions. It does not
@@ -28,23 +31,23 @@ there is no CLI parser or TUI in this crate.
 
 | Module | Principal public types and entrypoints |
 | --- | --- |
-| `services` | `Services`, `PeerExecutor`, `NativeCommand`, `ExecutionRequest`, `CommandOutput`, `SubcommandServices` |
+| `services` | `Services`, `PeerExecutor`, `NativeCommand`, `ExecutionRequest`, `ActivityHeartbeat`, `CommandOutput`, `SubcommandServices` |
 | `routing` | `Policy`, `Candidate`, `Route`, `RoutingInputs`, `Accounts`, `Account`, `Council`, `RoleTier`, `TieBand`; `allocate`, `kind`, `valid_route`, `route_family`, `routable_route_model`, `model_family`, `weekly_used`, `account_weekly_used` |
-| `dispatch` | `DispatchRequest`, `Overlap`, `WIP_LIMIT`; `dispatch`, `command`, `scope_overlaps`, `check_wip` |
-| `results` | `FinalizeRequest`, `AcceptRequest`; `results`, `outcomes`, `finalize`, `finalize_snapshot`, `accept`, `verified_patch`, `safe_summary`, `evidence_reference` |
-| `review` | `Candidate`, `Settlement`; `verdict`, `automatic_review_workload`, `council_metadata` |
-| `salvage` | `SalvageRequest`, `Capture`; `managed`, `capture`, `salvage`, `payload`, `encoding_warnings`, `record_provenance` |
+| `dispatch` | `DispatchRequest`, `CarriedPatch`, `Overlap`, `WIP_LIMIT`; `dispatch`, `command`, `continuation`, `scope_overlaps`, `check_wip` |
+| `results` | `FinalizeRequest`, `AcceptRequest`, `ResultsRequest`; `results`, `results_page`, `outcomes`, `prior_findings`, `retry_delivery`, `finalize`, `finalize_snapshot`, `accept`, `verified_patch`, `safe_summary`, `evidence_reference` |
+| `review` | `Candidate`, `Settlement`, `CouncilRequest`; `verdict`, `automatic_review_workload`, `council_metadata`, `council_plan`, `council_execute` |
+| `salvage` | `SalvageRequest`, `Capture`; `managed`, `capture`, `salvage`, `payload`, `encoding_warnings`, `record_provenance`, `empty_provenance`, `continuation_patch` |
 | `release` | `release`, `classify`, `heartbeat_fresh`, `identity_gone`, `prove_native_absent` |
-| `state` | `Snapshot`; `repository`, `snapshot`, `active_mains`, `hold_state`, `save`, `load`, `evidence_matrix`, `action_inbox`, `return_brief` |
+| `state` | `Snapshot`; `repository`, `snapshot`, `heartbeat`, `active_mains`, `hold_state`, `save`, `load`, `evidence_matrix`, `action_inbox`, `return_brief` |
 | `cache` | `Cache`, `TickReads`; `fingerprint` |
 | `metrics` | `MetricInputs`; `number`, `percent`, `stamp`, `duration`, `five_hour`, `quota_bar`, `percentile`, `aggregate`, `metrics_text`, `collect` |
-| `health` | `project`, `work_health`, `alerts` |
+| `health` | `project`, `work_health`, `alerts`, `provider_catalog` |
 | `activity` | `Event`; `events`, `summarize`, `record_summary`, `read_summary`, `summary_lines`, `background` |
-| `files` | `Change`; `patch_paths`, `patch_changes`, `file_diff`, `overlaps`, `read_live`, `tree_rows` |
+| `files` | `Change`; `patch_paths`, `patch_changes`, `file_diff`, `overlaps`, `read_live`, `tree_rows`, `export_jsonl`, `export_bundle` |
 | `eventlog` | `EventLog`; `clean`, `line` |
 | `since` | `Counts`; `since_counts`, `since_line` |
-| `host` | `Host`; `herdr_active`; host request, pane, read, focus and zoom methods |
-| `terminals` | `PrivateStore`, `SessionProof`; `process`, `process_gone`, `ordinary_environment`, `state_home`, `valid_id`, `preview`, `tmux`, `session_proof`, `open_terminal`, `read_terminal`, `controller_store` |
+| `host` | `Host`; `herdr_active`, `absent`; host request, pane, read, focus and zoom methods |
+| `terminals` | `PrivateStore`, `SessionProof`; `process`, `process_gone`, `ordinary_environment`, `state_home`, `valid_id`, `preview`, `tmux`, `session_proof`, `open_terminal`, `read_terminal`, `controller_store`, `signal_process`, `signal_process_group`, `stop_terminal` |
 | `workspaces` | `list_workspaces`, `workspace_proof`, `open_workspace`, `focus` |
 | `jobs` | `Jobs`; `job_logs`, `archivable`; owned start, poll, interrupt, stop and list methods |
 | `history` | `capacity`, `transfer`, `archive`, `restore` |
@@ -66,15 +69,20 @@ represented as `bash -c` with a separate argument.
 
 `Services` supplies fixed native commands, contextual commands, artifact result
 registration, reviewed acceptance, finalization authority, model-family
-classification and positive host absence. A caller cannot obtain acceptance
-from an exit code alone. Default host absence remains unproven.
+classification, app delivery and positive host absence. Tmux absence checks bind
+server generation, physical socket identity and global pane/window tags. Herdr
+query failure remains unproven, matching the Python refusal. A caller cannot
+obtain acceptance from an exit code alone.
 
 `SubcommandServices` resolves the sibling executable named `oms`. Events,
 attempt bundles, failure reports, telemetry reports and task reads use native
 crate entrypoints directly. Other fixed verbs include `peer-delegate`,
-`peer-review`, `patch-admit`, `patch-land`, `room`, `agent-plan`, `agent-task`
-and `advise`. It performs no interpreter fallback, no shell concatenation of
-arguments, no global cwd/environment mutation and no automatic replay.
+`peer-review`, `patch-admit`, `patch-land`, `room`, `agent-plan`, `agent-task`,
+`peer-ask`, `cleanup`, `models` (the verified catalog verb) and `advise`. Room
+commands call `oms-command-room` directly. The native executable in the current
+repository does not own every remaining producer verb; an injected service or
+later dispatcher migration is still required for those operations. It performs
+no interpreter fallback, no shell concatenation of arguments, no global cwd/environment mutation and no automatic replay.
 A native executable is an adapter precondition; the adapter does not attest
 that an arbitrary file named `oms` is a reviewed native build.
 
@@ -115,15 +123,19 @@ storage primitives. No concurrent or crash tests were run in this phase.
   `panel-results.lock`. Verification occurs between two authority snapshots.
   A concurrent authority/evidence change refuses publication. The artifact
   precedes index registration; a writer failure leaves a local artifact and
-  returns an uncertain-publication error. The current default writer always
-  refuses; it cannot finish this transaction. Notification remains pending.
+  returns an uncertain-publication error. Prior failed rows are resolved only
+  after registration. Notification writes an indexed pending intent before app
+  delivery, then an immutable receipt and its index row. A kill between delivery
+  and receipt publication leaves delivery unknown; only explicit retry may
+  resend. Parent app delivery is unavailable in the default adapter.
 * Salvage writes `.oms/salvage-provenance/DIGEST.json` under `panel-salvage.lock`
   before `.oms/artifacts/delegate/salvage-TASK-ID.patch` and its `.patch.json`
   sidecar. Repeated payloads retain prior warning records. A kill may leave
   provenance only, or a patch without a sidecar; neither is evidence of an empty
   recovery. Each complete file is atomic. Capture uses isolated Git metadata,
   raw blobs, disabled external filters/hooks and temporary state removed on normal
-  return/unwind. A hard kill can leave that scratch directory.
+  return/unwind. A hard kill can leave that scratch directory. Telemetry
+  registration follows the sidecar; a kill can leave a complete unindexed pair.
 * `.oms/artifacts/panel-dispatch/CALL-summary.json` is immutable under
   `panel-activity.lock`. Concurrent differing summaries refuse. A kill leaves
   either complete summary bytes or the preceding/missing file.
@@ -149,65 +161,101 @@ storage primitives. No concurrent or crash tests were run in this phase.
   Connection loss after sending a mutation leaves its outcome unknown and never
   triggers a replay. Tmux operations may have happened before a later binding
   record fails; starting records and existing targets must be inspected.
-* Reviewed acceptance, plan finish and publication remain the owning native
-  producer's responsibility. This implementation does not write Git commits or
-  refs, and supplies no substitute completion proof.
+* Acceptance serializes per physical execution checkout under the canonical
+  panel acceptance lock. `.oms/panel/acceptances/TASK-DIGEST.json` is written
+  before application and updated at commit, plan-review and recorded stages.
+  A second call refuses an existing recovery record; it cannot reapply blindly.
+  Git's exclusive `index.lock` protects exact index bytes, and `update-ref`
+  compares the original HEAD. A kill can leave applied changes, a stale index
+  lock, an unreachable commit, a locally advanced HEAD, a plan in review, or
+  an acceptance whose index row is missing. The record and Git/patch-land
+  evidence require reconciliation; no automatic rollback or push occurs.
+* Council process polling emits canonical operations heartbeats every 60
+  seconds in `SubcommandServices`. Start precedes PeerAsk execution; confirmed
+  exits transition to done/failed/cancelled. Unconfirmed execution/cleanup
+  preserves a live lifecycle requiring reconciliation. A kill can retain that
+  live attempt. Custom executors must honor `ExecutionRequest.heartbeat`.
+* External briefs and summaries are owned, single-link regular files opened
+  with NOFOLLOW/NONBLOCK, read within the byte bound and rechecked on the same
+  descriptor. UTF-8, NUL and outbound validation apply before use. Dispatch
+  snapshots brief bytes in a private temporary directory; concurrent calls use
+  distinct scratch paths. Normal return/unwind removes them; hard kill may
+  leave scratch files. Intermediate directory symlinks on caller-selected
+  external paths are not rejected; the opened final file must satisfy policy.
+* PID signaling uses Linux pidfds when available. The POSIX fallback and group
+  signaling recheck the observed generation before signaling, but retain a
+  check-to-signal race. Terminal stop proves pane disappearance on the same
+  server/session, not the exit of escaped descendants. Its record explicitly
+  leaves cleanup unconfirmed. A kill after host mutation can leave an older
+  running record beside an absent pane.
 
-## Unresolved implementation and compatibility work
+## Implemented contracts and exact remaining work
 
-1. **Blocker: native artifact-index writer.** Implement or supply the canonical
-   writer through `Services::register_result`. Dependency/source changes outside
-   this new crate were not authorized. Source anchors:
-   `scripts/lib/panel_results.py:664` and
-   `rust/crates/oms-command-telemetry/src/lib.rs:413`.
-2. **Reviewed acceptance.** `Services::accept` needs the complete native exact-tree,
-   lease, reviewed-assignment, recheck, commit/CAS, publication and recovery
-   producer. The default adapter refuses it. `--finalize --landed-commit` does
-   not yet implement the reference's plan review/finish recovery sequence.
-3. **Dispatch parity.** Existing plan claim/start/observation fences, allowed-path
-   merging, canonical backlog accounting per main, supersession/settlement of
-   reservations, from-task findings composition, continuation carried patches,
-   native session provenance, alias inheritance, fallback/account overflow and
-   room rollover remain incomplete. `check_wip` implements the threshold but the
-   draft reservation accounting is not the legacy per-main backlog projection.
-   Dry-run input scrubbing and preliminary overlap checks exist; that is not
-   proof of complete `--dry-run`, `--scope`, `--continue` or `--from-task` parity.
-4. **Private supervisor parity.** Dispatch currently writes draft repository
-   records. Salvage requires a private supervisor receipt and cannot consume
-   those draft records. The full identity/envelope, boot generation, descendant
-   ownership, legacy read-only import and launch reconciliation protocol remains
-   to be ported. Do not treat repository receipts as release authority.
-5. **Results/settlement parity.** Result selection, delivery retry, independent
-   auto-review/rework, candidate supersession, admission binding and index repair
-   are not complete. Finalization authority is a conservative draft projection,
-   not the complete reference acceptance proof. `Settlement::step` records a
-   caller's completed effect; it does not implement each effect itself.
-6. **Salvage parity.** Missing-worktree indexed recovery, independently proven
-   empty salvage, complete encoding/transliteration warnings, approval flags,
-   paired publication reconciliation and non-UTF-8 path handling remain open.
-   Non-UTF-8 paths refuse rather than being silently substituted.
-7. **Read projections.** Metrics are a bounded subset of the reference report;
-   cohort, gate, handoff, overlap and usage statistics are incomplete. Health,
-   activity/provider usage, cache invalidation, snapshot lineage, retention and
-   since/event display still need reference parity checks. Local time and Unicode
-   display-width behavior differ in the current draft.
-8. **Managed controls.** Full launcher/pane proof, workspace control/key tables,
-   automatic reclamation, forget/restart, log identity and legacy private-record
-   compatibility remain incomplete. The new job API owns foreground generations;
-   it is not a complete detached registered-job CLI replacement.
-9. **Inherited dependency discrepancy.** Required `oms-reference` declares
-   macOS-only `proc_pidinfo` version 0.1.4 in its manifest and standalone lock,
-   but that registry package is absent from `rust/Cargo.lock`. Standalone offline
-   resolution includes it. No version or dependency source was changed; the
-   strict root-lock-only requirement needs owner reconciliation before admission.
-10. **Routing/account parity.** Catalog registration, public repository proof,
-   exact family classification, complete config validation, account-home
-   permission rechecks and refreshed quota collection require further work.
-   `RoutingInputs` explicitly supplies observations; absence is not discovery.
+* `DispatchRequest` carries `base`, `carried_patch` (`patch`, `sha256`, `base`,
+  `attempt`) and `allow_stale_base`. The resolver selects this main's terminal
+  worker, checks eligible verification failures, paired salvage/provenance or
+  an empty-salvage receipt, verifies patch bytes/base, checks reverse/forward
+  application using an isolated index and supplies carried-patch argv and
+  canonical continuation environment. Native delegates must implement the
+  carried-patch flags; the legacy Bash delegate only reads that environment.
+  Like Python `_continuation_base_note`,
+  a differing base that applies cleanly gives a diagnostic; a conflicting base
+  requires `allow_stale_base`. Explicit native resume is refused without session
+  and account proof. Room/main, label, alias, no-web and continuation metadata
+  use the reference environment interface; scopes use the room join writer.
+  `from_task` adds at most five bounded, scrubbed read-only findings.
+* `results` now returns canonical top-level `rows`, `coverage`, `truncated`,
+  `offset`, `omitted` and `omitted_range`. `results_page` adds task/participant
+  selection, offset/limit paging and preflight inclusion. Rows contain the
+  requested owner outcome, stage, evidence, delivery and action fields, with
+  at most eight calls. Artifact/result/delivery digests are checked. This is
+  schema implementation, not full selection/settlement parity: complete
+  supersession/continuation retirement, whole-main child adoption, all reason
+  and guard classifications, full answer rendering and round deltas remain.
+* Council plans support repeated-provider policy seats, late duplicate-seat
+  dropping within the 12-primary-call budget, catalog availability/partial
+  policy, independent families, lenses with zero rounds, normal rounds 1..2,
+  and until-agreement with a 1..6 cap (default 4). Lenses require unique names,
+  2..12 seats, and three families for 3+ lenses unless partial is enabled.
+  `council_plan` returns `oms-panel-council-plan`; `council_execute` owns the
+  lifecycle and PeerAsk invocation. Deterministic default thread IDs use
+  SHA-256 rather than Python UUIDv5, so cross-language thread continuity is
+  not yet equivalent. The older `council_metadata` signature remains the
+  normal-round helper; lenses and until-agreement use `CouncilRequest`.
+* Acceptance no longer has an unconditional unavailable stub, but currently
+  requires exactly one historical write worker and current same-provider main.
+  Superseded retries, main swaps, authenticated extra scope grants, full live
+  review-reader fences, accepted-prefix/publication recovery and automatic
+  recovery execution remain incomplete. `--finalize --landed-commit` still
+  needs the reference plan review/finish recovery sequence. Do not enable
+  production acceptance based on compilation alone.
+* Salvage publishes provenance, patch, sidecar and a canonical telemetry row.
+  Provenance/sidecar/header/payload binding is checked before continuation;
+  incomplete pairs refuse. An independently captured empty stopped worktree
+  can receive an immutable empty-salvage receipt when no indexed/published
+  patch exists. Missing-worktree recovery, exhaustive registered-worktree
+  comparison, full encoding/transliteration policy and the private legacy
+  supervisor envelope/identity import remain incomplete. Non-UTF-8 paths
+  continue to refuse. Dispatch's draft repository records do not supply those
+  private supervisor proofs.
+* Heartbeats belong to `agent-events`, as in `panel_state.update_activity`;
+  `oms-command-room` has no heartbeat verb. Room reads/writes use the native
+  room crate. Catalog probes use `Services` and `models --providers ... --json`.
+  File inventories can export bounded JSONL or a JSON bundle via the existing
+  exclusive 0600 export writer. These helpers do not complete every private
+  workspace, detached-job, retention, metric, account or routing projection
+  gap recorded by the original draft.
+* The standalone lock only gained the already-declared telemetry writer's
+  transitive `oms-lock` and `sha2` edges; no package version or manifest
+  dependency changed. The inherited macOS-only `proc_pidinfo` root-lock
+  discrepancy remains owner work outside this crate.
 
-These are exact remaining implementation items, not merely a request for more
-runtime testing. No legacy executable was deleted and no production cutover is
-claimed.
+The crate is **not ready to replace the Python panel**. In particular, the
+current repository's native dispatcher does not own `peer-delegate`,
+`peer-review`, `peer-ask`, `advise`, `patch-land`, `models` or `agent-plan` in
+this standalone adapter's invocation form. Those producers and app delivery
+need owner wiring outside the allowed write scope. Declaring a fixed verb here
+does not claim its implementation exists in that executable.
 
 ## Verification and source coverage
 
@@ -218,22 +266,19 @@ cargo +1.99.1 check --manifest-path rust/crates/oms-panel-core/Cargo.toml --all-
 cargo +1.99.1 fmt --manifest-path rust/crates/oms-panel-core/Cargo.toml -- --check
 ```
 
-The final check and format check both exited 0. The first compile found two
-reference-clone type errors in routing; both were repaired before the final
-successful run. No dependency version was widened. No tests, reversed-patch
-red/green runs, runtime fault probes or full repository gate ran: the task's
-implementation-first instructions explicitly prohibit running tests in this
-phase. Generated `target` output is removed before returning the worker patch.
+Both final commands exited 0. Formatting was applied with the same pinned
+formatter. No unit/operator tests, reverse-patch red/green runs, process fault
+probes, runtime mutations, commits, pushes, full repository gates or macOS
+checks ran: this brief explicitly restricts this phase to compile/format
+verification. The added branches and negative/limit paths therefore remain
+runtime-unverified. Generated build output is removed before handoff.
 
-Source inspection was scoped: graph API outlines covered all 22 named panel
-modules and dispatch-supervisor orientation; decisive ranges were read for
-routing, dispatch, results, salvage, review, release, private stores and native
-producer APIs. It was not a full contiguous reading of every reference module.
-Existing reference coverage includes `tests/operator/dispatch_results.py`,
-`tests/operator/room_protocol.py`, `tests/operator/salvage.py`,
-`tests/operator/auto_review.py`, `tests/panel-workspaces-smoke.sh` and
-`tests/terminal-control-smoke.sh`. Those tests were located but not executed. A bounded contract search submitted
-363 exported-name, file-name, option, JSON-key and message patterns across
-`tests/`, `scripts/`, `docs/` and root README files; 618 reference files matched.
-The source scan found no added lines combining the specified sensitive terms
-with an assignment sign, and no literal absolute home paths.
+Source review was scoped to current core modules, native producer APIs and
+specific Python dispatch, council, result, acceptance, host and salvage
+contracts. It was not a contiguous reading of all Python modules. Graph API
+queries for these new Rust files reported them unindexed, so direct source
+reads were used. Reference searches cover changed symbols, options, JSON keys,
+messages and filenames across tests, scripts, docs and README files; external
+prose is outside the allowed write scope. Existing operator coverage includes
+`dispatch_results.py`, `auto_review.py`, `room_protocol.py`, `salvage.py`,
+`panel-workspaces-smoke.sh` and `terminal-control-smoke.sh`; none ran here.

@@ -9,6 +9,13 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 pub const WIP_LIMIT: usize = 6;
 pub const MAX_PROMPT: usize = 65536;
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CarriedPatch {
+    pub patch: String,
+    pub sha256: String,
+    pub base: String,
+    pub attempt: String,
+}
 #[derive(Clone, Debug)]
 pub struct DispatchRequest {
     pub route: Route,
@@ -21,6 +28,9 @@ pub struct DispatchRequest {
     pub main: Option<String>,
     pub main_attempt: Option<String>,
     pub continue_task: Option<String>,
+    pub base: Option<String>,
+    pub carried_patch: Option<CarriedPatch>,
+    pub allow_stale_base: bool,
     pub from_task: Vec<String>,
     pub resume_session: Option<String>,
     pub candidate: Option<crate::review::Candidate>,
@@ -102,15 +112,7 @@ pub fn command(request: &DispatchRequest, store: &Store) -> Result<(NativeComman
         .brief
         .as_ref()
         .map(|p| {
-            let relative = if p.is_absolute() {
-                p.strip_prefix(store.repo())
-                    .map_err(|_| Error::new("brief must be inside execution repository"))?
-            } else {
-                p
-            };
-            let body = store.read(relative, MAX_PROMPT, false)?;
-            require(!body.contains(&0), "brief contains NUL")?;
-            crate::outbound(&body)?;
+            let body = crate::storage::input(store.repo(), p, MAX_PROMPT)?;
             String::from_utf8(body).map_err(Error::new)
         })
         .transpose()?;
@@ -259,6 +261,38 @@ pub fn command(request: &DispatchRequest, store: &Store) -> Result<(NativeComman
             &candidate.base,
         ]));
     }
+    if native == NativeCommand::Delegate {
+        if let Some(base) = &request.base {
+            require(
+                (7..=64).contains(&base.len()) && crate::hex(base, base.len()),
+                "base must be a lowercase Git object identity",
+            )?;
+            argv.extend(["--base".into(), base.into()]);
+        }
+        if let Some(carried) = &request.carried_patch {
+            require(
+                request.route.access == "write",
+                "carried patches require write access",
+            )?;
+            crate::identifier(&carried.attempt)?;
+            crate::review::Candidate {
+                patch: carried.patch.clone(),
+                sha256: carried.sha256.clone(),
+                base: carried.base.clone(),
+            }
+            .validate()?;
+            argv.extend(crate::services::args(&[
+                "--carried-patch",
+                &carried.patch,
+                "--carried-patch-sha256",
+                &carried.sha256,
+                "--carried-patch-base",
+                &carried.base,
+                "--carried-patch-attempt",
+                &carried.attempt,
+            ]));
+        }
+    }
     Ok((native, argv))
 }
 pub fn dispatch(
@@ -272,6 +306,19 @@ pub fn dispatch(
         crate::parent_only()?;
     }
     crate::identifier(&request.task_id)?;
+    if let Some(label) = &request.label {
+        require(
+            !label.trim().is_empty() && label.len() <= 480 && !label.chars().any(char::is_control),
+            "label must be a bounded nonblank line",
+        )?;
+        crate::outbound(label.as_bytes())?;
+    }
+    for ident in [&request.room, &request.main, &request.main_attempt]
+        .into_iter()
+        .flatten()
+    {
+        crate::identifier(ident)?;
+    }
     if let Some(alias) = &request.alias {
         require(
             !alias.is_empty()
@@ -284,7 +331,6 @@ pub fn dispatch(
     }
     let store = Store::open(repo)?;
     let execution = Store::open(&request.execution_repo)?;
-    let (native, argv) = command(request, &execution)?;
     let mut scopes = request
         .scopes
         .iter()
@@ -326,6 +372,66 @@ pub fn dispatch(
         stop,
     )?;
     require(attempts.is_array(), "lifecycle projection unavailable")?;
+    let mut resolved = request.clone();
+    let continuation_note = if request.continue_task.is_some() {
+        continuation(repo, &mut resolved, &attempts, service, stop)?
+    } else {
+        require(
+            request.carried_patch.is_none(),
+            "carried patches require a recorded continuation",
+        )?;
+        String::new()
+    };
+    let request = &resolved;
+    let (native, mut argv) = command(request, &execution)?;
+    let scratch = if request.dry_run {
+        None
+    } else {
+        Some(crate::git::Scratch::new()?)
+    };
+    if let Some(brief) = &request.brief {
+        let mut body = crate::storage::input(execution.repo(), brief, MAX_PROMPT)?;
+        if !request.from_task.is_empty() {
+            let brief_text = std::str::from_utf8(&body).map_err(Error::new)?;
+            let findings = crate::results::prior_findings(
+                repo,
+                &request.from_task,
+                brief_text,
+                service,
+                stop,
+            )?;
+            body.extend(findings.as_bytes());
+        }
+        require(
+            body.len() <= MAX_PROMPT,
+            "brief plus prior findings exceeds panel input contract",
+        )?;
+        if let Some(scratch) = &scratch {
+            let captured = scratch.0.join("brief.md");
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&captured)
+                .map_err(Error::new)?;
+            file.write_all(&body).map_err(Error::new)?;
+            if let Some(position) = argv
+                .iter()
+                .position(|v| v == "--brief-file" || v == "--prompt-file")
+            {
+                argv[position + 1] = captured.into_os_string();
+            } else if let Some(position) = argv.iter().position(|v| v == "--prompt") {
+                argv[position + 1] = String::from_utf8(body).map_err(Error::new)?.into();
+            }
+        }
+    }
+    if let Some(carried) = &request.carried_patch {
+        if let Some(position) = argv.iter().position(|v| v == "--carried-patch") {
+            argv[position + 1] = store.repo().join(&carried.patch).into_os_string();
+        }
+    }
     if crate::routing::INDEPENDENT.contains(&request.route.role.as_str()) {
         for task in request
             .from_task
@@ -378,7 +484,7 @@ pub fn dispatch(
         overlaps.is_empty(),
         "Scope overlap: write dispatch refused; wait for delivery/read or release declarations",
     )?;
-    let preview = serde_json::json!({"schema":1,"kind":"oms-panel-route","route":request.route,"task_id":request.task_id,"command":native.verb(),"argv":argv.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>(),"overlaps":overlaps,"executes":false});
+    let preview = serde_json::json!({"schema":1,"kind":"oms-panel-route","route":request.route,"task_id":request.task_id,"command":native.verb(),"argv":argv.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>(),"overlaps":overlaps,"continuation_note":continuation_note,"carried_patch":request.carried_patch,"executes":false});
     if request.dry_run {
         return Ok(preview);
     }
@@ -484,6 +590,48 @@ pub fn dispatch(
             ),
         ]);
     }
+    for (name, value) in [
+        ("OMS_PANEL_LABEL", request.label.as_deref()),
+        ("OMS_PANEL_ALIAS", request.alias.as_deref()),
+        ("OMS_PANEL_MAIN_PARTICIPANT", request.main.as_deref()),
+        (
+            "OMS_PANEL_CONTINUES",
+            request.carried_patch.as_ref().map(|v| v.attempt.as_str()),
+        ),
+    ] {
+        execution_request.remove_environment.push(name.into());
+        if let Some(value) = value {
+            execution_request
+                .environment
+                .push((name.into(), value.into()));
+        }
+    }
+    execution_request.environment.extend([
+        (
+            "OMS_PANEL_ACCESS".into(),
+            request.route.access.clone().into(),
+        ),
+        ("OMS_PANEL_OWNER".into(), request.route.owner.clone().into()),
+        (
+            "OMS_PANEL_PURPOSE".into(),
+            request.route.purpose.clone().into(),
+        ),
+        (
+            "OMS_PANEL_GRAPH_SCOPES".into(),
+            serde_json::to_string(&scopes).map_err(Error::new)?.into(),
+        ),
+    ]);
+    execution_request
+        .remove_environment
+        .push("OMS_PANEL_CONTINUATION".into());
+    if let Some(carried) = &request.carried_patch {
+        let context =
+            serde_json::json!({"patch":carried.patch,"sha256":carried.sha256,"base":carried.base});
+        execution_request.environment.push((
+            "OMS_PANEL_CONTINUATION".into(),
+            serde_json::to_string(&context).map_err(Error::new)?.into(),
+        ));
+    }
     if let Some(main) = &request.main_attempt {
         execution_request
             .environment
@@ -501,7 +649,10 @@ pub fn dispatch(
             .environment
             .push(("CODEX_HOME".into(), config.home(account)?.into()));
     }
-    let output = service.command_context(native, &execution_request, stop)?;
+    let output = service.command_context(native, &execution_request, stop).map_err(|e| Error {
+        publication_uncertain:true,
+        ..Error::new(format!("dispatch {member} execution unconfirmed; preserve reservation and inspect before retry: {}",e.message))
+    })?;
     let tx = store.transaction("panel-dispatch", Duration::from_secs(10))?;
     let mut registry = tx
         .json(
@@ -510,7 +661,7 @@ pub fn dispatch(
             false,
         )?
         .ok_or_else(|| Error::new("dispatch reservation disappeared"))?;
-    let state = if output.cleanup_complete && output.output_complete {
+    let state = if output.cleanup_complete && output.output_complete && !output.limited {
         "awaiting"
     } else {
         "unknown"
@@ -533,4 +684,151 @@ pub fn dispatch(
         65536,
     )?;
     Ok(receipt)
+}
+
+/// Resolve only the newest terminal worker owned by this main. Unpaired salvage
+/// or an unverified outcome refuses rather than silently discarding prior work.
+pub fn continuation(
+    repo: &Path,
+    request: &mut DispatchRequest,
+    attempts: &Value,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<String> {
+    let main = request
+        .main_attempt
+        .as_deref()
+        .ok_or_else(|| Error::new("continue requires the owning main attempt"))?;
+    let earlier = array(attempts)
+        .iter()
+        .filter(|v| {
+            v["task_id"] == request.task_id
+                && v["parent_attempt_id"] == main
+                && v["refs"]["panel_role"] == "worker"
+        })
+        .collect::<Vec<_>>();
+    require(
+        !earlier.is_empty() && earlier.iter().all(|v| v["terminal"] == true),
+        "prior worker absent or termination unconfirmed",
+    )?;
+    let last = earlier[earlier.len() - 1];
+    let attempt = text(last, "attempt_id");
+    crate::identifier(&attempt)?;
+    let rows = crate::results::index_rows(repo)?;
+    let latest = rows.iter().rev().find(|v| {
+        v["task_id"] == request.task_id && v["attempt_id"] == attempt && v["kind"] == "delegate"
+    });
+    let eligible = latest.is_some_and(|v| {
+        v.get("guard")
+            .is_none_or(|g| g.is_null() || g == false || g == "")
+            && v["reason_code"] != "worker_authority_violation"
+            && (v["exit"] == 0
+                || (last["reason_code"] == "verification_failed"
+                    && v["verify_exit"]
+                        .as_i64()
+                        .is_some_and(|n| (1..124).contains(&n))))
+    });
+    let store = Store::open(repo)?;
+    let selected = if last["state"] != "done" && !eligible {
+        if let Some(meta) = crate::salvage::continuation_patch(&store, &request.task_id, &attempt)?
+        {
+            Some(meta)
+        } else {
+            require(
+                crate::salvage::empty_provenance(&store, &request.task_id, &attempt)?,
+                "stopped write work is not transferred by --continue; salvage and inspect the stopped attempt first",
+            )?;
+            None
+        }
+    } else {
+        require(
+            eligible,
+            "previous delegate outcome cannot be verified; continuation refused",
+        )?;
+        latest.cloned()
+    };
+    let mut note = String::new();
+    let mut carried = None;
+    if let Some(row) = selected {
+        let body = crate::results::verified_patch(&store, &row)?;
+        if !body.is_empty() {
+            crate::outbound(&body)?;
+            let base = text(&row, "base_sha");
+            require(
+                (7..=64).contains(&base.len()) && crate::hex(&base, base.len()),
+                "previous patch has no recorded base; continuation refused",
+            )?;
+            if crate::git::applies(service, &request.execution_repo, &body, true, stop)? {
+                note = "previous patch is already part of HEAD; continue from it".into();
+            } else {
+                let head = crate::git::text(
+                    service,
+                    &request.execution_repo,
+                    &["rev-parse", "--verify", "HEAD^{commit}"],
+                    stop,
+                )?;
+                let resolved = crate::git::run(
+                    service,
+                    &request.execution_repo,
+                    &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+                    None,
+                    None,
+                    stop,
+                )?;
+                require(
+                    resolved.cleanup_complete && resolved.output_complete && !resolved.limited,
+                    "continuation base resolution incomplete",
+                )?;
+                if resolved.code == 0 {
+                    let base_full = String::from_utf8(resolved.stdout).map_err(Error::new)?;
+                    if base_full.trim() != head {
+                        let clean = crate::git::applies(
+                            service,
+                            &request.execution_repo,
+                            &body,
+                            false,
+                            stop,
+                        )?;
+                        require(
+                            request.allow_stale_base || clean,
+                            "continued patch base differs from HEAD and does not apply cleanly; start a fresh dispatch with --from-task or explicitly use --allow-stale-base",
+                        )?;
+                        note = format!(
+                            "continued patch base {base} differs from HEAD {head}; {}",
+                            if request.allow_stale_base {
+                                "--allow-stale-base was given"
+                            } else {
+                                "carried patch applies cleanly"
+                            }
+                        );
+                    }
+                } else {
+                    note = format!(
+                        "recorded continuation base {base} is not in this checkout; drift was not checked"
+                    );
+                }
+                carried = Some(CarriedPatch {
+                    patch: text(&row, "patch"),
+                    sha256: text(&row, "patch_sha256"),
+                    base,
+                    attempt: attempt.clone(),
+                });
+            }
+        }
+    }
+    require(
+        request
+            .carried_patch
+            .as_ref()
+            .is_none_or(|v| Some(v) == carried.as_ref()),
+        "explicit carried patch differs from recorded continuation",
+    )?;
+    request.carried_patch = carried;
+    // Native session storage and account provenance are independent authority;
+    // without an injected proof, a fresh worker receives the verified patch.
+    require(
+        request.resume_session.is_none(),
+        "native resume requires independently verified session/account provenance",
+    )?;
+    Ok(note)
 }

@@ -443,3 +443,156 @@ pub fn controller_store(repo: &Path, create: bool) -> Result<Store> {
     directory(&root, create, count + 1)?;
     Store::open(&root)
 }
+
+/// Signal only the observed generation. Linux pidfds close the PID reuse race;
+/// the POSIX fallback rechecks identity immediately before the kernel call.
+pub fn signal_process(owner: &Owner, signal: rustix::process::Signal) -> Result<bool> {
+    crate::parent_only()?;
+    let pid = rustix::process::Pid::from_raw(i32::try_from(owner.pid).map_err(Error::new)?)
+        .ok_or_else(|| Error::new("invalid process ID"))?;
+    require(
+        owner.uid == rustix::process::getuid().as_raw() && owner.pid != std::process::id(),
+        "refusing foreign or controller process",
+    )?;
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::process::{PidfdFlags, pidfd_open, pidfd_send_signal};
+        match pidfd_open(pid, PidfdFlags::empty()) {
+            Ok(fd) => {
+                if process_gone(owner) {
+                    return Ok(false);
+                }
+                require(
+                    process(owner.pid)? == *owner,
+                    "process identity unconfirmed",
+                )?;
+                return match pidfd_send_signal(fd, signal) {
+                    Ok(()) => Ok(true),
+                    Err(rustix::io::Errno::SRCH) => Ok(false),
+                    Err(e) => Err(Error::new(e)),
+                };
+            }
+            Err(rustix::io::Errno::SRCH) => return Ok(false),
+            Err(rustix::io::Errno::NOSYS | rustix::io::Errno::INVAL | rustix::io::Errno::PERM) => {}
+            Err(e) => return Err(Error::new(e)),
+        }
+    }
+    if process_gone(owner) {
+        return Ok(false);
+    }
+    require(
+        process(owner.pid)? == *owner,
+        "process identity unconfirmed",
+    )?;
+    match rustix::process::kill_process(pid, signal) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(e) => Err(Error::new(e)),
+    }
+}
+/// Stop one explicitly bound terminal pane. Server/session and pane identity
+/// are rechecked before the one-shot host mutation; an ambiguous result refuses.
+pub fn stop_terminal(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::parent_only()?;
+    let store = PrivateStore::open(repo, "terminals", false, false)?;
+    let row = store.record(ident)?;
+    let proof: SessionProof =
+        serde_json::from_value(row["session_proof"].clone()).map_err(Error::new)?;
+    require(
+        session_proof(service, repo, &proof.session, stop)? == proof,
+        "terminal live host identity changed",
+    )?;
+    let pane = row["pane"]
+        .as_str()
+        .ok_or_else(|| Error::new("terminal launch unconfirmed"))?;
+    require(
+        pane.strip_prefix('%')
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())),
+        "invalid terminal pane",
+    )?;
+    let expected = format!(
+        "{}\\t{}\\t{}",
+        proof.session,
+        row["window"].as_str().unwrap_or_default(),
+        pane
+    );
+    let binding = tmux(
+        service,
+        repo,
+        &crate::services::args(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{session_id}\t#{window_id}\t#{pane_id}",
+        ]),
+        stop,
+    )?;
+    require(binding == expected, "terminal pane binding changed")?;
+    require(
+        session_proof(service, repo, &proof.session, stop)? == proof && store.record(ident)? == row,
+        "terminal generation changed before stop",
+    )?;
+    tmux(
+        service,
+        repo,
+        &crate::services::args(&["kill-pane", "-t", pane]),
+        stop,
+    )
+    .map_err(|e| Error {
+        publication_uncertain: true,
+        ..e
+    })?;
+    let panes = tmux(
+        service,
+        repo,
+        &crate::services::args(&["list-panes", "-a", "-F", "#{pane_id}"]),
+        stop,
+    )?;
+    require(
+        !panes.lines().any(|v| v == pane),
+        "terminal pane exit unconfirmed",
+    )?;
+    let mut changed = row.clone();
+    changed["state"] = "stopped".into();
+    changed["host_pane_absent"] = true.into();
+    // Pane disappearance does not prove every escaped shell descendant exited.
+    changed["cleanup_complete"] = false.into();
+    store.update(ident, &row, &changed).map_err(|e| Error {
+        publication_uncertain: true,
+        ..e
+    })?;
+    Ok(changed)
+}
+
+/// POSIX group signaling requires its live group leader's exact generation.
+/// Sending a signal proves neither descendant containment nor group completion.
+pub fn signal_process_group(owner: &Owner, signal: rustix::process::Signal) -> Result<bool> {
+    crate::parent_only()?;
+    let pid = rustix::process::Pid::from_raw(i32::try_from(owner.pid).map_err(Error::new)?)
+        .ok_or_else(|| Error::new("invalid group leader"))?;
+    require(
+        owner.uid == rustix::process::getuid().as_raw()
+            && pid != rustix::process::getpid()
+            && rustix::process::getpgid(None).map_err(Error::new)? != pid,
+        "refusing foreign or controller group",
+    )?;
+    if process_gone(owner) {
+        return Ok(false);
+    }
+    require(
+        process(owner.pid)? == *owner
+            && rustix::process::getpgid(Some(pid)).map_err(Error::new)? == pid,
+        "group leader generation changed",
+    )?;
+    match rustix::process::kill_process_group(pid, signal) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(e) => Err(Error::new(e)),
+    }
+}

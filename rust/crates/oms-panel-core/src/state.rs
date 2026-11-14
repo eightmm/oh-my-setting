@@ -140,3 +140,24 @@ pub fn return_brief(report: &Value, before: Option<&Value>, limit: usize) -> Res
         .cloned()
         .map_err(Error::new)
 }
+
+/// Heartbeat belongs to the canonical operations producer. Room membership is
+/// observed separately; a heartbeat is never a room lease or release proof.
+pub fn heartbeat(
+    repo: &Path,
+    attempt: &str,
+    actor: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<()> {
+    crate::identifier(attempt)?;
+    crate::identifier(actor)?;
+    service
+        .command(
+            NativeCommand::Events,
+            repo,
+            &crate::services::args(&["heartbeat", "--attempt", attempt, "--actor", actor]),
+            stop,
+        )?
+        .success()
+}

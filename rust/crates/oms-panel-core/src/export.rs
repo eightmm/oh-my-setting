@@ -8,7 +8,19 @@ pub fn write(target: &Path, text: &str) -> Result<usize> {
         text.len() <= 16 * 1024 * 1024,
         "export exceeds result reader limit",
     )?;
-    crate::outbound(text.as_bytes())?;
+    let mut body = text.as_bytes().to_vec();
+    if !text.ends_with('\n') {
+        body.push(b'\n');
+    }
+    publish(target, &body)?;
+    Ok(body.iter().filter(|v| **v == b'\n').count())
+}
+pub(crate) fn publish(target: &Path, body: &[u8]) -> Result<()> {
+    require(
+        body.len() <= 16 * 1024 * 1024 + 1,
+        "export exceeds result reader limit",
+    )?;
+    crate::outbound(body)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -16,18 +28,10 @@ pub fn write(target: &Path, text: &str) -> Result<usize> {
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(target)
         .map_err(|_| Error::new("--export refuses to replace an existing or unsafe file"))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| {
-            if text.ends_with('\n') {
-                Ok(())
-            } else {
-                file.write_all(b"\n")
-            }
-        })
+    file.write_all(body)
         .and_then(|()| file.sync_all())
         .map_err(|_| Error {
             publication_uncertain: true,
             ..Error::new("export may be incomplete; inspect the new file")
-        })?;
-    Ok(text.bytes().filter(|&v| v == b'\n').count() + usize::from(!text.ends_with('\n')))
+        })
 }

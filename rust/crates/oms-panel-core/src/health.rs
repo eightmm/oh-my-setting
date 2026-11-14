@@ -177,3 +177,44 @@ pub fn alerts(report: &Value, now: f64) -> Vec<String> {
         })
         .collect()
 }
+
+/// Probe the registered catalog through the same bounded native service as
+/// dispatch/council. This lists cached models and does not spend model calls.
+pub fn provider_catalog(
+    repo: &std::path::Path,
+    selection: &str,
+    service: &dyn crate::Services,
+    stop: &std::sync::atomic::AtomicBool,
+) -> crate::Result<Value> {
+    crate::require(
+        !selection.is_empty()
+            && selection.len() <= 4096
+            && selection
+                .bytes()
+                .all(|v| v.is_ascii_alphanumeric() || b"._,-".contains(&v)),
+        "invalid provider selection",
+    )?;
+    let catalog = crate::services::query(
+        service,
+        crate::NativeCommand::ProviderCatalog,
+        repo,
+        &["--providers", selection, "--json"],
+        stop,
+    )?;
+    let rows = catalog.get("providers").unwrap_or(&catalog);
+    crate::require(rows.is_array(), "provider catalog projection unavailable")?;
+    let mut normalized = Vec::new();
+    for row in array(rows) {
+        crate::identifier(&text(row, "provider"))?;
+        let mut row = row.clone();
+        if row.get("installed").is_none() {
+            row["installed"] = row["present"].clone();
+        }
+        crate::require(
+            row["installed"].is_boolean(),
+            "provider installation proof unavailable",
+        )?;
+        normalized.push(row);
+    }
+    Ok(serde_json::json!({"schema":1,"providers":normalized}))
+}

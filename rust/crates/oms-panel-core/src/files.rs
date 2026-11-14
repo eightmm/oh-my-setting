@@ -194,3 +194,29 @@ pub fn read_live(repo: &Path, relative: &Path) -> Result<Vec<u8>> {
 pub fn tree_rows(changes: &[Change], declared: &[String]) -> Value {
     serde_json::json!({"files":changes,"declared":declared,"display_only":true})
 }
+
+/// Export bounded, scrubbed inventory records; raw logs and patch bodies are
+/// excluded. Exclusive publication uses the existing private export writer.
+pub fn export_jsonl(target: &Path, rows: &[Value]) -> Result<usize> {
+    require(rows.len() <= 10000, "file export exceeds record limit")?;
+    let mut body = Vec::new();
+    for row in rows {
+        let line = crate::value::encoded(row)?;
+        require(
+            line.len() <= FILE_LIMIT
+                && body.len().saturating_add(line.len()) <= crate::results::PATCH_MAX,
+            "file export exceeds byte limit",
+        )?;
+        crate::outbound(&line)?;
+        body.extend(line);
+    }
+    crate::export::publish(target, &body)?;
+    Ok(rows.len())
+}
+pub fn export_bundle(target: &Path, changes: &[Change], declared: &[String]) -> Result<usize> {
+    let bundle = serde_json::json!({"schema":1,"kind":"oms-panel-files","files":changes,"declared":declared,"display_only":true});
+    crate::export::write(
+        target,
+        &String::from_utf8(crate::value::encoded(&bundle)?).map_err(Error::new)?,
+    )
+}

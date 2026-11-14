@@ -5,6 +5,55 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 pub const MAX_STATE: usize = 8 * 1024 * 1024;
+/// Read caller-supplied scratch input through one descriptor, including external
+/// files. NONBLOCK avoids hanging on a FIFO before the regular-file check.
+pub(crate) fn input(repo: &Path, path: &Path, maximum: usize) -> Result<Vec<u8>> {
+    use rustix::fs::{self, FileType, Mode, OFlags};
+    use std::io::Read;
+    let target = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        repo.join(path)
+    };
+    let fd = fs::open(
+        &target,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(Error::new)?;
+    let before = fs::fstat(&fd).map_err(Error::new)?;
+    require(
+        FileType::from_raw_mode(before.st_mode) == FileType::RegularFile
+            && before.st_nlink == 1
+            && before.st_uid == rustix::process::getuid().as_raw()
+            && before.st_size >= 0
+            && before.st_size as u64 <= maximum as u64,
+        "input must be an owned single-link bounded regular file",
+    )?;
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(Error::new)?;
+    let after = fs::fstat(&file).map_err(Error::new)?;
+    require(
+        before.st_dev == after.st_dev
+            && before.st_ino == after.st_ino
+            && before.st_size == after.st_size
+            && before.st_mtime == after.st_mtime
+            && before.st_mtime_nsec == after.st_mtime_nsec
+            && before.st_ctime == after.st_ctime
+            && before.st_ctime_nsec == after.st_ctime_nsec
+            && after.st_nlink == 1
+            && bytes.len() as u64 == before.st_size as u64
+            && bytes.len() <= maximum,
+        "input changed while reading",
+    )?;
+    require(!bytes.contains(&0), "input contains NUL")?;
+    crate::outbound(&bytes)?;
+    Ok(bytes)
+}
 /// A captured physical root. No creation or repair occurs at open.
 pub struct Store {
     root: Root,

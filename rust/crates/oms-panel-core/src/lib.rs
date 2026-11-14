@@ -3,12 +3,14 @@
 #[cfg(not(unix))]
 compile_error!("OMS panel supports Linux, WSL2 and macOS");
 
+mod acceptance;
 pub mod activity;
 pub mod cache;
 pub mod dispatch;
 pub mod eventlog;
 pub mod export;
 pub mod files;
+mod git;
 pub mod health;
 pub mod history;
 pub mod host;

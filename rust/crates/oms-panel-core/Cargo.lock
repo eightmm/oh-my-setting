@@ -271,9 +271,11 @@ dependencies = [
  "chrono",
  "oms-context",
  "oms-json",
+ "oms-lock",
  "oms-safe-fs",
  "regex",
  "rustix",
+ "sha2",
 ]
 
 [[package]]

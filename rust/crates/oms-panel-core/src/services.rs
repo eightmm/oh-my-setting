@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeCommand {
+    PeerAsk,
+    Cleanup,
+    ProviderCatalog,
     Delegate,
     Review,
     Admit,
@@ -24,6 +27,9 @@ pub enum NativeCommand {
 impl NativeCommand {
     pub fn verb(self) -> &'static str {
         match self {
+            Self::PeerAsk => "peer-ask",
+            Self::Cleanup => "cleanup",
+            Self::ProviderCatalog => "models",
             Self::Delegate => "peer-delegate",
             Self::Review => "peer-review",
             Self::Admit => "patch-admit",
@@ -70,6 +76,12 @@ impl CommandOutput {
     }
 }
 #[derive(Clone, Debug)]
+pub struct ActivityHeartbeat {
+    pub repo: PathBuf,
+    pub attempt: String,
+    pub actor: String,
+}
+#[derive(Clone, Debug)]
 pub struct ExecutionRequest {
     pub argv: Vec<OsString>,
     pub cwd: PathBuf,
@@ -78,6 +90,7 @@ pub struct ExecutionRequest {
     pub stdin: Option<Vec<u8>>,
     pub timeout: Duration,
     pub output_limit: usize,
+    pub heartbeat: Option<ActivityHeartbeat>,
 }
 impl ExecutionRequest {
     pub fn new(argv: Vec<OsString>, cwd: &Path) -> Self {
@@ -89,6 +102,7 @@ impl ExecutionRequest {
             stdin: None,
             timeout: Duration::from_secs(3600),
             output_limit: 8 * 1024 * 1024,
+            heartbeat: None,
         }
     }
 }
@@ -102,17 +116,31 @@ pub trait PeerExecutor {
 }
 /// Only these domain services may produce authority. Display snapshots confer none.
 pub trait Services: PeerExecutor {
-    /// The native telemetry crate currently provides projections, not this writer.
-    /// Parent wiring must provide canonical artifact-index validation and locking.
-    fn register_result(
+    /// Parent app integration returns its durable delivery receipt. Unavailable
+    /// delivery leaves the core's pending intent and requires an explicit retry.
+    fn deliver_result(
         &self,
         _repo: &Path,
-        _result: &Value,
+        _message: &str,
         _interrupted: &AtomicBool,
-    ) -> Result<()> {
-        Err(Error::new(
-            "native artifact-index registration service unavailable",
-        ))
+    ) -> Result<Value> {
+        Err(Error::new("native app result delivery service unavailable"))
+    }
+    fn register_result(&self, repo: &Path, result: &Value, interrupted: &AtomicBool) -> Result<()> {
+        let field = |name| {
+            result[name]
+                .as_str()
+                .ok_or_else(|| Error::new("result registration field missing"))
+        };
+        oms_command_telemetry::store::register_panel_result(
+            repo,
+            field("owner")?,
+            field("task_id")?,
+            Path::new(field("artifact")?),
+            interrupted,
+        )
+        .map(|_| ())
+        .map_err(telemetry_error)
     }
     fn command(
         &self,
@@ -125,20 +153,16 @@ pub trait Services: PeerExecutor {
         crate::routing::model_family(provider, model).map(str::to_owned)
     }
     /// Terminal adapters must prove recorded host identity, not mere pane absence.
-    fn host_absent(&self, _repo: &Path, _attempt: &Value) -> Result<bool> {
-        Ok(false)
+    fn host_absent(&self, repo: &Path, attempt: &Value) -> Result<bool> {
+        crate::host::absent(repo, attempt, self)
     }
-    /// Acceptance must bind exact plan lease, reviews, patch tree and publication.
-    /// Default adapters intentionally cannot synthesize this authority from exit codes.
     fn accept(
         &self,
-        _repo: &Path,
-        _request: &crate::results::AcceptRequest,
-        _interrupted: &AtomicBool,
+        repo: &Path,
+        request: &crate::results::AcceptRequest,
+        interrupted: &AtomicBool,
     ) -> Result<Value> {
-        Err(Error::new(
-            "native reviewed publication service is required for --accept",
-        ))
+        crate::results::accept_native(repo, request, self, interrupted)
     }
     fn finalize_authority(
         &self,
@@ -215,7 +239,27 @@ impl PeerExecutor for SubcommandServices {
         let mut reactor = Reactor::new();
         let job = reactor.start(child).map_err(Error::new)?;
         let mut cancelling = false;
+        let mut heartbeat_at = Instant::now();
+        let mut heartbeat_failed = false;
         loop {
+            if let Some(activity) = &request.heartbeat {
+                if !cancelling && heartbeat_at.elapsed() >= Duration::from_secs(60) {
+                    let output = oms_command_operations::run(
+                        oms_command_operations::App::Events,
+                        &args(&[
+                            "heartbeat",
+                            "--attempt",
+                            &activity.attempt,
+                            "--actor",
+                            &activity.actor,
+                        ]),
+                        &activity.repo,
+                        interrupted,
+                    );
+                    heartbeat_failed |= output.0 != 0;
+                    heartbeat_at = Instant::now();
+                }
+            }
             if interrupted.load(std::sync::atomic::Ordering::Acquire) && !cancelling {
                 reactor
                     .stop(job, StopReason::Signal(2))
@@ -232,10 +276,14 @@ impl PeerExecutor for SubcommandServices {
                     let output_complete = done.output_complete();
                     let limited =
                         done.stdout.limited || done.stderr.as_ref().is_some_and(|v| v.limited);
+                    let mut stderr = done.stderr.map(|v| v.bytes).unwrap_or_default();
+                    if heartbeat_failed {
+                        stderr.extend_from_slice(b"\nOMS activity update unavailable\n");
+                    }
                     return Ok(CommandOutput {
                         code: done.exit.map(|v| v.shell_code()).unwrap_or(75),
                         stdout: done.stdout.bytes,
-                        stderr: done.stderr.map(|v| v.bytes).unwrap_or_default(),
+                        stderr,
                         cleanup_complete,
                         output_complete,
                         limited,
@@ -277,6 +325,7 @@ impl Services for SubcommandServices {
     ) -> Result<CommandOutput> {
         checkpoint(interrupted)?;
         let native = match command {
+            NativeCommand::Room => Some(oms_command_room::run(args, repo, interrupted)),
             NativeCommand::Events => Some(oms_command_operations::run(
                 oms_command_operations::App::Events,
                 args,
@@ -284,7 +333,9 @@ impl Services for SubcommandServices {
                 interrupted,
             )),
             NativeCommand::Bundle => Some(oms_command_attempt_bundle::run(args, repo, interrupted)),
-            NativeCommand::Telemetry => Some(oms_command_telemetry::run(args, repo, interrupted)),
+            NativeCommand::Telemetry if oms_command_telemetry::owns(args) => {
+                Some(oms_command_telemetry::run(args, repo, interrupted))
+            }
             NativeCommand::Failure => Some(oms_command_failure::run(args, repo, interrupted)),
             NativeCommand::Task
                 if args
@@ -312,6 +363,21 @@ impl Services for SubcommandServices {
         ];
         argv.extend_from_slice(args);
         self.execute(&ExecutionRequest::new(argv, repo), interrupted)
+    }
+}
+pub(crate) fn telemetry_error(error: oms_command_telemetry::store::StoreError) -> Error {
+    use oms_command_telemetry::store::StoreError;
+    use oms_safe_fs::MutationPhase;
+    Error {
+        code: error.exit_code(),
+        publication_uncertain: matches!(
+            &error,
+            StoreError::Storage {
+                phase: MutationPhase::PublicationUncertain | MutationPhase::Published,
+                ..
+            }
+        ),
+        ..Error::new(error)
     }
 }
 pub(crate) fn args(values: &[&str]) -> Vec<OsString> {

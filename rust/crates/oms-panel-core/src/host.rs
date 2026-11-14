@@ -168,3 +168,95 @@ impl Host {
         )
     }
 }
+
+/// A failed host query is unknown, never proof of absence.
+pub fn absent<S: crate::Services + ?Sized>(
+    repo: &Path,
+    attempt: &Value,
+    service: &S,
+) -> Result<bool> {
+    let refs = &attempt["refs"];
+    if refs["panel_host"] == "inline" {
+        return Ok(crate::release::identity_gone(refs, "wrapper"));
+    }
+    if refs["panel_host"] != "tmux" {
+        return Ok(false);
+    }
+    let pane = refs["panel_pane_id"].as_str().unwrap_or_default();
+    if !pane
+        .strip_prefix('%')
+        .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+        || !crate::hex(refs["panel_socket_digest"].as_str().unwrap_or_default(), 64)
+    {
+        return Ok(false);
+    }
+    if crate::release::identity_gone(refs, "tmux_server") {
+        return Ok(true);
+    }
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let run = |values: &[&str]| -> Result<String> {
+        let mut argv = vec!["tmux".into()];
+        argv.extend(crate::services::args(values));
+        let mut request = crate::services::ExecutionRequest::new(argv, repo);
+        request.timeout = Duration::from_secs(3);
+        request.output_limit = MAX_RESPONSE;
+        let output = service.execute(&request, &stop)?;
+        output.success()?;
+        String::from_utf8(output.stdout).map_err(Error::new)
+    };
+    let current = match run(&["display-message", "-p", "#{pid}\t#{socket_path}"]) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let fields = current.trim().split('\t').collect::<Vec<_>>();
+    if fields.len() != 2
+        || refs["panel_tmux_server_pid"] != fields[0]
+        || refs["panel_socket_digest"]
+            != crate::digest(
+                std::fs::canonicalize(fields[1])
+                    .map_err(Error::new)?
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            )
+    {
+        return Ok(false);
+    }
+    // The live generation must match; legacy birth encodings stay unproven.
+    let pid = match fields[0].parse::<u32>() {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let identity = match crate::terminals::process(pid) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    if refs["panel_tmux_server_identity"] != identity.birth
+        && refs["panel_tmux_server_identity"] != crate::digest(identity.birth.as_bytes())
+    {
+        return Ok(false);
+    }
+    let panes = match run(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{pane_id}\t#{@oms_panel_attempt}\t#{@oms_panel_main_attempt}",
+    ]) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let windows = match run(&[
+        "list-windows",
+        "-a",
+        "-F",
+        "#{@oms_panel_attempt}\t#{@oms_panel_main_attempt}",
+    ]) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let id = attempt["attempt_id"].as_str().unwrap_or_default();
+    Ok(!id.is_empty()
+        && !panes
+            .lines()
+            .chain(windows.lines())
+            .any(|line| line.split('\t').any(|value| value == id || value == pane)))
+}

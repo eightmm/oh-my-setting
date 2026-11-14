@@ -487,12 +487,32 @@ pub fn salvage(
         managed(&request.execution_repo, &request.kept)? == identity,
         "kept worktree identity moved during capture",
     )?;
-    require(
-        !captured.patch.is_empty(),
-        "no patch bytes recovered; empty salvage requires independent evidence reconciliation",
-    )?;
     let store = Store::open(repo)?;
-    let mut metadata = serde_json::json!({"schema":1,"kind":"oms-salvaged-patch","base_sha":captured.base,"salvaged_at":crate::now(),
+    if captured.patch.is_empty() {
+        let rows = crate::results::index_rows(repo)?;
+        require(
+            !rows.iter().any(|v| {
+                v["task_id"] == request.task_id
+                    && v["attempt_id"] == request.attempt_id
+                    && v["patch"].as_str().is_some_and(|p| !p.is_empty())
+            }),
+            "indexed recovery evidence prevents empty salvage",
+        )?;
+        require(
+            continuation_patch(&store, &request.task_id, &request.attempt_id)?.is_none(),
+            "published salvage prevents an empty recovery receipt",
+        )?;
+        let sha = empty_identity(&request.task_id, &request.attempt_id)?;
+        let relative = format!(".oms/salvage-provenance/empty-{sha}.json");
+        let proof = serde_json::json!({"schema":1,"payload_sha256":sha,"records":[{"salvaged_from":{"task":request.task_id,"attempt":request.attempt_id,"outcome":"nothing_to_recover","reason":"registered stopped worktree captured against recorded base"},"base_sha":captured.base,"encoding_warnings":[]}]});
+        store
+            .transaction("panel-salvage", Duration::from_secs(10))?
+            .write_json(Path::new(&relative), &proof, true, MAX_EVIDENCE)?;
+        return Ok(
+            serde_json::json!({"outcome":"nothing_to_recover","task":request.task_id,"attempt":request.attempt_id,"provenance":relative}),
+        );
+    }
+    let mut metadata = serde_json::json!({"schema":1,"kind":"oms-salvaged-patch","base_sha":captured.base,"salvaged_at":salvaged_at()?,
         "salvaged_from":{"task":request.task_id,"attempt":request.attempt_id,"kept_path":request.kept,"stop_reason":"confirmed-stopped"},
         "files":captured.files,"encoding_warnings":captured.encoding_warnings,"payload_sha256":crate::digest(&payload(&captured.patch))});
     metadata["provenance"] = record_provenance(&store, &metadata)?.into();
@@ -518,5 +538,190 @@ pub fn salvage(
         publication_uncertain: true,
         ..e
     })?;
+    drop(tx);
+    let mut registration = oms_command_telemetry::store::AppendArtifactRequest {
+        kind: "salvage".into(),
+        provider: "panel".into(),
+        artifact: Some(PathBuf::from(format!("{path}.json"))),
+        patch: Some(PathBuf::from(&path)),
+        task_id: Some(request.task_id.clone()),
+        inherit_env: false,
+        ..Default::default()
+    };
+    registration
+        .env_overrides
+        .insert("OMS_INDEX_ATTEMPT_ID".into(), request.attempt_id.clone());
+    registration
+        .env_overrides
+        .insert("OMS_INDEX_BASE_SHA".into(), captured.base);
+    oms_command_telemetry::store::append_artifact_index(repo, &registration, stop).map_err(
+        |e| Error {
+            publication_uncertain: true,
+            ..crate::services::telemetry_error(e)
+        },
+    )?;
     Ok(metadata)
+}
+
+fn empty_identity(task: &str, attempt: &str) -> Result<String> {
+    Ok(crate::digest(
+        &serde_json::to_vec(&[task, attempt]).map_err(Error::new)?,
+    ))
+}
+pub fn empty_provenance(store: &Store, task: &str, attempt: &str) -> Result<bool> {
+    let sha = empty_identity(task, attempt)?;
+    let path = format!(".oms/salvage-provenance/empty-{sha}.json");
+    let Some(value) = store.json(Path::new(&path), MAX_EVIDENCE, true)? else {
+        return Ok(false);
+    };
+    require(
+        value["schema"] == 1 && value["payload_sha256"] == sha && value["records"].is_array(),
+        "invalid empty salvage provenance",
+    )?;
+    Ok(crate::value::array(&value["records"]).iter().any(|v| {
+        v["salvaged_from"]["task"] == task
+            && v["salvaged_from"]["attempt"] == attempt
+            && v["salvaged_from"]["outcome"] == "nothing_to_recover"
+    }))
+}
+/// Select only paired, digest-checked patches with matching provenance. A patch
+/// without its sidecar, or provenance without its patch, remains unconfirmed.
+pub fn continuation_patch(store: &Store, task: &str, attempt: &str) -> Result<Option<Value>> {
+    crate::identifier(task)?;
+    crate::identifier(attempt)?;
+    let directory = store.repo().join(".oms/artifacts/delegate");
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(v) => Some(v),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Error::new(e)),
+    };
+    let mut names = Vec::new();
+    for entry in entries.into_iter().flatten() {
+        let entry = entry.map_err(Error::new)?;
+        require(
+            names.len() < 10000,
+            "salvage inventory exceeds bounded scan",
+        )?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| Error::new("non-UTF-8 salvage name"))?;
+        names.push(name);
+    }
+    names.sort();
+    let prefix = format!("salvage-{task}-");
+    let mut selected = Vec::new();
+    let mut covered = std::collections::BTreeSet::new();
+    for name in &names {
+        if !name.starts_with(&prefix) || !name.ends_with(".patch") {
+            continue;
+        }
+        require(
+            names.contains(&format!("{name}.json")),
+            "salvage publication incomplete: patch has no sidecar",
+        )?;
+    }
+    for name in &names {
+        if !name.starts_with(&prefix) || !name.ends_with(".patch.json") {
+            continue;
+        }
+        let path = format!(".oms/artifacts/delegate/{}", &name[..name.len() - 5]);
+        let meta = store
+            .json(Path::new(&format!("{path}.json")), MAX_EVIDENCE, false)?
+            .ok_or_else(|| Error::new("salvage sidecar missing"))?;
+        require(
+            meta["salvaged_from"]["task"] == task,
+            "salvage task differs from filename",
+        )?;
+        if meta["salvaged_from"]["attempt"] != attempt {
+            continue;
+        }
+        require(meta["patch"] == path, "salvage patch identity differs")?;
+        let body = crate::results::verified_patch(store, &meta)?;
+        let tail = body
+            .strip_prefix(PREFIX.as_bytes())
+            .ok_or_else(|| Error::new("salvage header absent"))?;
+        let end = tail
+            .iter()
+            .position(|v| *v == b'\n')
+            .ok_or_else(|| Error::new("salvage header incomplete"))?;
+        let header = crate::decode(&tail[..end], MAX_EVIDENCE)?;
+        for key in [
+            "salvaged_from",
+            "salvaged_at",
+            "payload_sha256",
+            "base_sha",
+            "encoding_warnings",
+        ] {
+            require(
+                header[key] == meta[key],
+                "salvage header differs from sidecar",
+            )?;
+        }
+        let sha = crate::digest(&payload(&body));
+        require(
+            meta["payload_sha256"] == sha,
+            "salvage payload digest differs",
+        )?;
+        let proof_path = format!(".oms/salvage-provenance/{sha}.json");
+        let proof = store
+            .json(Path::new(&proof_path), MAX_EVIDENCE, false)?
+            .ok_or_else(|| Error::new("salvage provenance absent"))?;
+        require(
+            proof["schema"] == 1
+                && proof["payload_sha256"] == sha
+                && crate::value::array(&proof["records"]).iter().any(|v| {
+                    v["salvaged_from"] == meta["salvaged_from"] && v["base_sha"] == meta["base_sha"]
+                }),
+            "salvage provenance does not bind this patch",
+        )?;
+        covered.insert(sha);
+        selected.push(meta);
+    }
+    let proof_dir = store.repo().join(".oms/salvage-provenance");
+    if proof_dir.exists() {
+        for (count, entry) in std::fs::read_dir(proof_dir)
+            .map_err(Error::new)?
+            .enumerate()
+        {
+            require(count < 10000, "salvage provenance exceeds bounded scan")?;
+            let name = entry.map_err(Error::new)?.file_name();
+            let relative = PathBuf::from(".oms/salvage-provenance").join(&name);
+            let value = store
+                .json(&relative, MAX_EVIDENCE, false)?
+                .ok_or_else(|| Error::new("salvage provenance disappeared"))?;
+            let relevant = crate::value::array(&value["records"]).iter().any(|v| {
+                v["salvaged_from"]["task"] == task
+                    && v["salvaged_from"]["attempt"] == attempt
+                    && v["salvaged_from"]["outcome"] != "nothing_to_recover"
+            });
+            if relevant {
+                require(
+                    value["payload_sha256"]
+                        .as_str()
+                        .is_some_and(|v| covered.contains(v)),
+                    "salvage publication incomplete: provenance has no paired patch",
+                )?;
+            }
+        }
+    }
+    selected.sort_by_key(|v| {
+        (
+            crate::value::text(v, "salvaged_at"),
+            crate::value::text(v, "patch"),
+        )
+    });
+    Ok(selected.pop())
+}
+
+fn salvaged_at() -> Result<String> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(Error::new)?;
+    let stamp = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        i64::try_from(duration.as_secs()).map_err(Error::new)?,
+        duration.subsec_nanos(),
+    )
+    .ok_or_else(|| Error::new("salvage timestamp unavailable"))?;
+    Ok(stamp.format("%Y-%m-%dT%H:%M:%S.%6fZ").to_string())
 }

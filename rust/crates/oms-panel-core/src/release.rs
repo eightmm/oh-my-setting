@@ -24,7 +24,13 @@ pub fn identity_gone(refs: &Value, kind: &str) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
-    matches!(NativeIdentity.owner_identity(pid), Err(OwnerError::Exited))
+    match NativeIdentity.owner_identity(pid) {
+        Err(OwnerError::Exited) => true,
+        #[cfg(target_os = "linux")]
+        Ok(current) if crate::hex(birth, 64) => crate::digest(current.birth.as_bytes()) != birth,
+        Ok(current) if birth.contains(':') => current.birth != birth,
+        _ => false,
+    }
 }
 pub fn heartbeat_fresh(row: &Value, now: f64) -> Result<bool> {
     let refs = &row["refs"];
