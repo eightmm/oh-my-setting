@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+mod registry;
 
 use oms_context::{Json, compare_manifests, inspect_manifest, parse_json};
 use oms_json::{PyString, Value as Encoded};
@@ -898,6 +899,20 @@ fn caller_cwd(tool: &str) -> PathBuf {
         )
     })
 }
+fn streaming_command_exit(
+    tool: &str,
+    code: i32,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> ! {
+    if code == 2 && writeln!(stderr, "hint: run `oms {tool} --help` for usage").is_err() {
+        std::process::exit(1);
+    }
+    if stdout.flush().is_err() || stderr.flush().is_err() {
+        std::process::exit(1);
+    }
+    std::process::exit(code);
+}
 fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
@@ -1016,9 +1031,25 @@ fn main() {
         source_root = Some(PathBuf::from(&argv[1]));
         argv.drain(..4);
     }
+    if registry::owns(&argv) {
+        if select {
+            return;
+        }
+        let Some(source) = source_root.as_deref() else {
+            eprintln!("runtime-core: root navigation requires validated native source metadata");
+            std::process::exit(2);
+        };
+        let (code, out, err) = registry::run(&argv, source);
+        use std::io::Write;
+        if std::io::stdout().write_all(&out).is_err() || std::io::stderr().write_all(&err).is_err()
+        {
+            std::process::exit(1);
+        }
+        std::process::exit(code);
+    }
     if let Some(
-        tool @ ("artifact-index" | "agent-role" | "input" | "agent-events" | "job-digest"
-        | "slurm-lint"),
+        tool @ ("artifact-index" | "agent-role" | "input" | "agent-events" | "agent-memory"
+        | "approval-inbox" | "job-digest" | "slurm-lint"),
     ) = argv.first().and_then(|v| v.to_str()).map(|v| {
         if v == "slurm-lint.sh" {
             "slurm-lint"
@@ -1037,7 +1068,9 @@ fn main() {
                     || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| v != "0");
                 !child && oms_command_input::owns(local)
             }
-            "agent-events" => oms_command_attempt_bundle::owns(local),
+            "agent-events" => oms_command_operations::owns_events(local),
+            "approval-inbox" => oms_command_operations::owns_approvals(local),
+            "agent-memory" => oms_command_memory::owns(local),
             "job-digest" => oms_command_job_digest::owns(local),
             "slurm-lint" => oms_command_slurm_lint::owns(local),
             _ => unreachable!(),
@@ -1048,7 +1081,7 @@ fn main() {
         if select {
             return;
         }
-        if matches!(tool, "agent-role" | "slurm-lint") && source_root.is_none() {
+        if matches!(tool, "agent-role" | "agent-memory" | "slurm-lint") && source_root.is_none() {
             command_exit(
                 tool,
                 (
@@ -1060,6 +1093,19 @@ fn main() {
             );
         }
         let cwd = caller_cwd(tool);
+        if let Some(app) = oms_command_operations::App::from_namespace(tool) {
+            let mut stdout = std::io::stdout().lock();
+            let mut stderr = std::io::stderr().lock();
+            let code = oms_command_operations::run_streaming(
+                app,
+                local,
+                &cwd,
+                &interrupted,
+                &mut stdout,
+                &mut stderr,
+            );
+            streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+        }
         let result = match tool {
             "artifact-index" => oms_command_telemetry::run(local, &cwd, &interrupted),
             "agent-role" => oms_command_agent_role::run_with_source(
@@ -1069,7 +1115,12 @@ fn main() {
                 &interrupted,
             ),
             "input" => oms_command_input::run(local, &cwd, &interrupted),
-            "agent-events" => oms_command_attempt_bundle::run(local, &cwd, &interrupted),
+            "agent-memory" => oms_command_memory::run_with_source(
+                local,
+                &cwd,
+                source_root.as_deref().expect("validated source metadata"),
+                &interrupted,
+            ),
             "job-digest" => oms_command_job_digest::run(local, &cwd, &interrupted),
             "slurm-lint" => oms_command_slurm_lint::run_with_source(
                 local,

@@ -13,6 +13,8 @@ oms-command-attempt-bundle = { path = "../oms-command-attempt-bundle" }
 oms-command-experiment = { path = "../oms-command-experiment" }
 oms-command-input = { path = "../oms-command-input" }
 oms-command-job-digest = { path = "../oms-command-job-digest" }
+oms-command-memory = { path = "../oms-command-memory" }
+oms-command-operations = { path = "../oms-command-operations" }
 oms-command-slurm-lint = { path = "../oms-command-slurm-lint" }
 oms-command-telemetry = { path = "../oms-command-telemetry" }
 oms-command-failure = { path = "../oms-command-failure" }

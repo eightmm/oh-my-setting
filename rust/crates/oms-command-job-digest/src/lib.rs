@@ -1505,6 +1505,39 @@ pub fn run(
     default_repo: &Path,
     interrupted: &AtomicBool,
 ) -> (i32, Vec<u8>, Vec<u8>) {
+    run_inner(args, default_repo, None, interrupted)
+}
+
+/// Accounting captured by a native parent for this exact job observation.
+/// The bytes retain the accounting command's output shape; this adapter neither
+/// refreshes them nor converts another command's columns into sacct's layout.
+#[derive(Clone, Copy, Debug)]
+pub struct AccountingSnapshot<'a> {
+    pub job_id: &'a str,
+    pub available: bool,
+    pub exit_code: i32,
+    pub stdout: &'a [u8],
+    pub stderr: &'a [u8],
+}
+
+/// Reuse a parent's accounting observation without another scheduler query.
+/// Waiting is refused because it would make the supplied observation stale.
+/// An unavailable observation remains unavailable even if sacct is on PATH.
+pub fn run_with_accounting(
+    args: &[OsString],
+    default_repo: &Path,
+    accounting: AccountingSnapshot<'_>,
+    interrupted: &AtomicBool,
+) -> (i32, Vec<u8>, Vec<u8>) {
+    run_inner(args, default_repo, Some(accounting), interrupted)
+}
+
+fn run_inner(
+    args: &[OsString],
+    default_repo: &Path,
+    accounting: Option<AccountingSnapshot<'_>>,
+    interrupted: &AtomicBool,
+) -> (i32, Vec<u8>, Vec<u8>) {
     let mut tail = 30usize;
     let mut patterns = 40usize;
     let mut wait = false;
@@ -1592,6 +1625,11 @@ pub fn run(
         } else {
             return fail_path("not a log file or job id: ", first);
         }
+    }
+    if let Some(snapshot) = accounting
+        && (wait || job.as_deref() != Some(snapshot.job_id))
+    {
+        return fail("captured accounting requires the same slurm job id and cannot use --wait");
     }
     if timeout.is_some() && !wait {
         return fail("--wait-timeout requires --wait");
@@ -1791,8 +1829,14 @@ pub fn run(
     let accounting_marker = "\0oms-accounting-output\0";
     if let Some(id) = &job {
         output.push_str("\n## Slurm accounting\n\n");
-        if executable("sacct", default_repo) {
-            let (rc, out, err) = if deadline.is_some_and(|d| Instant::now() >= d) {
+        if accounting.map_or_else(|| executable("sacct", default_repo), |s| s.available) {
+            let (rc, out, err) = if let Some(snapshot) = accounting {
+                (
+                    snapshot.exit_code,
+                    snapshot.stdout.to_vec(),
+                    snapshot.stderr.to_vec(),
+                )
+            } else if deadline.is_some_and(|d| Instant::now() >= d) {
                 (
                     124,
                     b"Accounting skipped: observation budget exhausted.".to_vec(),
