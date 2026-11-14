@@ -1,0 +1,445 @@
+//! Private terminal records and positive process-generation proofs.
+use crate::services::ExecutionRequest;
+use crate::{Error, Result, Services, Store, Value, require};
+use oms_reference::process::{IdentitySource, NativeIdentity, Owner, OwnerError};
+use std::ffi::OsString;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+pub const MAX_RECORD: usize = 65536;
+pub const MAX_READ: usize = 32768;
+pub const MAX_ITEMS: usize = 128;
+pub const MAX_ARCHIVED: usize = 512;
+pub fn process(pid: u32) -> Result<Owner> {
+    NativeIdentity
+        .owner_identity(pid)
+        .map_err(|_| Error::new("native process generation unavailable"))
+}
+pub fn process_gone(owner: &Owner) -> bool {
+    match NativeIdentity.owner_identity(owner.pid) {
+        Ok(current) => current != *owner,
+        Err(OwnerError::Exited) => true,
+        Err(_) => false,
+    }
+}
+pub fn ordinary_environment() -> Vec<(OsString, OsString)> {
+    std::env::vars_os()
+        .filter(|(k, _)| {
+            let name = k.to_string_lossy();
+            ![
+                "OMS_",
+                "CLAUDE_CODE_",
+                "CODEX_THREAD_",
+                "CODEX_SESSION_",
+                "AGY_SESSION_",
+                "ANTIGRAVITY_SESSION_",
+            ]
+            .iter()
+            .any(|p| name.starts_with(p))
+                && ![
+                    "CLAUDECODE",
+                    "CLAUDE_SESSION_ID",
+                    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+                ]
+                .contains(&name.as_ref())
+        })
+        .collect()
+}
+pub fn state_home() -> Result<PathBuf> {
+    let path = std::env::var_os("XDG_STATE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|v| PathBuf::from(v).join(".local/state")))
+        .ok_or_else(|| Error::new("private state home unavailable"))?;
+    require(
+        path.is_absolute() && !path.components().any(|c| matches!(c, Component::ParentDir)),
+        "state home must be absolute and normalized",
+    )?;
+    Ok(path)
+}
+fn directory(path: &Path, create: bool, private_start: usize) -> Result<()> {
+    use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut parent = fs::open("/", flags, Mode::empty()).map_err(Error::new)?;
+    for (index, name) in path
+        .components()
+        .filter_map(|v| {
+            if let Component::Normal(v) = v {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .enumerate()
+    {
+        if create {
+            match fs::mkdirat(&parent, name, Mode::from_raw_mode(0o700)) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::EXIST) => {}
+                Err(e) => return Err(Error::new(e)),
+            }
+        }
+        let child = fs::openat(&parent, name, flags, Mode::empty())
+            .map_err(|_| Error::new("private directory unavailable or unsafe"))?;
+        let named = fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(Error::new)?;
+        let info = fs::fstat(&child).map_err(Error::new)?;
+        require(
+            FileType::from_raw_mode(info.st_mode) == FileType::Directory
+                && named.st_dev == info.st_dev
+                && named.st_ino == info.st_ino,
+            "private directory changed",
+        )?;
+        if index >= private_start {
+            require(
+                info.st_uid == rustix::process::getuid().as_raw() && info.st_mode & 0o077 == 0,
+                "unsafe private directory",
+            )?;
+        } else if index + 1 == private_start {
+            require(
+                info.st_uid == rustix::process::getuid().as_raw() && info.st_mode & 0o022 == 0,
+                "unsafe state directory",
+            )?;
+        }
+        parent = child;
+    }
+    Ok(())
+}
+pub fn valid_id(ident: &str) -> bool {
+    ident
+        .strip_prefix("term-")
+        .or_else(|| ident.strip_prefix("job-"))
+        .is_some_and(|v| crate::hex(v, 32))
+}
+/// Matches the existing per-repository private namespace. Record files are never repaired.
+pub struct PrivateStore {
+    pub repo: PathBuf,
+    pub root: PathBuf,
+    pub kind: String,
+    pub archived: bool,
+    pub(crate) store: Store,
+}
+impl PrivateStore {
+    pub fn open(repo: &Path, kind: &str, archived: bool, create: bool) -> Result<Self> {
+        Self::at(repo, kind, archived, create, &state_home()?)
+    }
+    pub fn at(repo: &Path, kind: &str, archived: bool, create: bool, base: &Path) -> Result<Self> {
+        require(
+            ["terminals", "workspaces", "jobs"].contains(&kind),
+            "invalid managed record kind",
+        )?;
+        let repo = std::fs::canonicalize(repo).map_err(Error::new)?;
+        require(
+            base.is_absolute()
+                && !base.starts_with(&repo)
+                && !base.components().any(|v| matches!(v, Component::ParentDir)),
+            "private state must be normalized and outside repository",
+        )?;
+        let namespace = crate::digest(repo.as_os_str().as_encoded_bytes());
+        let root = base
+            .join("oh-my-setting/panel-control")
+            .join(namespace)
+            .join(format!("{kind}{}", if archived { "-archive" } else { "" }));
+        let base_count = base
+            .components()
+            .filter(|v| matches!(v, Component::Normal(_)))
+            .count();
+        directory(&root, create, base_count + 1)?;
+        Ok(Self {
+            repo,
+            store: Store::open(&root)?,
+            root,
+            kind: kind.into(),
+            archived,
+        })
+    }
+    pub fn identifiers(&self) -> Result<Vec<String>> {
+        let mut ids = vec![];
+        for entry in std::fs::read_dir(&self.root).map_err(Error::new)? {
+            let entry = entry.map_err(Error::new)?;
+            if let Some(id) = entry.file_name().to_str()
+                && valid_id(id)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+        require(
+            ids.len()
+                <= if self.archived {
+                    MAX_ARCHIVED
+                } else {
+                    MAX_ITEMS
+                },
+            "managed record capacity exceeded",
+        )?;
+        ids.sort();
+        Ok(ids)
+    }
+    pub fn record(&self, ident: &str) -> Result<Value> {
+        require(valid_id(ident), "invalid managed record ID")?;
+        let path = PathBuf::from(ident).join("record");
+        let info = std::fs::symlink_metadata(self.root.join(&path)).map_err(Error::new)?;
+        require(
+            info.uid() == rustix::process::getuid().as_raw() && info.mode() & 0o077 == 0,
+            "unsafe private record",
+        )?;
+        let row = self
+            .store
+            .json(&path, MAX_RECORD, false)?
+            .ok_or_else(|| Error::new("managed record missing"))?;
+        require(
+            row["schema"] == 1
+                && row["id"] == ident
+                && row["repo"] == self.repo.to_string_lossy().as_ref()
+                && row["uid"].as_u64() == Some(u64::from(rustix::process::getuid().as_raw()))
+                && row["archived"].as_bool().unwrap_or(false) == self.archived,
+            "invalid managed record binding",
+        )?;
+        Ok(row)
+    }
+    pub fn allocate(&self, prefix: &str, kind: &str, fields: &Value) -> Result<Value> {
+        crate::parent_only()?;
+        require(
+            !self.archived && ["term", "job"].contains(&prefix) && fields.is_object(),
+            "invalid record allocation",
+        )?;
+        let tx = self
+            .store
+            .lock_at(Path::new("lock"), Duration::from_secs(3))?;
+        require(
+            self.identifiers()?.len() < MAX_ITEMS,
+            "active slots are full; archive a completed item",
+        )?;
+        let id = format!("{prefix}-{}", crate::value::unique()?);
+        let mut row = fields.clone();
+        row["schema"] = 1.into();
+        row["id"] = id.clone().into();
+        row["repo"] = self.repo.to_string_lossy().as_ref().into();
+        row["uid"] = rustix::process::getuid().as_raw().into();
+        row["kind"] = kind.into();
+        tx.write_json(&PathBuf::from(&id).join("record"), &row, true, MAX_RECORD)?;
+        Ok(row)
+    }
+    pub fn update(&self, ident: &str, expected: &Value, changed: &Value) -> Result<()> {
+        crate::parent_only()?;
+        let tx = self
+            .store
+            .lock_at(Path::new("lock"), Duration::from_secs(3))?;
+        require(self.record(ident)? == *expected, "managed record changed")?;
+        tx.write_json(
+            &PathBuf::from(ident).join("record"),
+            changed,
+            false,
+            MAX_RECORD,
+        )?;
+        Ok(())
+    }
+    pub fn list(&self) -> Result<Vec<Value>> {
+        self.identifiers()?.iter().map(|v| self.record(v)).collect()
+    }
+}
+pub fn preview(raw: &[u8], maximum: usize) -> Result<Value> {
+    require(
+        (1..=MAX_READ).contains(&maximum),
+        "read limit must be between 1 and 32768 bytes",
+    )?;
+    let source_truncated = raw.len() > MAX_RECORD;
+    let raw = &raw[..raw.len().min(MAX_RECORD)];
+    let raw = String::from_utf8_lossy(raw);
+    let ansi =
+        regex::Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]")
+            .map_err(Error::new)?;
+    let plain = ansi
+        .replace_all(&raw, "")
+        .chars()
+        .filter(|c| matches!(c, '\n' | '\t') || (!c.is_control()))
+        .collect::<String>();
+    let long = plain.lines().any(|v| v.len() > 1024);
+    let bounded = plain
+        .lines()
+        .map(|v| {
+            if v.len() > 1024 {
+                "[oversized line omitted]"
+            } else {
+                v
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let safe = crate::value::redact(bounded.as_bytes())?;
+    let mut end = safe.len().min(maximum);
+    while !safe.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok(
+        serde_json::json!({"text":&safe[..end],"truncated":source_truncated || long || safe.len()>maximum}),
+    )
+}
+pub fn tmux(
+    service: &dyn Services,
+    repo: &Path,
+    argv: &[OsString],
+    stop: &AtomicBool,
+) -> Result<String> {
+    let mut full = vec!["tmux".into()];
+    full.extend_from_slice(argv);
+    let mut request = ExecutionRequest::new(full, repo);
+    request.timeout = Duration::from_secs(3);
+    request.output_limit = 1024 * 1024;
+    let output = service.execute(&request, stop)?;
+    output.success()?;
+    String::from_utf8(output.stdout)
+        .map(|v| v.replace('\r', "").trim().into())
+        .map_err(Error::new)
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SessionProof {
+    pub session: String,
+    pub server_pid: u32,
+    pub server_birth: String,
+    pub socket_digest: String,
+}
+pub fn session_proof(
+    service: &dyn Services,
+    repo: &Path,
+    session: &str,
+    stop: &AtomicBool,
+) -> Result<SessionProof> {
+    require(
+        session
+            .strip_prefix('$')
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|v| v.is_ascii_digit())),
+        "explicit tmux session ID required",
+    )?;
+    let output = tmux(
+        service,
+        repo,
+        &crate::services::args(&[
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{session_id}\t#{pid}\t#{socket_path}",
+        ]),
+        stop,
+    )?;
+    let fields: Vec<_> = output.split('\t').collect();
+    require(
+        fields.len() == 3 && fields[0] == session,
+        "session identity unavailable",
+    )?;
+    let owner = tmux(
+        service,
+        repo,
+        &crate::services::args(&["show-options", "-v", "-t", session, "@oms_panel_repo"]),
+        stop,
+    )?;
+    require(
+        owner
+            == std::fs::canonicalize(repo)
+                .map_err(Error::new)?
+                .to_string_lossy(),
+        "session is not owned by selected repository",
+    )?;
+    let pid = fields[1].parse().map_err(Error::new)?;
+    let process = process(pid)?;
+    Ok(SessionProof {
+        session: session.into(),
+        server_pid: pid,
+        server_birth: process.birth,
+        socket_digest: crate::digest(fields[2].as_bytes()),
+    })
+}
+pub fn open_terminal(
+    repo: &Path,
+    session: &str,
+    label: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::parent_only()?;
+    let proof = session_proof(service, repo, session, stop)?;
+    let store = PrivateStore::open(repo, "terminals", false, true)?;
+    let row = store.allocate("term","shell",&serde_json::json!({"session_proof":proof,"label":crate::eventlog::clean(label,120),"state":"starting"}))?;
+    let ident = row["id"].as_str().unwrap();
+    require(
+        session_proof(service, repo, session, stop)? == proof,
+        "session changed before terminal launch",
+    )?;
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| Path::new(s).is_absolute())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let command = format!("exec {} -l", shlex::try_quote(&shell).map_err(Error::new)?);
+    let mut argv = crate::services::args(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}\t#{pane_id}",
+        "-t",
+        session,
+        "-n",
+        &format!("oms-{}", &ident[5..17]),
+        "-c",
+    ]);
+    argv.push(repo.into());
+    argv.push(command.into());
+    let created = tmux(service, repo, &argv, stop)?;
+    let parts: Vec<_> = created.split('\t').collect();
+    require(
+        parts.len() == 2 && parts[0].starts_with('@') && parts[1].starts_with('%'),
+        "terminal launch binding unavailable; preserve starting record",
+    )?;
+    let mut changed = row.clone();
+    changed["window"] = parts[0].into();
+    changed["pane"] = parts[1].into();
+    changed["state"] = "running".into();
+    store.update(ident, &row, &changed)?;
+    Ok(changed)
+}
+pub fn read_terminal(
+    repo: &Path,
+    ident: &str,
+    maximum: usize,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    let store = PrivateStore::open(repo, "terminals", false, false)?;
+    let row = store.record(ident)?;
+    let proof: SessionProof =
+        serde_json::from_value(row["session_proof"].clone()).map_err(Error::new)?;
+    require(
+        session_proof(service, repo, &proof.session, stop)? == proof,
+        "terminal host changed",
+    )?;
+    let pane = row["pane"]
+        .as_str()
+        .ok_or_else(|| Error::new("terminal launch unconfirmed"))?;
+    let raw = tmux(
+        service,
+        repo,
+        &crate::services::args(&["capture-pane", "-p", "-t", pane, "-S", "-200"]),
+        stop,
+    )?;
+    preview(raw.as_bytes(), maximum)
+}
+/// Private dispatch namespace, selected from this controller's environment only.
+pub fn controller_store(repo: &Path, create: bool) -> Result<Store> {
+    let repo = std::fs::canonicalize(repo).map_err(Error::new)?;
+    let base = state_home()?;
+    let root = base
+        .join("oh-my-setting/panel-control")
+        .join(crate::digest(repo.as_os_str().as_encoded_bytes()))
+        .join("dispatch");
+    require(
+        !root.starts_with(&repo),
+        "dispatch state must be outside repository",
+    )?;
+    let count = base
+        .components()
+        .filter(|v| matches!(v, Component::Normal(_)))
+        .count();
+    directory(&root, create, count + 1)?;
+    Store::open(&root)
+}

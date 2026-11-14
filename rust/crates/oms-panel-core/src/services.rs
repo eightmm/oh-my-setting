@@ -1,0 +1,330 @@
+//! Fixed command routing; argv never passes through a shell.
+use crate::{Error, Result, Value, checkpoint, decode, require};
+use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeCommand {
+    Delegate,
+    Review,
+    Admit,
+    Land,
+    Room,
+    Events,
+    Plan,
+    Task,
+    Bundle,
+    Telemetry,
+    Failure,
+    Advise,
+}
+impl NativeCommand {
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Delegate => "peer-delegate",
+            Self::Review => "peer-review",
+            Self::Admit => "patch-admit",
+            Self::Land => "patch-land",
+            Self::Room => "room",
+            Self::Events | Self::Bundle => "agent-events",
+            Self::Plan => "agent-plan",
+            Self::Task => "agent-task",
+            Self::Telemetry => "artifact-index",
+            Self::Failure => "failure-analyze",
+            Self::Advise => "advise",
+        }
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct CommandOutput {
+    pub code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub cleanup_complete: bool,
+    pub output_complete: bool,
+    pub limited: bool,
+}
+impl CommandOutput {
+    pub fn success(&self) -> Result<()> {
+        require(
+            self.code == 0 && self.cleanup_complete && self.output_complete && !self.limited,
+            "native command failed or completion evidence is incomplete",
+        )
+    }
+    pub fn json(&self) -> Result<Value> {
+        self.success()?;
+        decode(&self.stdout, 16 * 1024 * 1024)
+    }
+    fn native(v: (i32, Vec<u8>, Vec<u8>)) -> Self {
+        Self {
+            code: v.0,
+            stdout: v.1,
+            stderr: v.2,
+            cleanup_complete: true,
+            output_complete: true,
+            limited: false,
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub struct ExecutionRequest {
+    pub argv: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub environment: Vec<(OsString, OsString)>,
+    pub remove_environment: Vec<OsString>,
+    pub stdin: Option<Vec<u8>>,
+    pub timeout: Duration,
+    pub output_limit: usize,
+}
+impl ExecutionRequest {
+    pub fn new(argv: Vec<OsString>, cwd: &Path) -> Self {
+        Self {
+            argv,
+            cwd: cwd.into(),
+            environment: vec![],
+            remove_environment: vec![],
+            stdin: None,
+            timeout: Duration::from_secs(3600),
+            output_limit: 8 * 1024 * 1024,
+        }
+    }
+}
+/// In-process hosts can provide their existing supervised process reactor.
+pub trait PeerExecutor {
+    fn execute(
+        &self,
+        request: &ExecutionRequest,
+        interrupted: &AtomicBool,
+    ) -> Result<CommandOutput>;
+}
+/// Only these domain services may produce authority. Display snapshots confer none.
+pub trait Services: PeerExecutor {
+    /// The native telemetry crate currently provides projections, not this writer.
+    /// Parent wiring must provide canonical artifact-index validation and locking.
+    fn register_result(
+        &self,
+        _repo: &Path,
+        _result: &Value,
+        _interrupted: &AtomicBool,
+    ) -> Result<()> {
+        Err(Error::new(
+            "native artifact-index registration service unavailable",
+        ))
+    }
+    fn command(
+        &self,
+        command: NativeCommand,
+        repo: &Path,
+        args: &[OsString],
+        interrupted: &AtomicBool,
+    ) -> Result<CommandOutput>;
+    fn model_family(&self, provider: &str, model: &str) -> Result<String> {
+        crate::routing::model_family(provider, model).map(str::to_owned)
+    }
+    /// Terminal adapters must prove recorded host identity, not mere pane absence.
+    fn host_absent(&self, _repo: &Path, _attempt: &Value) -> Result<bool> {
+        Ok(false)
+    }
+    /// Acceptance must bind exact plan lease, reviews, patch tree and publication.
+    /// Default adapters intentionally cannot synthesize this authority from exit codes.
+    fn accept(
+        &self,
+        _repo: &Path,
+        _request: &crate::results::AcceptRequest,
+        _interrupted: &AtomicBool,
+    ) -> Result<Value> {
+        Err(Error::new(
+            "native reviewed publication service is required for --accept",
+        ))
+    }
+    fn finalize_authority(
+        &self,
+        repo: &Path,
+        request: &crate::results::FinalizeRequest,
+        interrupted: &AtomicBool,
+    ) -> Result<Value> {
+        crate::results::finalize_snapshot(repo, request, self, interrupted)
+    }
+    fn command_context(
+        &self,
+        command: NativeCommand,
+        request: &ExecutionRequest,
+        interrupted: &AtomicBool,
+    ) -> Result<CommandOutput> {
+        require(
+            request.environment.is_empty() && request.remove_environment.is_empty(),
+            "contextual native command service required",
+        )?;
+        self.command(command, &request.cwd, &request.argv, interrupted)
+    }
+}
+
+/// The executable must be the sibling native OMS binary; no provider CLI lookup
+/// or legacy interpreter fallback is performed. Native read domains are direct.
+pub struct SubcommandServices {
+    pub executable: PathBuf,
+}
+impl SubcommandServices {
+    pub fn sibling() -> Result<Self> {
+        let current = std::env::current_exe().map_err(Error::new)?;
+        Ok(Self {
+            executable: current
+                .parent()
+                .ok_or_else(|| Error::new("executable directory unavailable"))?
+                .join("oms"),
+        })
+    }
+    pub fn at(executable: PathBuf) -> Result<Self> {
+        require(
+            executable.is_absolute(),
+            "OMS adapter executable must be absolute",
+        )?;
+        Ok(Self { executable })
+    }
+}
+impl PeerExecutor for SubcommandServices {
+    fn execute(
+        &self,
+        request: &ExecutionRequest,
+        interrupted: &AtomicBool,
+    ) -> Result<CommandOutput> {
+        checkpoint(interrupted)?;
+        require(
+            !request.argv.is_empty() && !request.argv[0].is_empty() && request.argv.len() <= 256,
+            "process argv must contain 1..256 arguments",
+        )?;
+        require(
+            !request.timeout.is_zero()
+                && request.timeout <= Duration::from_secs(86400)
+                && request.output_limit > 0
+                && request.output_limit <= 256 * 1024 * 1024,
+            "invalid process limits",
+        )?;
+        let mut child = Request::new(request.argv.clone());
+        child.cwd = Some(std::fs::canonicalize(&request.cwd).map_err(Error::new)?);
+        child.stdin = request.stdin.clone();
+        child.environment = request.environment.clone();
+        child.remove_environment = request.remove_environment.clone();
+        child.streams = Streams::Separate;
+        child.capture.max_bytes = request.output_limit;
+        child.deadline = Some(Instant::now() + request.timeout);
+        child.scope = Scope::ProcessGroup;
+        let mut reactor = Reactor::new();
+        let job = reactor.start(child).map_err(Error::new)?;
+        let mut cancelling = false;
+        loop {
+            if interrupted.load(std::sync::atomic::Ordering::Acquire) && !cancelling {
+                reactor
+                    .stop(job, StopReason::Signal(2))
+                    .map_err(Error::new)?;
+                cancelling = true;
+            }
+            match reactor
+                .poll(job, Duration::from_millis(50))
+                .map_err(Error::new)?
+            {
+                Progress::Pending(_) => {}
+                Progress::Complete(done) => {
+                    let cleanup_complete = done.cleanup_complete();
+                    let output_complete = done.output_complete();
+                    let limited =
+                        done.stdout.limited || done.stderr.as_ref().is_some_and(|v| v.limited);
+                    return Ok(CommandOutput {
+                        code: done.exit.map(|v| v.shell_code()).unwrap_or(75),
+                        stdout: done.stdout.bytes,
+                        stderr: done.stderr.map(|v| v.bytes).unwrap_or_default(),
+                        cleanup_complete,
+                        output_complete,
+                        limited,
+                    });
+                }
+            }
+        }
+    }
+}
+impl Services for SubcommandServices {
+    fn command_context(
+        &self,
+        command: NativeCommand,
+        request: &ExecutionRequest,
+        interrupted: &AtomicBool,
+    ) -> Result<CommandOutput> {
+        require(
+            self.executable.is_absolute()
+                && self.executable.file_name().is_some_and(|v| v == "oms"),
+            "adapter requires sibling native oms executable",
+        )?;
+        let mut request = request.clone();
+        let mut argv = vec![
+            self.executable.clone().into_os_string(),
+            command.verb().into(),
+            "--repo".into(),
+            request.cwd.clone().into_os_string(),
+        ];
+        argv.extend(request.argv);
+        request.argv = argv;
+        self.execute(&request, interrupted)
+    }
+    fn command(
+        &self,
+        command: NativeCommand,
+        repo: &Path,
+        args: &[OsString],
+        interrupted: &AtomicBool,
+    ) -> Result<CommandOutput> {
+        checkpoint(interrupted)?;
+        let native = match command {
+            NativeCommand::Events => Some(oms_command_operations::run(
+                oms_command_operations::App::Events,
+                args,
+                repo,
+                interrupted,
+            )),
+            NativeCommand::Bundle => Some(oms_command_attempt_bundle::run(args, repo, interrupted)),
+            NativeCommand::Telemetry => Some(oms_command_telemetry::run(args, repo, interrupted)),
+            NativeCommand::Failure => Some(oms_command_failure::run(args, repo, interrupted)),
+            NativeCommand::Task
+                if args
+                    .first()
+                    .and_then(|v| v.to_str())
+                    .is_some_and(|v| matches!(v, "show" | "list" | "status")) =>
+            {
+                Some(oms_command_task::run(args, repo, interrupted))
+            }
+            _ => None,
+        };
+        if let Some(v) = native {
+            return Ok(CommandOutput::native(v));
+        }
+        require(
+            self.executable.is_absolute()
+                && self.executable.file_name().is_some_and(|v| v == "oms"),
+            "adapter requires the sibling native oms executable",
+        )?;
+        let mut argv = vec![
+            self.executable.clone().into_os_string(),
+            command.verb().into(),
+            "--repo".into(),
+            repo.into(),
+        ];
+        argv.extend_from_slice(args);
+        self.execute(&ExecutionRequest::new(argv, repo), interrupted)
+    }
+}
+pub(crate) fn args(values: &[&str]) -> Vec<OsString> {
+    values.iter().map(OsString::from).collect()
+}
+pub(crate) fn query<S: Services + ?Sized>(
+    service: &S,
+    command: NativeCommand,
+    repo: &Path,
+    values: &[&str],
+    interrupted: &AtomicBool,
+) -> Result<Value> {
+    service
+        .command(command, repo, &args(values), interrupted)?
+        .json()
+}
