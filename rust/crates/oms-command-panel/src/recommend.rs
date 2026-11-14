@@ -32,6 +32,8 @@ const FRONTIER_PATTERNS: &[&str] = &[
     "scripts/*hook*",
     "scripts/lib/*hook*",
     "scripts/lib/pi-oms-extension.mjs",
+    "rust/crates/oms-command-providers-skills/assets/pi-oms-extension.mjs",
+    "rust/crates/oms-command-providers-skills/src/harness.rs",
     "scripts/land.sh",
     "scripts/patch-land.sh",
     "scripts/patch-admit.sh",
@@ -39,6 +41,10 @@ const FRONTIER_PATTERNS: &[&str] = &[
     "scripts/provider-permissions.sh",
     ".github/workflows/*",
     "rules/*",
+    "rust/crates/oms/src/*",
+    "rust/crates/oms-command-hooks/*",
+    "rust/crates/oms-command-lifecycle/*",
+    "rust/crates/oms-command-landing/*",
     "*permission*",
     "*settings*",
     "*policy*",
@@ -721,4 +727,30 @@ fn render_plain(
         }
     }
     lines.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod native_path_tests {
+    #[test]
+    fn native_frontier_paths_preserve_legacy_and_ordinary_paths() {
+        for path in [
+            "rust/crates/oms/src/main.rs",
+            "rust/crates/oms-command-hooks/src/lib.rs",
+            "rust/crates/oms-command-lifecycle/src/update.rs",
+            "rust/crates/oms-command-landing/src/lib.rs",
+            "rust/crates/oms-command-providers-skills/assets/pi-oms-extension.mjs",
+            "rust/crates/oms-command-providers-skills/src/harness.rs",
+            "scripts/land.sh",
+            "scripts/install.sh",
+        ] {
+            assert_eq!(super::security_audit_paths(&[path.into()], b""), [path]);
+        }
+        for path in [
+            "",
+            "rust/crates/oms-panel-core/src/activity.rs",
+            "README.md",
+        ] {
+            assert!(super::security_audit_paths(&[path.into()], b"").is_empty());
+        }
+    }
 }

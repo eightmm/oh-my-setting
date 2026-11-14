@@ -4,6 +4,7 @@
 pub mod attention;
 pub mod cli;
 pub mod commands;
+mod executable;
 pub mod input;
 pub mod layout;
 pub mod managed;
@@ -120,3 +121,7 @@ pub(crate) fn text<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
 pub(crate) fn rows(value: &serde_json::Value) -> &[serde_json::Value] {
     value.as_array().map(Vec::as_slice).unwrap_or(&[])
 }
+
+#[cfg(test)]
+#[path = "../tests/support/executable_resolution.rs"]
+mod executable_resolution;

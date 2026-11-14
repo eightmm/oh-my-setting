@@ -201,21 +201,19 @@ fn job_executable(source: &Path) -> Result<PathBuf> {
     if let Some(explicit) = std::env::var_os("OMS_PANEL_JOB_EXECUTABLE")
         && !explicit.is_empty()
     {
-        return Ok(PathBuf::from(explicit));
+        let path = PathBuf::from(explicit);
+        require(
+            crate::executable::job_override(&path),
+            "oms supervisor executable unavailable",
+        )?;
+        return Ok(path);
     }
-    if let Ok(current) = std::env::current_exe() {
-        if current.file_name().is_some_and(|n| n == "oms") {
-            return Ok(current);
-        }
-        if let Some(sibling) = current.parent().map(|d| d.join("oms"))
-            && sibling.is_file()
-        {
-            return Ok(sibling);
-        }
-    }
-    let script = source.join("scripts/oms");
-    if script.is_file() {
-        return Ok(script);
-    }
-    Err(Error::new("oms supervisor executable unavailable"))
+    crate::executable::resolve_for_job(source)
+        .map(|entry| entry.path)
+        .ok_or_else(|| Error::new("oms supervisor executable unavailable"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_job_executable(source: &Path) -> Result<PathBuf> {
+    job_executable(source)
 }

@@ -155,6 +155,7 @@ fn reopen(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    let prefix = entry_prefix(source)?;
     let panes = discover_panel_panes(repo, services, stop)?;
     let caller = std::env::var("TMUX_PANE").ok();
     let current = caller
@@ -218,7 +219,7 @@ fn reopen(
                 .is_some_and(|v| !v.is_empty())
             && pane_option(services, repo, "@oms_panel_repo", stop).as_deref()
                 == Some(canon.as_str());
-        let cmd = watch_shell(repo, source, None, Some(&base.session), None);
+        let cmd = watch_shell(repo, &prefix, None, Some(&base.session));
         board_split(&base.pane, repo, &cmd, owns_main, services, stop)?;
     }
     terminals::tmux(
@@ -245,6 +246,7 @@ fn spawn_main(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    let prefix = entry_prefix(source)?;
     let harness = normalize_harness(raw_provider, repo, services, stop)?;
     let policy = load_policy(source)?;
     let model = options.get("model");
@@ -275,7 +277,7 @@ fn spawn_main(
 
     let pane = add_main_window(
         repo,
-        source,
+        &prefix,
         &policy,
         &session,
         &harness,
@@ -323,6 +325,7 @@ fn launch(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    let prefix = entry_prefix(source)?;
     let harness = normalize_harness(raw_provider, repo, services, stop)?;
     if harness == "pi" && options.has("resume") {
         return Err(Error::new(
@@ -346,7 +349,7 @@ fn launch(
             which_exists("tmux"),
             "native chat board requires tmux on PATH",
         )?;
-        split_panel(repo, source, &policy, &harness, options, services, stop)?;
+        split_panel(repo, &prefix, &policy, &harness, options, services, stop)?;
         return Ok((0, vec![], vec![]));
     }
     let code = run_native(repo, &policy, &harness, options, services, stop)?;
@@ -365,7 +368,7 @@ fn wants_split(options: &Options) -> bool {
 
 fn split_panel(
     repo: &Path,
-    source: &Path,
+    prefix: &[String],
     policy: &routing::Policy,
     harness: &str,
     options: &Options,
@@ -424,7 +427,7 @@ fn split_panel(
         }
         let pane = add_main_window(
             repo,
-            source,
+            prefix,
             policy,
             &session,
             harness,
@@ -470,7 +473,7 @@ fn split_panel(
         let execution = state::native_repository(repo, None)?;
         let cmd = launch_command(
             repo,
-            source,
+            prefix,
             &session,
             harness,
             options.get("resume"),
@@ -541,7 +544,8 @@ fn split_panel(
             repo,
             stop,
         )?;
-        let watch = watch_shell(repo, source, Some(harness), None, options.get("model"));
+        let owner = resolve_main(policy, harness, options.get("model")).owner;
+        let watch = watch_shell(repo, prefix, Some(&owner), None);
         board_split(&pane, repo, &watch, true, services, stop)?;
         terminals::tmux(
             services,
@@ -1117,7 +1121,7 @@ fn board_split(
 #[allow(clippy::too_many_arguments)]
 fn add_main_window(
     repo: &Path,
-    source: &Path,
+    prefix: &[String],
     policy: &routing::Policy,
     session: &str,
     harness: &str,
@@ -1133,7 +1137,7 @@ fn add_main_window(
     let execution = state::native_repository(repo, None)?;
     let cmd = launch_command(
         repo,
-        source,
+        prefix,
         session,
         harness,
         resume,
@@ -1168,7 +1172,8 @@ fn add_main_window(
         repo,
         stop,
     )?;
-    let watch = watch_shell(repo, source, Some(harness), None, model);
+    let owner = resolve_main(policy, harness, model).owner;
+    let watch = watch_shell(repo, prefix, Some(&owner), None);
     board_split(&pane, repo, &watch, true, services, stop)?;
     let _ = tmux_quiet(
         services,
@@ -1221,7 +1226,7 @@ fn bind_window(
 #[allow(clippy::too_many_arguments)]
 fn launch_command(
     repo: &Path,
-    source: &Path,
+    prefix: &[String],
     session: &str,
     launch: &str,
     resume: Option<&str>,
@@ -1234,7 +1239,7 @@ fn launch_command(
     if let Some(id) = room_id {
         parts.push(format!("OMS_ROOM_ID={id}"));
     }
-    parts.extend(entry_prefix(source));
+    parts.extend_from_slice(prefix);
     parts.extend([
         "panel".into(),
         "--repo".into(),
@@ -1261,31 +1266,23 @@ fn launch_command(
 
 fn watch_shell(
     repo: &Path,
-    source: &Path,
-    provider: Option<&str>,
+    prefix: &[String],
+    owner: Option<&str>,
     session: Option<&str>,
-    model: Option<&str>,
 ) -> String {
     let mut parts = panel_env_prefix();
     if let Some(s) = session {
         parts.push(format!("OMS_PANEL_SESSION={s}"));
     }
-    parts.extend(entry_prefix(source));
+    parts.extend_from_slice(prefix);
     parts.extend([
         "panel".into(),
         "--repo".into(),
         repo.to_string_lossy().into_owned(),
         "--watch".into(),
     ]);
-    if let Some(p) = provider {
-        let owner = resolve_main(
-            &load_policy(source)
-                .unwrap_or_else(|_| routing::Policy::bundled().expect("bundled policy")),
-            p,
-            model,
-        )
-        .owner;
-        parts.extend(["--owner".into(), owner]);
+    if let Some(owner) = owner {
+        parts.extend(["--owner".into(), owner.into()]);
     }
     format!(
         "exec {}",
@@ -1297,14 +1294,15 @@ fn watch_shell(
     )
 }
 
-fn entry_prefix(source: &Path) -> Vec<String> {
-    if let Ok(exe) = std::env::current_exe()
-        && exe.file_name().is_some_and(|n| n == "oms")
-    {
-        return vec![exe.to_string_lossy().into_owned()];
+fn entry_prefix(source: &Path) -> Result<Vec<String>> {
+    let entry = crate::executable::resolve(source)
+        .ok_or_else(|| Error::new("oms panel executable unavailable"))?;
+    let mut prefix = Vec::new();
+    if entry.script {
+        prefix.push("bash".into());
     }
-    let script = source.join("scripts/oms");
-    vec!["bash".into(), script.to_string_lossy().into_owned()]
+    prefix.push(entry.path.to_string_lossy().into_owned());
+    Ok(prefix)
 }
 
 fn panel_env_prefix() -> Vec<String> {
@@ -2017,4 +2015,22 @@ fn new_uuid() -> String {
         &hex[15..18],
         &hex[18..30]
     )
+}
+
+#[cfg(test)]
+pub(crate) fn test_entry_prefix(source: &Path) -> Result<Vec<String>> {
+    entry_prefix(source)
+}
+
+#[cfg(test)]
+pub(crate) fn test_entry_matches(repo: &Path, prefix: &[String]) -> bool {
+    let command = prefix
+        .iter()
+        .map(|p| crate::commands::shell_quote(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let repo_arg = crate::commands::shell_quote(&repo.to_string_lossy());
+    let command = format!("{command} panel --repo {repo_arg}");
+    match_panel_command(&command, repo) == Some(false)
+        && match_panel_command(&format!("{command} --watch"), repo) == Some(true)
 }

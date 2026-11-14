@@ -16,11 +16,11 @@ use std::ffi::OsString;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static STOP: AtomicBool = AtomicBool::new(false);
-static COUNTER: AtomicUsize = AtomicUsize::new(1);
+static COUNTER: AtomicU64 = AtomicU64::new(1);
 
 struct TempDir(PathBuf);
 
@@ -38,7 +38,7 @@ impl TempDir {
             .mode(0o700)
             .create(&inner)
             .unwrap();
-        Self(std::fs::canonicalize(&inner).unwrap_or(inner))
+        Self(inner.canonicalize().unwrap())
     }
     fn path(&self) -> &Path {
         &self.0
@@ -254,6 +254,7 @@ struct Fake {
     tmux_panes: RefCell<String>,
     tmux_windows: RefCell<String>,
     commands_seen: RefCell<Vec<(String, Vec<String>)>>,
+    native_seen: RefCell<Vec<(NativeCommand, Vec<OsString>)>>,
 }
 
 impl PeerExecutor for Fake {
@@ -324,6 +325,7 @@ impl Services for Fake {
         args: &[OsString],
         _: &AtomicBool,
     ) -> Result<CommandOutput> {
+        self.native_seen.borrow_mut().push((command, args.to_vec()));
         match command {
             NativeCommand::ProviderCatalog => {
                 let policy = oms_panel_core::routing::Policy::bundled()?;
@@ -796,6 +798,24 @@ fn settle_review_and_recommend_parity() {
     assert_eq!(dcode, 0, "stderr={}", String::from_utf8_lossy(&derr));
     let drec: Value = serde_json::from_slice(&dout).unwrap();
     assert_eq!(drec["diff"]["files"], json!(1));
+
+    // Native dispatcher changes receive the same audit routing as legacy entrypoints.
+    let native = "rust/crates/oms/src/main.rs";
+    std::fs::create_dir_all(repo.path().join("rust/crates/oms/src")).unwrap();
+    std::fs::write(repo.path().join(native), "fn main() {}\n").unwrap();
+    git_ok(repo.path(), &["add", native]);
+    let (code, out, err) = run_with_services(
+        "panel",
+        &os(&["--recommend", "implement", "--diff", "HEAD", "--json"]),
+        repo.path(),
+        repo.path(),
+        &STOP,
+        &services,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let native_rec: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(native_rec["risk"], "high");
+    assert_eq!(native_rec["diff"]["files"], 1);
 }
 
 fn usage_sessions_compare_and_routes_parity() {
@@ -1188,6 +1208,158 @@ fn salvage_via_recorded_kept_and_reader_render_and_redaction() {
         .status();
 }
 
+fn clean_env_child(command: &mut Command) {
+    command.env_clear();
+    for name in ["PATH", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+fn missing_entry_refuses_before_mutation() {
+    if let Some(repo) = std::env::var_os("PANEL_REFUSAL_REPO") {
+        let repo = PathBuf::from(repo).canonicalize().unwrap();
+        for args in [
+            os(&["--reopen"]),
+            os(&["--spawn-main", "codex"]),
+            os(&["--launch", "codex", "--host", "tmux"]),
+            os(&["--launch", "codex", "--host", "inline"]),
+        ] {
+            let services = Fake::default();
+            *services.tmux_panes.borrow_mut() = format!(
+                "oms-fixture\t@1\t%1\t0\t\toms panel --repo '{}' --launch codex\n",
+                repo.display()
+            );
+            let (code, _, err) = run_with_services("panel", &args, &repo, &repo, &STOP, &services);
+            assert_eq!(code, 2, "{args:?}: {}", String::from_utf8_lossy(&err));
+            assert!(
+                String::from_utf8_lossy(&err).contains("oms panel executable unavailable"),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&err)
+            );
+            assert!(
+                services
+                    .native_seen
+                    .borrow()
+                    .iter()
+                    .all(|(kind, args)| *kind != NativeCommand::Room
+                        || args.first().is_none_or(|arg| arg != "new"))
+            );
+            assert!(
+                services.commands_seen.borrow().iter().all(|(_, args)| {
+                    args.first().is_none_or(|arg| arg != "tmux")
+                        || args.get(1).is_some_and(|arg| {
+                            matches!(
+                                arg.as_str(),
+                                "list-panes"
+                                    | "show-option"
+                                    | "show-options"
+                                    | "show-environment"
+                                    | "has-session"
+                            )
+                        })
+                }),
+                "unexpected mutation: {:?}",
+                services.commands_seen.borrow()
+            );
+            assert!(!repo.join(".oms").exists(), "refusal created durable state");
+        }
+        for with_script in [false, true] {
+            if with_script {
+                let scripts = repo.join("scripts");
+                std::fs::create_dir(&scripts).unwrap();
+                write_private_file(&scripts.join("oms"), b"#!/bin/sh\nexit 0\n");
+            }
+            for args in [
+                os(&[
+                    "job",
+                    "run",
+                    "--repo",
+                    &repo.to_string_lossy(),
+                    "--session",
+                    "oms-fixture",
+                    "--",
+                    "echo",
+                    "fixture",
+                ]),
+                os(&[
+                    "job",
+                    "restart",
+                    "job-fixture",
+                    "--repo",
+                    &repo.to_string_lossy(),
+                    "--session",
+                    "oms-fixture",
+                    "--generation",
+                    "1",
+                ]),
+            ] {
+                let services = Fake::default();
+                let (code, _, err) =
+                    run_with_services("panel", &args, &repo, &repo, &STOP, &services);
+                assert_eq!(code, 2, "{}", String::from_utf8_lossy(&err));
+                assert!(
+                    String::from_utf8_lossy(&err).contains("oms supervisor executable unavailable"),
+                    "{}",
+                    String::from_utf8_lossy(&err)
+                );
+                assert!(
+                    !repo.join(".oms").exists(),
+                    "job refusal created durable state"
+                );
+            }
+        }
+        return;
+    }
+    let fixture = TempDir::new("oms-panel-refusal");
+    let repo = fixture.path();
+    let git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|dir| dir.join("git"))
+        .find(|path| path.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let mut init = Command::new(&git);
+    clean_env_child(&mut init);
+    assert!(
+        init.args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bin = repo.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
+    for name in ["tmux", "codex"] {
+        std::os::unix::fs::symlink(bin.join("git"), bin.join(name)).unwrap();
+    }
+    let executable = bin.join("panel-parity");
+    std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+    let state = repo.join("state");
+    std::fs::create_dir(&state).unwrap();
+    let mut child = Command::new(executable);
+    clean_env_child(&mut child);
+    let output = child
+        .arg("missing_entry_refuses_before_mutation")
+        .env("PATH", &bin)
+        .env("PANEL_REFUSAL_REPO", repo)
+        .env("OMS_PANEL_PARITY_ROOT", repo)
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CACHE_HOME", &state)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
 struct RootGuard(PathBuf);
 impl Drop for RootGuard {
     fn drop(&mut self) {
@@ -1241,7 +1413,11 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 5] = [
+    let cases: [(&str, fn()); 6] = [
+        (
+            "missing_entry_refuses_before_mutation",
+            missing_entry_refuses_before_mutation,
+        ),
         (
             "cli_validation_and_repo_conflict_parity",
             cli_validation_and_repo_conflict_parity,
