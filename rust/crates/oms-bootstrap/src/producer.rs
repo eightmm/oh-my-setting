@@ -1,62 +1,31 @@
-//! Narrow requests to lifecycle owners. These types carry no write authority.
-use std::fmt;
-use std::path::PathBuf;
+//! Native Reference service composition; callers retain publication authority.
+use crate::{Error, ValidatedPayload};
+use oms_reference::{controller::Controller, scope::Protocol};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProducerOperation {
-    StageNativePayload,
-    WriteInstallReceipt,
-    MaterializeFrontdoor,
+/// Shares the bootstrap's authenticated image and the real checked operations
+/// append service. Constructing this value performs no lifecycle publication.
+pub struct ReferenceProducer {
+    controller: Controller,
+    protocol: Protocol,
 }
-#[derive(Debug)]
-pub struct ProducerRequest {
-    pub operation: ProducerOperation,
-    pub source_root: PathBuf,
-    pub source_revision: String,
-    pub destination: PathBuf,
-}
-
-/// An in-memory acknowledgment from the real producer after its atomic
-/// publication. This is not a persisted receipt schema or a dispatch proof.
-#[derive(Debug)]
-pub struct ProducerReceipt {
-    pub operation: ProducerOperation,
-    pub source_root: PathBuf,
-    pub source_revision: String,
-    pub destination: PathBuf,
-    pub content_digest: String,
-}
-impl ProducerReceipt {
-    pub fn matches(&self, request: &ProducerRequest) -> bool {
-        self.operation == request.operation
-            && self.source_root == request.source_root
-            && self.source_revision == request.source_revision
-            && self.destination == request.destination
-            && self.source_root.is_absolute()
-            && self.destination.is_absolute()
-            && crate::hex(self.source_revision.as_bytes(), 40)
-            && crate::hex(self.content_digest.as_bytes(), 64)
-    }
-}
-#[derive(Debug)]
-pub struct ProducerUnavailable {
-    pub operation: ProducerOperation,
-}
-impl fmt::Display for ProducerUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "native bootstrap producer {:?} is unavailable; the lifecycle owner must provide a reviewed implementation",
-            self.operation
-        )
-    }
-}
-impl std::error::Error for ProducerUnavailable {}
-impl ProducerRequest {
-    /// Always unavailable in this phase. Never starts shell lifecycle writers.
-    pub fn execute(self) -> Result<std::convert::Infallible, ProducerUnavailable> {
-        Err(ProducerUnavailable {
-            operation: self.operation,
+impl ReferenceProducer {
+    pub fn new(payload: &ValidatedPayload) -> Result<Self, Error> {
+        let controller = payload.controller()?;
+        // This factory selects NativeIdentity and native_checked_append; it
+        // never accepts a caller-supplied digest as executing-image proof.
+        let protocol =
+            Protocol::production_with_controller(controller.clone()).map_err(Error::integrity)?;
+        Ok(Self {
+            controller,
+            protocol,
         })
+    }
+    pub fn protocol(&self) -> Result<&Protocol, Error> {
+        self.controller.check().map_err(Error::integrity)?;
+        Ok(&self.protocol)
+    }
+    pub fn controller(&self) -> Result<Controller, Error> {
+        self.controller.check().map_err(Error::integrity)?;
+        Ok(self.controller.clone())
     }
 }

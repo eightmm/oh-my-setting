@@ -1,9 +1,24 @@
-//! Shared build/runtime definition of the native source closure.
-use std::path::{Path, PathBuf};
+//! Build-time definition of the native runtime source and policy closure.
+use crate::limits::{DATA_ROOTS, MAX_DEPTH, MAX_FILES};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 
-pub fn paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    fn walk(root: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        if relative.components().count() > 64 || out.len() > 8192 {
+pub struct Inventory {
+    pub files: BTreeSet<PathBuf>,
+    pub watches: BTreeSet<PathBuf>,
+}
+impl Inventory {
+    fn add(&mut self, path: PathBuf) -> std::io::Result<()> {
+        if self.files.len() >= MAX_FILES && !self.files.contains(&path) {
+            return Err(std::io::Error::other(
+                "native source inventory exceeds limit",
+            ));
+        }
+        self.files.insert(path);
+        Ok(())
+    }
+    fn walk(&mut self, root: &Path, relative: &Path) -> std::io::Result<()> {
+        if relative.components().count() > MAX_DEPTH {
             return Err(std::io::Error::other(
                 "native source inventory exceeds limit",
             ));
@@ -13,46 +28,104 @@ pub fn paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {
             let path = relative.join(entry.file_name());
             let kind = entry.file_type()?;
             if kind.is_dir() {
-                walk(root, &path, out)?;
+                self.walk(root, &path)?;
             } else if kind.is_file() {
-                if out.len() >= 8192 {
-                    return Err(std::io::Error::other(
-                        "native source inventory exceeds limit",
-                    ));
-                }
-                out.push(path);
+                self.add(path)?;
             } else {
                 return Err(std::io::Error::other("linked native source"));
             }
         }
         Ok(())
     }
-    let mut out = Vec::new();
+}
+
+pub fn paths(root: &Path) -> std::io::Result<Inventory> {
+    let mut out = Inventory {
+        files: BTreeSet::new(),
+        watches: BTreeSet::new(),
+    };
     for name in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"] {
-        out.push(Path::new("rust").join(name));
+        out.add(Path::new("rust").join(name))?;
     }
-    for entry in std::fs::read_dir(root.join("rust/crates"))? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            return Err(std::io::Error::other("invalid native crate directory"));
+    // Standalone native service roots also contribute to the runtime closure.
+    // Dependency lock files and target directories do not affect compilation.
+    let mut pending: Vec<PathBuf> = [
+        "oms",
+        "oms-bootstrap",
+        "oms-runtime",
+        "oms-command-graph",
+        "oms-command-peer",
+        "oms-command-landing",
+    ]
+    .iter()
+    .map(|name| Path::new("rust/crates").join(name))
+    .collect();
+    let mut seen = BTreeSet::new();
+    while let Some(relative) = pending.pop() {
+        if !seen.insert(relative.clone()) {
+            continue;
         }
-        let relative = Path::new("rust/crates").join(entry.file_name());
-        out.push(relative.join("Cargo.toml"));
-        for name in ["Cargo.lock", "build.rs"] {
-            let path = relative.join(name);
-            match std::fs::symlink_metadata(root.join(&path)) {
-                Ok(_) => out.push(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+        let manifest = relative.join("Cargo.toml");
+        let raw = std::fs::read_to_string(root.join(&manifest))?;
+        let mut dependencies = false;
+        for line in raw.lines().map(str::trim) {
+            if line.starts_with('[') {
+                if line.contains("dependencies.") {
+                    return Err(std::io::Error::other("unsupported local dependency table"));
+                }
+                dependencies =
+                    line.ends_with("dependencies]") && !line.ends_with("dev-dependencies]");
+            } else if dependencies && line.contains("workspace") && !line.starts_with('#') {
+                return Err(std::io::Error::other("unsupported inherited dependency"));
+            } else if dependencies && line.contains("path") && !line.starts_with('#') {
+                // Local manifests use inline double-quoted dependency paths.
+                // Refuse unsupported syntax rather than silently losing closure.
+                let (_, field) = line
+                    .split_once("path")
+                    .ok_or_else(|| std::io::Error::other("invalid local dependency"))?;
+                let field = field
+                    .trim_start()
+                    .strip_prefix('=')
+                    .map(str::trim_start)
+                    .and_then(|v| v.strip_prefix('"'))
+                    .ok_or_else(|| std::io::Error::other("unsupported local dependency path"))?;
+                let (path, _) = field
+                    .split_once('"')
+                    .ok_or_else(|| std::io::Error::other("invalid local dependency path"))?;
+                let name = Path::new(path)
+                    .strip_prefix("..")
+                    .ok()
+                    .filter(|p| {
+                        p.components().count() == 1
+                            && matches!(p.components().next(), Some(Component::Normal(_)))
+                    })
+                    .ok_or_else(|| std::io::Error::other("foreign local dependency path"))?;
+                pending.push(Path::new("rust/crates").join(name));
             }
         }
-        walk(root, &relative.join("src"), &mut out)?;
+        out.add(manifest)?;
+        let build = relative.join("build.rs");
+        out.watches.insert(build.clone());
+        match std::fs::symlink_metadata(root.join(&build)) {
+            Ok(meta) if meta.is_file() => out.add(build)?,
+            Ok(_) => return Err(std::io::Error::other("linked native build script")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let src = relative.join("src");
+        out.watches.insert(src.clone());
+        out.walk(root, &src)?;
     }
-    if out.len() > 8192 {
-        return Err(std::io::Error::other(
-            "native source inventory exceeds limit",
-        ));
+    for name in DATA_ROOTS {
+        let path = Path::new(name);
+        out.watches.insert(path.into());
+        match std::fs::symlink_metadata(root.join(path)) {
+            Ok(meta) if meta.is_dir() => out.walk(root, path)?,
+            Ok(_) => return Err(std::io::Error::other("linked native runtime data")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
-    out.sort();
+    out.watches.extend(out.files.iter().cloned());
     Ok(out)
 }

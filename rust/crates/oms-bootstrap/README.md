@@ -57,6 +57,11 @@ This patch alone does not make an installed invocation Python-free.
    action's status 75 is final, never a reason to retry through legacy code.
 10. Write errors using `Error::diagnostic()` plus LF and exit with `Error::status`.
     `Display` is a lossy projection; diagnostics preserve non-UTF8 paths.
+11. Construct `ReferenceProducer::new(&payload)` for Reference scope services.
+    Its checked `protocol()` shares the payload's retained `Controller` and
+    selects `Protocol::production_with_controller`, including `NativeIdentity`
+    and `native_checked_append`. `controller()` shares that same snapshot with
+    other native consumers. Construction grants no publication authority.
 
 A missing cache or current-revision entry retains staged rollout fallback.
 Corruption, unsafe authority or stale content in a present selected entry is a
@@ -94,26 +99,46 @@ No runtime path writes or repairs an entry.
 - Checksum: require exactly 64 lowercase hex bytes plus LF, matching manifest
   `artifacts.oms`; hash the executable once before any exec. Hash an optional
   helper once too. The native binary never authenticates an unstarted verifier.
-- Source content: the build embeds a sorted raw-path/digest inventory of all
-  crate `src` trees, crate manifests/locks/build scripts, workspace manifest/lock,
-  and pinned toolchain. This includes embedded SQL/help/data and source-local
-  unit tests. Separate test and documentation directories are excluded. Runtime
-  enumerates that same closure, compares every path and digest, and detects
-  additions/removals. No runtime cache receipt substitutes for those bytes.
+- Source content: the build follows local dependencies from `oms`, bootstrap,
+  runtime, graph, peer and landing native roots. It embeds their `src` trees,
+  manifests/build scripts, workspace manifest/lock and pinned toolchain, plus
+  bundled `config`, `roles` and optional `prompts` trees. This includes
+  `config/capability-profiles.json`, embedded SQL/help/data and source-local
+  tests. Standalone dependency locks, targets, separate tests and docs are
+  excluded. Local dependency paths use the repository's inline double-quoted
+  `../CRATE` manifest form. Build watches cover those inputs and source/data
+  subtrees, never the entire workspace or standalone build directories.
+  Runtime indexes the reviewed manifest, enumerates each source/data directory
+  once, and opens/hashes each source file once. Rechecks use shared retained
+  parent descriptors, file metadata and directory generations, without another
+  walk, open or hash. Missing optional data roots/build scripts are rechecked
+  for additions. No runtime cache receipt substitutes for source bytes.
 - Filesystem: retain nofollow directory/file handles; require a regular single
   link for every authority file; check executable bits, owner and write modes;
-  reject set-ID metadata. Root or the effective user may own read authority;
-  group/other writes fail except root-owned sticky system ancestors. Recheck
-  device/inode/mode/owner namespace identity and stable file size/timestamps.
+  reject set-ID files and setuid directories. Root or the effective user may
+  own read authority; group writes and directory setgid are allowed, preserving
+  shared/umask `002` installs. Other writes fail except root-owned sticky system
+  ancestors. A writable group belongs to the installation's trust boundary.
+  These ownership/world-write checks strengthen the Bash and existing native
+  validators, which only require ordinary protected payload types and hashes.
+  Recheck device/inode/mode/owner/group namespace identity and stable file
+  size/timestamps. Reads use positional I/O and never share descriptor cursors.
+- Loaded image: on Linux, prove the retained executable against the fixed
+  kernel executable link under checked procfs descriptors. Create one Reference
+  `Controller` from that descriptor and reuse its digest instead of hashing
+  again. Named executable replacement cannot authenticate the loaded image.
+  A separate launcher may validate and exec another image. In-process use and
+  Reference service construction refuse when the image cannot be proven.
+  macOS currently lacks a native executing-artifact provider in Reference;
+  pathname/digest equality cannot replace that proof and fails closed.
 - Limits: manifest/receipt 4 MiB, Git pointer/ref 64 KiB, packed refs 16 MiB,
   native source file 64 MiB, executable/helper 1 GiB, source closure 8192 files
-  and 64 directory components. All overflow and malformed paths fail explicitly.
-- Lifecycle: `ProducerRequest` names only staging a payload, writing an install
-  receipt or materializing a frontdoor. `ProducerReceipt` is a typed in-memory
-  acknowledgment binding operation/root/revision/destination/content digest;
-  it introduces no persisted schema and grants no dispatch authority.
-  `ProducerRequest::execute` always returns `ProducerUnavailable`. Real
-  install/update/uninstall ownership transactions remain separate producers.
+  and 64 path components. Source snapshots also bound retained directories at
+  8192. Empty/duplicate/malformed reviewed inventories fail explicitly.
+- Producer: `ReferenceProducer` replaces the unused lifecycle request/receipt
+  placeholders and unavailable executor with the actual Reference service.
+  Payload staging, install receipt and frontdoor ownership transactions remain
+  separate lifecycle-owner responsibilities; Reference has no such operations.
 
 ## Integrity and concurrent interruption
 
@@ -128,10 +153,14 @@ Discovery, selection, receipt reading and validation write no files, refs,
 records or environment. Concurrent calls therefore have independent open
 handles; a kill leaves no runtime residue. `CheckedExec` changes only its child
 Git environment and replaces the caller process; it creates no receipt or
-fallback record. Producer requests also write nothing. Build-time Cargo writes
-its standalone lock and ignored target output; Cargo serializes its own build
-directory. An interrupted build can leave ignored generated files and must be
-rebuilt before any owner stages an artifact. Never publish a partial build.
+fallback record. `ReferenceProducer` construction and accessors write nothing;
+independent calls share no persistent cache. Calls to its protocol use Reference's
+canonical operations lock, validators and scope publication rules; interrupted
+operations can leave incomplete scope/attempt state, never inferred success.
+Build-time Cargo writes its standalone lock and ignored target output, including
+`source_inventory.rs`; Cargo serializes its own build directory. An interrupted
+build can leave a partial generated file and must be rebuilt before any owner
+stages an artifact. Never publish a partial build.
 
 ## Evidence and deferred verification
 

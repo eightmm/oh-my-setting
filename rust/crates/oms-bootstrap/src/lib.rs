@@ -7,14 +7,15 @@
 
 mod filesystem;
 mod git;
-mod inventory;
+mod limits;
 mod payload;
 mod producer;
 mod route;
+mod snapshot;
 mod source;
 
 pub use payload::{CheckedExec, SourceFile, SourceInventory, ValidatedPayload};
-pub use producer::{ProducerOperation, ProducerReceipt, ProducerRequest, ProducerUnavailable};
+pub use producer::ReferenceProducer;
 pub use route::{
     CommandAdapter, CommandOutput, Frontdoor, LegacyCommand, Navigation, Prepared,
     PrivateInvocation, PythonRequirement, Route, Terminal,

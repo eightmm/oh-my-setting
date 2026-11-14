@@ -1,5 +1,7 @@
 #[path = "src/inventory.rs"]
 mod inventory;
+#[path = "src/limits.rs"]
+mod limits;
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -10,15 +12,14 @@ fn main() {
         .join("../../..")
         .canonicalize()
         .expect("native source root");
-    // Directory watches also notice additions and removals, not just edits.
-    println!(
-        "cargo:rerun-if-changed={}",
-        root.join("rust/crates").display()
-    );
+    let inventory = inventory::paths(&root).expect("native source inventory");
+    // Watch source/data subtrees, never crate roots containing standalone builds.
+    for path in &inventory.watches {
+        println!("cargo:rerun-if-changed={}", root.join(path).display());
+    }
     let mut output = String::from("pub const FILES: &[(&[u8], &str)] = &[\n");
-    for path in inventory::paths(&root).expect("native source inventory") {
+    for path in inventory.files {
         let absolute = root.join(&path);
-        println!("cargo:rerun-if-changed={}", absolute.display());
         let bytes = std::fs::read(&absolute).expect("native source file");
         writeln!(
             output,

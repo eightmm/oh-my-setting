@@ -1,7 +1,8 @@
-use crate::filesystem::{Anchor, Opened, Stamp};
-use crate::{Discovery, Error, git, hex, inventory, member};
+use crate::filesystem::{Anchor, Opened};
+use crate::snapshot::Snapshot;
+use crate::{Discovery, Error, git, hex, member};
 use oms_context::Json;
-use sha2::{Digest, Sha256};
+use oms_reference::controller::Controller;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
@@ -14,9 +15,9 @@ mod built {
 
 pub type SourceFile<'a> = (&'a [u8], &'a str);
 /// Expected bytes from the reviewed build, never an on-disk cache receipt.
-/// The closure includes every crate's src, build.rs, manifest and lock, plus
-/// the workspace manifests and pinned toolchain. Separate tests/docs trees
-/// are excluded; source-local test modules remain part of the closure.
+/// The closure includes native runtime dependency sources, manifests and build
+/// scripts, workspace lock/toolchain, and bundled config/roles/prompts data.
+/// Separate tests/docs trees are excluded; source-local tests are included.
 pub struct SourceInventory<'a> {
     files: &'a [SourceFile<'a>],
 }
@@ -33,38 +34,8 @@ impl<'a> SourceInventory<'a> {
     pub fn reviewed(files: &'a [SourceFile<'a>]) -> Self {
         Self { files }
     }
-    fn validate(&self, root: &Anchor) -> Result<(String, Vec<(PathBuf, Stamp)>), Error> {
-        let actual = inventory::paths(root.path())
-            .map_err(|_| Error::integrity("cannot enumerate current native source"))?;
-        if actual.len() != self.files.len()
-            || actual
-                .iter()
-                .zip(self.files)
-                .any(|(a, (b, _))| a.as_os_str().as_bytes() != *b)
-        {
-            return Err(Error::integrity(
-                "native source inventory differs from the reviewed build",
-            ));
-        }
-        let mut stamps = Vec::new();
-        let mut hash = Sha256::new();
-        for (label, expected) in self.files {
-            if !hex(expected.as_bytes(), 64) {
-                return Err(Error::integrity("invalid reviewed native source digest"));
-            }
-            let path = Path::new(OsStr::from_bytes(label));
-            let source = root.file(path, false)?;
-            if source.digest(64 * 1024 * 1024)? != *expected {
-                return Err(Error::integrity(
-                    "native source content differs from the reviewed build",
-                ));
-            }
-            hash.update((label.len() as u64).to_be_bytes());
-            hash.update(label);
-            hash.update(expected.as_bytes());
-            stamps.push((path.to_path_buf(), source.stamp()));
-        }
-        Ok((format!("{:x}", hash.finalize()), stamps))
+    fn validate(&self, root: &Anchor) -> Result<(String, Snapshot), Error> {
+        Snapshot::capture(root, self.files)
     }
 }
 
@@ -73,13 +44,15 @@ impl<'a> SourceInventory<'a> {
 /// an environment variable or a previous process's success status.
 pub struct ValidatedPayload {
     directory: Anchor,
+    directory_generation: std::fs::Metadata,
     executable: Opened,
+    controller: Option<Controller>,
     helper: Option<Opened>,
     manifest: Opened,
     checksum: Opened,
     revision: String,
     source_digest: String,
-    sources: Vec<(PathBuf, Stamp)>,
+    sources: Snapshot,
 }
 impl ValidatedPayload {
     /// For the existing --oms-select/--oms-dispatch consumers. The embedding
@@ -127,6 +100,7 @@ impl ValidatedPayload {
             return Ok(None);
         }
         let directory = cache.descend(Path::new(&revision))?;
+        let directory_generation = directory.generation()?;
         let manifest = directory.file(Path::new("manifest.json"), false)?;
         let checksum = directory.file(Path::new("oms.sha256"), false)?;
         let bytes = manifest.read(4 * 1024 * 1024)?;
@@ -155,7 +129,12 @@ impl ValidatedPayload {
             return Err(Error::integrity("invalid native executable checksum"));
         }
         let executable = directory.file(Path::new("oms"), true)?;
-        if executable.digest(1024 * 1024 * 1024)?.as_bytes() != expected {
+        let controller = executable.controller()?;
+        let executable_digest = match &controller {
+            Some(controller) => controller.digest().map_err(Error::integrity)?.to_owned(),
+            None => executable.digest(1024 * 1024 * 1024)?,
+        };
+        if executable_digest.as_bytes() != expected {
             return Err(Error::integrity(
                 "native executable checksum mismatch; run oms doctor --repair",
             ));
@@ -169,14 +148,15 @@ impl ValidatedPayload {
         } else {
             None
         };
-        for entry in std::fs::read_dir(directory.path())
+        for entry in rustix::fs::Dir::read_from(directory.last())
             .map_err(|_| Error::integrity("cannot enumerate native payload"))?
         {
-            let name = entry
-                .map_err(|_| Error::integrity("cannot enumerate native payload"))?
-                .file_name();
-            if !matches!(name.as_bytes(), b"oms" | b"manifest.json" | b"oms.sha256")
-                && !(name == "oms-graph-python-helper" && helper.is_some())
+            let entry = entry.map_err(|_| Error::integrity("cannot enumerate native payload"))?;
+            let name = entry.file_name().to_bytes();
+            if !matches!(
+                name,
+                b"." | b".." | b"oms" | b"manifest.json" | b"oms.sha256"
+            ) && !(name == b"oms-graph-python-helper" && helper.is_some())
             {
                 return Err(Error::integrity("foreign native payload content"));
             }
@@ -184,7 +164,9 @@ impl ValidatedPayload {
         let (source_digest, sources) = inventory.validate(&source.root)?;
         let payload = Self {
             directory,
+            directory_generation,
             executable,
+            controller,
             helper,
             manifest,
             checksum,
@@ -212,6 +194,8 @@ impl ValidatedPayload {
     pub fn recheck(&self, source: &Discovery) -> Result<(), Error> {
         source.check()?;
         self.directory.check()?;
+        self.directory
+            .check_generation(&self.directory_generation, true)?;
         self.executable.check()?;
         self.manifest.check()?;
         self.checksum.check()?;
@@ -223,33 +207,25 @@ impl ValidatedPayload {
                 "native source revision changed during validation",
             ));
         }
-        let current = inventory::paths(source.source_root())
-            .map_err(|_| Error::integrity("cannot enumerate current native source"))?;
-        if current.len() != self.sources.len()
-            || current.iter().zip(&self.sources).any(|(a, (b, _))| a != b)
-        {
-            return Err(Error::integrity(
-                "native source inventory changed during validation",
-            ));
+        if let Some(controller) = &self.controller {
+            controller.check().map_err(Error::integrity)?;
         }
-        for (path, stamp) in &self.sources {
-            if !source.root.file(path, false)?.matches_stamp(stamp) {
-                return Err(Error::integrity("native source changed during validation"));
-            }
-        }
-        Ok(())
+        self.sources.check(&source.root)
     }
     /// An in-process main must prove it is the authenticated payload before
     /// using this proof to run migrated implementations directly.
     pub fn authenticates_current_process(&self) -> Result<(), Error> {
-        let current = std::env::current_exe()
-            .map_err(|_| Error::integrity("cannot identify native executable"))?;
-        if !self.executable.identity_matches(&current) {
-            return Err(Error::integrity(
-                "native executable does not belong to this checkout",
-            ));
-        }
-        self.executable.check()
+        self.controller().map(|_| ())
+    }
+    /// Share the already hashed, kernel-authenticated command image with the
+    /// Reference protocol and other native services. No second capture/hash.
+    pub fn controller(&self) -> Result<Controller, Error> {
+        let controller = self.controller.as_ref().ok_or_else(|| Error::integrity(
+            "native executing-artifact proof unavailable or executable does not belong to this checkout"
+        ))?;
+        self.executable.check()?;
+        controller.check().map_err(Error::integrity)?;
+        Ok(controller.clone())
     }
     /// Consumes the proof and retains it until the final pre-exec checks.
     pub fn into_exec(self, source: Discovery, args: Vec<OsString>) -> CheckedExec {
