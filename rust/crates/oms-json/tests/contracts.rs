@@ -106,6 +106,16 @@ fn replacement_length_counts_plain_text() {
     assert_eq!(text.utf8_with_replacement_len(), 10);
     assert_eq!(PyString::from("").utf8_with_replacement_len(), 0);
     assert!(PyString::from_codepoints(vec![0x110000]).is_err());
+    assert_eq!(text.to_str_checked(), None);
+    assert_eq!(
+        text.to_utf8_string_lossy().as_bytes(),
+        text.utf8_with_replacement()
+    );
+    assert_eq!(PyString::from("").to_str_checked().as_deref(), Some(""));
+    assert_eq!(
+        PyString::from("😀é").to_str_checked().as_deref(),
+        Some("😀é")
+    );
 }
 
 #[test]
@@ -173,6 +183,13 @@ fn depth_bound_and_deep_drop() {
     }
     let at_limit = nested(1024);
     let over = nested(1025);
+    let cloned = at_limit.clone_bounded().unwrap();
+    assert!(Value::values_equal(&at_limit, &cloned));
+    assert!(matches!(
+        over.clone_bounded(),
+        Err(oms_json::Error::DepthLimit)
+    ));
+    assert!(!Value::values_equal(&over, &over));
     for encode in [
         canonical_json,
         pretty_json,
@@ -192,6 +209,8 @@ fn depth_bound_and_deep_drop() {
         .spawn(|| {
             let v = nested(50_000);
             assert!(canonical_json(&v).is_err());
+            assert!(v.clone_bounded().is_err());
+            assert!(!Value::values_equal(&v, &v));
             drop(v);
         })
         .unwrap()
@@ -242,4 +261,104 @@ fn codepoints_preserve_surrogates() {
     let text = PyString::from_codepoints(vec![0x61, 0xdcff, 0x1f600]).unwrap();
     assert_eq!(text.codepoints(), &[0x61, 0xdcff, 0x1f600]);
     assert!(canonical_json(&Value::String(text)).is_err());
+}
+
+#[test]
+fn safe_value_accessors_and_numeric_conversion() {
+    for decimal in [
+        "0",
+        "-1",
+        "9223372036854775807",
+        "-9223372036854775808",
+        "18446744073709551615",
+        "18446744073709551616",
+    ] {
+        let value = Value::integer(decimal).unwrap();
+        let integer = value.as_integer().unwrap();
+        assert_eq!(integer.as_decimal(), decimal);
+        assert_eq!(integer.as_i64(), decimal.parse::<i64>().ok());
+        assert_eq!(integer.as_u64(), decimal.parse::<u64>().ok());
+        assert_eq!(integer.is_negative(), decimal.starts_with('-'));
+        assert_eq!(integer.digit_len(), decimal.trim_start_matches('-').len());
+        assert!(value.as_float().is_none());
+        assert_eq!(value.as_f64(), decimal.parse::<f64>().ok());
+        assert_eq!(value.as_number_f64(), value.as_f64());
+        assert!(value.as_string().is_none());
+        assert!(value.as_bool().is_none());
+    }
+    let mut object = Value::Object(BTreeMap::new());
+    object
+        .as_object_mut()
+        .unwrap()
+        .insert("é".into(), Value::Bool(true));
+    assert_eq!(object.get("é").unwrap().as_bool(), Some(true));
+    assert!(object.get("missing").is_none());
+    assert!(object.as_object().is_some());
+    assert!(object.as_array_mut().is_none());
+    let mut array = Value::Array(Vec::new());
+    array.as_array_mut().unwrap().push(Value::Null);
+    assert_eq!(array.as_array().unwrap().len(), 1);
+    assert!(array.as_object_mut().is_none());
+    assert!(array.get("0").is_none());
+    assert!(Value::Null.as_object().is_none());
+    assert!(Value::Null.as_array().is_none());
+    assert!(Value::Null.as_integer().is_none());
+    assert!(Value::Null.as_f64().is_none());
+    let float = Value::Float(-0.0);
+    assert!(float.as_float().unwrap().is_sign_negative());
+    assert!(float.as_number_f64().unwrap().is_sign_negative());
+    let string = Value::String("text".into());
+    assert_eq!(
+        string.as_string().unwrap().to_str_checked().as_deref(),
+        Some("text")
+    );
+    let huge = Value::integer(&"9".repeat(4301)).unwrap();
+    assert!(huge.as_f64().unwrap().is_infinite());
+    assert!(Value::values_equal(&huge, &huge.clone_bounded().unwrap()));
+}
+
+#[test]
+fn structural_equality_and_clone_preserve_variants() {
+    let mut object = BTreeMap::new();
+    object.insert(
+        "a".into(),
+        Value::Array(vec![
+            Value::Null,
+            Value::Bool(false),
+            Value::String(PyString::from_codepoints(vec![0xd800]).unwrap()),
+        ]),
+    );
+    object.insert("b".into(), Value::Object(BTreeMap::new()));
+    let original = Value::Object(object);
+    let mut cloned = original.clone_bounded().unwrap();
+    assert!(oms_json::values_equal(&original, &cloned));
+    cloned
+        .as_object_mut()
+        .unwrap()
+        .insert("b".into(), Value::Null);
+    assert!(!oms_json::values_equal(&original, &cloned));
+    assert!(!oms_json::values_equal(
+        &Value::integer("1").unwrap(),
+        &Value::Float(1.0)
+    ));
+    for number in [0.0, -0.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let cloned = Value::Float(number).clone_bounded().unwrap();
+        assert_eq!(cloned.as_float().unwrap().to_bits(), number.to_bits());
+    }
+    assert!(!oms_json::values_equal(
+        &Value::Float(f64::NAN),
+        &Value::Float(f64::NAN)
+    ));
+    assert!(oms_json::values_equal(
+        &Value::Float(-0.0),
+        &Value::Float(0.0)
+    ));
+    assert!(!oms_json::values_equal(
+        &Value::Array(vec![]),
+        &Value::Array(vec![Value::Null])
+    ));
+    assert!(!oms_json::values_equal(
+        &Value::Object([(PyString::from("a"), Value::Null)].into()),
+        &Value::Object([(PyString::from("b"), Value::Null)].into())
+    ));
 }

@@ -11,6 +11,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+mod parse;
+mod value;
+pub use parse::{ParseError, ParseOptions, parse_python, parse_strict, parse_with_options};
+pub use value::values_equal;
+
 /// A Python string, including code points in the surrogate range.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PyString(Vec<u32>);
@@ -26,6 +31,19 @@ impl PyString {
     /// Borrow the original Python code points, including surrogates.
     pub fn codepoints(&self) -> &[u32] {
         &self.0
+    }
+
+    /// Return Unicode text only when every Python code point is a scalar.
+    pub fn to_str_checked(&self) -> Option<String> {
+        self.0.iter().map(|&p| char::from_u32(p)).collect()
+    }
+
+    /// Replace each surrogate with `?`, like Python's UTF-8 replacement codec.
+    pub fn to_utf8_string_lossy(&self) -> String {
+        self.0
+            .iter()
+            .map(|&p| char::from_u32(p).unwrap_or('?'))
+            .collect()
     }
 
     /// Encode like Python's UTF-8 codec with `errors="replace"`.
@@ -53,7 +71,7 @@ impl From<&str> for PyString {
 
 /// JSON value for the domain encoders. It intentionally does not implement
 /// `Clone`, `Debug`, or `PartialEq`: their derived implementations recurse
-/// without a depth bound. Consumers can borrow values and use the encoders.
+/// without a depth bound. Use `clone_bounded` and `values_equal` instead.
 pub enum Value {
     Null,
     Bool(bool),
@@ -83,6 +101,28 @@ impl Drop for Value {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Integer(String);
+
+impl Integer {
+    pub fn as_decimal(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        self.0.parse().ok()
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        self.0.parse().ok()
+    }
+
+    pub fn is_negative(&self) -> bool {
+        self.0.starts_with('-')
+    }
+
+    pub fn digit_len(&self) -> usize {
+        self.0.len() - usize::from(self.is_negative())
+    }
+}
 
 impl Value {
     /// Construct a Python integer from its canonical decimal representation.
