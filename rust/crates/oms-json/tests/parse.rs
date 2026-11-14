@@ -1,6 +1,7 @@
 use oms_json::{
-    ParseError, ParseOptions, canonical_json, parse_python, parse_strict, parse_with_options,
-    values_equal,
+    Error, OrderedObject, OrderedValue, ParseError, ParseOptions, PyString, canonical_json,
+    ordered_values_equal, parse_ordered_with_options, parse_python, parse_python_ordered,
+    parse_strict, parse_strict_ordered, parse_with_options, values_equal,
 };
 
 fn error(input: &[u8], options: &ParseOptions) -> ParseError {
@@ -299,8 +300,141 @@ fn iterative_parsing_on_a_small_stack() {
             let input = format!("{}null{}", "{\"x\":".repeat(20_000), "}".repeat(20_000));
             drop(parse_with_options(input.as_bytes(), &options).unwrap());
             assert!(parse_with_options(&input.as_bytes()[..input.len() - 1], &options).is_err());
+
+            for depth in [1024, 1025] {
+                let ordered_input = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+                if depth == 1024 {
+                    let ordered = parse_strict_ordered(ordered_input.as_bytes()).unwrap();
+                    assert!(ordered_values_equal(
+                        &ordered,
+                        &ordered.clone_bounded().unwrap()
+                    ));
+                    assert!(ordered.into_value().is_ok());
+                } else {
+                    assert_eq!(
+                        match parse_ordered_with_options(
+                            ordered_input.as_bytes(),
+                            &ParseOptions::strict()
+                        ) {
+                            Err(err) => err,
+                            Ok(_) => panic!("expected depth limit"),
+                        },
+                        ParseError::DepthLimit
+                    );
+                }
+            }
+            drop(parse_ordered_with_options(input.as_bytes(), &options).unwrap());
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn ordered_parsing_preserves_insertion_order_and_python_duplicate_semantics() {
+    let parsed = parse_python_ordered(
+        br#"{"b ":1,"b":2,"big":9223372036854775808,"a":{"z":1,"a":2},"b ":99}"#,
+    )
+    .unwrap();
+    let keys: Vec<String> = parsed
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, _)| k.to_str_checked().unwrap())
+        .collect();
+    assert_eq!(keys, vec!["b ", "b", "big", "a"]);
+    assert_eq!(
+        parsed
+            .as_object()
+            .unwrap()
+            .get("b ")
+            .unwrap()
+            .as_integer()
+            .unwrap()
+            .as_i64(),
+        Some(99)
+    );
+    assert_eq!(
+        parsed
+            .get("big")
+            .unwrap()
+            .as_integer()
+            .unwrap()
+            .as_decimal(),
+        "9223372036854775808"
+    );
+
+    let inner_keys: Vec<String> = parsed
+        .get("a")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, _)| k.to_str_checked().unwrap())
+        .collect();
+    assert_eq!(inner_keys, vec!["z", "a"]);
+
+    assert_eq!(
+        match parse_strict_ordered(br#"{"a":1,"a":2}"#) {
+            Err(err) => err,
+            Ok(_) => panic!("strict ordered must reject duplicate keys"),
+        },
+        ParseError::DuplicateKey
+    );
+
+    let mut pairs = Vec::new();
+    for i in (1..=65).rev() {
+        pairs.push(format!("\"k{i:02}\":{i}"));
+    }
+    let wide = format!("{{{}}}", pairs.join(","));
+    let parsed_wide = parse_python_ordered(wide.as_bytes()).unwrap();
+    let first64: Vec<String> = parsed_wide
+        .as_object()
+        .unwrap()
+        .iter()
+        .take(64)
+        .map(|(k, _)| k.to_str_checked().unwrap())
+        .collect();
+    let expected64: Vec<String> = (2..=65).rev().map(|i| format!("k{i:02}")).collect();
+    assert_eq!(first64, expected64);
+
+    let left = parse_strict_ordered(br#"{"a":1,"b":2}"#).unwrap();
+    let right = parse_strict_ordered(br#"{"b":2,"a":1}"#).unwrap();
+    assert!(!ordered_values_equal(&left, &right));
+    assert!(values_equal(
+        &left.clone_bounded().unwrap().into_value().unwrap(),
+        &right.clone_bounded().unwrap().into_value().unwrap()
+    ));
+    assert_eq!(
+        canonical_json(&left.into_value().unwrap()).unwrap(),
+        br#"{"a":1,"b":2}"#
+    );
+
+    let mut obj = OrderedObject::new();
+    assert!(
+        obj.insert(PyString::from("first"), OrderedValue::integer("1").unwrap())
+            .is_none()
+    );
+    assert!(
+        obj.insert(PyString::from("second"), OrderedValue::Bool(true))
+            .is_none()
+    );
+    let prev = obj
+        .insert(PyString::from("first"), OrderedValue::integer("3").unwrap())
+        .unwrap();
+    assert_eq!(prev.as_integer().unwrap().as_i64(), Some(1));
+    assert_eq!(obj.len(), 2);
+    assert_eq!(
+        obj.iter()
+            .map(|(k, _)| k.to_str_checked().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"]
+    );
+
+    let mut deep = OrderedValue::Null;
+    for _ in 0..1025 {
+        deep = OrderedValue::Array(vec![deep]);
+    }
+    assert!(matches!(deep.clone_bounded(), Err(Error::DepthLimit)));
+    assert!(matches!(deep.into_value(), Err(Error::DepthLimit)));
 }

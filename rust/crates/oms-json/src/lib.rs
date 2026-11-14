@@ -8,16 +8,19 @@
 #![forbid(unsafe_code)]
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 mod parse;
 mod value;
-pub use parse::{ParseError, ParseOptions, parse_python, parse_strict, parse_with_options};
-pub use value::values_equal;
+pub use parse::{
+    ParseError, ParseOptions, parse_ordered_with_options, parse_python, parse_python_ordered,
+    parse_strict, parse_strict_ordered, parse_with_options,
+};
+pub use value::{ordered_values_equal, values_equal};
 
 /// A Python string, including code points in the surrogate range.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PyString(Vec<u32>);
 
 impl PyString {
@@ -82,6 +85,19 @@ pub enum Value {
     Object(BTreeMap<PyString, Value>),
 }
 
+fn drain_ordered_value(value: &mut OrderedValue, pending: &mut Vec<OrderedValue>) {
+    match value {
+        OrderedValue::Array(items) => pending.append(items),
+        OrderedValue::Object(obj) => {
+            obj.index.clear();
+            for (_, v) in std::mem::take(&mut obj.entries) {
+                pending.push(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl Drop for Value {
     fn drop(&mut self) {
         let mut pending = Vec::new();
@@ -95,6 +111,53 @@ impl Drop for Value {
         drain(self, &mut pending);
         while let Some(mut value) = pending.pop() {
             drain(&mut value, &mut pending);
+        }
+    }
+}
+
+/// Insertion-ordered JSON object preserving Python dict key order and duplicate
+/// key in-place replacement semantics.
+#[derive(Default)]
+pub struct OrderedObject {
+    entries: Vec<(PyString, OrderedValue)>,
+    index: HashMap<PyString, usize>,
+}
+
+impl Drop for OrderedObject {
+    fn drop(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        self.index.clear();
+        let mut pending: Vec<OrderedValue> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        while let Some(mut value) = pending.pop() {
+            drain_ordered_value(&mut value, &mut pending);
+        }
+    }
+}
+
+/// JSON value preserving object key insertion order (Python 3.7+ `dict` order).
+/// Intentionally omits recursive `Clone`, `Debug`, and `PartialEq` for stack
+/// safety; use `clone_bounded`, `ordered_values_equal`, and `into_value`.
+pub enum OrderedValue {
+    Null,
+    Bool(bool),
+    Integer(Integer),
+    Float(f64),
+    String(PyString),
+    Array(Vec<OrderedValue>),
+    Object(OrderedObject),
+}
+
+impl Drop for OrderedValue {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        drain_ordered_value(self, &mut pending);
+        while let Some(mut value) = pending.pop() {
+            drain_ordered_value(&mut value, &mut pending);
         }
     }
 }
@@ -124,18 +187,29 @@ impl Integer {
     }
 }
 
+fn canonical_integer(decimal: &str) -> Result<Integer, Error> {
+    let digits = decimal.strip_prefix('-').unwrap_or(decimal);
+    if digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || decimal == "-0"
+    {
+        return Err(Error::InvalidInteger);
+    }
+    Ok(Integer(decimal.to_owned()))
+}
+
 impl Value {
     /// Construct a Python integer from its canonical decimal representation.
     pub fn integer(decimal: &str) -> Result<Self, Error> {
-        let digits = decimal.strip_prefix('-').unwrap_or(decimal);
-        if digits.is_empty()
-            || !digits.bytes().all(|b| b.is_ascii_digit())
-            || (digits.len() > 1 && digits.starts_with('0'))
-            || decimal == "-0"
-        {
-            return Err(Error::InvalidInteger);
-        }
-        Ok(Self::Integer(Integer(decimal.to_owned())))
+        Ok(Self::Integer(canonical_integer(decimal)?))
+    }
+}
+
+impl OrderedValue {
+    /// Construct a Python integer from its canonical decimal representation.
+    pub fn integer(decimal: &str) -> Result<Self, Error> {
+        Ok(Self::Integer(canonical_integer(decimal)?))
     }
 }
 

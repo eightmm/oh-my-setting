@@ -1,6 +1,6 @@
 //! Iterative parsing with independent limits on input bytes, nesting and integers.
 
-use crate::{Integer, PyString, Value};
+use crate::{Integer, OrderedObject, OrderedValue, PyString, Value};
 use std::collections::BTreeMap;
 
 /// Limits apply in both modes. Zero integer digits means no digit limit; zero
@@ -72,9 +72,99 @@ pub fn parse_python(input: &[u8]) -> Result<Value, ParseError> {
     parse_with_options(input, &ParseOptions::python_compat())
 }
 
-enum Frame {
-    Array(Vec<Value>),
-    Object(BTreeMap<PyString, Value>, PyString),
+pub fn parse_strict_ordered(input: &[u8]) -> Result<OrderedValue, ParseError> {
+    parse_ordered_with_options(input, &ParseOptions::strict())
+}
+
+pub fn parse_python_ordered(input: &[u8]) -> Result<OrderedValue, ParseError> {
+    parse_ordered_with_options(input, &ParseOptions::python_compat())
+}
+
+trait JsonTree: Sized {
+    type Map;
+    fn null() -> Self;
+    fn bool(value: bool) -> Self;
+    fn integer(value: Integer) -> Self;
+    fn float(value: f64) -> Self;
+    fn string(value: PyString) -> Self;
+    fn array(items: Vec<Self>) -> Self;
+    fn object_new() -> Self::Map;
+    fn object_contains(obj: &Self::Map, key: &PyString) -> bool;
+    fn object_insert(obj: &mut Self::Map, key: PyString, value: Self);
+    fn object_finish(obj: Self::Map) -> Self;
+}
+
+impl JsonTree for Value {
+    type Map = BTreeMap<PyString, Value>;
+    fn null() -> Self {
+        Self::Null
+    }
+    fn bool(value: bool) -> Self {
+        Self::Bool(value)
+    }
+    fn integer(value: Integer) -> Self {
+        Self::Integer(value)
+    }
+    fn float(value: f64) -> Self {
+        Self::Float(value)
+    }
+    fn string(value: PyString) -> Self {
+        Self::String(value)
+    }
+    fn array(items: Vec<Self>) -> Self {
+        Self::Array(items)
+    }
+    fn object_new() -> Self::Map {
+        BTreeMap::new()
+    }
+    fn object_contains(obj: &Self::Map, key: &PyString) -> bool {
+        obj.contains_key(key)
+    }
+    fn object_insert(obj: &mut Self::Map, key: PyString, value: Self) {
+        obj.insert(key, value);
+    }
+    fn object_finish(obj: Self::Map) -> Self {
+        Self::Object(obj)
+    }
+}
+
+impl JsonTree for OrderedValue {
+    type Map = OrderedObject;
+    fn null() -> Self {
+        Self::Null
+    }
+    fn bool(value: bool) -> Self {
+        Self::Bool(value)
+    }
+    fn integer(value: Integer) -> Self {
+        Self::Integer(value)
+    }
+    fn float(value: f64) -> Self {
+        Self::Float(value)
+    }
+    fn string(value: PyString) -> Self {
+        Self::String(value)
+    }
+    fn array(items: Vec<Self>) -> Self {
+        Self::Array(items)
+    }
+    fn object_new() -> Self::Map {
+        OrderedObject::new()
+    }
+    fn object_contains(obj: &Self::Map, key: &PyString) -> bool {
+        obj.contains_key(key)
+    }
+    fn object_insert(obj: &mut Self::Map, key: PyString, value: Self) {
+        obj.insert(key, value);
+    }
+    fn object_finish(obj: Self::Map) -> Self {
+        Self::Object(obj)
+    }
+}
+
+enum Frame<T: JsonTree> {
+    Array(Vec<T>),
+    Object(T::Map, PyString),
 }
 
 struct Parser<'a> {
@@ -84,6 +174,17 @@ struct Parser<'a> {
 }
 
 pub fn parse_with_options(input: &[u8], options: &ParseOptions) -> Result<Value, ParseError> {
+    parse_generic(input, options)
+}
+
+pub fn parse_ordered_with_options(
+    input: &[u8],
+    options: &ParseOptions,
+) -> Result<OrderedValue, ParseError> {
+    parse_generic(input, options)
+}
+
+fn parse_generic<T: JsonTree>(input: &[u8], options: &ParseOptions) -> Result<T, ParseError> {
     if input.len() > options.max_bytes {
         return Err(ParseError::ByteLimit);
     }
@@ -92,7 +193,7 @@ pub fn parse_with_options(input: &[u8], options: &ParseOptions) -> Result<Value,
         pos: 0,
         options,
     };
-    let mut stack = Vec::new();
+    let mut stack: Vec<Frame<T>> = Vec::new();
     loop {
         parser.whitespace();
         let mut value = match parser.peek().ok_or(ParseError::UnexpectedEnd)? {
@@ -104,31 +205,31 @@ pub fn parse_with_options(input: &[u8], options: &ParseOptions) -> Result<Value,
                 parser.whitespace();
                 if open == b'[' {
                     if parser.consume(b']') {
-                        Value::Array(Vec::new())
+                        T::array(Vec::new())
                     } else {
                         stack.push(Frame::Array(Vec::new()));
                         continue;
                     }
                 } else if parser.consume(b'}') {
-                    Value::Object(BTreeMap::new())
+                    T::object_finish(T::object_new())
                 } else {
                     let key = parser.object_key()?;
-                    stack.push(Frame::Object(BTreeMap::new(), key));
+                    stack.push(Frame::Object(T::object_new(), key));
                     continue;
                 }
             }
-            b'"' => Value::String(parser.string()?),
+            b'"' => T::string(parser.string()?),
             b'n' => {
                 parser.literal(b"null")?;
-                Value::Null
+                T::null()
             }
             b't' => {
                 parser.literal(b"true")?;
-                Value::Bool(true)
+                T::bool(true)
             }
             b'f' => {
                 parser.literal(b"false")?;
-                Value::Bool(false)
+                T::bool(false)
             }
             b'N' | b'I' => parser.nonfinite()?,
             b'-' if parser.input.as_bytes().get(parser.pos + 1) == Some(&b'I') => {
@@ -152,7 +253,7 @@ pub fn parse_with_options(input: &[u8], options: &ParseOptions) -> Result<Value,
                 Some(Frame::Array(mut items)) => {
                     items.push(value);
                     if parser.consume(b']') {
-                        value = Value::Array(items);
+                        value = T::array(items);
                     } else {
                         parser.expect(b',')?;
                         stack.push(Frame::Array(items));
@@ -160,12 +261,12 @@ pub fn parse_with_options(input: &[u8], options: &ParseOptions) -> Result<Value,
                     }
                 }
                 Some(Frame::Object(mut items, key)) => {
-                    if !options.allow_duplicate_keys && items.contains_key(&key) {
+                    if !options.allow_duplicate_keys && T::object_contains(&items, &key) {
                         return Err(ParseError::DuplicateKey);
                     }
-                    items.insert(key, value);
+                    T::object_insert(&mut items, key, value);
                     if parser.consume(b'}') {
-                        value = Value::Object(items);
+                        value = T::object_finish(items);
                     } else {
                         parser.expect(b',')?;
                         parser.whitespace();
@@ -227,7 +328,7 @@ impl Parser<'_> {
         Ok(key)
     }
 
-    fn nonfinite(&mut self) -> Result<Value, ParseError> {
+    fn nonfinite<T: JsonTree>(&mut self) -> Result<T, ParseError> {
         let value = if self.peek() == Some(b'N') {
             self.literal(b"NaN")?;
             f64::NAN
@@ -241,10 +342,10 @@ impl Parser<'_> {
         if !self.options.allow_nonfinite {
             return Err(ParseError::NonFiniteFloat);
         }
-        Ok(Value::Float(value))
+        Ok(T::float(value))
     }
 
-    fn number(&mut self) -> Result<Value, ParseError> {
+    fn number<T: JsonTree>(&mut self) -> Result<T, ParseError> {
         let start = self.pos;
         self.consume(b'-');
         let digits_start = self.pos;
@@ -279,12 +380,12 @@ impl Parser<'_> {
             if !number.is_finite() && !self.options.allow_nonfinite {
                 return Err(ParseError::NonFiniteFloat);
             }
-            Ok(Value::Float(number))
+            Ok(T::float(number))
         } else {
             if self.options.max_integer_digits != 0 && digit_len > self.options.max_integer_digits {
                 return Err(ParseError::IntegerDigitLimit);
             }
-            Ok(Value::Integer(Integer(
+            Ok(T::integer(Integer(
                 if numeric_text == "-0" {
                     "0"
                 } else {

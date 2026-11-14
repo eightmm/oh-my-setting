@@ -44,3 +44,12 @@ variants remain distinct; floats use IEEE equality, so NaN differs from itself
 and positive and negative zero compare equal. These operations use memory
 proportional to nesting for traversal; cloned output additionally owns its data.
 Existing serializers retain their original limits and encoding policies.
+
+For consumers that need Python `dict` insertion-order semantics prior to
+normalization (`sanitize`, duplicate-key precedence, bounded key slices),
+`parse_strict_ordered`, `parse_python_ordered`, and
+`parse_ordered_with_options` return `OrderedValue` whose `OrderedObject`
+preserves first-insertion order (replacing duplicate keys in place). Use
+`OrderedValue::clone_bounded`, `ordered_values_equal`, and `OrderedValue::into_value`
+for bounded cloning, order-sensitive comparison, and conversion to key-sorted
+`Value`.
