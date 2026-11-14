@@ -61,6 +61,42 @@ fn cache(paths: &Paths) -> Result<PathBuf> {
         .join("plugins/cache/oh-my-setting-local/oh-my-setting")
         .join(version))
 }
+fn native_codex(paths: &Paths) -> Result<r::Scratch> {
+    let source = paths.source.join("plugins/oh-my-setting");
+    let stage = r::Scratch::new()?;
+    let mut hooks = json!({"hooks":{}});
+    for (event, action, matcher, timeout) in [
+        ("UserPromptSubmit", "skill-router", None, 5),
+        ("Stop", "turn-guard", None, 12),
+        ("PreCompact", "precompact-handoff codex", None, 30),
+        ("SessionStart", "resume-hook", None, 10),
+        ("SessionStart", "telemetry-hook", None, 5),
+        ("PostToolUse", "syntax-guard-hook", Some("apply_patch"), 5),
+        ("SessionEnd", "telemetry-hook", None, 3),
+    ] {
+        let mut group = json!({"hooks":[{"type":"command","command":format!("{} {action}",
+            crate::integrations::native_command(paths, "harness-hook")?),"timeout":timeout}]});
+        if let Some(matcher) = matcher {
+            group["matcher"] = json!(matcher);
+        }
+        hooks["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .entry(event)
+            .or_insert(json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(group);
+    }
+    std::fs::create_dir(stage.0.join(".codex-plugin"))?;
+    r::new_file(
+        &stage.0.join(".codex-plugin/plugin.json"),
+        &r::read(&source.join(".codex-plugin/plugin.json"), r::LIMIT)?,
+        0o600,
+    )?;
+    r::new_file(&stage.0.join("hooks.json"), &r::bytes(&hooks)?, 0o600)?;
+    Ok(stage)
+}
 fn owned_cache(paths: &Paths, cache: &std::path::Path, deleted: bool) -> Result<()> {
     let base = paths.codex_home()?;
     let mut ancestor = cache;
@@ -172,7 +208,7 @@ pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> 
             && root != manifest
             && root != paths.source.join(".agents/plugins")
             && !(root.join(".agents/plugins/marketplace.json").is_file()
-                && root.join("scripts/install-codex-plugin.sh").is_file())
+                && root.join("rules/global-AGENTS.md").is_file())
         {
             return r::fail("foreign Codex marketplace; takeover refused");
         }
@@ -231,12 +267,10 @@ fn apply_codex(
             }
         } else {
             let destination = cache(paths)?;
+            let native = native_codex(paths)?;
             let stale = !r::exists(&destination)
                 || crate::fingerprint::tree(&destination, false)?
-                    != crate::fingerprint::tree(
-                        &paths.source.join("plugins/oh-my-setting"),
-                        false,
-                    )?;
+                    != crate::fingerprint::tree(&native.0, false)?;
             let desired = std::env::var_os("OMS_CODEX_MARKETPLACE_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or(paths.source.clone());
@@ -312,10 +346,10 @@ fn apply_codex(
     }
     let cache = cache(paths)?;
     owned_cache(paths, &cache, false)?;
-    let source = paths.source.join("plugins/oh-my-setting");
-    let expected = crate::fingerprint::tree(&source, false)?;
+    let native = native_codex(paths)?;
+    let expected = crate::fingerprint::tree(&native.0, false)?;
     if crate::fingerprint::tree(&cache, false)? != expected {
-        tx.publish_external(&cache, &source)?;
+        tx.publish_external(&cache, &native.0)?;
     }
     tx.write(
         &cache.join(".oh-my-setting-source-root"),
@@ -374,13 +408,9 @@ pub(crate) fn apply(
     let mcp = json!({"mcpServers":{"oh-my-setting":{"command":paths.home.join(".local/bin/oms"),"args":["mcp-server"]}}});
     let certified = crate::agy_surface::verified(paths)?;
     let hooks = json!({"oh-my-setting":{
-        "PreInvocation":[{"type":"command","command":"bash ./agy-hook.sh preinvocation","timeout":5}],
-        "Stop":[{"type":"command","command":"bash ./agy-hook.sh stop","timeout":5}]
+        "PreInvocation":[{"type":"command","command":format!("{} preinvocation", crate::integrations::native_command(paths, "agy-hook")?),"timeout":5}],
+        "Stop":[{"type":"command","command":format!("{} stop", crate::integrations::native_command(paths, "agy-hook")?),"timeout":5}]
     }});
-    let launcher = format!(
-        "#!/bin/sh\n# oh-my-setting native Antigravity lifecycle adapter\nexec {} agy-hook \"$@\"\n",
-        r::shell(paths.home.join(".local/bin/oms").as_os_str())?
-    );
     let plugin_raw = r::bytes(&plugin)?;
     let mcp_raw = r::bytes(&mcp)?;
     let hooks_raw = r::bytes(&hooks)?;
@@ -390,7 +420,6 @@ pub(crate) fn apply(
     ];
     if certified {
         files.push(("hooks.json", hooks_raw.as_slice(), 0o600));
-        files.push(("agy-hook.sh", launcher.as_bytes(), 0o755));
     }
     tx.files(&target, &files)?;
     let row = json!({"schema":1,"kind":"directory","source":source,"sha256":transaction::identity(&target)?});

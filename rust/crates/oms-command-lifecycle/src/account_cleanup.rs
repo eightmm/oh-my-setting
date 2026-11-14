@@ -398,7 +398,8 @@ fn settings_plan(paths: &Paths, row: &Value, directory: &Path) -> Result<Option<
             .ok_or_else(|| r::Error(2, "invalid account source".into()))?,
     );
     if !source.join("rules/global-AGENTS.md").is_file()
-        || !source.join("scripts/install-claude-hooks.sh").is_file()
+        || !source.join("rust/Cargo.toml").is_file()
+            && !source.join("scripts/install-claude-hooks.sh").is_file()
     {
         return r::fail("Claude account source unavailable; restore it for cleanup");
     }
@@ -413,7 +414,8 @@ fn settings_plan(paths: &Paths, row: &Value, directory: &Path) -> Result<Option<
         );
         if !root.is_absolute()
             || !root.join("rules/global-AGENTS.md").is_file()
-            || !root.join("scripts/install-claude-hooks.sh").is_file()
+            || !root.join("rust/Cargo.toml").is_file()
+                && !root.join("scripts/install-claude-hooks.sh").is_file()
         {
             return r::fail("unverified account hook source ownership");
         }
@@ -476,8 +478,11 @@ fn settings_plan(paths: &Paths, row: &Value, directory: &Path) -> Result<Option<
                             .and_then(crate::integrations::command_words)
                             .is_some_and(|words| match words.as_slice() {
                                 [program, path] => {
-                                    program == "python3"
-                                        && Path::new(path) == source.join("scripts").join(script)
+                                    (Path::new(program) == paths.home.join(".local/bin/oms")
+                                        && path == script.trim_end_matches(".py"))
+                                        || program == "python3"
+                                            && Path::new(path)
+                                                == source.join("scripts").join(script)
                                 }
                                 [bash, wrapper, program, path] => {
                                     bash == "bash"
@@ -687,21 +692,15 @@ pub(crate) fn hooks(
     let mut leaves = Vec::new();
     let mut owned_hooks = Vec::new();
     let mut containers = std::collections::BTreeSet::<Vec<String>>::new();
-    let command = |script: &str| -> Result<String> {
-        Ok(format!(
-            "bash {} python3 {}",
-            r::shell(paths.source.join("scripts/lib/python-entry.sh").as_os_str())?,
-            r::shell(paths.source.join("scripts").join(script).as_os_str())?
-        ))
-    };
+    let command = |verb: &str| crate::integrations::native_command(paths, verb);
     for (parts, value) in [
         (
             vec!["statusLine"],
-            json!({"type":"command","command":command("claude-statusline.py")?}),
+            json!({"type":"command","command":command("claude-statusline")?}),
         ),
         (
             vec!["subagentStatusLine"],
-            json!({"type":"command","command":command("claude-subagent-statusline.py")?}),
+            json!({"type":"command","command":command("claude-subagent-statusline")?}),
         ),
         (
             vec!["modelSettings", "claude-opus-5-5", "effortLevel"],

@@ -1,8 +1,8 @@
 # Native lifecycle implementation
 
 This crate owns native lifecycle planning, validation, transactions, and provider
-configuration. It preserves `run`, `run_with_source`, and `run_with_services`;
-the first two use `UnavailableServices`. It never dispatches a Bash or Python
+configuration. It preserves `run_with_source` and `run_with_services`;
+the former uses `UnavailableServices`. It never dispatches a Bash or Python
 lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enabled.
 
 ## Implemented surfaces
@@ -25,17 +25,25 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   tables, foreign caches, modified managed caches, and unrelated config changes
   remain refusals. External snapshots cover the OMS marketplace/cache namespaces
   and actual Codex config, never the entire provider plugins directory.
+  Installed hook payloads invoke `oms harness-hook` directly; legacy shell
+  templates are retired in favor of a crate-owned native inventory without
+  reading or installing their scripts.
+  Cache provenance records the generated payload digest, so repeated installs
+  converge and modified caches remain refusals.
 - `install-claude-hooks`: isolated, bounded capability negotiation before global
   receipt/transaction locking; conditional `onFailure` and compact-window
   convergence; adoption/removal of legacy OMS wrapper commands even when their
-  checkout was deleted. Account mode requires a matching effects reservation
+  checkout was deleted. Native hook schema 12 is defined in the crate, so hook
+  installation and `doctor --surfaces` need no shell installer or script files.
+  Statuslines invoke `oms claude-statusline` and `oms claude-subagent-statusline`.
+  Account mode requires a matching effects reservation
   (`--ownership-receipt`) and removes only exact recorded leaves/hooks.
 - `install-agy-plugin --probe-surfaces`: disposable home/workspace certification
   checks hook delivery, payload, blocking, and timeout behavior. Cache identity
   uses Bash-compatible binary spelling and stat identity, including macOS path
   aliases. A binary removed during the probe produces `binary_changed`.
   `agy-surfaces.env` is evidence only for that binary; changed identity retracts
-  hooks. Certified plugins ship native `agy-hook` PreInvocation/Stop adapters;
+  hooks. Certified plugins register `oms agy-hook` PreInvocation/Stop commands;
   uncertified plugins remain MCP-only. The adapter translates provider payloads,
   bounds stdin, honors kill switches, and keeps advisory Stop calls nonblocking.
 - `install-tools` / `install-profile`: catalog/profile inheritance, `--only`,
@@ -158,16 +166,35 @@ retained when recovery cannot prove ownership.
 
 ## Verification status
 
-This implementation round permits offline compilation and formatting only.
-The following passing checks do not establish runtime parity:
+The crate-local `native_lifecycle` regression uses a disposable home/source and
+an isolated PATH containing Git and a deterministic Codex inventory fixture,
+with no Python executable. It covers native Claude hook/statusline generation,
+account ownership round trips (or explicit ancestor-safety refusal in sandboxes
+with unmapped ownership), schema-12 doctor surface validation, native Codex
+cache generation without legacy templates, Git-hook convergence, cron
+registration, legacy MCP/interpreter-link removal, install planning and missing
+payload refusal, tick dispatch and all ten `Services` methods. All default
+service methods fail closed. Public service signatures remain unchanged.
+
+Focused verification:
 
 ```sh
-cargo +1.99.1 check --manifest-path rust/crates/oms-command-lifecycle/Cargo.toml --all-targets --offline
-cargo +1.99.1 fmt --manifest-path rust/crates/oms-command-lifecycle/Cargo.toml -- --check
+cargo +1.99.1 test --manifest-path rust/Cargo.toml -p oms-command-lifecycle --test native_lifecycle --locked --offline
+cargo +1.99.1 clippy --manifest-path rust/Cargo.toml -p oms-command-lifecycle --test native_lifecycle --locked --offline -- -D warnings
+cargo +1.99.1 fmt --manifest-path rust/Cargo.toml -p oms-command-lifecycle -- --check
 ```
 
- Provider CLI compatibility, real
-Linux/macOS installation, live surface/model probes, signal/crash recovery, and
-cross-process contention still require behavioral verification by the owner.
-No tests or live provider turns were run in this phase; no dependency, lockfile,
-external dispatcher, or canonical Bash/Python producer was changed.
+Successful payload install/link/repair and certified Antigravity installation
+still need the embedding host's authenticated native payload. Bootstrap's source
+proof, outside this crate, retains its `scripts/agent-task.sh` authority marker
+and reviewed source inventory. This crate does not weaken that proof. The
+optional `oms-graph-python-helper` artifact is a Cargo-built native Rust parser,
+not an interpreter or a required runtime. Legacy paths in cleanup, cron
+migration, and provider evidence references remain readable. Disposable live
+Antigravity certification probes use shell test fixtures; installed plugins do
+not ship those fixtures. The integrity frontdoor and Git's executable hook entry
+retain minimal shell launchers that execute native commands directly.
+
+Provider CLI compatibility, real Linux/macOS installation, live surface/model
+probes, signal/crash recovery, and cross-process contention require host
+verification. No dependency, lockfile, or external dispatcher changes are made.

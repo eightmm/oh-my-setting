@@ -11,53 +11,61 @@ use std::{
 };
 
 pub(crate) fn expected(paths: &Paths) -> Result<Value> {
-    let raw = String::from_utf8(r::read(
-        &paths.source.join("scripts/install-claude-hooks.sh"),
-        r::LIMIT,
-    )?)
-    .map_err(|_| r::Error(2, "invalid hook source".into()))?;
-    let schema = raw
-        .lines()
-        .find_map(|s| s.strip_prefix("HOOKS_SCHEMA="))
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| r::Error(2, "hook schema missing".into()))?;
-    let surfaces = raw
-        .split_once("HOOK_SURFACES='\n")
-        .and_then(|(_, s)| s.split_once("\n'\n"))
-        .map(|(s, _)| s)
-        .ok_or_else(|| r::Error(2, "hook surfaces missing".into()))?;
-    let mut rows = Vec::new();
-    for line in surfaces
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        let parts = line.split('|').collect::<Vec<_>>();
-        if parts.len() < 4 || !r::safe_name(parts[1]) {
-            return r::fail("invalid hook surface");
-        }
-        let timeout = if parts.last().unwrap().is_empty() {
-            Value::Null
-        } else {
-            json!(
-                parts
-                    .last()
-                    .unwrap()
-                    .parse::<u64>()
-                    .map_err(|_| r::Error(2, "invalid hook timeout".into()))?
+    // Native registration owns its inventory; source checkouts need no shell installer.
+    let surfaces = [
+        ("UserPromptSubmit", "skill-router", None, None),
+        ("Stop", "turn-guard", None, Some(12)),
+        (
+            "PostToolUseFailure",
+            "fail-ledger-hook",
+            Some("Bash"),
+            Some(5),
+        ),
+        ("PostToolUse", "fail-ledger-hook", Some("Bash"), Some(5)),
+        ("PreToolUse", "git-move-guard-hook", Some("Bash"), Some(5)),
+        ("PreToolUse", "command-guard-hook", Some("Bash"), Some(5)),
+        (
+            "PostToolUse",
+            "syntax-guard-hook",
+            Some("Edit|Write|MultiEdit"),
+            Some(5),
+        ),
+        ("PreCompact", "precompact-handoff", None, Some(30)),
+        ("SessionEnd", "precompact-handoff", None, Some(30)),
+        ("SessionStart", "resume-hook", None, Some(10)),
+        ("SessionStart", "telemetry-hook", None, Some(5)),
+        ("SessionEnd", "telemetry-hook", None, Some(5)),
+        (
+            "Notification",
+            "telemetry-hook",
+            Some("permission_prompt|elicitation_dialog"),
+            Some(5),
+        ),
+    ];
+    let rows = surfaces
+        .into_iter()
+        .map(|(event, verb, matcher, timeout)| {
+            Ok(
+                json!({"event":event,"script":verb,"matcher":matcher,"timeout":timeout,
+            "command":native_command(paths, verb)?,"fail_closed":verb=="command-guard-hook"}),
             )
-        };
-        let matcher = parts[2..parts.len() - 1].join("|");
-        let entry = paths.source.join("scripts").join(parts[1]);
-        let command = format!(
-            "bash {} bash {}",
-            r::shell(paths.source.join("scripts/lib/python-entry.sh").as_os_str())?,
-            r::shell(entry.as_os_str())?
-        );
-        rows.push(json!({"event":parts[0],"script":parts[1],"matcher":if matcher.is_empty(){Value::Null}else{json!(matcher)},"timeout":timeout,"command":command,"fail_closed":parts[1]=="command-guard-hook.sh"}));
-    }
-    Ok(json!({"schema":1,"hooks_schema":schema,"root":paths.source,"surfaces":rows}))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({"schema":1,"hooks_schema":12,"root":paths.source,"surfaces":rows}))
 }
+pub(crate) fn native_command(paths: &Paths, verb: &str) -> Result<String> {
+    Ok(format!(
+        "{} {verb}",
+        r::shell(paths.home.join(".local/bin/oms").as_os_str())?
+    ))
+}
+pub(crate) fn owned_native(command: &str, verb: &str, paths: &Paths) -> bool {
+    command_words(command).is_some_and(|words| {
+        matches!(words.as_slice(), [program, arg]
+        if Path::new(program) == paths.home.join(".local/bin/oms") && arg == verb)
+    })
+}
+
 pub(crate) fn command_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -151,7 +159,10 @@ fn owned_entry(command: &str, executable: &str, script: &str, paths: &Paths) -> 
 }
 pub(crate) fn owned_hook(command: &str, paths: &Paths, expected: &Value) -> Result<bool> {
     for row in expected["surfaces"].as_array().unwrap() {
-        if owned_entry(command, "bash", row["script"].as_str().unwrap(), paths)? {
+        let verb = row["script"].as_str().unwrap();
+        if owned_native(command, verb, paths)
+            || owned_entry(command, "bash", &format!("{verb}.sh"), paths)?
+        {
             return Ok(true);
         }
     }
@@ -270,7 +281,12 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction, _flag: &AtomicB
                     && row["onFailure"] == "block"
                     && row["command"]
                         .as_str()
-                        .map(|c| owned_entry(c, "bash", "command-guard-hook.sh", paths))
+                        .map(|c| {
+                            Ok::<_, r::Error>(
+                                owned_native(c, "command-guard-hook", paths)
+                                    || owned_entry(c, "bash", "command-guard-hook.sh", paths)?,
+                            )
+                        })
                         .transpose()?
                         .unwrap_or(false)
                 {
@@ -334,14 +350,15 @@ fn defaults(paths: &Paths, value: &mut Value, remove: bool, auto_compact: bool) 
         ("statusLine", "claude-statusline.py"),
         ("subagentStatusLine", "claude-subagent-statusline.py"),
     ] {
-        let command = format!(
-            "bash {} python3 {}",
-            r::shell(paths.source.join("scripts/lib/python-entry.sh").as_os_str())?,
-            r::shell(paths.source.join("scripts").join(script).as_os_str())?
-        );
+        let verb = script.trim_end_matches(".py");
+        let command = native_command(paths, verb)?;
         let ours = value[key]["command"]
             .as_str()
-            .map(|c| owned_entry(c, "python3", script, paths))
+            .map(|c| {
+                Ok::<_, r::Error>(
+                    owned_native(c, verb, paths) || owned_entry(c, "python3", script, paths)?,
+                )
+            })
             .transpose()?
             .unwrap_or(false);
         if remove {
@@ -519,7 +536,10 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
     let body = toml_block(&raw, &block, section)?;
     let candidate = crate::config::toml(body.as_bytes())?;
     if options.has("--remove") {
-        if let Some(servers) = expected["mcp_servers"].as_object_mut() {
+        if let Some(servers) = expected
+            .get_mut("mcp_servers")
+            .and_then(Value::as_object_mut)
+        {
             servers.remove("oh-my-setting");
         }
         if expected["mcp_servers"]
@@ -553,8 +573,23 @@ fn git_hook(
     if options.has("--check-protection") && !options.hook_protected {
         return r::fail("CI gate requirement was not proven; quick hook unchanged");
     }
-    let raw = r::git(&paths.source, &["rev-parse", "--git-path", "hooks"], flag)?;
-    let dir = PathBuf::from(raw);
+    // The mutation helper suppresses hooks with core.hooksPath=/dev/null;
+    // a read-only path query must retain Git's configured hook directory.
+    let git = r::find("git", &paths.cwd).ok_or_else(|| r::Error(2, "git is required".into()))?;
+    let output = r::command(
+        git,
+        &["rev-parse".into(), "--git-path".into(), "hooks".into()],
+        &paths.source,
+        None,
+        flag,
+        std::time::Duration::from_secs(30),
+    )?;
+    if output.0 != 0 {
+        return r::fail("cannot resolve Git hook directory");
+    }
+    let raw = String::from_utf8(output.1)
+        .map_err(|_| r::Error(2, "Git hook directory is not UTF-8".into()))?;
+    let dir = PathBuf::from(raw.trim_end_matches(['\r', '\n']));
     let dir = if dir.is_absolute() {
         dir
     } else {
@@ -563,7 +598,10 @@ fn git_hook(
     let target = dir.join("pre-push");
     if r::exists(&target) {
         let old = r::read(&target, r::LIMIT)?;
-        if !String::from_utf8_lossy(&old).contains("scripts/pre-push-check.sh") {
+        let text = String::from_utf8_lossy(&old);
+        if !text.contains("scripts/pre-push-check.sh")
+            && !text.starts_with("#!/bin/sh\n# oh-my-setting native pre-push\n")
+        {
             return r::fail("refusing to replace an unmanaged pre-push hook");
         }
     }
@@ -572,7 +610,15 @@ fn git_hook(
     } else {
         " --full"
     };
-    tx.write(&target,format!("#!/usr/bin/env bash\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/pre-push-check.sh\"{mode} \"$@\"\n").as_bytes(),0o755)
+    tx.write(
+        &target,
+        format!(
+            "#!/bin/sh\n# oh-my-setting native pre-push\nexec {}{mode} \"$@\"\n",
+            native_command(paths, "pre-push-check")?
+        )
+        .as_bytes(),
+        0o755,
+    )
 }
 pub(crate) fn prepare_hooks(
     paths: &Paths,

@@ -237,6 +237,7 @@ pub(crate) fn apply(
     }
     let mut row = receipt::build(paths, old, flag)?;
     payload::install(paths, payload, tx)?;
+    retire_interpreter_launcher(paths, tx)?;
     for (source, target) in &pairs {
         r::check(flag)?;
         let prior = if target == &paths.home.join(".local/bin/oms") {
@@ -392,19 +393,27 @@ fn apply_unlink(
         r::check(flag)?;
         restore(paths, tx, &source, &target)?;
     }
-    // Legacy interpreter trees contain symlinks; only remove a proven-owned
-    // launcher here. Runtime directory cleanup is a separate explicit action.
-    let shim = paths.home.join(".local/bin/python3");
-    if shim.is_symlink() {
-        let to = fs::read_link(&shim)?;
-        if to.starts_with(paths.data.join("python-runtime")) {
-            tx.remove(&shim)?;
-        }
-    }
+    retire_interpreter_launcher(paths, tx)?;
     if r::exists(&paths.receipt) {
         tx.remove(&paths.receipt)?;
     }
     Ok(r::text("managed links removed; user backups restored"))
+}
+fn retire_interpreter_launcher(paths: &Paths, tx: &mut Transaction) -> Result<()> {
+    // Remove only the interpreter link owned by the retired OMS runtime.
+    let shim = paths.home.join(".local/bin/python3");
+    if shim.is_symlink() {
+        let to = fs::read_link(&shim)?;
+        let to = if to.is_absolute() {
+            to
+        } else {
+            shim.parent().unwrap().join(to)
+        };
+        if r::physical(&to)?.starts_with(r::physical(&paths.data.join("python-runtime"))?) {
+            tx.remove(&shim)?;
+        }
+    }
+    Ok(())
 }
 pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
     paths.require_owner()?;
@@ -560,6 +569,7 @@ fn install(
     let payload = payload::verify(paths, flag)?;
     let native = apply(paths, fresh.as_ref(), &payload, &mut tx, flag)?;
     row["native"] = native["native"].clone();
+    row["hooks_schema"] = crate::integrations::expected(paths)?["hooks_schema"].clone();
     for (key, tool) in [
         ("claude_hooks", "install-claude-hooks"),
         ("mcp", "install-mcp"),

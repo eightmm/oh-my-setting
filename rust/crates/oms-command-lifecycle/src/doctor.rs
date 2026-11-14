@@ -969,10 +969,14 @@ fn health(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
     if let Some(row) = paths.load()? {
         let mut owner_paths = paths.clone();
         owner_paths.source = receipt::owner(&row)?;
-        let frontdoor = row["native"]["frontdoor"]
-            .as_str()
-            .map(PathBuf::from)
-            .unwrap_or(owner_paths.source.join("scripts/oms"));
+        let Some(frontdoor) = row["native"]["frontdoor"].as_str().map(PathBuf::from) else {
+            rows.push(finding(
+                "managed inventory",
+                "error",
+                "native frontdoor missing; run oms doctor --repair",
+            ));
+            return Ok(rows);
+        };
         for (source, target) in crate::install::targets(&owner_paths, &frontdoor)? {
             let owned = crate::install::owned(&source, &target)?;
             rows.push(finding(
