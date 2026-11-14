@@ -1017,9 +1017,15 @@ fn main() {
         argv.drain(..4);
     }
     if let Some(
-        tool @ ("artifact-index" | "agent-role" | "input" | "agent-events" | "job-digest"),
-    ) = argv.first().and_then(|v| v.to_str())
-    {
+        tool @ ("artifact-index" | "agent-role" | "input" | "agent-events" | "job-digest"
+        | "slurm-lint"),
+    ) = argv.first().and_then(|v| v.to_str()).map(|v| {
+        if v == "slurm-lint.sh" {
+            "slurm-lint"
+        } else {
+            v
+        }
+    }) {
         let local = &argv[1..];
         let owned = match tool {
             "artifact-index" => oms_command_telemetry::owns(local),
@@ -1033,6 +1039,7 @@ fn main() {
             }
             "agent-events" => oms_command_attempt_bundle::owns(local),
             "job-digest" => oms_command_job_digest::owns(local),
+            "slurm-lint" => oms_command_slurm_lint::owns(local),
             _ => unreachable!(),
         };
         if !owned {
@@ -1041,13 +1048,14 @@ fn main() {
         if select {
             return;
         }
-        if tool == "agent-role" && source_root.is_none() {
+        if matches!(tool, "agent-role" | "slurm-lint") && source_root.is_none() {
             command_exit(
                 tool,
                 (
                     2,
                     vec![],
-                    b"error: agent-role requires validated native source metadata\n".to_vec(),
+                    format!("error: {tool} requires validated native source metadata\n")
+                        .into_bytes(),
                 ),
             );
         }
@@ -1063,6 +1071,12 @@ fn main() {
             "input" => oms_command_input::run(local, &cwd, &interrupted),
             "agent-events" => oms_command_attempt_bundle::run(local, &cwd, &interrupted),
             "job-digest" => oms_command_job_digest::run(local, &cwd, &interrupted),
+            "slurm-lint" => oms_command_slurm_lint::run_with_source(
+                local,
+                &cwd,
+                source_root.as_deref().expect("validated source metadata"),
+                &interrupted,
+            ),
             _ => unreachable!(),
         };
         command_exit(tool, result);

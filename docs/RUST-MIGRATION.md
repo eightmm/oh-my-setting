@@ -73,7 +73,8 @@ native handlers. The production workspace has 28 packages; the separately locked
 checker makes 29 packages in total. Public routing now
 selects native context/failure/experiment modes under runtime, normal/grouped
 artifact-index telemetry, all agent-role modes, parent input attachments,
-agent-events attempt-bundle reads and job-digest. Other modes retain their
+agent-events attempt-bundle reads, job-digest and all static slurm-lint arguments.
+Other modes retain their
 explicit transitional selection. Notebook parsing and graph pipeline consumers
 remain in progress. The lock library is registered but has no public writer
 cutover. Partial routing does not retire any of the 82 whole public tools.
@@ -186,8 +187,25 @@ are not claimed equivalent across all locales.
 Both packages are registered in the 28-package locked production workspace;
 the separate development checker keeps the combined count at 29. Existing
 external versions, sources and checksums are preserved; approved num-bigint 0.4.6
-and shlex 1.3.0 add their num-integer 0.1.47 dependency. Public Slurm selection,
-native MCP entry/owner packaging and exact-artifact installation remain pending.
+and shlex 1.3.0 add their num-integer 0.1.47 dependency.
+
+The public source dispatcher now selects the admitted Slurm handler before
+Python activation when a validated current-revision native payload is staged.
+Both `oms slurm-lint` and the existing `oms slurm-lint.sh` spelling own every
+leaf argument, including malformed input, with no legacy retry after dispatch.
+Lint, preview and template keep their output, status and usage hints. Relative
+script/explicit snapshot paths and OH_MY_SETTING_SLURM_REF use the caller
+directory; the default local/slurm.md and templates/slurm-job.sh use the
+validated checkout. Unvalidated standalone source metadata is rejected.
+The existing native-entry suite covers these public paths with the interpreter
+blocked, raw path labels, empty/zero requests, equal limits, child invocations,
+inert selection and unchanged input files. These handlers write no files or
+records: concurrent calls and interruption add no partial state.
+
+Exact-artifact Slurm installation/packaging, native MCP entry/owner packaging
+and direct legacy consumers (including scripts/slurm-submit.sh) remain pending.
+Missing current payloads retain transitional legacy selection; this routing
+does not retire the direct scripts/slurm-lint.sh implementation.
 
 Two inert native MCP corpus paths add four conservative Python-reference lines:
 parser-reference.json (3) and value-reference.json (1). Native tests deserialize

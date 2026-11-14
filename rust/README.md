@@ -42,9 +42,12 @@ command uses a staged native context payload when the trusted owner supplies
 the exact-revision artifacts before Python activation. The public selector also
 owns runtime failure/experiment modes, normal/grouped artifact telemetry, all
 agent-role modes, parent input attachments, agent-events attempt-bundle reads and
-job-digest. Missing current payloads retain transitional legacy selection.
-The newly registered Slurm and MCP components still need public/install
-selection and packaging; registration alone does not activate them.
+job-digest, plus all static slurm-lint lint/preview/template arguments (including
+the existing slurm-lint.sh spelling). Slurm defaults and templates use the
+validated source root; script and explicit snapshot paths use the caller directory.
+Missing current payloads retain transitional legacy selection. Native Slurm
+installation/packaging and MCP public selection remain pending. Direct legacy
+scripts, including slurm-submit's lint consumer, still need migration.
 No whole legacy domain is retired.
 
 The graph helper is a private libexec artifact, not another PATH command. Its

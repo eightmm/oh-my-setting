@@ -1345,6 +1345,11 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
     );
     for argv in [
         vec!["job-digest", "123", "missing.log"],
+        vec!["slurm-lint"],
+        vec!["slurm-lint", "missing.sh"],
+        vec!["slurm-lint", "--template"],
+        vec!["slurm-lint", "--snapshot"],
+        vec!["slurm-lint.sh", "--unknown"],
         vec!["artifact-index", "telemetry", "--repo", "absent"],
         vec!["artifact-index", "telemetry", "--by", "bad"],
         vec!["agent-role", "init", "--name", "never-created"],
@@ -1708,4 +1713,176 @@ fn public_job_digest_routes_all_leaf_arguments_without_python_or_writes() {
     );
     assert_eq!(files(&data), before);
     assert!(!f.0.join("preflight").exists());
+}
+
+#[test]
+fn public_slurm_lint_preserves_static_modes_source_roots_and_raw_arguments() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    std::fs::copy(
+        source.join("scripts/slurm-lint.sh"),
+        f.0.join("scripts/slurm-lint.sh"),
+    )
+    .unwrap();
+    let data = f.0.join("data");
+    for root in [&f.0, &data] {
+        std::fs::create_dir(root.join("templates")).unwrap();
+        std::fs::create_dir(root.join("local")).unwrap();
+    }
+    let template = b"#!/bin/bash\n# source template\n: > executed\n";
+    std::fs::write(f.0.join("templates/slurm-job.sh"), template).unwrap();
+    std::fs::write(
+        data.join("templates/slurm-job.sh"),
+        b"wrong caller template\n",
+    )
+    .unwrap();
+    let snapshot = b"- QOS default: high\n## QOS\nName|PreemptMode|MaxTRESPJ|MaxWall\nhigh|CANCEL|gres/gpu=2|01:00:00\n";
+    std::fs::write(f.0.join("local/slurm.md"), snapshot).unwrap();
+    std::fs::write(data.join("local/slurm.md"), b"wrong caller snapshot\n").unwrap();
+    std::fs::write(data.join("snapshot.md"), snapshot).unwrap();
+    std::fs::write(data.join("empty.md"), b"").unwrap();
+    std::fs::write(data.join("job.sh"), b"#!/bin/bash\n#SBATCH --time=01:00:00\n#SBATCH --gpus=2\n#SBATCH --output=run-%j.log\n: > executed\n").unwrap();
+    std::fs::write(
+        data.join("zero.sh"),
+        b"#SBATCH --time=0\n#SBATCH --gpus=0\n#SBATCH --output=run-%j.log\n",
+    )
+    .unwrap();
+    std::fs::write(data.join("empty.sh"), b"").unwrap();
+    let raw = OsString::from_vec(b"job-\xff.sh".to_vec());
+    std::fs::copy(data.join("job.sh"), data.join(&raw)).unwrap();
+    let before = files(&data);
+    let source_before = [files(&f.0.join("templates")), files(&f.0.join("local"))];
+    let reference = |args: &[OsString]| {
+        let (code, output, mut error) = oms_command_slurm_lint::run_with_source(
+            args,
+            &data,
+            &f.0,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        if code == 2 {
+            error.extend_from_slice(b"hint: run `oms slurm-lint --help` for usage\n");
+        }
+        (code, output, error)
+    };
+    for (args, expected_code) in [
+        (vec![], 2),
+        (vec![""], 2),
+        (vec!["--help"], 0),
+        (vec!["-h", "--unknown"], 0),
+        (vec!["--unknown", "--help"], 2),
+        (vec!["--snapshot"], 2),
+        (vec!["missing.sh"], 2),
+        (vec!["job.sh", "other.sh"], 2),
+        (vec!["job.sh", "--template"], 2),
+        (vec!["--template", "extra"], 2),
+        (vec!["--template"], 0),
+        (vec!["--preview", "--template"], 0),
+        (vec!["job.sh", "--snapshot", "snapshot.md"], 0),
+        (vec!["empty.sh", "--snapshot", "snapshot.md"], 1),
+        (vec!["zero.sh", "--snapshot", "snapshot.md"], 1),
+        (vec!["--preview", "job.sh", "--snapshot", "snapshot.md"], 0),
+        (vec!["--preview", "empty.sh", "--snapshot", "empty.md"], 0),
+        (vec!["--preview", "zero.sh", "--snapshot", "absent.md"], 0),
+    ] {
+        let argv: Vec<_> = args.iter().map(OsString::from).collect();
+        let (code, expected, error) = reference(&argv);
+        assert_eq!(code, expected_code, "{args:?}");
+        if args == ["--template"] {
+            assert_eq!(expected, template);
+        }
+        exact(
+            f.public(&bin)
+                .arg("slurm-lint")
+                .args(&argv)
+                .env_remove("OH_MY_SETTING_SLURM_REF")
+                .output()
+                .unwrap(),
+            code,
+            &expected,
+            &error,
+        );
+    }
+    for (verb, args) in [
+        ("slurm-lint.sh", vec!["--template"]),
+        ("slurm-lint", vec!["--template"]),
+        ("slurm-lint.sh", vec!["--unknown"]),
+    ] {
+        let argv: Vec<_> = args.iter().map(OsString::from).collect();
+        let (code, expected, error) = reference(&argv);
+        exact(
+            f.public(&bin)
+                .arg(verb)
+                .args(argv)
+                .env("OMS_HARNESS_CHILD", "1")
+                .output()
+                .unwrap(),
+            code,
+            &expected,
+            &error,
+        );
+    }
+    for preview in [false, true] {
+        for (setting, snapshot) in [
+            (None, f.0.join("local/slurm.md").into_os_string()),
+            (Some(""), f.0.join("local/slurm.md").into_os_string()),
+            (Some("snapshot.md"), OsString::from("snapshot.md")),
+        ] {
+            let mut args = vec![raw.clone()];
+            if preview {
+                args.push(OsString::from("--preview"));
+            }
+            let mut explicit = args.clone();
+            explicit.extend([OsString::from("--snapshot"), snapshot]);
+            let (code, expected, error) = reference(&explicit);
+            assert_eq!(code, 0);
+            assert!(
+                expected
+                    .windows(raw.as_encoded_bytes().len())
+                    .any(|v| v == raw.as_encoded_bytes())
+            );
+            if preview {
+                assert!(String::from_utf8_lossy(&expected).contains("per job asks 2    within"));
+            }
+            let mut command = f.public(&bin);
+            command
+                .arg("slurm-lint")
+                .args(args)
+                .env_remove("OH_MY_SETTING_SLURM_REF");
+            if let Some(value) = setting {
+                command.env("OH_MY_SETTING_SLURM_REF", value);
+            }
+            exact(command.output().unwrap(), code, &expected, &error);
+        }
+    }
+    exact(
+        f.command(&bin, &PathBuf::from(env!("CARGO_BIN_EXE_oms")))
+            .args(["slurm-lint", "--template"]).env("OMS_SOURCE_ROOT", &f.0)
+            .output().unwrap(),
+        2, b"", b"error: slurm-lint requires validated native source metadata\nhint: run `oms slurm-lint --help` for usage\n",
+    );
+    std::fs::remove_file(f.0.join("templates/slurm-job.sh")).unwrap();
+    exact(
+        f.public(&bin)
+            .args(["slurm-lint", "--template"])
+            .output()
+            .unwrap(),
+        2,
+        b"",
+        format!(
+            "error: template missing: {}\nhint: run `oms slurm-lint --help` for usage\n",
+            f.0.join("templates/slurm-job.sh").display()
+        )
+        .as_bytes(),
+    );
+    std::fs::write(f.0.join("templates/slurm-job.sh"), template).unwrap();
+    assert_eq!(files(&data), before);
+    assert_eq!(
+        [files(&f.0.join("templates")), files(&f.0.join("local"))],
+        source_before
+    );
+    assert!(!f.0.join("preflight").exists());
+    assert!(!f.0.join("executed").exists());
 }

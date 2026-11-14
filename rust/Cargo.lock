@@ -409,6 +409,7 @@ dependencies = [
  "oms-command-failure",
  "oms-command-input",
  "oms-command-job-digest",
+ "oms-command-slurm-lint",
  "oms-command-telemetry",
  "oms-context",
  "oms-context-report",
