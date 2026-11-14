@@ -1,0 +1,22 @@
+Usage: external.sh add --kind skill|mcp|model|dataset|tool --name NAME [options]
+       external.sh list [--json]
+       external.sh show ID
+       external.sh check [ID]
+
+add options:
+  --version V       Version or commit.
+  --file PATH       File to hash (sha256 recorded). --sha256 HEX records a
+                    known digest instead, or must equal the file's.
+  --license TEXT    License as declared by the source; recorded, never judged.
+  --env PATH        Environment lock file (conda-lock, requirements, uv.lock);
+                    its sha256 is recorded.
+  --egress KIND     none (default), public-query, uploads-input. Anything but
+                    none needs --approver NAME: unpublished structures or
+                    sequences may leave this machine. "none" is the
+                    provider's description, not a network observation.
+  --approver NAME   Who accepted the egress (recorded as stated).
+  --note TEXT
+
+check    Recompute recorded file and env-lock hashes; exit 1 on drift or a
+         missing file. Egress rows print a reminder.
+Receipts are append-only; the last row for an id wins.

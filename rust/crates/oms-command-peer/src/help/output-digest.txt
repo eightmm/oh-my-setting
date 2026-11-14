@@ -1,0 +1,32 @@
+Usage: output-digest.sh [options] -- COMMAND [ARG...]
+       output-digest.sh [options] --file PATH [--exit-code N]
+
+Run COMMAND, keep its whole output (stdout and stderr, in order) in a local
+file, and print a bounded digest: exit code, line and byte counts, the raw
+file's path and sha256, the failure lines a recogniser matched, a head and a
+tail, and how much was left out. The command's exit code is this tool's exit
+code. With --file, digest an existing capture; nothing is run or stored.
+
+The digest is a derived view for reading. It is not the run's record and not
+verification evidence: a verifier's input and receipt stay the raw output.
+
+Options:
+  --max-bytes N   Budget for the shown lines. Default 4000 (256..1048576).
+                  Output that fits is shown whole.
+  --head N        Leading lines to show when cutting. Default 10.
+  --tail N        Trailing lines to show when cutting. Default 30.
+  --no-store      Do not keep the raw output (digest names no file).
+  --json          Print the digest as JSON (schema 1, kind oms-output-digest).
+  --file PATH     Digest this file instead of running a command.
+  --exit-code N   With --file: the exit code to report. Default: unknown.
+
+Captures live in .oms/artifacts/output-digest/ (mode 600); the newest 50
+are kept. A harness child keeps none. Before the capture is kept, every line
+the secret scan flags is replaced by [oms-redacted:CLASS] (CLASS names the
+pattern class, never the value); the exit code and the sha256 describe that
+stored file. If the scan cannot run the stored file is one marker line. If the
+shown lines still look like they carry a secret, they are withheld and only the
+counts, the exit code and the path are printed.
+
+Exit: the command's exit code; 125 when this tool itself failed in run mode;
+with --file, 0 on success and 2 on a bad request.

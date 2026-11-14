@@ -1,0 +1,54 @@
+Usage: session-handoff.sh <capture|list|show> [options]
+
+Distill an agent CLI session into a portable handoff digest.
+
+Subcommands:
+  capture   Read a session and write a digest to the project's .oms/handoffs/
+            (the repo containing --cwd; the Work Journal digest points there).
+  list      List captured handoff digests (newest first); --json for machines.
+  show FILE Print a captured digest to stdout.
+  prompt    Print an editable next-session prompt (Markdown) built from OMS
+            records: goal, plan state, decisions, open findings, verified /
+            not verified, next step, pointers. No model call, read-only.
+
+prompt options:
+  --cwd PATH       Project dir (default: OMS_STATE_REPO or current dir).
+  --max-bytes N    Bound the output (512-65536, default 4096); the cut is
+                   named on a "truncated:" line.
+  --output FILE    Write to a new file (refuses to overwrite) and print its path.
+
+list options:
+  --json           Emit JSON.
+  --limit N        Show at most N newest digests (default: all).
+  --status         Text mode: prefix each path with "unclaimed" or
+                   "picked-up SESSION TIME" (the first session the resume
+                   hook showed it to). --json always carries picked_up,
+                   picked_up_by, picked_up_at and pickups.
+
+capture options:
+  --agent NAME     claude | codex | antigravity (default: claude).
+  --session ID     Session id / file. Default: most recent for --cwd.
+  --cwd PATH       Project dir to match (default: current dir).
+  --note TEXT      Free-text note added to the digest header.
+  --out FILE       Write digest here instead of the default handoffs dir.
+  --min-user-turns N  Skip the capture when the session has fewer than N real
+                   user turns (default: 2; 0 captures anything).
+  --missing-session-policy skip|fail
+                   What to do when the named session has no transcript on
+                   disk at all (default: fail, exit 2). The automatic hook
+                   passes skip: worker-style session ids fire hooks without
+                   ever writing a transcript, so the capture becomes a quiet
+                   no-op instead of a daily ledger row. Real capture
+                   failures (sensitive refusal, parse errors) always fail.
+  --allow-sensitive  Write the digest even if it looks sensitive (default:
+                   refuse, since the digest is meant for another agent).
+
+Notes:
+  - Extraction is mechanical; no model is called.
+  - OMS_HANDOFF_TURNS sets the retained recent user turns (0-50, default: 6).
+  - A session below --min-user-turns is skipped, not failed: it writes no
+    digest, says so on stderr, and exits 0, so the automatic hooks stay quiet
+    instead of reporting a failure for every trivial session.
+  - antigravity stores only user prompts in history.jsonl (assistant output
+    lives in opaque protobuf), so its digest is prompts-only (best-effort).
+  - Digests are local artifacts; loading one into another agent is your step.

@@ -1,0 +1,185 @@
+Usage: peer-delegate.sh --to PROVIDER (--prompt TEXT | --brief-file PATH) [options]
+
+Delegate a write task to another agent CLI. The worker runs non-interactively
+inside an isolated git worktree; the result comes back as a patch artifact that
+the caller reviews before applying. The worker never touches the main tree and
+never commits or pushes.
+
+Options:
+  --to PROVIDER        Registered write-capable agent transport. Required;
+                       inspect `oms models` for detected agents.
+  --prompt TEXT        Short task brief.
+  --role NAME          Prepend a reusable strategy profile (agent-role.sh:
+                       repo, global, then bundled fallback) to the worker brief.
+                       Overrides a plan task's role field. A bundled role the
+                       contract marks read_only launches with --read-only
+                       access unless --apply, --interactive or
+                       OMS_DELEGATE_ROLE_WRITE=1 is given.
+  --brief-file PATH    File with a structured brief (Task/Context/Constraints/
+                       Files/Success criteria). Preferred for non-trivial tasks.
+  --review-artifact P  Prior peer-review artifact (e.g. its _synthesis file).
+                       Its findings are embedded in the worker brief as
+                       untrusted reviewer claims to address, and the
+                       delegation's index row records it as source_artifact so
+                       review and patch stay joined. Reviewed findings routed
+                       as separate artifacts get ignored; embedded ones get
+                       addressed.
+  --repo PATH          Git repo to work on. Default: current directory.
+  --model MODEL        Exact provider model; disables implicit fallback.
+  --workload CLASS     standard (default) or routine. Routine selects the lowest
+                       seeded routable rank for a well-specified bounded task.
+                       --model wins over the routine preset.
+  --interactive        Claude/Antigravity conversation in one isolated worktree.
+                       stdout is NDJSON; stdin accepts {"prompt":"..."} or
+                       {"finish":true}. Every turn returns an unverified answer;
+                       finish runs the final verifier and returns a patch.
+                       Standalone writes only: no repair, plan-task,
+                       read-only, apply, fallback-model, or dry-run.
+  --max-turns N        Interactive turn cap including the initial prompt (1-20;
+                       default 5). Reaching it still requires explicit finish.
+  --idle-timeout N     Seconds to wait for each control message (1-3600;
+                       default 300). EOF/timeout fails; never auto-finishes.
+  --fallback-model M   Explicit one-shot capacity fallback model.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
+  --verify CMD         Command run inside the worktree after the worker
+                       finishes (e.g. "uv run pytest tests/"). Non-zero exit
+                       marks the delegation failed. Default for writes:
+                       "bash scripts/check.sh fast" when implemented.
+                       A check.sh without fast needs an explicit --verify CMD
+                       (or --no-verify); ML checks are never inferred from style.
+                       Without check.sh, a PROJECT.md command is suggested only.
+                       Read-only reports have no automatic test run.
+  --read-only          Run the worker with read access (plan mode / read-only
+                       sandbox). An audit or review role produces a report,
+                       never a patch; the role's prose mandate gains the
+                       matching authority. Incompatible with --apply.
+                       When the check fails, an `escalate:` line prints the same
+                       command with --reasoning-effort one step higher (then
+                       --workload standard from routine at the top). It is
+                       printed with its reason, never run.
+  --no-verify          Skip the default scripts/check.sh verification.
+  --allow-no-change    Treat an empty write patch as an allowed no_change result.
+                       Otherwise a panel dispatch or plan task whose write
+                       patch is empty exits 6 (no changes); direct calls exit 0.
+  --repair N           On worker or verify failure, re-run the same worker in
+                       the same worktree up to N times (1-3), feeding back the
+                       original brief, its rejected patch, and the failing
+                       verify output tail. Missing-CLI and outbound-gate
+                       failures are never retried. Each round adds another
+                       OMS_PEER_TIMEOUT of wall-clock budget.
+                       No additional advisor unless OMS_ADVISE_ON_REPEAT=1.
+                       Default: 0 (one-shot).
+                       With --repair 2|3, historical replay may stop repeated
+                       identical failures early; sparse evidence keeps this cap.
+  --apply              Apply the resulting patch to the main tree when the
+                       worker and --verify succeed. Requires a clean main tree.
+  --allow-restructure  Forward to the landing gate: permit an unscoped patch
+                       that adds top-level files or moves files across
+                       directories (normally rejected by the structural floor).
+  --allow-verifier-change  Forward explicit consent to change verifier files;
+                       the landing gate still runs the base verification floor.
+  --allow-test-reduction  Forward explicit consent to reduce test assertions;
+                       the landing gate still runs the base verification floor.
+  --keep-worktree      Keep the worktree for manual inspection.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task packet (default for writes).
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable task context.
+  --no-ml-context      Disable --ml-context (compatibility).
+  --thread ID          Join a cross-agent thread: prior turns go into the
+                       worker brief and the outcome is appended (thread.sh).
+  --task-id ID         Plan/task id (agent-plan.sh) to stamp on this run's
+                       artifact-index rows for lineage. [A-Za-z0-9._-]+.
+  --resume-session ID  Continue this provider session (claude, codex) in the
+                       new worktree; its id is recorded as refs.native_session.
+  --observe-plan-binding JSON
+                       Panel-only marker observation, revalidated under locks.
+                       Excludes --plan-task and grants no child plan rights.
+  --plan-task ID       Couple this delegation to an agent-plan.sh task: on
+                       worker/verify failure (or an outbound-gate block) the
+                       claim is released back to ready; on success the task
+                       moves to review with the artifact and patch (or to done
+                       when --apply landed the patch). Implies --task-id ID.
+                       Without --prompt/--brief-file the task's stored brief
+                       becomes the worker prompt, and without --verify the
+                       task's verify command becomes the contract.
+  --terminalize-resumed-repair
+                       Internal plan-run contract: this is the one permitted
+                       same-lease landing repair. On failure, atomically block
+                       that exact plan lease instead of releasing it to ready.
+  --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
+  --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
+  --context-manifest   Compile a bounded context bundle from the detached HEAD
+                       snapshot, attach it to the worker prompt, and record its
+                       manifest and bundle digests on the delegation row.
+  --context-pack FILE  Typed Project Graph orientation pack (validated before
+                       the worktree exists). Renders file/test pointers into
+                       the brief; takes precedence over --graph-context.
+  --graph-context      Opt in to bounded file/test orientation from the worker
+                       snapshot when relationships or change impact are unclear.
+                       No source bodies; default: off (direct source discovery).
+  --no-graph-context   Disable preparation requested by an earlier --graph-context.
+  --dry-run            Write prompt and empty patch without calling the CLI.
+                       Also prints an advisory inline/researcher/worker verdict
+                       from facts only (never refuses a delegate); thresholds
+                       OMS_DELEGATE_ADVICE_SMALL_BYTES (600) and
+                       OMS_DELEGATE_ADVICE_SMALL_PATHS (3).
+  --json               With --dry-run, print the verdict as one `advice-json:` line.
+  --strict-brief       Refuse (exit 2) a caller brief that lacks a goal, scope,
+                       output form, stop condition or file pointers. Without it
+                       the same findings are only `warning: brief:` lines.
+  -h, --help           Show this help.
+
+Environment:
+  OH_MY_SETTING_DELEGATE_DRY_RUN=1  Same as --dry-run.
+  OMS_DELEGATE_ROLE_WRITE=1  Keep write access for a bundled read-only --role
+                             (default: such a role launches as --read-only).
+  OMS_ADVISE_ON_REPEAT=1     Permit one extra advisor call after a failed repair.
+                             Default: off; set only within user-authorized scope.
+  OMS_REPAIR_REPLAY=0        Keep the explicit repair budget; still record outcomes.
+  OMS_DELEGATE_WORKTREE_ROOT  Parent for temporary delegated worktrees. Default:
+                             $XDG_CACHE_HOME/oh-my-setting/worktrees, else
+                             ~/.cache/oh-my-setting/worktrees.
+  OMS_WORKER_GUARD_OFF=1     Skip the worker-authority check entirely.
+                             The guard also warns, by file name only, when a
+                             provider setting, shell start file or git config
+                             under HOME changed during the run.
+  OMS_WORKER_GUARD_MAX_FILES=20000
+                             Cap the untracked/ignored stat scan; a truncated
+                             scan is reported, never silent.
+  OMS_WORKER_GUARD_STRICT=1  Fail on every classified changed surface. Validated
+                             live managed-worktree lifecycle stays quiet,
+                             including detached siblings added during the run.
+                             By default a change
+                             to untracked/ignored files, tracked content,
+                             remote-tracking refs, stash, a sibling's branch
+                             tracking config, or a dead-owner scratch HEAD move
+                             is reported but does not fail the run: it cannot
+                             be told apart from concurrent repository activity.
+  OMS_WORKER_AUTHORITY_EXCLUSIVE=1
+                             When no sibling can write owner state, compare and
+                             restore the full primary .oms authority surface.
+                             Unsafe for ordinary parallel multi-agent work.
+
+The worker-authority check compares the primary repo's tracked state, untracked
+and ignored files (by stat, not by reading them), local git config, remotes,
+refs, object-store/worktree/submodule metadata, and hooks around the worker.
+Shared .oms state is checked by its contract rather than by equality: workers
+receive no primary state capability; the default guard nevertheless tolerates
+JSONL growth because it cannot attribute a sibling agent's append. Rewriting
+existing rows, truncating them, or deleting a state file is a violation.
+For a plan-bound operation, the default guard also binds the complete selected
+task/lease objects across the provider window. Other tasks may move
+concurrently; this operation's authority may not.
+On a violation the run fails and the operation's own authority is repaired
+from the pre-launch snapshot: authority and evidence fields always restore,
+while claim-cycle fields restore only under the operation's own lease
+(keeping an operator block and heartbeat) and are kept and named for
+inspection when the lease itself moved. A snapshot whose bytes no longer
+match the pre-launch hash refuses restoration.
+It is detection, not a sandbox: it cannot prevent a write, and it cannot see a
+write that is undone before the worker exits, anything the worker reads
+(inherited tokens, ssh agents), or anything it does outside the repository
+(HOME, /tmp, a surviving background process). Those need process isolation.
+  OMS_PEER_TIMEOUT           Worker wall-clock timeout (default: 30m).

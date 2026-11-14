@@ -1,0 +1,48 @@
+Usage: advise.sh (--prompt TEXT | --prompt-file PATH) [options]
+
+Consult an advisor agent at a decision point: before an irreversible or
+high-risk decision, after repeated failures, or at a release go/no-go. Sends an
+adversarial-review prompt to one other local agent CLI (read-only pass via
+agent-call.sh) and prints its verdict. Include in the prompt: the decision,
+the evidence, the alternatives considered, and the planned next action.
+
+Options:
+  --prompt TEXT        Decision context to review.
+  --prompt-file PATH   Decision context from a file.
+  --thread ID          Record the advice in a cross-agent thread and give the
+                       advisor the conversation so far (thread.sh).
+  --session            Attach a mechanical digest of the calling agent's
+                       current session (session-handoff.sh), so the advisor
+                       reads the history behind the decision instead of only
+                       the caller's summary of it. Default: the newest
+                       session matching --repo; when two live sessions share
+                       one worktree, pin the right one with --session-id.
+  --session-id ID      Digest exactly this session (implies --session).
+  --allow-sensitive    Attach the session digest even when it looks
+                       sensitive. session-handoff refuses by default because
+                       the digest crosses to another provider; agent-call
+                       runs its own outbound scrub after this and may still
+                       block the call. Requires --session.
+  --to PROVIDER        Registered advisor transport; inspect `oms models`.
+                       Default: OMS_ADVISOR_PROVIDER, else the first
+                       available provider that is not the caller (OMS_AGENT).
+  --repo PATH          Repo for context and artifacts. Default: PWD.
+  --artifact-dir PATH  Answer artifacts. Default: REPO/.oms/artifacts/advise.
+  --strategy NAME      Strategy/role profile (default: decision-advisor).
+                       Alias: --role NAME.
+  --model MODEL        Exact advisor model.
+  --fallback-model M   Explicit one-shot capacity fallback model.
+  --reasoning-effort E Explicit effort; default uses the shared model router.
+  --no-strategy        Do not inject a strategy profile.
+  --no-failures        Do not attach unresolved fail-ledger rows.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task handoff packet.
+  --ml-context         Attach the compact ML context digest.
+  --export-only        Write the prompt artifact without calling the CLI.
+  --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
+  --dry-run            Write prompt artifact without calling the CLI.
+  -h, --help           Show help.
+
+Environment:
+  OMS_ADVISOR_PROVIDER   Default advisor provider (overridden by --to).
+  OMS_AGENT              Caller identity; the default advisor avoids it.

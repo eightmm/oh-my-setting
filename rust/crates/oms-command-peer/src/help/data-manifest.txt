@@ -1,0 +1,62 @@
+Usage: data-manifest.sh create --name NAME --split LABEL=FILE [options]
+       data-manifest.sh check --name NAME
+       data-manifest.sh leakage --name NAME [--show-examples]
+       data-manifest.sh list [--json]
+       data-manifest.sh show --name NAME
+
+Fingerprint dataset splits to catch data drift and train/eval leakage.
+Stores only content hashes, row counts, and ID-set hashes under
+.oms/manifests/ (no raw rows).
+
+create options:
+  --name NAME        Manifest name (required).
+  --split LABEL=FILE Split file, e.g. --split train=train.txt. Repeatable.
+  --id-column NAME   Treat files as CSV/TSV and use this header column as the ID.
+  --id-index N       Use 0-based column N (CSV/TSV) as the ID.
+  --key-column NAME  Extra CSV/TSV header column to check for entity overlap on
+                     top of the ID (repeatable). Use for chem-bio leakage that
+                     exact-ID overlap misses: the project precomputes columns
+                     like inchikey, scaffold, uniprot, sequence_cluster, or
+                     assay_id, and this flags train/eval overlap on each.
+  --policy P         Declare how the splits were made, so `leakage` checks that
+                     policy's invariant and not only ID overlap:
+                       random    exact ID overlap only
+                       group     needs --key-column; no key may cross splits
+                       scaffold  as group, for a precomputed scaffold key
+                       cold      needs --entity-column; no entity (drug, target,
+                                 ...) may cross splits, each column on its own
+                       time      needs --time-column; list --split oldest first;
+                                 every row of a later split must be later than
+                                 every row of an earlier one
+  --time-column NAME CSV/TSV header column holding a number or an ISO-8601
+                     date for --policy time; values must be present and use
+                     consistently naive or timezone-aware timestamps.
+  --entity-column NAME  CSV/TSV header column for --policy cold. Repeatable;
+                     also recorded and checked like a --key-column.
+  --derive-cmd TEXT  The command that computed the key columns (recorded as
+                     text; never run here).
+  --derive-script FILE  The script that computed them; its sha256 is recorded
+                     and `check` warns when the file changed or is gone.
+  --source NAME=REF  A named upstream source and a free-text reference
+                     (accession, release tag, URL, DOI, internal label), e.g.
+                     --source pdbbind=v2020. Repeatable. Stored as given;
+                     nothing is fetched or validated. A REF that looks like a
+                     credential or carries URL userinfo is refused.
+  --source-digest NAME=SHA256  The sha256 you computed for that source's
+                     archive (64 hex characters; format-checked only).
+  --split-rationale TEXT  One line: why this policy and these keys fit the
+                     claim, e.g. "cold by protein family: test families unseen".
+  --entity-kind COLUMN=KIND  What an entity/key column identifies: protein,
+                     ligand, complex, pocket, assay or other. Repeatable. A
+                     label only; `leakage` uses it to say "cold by protein".
+  --note TEXT        Free-text note.
+  (default: each non-empty line is one ID.)
+
+check    Recompute current split files; nonzero exit on any drift.
+leakage  Report ID overlap between splits; nonzero exit if any overlap. Also
+         reports overlap on every recorded --key-column, tagged [key], the
+         declared policy's invariant, and IDs repeated inside one split
+         (a warning). Exact matches only: analogs, homologs and other
+         near-duplicates need the project's own similarity tooling.
+  --show-examples    Print up to 5 overlapping IDs/keys (off by default; values
+                     may be sensitive).

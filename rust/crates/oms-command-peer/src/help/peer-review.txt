@@ -1,0 +1,157 @@
+Usage: peer-review.sh [options] --prompt TEXT
+       peer-review.sh verdicts [--json] [artifact-dir]
+       peer-review.sh findings list [--status STATE] [--json]
+       peer-review.sh findings show ID
+       peer-review.sh findings fix ID [--commit SHA] [--note TEXT]
+       peer-review.sh findings verify ID --run VERIFY_ARTIFACT
+       peer-review.sh findings dismiss ID --reason TEXT
+       peer-review.sh findings out-of-scope ID --reason TEXT
+       peer-review.sh findings reopen ID --reason TEXT
+       peer-review.sh findings suggest-rules
+       peer-review.sh findings rules [--json] [--min-samples N]
+       peer-review.sh advise [--json] [--repo PATH] [--base REF] [--red-check CMD [--red-timeout SEC]]
+
+Review an existing diff with an independent provider council. The default
+council is Codex, Claude Code, and Antigravity.
+Plain review persists seat answers as artifacts.
+With --gate, enforce and record the typed gate outcome.
+
+verdicts: inspect the latest review run's artifacts and print one line per
+provider — pass, fail, or incomplete (artifact has no exit section, e.g. the
+run died mid-flight). For --debate runs each provider's FINAL round artifact
+is used. Exit 0 all pass, 1 any fail, 2 incomplete/undeterminable; 2 takes
+precedence over 1 (a died provider means the round must be re-run before any
+fail is meaningful). Dry-run artifacts have no exit section and therefore
+always read as incomplete.
+
+advise: print how deep to review the tracked diff against --base (default
+HEAD): none, single, gate+security or council, with the reasons (risk paths,
+contract files, size; thresholds in config/review-depth.json). Advice only: it
+starts no review and never changes a gate verdict. --json for machines.
+--red-check CMD (opt-in, never automatic) also runs CMD in a scratch worktree at
+--base with only the diff's test-file changes applied, per test file, and notes
+whether each fails on base (good) or passes on base (does not test the change);
+bounded by --red-timeout SEC in total (default 300). Advisory, not evidence.
+
+findings: what gate seats reported in their fenced findings block, and what
+became of each. A gate run checks every reported file:line against the diff
+the seats saw and the file itself (in-diff, context, outside-scope,
+anchor-not-found; unclassified when no diff was attached) and records them
+beside the review-scope artifact; no model is called and the GATE verdict is
+unchanged. A finding is open until someone records otherwise: fix is a claim,
+verify needs a fix recorded with --commit SHA and the artifact id or file name
+of a passing gate-verify receipt recorded after it. The receipt must pin a
+scope with a clean tracked tree at that commit, cover the cited file and use
+the original review base. Rerun the gate with --base ORIGINAL_BASE --verify CMD
+after recording the fix.
+Older receipts without that scope remain readable but cannot verify a finding.
+dismiss (the finding is wrong) and out-of-scope (right, but not this change) are
+the owner's and need a reason (a harness worker or reviewer cannot), reopen needs
+a reason; fix is the accept. `findings list --status open` lists the findings
+without a disposition. A fixed or verified
+finding that a later review reports again reads open. Every status is a
+record, never approval or verification evidence. Each action takes
+--artifact-dir PATH (default: ./.oms/artifacts/review) and --repo PATH.
+
+Options:
+  --prompt TEXT        Review question/task. Required unless --ml is set.
+  --ml                 ML preset: inject a silent-ML-bug checklist (leakage,
+                       splits, loss, eval mode, reproducibility, DDP) into
+                       every reviewer prompt. Intended as a pre-training gate
+                       before long runs or Slurm submissions.
+  --repo PATH          Git repo to review. Default: current directory.
+  --base REF           Diff base ref. Default: HEAD (staged + unstaged changes).
+                       Use e.g. --base origin/main for branch/PR review.
+  --since-last         With --base: review only what was added since the most
+                       recent completed review of this base whose recorded head
+                       is an ancestor of HEAD. Any doubt (no earlier review,
+                       rebase, moved base, unfinished review) says why and
+                       falls back to the full review. The outcome is recorded
+                       as advisory (review-incremental), never gate evidence.
+  --providers LIST     Comma list of registered targets. Default: the stable
+                       Codex/Claude/Antigravity council; optional agents are
+                       available when explicitly named.
+                       An entry may carry a model (codex:model=NAME) to pin it.
+  --writer PROVIDER    Name the provider that authored the change under
+                       review. By default that provider is dropped from the
+                       reviewer council (its family re-judging its own patch
+                       is correlated judgment, not independence); an explicit
+                       --providers list including it is honored with a
+                       warning.
+  --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
+  --model MODEL        Exact model; requires exactly one provider.
+  --fallback-model M   One-shot capacity fallback; requires one provider.
+  --reasoning-effort E auto, low, medium, high, xhigh, max, or ultra.
+  --no-diff            Do not attach git diff/status context.
+  --candidate-patch P  Automatic panel gate: indexed patch in the owner repo.
+  --candidate-sha256 H Expected patch digest; requires --candidate-base SHA.
+                       Verify and review a private checkout of base + patch.
+  --memory             Attach shared harness memory.
+  --task               Attach the active task handoff packet.
+  --ml-context         Attach the compact ML context digest.
+  --no-memory          Disable --memory (compatibility).
+  --no-task            Disable --task (compatibility).
+  --no-ml-context      Disable --ml-context (compatibility).
+  --debate N           Add N debate rounds (1-3). Each round, every reviewer
+                       sees the others' previous findings, critiques them, and
+                       revises its own. The diff is in round-1 prompts; later
+                       calls receive bounded findings, evidence and deltas,
+                       plus references to shared initial context and sanitized
+                       answer copies. All seats share
+                       OMS_DEBATE_ROUND_BYTES (default 65536, excluding native
+                       provider context). The debate stops
+                       early when every seat declares "none" under "Changed
+                       from previous round:".
+  --security-audit PROVIDER
+                       Gate mode: when the change touches the risk paths
+                       patch-admit advises on, ask PROVIDER (use a different
+                       model family than the writer) for a read-only audit
+                       under the security-auditor role and print its own
+                       verdict line: security: pass, fail or incomplete.
+                       Advisory: it is recorded and never changes the GATE
+                       verdict; no risk path means no call. Off by default.
+  --confirm PROVIDER   Gate mode: put the blocking findings only one seat
+                       reported to PROVIDER (use a different model family)
+                       for one label each: confirmed, refuted or unverified.
+                       One extra read-only call, off by default. The labels
+                       are recorded beside the findings; they never change
+                       the GATE verdict, and a finding nobody confirmed is
+                       kept and listed as unconfirmed.
+  --gate               Require each reviewer to end with GATE: pass or
+                       GATE: fail, then print verdicts and exit with the gate
+                       status. Review mode only.
+  --verify CMD         Gate mode: run CMD in the repo after the reviews; a
+                       non-zero exit forces the gate to fail regardless of
+                       reviewer verdicts (a GATE: pass self-report cannot
+                       pass a diff that fails the project's own checks).
+                       Defaults to a declared fast mode (ml-smoke with --ml).
+                       Without check.sh, a PROJECT.md command is suggested only.
+                       Otherwise pass --verify explicitly; review never
+                       silently starts the full release suite.
+  --covers ID          Gate mode: acceptance criterion the gate verify run
+                       proves (repeatable). Ids are validated against the
+                       runtime envelope up front and ride the mechanical
+                       verify receipt exit-judged; reviewer prose never
+                       contributes verified coverage, so --covers requires
+                       a gate verify command.
+  --no-verify          Gate mode: skip the default scripts/check.sh backstop.
+  --require-dispositions
+                       Gate mode: a reviewer pass becomes incomplete (exit 2) while
+                       an earlier run's finding is still open; record each with
+                       `findings fix|dismiss|out-of-scope`. Also
+                       OMS_REVIEW_REQUIRE_DISPOSITIONS=1. Off by default.
+  --export-only        Write provider prompt artifacts and do not call CLIs.
+                       Use when the current agent may not send repo context to
+                       another external provider. Import answers later with
+                       `oms artifact-index import`.
+  --synthesize [P]     After provider reviews, run a synthesis pass with a
+                       registered provider P. Default: claude.
+  --print-timeout DUR  Antigravity print-mode wait. Default: the review 20m wall.
+  --dry-run            Write prompts as artifacts without CLI calls.
+  -h, --help           Show this help.
+
+Environment:
+  OH_MY_SETTING_REVIEW_DRY_RUN=1   Same as --dry-run.
+  OMS_PEER_TIMEOUT          Per-provider wall-clock timeout (default: 20m).
+  OMS_PEER_PRINT_TIMEOUT    Timeout for print mode wait (agy); tracks the
+                            verb wall default unless set.
