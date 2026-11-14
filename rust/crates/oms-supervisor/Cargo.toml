@@ -1,0 +1,18 @@
+[package]
+name = "oms-supervisor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+oms-command-operations = { path = "../oms-command-operations" }
+rustix = { version = "=1.1.6", features = ["fs", "process", "pipe", "event"] }
+sha2 = "=0.10.9"
+regex = "=1.13.1"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"
