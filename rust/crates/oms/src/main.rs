@@ -1,5 +1,11 @@
 #![forbid(unsafe_code)]
 mod registry;
+#[allow(dead_code)]
+mod services_collab;
+#[allow(dead_code)]
+mod services_control;
+#[allow(dead_code)]
+mod services_runtime;
 
 use oms_context::{Json, compare_manifests, inspect_manifest, parse_json};
 use oms_json::{PyString, Value as Encoded};
