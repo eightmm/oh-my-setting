@@ -1,0 +1,22 @@
+[package]
+name = "oms-reference"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[workspace]
+
+[dependencies]
+oms-command-operations = { path = "../oms-command-operations" }
+oms-command-task = { path = "../oms-command-task" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+sha2 = "=0.10.9"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+rustix = { version = "=1.1.6", features = ["fs", "process", "system"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+proc_pidinfo = "=0.1.4"
+
+[lints.rust]
+unsafe_code = "forbid"
