@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; worker-src blob:; base-uri 'none'; form-action 'none'">
+<title>__TITLE__</title>
+<style>__CSS__</style>
+</head>
+<body>
+<header><div><span class="eyebrow">OMS / RESEARCH</span><h1 id="title">__TITLE__</h1><p id="source" class="muted"></p></div><div class="actions"><button id="save-view">Save this view</button><button id="export-feedback">Export all feedback</button><button id="export-selected-feedback" aria-describedby="feedback-export-hint" disabled>Export selected feedback</button></div></header>
+<main>
+<section class="card" aria-label="Comparison controls">
+<div class="controls">
+<label>Search cases, runs, parameters<input id="search" type="search" placeholder="Search recorded results"></label>
+<label>Variant<select id="variant"></select></label>
+<label>Status<select id="status"><option value="">All statuses</option><option>complete</option><option>failed</option><option>interrupted</option></select></label>
+<label>Metric<select id="metric"></select></label>
+<label>Baseline<select id="baseline"></select></label>
+<label>Scatter X<select id="axis-x"></select></label>
+</div>
+<div class="summary"><strong id="count"></strong><span id="direction" class="muted"></span><button id="clear">Reset filters</button></div>
+</section>
+<div class="compare-grid">
+<section class="card"><h2>Metric by variant</h2><p class="muted">Complete rows only; missing values are excluded.</p><div id="groups" class="table-wrap"></div></section>
+<section class="card"><h2>Parameter and metric comparison</h2><div id="plot" role="img" aria-label="Interactive scatter plot"></div><p id="plot-note" class="muted"></p></section>
+</div>
+<section class="card"><div class="section-heading"><h2>Recorded cases</h2><div class="actions"><button id="select-page">Select this page</button><button id="clear-selection">Clear selection</button></div></div><p id="feedback-export-hint" class="muted">Export selected feedback includes only checked cases, with their full comments. Clear selection between batches; all annotations remain in this view.</p><div id="rows" class="table-wrap"></div><div class="pagination"><button id="previous">Previous</button><span id="page"></span><button id="next-page">Next</button></div></section>
+<section class="card"><h2>Case detail and artifacts</h2><p id="detail-empty" class="muted">Open a case to inspect its parameters and retained artifacts.</p><div id="detail" hidden><div class="detail-grid"><div><h3 id="detail-title"></h3><pre id="detail-data"></pre><div class="controls"><label>Judgment<select id="judgment"><option value="">No judgment</option><option value="accept">Accept</option><option value="reject">Reject</option><option value="uncertain">Uncertain</option></select></label><label class="grow">Comment<textarea id="comment" rows="3" maxlength="4000"></textarea></label></div><button id="record-comment">Record judgment / comment</button><p id="feedback-status" role="status"></p></div><div><h3>Artifact preview</h3><label>Artifact<select id="artifact"></select></label><div id="artifact-preview"></div></div></div></div></section>
+<section class="card"><h2>Molecular comparison</h2><p class="muted">Views share camera orientation. Coordinate frames and alignment evidence are displayed as supplied; no alignment or scientific validation is inferred.</p><p id="molecule-status" role="status"></p><div class="molecule-grid"><div><label>Structure A<select id="molecule-a"></select></label><div id="molecule-view-a" class="molecule-view"></div><p id="molecule-meta-a" class="muted"></p></div><div><label>Structure B<select id="molecule-b"></select></label><div id="molecule-view-b" class="molecule-view"></div><p id="molecule-meta-b" class="muted"></p></div></div></section>
+<section class="card report"><div class="section-heading"><h2>Research decision</h2><button id="export-report">Export Markdown report</button></div><label>Report title<input id="report-title" maxlength="200"></label><label>Question<textarea id="report-question" rows="2" maxlength="12000"></textarea></label><div class="detail-grid"><label>Decision and evidence<textarea id="report-decision" rows="5" maxlength="12000"></textarea></label><label>Next experiment / instruction<textarea id="report-next" rows="5" maxlength="12000"></textarea></label></div><p class="muted">Exports retain the source digest and selected case identities. Import feedback with <code>oms artifact-view --repo . import-events FILE</code>; browser edits do not change repository records.</p></section>
+</main>
+<footer><span id="notice" role="status"></span><span>Offline snapshot · embedded source records · no background requests</span></footer>
+<script id="oms-payload" type="application/octet-stream">__PAYLOAD__</script>
+<script id="oms-molecule-library" type="application/octet-stream">__MOLECULE_JS__</script>
+<script id="oms-saved-state" type="application/octet-stream"></script>
+<script>__JS__</script>
+</body>
+</html>

@@ -449,13 +449,26 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         ("data", data.clone()),
     ]);
     let assets = Path::new("scripts/lib/artifact_view_assets");
-    let read_asset = |name: &str| -> Result<String> {
-        String::from_utf8(storage::read(context.source, &assets.join(name), false)?)
+    let read_asset = |name: &str, embedded: &str| -> Result<String> {
+        let path = assets.join(name);
+        match std::fs::symlink_metadata(context.source.join(&path)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Validate existing ancestors even when the leaf is absent.
+                storage::read(context.source, &path, true)?;
+                return Ok(embedded.into());
+            }
+            _ => {}
+        }
+        String::from_utf8(storage::read(context.source, &path, false)?)
             .map_err(|_| Error::new(2, "invalid installed view asset"))
     };
-    let js = format!("{}\n{}", read_asset("analysis.js")?, read_asset("view.js")?);
-    let css = read_asset("view.css")?;
-    let template = read_asset("view.html")?;
+    let js = format!(
+        "{}\n{}",
+        read_asset("analysis.js", include_str!("../assets/analysis.js"))?,
+        read_asset("view.js", include_str!("../assets/view.js"))?
+    );
+    let css = read_asset("view.css", include_str!("../assets/view.css"))?;
+    let template = read_asset("view.html", include_str!("../assets/view.html"))?;
     let vendor = if args.has("molecule-js") {
         storage::file(&args.path("molecule-js", context.cwd))?
     } else {

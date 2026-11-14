@@ -6,8 +6,8 @@ Do not wire it into production routing until the remaining contracts below
 have been implemented and the canonical behavior suites have run.
 
 The standalone workspace uses Rust 1.99.1, edition 2024, resolver 3 and forbids
-unsafe code. No parent manifest, parent lockfile, dispatcher or other crate is
-changed. The local lockfile records the offline dependency resolution.
+unsafe code. Dependencies resolve through the root workspace lockfile; no crate-local
+lockfile or new dependency is needed for the embedded view assets.
 
 ## Entrypoints
 
@@ -68,10 +68,13 @@ The trusted source root supplies:
 - `config/role-contracts.json`
 - `config/review-depth.json`
 - `roles/*.md`, through `oms-command-agent-role` resolution
-- `scripts/lib/artifact_view_assets/analysis.js`
-- `scripts/lib/artifact_view_assets/view.js`
-- `scripts/lib/artifact_view_assets/view.css`
-- `scripts/lib/artifact_view_assets/view.html`
+
+Optional view overrides are read from `scripts/lib/artifact_view_assets/`:
+`analysis.js`, `view.js`, `view.css` and `view.html`. Each absent file falls back
+independently to its exact bundled copy in `assets/`, embedded with `include_str!`.
+Existing empty files remain overrides. Invalid UTF-8, symlinks, unsafe ancestors
+and other read errors refuse rendering instead of silently selecting a fallback.
+The source root itself must still be a valid directory.
 
 Role resolution retains repository and global overrides through the existing
 role crate. Account configuration is read from the existing user configuration
@@ -228,9 +231,12 @@ cargo +1.99.1 check --manifest-path rust/crates/oms-command-peer/Cargo.toml --al
 cargo +1.99.1 fmt --manifest-path rust/crates/oms-command-peer/Cargo.toml -- --check
 ```
 
-No tests are added or changed in this implementation-first snapshot. The
-test-reversion protocol therefore has no new/changed test to exercise. The
-owner must run the canonical behavioral suites after closing the gaps above.
+`tests/peer_contract.rs` covers ownership/help, bare-source view rendering,
+installed overrides and refusal paths, ML prompt summaries, peer/delegate dry
+runs and validation, review verdicts/risk classification, and unavailable runtime
+services. It uses isolated subprocess environments and unique initialized Git
+repositories; no provider executable or online service is needed.
+The owner must still run canonical behavioral suites for full migration parity.
 
 Behavior sources inspected: `scripts/thread.sh`,
 `scripts/lib/review_confirm.py`, `scripts/lib/review_since.py`,
@@ -241,3 +247,32 @@ Behavior sources inspected: `scripts/thread.sh`,
 Existing `tests/test_sessions.py`, `tests/test_oms_runtime_context_pack.py`,
 `tests/test_artifact_view.py`, operator suites and shell smoke coverage remain
 for the owner's behavioral validation phase.
+
+## Asset and dependency audit (W2)
+
+The scoped audit of `delegate`, `ml_context`, `review`, `receipts`, `thread` and
+`lib` found no Python command bridge. Delegation uses Git, provider executables
+and Bash for selected verification commands. Its optional `scripts/check.sh`
+fast-mode discovery remains a repository check contract. ML context reads Python
+source as data and emits check hints; it never imports or executes that source.
+Citation lookup uses curl. Review path globs are classification data, including
+legacy script names; removing them would lower existing review tiers.
+`plugins/*` includes plugin `hooks.json`; there is deliberately no blanket
+`hooks.json` or `rust/crates/oms*` risk glob. Native paths still match the existing
+permission/policy/scanner name patterns and risky patch-content rules. Changing
+the overall tier policy belongs to the owning migration task.
+
+For Wave 3, the peer execution boundary is `process::Executor`, not a public
+peer `Services` trait. `native::Services` implements read projections for runtime
+and plan; it does not supply approval, landing, lifecycle writer or app delivery
+authority. `thread append --room-event` currently passes room `LocalServices`;
+operations-dependent room events must keep refusing until the owner wires the
+native operations guard and managed repository resolver. Explicit plan/apply
+requests remain fail-closed. No callback contract was widened in W2.
+
+Asset lookup adds no durable writes. View HTML and metadata retain the registry
+lock and publication order described above. The bundled files are immutable;
+concurrent builds remain serialized and a kill between HTML and metadata still
+leaves an unregistered HTML file. Contract-test fixtures are unique per PID and
+atomic sequence and removed by non-panicking teardown; a killed test may leave
+only its private temporary repository.
