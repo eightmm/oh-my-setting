@@ -5,6 +5,7 @@ pub mod cli;
 pub mod cold;
 pub mod config;
 mod files;
+mod json;
 mod labels;
 pub mod notion;
 pub mod render;
@@ -22,6 +23,7 @@ use crate::config::{
     configure_notion, expand_user_path, notion_settings, purge_notion_config, set_journal_language,
     update_notion_exclusions,
 };
+use crate::json::{JsonExt, Value};
 use crate::notion::{NotionExporter, SyncOptions, sync_notion};
 use crate::sanitize::pretty_json_bytes;
 use crate::schema::{atomic_write_bytes, canonical_repo_root, project_id_path, work_journal_dir};
@@ -29,7 +31,6 @@ use crate::search::run_recorded_search;
 use crate::store::{JournalStore, MemoryAppendFn};
 pub use crate::store::{MemoryAppendFn as JournalMemoryAppendFn, MemoryAppendOutcome};
 use crate::tz::current_utc_now;
-use serde_json::Value;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -318,7 +319,7 @@ fn execute_command(
                         Vec::new(),
                     ));
                 }
-                let value = serde_json::json!({"schema_version":1,"project_id":detected_id,"project_name":detected_name});
+                let value = crate::json::json!({"schema_version":1,"project_id":detected_id,"project_name":detected_name});
                 atomic_write_bytes(&project_id_path(&repo_root), &pretty_json_bytes(&value)?)?;
                 crate::files::remove_owned_file(&store.root.join("sync/notion.json"))?;
                 let rebuilt = JournalStore::open_for_read(&repo_root, None)?.rebuild()?;
@@ -329,7 +330,7 @@ fn execute_command(
                     .unwrap_or("unpinned");
                 return Ok((0,format!("adopted: {detected_name} ({detected_id}) — was {old_name} ({old_id}); rebuilt {} events, {} daily, {} weekly\nnext: oms journal sync --force\n",rebuilt.event_count,rebuilt.daily_periods.len(),rebuilt.weekly_periods.len()).into_bytes(),Vec::new()));
             }
-            let row = serde_json::json!({"pinned_id":pinned.as_ref().map(|(id,_)|id),"pinned_name":pinned.as_ref().map(|(_,name)|name),"detected_id":detected_id,"detected_name":detected_name,"drift":drift});
+            let row = crate::json::json!({"pinned_id":pinned.as_ref().map(|(id,_)|id),"pinned_name":pinned.as_ref().map(|(_,name)|name),"detected_id":detected_id,"detected_name":detected_name,"drift":drift});
             if json {
                 return Ok((0, json_output(&row)?, Vec::new()));
             }
@@ -366,37 +367,37 @@ fn execute_command(
                 }
                 return Ok((0, crate::sanitize::default_json_bytes(&wire)?, Vec::new()));
             }
-            let project = &status["project"];
-            let notion = &status["notion"];
-            let drift = if project["drift"].as_bool() == Some(true) {
+            let project = &status.at("project");
+            let notion = &status.at("notion");
+            let drift = if project.at("drift").as_bool() == Some(true) {
                 format!(
                     " — detected {}; `oms journal identity --adopt-detected` merges",
-                    project["detected_name"].as_str().unwrap_or("")
+                    project.at("detected_name").as_str().unwrap_or_default()
                 )
             } else {
                 String::new()
             };
             let text = format!(
                 "\n- project: {} ({}){drift}\n- events: {} ({} bytes)\n- summaries: {} daily, {} weekly\n- notion: {}, credential {}, {} synced, {} pending, {} failed\n",
-                project["name"].as_str().unwrap_or(""),
-                project["id"].as_str().unwrap_or(""),
-                status["event_count"],
-                status["events_bytes"],
-                status["daily_count"],
-                status["weekly_count"],
-                if notion["configured"].as_bool() == Some(true) {
+                project.at("name").as_str().unwrap_or_default(),
+                project.at("id").as_str().unwrap_or_default(),
+                status.at("event_count").to_string(),
+                status.at("events_bytes").to_string(),
+                status.at("daily_count").to_string(),
+                status.at("weekly_count").to_string(),
+                if notion.at("configured").as_bool() == Some(true) {
                     "configured"
                 } else {
                     "not configured"
                 },
-                if notion[concat!("cred", "ential_present")].as_bool() == Some(true) {
+                if notion.at(concat!("cred", "ential_present")).as_bool() == Some(true) {
                     "present"
                 } else {
                     "missing"
                 },
-                notion["synced"],
-                notion["pending"],
-                notion["failed"]
+                notion.at("synced").to_string(),
+                notion.at("pending").to_string(),
+                notion.at("failed").to_string()
             );
             use std::os::unix::ffi::OsStrExt;
             let mut output = b"Work Journal\n- repo: ".to_vec();
@@ -539,8 +540,8 @@ fn execute_command(
                 ShowMode::Blockers => {
                     let rows = store.open_annotations()?;
                     if json {
-                        let convert = |r: &crate::store::AnnotationRow| serde_json::json!({"text":r.text,"event_id":r.event_id,"occurred_at":r.occurred_at,"local_date":r.local_date});
-                        let value = serde_json::json!({"since":rows.since,"blockers":rows.blockers.iter().map(convert).collect::<Vec<_>>(),"next_actions":rows.next_actions.iter().map(convert).collect::<Vec<_>>()});
+                        let convert = |r: &crate::store::AnnotationRow| crate::json::json!({"text":r.text,"event_id":r.event_id,"occurred_at":r.occurred_at,"local_date":r.local_date});
+                        let value = crate::json::json!({"since":rows.since,"blockers":rows.blockers.iter().map(convert).collect::<Vec<_>>(),"next_actions":rows.next_actions.iter().map(convert).collect::<Vec<_>>()});
                         return Ok((0, json_output(&value)?, Vec::new()));
                     }
                     let mut output = String::new();
@@ -574,11 +575,11 @@ fn execute_command(
                         Err(error) => return Err(error),
                     };
                     if json {
-                        let rows:Vec<_>=report.items.iter().map(|r|serde_json::json!({"text":r.decision,"event_id":r.event_id,"event_type":r.event_type,"occurred_at":r.occurred_at,"local_date":r.local_date,"task_id":r.task_id})).collect();
+                        let rows:Vec<_>=report.items.iter().map(|r|crate::json::json!({"text":r.decision,"event_id":r.event_id,"event_type":r.event_type,"occurred_at":r.occurred_at,"local_date":r.local_date,"task_id":r.task_id})).collect();
                         return Ok((
                             0,
                             json_output(
-                                &serde_json::json!({"since":since,"decisions":rows,"omitted":report.omitted}),
+                                &crate::json::json!({"since":since,"decisions":rows,"omitted":report.omitted}),
                             )?,
                             Vec::new(),
                         ));
@@ -612,7 +613,7 @@ fn execute_command(
                 ShowMode::Recent(n) => {
                     let events = store.recent_events(n.clamp(1, 256) as usize)?;
                     if json {
-                        let obj = serde_json::json!({ "events": events });
+                        let obj = crate::json::json!({ "events": events });
                         let bytes = json_output(&obj)?;
                         return Ok((0, bytes, Vec::new()));
                     }
@@ -625,11 +626,21 @@ fn execute_command(
                     }
                     let mut out = String::new();
                     for ev in &events {
-                        let eid = ev.get("event_id").and_then(Value::as_str).unwrap_or("");
-                        let occ = ev.get("occurred_at").and_then(Value::as_str).unwrap_or("");
-                        let et = ev.get("event_type").and_then(Value::as_str).unwrap_or("");
-                        let summary = ev["outcome"]["summary"].as_str().unwrap_or("");
-                        let verification = ev["verification_status"].as_str().unwrap_or("");
+                        let eid = ev
+                            .get("event_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let occ = ev
+                            .get("occurred_at")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let et = ev
+                            .get("event_type")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let summary = ev.at("outcome").at("summary").as_str().unwrap_or_default();
+                        let verification =
+                            ev.at("verification_status").as_str().unwrap_or_default();
                         out.push_str(&format!(
                             "- {occ} {et}: {summary} ({verification}) [{eid}]\n"
                         ));
@@ -787,7 +798,7 @@ fn render_show_period(
     if json {
         return Ok((
             0,
-            json_output(&serde_json::json!({"kind":kind,"period":period,"content":summary}))?,
+            json_output(&crate::json::json!({"kind":kind,"period":period,"content":summary}))?,
             Vec::new(),
         ));
     }

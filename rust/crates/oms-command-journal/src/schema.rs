@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 
+use crate::json::{JsonExt, Map, MapExt, Value};
 use crate::sanitize::{
     SCHEMA_VERSION, canonical_json_bytes, sanitize_text, sanitize_value, sha256_hex,
 };
 use crate::tz::{TimeZoneSpec, parse_rfc3339_utc, utc_rfc3339};
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
@@ -228,7 +228,7 @@ pub fn resolve_project_identity(
         });
     let project_path = project_id_path(repo_root);
     let stored = crate::cold::read_regular_no_symlink_bytes(&project_path)?
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|bytes| crate::json::from_slice(&bytes).ok())
         .filter(|row| row.get("schema_version").and_then(Value::as_u64) == Some(1))
         .and_then(|row| {
             Some((
@@ -255,7 +255,7 @@ pub fn resolve_project_identity(
         .unwrap_or(detected_name);
     if persist_if_missing && crate::cold::read_regular_no_symlink_bytes(&project_path)?.is_none() {
         let value =
-            serde_json::json!({"schema_version": 1, "project_id": id, "project_name": name});
+            crate::json::json!({"schema_version": 1, "project_id": id, "project_name": name});
         atomic_write_bytes(&project_path, &crate::sanitize::pretty_json_bytes(&value)?)?;
     }
     Ok(ProjectIdentity {
@@ -326,11 +326,7 @@ pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
     crate::files::replace_bytes(path, content)
 }
 
-fn clean_record(
-    value: &Value,
-    allowed: &[&str],
-    required: &[&str],
-) -> Result<Map<String, Value>, String> {
+fn clean_record(value: &Value, allowed: &[&str], required: &[&str]) -> Result<Map, String> {
     let obj = value
         .as_object()
         .ok_or("structured field must be an object")?;
@@ -338,6 +334,7 @@ fn clean_record(
     for &key in allowed {
         if let Some(value) = obj.get(key).and_then(|v| sanitize_value(v, Some(key))) {
             if !is_empty_value(&value) {
+                crate::sanitize::require_scalar_strings(&value)?;
                 output.insert(key.into(), value);
             }
         }
@@ -366,80 +363,117 @@ pub(crate) fn json_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64() != Some(0.0),
-        Value::String(s) => !s.is_empty(),
+        Value::Integer(n) => n.as_decimal() != "0",
+        Value::Float(n) => *n != 0.0,
+        Value::String(s) => !s.codepoints().is_empty(),
         Value::Array(a) => !a.is_empty(),
         Value::Object(m) => !m.is_empty(),
     }
 }
 
-fn python_repr(value: &Value) -> String {
-    match value {
-        Value::String(text) => {
-            let quote = if text.contains('\'') && !text.contains('"') {
-                '"'
-            } else {
-                '\''
-            };
-            let mut out = String::new();
-            out.push(quote);
-            for ch in text.chars() {
-                match ch {
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    ch if ch == quote => {
-                        out.push('\\');
-                        out.push(ch);
-                    }
-                    ch if !crate::unicode::printable(ch) => {
-                        use std::fmt::Write;
-                        let point = u32::from(ch);
-                        if point <= 0xff {
-                            let _ = write!(&mut out, "\\x{point:02x}");
-                        } else if point <= 0xffff {
-                            let _ = write!(&mut out, "\\u{point:04x}");
-                        } else {
-                            let _ = write!(&mut out, "\\U{point:08x}");
-                        }
-                    }
-                    _ => out.push(ch),
+fn python_string_repr(text: &oms_json::PyString) -> String {
+    let points = text.codepoints();
+    let quote = if points.contains(&u32::from('\'')) && !points.contains(&u32::from('"')) {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::new();
+    out.push(quote);
+    for &point in points {
+        match char::from_u32(point) {
+            Some('\\') => out.push_str("\\\\"),
+            Some('\n') => out.push_str("\\n"),
+            Some('\r') => out.push_str("\\r"),
+            Some('\t') => out.push_str("\\t"),
+            Some(ch) if ch == quote => {
+                out.push('\\');
+                out.push(ch);
+            }
+            Some(ch) if crate::unicode::printable(ch) => out.push(ch),
+            _ => {
+                use std::fmt::Write;
+                if point <= 0xff {
+                    let _ = write!(&mut out, "\\x{point:02x}");
+                } else if point <= 0xffff {
+                    let _ = write!(&mut out, "\\u{point:04x}");
+                } else {
+                    let _ = write!(&mut out, "\\U{point:08x}");
                 }
             }
-            out.push(quote);
-            out
         }
-        Value::Array(items) => format!(
-            "[{}]",
-            items.iter().map(python_repr).collect::<Vec<_>>().join(", ")
-        ),
-        Value::Object(object) => format!(
-            "{{{}}}",
-            object
-                .iter()
-                .map(|(k, v)| format!(
-                    "{}: {}",
-                    python_repr(&Value::String(k.clone())),
-                    python_repr(v)
-                ))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        _ => python_str(value),
     }
+    out.push(quote);
+    out
+}
+
+fn python_repr(value: &Value) -> String {
+    enum Frame<'a> {
+        Node(&'a Value),
+        Text(String),
+    }
+    let mut pending = vec![Frame::Node(value)];
+    let mut out = String::new();
+    while let Some(frame) = pending.pop() {
+        let Frame::Node(value) = frame else {
+            if let Frame::Text(text) = frame {
+                out.push_str(&text);
+            }
+            continue;
+        };
+        match value {
+            Value::String(text) => out.push_str(&python_string_repr(text)),
+            Value::Array(items) => {
+                out.push('[');
+                pending.push(Frame::Text("]".into()));
+                for (index, item) in items.iter().enumerate().rev() {
+                    pending.push(Frame::Node(item));
+                    if index > 0 {
+                        pending.push(Frame::Text(", ".into()));
+                    }
+                }
+            }
+            Value::Object(object) => {
+                out.push('{');
+                pending.push(Frame::Text("}".into()));
+                for (index, (key, value)) in object.iter().enumerate().rev() {
+                    pending.push(Frame::Node(value));
+                    pending.push(Frame::Text(": ".into()));
+                    pending.push(Frame::Text(python_string_repr(key)));
+                    if index > 0 {
+                        pending.push(Frame::Text(", ".into()));
+                    }
+                }
+            }
+            _ => out.push_str(&python_str(value)),
+        }
+    }
+    out
 }
 pub(crate) fn python_str(value: &Value) -> String {
     match value {
         Value::Null => "None".into(),
         Value::Bool(true) => "True".into(),
         Value::Bool(false) => "False".into(),
-        Value::String(s) => s.clone(),
-        Value::Number(_) => {
-            crate::sanitize::canonical_json_string(value).unwrap_or_else(|_| value.to_string())
+        Value::String(s) => crate::sanitize::display_py_string(s),
+        Value::Integer(n) => n.as_decimal().into(),
+        Value::Float(n) if n.is_nan() => "nan".into(),
+        Value::Float(n) if *n == f64::INFINITY => "inf".into(),
+        Value::Float(n) if *n == f64::NEG_INFINITY => "-inf".into(),
+        Value::Float(_) => {
+            crate::sanitize::canonical_json_string(value).expect("finite JSON float")
         }
         _ => python_repr(value),
     }
+}
+
+pub(crate) fn python_str_checked(value: &Value) -> Result<String, String> {
+    if let Value::String(text) = value {
+        return text
+            .to_str_checked()
+            .ok_or_else(|| "canonical JSON error: lone surrogate".into());
+    }
+    Ok(python_str(value))
 }
 
 pub fn normalize_event(
@@ -456,13 +490,21 @@ pub fn normalize_event(
         return Err("unsupported schema version".into());
     }
     let event_type = sanitize_text(
-        &obj.get("event_type").map(python_str).unwrap_or_default(),
+        &obj.get("event_type")
+            .map(python_str_checked)
+            .transpose()?
+            .unwrap_or_default(),
         80,
     );
     if !is_valid_event_type(&event_type) {
         return Err("invalid event_type".into());
     }
-    let occurred = parse_rfc3339_utc(&obj.get("occurred_at").map(python_str).unwrap_or_default())?;
+    let occurred = parse_rfc3339_utc(
+        &obj.get("occurred_at")
+            .map(python_str_checked)
+            .transpose()?
+            .unwrap_or_default(),
+    )?;
     let (_, local_date, iso_week) = tz.local_date_and_week(occurred);
     let mut source = clean_record(
         obj.get("source").unwrap_or(&Value::Null),
@@ -470,7 +512,7 @@ pub fn normalize_event(
         &["type"],
     )?;
     let authoritative = source.get("id").is_some_and(json_truthy);
-    let empty = serde_json::json!({});
+    let empty = crate::json::json!({});
     let correlation = clean_record(
         obj.get("correlation").unwrap_or(&empty),
         &[
@@ -485,33 +527,38 @@ pub fn normalize_event(
     let operation = correlation
         .get("operation_id")
         .filter(|v| json_truthy(v))
-        .map(python_str);
+        .map(python_str_checked)
+        .transpose()?;
     if !authoritative {
         let id = if let Some(operation) = &operation {
             format!("op_{}", &sha256_hex(operation.as_bytes())[..24])
         } else {
-            let stable: Map<String, Value> = obj
-                .iter()
-                .filter(|(k, _)| {
-                    !matches!(k.as_str(), "recorded_at" | "occurred_at" | "schema_version")
-                })
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let stable: Map = crate::json::object(
+                obj.iter()
+                    .filter(|(k, _)| {
+                        !matches!(
+                            k.to_str_checked().as_deref().unwrap_or(""),
+                            "recorded_at" | "occurred_at" | "schema_version"
+                        )
+                    })
+                    .map(|(k, v)| (k.clone(), v.copy())),
+            );
             let clean = sanitize_value(&Value::Object(stable), None).unwrap_or(Value::Null);
             format!("src_{}", &sha256_hex(&canonical_json_bytes(&clean)?)[..24])
         };
-        source.insert("id".into(), Value::String(id));
+        source.insert("id".into(), Value::String(id.as_str().into()));
     }
     let verification = sanitize_text(
         &obj.get("verification_status")
-            .map(python_str)
+            .map(python_str_checked)
+            .transpose()?
             .unwrap_or_default(),
         40,
     );
     if !is_valid_verification_status(&verification) {
         return Err("invalid verification_status".into());
     }
-    let mut normalized = serde_json::json!({
+    let mut normalized = crate::json::json!({
         "schema_version": SCHEMA_VERSION,
         "project_id": sanitize_text(&project.id, 120),
         "project_name": sanitize_text(&project.name, 120),
@@ -566,11 +613,10 @@ pub fn normalize_event(
         }
     }
     for field in ["goal", "decision", "blocker", "next_action"] {
-        if let Some(Value::String(clean)) =
-            obj.get(field).and_then(|v| sanitize_value(v, Some(field)))
-        {
-            if !clean.is_empty() {
-                out.insert(field.into(), Value::String(clean));
+        if let Some(clean) = obj.get(field).and_then(|v| sanitize_value(v, Some(field))) {
+            if matches!(&clean, Value::String(s) if !s.codepoints().is_empty()) {
+                crate::sanitize::require_scalar_strings(&clean)?;
+                out.insert(field.into(), clean);
             }
         }
     }
@@ -607,7 +653,8 @@ pub fn normalize_event(
     }
     let supersedes = sanitize_text(
         &obj.get("supersedes_event_id")
-            .map(python_str)
+            .map(python_str_checked)
+            .transpose()?
             .unwrap_or_default(),
         120,
     );
@@ -615,18 +662,21 @@ pub fn normalize_event(
         if event_type != "correction" {
             return Err("only correction events may supersede".into());
         }
-        out.insert("supersedes_event_id".into(), Value::String(supersedes));
+        out.insert(
+            "supersedes_event_id".into(),
+            Value::String(supersedes.as_str().into()),
+        );
     }
     let basis = if authoritative {
-        serde_json::json!({"project_id": out["project_id"], "source_type": out["source"]["type"], "source_id": out["source"]["id"]})
+        crate::json::json!({"project_id": out.at("project_id"), "source_type": out.at("source").at("type"), "source_id": out.at("source").at("id")})
     } else if let Some(operation) = operation {
-        serde_json::json!({"project_id": out["project_id"], "operation_id": operation, "event_type": out["event_type"]})
+        crate::json::json!({"project_id": out.at("project_id"), "operation_id": operation, "event_type": out.at("event_type")})
     } else {
-        Value::Object(
+        Value::Object(crate::json::object(
             out.iter()
                 .filter(|(k, _)| {
                     !matches!(
-                        k.as_str(),
+                        k.to_str_checked().as_deref().unwrap_or(""),
                         "event_id"
                             | "recorded_at"
                             | "occurred_at"
@@ -635,16 +685,16 @@ pub fn normalize_event(
                             | "timezone"
                     )
                 })
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        )
+                .map(|(k, v)| (k.clone(), v.copy())),
+        ))
     };
     out.insert(
         "event_id".into(),
-        Value::String(format!(
-            "wj_{}",
-            &sha256_hex(&canonical_json_bytes(&basis)?)[..32]
-        )),
+        Value::String(
+            format!("wj_{}", &sha256_hex(&canonical_json_bytes(&basis)?)[..32])
+                .as_str()
+                .into(),
+        ),
     );
     validate_canonical_event(&normalized)?;
     Ok(normalized)
@@ -652,7 +702,7 @@ pub fn normalize_event(
 
 fn is_empty_value(v: &Value) -> bool {
     matches!(v, Value::Null)
-        || matches!(v, Value::String(s) if s.is_empty())
+        || matches!(v, Value::String(s) if s.codepoints().is_empty())
         || matches!(v, Value::Array(a) if a.is_empty())
         || matches!(v, Value::Object(m) if m.is_empty())
 }
@@ -675,21 +725,21 @@ pub fn validate_canonical_event(event: &Value) -> Result<(), String> {
         "source",
         "verification_status",
     ] {
-        if !obj.contains_key(key) {
+        if !obj.has_key(key) {
             return Err("missing canonical field".into());
         }
     }
     if !obj
         .get("event_type")
         .and_then(Value::as_str)
-        .is_some_and(is_valid_event_type)
+        .is_some_and(|s| is_valid_event_type(&s))
     {
         return Err("invalid canonical event_type".into());
     }
     if !obj
         .get("verification_status")
         .and_then(Value::as_str)
-        .is_some_and(is_valid_verification_status)
+        .is_some_and(|s| is_valid_verification_status(&s))
     {
         return Err("invalid canonical verification_status".into());
     }
@@ -706,7 +756,7 @@ pub fn validate_canonical_event(event: &Value) -> Result<(), String> {
         return Err("invalid canonical event_id".into());
     }
     for key in ["occurred_at", "recorded_at"] {
-        parse_rfc3339_utc(&python_str(&obj[key]))?;
+        parse_rfc3339_utc(&python_str(&obj.at(key)))?;
     }
     let source = obj
         .get("source")

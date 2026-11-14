@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
+use crate::json::{JsonExt, Map, MapExt, Value};
 use crate::sanitize::os_str_to_utf8;
 use crate::schema::atomic_write_bytes;
 use crate::tz::TimeZoneSpec;
-use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -135,13 +135,13 @@ pub fn work_journal_config_path() -> PathBuf {
     oms_config_home().join("work-journal.json")
 }
 
-pub fn load_work_journal_config() -> Result<Map<String, Value>, String> {
+pub fn load_work_journal_config() -> Result<Map, String> {
     let path = work_journal_config_path();
     let Some(bytes) = crate::cold::read_regular_no_symlink_bytes(&path)? else {
         return Ok(Map::new());
     };
     let row: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "invalid Work Journal configuration")?;
+        crate::json::from_slice(&bytes).map_err(|_| "invalid Work Journal configuration")?;
     let object = row
         .as_object()
         .ok_or("unsupported Work Journal configuration")?;
@@ -151,13 +151,13 @@ pub fn load_work_journal_config() -> Result<Map<String, Value>, String> {
     if !object.get("notion").is_some_and(Value::is_object) {
         return Err("invalid Work Journal Notion configuration".into());
     }
-    Ok(object.clone())
+    Ok(object.copy())
 }
-pub fn save_work_journal_config(obj: &Map<String, Value>) -> Result<PathBuf, String> {
+pub fn save_work_journal_config(obj: &Map) -> Result<PathBuf, String> {
     let path = work_journal_config_path();
     atomic_write_bytes(
         &path,
-        &crate::sanitize::pretty_json_bytes(&Value::Object(obj.clone()))?,
+        &crate::sanitize::pretty_json_bytes(&Value::Object(obj.copy()))?,
     )?;
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
@@ -171,7 +171,7 @@ pub fn configured_journal_language() -> String {
     let value = cfg
         .get("language")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .unwrap_or_default()
         .trim()
         .to_lowercase();
     if ["ko", "en"].contains(&value.as_str()) {
@@ -218,12 +218,12 @@ pub fn set_journal_language(language: &str) -> Result<PathBuf, String> {
     }
     let mut cfg = load_work_journal_config()?;
     if cfg.is_empty() {
-        cfg = serde_json::json!({"schema_version":1,"managed_by":"oh-my-setting","notion":{}})
+        cfg = crate::json::json!({"schema_version":1,"managed_by":"oh-my-setting","notion":{}})
             .as_object()
             .expect("object")
-            .clone();
+            .copy();
     }
-    cfg.insert("language".into(), Value::String(value));
+    cfg.insert("language".into(), Value::String(value.as_str().into()));
     save_work_journal_config(&cfg)
 }
 pub fn notion_access_env_var_name() -> &'static str {
@@ -232,7 +232,7 @@ pub fn notion_access_env_var_name() -> &'static str {
 pub fn notion_fallback_env_var_name() -> &'static str {
     concat!("NOTION_", "TOK", "EN")
 }
-fn env_or_config(environment: &str, object: &Map<String, Value>, name: &str) -> String {
+fn env_or_config(environment: &str, object: &Map, name: &str) -> String {
     std::env::var(environment)
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -251,12 +251,12 @@ pub fn notion_settings() -> Result<NotionSettings, String> {
     let notion = cfg
         .get("notion")
         .and_then(Value::as_object)
-        .cloned()
+        .map(|v| v.copy())
         .unwrap_or_default();
     let props = notion
         .get("properties")
         .and_then(Value::as_object)
-        .cloned()
+        .map(|v| v.copy())
         .unwrap_or_default();
     let property = |name: &str, default: &str| {
         let environment = format!(
@@ -407,12 +407,16 @@ pub fn update_notion_exclusions(
             "--include-repo",
         )?);
     }
-    let mut notion = cfg["notion"].as_object().expect("validated notion").clone();
+    let mut notion = cfg
+        .at("notion")
+        .as_object()
+        .expect("validated notion")
+        .copy();
     let list: Vec<_> = set.into_iter().collect();
     if list.is_empty() {
         notion.remove("excluded_repos");
     } else {
-        notion.insert("excluded_repos".into(), serde_json::json!(list));
+        notion.insert("excluded_repos".into(), crate::json::json!(list));
     }
     cfg.insert("notion".into(), Value::Object(notion));
     Ok((save_work_journal_config(&cfg)?, list))
@@ -427,30 +431,30 @@ pub fn configure_notion(target: &str, auth_mode: Option<&str>) -> Result<PathBuf
     }
     let prior = load_work_journal_config()?;
     let settings = notion_settings()?;
-    let mut notion = serde_json::json!({"data_source_id":target.trim(),"properties":{"title":"Name","key":"Work Journal Key","hash":"Content Hash","project":"Project","kind":"Kind","period":"Period","blocker":"Has Blocker","sessions":"Sessions","commits":"Commits","verified":"Verified"},"sync_mode":"finalized"});
+    let mut notion = crate::json::json!({"data_source_id":target.trim(),"properties":{"title":"Name","key":"Work Journal Key","hash":"Content Hash","project":"Project","kind":"Kind","period":"Period","blocker":"Has Blocker","sessions":"Sessions","commits":"Commits","verified":"Verified"},"sync_mode":"finalized"});
     if let Some(excluded) = prior
         .get("notion")
         .and_then(|n| n.get("excluded_repos"))
         .filter(|v| v.as_array().is_some_and(|a| !a.is_empty()))
     {
-        notion["excluded_repos"] = excluded.clone();
+        *notion.at_mut("excluded_repos") = excluded.copy();
     }
     if auth_mode.unwrap_or(&settings.auth_mode) == "ntn" {
-        notion["auth_mode"] = serde_json::json!("ntn");
-        notion["cli_command"] = serde_json::json!(settings.cli_command);
+        *notion.at_mut("auth_mode") = crate::json::json!("ntn");
+        *notion.at_mut("cli_command") = crate::json::json!(settings.cli_command);
         if settings.keyring == "file" {
-            notion["keyring"] = serde_json::json!("file");
+            *notion.at_mut("keyring") = crate::json::json!("file");
         }
     }
     let mut written =
-        serde_json::json!({"schema_version":1,"managed_by":"oh-my-setting","notion":notion});
+        crate::json::json!({"schema_version":1,"managed_by":"oh-my-setting","notion":notion});
     if let Some(lang) = prior
         .get("language")
         .and_then(Value::as_str)
         .map(|s| s.trim().to_lowercase())
         .filter(|s| ["ko", "en"].contains(&s.as_str()))
     {
-        written["language"] = serde_json::json!(lang);
+        *written.at_mut("language") = crate::json::json!(lang);
     }
     save_work_journal_config(written.as_object().expect("object"))
 }
@@ -460,7 +464,7 @@ pub fn purge_notion_config() -> Result<bool, String> {
         return Ok(false);
     }
     let config = load_work_journal_config()?;
-    if config.get("managed_by").and_then(Value::as_str) != Some("oh-my-setting") {
+    if config.get("managed_by").and_then(Value::as_str).as_deref() != Some("oh-my-setting") {
         return Ok(false);
     }
     crate::files::remove_owned_file(&path)?;

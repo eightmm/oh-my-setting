@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
+use crate::json::{JsonExt, Map, MapExt, Value};
 use crate::sanitize::{
     COLD_SCHEMA_VERSION, JOURNAL_FILE_COUNT_LIMIT, LIVE_EVENT_LINE_LIMIT, LIVE_FILE_BYTE_LIMIT,
     canonical_json_bytes, sha256_hex,
 };
 use crate::schema::{atomic_write_bytes, ensure_oms_gitignore, validate_canonical_event};
 use crate::tz::{TimeZoneSpec, naive_date_to_string};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,7 @@ pub struct StorageHealth {
 
 impl StorageHealth {
     pub fn to_json(&self) -> Value {
-        serde_json::json!({"present":self.present,"healthy":self.healthy,"event_lines":self.event_lines,
+        crate::json::json!({"present":self.present,"healthy":self.healthy,"event_lines":self.event_lines,
             "events_bytes":self.events_bytes,"file_count":self.file_count,"total_bytes":self.total_bytes,
             "thresholds":{"event_lines":LIVE_EVENT_LINE_LIMIT,"events_bytes":LIVE_FILE_BYTE_LIMIT,"file_count":JOURNAL_FILE_COUNT_LIMIT},
             "threshold_exceeded":self.threshold_exceeded,"cold_partition":self.has_cold_segments,
@@ -37,8 +37,6 @@ impl StorageHealth {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ColdSegmentEntry {
     pub file: String,
     pub month: String,
@@ -56,15 +54,114 @@ pub struct PendingSeal {
     pub cutoff: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, PartialEq)]
 pub struct ColdManifest {
     pub schema_version: u64,
     pub segments: Vec<ColdSegmentEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<PendingSeal>,
-    #[serde(skip)]
     pending_null: bool,
+}
+
+impl Clone for ColdSegmentEntry {
+    fn clone(&self) -> Self {
+        Self {
+            file: self.file.clone(),
+            month: self.month.clone(),
+            count: self.count,
+            first_event_id: self.first_event_id.copy(),
+            last_event_id: self.last_event_id.copy(),
+            sha256: self.sha256.clone(),
+        }
+    }
+}
+impl PartialEq for ColdSegmentEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.file == other.file
+            && self.month == other.month
+            && self.count == other.count
+            && self.sha256 == other.sha256
+            && oms_json::ordered_values_equal(&self.first_event_id, &other.first_event_id)
+            && oms_json::ordered_values_equal(&self.last_event_id, &other.last_event_id)
+    }
+}
+
+fn checked_fields<'a>(
+    value: &'a Value,
+    allowed: &[&str],
+    required: &[&str],
+) -> Result<&'a Map, String> {
+    let obj = value.as_object().ok_or("invalid cold journal manifest")?;
+    if obj.iter().any(|(key, _)| {
+        !allowed
+            .iter()
+            .any(|name| key == &oms_json::PyString::from(*name))
+    }) || required.iter().any(|name| obj.get(name).is_none())
+    {
+        return Err("invalid cold journal manifest".into());
+    }
+    Ok(obj)
+}
+fn manifest_text(obj: &Map, key: &str) -> Result<String, String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| "invalid cold journal manifest".into())
+}
+fn parse_manifest(original: &Value) -> Result<ColdManifest, String> {
+    let obj = checked_fields(
+        original,
+        &["schema_version", "segments", "pending"],
+        &["schema_version", "segments"],
+    )?;
+    let schema_version = obj
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or("invalid cold journal manifest")?;
+    let mut segments = Vec::new();
+    for row in obj
+        .get("segments")
+        .and_then(Value::as_array)
+        .ok_or("invalid cold journal manifest")?
+    {
+        let fields = &[
+            "file",
+            "month",
+            "count",
+            "first_event_id",
+            "last_event_id",
+            "sha256",
+        ];
+        let row = checked_fields(row, fields, fields)?;
+        segments.push(ColdSegmentEntry {
+            file: manifest_text(row, "file")?,
+            month: manifest_text(row, "month")?,
+            count: row
+                .get("count")
+                .and_then(Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("invalid cold journal manifest")?,
+            first_event_id: row.at("first_event_id").copy(),
+            last_event_id: row.at("last_event_id").copy(),
+            sha256: manifest_text(row, "sha256")?,
+        });
+    }
+    let pending = match obj.get("pending") {
+        None | Some(Value::Null) => None,
+        Some(row) => {
+            let fields = &["before", "after", "cutoff"];
+            let row = checked_fields(row, fields, fields)?;
+            Some(PendingSeal {
+                before: manifest_text(row, "before")?,
+                after: manifest_text(row, "after")?,
+                cutoff: manifest_text(row, "cutoff")?,
+            })
+        }
+    };
+    Ok(ColdManifest {
+        schema_version,
+        segments,
+        pending,
+        pending_null: obj.get("pending").is_some_and(Value::is_null),
+    })
 }
 
 impl Default for ColdManifest {
@@ -201,11 +298,9 @@ pub fn load_cold_manifest(journal_dir: &Path) -> Result<ColdManifest, String> {
         }
         return Ok(ColdManifest::default());
     };
-    let mut manifest: ColdManifest =
-        serde_json::from_slice(&bytes).map_err(|_| "invalid cold journal manifest")?;
     let original: Value =
-        serde_json::from_slice(&bytes).map_err(|_| "invalid cold journal manifest")?;
-    manifest.pending_null = original.get("pending").is_some_and(Value::is_null);
+        crate::json::from_slice(&bytes).map_err(|_| "invalid cold journal manifest")?;
+    let manifest = parse_manifest(&original)?;
     if manifest.schema_version != COLD_SCHEMA_VERSION {
         return Err("invalid cold journal manifest".into());
     }
@@ -232,9 +327,16 @@ pub fn load_cold_manifest(journal_dir: &Path) -> Result<ColdManifest, String> {
 }
 
 pub(crate) fn manifest_value(manifest: &ColdManifest) -> Result<Value, String> {
-    let mut value = serde_json::to_value(manifest).map_err(|e| e.to_string())?;
-    if manifest.pending.is_none() && manifest.pending_null {
-        value["pending"] = Value::Null;
+    let segments: Vec<_> = manifest.segments.iter().map(|row| crate::json::json!({
+        "file": row.file, "month": row.month, "count": row.count, "first_event_id": row.first_event_id,
+        "last_event_id": row.last_event_id, "sha256": row.sha256
+    })).collect();
+    let mut value =
+        crate::json::json!({"schema_version": manifest.schema_version, "segments": segments});
+    if let Some(pending) = &manifest.pending {
+        *value.at_mut("pending") = crate::json::json!({"before": pending.before, "after": pending.after, "cutoff": pending.cutoff});
+    } else if manifest.pending_null {
+        *value.at_mut("pending") = Value::Null;
     }
     Ok(value)
 }
@@ -249,14 +351,13 @@ pub fn save_cold_manifest(journal_dir: &Path, manifest: &ColdManifest) -> Result
 }
 
 fn cold_event(raw: &[u8]) -> Result<Value, String> {
-    crate::sanitize::require_exact_integers(raw)?;
-    let row: Value = serde_json::from_slice(raw).map_err(|_| "invalid cold journal segment")?;
+    let row: Value = crate::json::from_slice(raw).map_err(|_| "invalid cold journal segment")?;
     validate_canonical_event(&row)?;
     let date = row
         .get("local_date")
         .and_then(Value::as_str)
         .ok_or("invalid canonical date")?;
-    let parsed = crate::tz::parse_date_ymd(date).ok_or("invalid canonical date")?;
+    let parsed = crate::tz::parse_date_ymd(&date).ok_or("invalid canonical date")?;
     if naive_date_to_string(parsed) != date {
         return Err("invalid canonical date".into());
     }
@@ -274,10 +375,20 @@ fn segment_events(journal_dir: &Path, entry: &ColdSegmentEntry) -> Result<Vec<Va
         .collect::<Result<_, _>>()
         .map_err(|_| "invalid cold journal segment")?;
     if rows.len() != entry.count
-        || rows.first().and_then(|r| r.get("event_id")) != Some(&entry.first_event_id)
-        || rows.last().and_then(|r| r.get("event_id")) != Some(&entry.last_event_id)
+        || !rows
+            .first()
+            .and_then(|r| r.get("event_id"))
+            .is_some_and(|id| oms_json::ordered_values_equal(id, &entry.first_event_id))
+        || !rows
+            .last()
+            .and_then(|r| r.get("event_id"))
+            .is_some_and(|id| oms_json::ordered_values_equal(id, &entry.last_event_id))
         || rows.iter().any(|r| {
-            r["local_date"].as_str().and_then(|d| d.get(..7)) != Some(entry.month.as_str())
+            r.at("local_date")
+                .as_str()
+                .map(|d| d.chars().take(7).collect::<String>())
+                .as_deref()
+                != Some(entry.month.as_str())
         })
     {
         return Err("invalid cold journal segment".into());
@@ -325,10 +436,9 @@ fn partition_live(content: &[u8], cutoff: &str) -> (BTreeMap<String, Vec<u8>>, V
             .then(|| cold_event(raw).ok())
             .flatten()
             .and_then(|row| {
-                row["local_date"]
+                row.at("local_date")
                     .as_str()
-                    .and_then(|d| d.get(..7))
-                    .map(str::to_owned)
+                    .and_then(|d| d.get(..7).map(str::to_owned))
             });
         if let Some(month) = month.filter(|m| m.as_str() < cutoff) {
             months.entry(month).or_default().extend_from_slice(raw);
@@ -598,8 +708,8 @@ pub(crate) fn seal_verified(
             month,
             sha256: digest,
             count: rows.len(),
-            first_event_id: rows[0]["event_id"].clone(),
-            last_event_id: rows[rows.len() - 1]["event_id"].clone(),
+            first_event_id: rows[0].at("event_id").copy(),
+            last_event_id: rows[rows.len() - 1].at("event_id").copy(),
         });
     }
     manifest.pending = Some(PendingSeal {

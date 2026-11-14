@@ -2,6 +2,7 @@
 
 use crate::cold::{ensure_regular_dir_no_symlink, read_regular_no_symlink_bytes};
 use crate::config::{journal_language, notion_repo_excluded, notion_settings};
+use crate::json::{JsonExt, Map, MapExt, Value};
 use crate::render::{compute_period_aggregates, has_blocker, render_daily, render_weekly};
 use crate::sanitize::{
     INDEX_SCHEMA_VERSION, RENDERER_VERSION, canonical_json_bytes, pretty_json_bytes, sanitize_text,
@@ -18,7 +19,6 @@ use crate::tz::{
 use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension as _, params};
-use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,7 +38,16 @@ fn event_id_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^wj_[0-9a-f]{32}$").expect("valid regex"))
 }
 
-type SourceSnapshot = (crate::cold::ColdManifest, Vec<Value>, Option<Vec<u8>>);
+struct SourceSnapshot(crate::cold::ColdManifest, Vec<Value>, Option<Vec<u8>>);
+impl Clone for SourceSnapshot {
+    fn clone(&self) -> Self {
+        Self(
+            self.0.clone(),
+            self.1.iter().map(JsonExt::copy).collect(),
+            self.2.clone(),
+        )
+    }
+}
 
 pub struct JournalStore {
     pub repo_root: PathBuf,
@@ -82,11 +91,11 @@ impl JournalStore {
         let tz = crate::tz::checked_timezone(timezone_name)?;
 
         let pinned = read_regular_no_symlink_bytes(&crate::schema::project_id_path(repo_root))?
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|bytes| crate::json::from_slice(&bytes).ok())
             .is_some_and(|row| {
-                row["schema_version"].as_u64() == Some(1)
-                    && row["project_id"].is_string()
-                    && row["project_name"].is_string()
+                row.at("schema_version").as_u64() == Some(1)
+                    && row.at("project_id").is_string()
+                    && row.at("project_name").is_string()
             });
         let (manifest, cold, live) = if pinned {
             let (manifest, cold) = crate::cold::read_verified_cold_events(&root)?;
@@ -95,13 +104,10 @@ impl JournalStore {
             let (manifest, cold, live) = crate::cold::replay_snapshot(&root)?;
             (manifest, cold, Some(live))
         };
-        let mut seed_events = cold.clone();
+        let mut seed_events = cold.iter().map(JsonExt::copy).collect::<Vec<_>>();
         if let Some(live) = &live {
             for raw in crate::cold::byte_lines(live) {
-                if let Ok(row) = serde_json::from_slice::<Value>(raw) {
-                    if validate_canonical_event(&row).is_ok() {
-                        crate::sanitize::require_exact_integers(raw)?;
-                    }
+                if let Ok(row) = crate::json::from_slice(raw) {
                     seed_events.push(row);
                 }
             }
@@ -125,7 +131,9 @@ impl JournalStore {
             storage_checked: std::cell::Cell::new(false),
             repo_anchor: oms_safe_fs::Root::open(repo_root)
                 .map_err(|e| format!("journal repository unavailable: {e:?}"))?,
-            snapshot: std::cell::RefCell::new(Some(std::rc::Rc::new(snapshot))),
+            snapshot: std::cell::RefCell::new(Some(std::rc::Rc::new(SourceSnapshot(
+                snapshot.0, snapshot.1, snapshot.2,
+            )))),
         })
     }
 
@@ -133,25 +141,27 @@ impl JournalStore {
         if let Some(bytes) =
             read_regular_no_symlink_bytes(&crate::schema::project_id_path(&self.repo_root))?
         {
-            if let Ok(row) = serde_json::from_slice::<Value>(&bytes) {
-                if row["schema_version"].as_u64() == Some(1) {
-                    if let (Some(id), Some(name)) =
-                        (row["project_id"].as_str(), row["project_name"].as_str())
-                    {
+            if let Ok(row) = crate::json::from_slice(&bytes) {
+                if row.at("schema_version").as_u64() == Some(1) {
+                    if let (Some(id), Some(name)) = (
+                        row.at("project_id").as_str(),
+                        row.at("project_name").as_str(),
+                    ) {
                         return Ok(Some((id.into(), name.into())));
                     }
                 }
             }
         }
         let snapshot = self.replay_source_snapshot()?;
-        for event in snapshot.1.iter().cloned().chain(
+        for event in snapshot.1.iter().map(JsonExt::copy).chain(
             crate::cold::byte_lines(snapshot.2.as_ref().expect("replayed live snapshot"))
-                .filter_map(|r| serde_json::from_slice::<Value>(r).ok()),
+                .filter_map(|r| crate::json::from_slice(r).ok()),
         ) {
             if validate_canonical_event(&event).is_ok() {
-                if let (Some(id), Some(name)) =
-                    (event["project_id"].as_str(), event["project_name"].as_str())
-                {
+                if let (Some(id), Some(name)) = (
+                    event.at("project_id").as_str(),
+                    event.at("project_name").as_str(),
+                ) {
                     return Ok(Some((id.into(), name.into())));
                 }
             }
@@ -186,7 +196,7 @@ impl JournalStore {
         } else {
             None
         };
-        let snapshot = std::rc::Rc::new((manifest, events, live));
+        let snapshot = std::rc::Rc::new(SourceSnapshot(manifest, events, live));
         self.snapshot.replace(Some(snapshot.clone()));
         Ok(snapshot)
     }
@@ -203,7 +213,11 @@ impl JournalStore {
             if snapshot.0 != crate::cold::load_cold_manifest(&self.root)? {
                 continue;
             }
-            let snapshot = std::rc::Rc::new((snapshot.0.clone(), snapshot.1.clone(), Some(live?)));
+            let snapshot = std::rc::Rc::new(SourceSnapshot(
+                snapshot.0.clone(),
+                snapshot.1.iter().map(JsonExt::copy).collect(),
+                Some(live?),
+            ));
             self.snapshot.replace(Some(snapshot.clone()));
             return Ok(snapshot);
         }
@@ -212,7 +226,7 @@ impl JournalStore {
 
     pub fn load_all_events_verified(&self, record_quarantine: bool) -> Result<Vec<Value>, String> {
         let snapshot = self.replay_source_snapshot()?;
-        let mut ordered = snapshot.1.clone();
+        let mut ordered = snapshot.1.iter().map(JsonExt::copy).collect::<Vec<_>>();
         let live = snapshot.2.as_ref().expect("replayed live snapshot");
         let mut quarantine = Vec::new();
         let offset = ordered.len();
@@ -220,11 +234,10 @@ impl JournalStore {
             if raw.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let parsed = serde_json::from_slice::<Value>(raw);
+            let parsed = crate::json::from_slice(raw);
             let reason = match parsed {
                 Ok(value) => match validate_canonical_event(&value) {
                     Ok(()) => {
-                        crate::sanitize::require_exact_integers(raw)?;
                         ordered.push(value);
                         continue;
                     }
@@ -233,24 +246,32 @@ impl JournalStore {
                 },
                 Err(_) => "malformed",
             };
-            quarantine.push(serde_json::json!({"record": offset+index+1, "sha256": sha256_hex(raw), "reason": reason}));
+            quarantine.push(crate::json::json!({"record": offset+index+1, "sha256": sha256_hex(raw), "reason": reason}));
         }
         if record_quarantine
             && (!quarantine.is_empty()
                 || read_regular_no_symlink_bytes(&self.quarantine_path)?.is_some())
         {
-            let value = serde_json::json!({"schema_version": 1, "entries": quarantine});
+            let value = crate::json::json!({"schema_version": 1, "entries": quarantine});
             atomic_write_bytes(&self.quarantine_path, &pretty_json_bytes(&value)?)?;
         }
 
         ordered.sort_by(|a, b| {
             let ka = (
-                a.get("occurred_at").and_then(Value::as_str).unwrap_or(""),
-                a.get("event_id").and_then(Value::as_str).unwrap_or(""),
+                a.get("occurred_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                a.get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
             );
             let kb = (
-                b.get("occurred_at").and_then(Value::as_str).unwrap_or(""),
-                b.get("event_id").and_then(Value::as_str).unwrap_or(""),
+                b.get("occurred_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                b.get("event_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
             );
             ka.cmp(&kb)
         });
@@ -354,7 +375,7 @@ impl JournalStore {
             atomic_write_bytes(
                 &project,
                 &pretty_json_bytes(
-                    &serde_json::json!({"schema_version":1,"project_id":self.project.id,"project_name":self.project.name}),
+                    &crate::json::json!({"schema_version":1,"project_id":self.project.id,"project_name":self.project.name}),
                 )?,
             )?;
         }
@@ -489,14 +510,14 @@ impl JournalStore {
                     .unwrap_or_default();
                 let st = ev
                     .pointer("/source/type")
-                    .and_then(Value::as_str)
+                    .map(crate::schema::python_str)
                     .unwrap_or_default();
                 let sid = ev
                     .pointer("/source/id")
-                    .and_then(Value::as_str)
+                    .map(crate::schema::python_str)
                     .unwrap_or_default();
                 let sup = ev.get("supersedes_event_id").and_then(Value::as_str);
-                let active = if superseded_ids.contains(eid) {
+                let active = if superseded_ids.contains(&eid) {
                     0i64
                 } else {
                     1i64
@@ -578,7 +599,7 @@ impl JournalStore {
             .optional()
             .map_err(|e| format!("sqlite lookup failed: {e}"))?
         {
-            if let Ok(val) = serde_json::from_str::<Value>(&existing_payload) {
+            if let Ok(val) = crate::json::from_str(&existing_payload) {
                 validate_canonical_event(&val)?;
                 return Ok((val, false));
             }
@@ -629,11 +650,11 @@ impl JournalStore {
                 .unwrap_or_default();
             let st = normalized
                 .pointer("/source/type")
-                .and_then(Value::as_str)
+                .map(crate::schema::python_str)
                 .unwrap_or_default();
             let sid = normalized
                 .pointer("/source/id")
-                .and_then(Value::as_str)
+                .map(crate::schema::python_str)
                 .unwrap_or_default();
             let sup = normalized
                 .get("supersedes_event_id")
@@ -731,7 +752,7 @@ impl JournalStore {
         }
         let sha = fields[0];
         self.last_head.replace(sha.into());
-        let payload = serde_json::json!({"event_type":"commit","occurred_at":utc_rfc3339(parse_rfc3339_utc(fields[1])?),"source":{"type":"git-commit","id":sha},
+        let payload = crate::json::json!({"event_type":"commit","occurred_at":utc_rfc3339(parse_rfc3339_utc(fields[1])?),"source":{"type":"git-commit","id":sha},
             "outcome":{"summary":format!("Commit {}: {}",sha.chars().take(12).collect::<String>(),sanitize_text(fields[2],500)),"status":"recorded"},"verification_status":"not_verified",
             "refs":[{"type":"commit","id":sha}],"evidence":[{"type":"git-commit","ref":sha}],"provenance":{"code_commit":sha}});
         let (event, created) = self.record_event(&payload, now)?;
@@ -920,12 +941,16 @@ impl JournalStore {
             .into_iter()
             .enumerate()
             {
-                if let Some(text) = event[field].as_str().filter(|t| !t.is_empty()) {
+                if let Some(text) = event.at(field).as_str().filter(|t| !t.is_empty()) {
                     if seen[index].insert(text.to_owned()) {
                         bucket.push(AnnotationRow {
-                            event_id: event["event_id"].as_str().unwrap_or("").into(),
-                            occurred_at: event["occurred_at"].as_str().unwrap_or("").into(),
-                            local_date: event["local_date"].as_str().unwrap_or("").into(),
+                            event_id: event.at("event_id").as_str().unwrap_or_default().into(),
+                            occurred_at: event
+                                .at("occurred_at")
+                                .as_str()
+                                .unwrap_or_default()
+                                .into(),
+                            local_date: event.at("local_date").as_str().unwrap_or_default().into(),
                             text: text.into(),
                         });
                     }
@@ -963,9 +988,12 @@ impl JournalStore {
         for r in rows {
             let s = r.map_err(|e| format!("sqlite decisions row failed: {e}"))?;
             let ev = decode_indexed(&s)?;
-            let ld = ev.get("local_date").and_then(Value::as_str).unwrap_or("");
+            let ld = ev
+                .get("local_date")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if let Some(since_date) = since {
-                if ld < since_date {
+                if ld.as_str() < since_date {
                     continue;
                 }
             }
@@ -987,26 +1015,31 @@ impl JournalStore {
                 event_id: ev
                     .get("event_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .unwrap_or_default()
                     .to_string(),
                 occurred_at: ev
                     .get("occurred_at")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .unwrap_or_default()
                     .to_string(),
                 local_date: ld.to_string(),
                 decision: dec.to_string(),
-                event_type: ev["event_type"].as_str().unwrap_or("").into(),
-                task_id: ev["correlation"]["task_id"].as_str().unwrap_or("").into(),
+                event_type: ev.at("event_type").as_str().unwrap_or_default().into(),
+                task_id: ev
+                    .at("correlation")
+                    .at("task_id")
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
                 source_type: ev
                     .pointer("/source/type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .map(crate::schema::python_str)
+                    .unwrap_or_default()
                     .to_string(),
                 source_id: ev
                     .pointer("/source/id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .map(crate::schema::python_str)
+                    .unwrap_or_default()
                     .to_string(),
             });
         }
@@ -1037,13 +1070,13 @@ impl JournalStore {
             .optional()
             .map_err(|e| e.to_string())?;
         let target=decode_indexed(&target_payload.ok_or("no active journal event with that ID carries a blocker (see: oms journal show --blockers)")?)?;
-        let target_blocker=target["blocker"].as_str().filter(|b|!b.is_empty()).ok_or("no active journal event with that ID carries a blocker (see: oms journal show --blockers)")?.to_owned();
+        let target_blocker=target.at("blocker").as_str().filter(|b|!b.is_empty()).ok_or("no active journal event with that ID carries a blocker (see: oms journal show --blockers)")?.to_owned();
         let short: String = target_blocker.chars().take(200).collect();
-        let mut correction_payload = serde_json::json!({"event_type":"correction","occurred_at":utc_rfc3339(now),"source":{"type":"journal-resolve","id":format!("resolve:{eid}")},"supersedes_event_id":eid,
+        let mut correction_payload = crate::json::json!({"event_type":"correction","occurred_at":utc_rfc3339(now),"source":{"type":"journal-resolve","id":format!("resolve:{eid}")},"supersedes_event_id":eid,
             "outcome":{"summary":format!("Blocker resolved: {short}"),"status":"resolved"},"decision":format!("Resolved blocker \"{short}\": {}",how_clean.chars().take(400).collect::<String>()),"verification_status":"not_verified"});
-        if crate::schema::json_truthy(&target["correlation"]["task_id"]) {
-            correction_payload["correlation"] =
-                serde_json::json!({"task_id":target["correlation"]["task_id"]});
+        if crate::schema::json_truthy(&target.at("correlation").at("task_id")) {
+            *correction_payload.at_mut("correlation") =
+                crate::json::json!({"task_id":target.at("correlation").at("task_id")});
         }
         drop(conn);
 
@@ -1065,7 +1098,7 @@ impl JournalStore {
             for row in rows {
                 let (other_id, payload) = row.map_err(|e| e.to_string())?;
                 let value = decode_indexed(&payload)?;
-                if value["blocker"].as_str() == Some(&target_blocker) {
+                if value.at("blocker").as_str().as_deref() == Some(&target_blocker) {
                     remaining_matching.push(other_id);
                 }
             }
@@ -1078,7 +1111,7 @@ impl JournalStore {
             correction_event_id: correction
                 .get("event_id")
                 .and_then(Value::as_str)
-                .unwrap_or("")
+                .unwrap_or_default()
                 .to_string(),
             remaining_matching_blocker_ids: remaining_matching,
         })
@@ -1118,7 +1151,7 @@ impl JournalStore {
             return Ok(Value::Object(Map::new()));
         }
         let agg = compute_period_aggregates(&events);
-        Ok(serde_json::json!({
+        Ok(crate::json::json!({
             "sessions": agg.sessions,
             "commits": agg.commits,
             "verified": agg.verified,
@@ -1154,9 +1187,9 @@ impl JournalStore {
         let (_, today, _) = self.tz.local_date_and_week(now);
         let path = self.root.join("digest.json");
         if let Some(bytes) = read_regular_no_symlink_bytes(&path)? {
-            if let Ok(row) = serde_json::from_slice::<Value>(&bytes) {
-                if row["schema_version"].as_u64() == Some(1)
-                    && row["last_date"].as_str() == Some(&today)
+            if let Ok(row) = crate::json::from_slice(&bytes) {
+                if row.at("schema_version").as_u64() == Some(1)
+                    && row.at("last_date").as_str().as_deref() == Some(&today)
                 {
                     return Ok(None);
                 }
@@ -1169,8 +1202,8 @@ impl JournalStore {
         let annotations = self.open_annotations_at(now)?;
         let previous: BTreeSet<_> = recent
             .iter()
-            .filter_map(|e| e["local_date"].as_str())
-            .filter(|d| *d < today.as_str())
+            .filter_map(|e| e.at("local_date").as_str())
+            .filter(|d| d.as_str() < today.as_str())
             .collect();
         if annotations.blockers.is_empty()
             && annotations.next_actions.is_empty()
@@ -1195,11 +1228,11 @@ impl JournalStore {
         if let Some(day) = previous.last() {
             let rows: Vec<_> = recent
                 .iter()
-                .filter(|e| e["local_date"].as_str() == Some(day))
+                .filter(|e| e.at("local_date").as_str().as_deref() == Some(day))
                 .collect();
             let verified = rows
                 .iter()
-                .filter(|e| e["verification_status"].as_str() == Some("passed"))
+                .filter(|e| e.at("verification_status").as_str().as_deref() == Some("passed"))
                 .count();
             lines.push(format!(
                 "Last journal day {day}: {} events, {verified} verified.",
@@ -1208,7 +1241,7 @@ impl JournalStore {
             let all = self.load_events_for_period("daily", day)?;
             if !all
                 .iter()
-                .any(|e| crate::schema::json_truthy(&e["decision"]))
+                .any(|e| crate::schema::json_truthy(&e.at("decision")))
             {
                 lines.push("That day recorded no decision: 'oms agent-task update --decision TEXT [--next TEXT]' is what keeps the summary readable.".into());
             }
@@ -1252,7 +1285,7 @@ impl JournalStore {
         lines.push("Details: oms journal show --today | --blockers | --recent 20".into());
         atomic_write_bytes(
             &path,
-            &pretty_json_bytes(&serde_json::json!({"schema_version":1,"last_date":today}))?,
+            &pretty_json_bytes(&crate::json::json!({"schema_version":1,"last_date":today}))?,
         )?;
         Ok(Some(lines.join("\n")))
     }
@@ -1265,7 +1298,7 @@ impl JournalStore {
     ) -> Result<DistillReport, String> {
         let state_path = self.root.join("distill.json");
         let marker: Option<(String, String)> = read_regular_no_symlink_bytes(&state_path)?
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .and_then(|b| crate::json::from_slice(&b).ok())
             .and_then(|row| {
                 if row.get("schema_version").and_then(Value::as_i64) != Some(1) {
                     return None;
@@ -1302,7 +1335,7 @@ impl JournalStore {
                 None => true,
                 Some(m) => key > *m,
             };
-            all_events.push((key, ev.clone()));
+            all_events.push((key, ev.copy()));
             if is_pending {
                 pending.push(ev);
             }
@@ -1348,7 +1381,7 @@ impl JournalStore {
 
         let through_val =
             if let Some(((occ, eid), _)) = all_events.iter().max_by(|a, b| a.0.cmp(&b.0)) {
-                serde_json::json!({
+                crate::json::json!({
                     "occurred_at": occ,
                     "event_id": eid,
                 })
@@ -1358,9 +1391,12 @@ impl JournalStore {
 
         let (_, today_str, _) = self.tz.local_date_and_week(now);
         let mut state_obj = Map::new();
-        state_obj.insert("schema_version".into(), Value::Number(1.into()));
+        state_obj.insert("schema_version".into(), crate::json::json!(1));
         state_obj.insert("through".into(), through_val);
-        state_obj.insert("last_run_date".into(), Value::String(today_str));
+        state_obj.insert(
+            "last_run_date".into(),
+            Value::String(today_str.as_str().into()),
+        );
         let bytes = pretty_json_bytes(&Value::Object(state_obj))?;
         atomic_write_bytes(&state_path, &bytes)?;
 
@@ -1378,9 +1414,10 @@ impl JournalStore {
         let state_path = self.root.join("distill.json");
         let (_, today, _) = self.tz.local_date_and_week(now);
         if let Some(bytes) = read_regular_no_symlink_bytes(&state_path)? {
-            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+            if let Ok(v) = crate::json::from_slice(&bytes) {
                 if v.get("schema_version").and_then(Value::as_i64) == Some(1)
-                    && v.get("last_run_date").and_then(Value::as_str) == Some(today.as_str())
+                    && v.get("last_run_date").and_then(Value::as_str).as_deref()
+                        == Some(today.as_str())
                 {
                     return Ok(false);
                 }
@@ -1401,11 +1438,11 @@ impl JournalStore {
         let mut pending = 0;
         let mut failed = 0;
         if let Some(bytes) = read_regular_no_symlink_bytes(&self.root.join("sync/notion.json"))? {
-            match serde_json::from_slice::<Value>(&bytes) {
+            match crate::json::from_slice(&bytes) {
                 Ok(state) => {
-                    if let Some(rows) = state["summaries"].as_object() {
+                    if let Some(rows) = state.at("summaries").as_object() {
                         for row in rows.values() {
-                            match row["status"].as_str() {
+                            match row.at("status").as_str().as_deref() {
                                 Some("synced") => synced += 1,
                                 Some("pending") => pending += 1,
                                 Some("failed") => failed += 1,
@@ -1420,10 +1457,10 @@ impl JournalStore {
         let (detected_id, detected_name) = crate::schema::detected_identity(&self.repo_root);
         let settings = notion_settings()?;
         Ok(
-            serde_json::json!({"repo":crate::sanitize::diagnostic_os_str(self.repo_root.as_os_str()),"enabled":true,
+            crate::json::json!({"repo":crate::sanitize::diagnostic_os_str(self.repo_root.as_os_str()),"enabled":true,
             "project":{"id":self.project.id,"name":self.project.name,"detected_id":detected_id,"detected_name":detected_name,"drift":self.project.id!=detected_id||self.project.name!=detected_name},
-            "event_count":summary["event_count"],"active_event_count":summary["active_event_count"],"events_bytes":self.live_stat()?.0,"storage":storage.to_json(),
-            "daily_count":summary["daily"].as_array().map(Vec::len).unwrap_or(0),"weekly_count":summary["weekly"].as_array().map(Vec::len).unwrap_or(0),"dirty_period_count":dirty,"index_ready":true,
+            "event_count":summary.at("event_count"),"active_event_count":summary.at("active_event_count"),"events_bytes":self.live_stat()?.0,"storage":storage.to_json(),
+            "daily_count":summary.at("daily").as_array().map(<[_]>::len).unwrap_or(0),"weekly_count":summary.at("weekly").as_array().map(<[_]>::len).unwrap_or(0),"dirty_period_count":dirty,"index_ready":true,
             "notion":{"configured":!settings.target_id().is_empty(),"excluded":notion_repo_excluded(&self.repo_root),"credential_present":crate::config::notion_auth_available(&settings),"auth_mode":settings.auth_mode,
                 "target_kind":if !settings.data_source_id.is_empty(){"data_source"}else if !settings.database_id.is_empty(){"database"}else{""},"data_source_id":settings.data_source_id,"sync_mode":"finalized","synced":synced,"pending":pending,"failed":failed}}),
         )
@@ -1579,8 +1616,7 @@ fn load_active_events_for_period(
 }
 
 fn decode_indexed(payload: &str) -> Result<Value, String> {
-    crate::sanitize::require_exact_integers(payload.as_bytes())?;
-    let value: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    let value: Value = crate::json::from_str(payload).map_err(|e| e.to_string())?;
     validate_canonical_event(&value)?;
     Ok(value)
 }
@@ -1615,22 +1651,23 @@ fn index_summary(conn: &Connection, project_id: &str) -> Result<Value, String> {
     let mut events = Vec::new();
     for row in rows {
         let value = decode_indexed(&row.map_err(|e| e.to_string())?)?;
-        let descriptor: Map<String, Value> = [
-            "event_id",
-            "occurred_at",
-            "local_date",
-            "iso_week",
-            "event_type",
-            "source",
-        ]
-        .into_iter()
-        .map(|k| (k.into(), value[k].clone()))
-        .collect();
+        let descriptor: Map = crate::json::object(
+            [
+                "event_id",
+                "occurred_at",
+                "local_date",
+                "iso_week",
+                "event_type",
+                "source",
+            ]
+            .into_iter()
+            .map(|k| (k.into(), value.at(k).copy())),
+        );
         events.push(Value::Object(descriptor));
     }
     events.reverse();
     Ok(
-        serde_json::json!({"schema_version":1,"renderer_version":3,"project_id":project_id,"event_count":event_count,"active_event_count":active,"events_truncated":active>events.len() as i64,"events":events,"daily":periods[0],"weekly":periods[1]}),
+        crate::json::json!({"schema_version":1,"renderer_version":3,"project_id":project_id,"event_count":event_count,"active_event_count":active,"events_truncated":active>events.len() as i64,"events":events,"daily":periods[0],"weekly":periods[1]}),
     )
 }
 fn write_index_json(
@@ -1644,20 +1681,20 @@ fn write_index_json(
         atomic_write_bytes(path, &bytes)?;
     }
     Ok(MaterializeReport {
-        event_count: value["event_count"].as_u64().unwrap_or(0) as usize,
-        daily_periods: value["daily"]
+        event_count: value.at("event_count").as_u64().unwrap_or(0) as usize,
+        daily_periods: value
+            .at("daily")
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .map(str::to_owned)
             .collect(),
-        weekly_periods: value["weekly"]
+        weekly_periods: value
+            .at("weekly")
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .map(str::to_owned)
             .collect(),
         ..Default::default()
     })
@@ -1697,19 +1734,22 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
         let occ = ev
             .get("occurred_at")
             .and_then(Value::as_str)
-            .unwrap_or("")
+            .unwrap_or_default()
             .to_string();
         let eid = ev
             .get("event_id")
             .and_then(Value::as_str)
-            .unwrap_or("")
+            .unwrap_or_default()
             .to_string();
-        let ld = ev.get("local_date").and_then(Value::as_str).unwrap_or("");
+        let ld = ev
+            .get("local_date")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
 
         if let Some(dec) = ev.get("decision").and_then(Value::as_str) {
-            let dkey = distill_normalized_text(dec);
+            let dkey = distill_normalized_text(&dec);
             if !dkey.is_empty() && seen_decisions.insert(dkey) {
-                let clean = sanitize_text(dec, 600);
+                let clean = sanitize_text(&dec, 600);
                 let needle = distill_normalized_text(&clean);
                 candidates.push((
                     (occ.clone(), eid.clone()),
@@ -1719,7 +1759,7 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
             }
         }
         if let Some(blk) = ev.get("blocker").and_then(Value::as_str) {
-            let bkey = distill_normalized_text(blk);
+            let bkey = distill_normalized_text(&blk);
             if !bkey.is_empty() {
                 blockers.entry(bkey).or_default().push(ev);
             }
@@ -1727,7 +1767,7 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
     }
 
     for group in blockers.into_values() {
-        let mut days: BTreeSet<&str> = BTreeSet::new();
+        let mut days: BTreeSet<String> = BTreeSet::new();
         let mut latest: Option<(String, String)> = None;
         for ev in &group {
             if let Some(ld) = ev.get("local_date").and_then(Value::as_str) {
@@ -1738,11 +1778,11 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
             let pos = (
                 ev.get("occurred_at")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .unwrap_or_default()
                     .to_string(),
                 ev.get("event_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("")
+                    .unwrap_or_default()
                     .to_string(),
             );
             if latest.as_ref().is_none_or(|cur| pos > *cur) {
@@ -1752,13 +1792,13 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
         if days.len() < 2 {
             continue;
         }
-        let first_day = days.iter().next().copied().unwrap_or("");
-        let last_day = days.iter().next_back().copied().unwrap_or("");
+        let first_day = days.iter().next().map(String::as_str).unwrap_or("");
+        let last_day = days.iter().next_back().map(String::as_str).unwrap_or("");
         let raw_blk = group[0]
             .get("blocker")
             .and_then(Value::as_str)
-            .unwrap_or("");
-        let clean = sanitize_text(raw_blk, 600);
+            .unwrap_or_default();
+        let clean = sanitize_text(&raw_blk, 600);
         let needle = distill_normalized_text(&clean);
         candidates.push((
             latest.unwrap_or_default(),

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
+use crate::json::{JsonExt, MapExt, Value, json};
 use crate::sanitize::os_str_to_py_string;
-use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -161,7 +161,7 @@ fn strings(value: &Value, out: &mut Vec<String>, depth: usize) {
         return;
     }
     match value {
-        Value::String(s) => out.push(s.clone()),
+        Value::String(s) => out.push(crate::sanitize::display_py_string(s)),
         Value::Object(o) => {
             for v in o.values() {
                 strings(v, out, depth + 1);
@@ -255,7 +255,7 @@ pub fn run_recorded_search(
                 continue;
             }
             let parsed = if rows {
-                serde_json::from_str::<Value>(line).ok()
+                crate::json::from_str(line).ok()
             } else {
                 None
             };
@@ -281,7 +281,7 @@ pub fn run_recorded_search(
                     .and_then(|r| r.get("event_id"))
                     .and_then(Value::as_str)
                 {
-                    id = clean(value).chars().take(80).collect::<String>().into();
+                    id = clean(&value).chars().take(80).collect::<String>().into();
                 }
             }
             let when = parsed

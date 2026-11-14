@@ -1,9 +1,8 @@
 #![forbid(unsafe_code)]
 
+use crate::json::{JsonExt, Map, Value};
 use regex::{Captures, Regex};
-use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::sync::OnceLock;
 
@@ -177,79 +176,113 @@ pub fn is_forbidden_raw_key(key: &str) -> bool {
     raw_field_re().is_match(key)
 }
 
-pub fn sanitize_value(value: &Value, key_hint: Option<&str>) -> Option<Value> {
-    if key_hint.is_some_and(is_forbidden_raw_key) {
-        return None;
+fn sanitize_py_string(raw: &oms_json::PyString, limit: usize) -> oms_json::PyString {
+    if let Some(text) = raw.to_str_checked() {
+        return sanitize_text(&text, limit).as_str().into();
     }
-    if key_hint.is_some_and(sensitive_field) {
-        return Some(Value::String("[REDACTED]".into()));
-    }
-    match value {
-        Value::Null => None,
-        Value::Bool(_) | Value::Number(_) => Some(value.clone()),
-        Value::String(s) => Some(Value::String(sanitize_text(s, 2000))),
-        Value::Array(items) => Some(Value::Array(
-            items
-                .iter()
-                .take(64)
-                .filter_map(|v| sanitize_value(v, None))
-                .collect(),
-        )),
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (key, value) in map.iter().take(64) {
-                let key = sanitize_text(key, 120);
-                if key.is_empty() || is_forbidden_raw_key(&key) {
-                    continue;
-                }
-                if let Some(value) = sanitize_value(value, Some(&key)) {
-                    out.insert(key, value);
-                }
-            }
-            Some(Value::Object(out))
+    // Keep surrogate code points until the canonical writer can explicitly
+    // reject them. Sanitize scalar spans without replacing a key or string.
+    let mut points = Vec::new();
+    let mut span = String::new();
+    for &point in raw.codepoints() {
+        if let Some(ch) = char::from_u32(point) {
+            span.push(ch);
+        } else {
+            points.extend(sanitize_text(&span, limit).chars().map(u32::from));
+            span.clear();
+            points.push(point);
         }
     }
+    points.extend(sanitize_text(&span, limit).chars().map(u32::from));
+    oms_json::PyString::from_codepoints(points).expect("original Python code points")
+}
+
+pub fn sanitize_value(value: &Value, key_hint: Option<&str>) -> Option<Value> {
+    enum Frame<'a> {
+        Node(&'a Value, Option<String>),
+        Array(std::slice::Iter<'a, Value>, Vec<Value>),
+        Object(
+            std::slice::Iter<'a, (oms_json::PyString, Value)>,
+            Map,
+            Option<oms_json::PyString>,
+        ),
+    }
+    let mut stack = vec![Frame::Node(value, key_hint.map(str::to_owned))];
+    let mut result = None;
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Node(node, hint) => {
+                if hint.as_deref().is_some_and(is_forbidden_raw_key) {
+                    result = None;
+                    continue;
+                }
+                if hint.as_deref().is_some_and(sensitive_field) {
+                    result = Some(Value::String("[REDACTED]".into()));
+                    continue;
+                }
+                result = match node {
+                    Value::Null => None,
+                    Value::Float(n) if !n.is_finite() => None,
+                    Value::Bool(_) | Value::Integer(_) | Value::Float(_) => Some(node.copy()),
+                    Value::String(s) => Some(Value::String(sanitize_py_string(s, 2000))),
+                    Value::Array(items) => {
+                        stack.push(Frame::Array(
+                            items[..items.len().min(64)].iter(),
+                            Vec::new(),
+                        ));
+                        continue;
+                    }
+                    Value::Object(items) => {
+                        let entries = items.as_slice();
+                        stack.push(Frame::Object(
+                            entries[..entries.len().min(64)].iter(),
+                            Map::new(),
+                            None,
+                        ));
+                        continue;
+                    }
+                };
+            }
+            Frame::Array(mut items, mut output) => {
+                if let Some(child) = result.take() {
+                    output.push(child);
+                }
+                if let Some(child) = items.next() {
+                    stack.push(Frame::Array(items, output));
+                    stack.push(Frame::Node(child, None));
+                } else {
+                    result = Some(Value::Array(output));
+                }
+            }
+            Frame::Object(mut items, mut output, previous) => {
+                if let (Some(key), Some(child)) = (previous, result.take()) {
+                    output.insert(key, child);
+                }
+                if let Some((key, child)) = items.next() {
+                    let key = sanitize_py_string(key, 120);
+                    let hint = key.to_str_checked();
+                    if key.codepoints().is_empty()
+                        || hint.as_deref().is_some_and(is_forbidden_raw_key)
+                    {
+                        stack.push(Frame::Object(items, output, None));
+                    } else {
+                        stack.push(Frame::Object(items, output, Some(key)));
+                        stack.push(Frame::Node(child, hint));
+                    }
+                } else {
+                    result = Some(Value::Object(output));
+                }
+            }
+        }
+    }
+    result
 }
 
 pub fn to_oms_json(value: &Value) -> Result<oms_json::Value, String> {
-    match value {
-        Value::Null => Ok(oms_json::Value::Null),
-        Value::Bool(b) => Ok(oms_json::Value::Bool(*b)),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                oms_json::Value::integer(&i.to_string())
-                    .map_err(|e| format!("invalid JSON integer: {e}"))
-            } else if let Some(u) = n.as_u64() {
-                oms_json::Value::integer(&u.to_string())
-                    .map_err(|e| format!("invalid JSON integer: {e}"))
-            } else if let Some(f) = n.as_f64() {
-                if f.is_finite() {
-                    Ok(oms_json::Value::Float(f))
-                } else {
-                    Err("non-finite float in canonical JSON".to_string())
-                }
-            } else {
-                Err("invalid JSON number".to_string())
-            }
-        }
-        Value::String(s) => Ok(oms_json::Value::String(oms_json::PyString::from(
-            s.as_str(),
-        ))),
-        Value::Array(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items {
-                out.push(to_oms_json(item)?);
-            }
-            Ok(oms_json::Value::Array(out))
-        }
-        Value::Object(map) => {
-            let mut out = BTreeMap::new();
-            for (k, v) in map {
-                out.insert(oms_json::PyString::from(k.as_str()), to_oms_json(v)?);
-            }
-            Ok(oms_json::Value::Object(out))
-        }
-    }
+    value
+        .clone_bounded()
+        .and_then(Value::into_value)
+        .map_err(|e| e.to_string())
 }
 
 pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, String> {
@@ -509,55 +542,39 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// Refuse a number the current public JSON value type would silently round.
-/// The canonical Python contract has unbounded integers; this refusal is an
-/// explicit interface limitation, never permission to quarantine or migrate it.
-pub(crate) fn require_exact_integers(bytes: &[u8]) -> Result<(), String> {
-    let mut index = 0;
-    let mut quoted = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\x5c' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            index += 1;
-            continue;
+/// Display unencodable code points explicitly instead of replacing them.
+pub(crate) fn display_py_string(text: &oms_json::PyString) -> String {
+    let mut out = String::new();
+    for &point in text.codepoints() {
+        if let Some(ch) = char::from_u32(point) {
+            out.push(ch);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "\\u{point:04x}");
         }
-        if byte == b'"' {
-            quoted = true;
-            index += 1;
-            continue;
-        }
-        if byte == b'-' || byte.is_ascii_digit() {
-            let start = index;
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_digit()
-                    || matches!(bytes[index], b'.' | b'e' | b'E' | b'+' | b'-'))
-            {
-                index += 1;
+    }
+    out
+}
+
+/// Canonical journal output is UTF-8, like Python's strict UTF-8 writer.
+/// Refuse unencodable input before adapters can coerce it to Rust text.
+pub(crate) fn require_scalar_strings(root: &Value) -> Result<(), String> {
+    let mut pending = vec![root];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::String(s) if py_string_has_surrogate(s) => {
+                return Err("canonical JSON error: lone surrogate".into());
             }
-            let number = &bytes[start..index];
-            let digits = number.strip_prefix(b"-").unwrap_or(number);
-            if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
-                let text = std::str::from_utf8(number).map_err(|_| "invalid JSON number")?;
-                let representable = if number.starts_with(b"-") {
-                    text.parse::<i64>().is_ok()
-                } else {
-                    text.parse::<u64>().is_ok()
-                };
-                if !representable {
-                    return Err("canonical integer exceeds the current native JSON interface; original data was not converted".into());
+            Value::Array(items) => pending.extend(items.iter()),
+            Value::Object(items) => {
+                for (key, child) in items.iter() {
+                    if py_string_has_surrogate(key) {
+                        return Err("canonical JSON error: lone surrogate".into());
+                    }
+                    pending.push(child);
                 }
             }
-        } else {
-            index += 1;
+            _ => {}
         }
     }
     Ok(())

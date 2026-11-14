@@ -2,6 +2,7 @@
 
 use crate::cold::read_regular_no_symlink_bytes;
 use crate::config::{NotionSettings, journal_language, notion_repo_excluded, notion_settings};
+use crate::json::{JsonExt, Map, Value};
 use crate::render::notion_presentation;
 use crate::sanitize::{pretty_json_bytes, sanitize_text};
 use crate::schema::atomic_write_bytes;
@@ -16,7 +17,6 @@ use rustix::io::Errno;
 use rustix::process::{
     Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, geteuid, kill_process_group, waitid,
 };
-use serde_json::{Map, Value};
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::os::fd::OwnedFd;
@@ -978,7 +978,7 @@ impl LiveTransport {
                 args.push("--data-binary".into());
                 args.push("@-".into());
                 Some(
-                    serde_json::to_vec(body)
+                    crate::sanitize::canonical_json_bytes(body)
                         .map_err(|e| TransportError::Io(format!("JSON encode failed: {e}")))?,
                 )
             }
@@ -1061,7 +1061,7 @@ impl LiveTransport {
         if body_str.is_empty() {
             return Ok(Value::Object(Map::new()));
         }
-        serde_json::from_str::<Value>(body_str)
+        crate::json::from_str(body_str)
             .map_err(|e| TransportError::Io(format!("invalid JSON from Notion API: {e}")))
     }
 
@@ -1094,7 +1094,7 @@ impl LiveTransport {
         }
         let json_bytes = match payload {
             Some(body) => Some(
-                serde_json::to_vec(body)
+                crate::sanitize::canonical_json_bytes(body)
                     .map_err(|e| TransportError::Io(format!("JSON encode failed: {e}")))?,
             ),
             None => None,
@@ -1142,7 +1142,7 @@ impl LiveTransport {
         if stdout_s.is_empty() {
             return Ok(Value::Object(Map::new()));
         }
-        serde_json::from_str::<Value>(&stdout_s)
+        crate::json::from_str(&stdout_s)
             .map_err(|e| TransportError::Io(format!("invalid JSON from {command}: {e}")))
     }
 }
@@ -1324,27 +1324,29 @@ impl NotionExporter {
         let mut candidates = Vec::new();
         let mut cursors = std::collections::HashSet::new();
         loop {
-            let mut body = serde_json::json!({"filter":{"property":"object","value":"data_source"},"page_size":100});
+            let mut body = crate::json::json!({"filter":{"property":"object","value":"data_source"},"page_size":100});
             if let Some(value) = &cursor {
-                body["start_cursor"] = Value::String(value.clone());
+                *body.at_mut("start_cursor") = Value::String(value.as_str().into());
             }
             let response = self
                 .request("POST", "/v1/search", Some(&body), interrupted)
                 .map_err(|e| e.message().to_owned())?;
-            let rows = response["results"]
+            let rows = response
+                .at("results")
                 .as_array()
                 .ok_or("Notion search response is invalid")?;
             for row in rows {
-                if row["object"].as_str() == Some("data_source") {
-                    if let Some(id) = row["id"].as_str().filter(|s| !s.is_empty()) {
+                if row.at("object").as_str().as_deref() == Some("data_source") {
+                    if let Some(id) = row.at("id").as_str().filter(|s| !s.is_empty()) {
                         candidates.push(id.to_owned());
                     }
                 }
             }
-            if response["has_more"].as_bool() != Some(true) {
+            if response.at("has_more").as_bool() != Some(true) {
                 break;
             }
-            let next = response["next_cursor"]
+            let next = response
+                .at("next_cursor")
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .ok_or("Notion search cursor is missing")?;
@@ -1373,8 +1375,15 @@ impl NotionExporter {
                 ("Has Blocker", "checkbox"),
             ]
             .iter()
-            .all(|(name, kind)| response["properties"][name]["type"].as_str() == Some(*kind))
-            {
+            .all(|(name, kind)| {
+                response
+                    .at("properties")
+                    .at(name)
+                    .at("type")
+                    .as_str()
+                    .as_deref()
+                    == Some(*kind)
+            }) {
                 matches.push(id);
             }
         }
@@ -1395,7 +1404,8 @@ impl NotionExporter {
         let response = self
             .request("GET", &path, None, interrupted)
             .map_err(|e| e.message().to_owned())?;
-        let props = response["properties"]
+        let props = response
+            .at("properties")
             .as_object()
             .ok_or("Notion target schema is unavailable")?;
         for (name, allowed, required) in [
@@ -1421,7 +1431,10 @@ impl NotionExporter {
                 .get(name)
                 .and_then(|v| v.get("type"))
                 .and_then(Value::as_str);
-            if actual.is_some_and(|kind| !allowed.contains(&kind)) || (required && actual.is_none())
+            if actual
+                .as_deref()
+                .is_some_and(|kind| !allowed.contains(&kind))
+                || (required && actual.is_none())
             {
                 return Err("Notion target schema is incompatible".into());
             }
@@ -1601,7 +1614,7 @@ impl NotionExporter {
         let mut remote_hash = String::new();
 
         if existing_page_id.is_none() {
-            let filter = serde_json::json!({
+            let filter = crate::json::json!({
                 "filter": {
                     "property": schema.key_prop,
                     "rich_text": {"equals": key}
@@ -1619,8 +1632,11 @@ impl NotionExporter {
                 .iter()
                 .find(|p| p.get("id").is_some_and(crate::schema::json_truthy))
             {
-                existing_page_id = Some(crate::schema::python_str(&page["id"]));
-                remote_hash = page["properties"][&schema.hash_prop]["rich_text"]
+                existing_page_id = Some(crate::schema::python_str(&page.at("id")));
+                remote_hash = page
+                    .at("properties")
+                    .at(&schema.hash_prop)
+                    .at("rich_text")
                     .as_array()
                     .into_iter()
                     .flatten()
@@ -1666,10 +1682,11 @@ impl NotionExporter {
                         })?;
                     child_ids.push(crate::schema::python_str(id));
                 }
-                if response["has_more"].as_bool() != Some(true) {
+                if response.at("has_more").as_bool() != Some(true) {
                     break;
                 }
-                let cursor = response["next_cursor"]
+                let cursor = response
+                    .at("next_cursor")
                     .as_str()
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| {
@@ -1682,7 +1699,7 @@ impl NotionExporter {
                         "Notion API returned an invalid pagination cursor".into(),
                     ));
                 }
-                list_path = format!("{base_path}?start_cursor={}", url_quote(cursor));
+                list_path = format!("{base_path}?start_cursor={}", url_quote(&cursor));
             }
             for id in child_ids {
                 self.request(
@@ -1695,7 +1712,7 @@ impl NotionExporter {
 
             for chunk in children.chunks(NOTION_CHILD_BATCH) {
                 let patch_path = format!("/v1/blocks/{}/children", url_quote(&page_id));
-                let body = serde_json::json!({ "children": chunk });
+                let body = crate::json::json!({ "children": chunk });
                 self.request("PATCH", &patch_path, Some(&body), interrupted)?;
             }
 
@@ -1712,7 +1729,7 @@ impl NotionExporter {
                 interrupted,
             )?;
             let page_path = format!("/v1/pages/{}", url_quote(&page_id));
-            let body = serde_json::json!({
+            let body = crate::json::json!({
                 "properties": props,
                 "icon": {"type": "emoji", "emoji": icon}
             });
@@ -1740,12 +1757,16 @@ impl NotionExporter {
             interrupted,
         )?;
         let parent = if schema.is_data_source {
-            serde_json::json!({"type": "data_source_id", "data_source_id": schema.target_id})
+            crate::json::json!({"type": "data_source_id", "data_source_id": schema.target_id})
         } else {
-            serde_json::json!({"database_id": schema.target_id})
+            crate::json::json!({"database_id": schema.target_id})
         };
-        let first_batch: Vec<Value> = children.iter().take(NOTION_CHILD_BATCH).cloned().collect();
-        let create_body = serde_json::json!({
+        let first_batch: Vec<Value> = children
+            .iter()
+            .take(NOTION_CHILD_BATCH)
+            .map(|v| v.copy())
+            .collect();
+        let create_body = crate::json::json!({
             "parent": parent,
             "icon": {"type": "emoji", "emoji": icon},
             "properties": initial_props,
@@ -1761,7 +1782,7 @@ impl NotionExporter {
         if multi_batch {
             for chunk in children[NOTION_CHILD_BATCH..].chunks(NOTION_CHILD_BATCH) {
                 let patch_path = format!("/v1/blocks/{}/children", url_quote(&page_id));
-                let body = serde_json::json!({ "children": chunk });
+                let body = crate::json::json!({ "children": chunk });
                 self.request("PATCH", &patch_path, Some(&body), interrupted)?;
             }
             let final_props = self.properties(
@@ -1780,7 +1801,7 @@ impl NotionExporter {
             self.request(
                 "PATCH",
                 &page_path,
-                Some(&serde_json::json!({"properties": final_props})),
+                Some(&crate::json::json!({"properties": final_props})),
                 interrupted,
             )?;
         }
@@ -1817,17 +1838,17 @@ fn build_page_properties(
     has_blocker: bool,
     aggregates: &Value,
 ) -> Value {
-    let text = |value: &str| serde_json::json!({"type":"text","text":{"content":value}});
+    let text = |value: &str| crate::json::json!({"type":"text","text":{"content":value}});
     let mut props = Map::new();
     props.insert(
-        schema.title_prop.clone(),
-        serde_json::json!({"title":[text(title)]}),
+        schema.title_prop.as_str().into(),
+        crate::json::json!({"title":[text(title)]}),
     );
     props.insert(
-        schema.key_prop.clone(),
-        serde_json::json!({"rich_text":[text(key)]}),
+        schema.key_prop.as_str().into(),
+        crate::json::json!({"rich_text":[text(key)]}),
     );
-    props.insert(schema.hash_prop.clone(),serde_json::json!({"rich_text":content_hash.map(|value|vec![text(value)]).unwrap_or_default()}));
+    props.insert(schema.hash_prop.as_str().into(),crate::json::json!({"rich_text":content_hash.map(|value|vec![text(value)]).unwrap_or_default()}));
     if let Some((name, kind)) = &schema.project_prop {
         if !project_name.is_empty() {
             if kind == "select" {
@@ -1838,19 +1859,23 @@ fn build_page_properties(
                     .take(100)
                     .collect();
                 if !option.is_empty() {
-                    props.insert(name.clone(), serde_json::json!({"select":{"name":option}}));
+                    props.insert(
+                        name.as_str().into(),
+                        crate::json::json!({"select":{"name":option}}),
+                    );
                 }
             } else if kind == "rich_text" {
                 props.insert(
-                    name.clone(),
-                    serde_json::json!({"rich_text":[text(project_name)]}),
+                    name.as_str().into(),
+                    crate::json::json!({"rich_text":[text(project_name)]}),
                 );
             }
         }
     }
     if let Some((name, kind)) = &schema.sessions_prop {
         if kind == "rich_text" {
-            let sessions: Vec<_> = aggregates["sessions"]
+            let sessions: Vec<_> = aggregates
+                .at("sessions")
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -1861,8 +1886,8 @@ fn build_page_properties(
             let listed: String = sessions.join(", ").chars().take(1900).collect();
             if !listed.is_empty() {
                 props.insert(
-                    name.clone(),
-                    serde_json::json!({"rich_text":[text(&listed)]}),
+                    name.as_str().into(),
+                    crate::json::json!({"rich_text":[text(&listed)]}),
                 );
             }
         }
@@ -1872,10 +1897,10 @@ fn build_page_properties(
         (&schema.verified_prop, "verified"),
     ] {
         if let Some((name, kind)) = property {
-            if kind == "number" && !aggregates[field].is_null() {
+            if kind == "number" && !aggregates.at(field).is_null() {
                 props.insert(
-                    name.clone(),
-                    serde_json::json!({"number":aggregates[field]}),
+                    name.as_str().into(),
+                    crate::json::json!({"number":aggregates.at(field)}),
                 );
             }
         }
@@ -1889,8 +1914,8 @@ fn build_page_properties(
             kind
         };
         props.insert(
-            name.clone(),
-            serde_json::json!({"select":{"name":name_value}}),
+            name.as_str().into(),
+            crate::json::json!({"select":{"name":name_value}}),
         );
     }
     if let Some((name, _)) = &schema.period_prop {
@@ -1901,38 +1926,86 @@ fn build_page_properties(
         } else {
             period.into()
         };
-        props.insert(name.clone(), serde_json::json!({"date":{"start":date}}));
+        props.insert(
+            name.as_str().into(),
+            crate::json::json!({"date":{"start":date}}),
+        );
     }
     if let Some((name, _)) = &schema.blocker_prop {
-        props.insert(name.clone(), serde_json::json!({"checkbox":has_blocker}));
+        props.insert(
+            name.as_str().into(),
+            crate::json::json!({"checkbox":has_blocker}),
+        );
     }
     Value::Object(props)
 }
 
-fn contains_text(value: &Value, needle: &str) -> bool {
-    match value {
-        Value::String(s) => s.contains(needle),
-        Value::Array(a) => a.iter().any(|v| contains_text(v, needle)),
-        Value::Object(o) => o
-            .iter()
-            .any(|(k, v)| k.contains(needle) || contains_text(v, needle)),
-        _ => false,
-    }
+fn py_contains(value: &oms_json::PyString, needle: &str) -> bool {
+    let needle: Vec<_> = needle.chars().map(u32::from).collect();
+    needle.is_empty()
+        || value
+            .codepoints()
+            .windows(needle.len())
+            .any(|part| part == needle)
 }
-fn redact_json(value: &Value, access: &str) -> Value {
-    if access.is_empty() {
+fn py_redact(value: &oms_json::PyString, needle: &str) -> oms_json::PyString {
+    let needle: Vec<_> = needle.chars().map(u32::from).collect();
+    if needle.is_empty() {
         return value.clone();
     }
-    match value {
-        Value::String(s) => Value::String(s.replace(access, "[REDACTED]")),
-        Value::Array(a) => Value::Array(a.iter().map(|v| redact_json(v, access)).collect()),
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .map(|(k, v)| (k.replace(access, "[REDACTED]"), redact_json(v, access)))
-                .collect(),
-        ),
-        _ => value.clone(),
+    let mut remaining = value.codepoints();
+    let mut points = Vec::new();
+    while !remaining.is_empty() {
+        if remaining.starts_with(&needle) {
+            points.extend("[REDACTED]".chars().map(u32::from));
+            remaining = &remaining[needle.len()..];
+        } else {
+            points.push(remaining[0]);
+            remaining = &remaining[1..];
+        }
     }
+    oms_json::PyString::from_codepoints(points).expect("existing Python code points")
+}
+fn contains_text(value: &Value, needle: &str) -> bool {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::String(s) if py_contains(s, needle) => return true,
+            Value::Array(a) => pending.extend(a.iter()),
+            Value::Object(o) => {
+                for (key, child) in o.iter() {
+                    if py_contains(key, needle) {
+                        return true;
+                    }
+                    pending.push(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+fn redact_json(value: &Value, access: &str) -> Value {
+    let mut output = value.copy();
+    if access.is_empty() {
+        return output;
+    }
+    let mut pending = vec![&mut output];
+    while let Some(node) = pending.pop() {
+        match node {
+            Value::String(s) => *s = py_redact(s, access),
+            Value::Array(items) => pending.extend(items.iter_mut()),
+            Value::Object(obj) => {
+                let original = std::mem::take(obj);
+                for (key, value) in original {
+                    obj.insert(py_redact(&key, access), value);
+                }
+                pending.extend(obj.iter_mut().map(|(_, v)| v));
+            }
+            _ => {}
+        }
+    }
+    output
 }
 
 fn url_quote(value: &str) -> String {
@@ -1949,10 +2022,10 @@ fn url_quote(value: &str) -> String {
 }
 
 fn text_object(content: &str) -> Value {
-    serde_json::json!({"type":"text","text":{"content":content}})
+    crate::json::json!({"type":"text","text":{"content":content}})
 }
 fn note_block(content: &str) -> Value {
-    serde_json::json!({"object":"block","type":"paragraph","paragraph":{"rich_text":[text_object(content)]}})
+    crate::json::json!({"object":"block","type":"paragraph","paragraph":{"rich_text":[text_object(content)]}})
 }
 struct Blocks {
     children: Vec<Value>,
@@ -1972,7 +2045,9 @@ impl Blocks {
             return None;
         }
         let location = if let Some(index) = self.toggle {
-            let nested = self.children[index]["toggle"]["children"]
+            let nested = self.children[index]
+                .at_mut("toggle")
+                .at_mut("children")
                 .as_array_mut()
                 .expect("toggle children");
             if nested.len() >= NOTION_TOGGLE_CHILD_LIMIT {
@@ -2007,15 +2082,18 @@ impl Blocks {
         for (offset, chunk) in chars.chunks(NOTION_TEXT_CHUNK).enumerate() {
             let kind = if offset == 0 { kind } else { "paragraph" };
             let chunk: String = chunk.iter().collect();
-            let mut payload = serde_json::json!({"rich_text":[text_object(&chunk)]});
+            let mut payload = crate::json::json!({"rich_text":[text_object(&chunk)]});
             if offset == 0 {
                 if let Some(attributes) = attributes.as_object() {
-                    for (k, v) in attributes {
-                        payload[k] = v.clone();
+                    for (k, v) in attributes.iter() {
+                        payload
+                            .as_object_mut()
+                            .expect("block payload")
+                            .insert(k.clone(), v.copy());
                     }
                 }
             }
-            let block = serde_json::json!({"object":"block","type":kind,kind:payload});
+            let block = crate::json::json!({"object":"block","type":kind,kind:payload});
             let Some(location) = self.emit(block) else {
                 return first;
             };
@@ -2027,12 +2105,20 @@ impl Blocks {
     }
     fn detail(&mut self, location: (Option<usize>, usize), text: &str) {
         let block = if let (Some(toggle), index) = location {
-            &mut self.children[toggle]["toggle"]["children"][index]
+            &mut self.children[toggle]
+                .at_mut("toggle")
+                .at_mut("children")
+                .as_array_mut()
+                .expect("toggle children")[index]
         } else {
             &mut self.children[location.1]
         };
-        let kind = block["type"].as_str().unwrap_or("").to_owned();
-        let array = block[&kind]["rich_text"].as_array_mut().expect("rich text");
+        let kind = block.at("type").as_str().unwrap_or_default().to_owned();
+        let array = block
+            .at_mut(&kind)
+            .at_mut("rich_text")
+            .as_array_mut()
+            .expect("rich text");
         let chars: Vec<_> = text.chars().collect();
         for chunk in chars.chunks(NOTION_TEXT_CHUNK - 3) {
             if array.len() >= NOTION_CHILD_BATCH {
@@ -2085,7 +2171,7 @@ pub fn markdown_to_notion_blocks(markdown: &str) -> Vec<Value> {
         }
         if line == "---" {
             state.close();
-            state.emit(serde_json::json!({"object":"block","type":"divider","divider":{}}));
+            state.emit(crate::json::json!({"object":"block","type":"divider","divider":{}}));
         } else if let Some(c) = heading.captures(line) {
             let level = c[1].len();
             let title = &c[2];
@@ -2096,7 +2182,7 @@ pub fn markdown_to_notion_blocks(markdown: &str) -> Vec<Value> {
             }
             state.close();
             if level == 2 && collapsed.contains(&title.trim()) {
-                let block = serde_json::json!({"object":"block","type":"toggle","toggle":{"rich_text":[text_object(title.trim())],"children":[]}});
+                let block = crate::json::json!({"object":"block","type":"toggle","toggle":{"rich_text":[text_object(title.trim())],"children":[]}});
                 if let Some((_, index)) = state.emit(block) {
                     state.toggle = Some(index);
                 }
@@ -2107,14 +2193,14 @@ pub fn markdown_to_notion_blocks(markdown: &str) -> Vec<Value> {
             state.last = state.append(
                 "to_do",
                 &c[2],
-                serde_json::json!({"checked":c[1].eq_ignore_ascii_case("x")}),
+                crate::json::json!({"checked":c[1].eq_ignore_ascii_case("x")}),
             );
         } else if let Some(c) = quote.captures(line) {
             state.last = None;
             state.append(
                 "callout",
                 &c[1],
-                serde_json::json!({"icon":{"type":"emoji","emoji":"💡"}}),
+                crate::json::json!({"icon":{"type":"emoji","emoji":"💡"}}),
             );
         } else if let Some(c) = bullet.captures(line) {
             if let Some(location) = state.last.filter(|_| indented) {
@@ -2222,17 +2308,17 @@ pub fn sync_notion(
         return Ok(report);
     }
     report.enabled = true;
-    let properties = serde_json::json!({"title_property":settings.title_property,"key_property":settings.key_property,"hash_property":settings.hash_property,"project_property":settings.project_property,"kind_property":settings.kind_property,"period_property":settings.period_property,"blocker_property":settings.blocker_property,"sessions_property":settings.sessions_property,"commits_property":settings.commits_property,"verified_property":settings.verified_property});
-    let target = serde_json::json!({"kind":if !settings.data_source_id.is_empty(){"data_source"}else{"database"},"id":settings.target_id(),"properties":properties});
+    let properties = crate::json::json!({"title_property":settings.title_property,"key_property":settings.key_property,"hash_property":settings.hash_property,"project_property":settings.project_property,"kind_property":settings.kind_property,"period_property":settings.period_property,"blocker_property":settings.blocker_property,"sessions_property":settings.sessions_property,"commits_property":settings.commits_property,"verified_property":settings.verified_property});
+    let target = crate::json::json!({"kind":if !settings.data_source_id.is_empty(){"data_source"}else{"database"},"id":settings.target_id(),"properties":properties});
     let fingerprint = crate::sanitize::sha256_hex(&crate::sanitize::canonical_json_bytes(&target)?);
     let path = store.root.join("sync/notion.json");
     let mut state =
-        serde_json::json!({"schema_version":1,"target_fingerprint":fingerprint,"summaries":{}});
+        crate::json::json!({"schema_version":1,"target_fingerprint":fingerprint,"summaries":{}});
     if let Some(bytes) = read_regular_no_symlink_bytes(&path)? {
-        if let Ok(loaded) = serde_json::from_slice::<Value>(&bytes) {
-            if loaded["schema_version"].as_u64() == Some(1)
-                && loaded["target_fingerprint"].as_str() == Some(&fingerprint)
-                && loaded["summaries"].is_object()
+        if let Ok(loaded) = crate::json::from_slice(&bytes) {
+            if loaded.at("schema_version").as_u64() == Some(1)
+                && loaded.at("target_fingerprint").as_str().as_deref() == Some(&fingerprint)
+                && loaded.at("summaries").is_object()
             {
                 state = loaded;
             }
@@ -2285,20 +2371,21 @@ pub fn sync_notion(
         let content = notion_presentation(&row.content, Some(&events), &lang);
         let hash = crate::sanitize::sha256_hex(content.as_bytes());
         let key = format!("{}:{}:{}", store.project.id, row.kind, row.period);
-        let previous = state["summaries"]
+        let previous = state
+            .at("summaries")
             .get(&key)
             .filter(|v| v.is_object())
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        if previous["status"].as_str() == Some("synced")
-            && previous["content_hash"].as_str() == Some(&hash)
+            .map(|v| v.copy())
+            .unwrap_or(crate::json::json!({}));
+        if previous.at("status").as_str().as_deref() == Some("synced")
+            && previous.at("content_hash").as_str().as_deref() == Some(&hash)
         {
             continue;
         }
-        if let Some(stamp) = previous["next_retry_at"].as_str() {
-            let changed = previous["status"].as_str() == Some("failed")
-                && previous["pending_content_hash"].as_str() != Some(&hash);
-            if let Ok(retry) = parse_rfc3339_utc(stamp) {
+        if let Some(stamp) = previous.at("next_retry_at").as_str() {
+            let changed = previous.at("status").as_str().as_deref() == Some("failed")
+                && previous.at("pending_content_hash").as_str().as_deref() != Some(&hash);
+            if let Ok(retry) = parse_rfc3339_utc(&stamp) {
                 if !changed && retry > now {
                     report.waiting += 1;
                     let stamp = utc_rfc3339(retry);
@@ -2341,14 +2428,14 @@ pub fn sync_notion(
                 &store.project.name,
                 row.has_blocker,
                 &aggregates,
-                previous["page_id"].as_str(),
+                previous.at("page_id").as_str().as_deref(),
                 interrupted,
             )
         })();
         let entry = match result {
             Ok(page) => {
                 report.exported += 1;
-                serde_json::json!({"status":"synced","page_id":if page.is_empty(){previous["page_id"].clone()}else{Value::String(page)},"content_hash":hash,"period":row.period,"kind":row.kind})
+                crate::json::json!({"status":"synced","page_id":if page.is_empty(){previous.at("page_id").copy()}else{Value::String(page.as_str().into())},"content_hash":hash,"period":row.period,"kind":row.kind})
             }
             Err(error) => {
                 let error_name = match &error {
@@ -2364,34 +2451,36 @@ pub fn sync_notion(
                     TransportError::ClientError { status: 404, .. }
                         | TransportError::Deferred { status: 404, .. }
                 );
-                let mut entry = serde_json::json!({"status":"failed","page_id":if missing{Value::Null}else{previous["page_id"].clone()},"content_hash":previous["content_hash"],"pending_content_hash":hash,"period":row.period,"kind":row.kind,"error":error_name});
+                let mut entry = crate::json::json!({"status":"failed","page_id":if missing{Value::Null}else{previous.at("page_id").copy()},"content_hash":previous.at("content_hash"),"pending_content_hash":hash,"period":row.period,"kind":row.kind,"error":error_name});
                 let scheduled = if let TransportError::Deferred { retry_after, .. } = error {
                     (retry_after.is_finite() && retry_after > 0.0).then_some(retry_after)
                 } else {
                     None
                 };
                 if let Some(seconds) = scheduled {
-                    entry["status"] = serde_json::json!("pending");
-                    entry["next_retry_at"] = serde_json::json!(utc_rfc3339(
+                    *entry.at_mut("status") = crate::json::json!("pending");
+                    *entry.at_mut("next_retry_at") = crate::json::json!(utc_rfc3339(
                         now + Duration::microseconds((seconds * 1_000_000.0).round() as i64)
                     ));
                     report.deferred += 1;
                 } else {
-                    let previous_attempts = if previous["status"].as_str() == Some("failed")
-                        && previous["pending_content_hash"].as_str() == Some(&hash)
+                    let previous_attempts = if previous.at("status").as_str().as_deref()
+                        == Some("failed")
+                        && previous.at("pending_content_hash").as_str().as_deref() == Some(&hash)
                     {
-                        previous["attempts"].as_u64().unwrap_or(0)
+                        previous.at("attempts").as_integer()
                     } else {
-                        0
+                        None
                     };
-                    let attempts = previous_attempts.saturating_add(1);
-                    entry["attempts"] = serde_json::json!(attempts);
+                    let (exact_attempts, attempts) = increment_retry_attempts(previous_attempts)?;
+                    *entry.at_mut("attempts") = exact_attempts;
                     if attempts >= 2 {
                         let seconds = 60u64
                             .saturating_mul(1u64 << attempts.saturating_sub(2).min(20))
                             .min(86400);
-                        entry["next_retry_at"] =
-                            serde_json::json!(utc_rfc3339(now + Duration::seconds(seconds as i64)));
+                        *entry.at_mut("next_retry_at") = crate::json::json!(utc_rfc3339(
+                            now + Duration::seconds(seconds as i64)
+                        ));
                     }
                     report.failed += 1;
                 }
@@ -2399,8 +2488,41 @@ pub fn sync_notion(
                 entry
             }
         };
-        state["summaries"][&key] = entry;
+        *state.at_mut("summaries").at_mut(&key) = entry;
         atomic_write_bytes(&path, &pretty_json_bytes(&state)?)?;
     }
     Ok(report)
 }
+
+// Keep the persisted counter exact; only the bounded scheduling calculation
+// saturates after its delay has already reached the maximum.
+fn increment_retry_attempts(previous: Option<&oms_json::Integer>) -> Result<(Value, u64), String> {
+    let decimal = previous
+        .filter(|n| !n.is_negative())
+        .map_or("0", |n| n.as_decimal());
+    let mut digits = decimal.as_bytes().to_vec();
+    let mut carry = true;
+    for digit in digits.iter_mut().rev() {
+        if *digit == b'9' {
+            *digit = b'0';
+        } else {
+            *digit += 1;
+            carry = false;
+            break;
+        }
+    }
+    if carry {
+        digits.insert(0, b'1');
+    }
+    if digits.len() > 4300 {
+        return Err("Notion retry attempts exceed the JSON integer digit limit".into());
+    }
+    let decimal = String::from_utf8(digits).expect("decimal digits");
+    let scheduling = decimal.parse::<u64>().unwrap_or(u64::MAX);
+    let value = Value::integer(&decimal).map_err(|e| e.to_string())?;
+    Ok((value, scheduling))
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/notion_json.rs"]
+mod json_tests;
