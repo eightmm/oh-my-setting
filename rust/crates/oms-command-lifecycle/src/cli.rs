@@ -1,0 +1,320 @@
+use crate::{
+    receipt::Paths,
+    runtime::{self as r, Result},
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
+
+#[derive(Clone, Default)]
+pub(crate) struct Options {
+    pub tool: String,
+    pub action: String,
+    pub flags: BTreeSet<String>,
+    values: BTreeMap<String, Vec<String>>,
+}
+impl Options {
+    pub fn has(&self, k: &str) -> bool {
+        self.flags.contains(k) || self.values.contains_key(k)
+    }
+    pub fn get(&self, k: &str) -> Option<&str> {
+        self.values
+            .get(k)
+            .and_then(|v| v.last())
+            .map(String::as_str)
+    }
+    pub fn all(&self, k: &str) -> &[String] {
+        self.values.get(k).map(Vec::as_slice).unwrap_or(&[])
+    }
+    pub fn path(&self, k: &str, cwd: &Path) -> Result<Option<PathBuf>> {
+        self.get(k)
+            .map(|s| {
+                r::leaf(&if Path::new(s).is_absolute() {
+                    PathBuf::from(s)
+                } else {
+                    cwd.join(s)
+                })
+            })
+            .transpose()
+    }
+    pub fn preview(&self) -> bool {
+        self.has("--plan")
+            || self.has("--dry-run")
+            || std::env::var_os("OH_MY_SETTING_DRY_RUN").is_some_and(|s| s == "1")
+    }
+}
+fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match tool {
+        "doctor" => (
+            &[
+                "--json",
+                "--remediation-plan",
+                "--repair",
+                "--surfaces",
+                "--tool-lock",
+                "--contract",
+                "--security",
+                "--residue",
+                "--sandbox",
+                "--probe",
+                "--live-models",
+                "--strict-diversity",
+                "--no-model-doctor",
+                "--extensions",
+                "--mcp",
+                "--pin",
+                "--providers",
+                "--check",
+            ],
+            &["--repo", "--probe-tools", "--table", "--root"],
+        ),
+        "install" => (
+            &[
+                "--full",
+                "--tools",
+                "--connect-services",
+                "--no-connect-services",
+                "--auto-update",
+                "--no-auto-update",
+                "--machine-snapshot",
+                "--slurm-snapshot",
+                "--peer-permissions",
+                "--star",
+                "--no-star",
+                "--plan",
+            ],
+            &[
+                "--ref",
+                "--profile",
+                "--primary-provider",
+                "--notion-data-source",
+            ],
+        ),
+        "link" => (&["--plan"], &[]),
+        "unlink" => (&["--dry-run"], &[]),
+        "uninstall" => (
+            &["--yes", "-y", "--purge", "--purge-dirty", "--dry-run"],
+            &[],
+        ),
+        "install-profile" | "install-tools" => (
+            &[
+                "--plan",
+                "--check",
+                "--apply",
+                "--reapply",
+                "--add",
+                "--upgrade",
+                "--allow-missing",
+                "--full",
+                "--dry-run",
+            ],
+            &["--profile", "--primary-provider", "--receipt", "--only"],
+        ),
+        "install-hooks" => (&["--quick", "--check-protection", "--dry-run"], &[]),
+        "install-claude-hooks" => (
+            &["--remove", "--print-expected", "--dry-run"],
+            &["--settings", "--ownership-receipt"],
+        ),
+        "install-mcp" | "install-codex-plugin" => (&["--remove", "--dry-run"], &[]),
+        "install-agy-plugin" => (&["--remove", "--probe-surfaces", "--dry-run"], &[]),
+        "install-skills" => (&[], &[]),
+        "install-autoupdate" => (&["--apply", "--check-only", "--dry-run"], &["--method"]),
+        "uninstall-autoupdate" => (&["--dry-run"], &[]),
+        "update" => (
+            &[
+                "--check",
+                "--plan",
+                "--rollback",
+                "--fallback-to-edge",
+                "--tools",
+                "--no-tools",
+                "--no-doctor",
+                "--probe-agy-surfaces",
+                "--json",
+            ],
+            &["--ref"],
+        ),
+        "auto-update" => (
+            &["--dry-run", "--apply", "--check-only", "--json"],
+            &["--method"],
+        ),
+        "status" => (
+            &["--verbose", "--json", "--fingerprint"],
+            &["--repo", "--compare"],
+        ),
+        "snapshot" | "write-machine-snapshot" => (&["--check", "--dry-run"], &[]),
+        "tick" => (
+            &[
+                "--dry-run",
+                "--json",
+                "--pause",
+                "--resume",
+                "--cancel",
+                "--list",
+            ],
+            &["--repo", "--method", "--contract", "--every", "--until"],
+        ),
+        _ => (&[], &[]),
+    }
+}
+fn usage(tool: &str) -> String {
+    let (flags, values) = spec(tool);
+    let actions = match tool {
+        "auto-update" => " [check|apply|status|attention|install|remove]",
+        "tick" => " [run|register|unregister|install|uninstall|status|schedule|refresh-catalogs]",
+        _ => "",
+    };
+    format!(
+        "Usage: oms {tool}{actions} [options]\n\n{}\n  -h, --help\n\nNative lifecycle adapter. Operations without a complete native authority adapter fail before mutation.\n",
+        flags
+            .iter()
+            .map(|s| format!("  {s}"))
+            .chain(values.iter().map(|s| format!("  {s} VALUE")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
+    let (flags, values) = spec(tool);
+    let mut out = Options {
+        tool: tool.into(),
+        ..Default::default()
+    };
+    let mut args = args.iter();
+    while let Some(raw) = args.next() {
+        let s = raw
+            .to_str()
+            .ok_or_else(|| r::Error(2, "lifecycle arguments must be UTF-8".into()))?;
+        if matches!(s, "--help" | "-h") {
+            out.flags.insert("--help".into());
+            continue;
+        }
+        if flags.contains(&s) {
+            out.flags.insert(s.into());
+            continue;
+        }
+        let (name, attached) = s
+            .split_once('=')
+            .map(|(a, b)| (a, Some(b)))
+            .unwrap_or((s, None));
+        if values.contains(&name) {
+            let v = match attached {
+                Some(s) => s,
+                None => args
+                    .next()
+                    .and_then(|v| v.to_str())
+                    .ok_or_else(|| r::Error(2, format!("{name} requires a UTF-8 value")))?,
+            };
+            if v.is_empty() {
+                return r::fail(format!("{name} requires a nonempty value"));
+            }
+            let entries = out.values.entry(name.into()).or_default();
+            if !entries.is_empty() && !matches!(name, "--profile" | "--repo") {
+                return r::fail(format!("{name} may be specified only once"));
+            }
+            entries.push(v.into());
+            continue;
+        }
+        if !s.starts_with('-') && out.action.is_empty() && matches!(tool, "tick" | "auto-update") {
+            out.action = s.into();
+            continue;
+        }
+        return r::fail(format!("unknown argument for {tool}: {s}"));
+    }
+    if out.has("--help") {
+        return Ok(out);
+    }
+    for pair in [
+        ["--fingerprint", "--compare"],
+        ["--check", "--rollback"],
+        ["--rollback", "--ref"],
+        ["--rollback", "--fallback-to-edge"],
+        ["--json", "--remediation-plan"],
+        ["--apply", "--check-only"],
+    ] {
+        if out.has(pair[0]) && out.has(pair[1]) {
+            return r::fail(format!("{} and {} are exclusive", pair[0], pair[1]));
+        }
+    }
+    if tool == "update"
+        && out.has("--plan")
+        && ["--check", "--rollback", "--probe-agy-surfaces"]
+            .iter()
+            .any(|s| out.has(s))
+    {
+        return r::fail(
+            "--plan cannot be combined with --check, --rollback or --probe-agy-surfaces",
+        );
+    }
+    if tool == "doctor" {
+        let modes = [
+            "--security",
+            "--sandbox",
+            "--surfaces",
+            "--extensions",
+            "--mcp",
+            "--providers",
+            "--tool-lock",
+        ];
+        if modes.iter().filter(|s| out.has(s)).count() > 1 {
+            return r::fail("doctor standalone report modes are exclusive");
+        }
+        for (child, parent) in [
+            ("--residue", "--security"),
+            ("--probe", "--sandbox"),
+            ("--pin", "--mcp"),
+            ("--probe-tools", "--mcp"),
+        ] {
+            if out.has(child) && !out.has(parent) {
+                return r::fail(format!("{child} requires {parent}"));
+            }
+        }
+        if out.has("--repair") && modes.iter().any(|s| out.has(s)) {
+            return r::fail("--repair cannot be combined with standalone reports");
+        }
+    }
+    Ok(out)
+}
+pub(crate) fn execute(
+    tool: &str,
+    args: &[OsString],
+    cwd: &Path,
+    source: &Path,
+    flag: &AtomicBool,
+) -> Result<crate::Output> {
+    if !crate::owns(tool, args) {
+        return r::fail("command is not owned by the lifecycle crate");
+    }
+    let options = parse(tool, args)?;
+    if options.has("--help") {
+        return Ok(r::text(usage(tool)));
+    }
+    r::check(flag)?;
+    r::native_host()?;
+    let mut paths = Paths::new(cwd, source)?;
+    if tool != "tick" {
+        if let Some(repo) = options.path("--repo", &paths.cwd)? {
+            paths.cwd = r::physical(&repo)?;
+        }
+    }
+    match tool {
+        "doctor" => crate::doctor::run(&paths, &options, flag),
+        "status" => crate::doctor::status(&paths, &options, flag),
+        "snapshot" | "write-machine-snapshot" => crate::snapshot::run(&paths, &options, flag),
+        "update" | "auto-update" => crate::update::run(&paths, &options, flag),
+        "tick" => crate::tick::run(&paths, &options, flag),
+        "install-profile" | "install-tools" => crate::tools::run(&paths, &options, flag),
+        "install-autoupdate" | "uninstall-autoupdate" => {
+            crate::scheduler::run(&paths, &options, flag)
+        }
+        "install-hooks"
+        | "install-claude-hooks"
+        | "install-mcp"
+        | "install-codex-plugin"
+        | "install-agy-plugin" => crate::integrations::run(&paths, &options, flag),
+        _ => crate::install::run(&paths, &options, flag),
+    }
+}
