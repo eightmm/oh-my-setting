@@ -147,10 +147,10 @@ pub(crate) fn checked_timezone(requested: Option<&str>) -> Result<TimeZoneSpec, 
                 "/var/db/timezone/zoneinfo",
                 "/etc/zoneinfo",
             ] {
-                if let Ok(bytes) = fs::read(Path::new(base).join(name)) {
-                    if let Some(zone) = parse_tzif(name, &bytes) {
-                        return Ok(TimeZoneSpec::Tzif(zone));
-                    }
+                if let Ok(bytes) = fs::read(Path::new(base).join(name))
+                    && let Some(zone) = parse_tzif(name, &bytes)
+                {
+                    return Ok(TimeZoneSpec::Tzif(zone));
                 }
             }
         }
@@ -187,10 +187,10 @@ pub fn resolve_timezone(requested: Option<&str>) -> TimeZoneSpec {
                 "/var/db/timezone/zoneinfo",
                 "/etc/zoneinfo",
             ] {
-                if let Ok(bytes) = fs::read(Path::new(base).join(&system_name)) {
-                    if let Some(zone) = parse_tzif(&system_name, &bytes) {
-                        return TimeZoneSpec::Tzif(zone);
-                    }
+                if let Ok(bytes) = fs::read(Path::new(base).join(&system_name))
+                    && let Some(zone) = parse_tzif(&system_name, &bytes)
+                {
+                    return TimeZoneSpec::Tzif(zone);
                 }
             }
         }
@@ -226,10 +226,10 @@ fn resolve_named_timezone(name: &str) -> Option<TimeZoneSpec> {
         "/etc/zoneinfo",
     ] {
         let path = Path::new(base).join(trimmed);
-        if let Ok(bytes) = fs::read(&path) {
-            if let Some(zone) = parse_tzif(trimmed, &bytes) {
-                return Some(TimeZoneSpec::Tzif(zone));
-            }
+        if let Ok(bytes) = fs::read(&path)
+            && let Some(zone) = parse_tzif(trimmed, &bytes)
+        {
+            return Some(TimeZoneSpec::Tzif(zone));
         }
     }
     if let Some(posix) = parse_posix_tz(trimmed) {
@@ -289,10 +289,10 @@ fn detect_system_timezone_name() -> Option<String> {
             ] {
                 if let Some(idx) = raw.windows(prefix.len()).position(|w| w == prefix) {
                     let rest = &raw[idx + prefix.len()..];
-                    if !rest.is_empty() {
-                        if let Ok(s) = std::str::from_utf8(rest) {
-                            return Some(s.to_string());
-                        }
+                    if !rest.is_empty()
+                        && let Ok(s) = std::str::from_utf8(rest)
+                    {
+                        return Some(s.to_string());
                     }
                 }
             }
@@ -320,12 +320,11 @@ fn detect_system_timezone_name() -> Option<String> {
 impl TzifZone {
     pub fn offset_seconds_at(&self, epoch: i64) -> i32 {
         if !self.transitions.is_empty() {
-            if let Some(last) = self.transitions.last().copied() {
-                if epoch >= last {
-                    if let Some(posix) = &self.posix_tz {
-                        return posix.offset_seconds_at(epoch);
-                    }
-                }
+            if let Some(last) = self.transitions.last().copied()
+                && epoch >= last
+                && let Some(posix) = &self.posix_tz
+            {
+                return posix.offset_seconds_at(epoch);
             }
             let pos = self.transitions.partition_point(|&t| t <= epoch);
             let idx = if pos == 0 {
@@ -436,12 +435,12 @@ fn parse_tzif(name: &str, data: &[u8]) -> Option<TzifZone> {
         .checked_add(ttisutcnt2)?;
 
     let mut posix_tz = None;
-    if cursor < data.len() {
-        if let Ok(footer) = std::str::from_utf8(&data[cursor..]) {
-            let trimmed = footer.trim();
-            if !trimmed.is_empty() {
-                posix_tz = parse_posix_tz(trimmed);
-            }
+    if cursor < data.len()
+        && let Ok(footer) = std::str::from_utf8(&data[cursor..])
+    {
+        let trimmed = footer.trim();
+        if !trimmed.is_empty() {
+            posix_tz = parse_posix_tz(trimmed);
         }
     }
 
@@ -480,9 +479,7 @@ fn parse_posix_tz(spec: &str) -> Option<PosixTz> {
             dst: None,
         });
     }
-    let Some(dst_after_abbr) = skip_tz_abbr(bytes, pos) else {
-        return None;
-    };
+    let dst_after_abbr = skip_tz_abbr(bytes, pos)?;
     pos = dst_after_abbr;
     let dst_offset_west = if pos < bytes.len() && bytes[pos] != b',' {
         let (off, np) = parse_posix_offset(bytes, pos)?;
@@ -704,12 +701,11 @@ pub fn parse_rfc3339_utc(raw: &str) -> Result<DateTime<Utc>, String> {
     let valid = |date: DateTime<FixedOffset>| {
         date.year() >= 1 && date.year() <= 9999 && date.nanosecond() < 1_000_000_000
     };
-    if !raw.ends_with('z') {
-        if let Ok(date) = DateTime::parse_from_rfc3339(raw) {
-            if valid(date) {
-                return Ok(date.with_timezone(&Utc));
-            }
-        }
+    if !raw.ends_with('z')
+        && let Ok(date) = DateTime::parse_from_rfc3339(raw)
+        && valid(date)
+    {
+        return Ok(date.with_timezone(&Utc));
     }
     let normalized = raw
         .strip_suffix('Z')
@@ -728,10 +724,10 @@ pub fn parse_rfc3339_utc(raw: &str) -> Result<DateTime<Utc>, String> {
         "%Y-%m-%dT%H:%M:%S%.f%::z",
         "%G-W%V-%uT%H:%M:%S%.f%:z",
     ] {
-        if let Ok(date) = DateTime::parse_from_str(&normalized, format) {
-            if valid(date) {
-                return Ok(date.with_timezone(&Utc));
-            }
+        if let Ok(date) = DateTime::parse_from_str(&normalized, format)
+            && valid(date)
+        {
+            return Ok(date.with_timezone(&Utc));
         }
     }
     if !raw.contains(['+', 'Z']) && raw.get(10..).is_none_or(|s| !s.contains('-')) {
@@ -797,15 +793,15 @@ pub fn parse_http_date_epoch(raw: &str) -> Option<i64> {
 }
 
 fn system_local_zone() -> Option<TzifZone> {
-    if let Some(name) = detect_system_timezone_name() {
-        if let Some(TimeZoneSpec::Tzif(zone)) = resolve_named_timezone(&name) {
-            return Some(zone);
-        }
+    if let Some(name) = detect_system_timezone_name()
+        && let Some(TimeZoneSpec::Tzif(zone)) = resolve_named_timezone(&name)
+    {
+        return Some(zone);
     }
-    if let Ok(bytes) = fs::read("/etc/localtime") {
-        if let Some(zone) = parse_tzif("system-local", &bytes) {
-            return Some(zone);
-        }
+    if let Ok(bytes) = fs::read("/etc/localtime")
+        && let Some(zone) = parse_tzif("system-local", &bytes)
+    {
+        return Some(zone);
     }
     None
 }

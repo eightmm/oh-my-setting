@@ -300,10 +300,10 @@ impl Store {
         let path = path.as_ref();
         self.relative(path)?;
         self.validate_write_parent(path, create)?;
-        if let Ok(a) = self.anchor(path) {
-            if let Some(s) = a.stat()? {
-                self.trusted(&s, false, false)?;
-            }
+        if let Ok(a) = self.anchor(path)
+            && let Some(s) = a.stat()?
+        {
+            self.trusted(&s, false, false)?;
         }
         self.root
             .atomic_mutate(
@@ -494,17 +494,16 @@ impl Store {
         let a = match self.anchor(&rel) {
             Ok(a) => a,
             Err(e) => {
-                if missing {
-                    match self.root.read_no_follow(
+                if missing
+                    && let Err(oms_safe_fs::ByteError::Missing) = self.root.read_no_follow(
                         &rel,
                         ByteReadOptions {
                             missing_ok: false,
                             max_bytes: 0,
                         },
-                    ) {
-                        Err(oms_safe_fs::ByteError::Missing) => return Ok(vec![]),
-                        _ => {}
-                    }
+                    )
+                {
+                    return Ok(vec![]);
                 }
                 return Err(e);
             }

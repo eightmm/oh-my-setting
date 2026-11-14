@@ -397,8 +397,7 @@ fn state_hint(_v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         let terminal = raw
             .split(|b| *b == b'\n')
             .filter_map(document)
-            .filter(|v| v["kind"] == "terminal")
-            .next_back();
+            .rfind(|v| v["kind"] == "terminal");
         if let Some(v) = terminal
             && v["status"] == "park"
         {

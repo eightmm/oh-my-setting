@@ -487,10 +487,10 @@ fn url_uuid_v5(name: &str) -> String {
         0x10325476,
         0xc3d2e1f0,
     ];
-    for block in bytes.chunks_exact(64) {
+    for block in bytes.as_chunks::<64>().0 {
         let mut words = [0u32; 80];
-        for (slot, chunk) in words.iter_mut().zip(block.chunks_exact(4)) {
-            *slot = u32::from_be_bytes(chunk.try_into().unwrap());
+        for (slot, chunk) in words.iter_mut().zip(block.as_chunks::<4>().0) {
+            *slot = u32::from_be_bytes(*chunk);
         }
         for i in 16..80 {
             words[i] = (words[i - 3] ^ words[i - 8] ^ words[i - 14] ^ words[i - 16]).rotate_left(1);
@@ -516,7 +516,7 @@ fn url_uuid_v5(name: &str) -> String {
         }
     }
     let mut uuid = [0u8; 16];
-    for (chunk, word) in uuid.chunks_exact_mut(4).zip(state) {
+    for (chunk, word) in uuid.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         chunk.copy_from_slice(&word.to_be_bytes());
     }
     uuid[6] = (uuid[6] & 0x0f) | 0x50;
@@ -899,20 +899,20 @@ pub fn settle_review(
             if aid.is_empty() {
                 continue;
             }
-            if let Some(req_att) = &request.owner_attempt {
-                if &aid != req_att {
-                    continue;
-                }
+            if let Some(req_att) = &request.owner_attempt
+                && &aid != req_att
+            {
+                continue;
             }
             let row_owner = row["refs"]["panel_owner"]
                 .as_str()
                 .filter(|v| !v.is_empty())
                 .or_else(|| row["provider"].as_str())
                 .unwrap_or_default();
-            if let Some(req_owner) = &request.owner {
-                if row_owner != req_owner {
-                    continue;
-                }
+            if let Some(req_owner) = &request.owner
+                && row_owner != req_owner
+            {
+                continue;
             }
             let dead = crate::state::TERMINAL_STATES.contains(&text(row, "state").as_str());
             if !dead {
@@ -1057,7 +1057,7 @@ pub fn settle_review(
         if plan_unreadable && target.is_some() && !landed {
             target = None;
         }
-        let stopped_ok = crate::control::stopped(repo, row, &attempts).is_ok();
+        let stopped_ok = crate::control::stopped(repo, row, attempts).is_ok();
         let exit_proven = artifacts
             .iter()
             .any(|art| art["attempt_id"] == ident && art["exit"].is_i64())

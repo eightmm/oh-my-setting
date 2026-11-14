@@ -42,15 +42,14 @@ fn rank(repo: &Path, index: &Graph, terms: &[String], cancel: &AtomicBool) -> Re
             continue;
         }
         let mut lines = vec![];
-        if !path.to_lowercase().ends_with(".ipynb") {
-            if let Ok(data) = root.read(path, 2 * 1024 * 1024, oms_safe_fs::Policy::source()) {
-                if sha(&data) == s(node, "source_digest") {
-                    lines = String::from_utf8_lossy(&data)
-                        .lines()
-                        .map(str::to_owned)
-                        .collect();
-                }
-            }
+        if !path.to_lowercase().ends_with(".ipynb")
+            && let Ok(data) = root.read(path, 2 * 1024 * 1024, oms_safe_fs::Policy::source())
+            && sha(&data) == s(node, "source_digest")
+        {
+            lines = String::from_utf8_lossy(&data)
+                .lines()
+                .map(str::to_owned)
+                .collect();
         }
         sources.insert(path.into(), lines);
     }
@@ -133,6 +132,7 @@ fn rank(repo: &Path, index: &Graph, terms: &[String], cancel: &AtomicBool) -> Re
     });
     Ok(rows)
 }
+#[allow(clippy::too_many_arguments)]
 pub fn select(
     repo: &Path,
     index: &Graph,
@@ -472,6 +472,7 @@ pub fn persist(state: &Path, repo: &Path, pack: &mut Value) -> Result<()> {
     measure(pack)?;
     write_json(&path, pack)
 }
+#[allow(clippy::too_many_arguments)]
 pub fn signature_map(
     repo: &Path,
     index: &Graph,

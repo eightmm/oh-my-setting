@@ -182,18 +182,18 @@ pub fn exec(
         spec.get("id").or("-").py(),
         if entry.is_empty() { "-" } else { entry }
     );
-    if let Some(route) = route {
-        if !st(route, "status").is_empty() {
-            out.push_str(&format!(
-                "route {}{}\n",
-                st(route, "status"),
-                if st(route, "reason").is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", st(route, "reason"))
-                }
-            ));
-        }
+    if let Some(route) = route
+        && !st(route, "status").is_empty()
+    {
+        out.push_str(&format!(
+            "route {}{}\n",
+            st(route, "status"),
+            if st(route, "reason").is_empty() {
+                String::new()
+            } else {
+                format!(": {}", st(route, "reason"))
+            }
+        ));
     }
     for id in order {
         let node = &nodes[&id];

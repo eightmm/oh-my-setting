@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 
-[workspace]
-resolver = "3"
 
 [dependencies]
 oms-panel-core = { path = "../oms-panel-core" }
@@ -29,3 +27,6 @@ unicode-general-category = "=0.6.0"
 [[test]]
 name = "panel_parity"
 harness = false
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1307,8 +1307,6 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
         vec!["artifact-index.sh", "telemetry"],
         vec!["artifact-index", "telemetry", "--waste"],
         vec!["artifact-index", "list"],
-        vec!["agent-events", "show", "--attempt", "missing"],
-        vec!["agent-events", "list"],
         vec!["input", "--help"],
         vec!["input", "attach", "terminal"],
         vec!["input", "list"],
@@ -1373,6 +1371,8 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
             "absent",
             "--last",
         ],
+        vec!["agent-events", "show", "--attempt", "missing"],
+        vec!["agent-events", "list"],
         vec!["agent-events", "show", "--attempt", "missing", "--bundle"],
     ] {
         exact(

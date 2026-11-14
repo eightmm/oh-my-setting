@@ -372,25 +372,25 @@ pub(crate) fn run(
         let started = epoch();
         storage::replace_locked(&ctx.state_repo, &bundle.join("output.log"), b"")?;
         let env = environment(ctx, &bundle)?;
-        if opts.all("data").is_empty() {
-            if let Ok(entries) = std::fs::read_dir(manifest_dir(ctx)) {
-                let mut names = entries
-                    .flatten()
-                    .filter(|e| e.path().extension().is_some_and(|s| s == "json"))
-                    .filter_map(|e| {
-                        e.path()
-                            .file_stem()
-                            .and_then(|n| n.to_str())
-                            .map(str::to_owned)
-                    })
-                    .collect::<Vec<_>>();
-                names.sort();
-                if !names.is_empty() {
-                    eprintln!(
-                        "capsule: data manifests present ({}); record provenance with --data NAME",
-                        names.join(", ")
-                    );
-                }
+        if opts.all("data").is_empty()
+            && let Ok(entries) = std::fs::read_dir(manifest_dir(ctx))
+        {
+            let mut names = entries
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|s| s == "json"))
+                .filter_map(|e| {
+                    e.path()
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .map(str::to_owned)
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            if !names.is_empty() {
+                eprintln!(
+                    "capsule: data manifests present ({}); record provenance with --data NAME",
+                    names.join(", ")
+                );
             }
         }
         for output in opts.all("output") {
@@ -537,18 +537,18 @@ pub(crate) fn run(
                 &helpers::agent(),
             )?;
         }
-        if services.available(oms_command_runs::Service::Journal) {
-            if let Err(e) = services.observe(oms_command_runs::Observation {
+        if services.available(oms_command_runs::Service::Journal)
+            && let Err(e) = services.observe(oms_command_runs::Observation {
                 repo: &ctx.repo,
                 source_type: "run-capsule",
                 record_path: &bundle.join("capsule.json"),
                 row: &helpers::context(&capsule)?,
                 event_type: None,
-            }) {
-                diagnostics.extend_from_slice(
-                    format!("capsule: journal observation failed: {e}\n").as_bytes(),
-                );
-            }
+            })
+        {
+            diagnostics.extend_from_slice(
+                format!("capsule: journal observation failed: {e}\n").as_bytes(),
+            );
         }
         diagnostics.extend_from_slice(
             format!(
@@ -819,6 +819,7 @@ fn environment(ctx: &Context<'_>, bundle: &Path) -> Result<Value> {
     if let Ok(name) = std::env::var("CONDA_DEFAULT_ENV")
         && !name.is_empty()
     {
+        let urls = regex::Regex::new(r"://[^/\s@]*@|/t/[^/\s]+/").expect("static expression");
         for tool in ["conda", "mamba"] {
             if let Some(body) = probe(&[tool, "env", "export", "--no-builds"]) {
                 let mut clean = String::new();
@@ -850,8 +851,6 @@ fn environment(ctx: &Context<'_>, bundle: &Path) -> Result<Value> {
                         },
                     ),
                 ]);
-                let urls =
-                    regex::Regex::new(r"://[^/\s@]*@|/t/[^/\s]+/").expect("static expression");
                 if clean.len() <= 1024 * 1024
                     && !urls.is_match(&clean)
                     && helpers::scrub(&string(&clean)).is_ok()

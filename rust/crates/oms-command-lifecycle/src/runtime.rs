@@ -288,6 +288,7 @@ pub(crate) fn command_env(
 ) -> Result<Output> {
     command_env_limit(program, args, cwd, input, flag, timeout, environment, LIMIT)
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn command_env_limit(
     program: impl AsRef<OsStr>,
     args: &[OsString],

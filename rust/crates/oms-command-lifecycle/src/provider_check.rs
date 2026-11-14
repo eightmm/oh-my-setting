@@ -138,6 +138,8 @@ pub(crate) fn models(
                 .unwrap_or(paths.home.join(".cache"))
                 .join("oh-my-setting/capabilities")
         });
+    let effort_pattern = regex::Regex::new(r"\(([a-z][a-z0-9]*(?:\s*[,|]\s*[a-z][a-z0-9]*)+)\)")
+        .map_err(|_| r::Error(2, "invalid effort pattern".into()))?;
     for (provider, binary, family) in [
         ("codex", "codex", "openai"),
         ("claude", "claude", "anthropic"),
@@ -263,9 +265,7 @@ pub(crate) fn models(
                 .collect();
                 if mechanism == "flag" {
                     let lines = text.lines().collect::<Vec<_>>();
-                    let pattern =
-                        regex::Regex::new(r"\(([a-z][a-z0-9]*(?:\s*[,|]\s*[a-z][a-z0-9]*)+)\)")
-                            .map_err(|_| r::Error(2, "invalid effort pattern".into()))?;
+                    let pattern = &effort_pattern;
                     for (i, line) in lines.iter().enumerate() {
                         if line.contains(control) {
                             let window = lines[i..lines.len().min(i + 3)].join(" ");

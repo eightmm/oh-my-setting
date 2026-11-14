@@ -344,12 +344,12 @@ impl Directory {
             fs::renameat(&self.fd, temp, &self.fd, name).map_err(io)?;
             sync_dir(&self.fd)
         })();
-        if result.is_err() {
-            if let Ok(s) = fs::statat(&self.fd, temp, AtFlags::SYMLINK_NOFOLLOW) {
-                if same(&initial, &s) && regular(&s) {
-                    let _ = self.unlink(temp, Some(&s));
-                }
-            }
+        if result.is_err()
+            && let Ok(s) = fs::statat(&self.fd, temp, AtFlags::SYMLINK_NOFOLLOW)
+            && same(&initial, &s)
+            && regular(&s)
+        {
+            let _ = self.unlink(temp, Some(&s));
         }
         result
     }

@@ -11,6 +11,7 @@ fn confidence(edge: &Value) -> u8 {
         _ => 3,
     }
 }
+#[allow(clippy::too_many_arguments)]
 pub fn model(
     graph: &Graph,
     limit: i64,

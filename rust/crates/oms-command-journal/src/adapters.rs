@@ -78,7 +78,7 @@ fn text(value: &Value) -> Result<String, String> {
         .transpose()?
         .unwrap_or_default())
 }
-fn first<'a>(values: &[&'a Value]) -> Value {
+fn first(values: &[&Value]) -> Value {
     values
         .iter()
         .find(|v| json_truthy(v))
@@ -377,11 +377,11 @@ pub fn build_source_payload(
             "outcome":{"summary":summary,"status":o.outcome_status.as_deref().unwrap_or("recorded")},
             "verification_status":o.verification_status.as_deref().unwrap_or(if ["handoff","session-handoff"].contains(&kind){"not_applicable"}else{"not_verified"}),
             "evidence":[{"type":kind,"ref":sid}]});
-        if kind == "peer-review" {
-            if let Some(task) = infer_review_task_id(repo, path, "") {
-                *payload.at_mut("correlation") = json!({"task_id":task});
-                *payload.at_mut("outcome").at_mut("summary") = json!(format!("{summary}: {task}"));
-            }
+        if kind == "peer-review"
+            && let Some(task) = infer_review_task_id(repo, path, "")
+        {
+            *payload.at_mut("correlation") = json!({"task_id":task});
+            *payload.at_mut("outcome").at_mut("summary") = json!(format!("{summary}: {task}"));
         }
         if let Some(relative) = relative(repo, evidence) {
             *payload.at_mut("refs") = json!([{"type":kind,"path":relative,"id":sid}]);
@@ -389,15 +389,15 @@ pub fn build_source_payload(
         payload
     } else {
         let row = read_json(path)?;
-        let occurred = nonempty(&row.at("ts"))
+        let occurred = nonempty(row.at("ts"))
             .map(|v| v.copy())
             .unwrap_or(json!(occurred));
         match kind {
             "panel-result" => {
                 let sid = supplied_id.map(str::to_owned).map(Ok).unwrap_or_else(|| {
                     text(&first(&[
-                        &row.at("revision"),
-                        &row.at("task_id"),
+                        row.at("revision"),
+                        row.at("task_id"),
                         &json!(
                             path.file_stem()
                                 .map(crate::sanitize::diagnostic_os_str)
@@ -405,10 +405,10 @@ pub fn build_source_payload(
                         ),
                     ]))
                 })?;
-                let task = sanitize_text(&text(&row.at("task_id"))?, 160);
+                let task = sanitize_text(&text(row.at("task_id"))?, 160);
                 let summary =
-                    sanitize_text(text(&row.at("summary"))?.lines().next().unwrap_or(""), 120);
-                let status = nonempty(&row.at("outcome"))
+                    sanitize_text(text(row.at("summary"))?.lines().next().unwrap_or(""), 120);
+                let status = nonempty(row.at("outcome"))
                     .map(|v| v.copy())
                     .unwrap_or(json!("completed"));
                 let panel_summary = if let Some(summary) = &o.outcome {
@@ -427,8 +427,8 @@ pub fn build_source_payload(
             "run-ledger" => {
                 let sid = if let Some(id) = supplied_id {
                     id.to_owned()
-                } else if json_truthy(&row.at("id")) {
-                    python_str_checked(&row.at("id"))?
+                } else if json_truthy(row.at("id")) {
+                    python_str_checked(row.at("id"))?
                 } else {
                     let stable: Map = crate::json::object(
                         [
@@ -450,11 +450,11 @@ pub fn build_source_payload(
                 };
                 let exit = &row.at("exit");
                 let research = &row.at("research");
-                let note = sanitize_text(&text(&row.at("note"))?, 800);
-                let summary = if json_truthy(&research.at("question")) {
+                let note = sanitize_text(&text(row.at("note"))?, 800);
+                let summary = if json_truthy(research.at("question")) {
                     format!(
                         "Research run: {}",
-                        python_str_checked(&research.at("question"))?
+                        python_str_checked(research.at("question"))?
                     )
                 } else if !note.is_empty() {
                     note
@@ -463,12 +463,12 @@ pub fn build_source_payload(
                 };
                 let mut payload = json!({"event_type":"run","occurred_at":occurred,"source":{"type":kind,"id":sid},"correlation":{"run_id":row.at("run_id"),"operation_id":row.at("operation_id")},
                     "outcome":{"summary":summary,"status":if zero_exit(exit){"success"}else{"failure"}},"verification_status":if !exit.is_null()&&!zero_exit(exit){"failed"}else{"not_verified"},
-                    "evidence":[{"type":"run-ledger","ref":source_ref(repo,evidence,&sid)}],"provenance":{"code_commit":row.at("git_sha"),"job_id":row.at("slurm_job_id"),"command_summary":command_summary(&row.at("cmd"))?,"exit_code":exit,"duration_seconds":row.at("duration_s"),
+                    "evidence":[{"type":"run-ledger","ref":source_ref(repo,evidence,&sid)}],"provenance":{"code_commit":row.at("git_sha"),"job_id":row.at("slurm_job_id"),"command_summary":command_summary(row.at("cmd"))?,"exit_code":exit,"duration_seconds":row.at("duration_s"),
                     "hypothesis":research.at("hypothesis"),"prediction":research.at("prediction"),"baseline":research.at("baseline"),"primary_metric":research.at("metric"),"success_criterion":research.at("success"),"independent_change":research.at("change")}});
-                if json_truthy(&research.at("question")) {
+                if json_truthy(research.at("question")) {
                     *payload.at_mut("goal") = research.at("question").copy();
                 }
-                let metrics = metrics(&row.at("metrics"), &sid);
+                let metrics = metrics(row.at("metrics"), &sid);
                 if !metrics.is_empty() {
                     *payload.at_mut("metrics") = json!(metrics);
                 }
@@ -478,14 +478,14 @@ pub fn build_source_payload(
                 let sid = supplied_id
                     .map(str::to_owned)
                     .map(Ok)
-                    .unwrap_or_else(|| text(&row.at("id")))?;
+                    .unwrap_or_else(|| text(row.at("id")))?;
                 let result = &row.at("result");
                 let exit = &result.at("exit");
                 let mut payload = json!({"event_type":"experiment","occurred_at":occurred,"source":{"type":kind,"id":sid},"correlation":{"run_id":sid},
-                    "outcome":{"summary":nonempty(&row.at("note")).map(|v| v.copy()).unwrap_or(json!("Experiment run completed")),"status":if zero_exit(exit){"success"}else{"failure"}},
+                    "outcome":{"summary":nonempty(row.at("note")).map(|v| v.copy()).unwrap_or(json!("Experiment run completed")),"status":if zero_exit(exit){"success"}else{"failure"}},
                     "verification_status":if !exit.is_null()&&!zero_exit(exit){"failed"}else{"not_verified"},"evidence":[{"type":"capsule","ref":source_ref(repo,evidence,&sid)}],
-                    "provenance":{"run_id":sid,"job_id":row.at("slurm_job_id"),"seed":row.at("seeds").as_array().and_then(|a|a.first()),"code_commit":first(&[&row.at("git").at("commit"),&row.at("git").at("commit_short")]),
-                    "command_summary":command_summary(&row.at("command"))?,"exit_code":exit,"duration_seconds":result.at("duration_s"),"gpu":row.at("env").at("gpu"),"execution_environment":row.at("env").at("platform")}});
+                    "provenance":{"run_id":sid,"job_id":row.at("slurm_job_id"),"seed":row.at("seeds").as_array().and_then(|a|a.first()),"code_commit":first(&[row.at("git").at("commit"),row.at("git").at("commit_short")]),
+                    "command_summary":command_summary(row.at("command"))?,"exit_code":exit,"duration_seconds":result.at("duration_s"),"gpu":row.at("env").at("gpu"),"execution_environment":row.at("env").at("platform")}});
                 let refs: Vec<Value> = [("configs", "config"), ("outputs", "artifact")]
                     .into_iter()
                     .flat_map(|(field, kind)| {
@@ -502,7 +502,7 @@ pub fn build_source_payload(
                     *payload.at_mut("refs") = json!(refs);
                 }
                 if result.at("metrics").is_object() {
-                    *payload.at_mut("metrics") = json!(metrics(&result.at("metrics"), &sid));
+                    *payload.at_mut("metrics") = json!(metrics(result.at("metrics"), &sid));
                 }
                 payload
             }
@@ -510,31 +510,31 @@ pub fn build_source_payload(
                 let sid = supplied_id
                     .map(str::to_owned)
                     .map(Ok)
-                    .unwrap_or_else(|| text(&row.at("job_id")))?;
-                let state = text(&row.at("state"))?;
-                json!({"event_type":"job","occurred_at":o.occurred_at.clone().map(|s| Value::String(s.as_str().into())).unwrap_or_else(||nonempty(&row.at("reconciled_at")).map(|v| v.copy()).unwrap_or(json!(utc_rfc3339(now)))),"source":{"type":kind,"id":sid},
+                    .unwrap_or_else(|| text(row.at("job_id")))?;
+                let state = text(row.at("state"))?;
+                json!({"event_type":"job","occurred_at":o.occurred_at.clone().map(|s| Value::String(s.as_str().into())).unwrap_or_else(||nonempty(row.at("reconciled_at")).map(|v| v.copy()).unwrap_or(json!(utc_rfc3339(now)))),"source":{"type":kind,"id":sid},
                     "outcome":{"summary":format!("Job {sid} finished: {state}"),"status":if state=="COMPLETED"{"success"}else{"failure"}},"verification_status":if state=="COMPLETED"{"not_verified"}else{"failed"},
                     "evidence":[{"type":"job-reconcile","ref":source_ref(repo,evidence,&sid)}],"provenance":{"job_id":sid,"exit_code":row.at("exit_code"),"duration_seconds":row.at("elapsed")}})
             }
             "experiment-board" => {
-                let id = text(&row.at("id"))?;
-                let state = text(&row.at("status"))?;
+                let id = text(row.at("id"))?;
+                let state = text(row.at("status"))?;
                 let sid = supplied_id
                     .map(str::to_owned)
                     .unwrap_or_else(|| format!("{id}:{state}"));
-                let result = first(&[&row.at("result"), &row.at("reason")]);
+                let result = first(&[row.at("result"), row.at("reason")]);
                 let mut payload = json!({"event_type":"experiment","occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":if json_truthy(&result){format!("Experiment {id} {state}: {}",python_str_checked(&result)?)}else{format!("Experiment {id} {state}")},"status":state},
                     "verification_status":"not_verified","evidence":[{"type":kind,"ref":source_ref(repo,evidence,&sid)}],"provenance":{"job_id":row.at("job"),"verdict":row.at("result")}});
                 for (field, key) in [("reason", "blocker"), ("next", "next_action")] {
-                    if json_truthy(&row.at(field)) {
+                    if json_truthy(row.at(field)) {
                         *payload.at_mut(key) = row.at(field).copy();
                     }
                 }
                 payload
             }
             "ci-status" => {
-                let conclusion = text(&first(&[&row.at("conclusion"), &row.at("status")]))?;
-                let run = first(&[&row.at("databaseId"), &row.at("run_id"), &row.at("id")]);
+                let conclusion = text(&first(&[row.at("conclusion"), row.at("status")]))?;
+                let run = first(&[row.at("databaseId"), row.at("run_id"), row.at("id")]);
                 let url = &row.at("url");
                 let attempt = &row.at("attempt");
                 let sid = if let Some(id) = supplied_id {
@@ -543,13 +543,13 @@ pub fn build_source_payload(
                     let identity = if json_truthy(&run) {
                         format!(
                             "{}:run:{}",
-                            python_str_checked(&row.at("sha"))?,
+                            python_str_checked(row.at("sha"))?,
                             python_str_checked(&run)?
                         )
                     } else {
                         format!(
                             "{}:run-url:{}",
-                            python_str_checked(&row.at("sha"))?,
+                            python_str_checked(row.at("sha"))?,
                             python_str_checked(url)?
                         )
                     };
@@ -562,7 +562,7 @@ pub fn build_source_payload(
                         format!("{identity}:{conclusion}")
                     }
                 } else {
-                    format!("{}:{conclusion}", python_str_checked(&row.at("sha"))?)
+                    format!("{}:{conclusion}", python_str_checked(row.at("sha"))?)
                 };
                 let failed = ["failure", "timed_out", "cancelled", "startup_failure"]
                     .contains(&conclusion.as_str());
@@ -577,21 +577,21 @@ pub fn build_source_payload(
                     json!({"type":"commit","id":row.at("sha")}),
                     json!({"type":"ci-run","url":url}),
                 ];
-                if json_truthy(&row.at("pr_number")) || json_truthy(&row.at("pr_url")) {
+                if json_truthy(row.at("pr_number")) || json_truthy(row.at("pr_url")) {
                     refs.push(
                         json!({"type":"pull_request","id":row.at("pr_number"),"url":row.at("pr_url")}),
                     );
                 }
-                json!({"event_type":"ci","occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":format!("CI {conclusion} for commit {}",python_str_checked(&row.at("sha"))?),"status":status},"verification_status":verification,
+                json!({"event_type":"ci","occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":format!("CI {conclusion} for commit {}",python_str_checked(row.at("sha"))?),"status":status},"verification_status":verification,
                     "refs":refs,"evidence":[{"type":"ci","ref":source_ref(repo,evidence,&sid)}],"provenance":{"workflow":row.at("workflow"),"attempt":attempt,"run_id":run}})
             }
             _ => {
                 let sid = supplied_id
                     .map(str::to_owned)
                     .map(Ok)
-                    .unwrap_or_else(|| text(&first(&[&row.at("id"), &row.at("event_id")])))?;
-                json!({"event_type":o.event_type.as_deref().unwrap_or("annotation"),"occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":o.outcome.clone().map(|s| Value::String(s.as_str().into())).unwrap_or_else(||nonempty(&row.at("summary")).map(|v| v.copy()).unwrap_or(json!(kind))),
-                    "status":o.outcome_status.clone().map(|s| Value::String(s.as_str().into())).unwrap_or_else(||nonempty(&row.at("status")).map(|v| v.copy()).unwrap_or(json!("recorded")))},"verification_status":"not_verified","evidence":[{"type":kind,"ref":sid}]})
+                    .unwrap_or_else(|| text(&first(&[row.at("id"), row.at("event_id")])))?;
+                json!({"event_type":o.event_type.as_deref().unwrap_or("annotation"),"occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":o.outcome.clone().map(|s| Value::String(s.as_str().into())).unwrap_or_else(||nonempty(row.at("summary")).map(|v| v.copy()).unwrap_or(json!(kind))),
+                    "status":o.outcome_status.clone().map(|s| Value::String(s.as_str().into())).unwrap_or_else(||nonempty(row.at("status")).map(|v| v.copy()).unwrap_or(json!("recorded")))},"verification_status":"not_verified","evidence":[{"type":kind,"ref":sid}]})
             }
         }
     };
@@ -618,11 +618,11 @@ pub fn build_source_payload(
     }
     if let Some(value) = o.outcome.as_ref().filter(|v| !v.is_empty()) {
         *payload.at_mut("outcome").at_mut("summary") = json!(if kind == "peer-review"
-            && json_truthy(&payload.at("correlation").at("task_id"))
+            && json_truthy(payload.at("correlation").at("task_id"))
         {
             format!(
                 "{value}: {}",
-                python_str_checked(&payload.at("correlation").at("task_id"))?
+                python_str_checked(payload.at("correlation").at("task_id"))?
             )
         } else {
             value.clone()
@@ -639,7 +639,7 @@ pub(crate) fn enrich_reviews(repo: &Path, events: Vec<Value>) -> Vec<Value> {
         .into_iter()
         .map(|mut event| {
             if event.at("source").at("type").as_str().as_deref() == Some("peer-review")
-                && !json_truthy(&event.at("correlation").at("task_id"))
+                && !json_truthy(event.at("correlation").at("task_id"))
             {
                 let path = event
                     .at("refs")
@@ -648,7 +648,7 @@ pub(crate) fn enrich_reviews(repo: &Path, events: Vec<Value>) -> Vec<Value> {
                     .flatten()
                     .find(|r| {
                         r.at("type").as_str().as_deref() == Some("peer-review")
-                            && json_truthy(&r.at("path"))
+                            && json_truthy(r.at("path"))
                     })
                     .and_then(|r| r.at("path").as_str());
                 if let Some(task) =
@@ -658,8 +658,8 @@ pub(crate) fn enrich_reviews(repo: &Path, events: Vec<Value>) -> Vec<Value> {
                         *event.at_mut("correlation") = json!({});
                     }
                     *event.at_mut("correlation").at_mut("task_id") = json!(task);
-                    let summary = if json_truthy(&event.at("outcome").at("summary")) {
-                        python_str(&event.at("outcome").at("summary"))
+                    let summary = if json_truthy(event.at("outcome").at("summary")) {
+                        python_str(event.at("outcome").at("summary"))
                     } else {
                         "Peer review outcome".into()
                     };

@@ -405,10 +405,10 @@ impl Reactor {
     /// Numeric provenance is retained; callers supply the real received signal.
     pub fn stop(&mut self, id: JobId, reason: StopReason) -> crate::Result<()> {
         let job = self.jobs.get_mut(&id).ok_or("unknown owned process")?;
-        if let StopReason::Signal(number) = reason {
-            if Signal::from_named_raw(number).is_none() {
-                return Err("unsupported signal number".into());
-            }
+        if let StopReason::Signal(number) = reason
+            && Signal::from_named_raw(number).is_none()
+        {
+            return Err("unsupported signal number".into());
         }
         job.begin_stop(reason);
         Ok(())

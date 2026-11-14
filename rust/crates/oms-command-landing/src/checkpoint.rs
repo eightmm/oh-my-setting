@@ -110,15 +110,14 @@ pub(crate) fn create(
     )?;
     if reuse {
         for name in names(repo)? {
-            if let Ok((row, _, _)) = metadata(repo, &name) {
-                if string(&row, "label") == label
-                    && string(&row, "head") == head
-                    && string(&row, "index_sha256") == digest(&index)
-                    && string(&row, "worktree_sha256") == digest(&work)
-                    && row.get("untracked_fingerprint") == capture.get("untracked_fingerprint")
-                {
-                    return Ok((name, row, true));
-                }
+            if let Ok((row, _, _)) = metadata(repo, &name)
+                && string(&row, "label") == label
+                && string(&row, "head") == head
+                && string(&row, "index_sha256") == digest(&index)
+                && string(&row, "worktree_sha256") == digest(&work)
+                && row.get("untracked_fingerprint") == capture.get("untracked_fingerprint")
+            {
+                return Ok((name, row, true));
             }
         }
     }
@@ -502,7 +501,7 @@ fn number(raw: &[u8]) -> Result<u64> {
 }
 pub fn restore_untracked(repo: &Path, archive: &[u8], apply: bool) -> Result<V> {
     require(
-        archive.len() >= 1024 && archive.len() % 512 == 0,
+        archive.len() >= 1024 && archive.len().is_multiple_of(512),
         "truncated or malformed untracked archive",
     )?;
     let (mut offset, mut missing, mut present, mut written, mut refused) =

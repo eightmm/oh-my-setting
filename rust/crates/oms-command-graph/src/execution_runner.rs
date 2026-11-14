@@ -367,7 +367,8 @@ fn build_invocation(
 fn claimed_outcome(node: &Value, task: &Value, facts: &Value) -> &'static str {
     let state = st(task, "state");
     let land = st(node, "mode") == "land";
-    let claimed = if state == "blocked" {
+
+    (if state == "blocked" {
         "blocked"
     } else if (!land && state == "review" && task.get("patch").truth())
         || (!land && state == "done")
@@ -382,8 +383,7 @@ fn claimed_outcome(node: &Value, task: &Value, facts: &Value) -> &'static str {
         "unverified"
     } else {
         "failed"
-    };
-    claimed
+    }) as _
 }
 fn outcome(node: &Value, task: &Value, facts: &Value) -> (String, Vec<Value>) {
     let claimed = claimed_outcome(node, task, facts);
@@ -695,6 +695,7 @@ fn append_context_pack(argv: &mut Vec<String>, context: Option<&Value>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn work(
     repo: &Path,
     run: &str,
@@ -1378,7 +1379,7 @@ fn record_job(
             .rev()
             .collect::<String>(),
     );
-    let artifact = events::directory(repo, &run)?
+    let artifact = events::directory(repo, run)?
         .join("artifacts")
         .join(format!("{}-{attempt}.txt", {
             let name = id
@@ -1454,7 +1455,7 @@ fn record_job(
     if !st(original, "bind_task").is_empty() {
         fields.set("binding", st(original, "bind_task"));
     }
-    record(repo, &run, &id, attempt, fields)?;
+    record(repo, run, &id, attempt, fields)?;
     Ok(())
 }
 fn native_deadline<T>(
@@ -1518,10 +1519,10 @@ fn read_cache(repo: &Path, key: &str) -> Option<Value> {
 fn proof(node: &Value, facts: &Value) -> Value {
     let mut result = empty();
     for p in ar(node, "proof") {
-        if let Ok((key, _, _)) = predicate(&p.py()) {
-            if facts.has(&key) {
-                result.set(&key, facts.get(&key).clone());
-            }
+        if let Ok((key, _, _)) = predicate(&p.py())
+            && facts.has(&key)
+        {
+            result.set(&key, facts.get(&key).clone());
         }
     }
     result

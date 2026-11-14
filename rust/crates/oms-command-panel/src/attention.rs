@@ -83,15 +83,12 @@ fn parse(value: &Value) -> BTreeMap<String, BTreeMap<String, (String, i64)>> {
                             .bytes()
                             .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
                         && entry.as_array().is_some_and(|v| v.len() == 2)
+                        && let (Some(class), Some(at)) = (entry[0].as_str(), entry[1].as_i64())
+                        && !class.is_empty()
+                        && class.len() <= 24
+                        && class.bytes().all(|v| v.is_ascii_lowercase() || v == b'_')
                     {
-                        if let (Some(class), Some(at)) = (entry[0].as_str(), entry[1].as_i64()) {
-                            if !class.is_empty()
-                                && class.len() <= 24
-                                && class.bytes().all(|v| v.is_ascii_lowercase() || v == b'_')
-                            {
-                                saved.insert(key.clone(), (class.into(), at));
-                            }
-                        }
+                        saved.insert(key.clone(), (class.into(), at));
                     }
                 }
             }

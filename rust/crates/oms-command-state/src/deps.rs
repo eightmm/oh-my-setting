@@ -237,6 +237,8 @@ pub fn card(repo: &Path, name: &str) -> Result<Value> {
         r"^\s*-\s*(?:[A-Za-z0-9_.-]+::)?([A-Za-z0-9._-]+)\s*={1,2}\s*([A-Za-z0-9.!+_*-]+)",
     )
     .expect("static expression");
+    let pin_re =
+        Regex::new(r"^={2,3}\s*([A-Za-z0-9][A-Za-z0-9.!+_*-]*)").expect("static expression");
     for entry in entries {
         let file = entry.file_name().to_string_lossy().into_owned();
         let lower = file.to_lowercase();
@@ -290,10 +292,7 @@ pub fn card(repo: &Path, name: &str) -> Result<Value> {
                         && canonical(&m[1]) == wanted
                     {
                         let spec = m[2].trim();
-                        let pin = Regex::new(r"^={2,3}\s*([A-Za-z0-9][A-Za-z0-9.!+_*-]*)")
-                            .expect("static expression")
-                            .captures(spec)
-                            .map(|m| m[1].to_owned());
+                        let pin = pin_re.captures(spec).map(|m| m[1].to_owned());
                         if let Some(version) = pin {
                             pinned.push(object([
                                 ("file", string(&file)),

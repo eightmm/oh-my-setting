@@ -31,7 +31,7 @@ fn base64(raw: &[u8]) -> String {
     let mut s = crate::thread::encode(raw)
         .replace('-', "+")
         .replace('_', "/");
-    while s.len() % 4 != 0 {
+    while !s.len().is_multiple_of(4) {
         s.push('=');
     }
     s

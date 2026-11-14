@@ -98,10 +98,8 @@ impl<'a> Git<'a> {
             repo: &physical,
             interrupted,
         };
-        Ok(
-            std::fs::canonicalize(git.text(&["rev-parse", "--show-toplevel"])?)
-                .map_err(|_| Error::new(2, "not a Git repository"))?,
-        )
+        std::fs::canonicalize(git.text(&["rev-parse", "--show-toplevel"])?)
+            .map_err(|_| Error::new(2, "not a Git repository"))
     }
     pub fn output(
         &self,

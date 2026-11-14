@@ -354,10 +354,10 @@ pub fn carry_plan(state: &Value, current: Option<&Value>, bounded: bool) -> Resu
                 "state",
                 "alias",
             ] {
-                if let Some(v) = p.get(k) {
-                    if !v.is_null() {
-                        e.set(k, v.clone());
-                    }
+                if let Some(v) = p.get(k)
+                    && !v.is_null()
+                {
+                    e.set(k, v.clone());
                 }
             }
             let first = p.text("initial_consumer");
@@ -530,31 +530,30 @@ impl Room<'_> {
                 .list("participants")
                 .iter()
                 .find(|w| w["participant"] == p["participant"] && w.flag("joined"))
+                && (p["provider"] != wanted["provider"] || p["model"] != wanted["model"])
             {
-                if p["provider"] != wanted["provider"] || p["model"] != wanted["model"] {
-                    let source = self.snapshot(state.text("id"))?;
-                    let swaps = source
-                        .rows
-                        .iter()
-                        .filter(|r| {
-                            r["room_event"].text("kind") == "main-swap"
-                                && r["room_event"]["participant"] == p["participant"]
-                        })
-                        .collect::<Vec<_>>();
-                    let mut matched = false;
-                    for row in swaps {
-                        let e = &row["room_event"];
-                        if e["provider"] == wanted["provider"] && e["model"] == wanted["model"] {
-                            self.append_at(new, e, row.text("text"), Carry::Replay(None))?;
-                            matched = true;
-                            break;
-                        }
+                let source = self.snapshot(state.text("id"))?;
+                let swaps = source
+                    .rows
+                    .iter()
+                    .filter(|r| {
+                        r["room_event"].text("kind") == "main-swap"
+                            && r["room_event"]["participant"] == p["participant"]
+                    })
+                    .collect::<Vec<_>>();
+                let mut matched = false;
+                for row in swaps {
+                    let e = &row["room_event"];
+                    if e["provider"] == wanted["provider"] && e["model"] == wanted["model"] {
+                        self.append_at(new, e, row.text("text"), Carry::Replay(None))?;
+                        matched = true;
+                        break;
                     }
-                    if !matched {
-                        return Err(Error::new(
-                            "carried main identity has no predecessor swap proof",
-                        ));
-                    }
+                }
+                if !matched {
+                    return Err(Error::new(
+                        "carried main identity has no predecessor swap proof",
+                    ));
                 }
             }
         }

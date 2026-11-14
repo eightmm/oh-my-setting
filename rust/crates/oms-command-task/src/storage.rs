@@ -92,6 +92,7 @@ impl Store {
     pub fn read(&self) -> Result<Option<Vec<u8>>> {
         read(&self.root, &self.relative, MAX_PACKET)
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn write(
         &self,
         repo: &Path,
@@ -178,6 +179,7 @@ impl Store {
             current = dir.parent();
         }
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn archive(
         &self,
         repo: &Path,

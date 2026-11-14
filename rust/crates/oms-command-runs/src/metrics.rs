@@ -493,7 +493,7 @@ pub fn validate_identity(value: &Json) -> Result<()> {
         .ok_or_else(|| Error::usage("invalid recorded input identity git state"))?;
     if !(hex(commit, &[40, 64]) || ["none", "no-commit"].contains(&commit))
         || count(get(git, "dirty"), 1_000_000_000).is_none()
-        || (!diff.is_empty() && !hex(&diff, &[16, 64]))
+        || (!diff.is_empty() && !hex(diff, &[16, 64]))
     {
         return Err(Error::usage("invalid recorded input identity git state"));
     }
@@ -927,16 +927,15 @@ pub fn groups(rows: &[(f64, Json)], metric: &str) -> Result<(Vec<Group>, usize)>
             continue;
         }
         let identity = get(row, "input_identity");
-        if let Some(i) = identity {
-            if validate_identity(i).is_err()
+        if let Some(i) = identity
+            && (validate_identity(i).is_err()
                 || s(i, "config_status") == "incomplete"
                 || ["none", "no-commit"].contains(&s(get(i, "git").unwrap(), "commit").as_str())
                 || get(get(i, "git").unwrap(), "dirty").is_some_and(truth)
-                    && s(get(i, "git").unwrap(), "diff_sha256").is_empty()
-            {
-                loose += 1;
-                continue;
-            }
+                    && s(get(i, "git").unwrap(), "diff_sha256").is_empty())
+        {
+            loose += 1;
+            continue;
         }
         let signature = Json::Array(vec![
             identity

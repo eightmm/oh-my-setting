@@ -339,10 +339,10 @@ pub(crate) fn replace(
     use oms_safe_fs::{ByteReadOptions, MutationOptions, Root};
     let path = root.join(relative);
     let snapshot = Namespace::snapshot(root, &path)?;
-    if let Ok(info) = fs::symlink_metadata(&path) {
-        if !own(&info) {
-            return Err("foreign or world-writable publication".into());
-        }
+    if let Ok(info) = fs::symlink_metadata(&path)
+        && !own(&info)
+    {
+        return Err("foreign or world-writable publication".into());
     }
     let opened = Root::open(root).map_err(|e| format!("publication root: {e:?}"))?;
     opened

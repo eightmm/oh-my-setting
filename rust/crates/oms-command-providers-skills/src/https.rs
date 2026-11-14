@@ -106,23 +106,21 @@ impl Drop for RequestDirectory {
         let Ok(info) = rfs::fstat(&self.fd) else {
             return;
         };
-        if info.st_uid != self.uid || (info.st_dev as u64, info.st_ino as u64) != self.identity {
+        if info.st_uid != self.uid || ({ info.st_dev }, { info.st_ino }) != self.identity {
             return;
         }
         if let (Some(expected), Ok(info)) = (
             self.file,
             rfs::statat(&self.fd, "cfg", AtFlags::SYMLINK_NOFOLLOW),
-        ) {
-            if info.st_uid == self.uid
-                && info.st_nlink == 1
-                && FileType::from_raw_mode(info.st_mode) == FileType::RegularFile
-                && (info.st_dev as u64, info.st_ino as u64) == expected
-            {
-                let _ = rfs::unlinkat(&self.fd, "cfg", AtFlags::empty());
-            }
+        ) && info.st_uid == self.uid
+            && info.st_nlink == 1
+            && FileType::from_raw_mode(info.st_mode) == FileType::RegularFile
+            && ({ info.st_dev }, { info.st_ino }) == expected
+        {
+            let _ = rfs::unlinkat(&self.fd, "cfg", AtFlags::empty());
         }
         if rfs::lstat(&self.path)
-            .is_ok_and(|info| (info.st_dev as u64, info.st_ino as u64) == self.identity)
+            .is_ok_and(|info| ({ info.st_dev }, { info.st_ino }) == self.identity)
         {
             let _ = std::fs::remove_dir(&self.path);
         }

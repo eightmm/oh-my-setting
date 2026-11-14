@@ -105,14 +105,14 @@ fn status(c: &Context<'_>, o: &Options, git: &Git<'_>, directory: &Path) -> Resu
             if entry.path().extension() != Some(OsStr::new("json")) {
                 continue;
             }
-            if let Ok(raw) = storage::read_external(&entry.path(), false) {
-                if let Ok(row) = V::parse(&raw) {
-                    let modified = entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::UNIX_EPOCH);
-                    receipts.push((string(&row, "sha") == head, modified, row, entry.path()));
-                }
+            if let Ok(raw) = storage::read_external(&entry.path(), false)
+                && let Ok(row) = V::parse(&raw)
+            {
+                let modified = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                receipts.push((string(&row, "sha") == head, modified, row, entry.path()));
             }
         }
     }
@@ -403,16 +403,16 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         );
         save(&receipt, &row, c.interrupted)?;
     }
-    if row.get("push").get("moved") == &1usize.into() {
-        if let Some(base) = crate::helpers::recorded_base(&row)? {
-            let _ = crate::attribution::record_commits(
-                &c.state(&repo)?,
-                &repo,
-                &format!("{base}..{}", snapshot.head),
-                &stamp,
-                c.interrupted,
-            );
-        }
+    if row.get("push").get("moved") == &1usize.into()
+        && let Some(base) = crate::helpers::recorded_base(&row)?
+    {
+        let _ = crate::attribution::record_commits(
+            &c.state(&repo)?,
+            &repo,
+            &format!("{base}..{}", snapshot.head),
+            &stamp,
+            c.interrupted,
+        );
     }
     if ci_wait == 0 {
         row.set("ci", obj([("conclusion", "skipped".into())]));
@@ -492,16 +492,15 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     let local_full = row.get("gate").get("scope").text() == Some("full");
     if scope != "full" && !local_full && !o.has("no-update") {
         let full = ci::latest(c, &destination, &snapshot.head, target, "workflow_dispatch")?;
-        if let Some(full) = full {
-            if ci::conclusion(&full, &snapshot.head)? == "success" {
-                let proof =
-                    ci::run_details(c, &destination, full.get("databaseId"), &snapshot.head)?;
-                if ci::full_scope(&proof, &snapshot.head).is_ok_and(|s| s == "full") {
-                    scope = "full";
-                    let mut ci = row.get("ci").clone();
-                    ci.set("full_run_id", full.get("databaseId").clone());
-                    row.set("ci", ci);
-                }
+        if let Some(full) = full
+            && ci::conclusion(&full, &snapshot.head)? == "success"
+        {
+            let proof = ci::run_details(c, &destination, full.get("databaseId"), &snapshot.head)?;
+            if ci::full_scope(&proof, &snapshot.head).is_ok_and(|s| s == "full") {
+                scope = "full";
+                let mut ci = row.get("ci").clone();
+                ci.set("full_run_id", full.get("databaseId").clone());
+                row.set("ci", ci);
             }
         }
         if scope != "full" && o.has("ci-full") && !row.get("ci").get("dispatch").truth() {

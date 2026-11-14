@@ -24,13 +24,13 @@ pub fn split_patch(raw: &[u8]) -> Vec<(Option<String>, String, Vec<u8>)> {
             let mut status = String::from("modified");
             for line in chunk.split(|b| *b == b'\n') {
                 if let Some(rest) = line.strip_prefix(b"diff --git ") {
-                    if !rest.contains(&b'"') {
-                        if let Some(i) = rest.windows(3).position(|s| s == b" b/") {
-                            let a = rest[..i].strip_prefix(b"a/");
-                            let b = &rest[i + 3..];
-                            if a == Some(b) {
-                                path = String::from_utf8(b.to_vec()).ok();
-                            }
+                    if !rest.contains(&b'"')
+                        && let Some(i) = rest.windows(3).position(|s| s == b" b/")
+                    {
+                        let a = rest[..i].strip_prefix(b"a/");
+                        let b = &rest[i + 3..];
+                        if a == Some(b) {
+                            path = String::from_utf8(b.to_vec()).ok();
                         }
                     }
                 } else if let Some(name) = line.strip_prefix(b"rename to ") {

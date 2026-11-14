@@ -176,11 +176,11 @@ impl Options {
     pub fn parse(args: &[OsString]) -> Result<Self> {
         let mut out = Self::default();
         let mut i = 0;
-        if let Some(v) = args.first().and_then(|v| v.to_str()) {
-            if matches!(v, "terminal" | "job") {
-                out.command = Some(v.into());
-                i = 1;
-            }
+        if let Some(v) = args.first().and_then(|v| v.to_str())
+            && matches!(v, "terminal" | "job")
+        {
+            out.command = Some(v.into());
+            i = 1;
         }
         while i < args.len() {
             let word = args[i]

@@ -312,7 +312,7 @@ pub fn safe_message(raw: &str, repo: &Path, maximum: usize) -> String {
         .map(String::as_str)
         .unwrap_or("");
     let ending = format!("…\n{last}\n");
-    if ending.len() + 1 <= maximum {
+    if ending.len() < maximum {
         let body = lines[..lines.len().saturating_sub(1)].join("\n");
         let prefix = clip(&body, maximum - ending.len() - 1);
         format!("{}\n{ending}", prefix.trim_end())
@@ -346,6 +346,7 @@ fn quote(s: &str) -> String {
         .map(|s| s.into_owned())
         .unwrap_or_else(|_| "''".into())
 }
+#[allow(clippy::too_many_arguments)]
 fn receipt(
     status: &str,
     tid: &str,

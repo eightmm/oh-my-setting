@@ -374,7 +374,9 @@ fn extension_configs(paths: &Paths) -> Vec<(&'static str, &'static str, PathBuf)
         ),
     ]
 }
-fn specs(paths: &Paths) -> Result<(Vec<(String, Value)>, Vec<String>)> {
+type DoctorSpecs = (Vec<(String, Value)>, Vec<String>);
+
+fn specs(paths: &Paths) -> Result<DoctorSpecs> {
     let mut specs = Vec::new();
     let mut unknown = Vec::new();
     for (provider, scope, path) in extension_configs(paths) {
@@ -509,21 +511,20 @@ fn risks(spec: &Value) -> Vec<&'static str> {
         .as_str()
         .or_else(|| spec["httpUrl"].as_str())
         .or_else(|| spec["serverUrl"].as_str())
+        && let Some(rest) = url.strip_prefix("http://")
     {
-        if let Some(rest) = url.strip_prefix("http://") {
-            let host = rest
-                .split(['/', '?', '#'])
-                .next()
-                .unwrap_or("")
-                .rsplit('@')
-                .next()
-                .unwrap_or("");
-            let local = host == "[::1]"
-                || host.starts_with("[::1]:")
-                || matches!(host.split(':').next(), Some("localhost" | "127.0.0.1"));
-            if !local {
-                rows.push("plain HTTP to a non-loopback host");
-            }
+        let host = rest
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .rsplit('@')
+            .next()
+            .unwrap_or("");
+        let local = host == "[::1]"
+            || host.starts_with("[::1]:")
+            || matches!(host.split(':').next(), Some("localhost" | "127.0.0.1"));
+        if !local {
+            rows.push("plain HTTP to a non-loopback host");
         }
     }
     rows
@@ -1417,14 +1418,14 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
             ("env", "environment declarations"),
             ("model_providers", "model provider declarations"),
         ] {
-            if let Some(table) = value[group].as_object() {
-                if !table.is_empty() {
-                    rows.push(finding(
-                        label,
-                        "info",
-                        format!("{} {kind}; values withheld", table.len()),
-                    ));
-                }
+            if let Some(table) = value[group].as_object()
+                && !table.is_empty()
+            {
+                rows.push(finding(
+                    label,
+                    "info",
+                    format!("{} {kind}; values withheld", table.len()),
+                ));
             }
         }
         for name in [
@@ -1447,8 +1448,8 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
                 ));
             }
         }
-        if let Some(domains) = value["sandbox"]["network"]["allowedDomains"].as_array() {
-            if domains.iter().any(|v| {
+        if let Some(domains) = value["sandbox"]["network"]["allowedDomains"].as_array()
+            && domains.iter().any(|v| {
                 v.as_str().is_some_and(|s| {
                     s.contains('*')
                         && s.split('.')
@@ -1456,13 +1457,13 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
                             .count()
                             < 2
                 })
-            }) {
-                rows.push(finding(
-                    label,
-                    "warn",
-                    "network policy has a catch-all domain",
-                ));
-            }
+            })
+        {
+            rows.push(finding(
+                label,
+                "warn",
+                "network policy has a catch-all domain",
+            ));
         }
         if value["sandbox"]["excludedCommands"]
             .as_array()

@@ -15,10 +15,8 @@ use std::{
 pub(crate) const FIELDS: &str = "event_id, source, ordinal, occurred_at, agent, kind, task_id, session_hash, git_sha, git_dirty, git_state, body, rendered";
 pub(crate) fn connect(path: &Path, readonly: bool) -> Result<Connection> {
     store::validate_owned(path)?;
-    if !readonly {
-        if !path.exists() {
-            return err("memory database: index file has not been initialized safely");
-        }
+    if !readonly && !path.exists() {
+        return err("memory database: index file has not been initialized safely");
     }
     let flags = if readonly {
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -489,6 +487,7 @@ pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Outp
     Ok((if count == 0 { 1 } else { 0 }, out, diagnostic.into_bytes()))
 }
 pub(crate) fn handoffs(dir: &Path, query: &str, as_json: bool) -> Result<(Vec<u8>, usize)> {
+    let file_re = regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.md$").unwrap();
     let mut files = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for f in entries.flatten() {
@@ -496,16 +495,14 @@ pub(crate) fn handoffs(dir: &Path, query: &str, as_json: bool) -> Result<(Vec<u8
             let Some(name) = filename.to_str().map(str::to_owned) else {
                 continue;
             };
-            if !regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.md$")
-                .unwrap()
-                .is_match(&name)
-            {
+            if !file_re.is_match(&name) {
                 continue;
             }
-            if let Ok(m) = f.path().symlink_metadata() {
-                if m.is_file() && !m.file_type().is_symlink() {
-                    files.push((m.mtime(), name, f.path()));
-                }
+            if let Ok(m) = f.path().symlink_metadata()
+                && m.is_file()
+                && !m.file_type().is_symlink()
+            {
+                files.push((m.mtime(), name, f.path()));
             }
         }
     }

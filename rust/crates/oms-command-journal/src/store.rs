@@ -140,30 +140,27 @@ impl JournalStore {
     pub(crate) fn pinned_identity(&self) -> Result<Option<(String, String)>, String> {
         if let Some(bytes) =
             read_regular_no_symlink_bytes(&crate::schema::project_id_path(&self.repo_root))?
+            && let Ok(row) = crate::json::from_slice(&bytes)
+            && row.at("schema_version").as_u64() == Some(1)
+            && let (Some(id), Some(name)) = (
+                row.at("project_id").as_str(),
+                row.at("project_name").as_str(),
+            )
         {
-            if let Ok(row) = crate::json::from_slice(&bytes) {
-                if row.at("schema_version").as_u64() == Some(1) {
-                    if let (Some(id), Some(name)) = (
-                        row.at("project_id").as_str(),
-                        row.at("project_name").as_str(),
-                    ) {
-                        return Ok(Some((id.into(), name.into())));
-                    }
-                }
-            }
+            return Ok(Some((id, name)));
         }
         let snapshot = self.replay_source_snapshot()?;
         for event in snapshot.1.iter().map(JsonExt::copy).chain(
             crate::cold::byte_lines(snapshot.2.as_ref().expect("replayed live snapshot"))
                 .filter_map(|r| crate::json::from_slice(r).ok()),
         ) {
-            if validate_canonical_event(&event).is_ok() {
-                if let (Some(id), Some(name)) = (
+            if validate_canonical_event(&event).is_ok()
+                && let (Some(id), Some(name)) = (
                     event.at("project_id").as_str(),
                     event.at("project_name").as_str(),
-                ) {
-                    return Ok(Some((id.into(), name.into())));
-                }
+                )
+            {
+                return Ok(Some((id, name)));
             }
         }
         Ok(None)
@@ -185,10 +182,10 @@ impl JournalStore {
     fn source_snapshot(&self) -> Result<std::rc::Rc<SourceSnapshot>, String> {
         self.verify_repo()?;
         let current = crate::cold::load_cold_manifest(&self.root)?;
-        if let Some(snapshot) = self.snapshot.borrow().as_ref() {
-            if snapshot.0 == current {
-                return Ok(snapshot.clone());
-            }
+        if let Some(snapshot) = self.snapshot.borrow().as_ref()
+            && snapshot.0 == current
+        {
+            return Ok(snapshot.clone());
         }
         let (manifest, events) = crate::cold::read_verified_cold_events(&self.root)?;
         let live = if manifest.pending.is_some() {
@@ -230,7 +227,7 @@ impl JournalStore {
         let live = snapshot.2.as_ref().expect("replayed live snapshot");
         let mut quarantine = Vec::new();
         let offset = ordered.len();
-        for (index, raw) in crate::cold::byte_lines(&live).enumerate() {
+        for (index, raw) in crate::cold::byte_lines(live).enumerate() {
             if raw.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
@@ -621,14 +618,14 @@ impl JournalStore {
         crate::files::append_event(&self.events_path, &line_bytes)?;
         let result = (|| -> Result<(Value, bool), String> {
             self.storage_checked.set(false);
-            if let Some(snapshot) = self.snapshot.borrow_mut().as_mut() {
-                if let Some(live) = std::rc::Rc::make_mut(snapshot).2.as_mut() {
-                    if !live.is_empty() && !live.ends_with(b"\n") {
-                        live.push(b'\n');
-                    }
-                    live.extend_from_slice(&line_bytes);
+            if let Some(snapshot) = self.snapshot.borrow_mut().as_mut()
+                && let Some(live) = std::rc::Rc::make_mut(snapshot).2.as_mut()
+            {
+                if !live.is_empty() && !live.ends_with(b"\n") {
                     live.push(b'\n');
                 }
+                live.extend_from_slice(&line_bytes);
+                live.push(b'\n');
             }
 
             let (new_size, new_mtime_ns) = self.events_fingerprint()?;
@@ -671,8 +668,8 @@ impl JournalStore {
         )
         .map_err(|e| format!("sqlite insert failed: {e}"))?;
 
-            if let Some(target_id) = sup {
-                if let Some((t_ld, t_iw)) = tx
+            if let Some(target_id) = sup
+                && let Some((t_ld, t_iw)) = tx
                     .query_row(
                         "SELECT local_date, iso_week FROM events WHERE event_id = ?1",
                         params![target_id],
@@ -680,27 +677,26 @@ impl JournalStore {
                     )
                     .optional()
                     .map_err(|e| format!("sqlite superseded lookup failed: {e}"))?
-                {
-                    tx.execute(
-                        "UPDATE events SET active = 0 WHERE event_id = ?1",
-                        params![target_id],
-                    )
-                    .map_err(|e| format!("sqlite deactivate failed: {e}"))?;
-                    tx.execute(
-                        "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('daily', ?1)",
-                        params![t_ld],
-                    )
-                    .map_err(|e| {
-                        format!("canonical append completed; derived index update failed: {e}")
-                    })?;
-                    tx.execute(
-                        "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('weekly', ?1)",
-                        params![t_iw],
-                    )
-                    .map_err(|e| {
-                        format!("canonical append completed; derived index update failed: {e}")
-                    })?;
-                }
+            {
+                tx.execute(
+                    "UPDATE events SET active = 0 WHERE event_id = ?1",
+                    params![target_id],
+                )
+                .map_err(|e| format!("sqlite deactivate failed: {e}"))?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('daily', ?1)",
+                    params![t_ld],
+                )
+                .map_err(|e| {
+                    format!("canonical append completed; derived index update failed: {e}")
+                })?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('weekly', ?1)",
+                    params![t_iw],
+                )
+                .map_err(|e| {
+                    format!("canonical append completed; derived index update failed: {e}")
+                })?;
             }
 
             if !ld.is_empty() {
@@ -941,19 +937,15 @@ impl JournalStore {
             .into_iter()
             .enumerate()
             {
-                if let Some(text) = event.at(field).as_str().filter(|t| !t.is_empty()) {
-                    if seen[index].insert(text.to_owned()) {
-                        bucket.push(AnnotationRow {
-                            event_id: event.at("event_id").as_str().unwrap_or_default().into(),
-                            occurred_at: event
-                                .at("occurred_at")
-                                .as_str()
-                                .unwrap_or_default()
-                                .into(),
-                            local_date: event.at("local_date").as_str().unwrap_or_default().into(),
-                            text: text.into(),
-                        });
-                    }
+                if let Some(text) = event.at(field).as_str().filter(|t| !t.is_empty())
+                    && seen[index].insert(text.to_owned())
+                {
+                    bucket.push(AnnotationRow {
+                        event_id: event.at("event_id").as_str().unwrap_or_default(),
+                        occurred_at: event.at("occurred_at").as_str().unwrap_or_default(),
+                        local_date: event.at("local_date").as_str().unwrap_or_default(),
+                        text,
+                    });
                 }
             }
         }
@@ -965,13 +957,12 @@ impl JournalStore {
     }
 
     pub fn decisions(&self, since: Option<&str>, limit: usize) -> Result<DecisionsResult, String> {
-        if let Some(s) = since {
-            if s.len() != 10
+        if let Some(s) = since
+            && (s.len() != 10
                 || parse_date_ymd(s).is_none()
-                || parse_date_ymd(s).map(naive_date_to_string).as_deref() != Some(s)
-            {
-                return Err(format!("invalid --since date '{s}'; expected YYYY-MM-DD"));
-            }
+                || parse_date_ymd(s).map(naive_date_to_string).as_deref() != Some(s))
+        {
+            return Err(format!("invalid --since date '{s}'; expected YYYY-MM-DD"));
         }
         let conn = self.ensure_index_current(false)?;
         let mut stmt = conn
@@ -992,10 +983,10 @@ impl JournalStore {
                 .get("local_date")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if let Some(since_date) = since {
-                if ld.as_str() < since_date {
-                    continue;
-                }
+            if let Some(since_date) = since
+                && ld.as_str() < since_date
+            {
+                continue;
             }
             let Some(dec) = ev
                 .get("decision")
@@ -1024,13 +1015,12 @@ impl JournalStore {
                     .to_string(),
                 local_date: ld.to_string(),
                 decision: dec.to_string(),
-                event_type: ev.at("event_type").as_str().unwrap_or_default().into(),
+                event_type: ev.at("event_type").as_str().unwrap_or_default(),
                 task_id: ev
                     .at("correlation")
                     .at("task_id")
                     .as_str()
-                    .unwrap_or_default()
-                    .into(),
+                    .unwrap_or_default(),
                 source_type: ev
                     .pointer("/source/type")
                     .map(crate::schema::python_str)
@@ -1074,7 +1064,7 @@ impl JournalStore {
         let short: String = target_blocker.chars().take(200).collect();
         let mut correction_payload = crate::json::json!({"event_type":"correction","occurred_at":utc_rfc3339(now),"source":{"type":"journal-resolve","id":format!("resolve:{eid}")},"supersedes_event_id":eid,
             "outcome":{"summary":format!("Blocker resolved: {short}"),"status":"resolved"},"decision":format!("Resolved blocker \"{short}\": {}",how_clean.chars().take(400).collect::<String>()),"verification_status":"not_verified"});
-        if crate::schema::json_truthy(&target.at("correlation").at("task_id")) {
+        if crate::schema::json_truthy(target.at("correlation").at("task_id")) {
             *correction_payload.at_mut("correlation") =
                 crate::json::json!({"task_id":target.at("correlation").at("task_id")});
         }
@@ -1186,14 +1176,12 @@ impl JournalStore {
     pub fn prompt_digest(&self, now: DateTime<Utc>) -> Result<Option<String>, String> {
         let (_, today, _) = self.tz.local_date_and_week(now);
         let path = self.root.join("digest.json");
-        if let Some(bytes) = read_regular_no_symlink_bytes(&path)? {
-            if let Ok(row) = crate::json::from_slice(&bytes) {
-                if row.at("schema_version").as_u64() == Some(1)
-                    && row.at("last_date").as_str().as_deref() == Some(&today)
-                {
-                    return Ok(None);
-                }
-            }
+        if let Some(bytes) = read_regular_no_symlink_bytes(&path)?
+            && let Ok(row) = crate::json::from_slice(&bytes)
+            && row.at("schema_version").as_u64() == Some(1)
+            && row.at("last_date").as_str().as_deref() == Some(&today)
+        {
+            return Ok(None);
         }
         let recent = self.recent_events(256)?;
         if recent.is_empty() {
@@ -1241,7 +1229,7 @@ impl JournalStore {
             let all = self.load_events_for_period("daily", day)?;
             if !all
                 .iter()
-                .any(|e| crate::schema::json_truthy(&e.at("decision")))
+                .any(|e| crate::schema::json_truthy(e.at("decision")))
             {
                 lines.push("That day recorded no decision: 'oms agent-task update --decision TEXT [--next TEXT]' is what keeps the summary readable.".into());
             }
@@ -1260,27 +1248,25 @@ impl JournalStore {
                 if !info.is_file() || info.file_type().is_symlink() {
                     continue;
                 }
-                if let Ok(modified) = info.modified() {
-                    if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
-                        newest = Some((modified, entry.file_name()));
-                    }
+                if let Ok(modified) = info.modified()
+                    && newest.as_ref().is_none_or(|(time, _)| modified > *time)
+                {
+                    newest = Some((modified, entry.file_name()));
                 }
             }
         }
-        if let Some((modified, name)) = newest {
-            if let Ok(duration) = std::time::SystemTime::UNIX_EPOCH
+        if let Some((modified, name)) = newest
+            && let Ok(duration) = std::time::SystemTime::UNIX_EPOCH
                 .checked_add(std::time::Duration::from_secs(now.timestamp().max(0) as u64))
                 .ok_or("invalid clock")?
                 .duration_since(modified)
-            {
-                if duration.as_secs_f64() <= 48.0 * 3600.0 {
-                    lines.push(format!(
-                        "Newest handoff ({}h old): oms session-handoff show {}",
-                        duration.as_secs() / 3600,
-                        sanitize_text(&crate::sanitize::diagnostic_os_str(&name), 200)
-                    ));
-                }
-            }
+            && duration.as_secs_f64() <= 48.0 * 3600.0
+        {
+            lines.push(format!(
+                "Newest handoff ({}h old): oms session-handoff show {}",
+                duration.as_secs() / 3600,
+                sanitize_text(&crate::sanitize::diagnostic_os_str(&name), 200)
+            ));
         }
         lines.push("Details: oms journal show --today | --blockers | --recent 20".into());
         atomic_write_bytes(
@@ -1413,15 +1399,12 @@ impl JournalStore {
     pub fn distill_due_today(&self, now: DateTime<Utc>) -> Result<bool, String> {
         let state_path = self.root.join("distill.json");
         let (_, today, _) = self.tz.local_date_and_week(now);
-        if let Some(bytes) = read_regular_no_symlink_bytes(&state_path)? {
-            if let Ok(v) = crate::json::from_slice(&bytes) {
-                if v.get("schema_version").and_then(Value::as_i64) == Some(1)
-                    && v.get("last_run_date").and_then(Value::as_str).as_deref()
-                        == Some(today.as_str())
-                {
-                    return Ok(false);
-                }
-            }
+        if let Some(bytes) = read_regular_no_symlink_bytes(&state_path)?
+            && let Ok(v) = crate::json::from_slice(&bytes)
+            && v.get("schema_version").and_then(Value::as_i64) == Some(1)
+            && v.get("last_run_date").and_then(Value::as_str).as_deref() == Some(today.as_str())
+        {
+            return Ok(false);
         }
         Ok(true)
     }
@@ -1770,10 +1753,10 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
         let mut days: BTreeSet<String> = BTreeSet::new();
         let mut latest: Option<(String, String)> = None;
         for ev in &group {
-            if let Some(ld) = ev.get("local_date").and_then(Value::as_str) {
-                if !ld.is_empty() {
-                    days.insert(ld);
-                }
+            if let Some(ld) = ev.get("local_date").and_then(Value::as_str)
+                && !ld.is_empty()
+            {
+                days.insert(ld);
             }
             let pos = (
                 ev.get("occurred_at")
@@ -1826,10 +1809,10 @@ fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, us
 }
 
 pub fn period_range_hint(kind: &str, period: &str) -> String {
-    if kind == "weekly" {
-        if let Some((start, end)) = iso_week_range(period) {
-            return format!("{start}..{end}");
-        }
+    if kind == "weekly"
+        && let Some((start, end)) = iso_week_range(period)
+    {
+        return format!("{start}..{end}");
     }
     period.to_string()
 }

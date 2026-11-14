@@ -303,11 +303,13 @@ fn quota(home: &Path) -> Option<f64> {
     }
     None
 }
+type AccountEnv = (Vec<(OsString, OsString)>, Option<String>);
+
 fn account_environment(
     route: &Route,
     excluded: &BTreeSet<String>,
     repo: &Path,
-) -> Result<(Vec<(OsString, OsString)>, Option<String>)> {
+) -> Result<AccountEnv> {
     if route.provider != "codex" || std::env::var_os("OMS_RESUME_SESSION").is_some() {
         return Ok((Vec::new(), None));
     }
@@ -366,17 +368,14 @@ fn account_environment(
     let mut accounts = Vec::new();
     let mut ids = BTreeSet::new();
     let mut homes = BTreeSet::new();
+    let id_re = regex::Regex::new(r"\A[a-z0-9][a-z0-9_-]{0,63}\z").unwrap();
     for entry in entries {
         if !keys_are(entry, &["id", "home"]) || !entry.has("id") || !entry.has("home") {
             return fail("unknown or missing provider account fields");
         }
         let ident = text(entry, "id");
         let raw = Path::new(text(entry, "home"));
-        if !regex::Regex::new(r"\A[a-z0-9][a-z0-9_-]{0,63}\z")
-            .unwrap()
-            .is_match(ident)
-            || !raw.is_absolute()
-        {
+        if !id_re.is_match(ident) || !raw.is_absolute() {
             return fail("invalid provider account id or home");
         }
         let location = raw.canonicalize().unwrap_or_else(|_| raw.to_owned());
@@ -827,17 +826,19 @@ pub(crate) fn execute(
                 .extend_from_slice(format!("\nconfigured model\n{model}\n").as_bytes());
         }
         result.complete &= terminal;
-        if overflow == 0 && capacity(&result) {
-            if let Some(account) = account.filter(|s| s != "default") {
-                excluded.insert(account);
-                continue;
-            }
+        if overflow == 0
+            && capacity(&result)
+            && let Some(account) = account.filter(|s| s != "default")
+        {
+            excluded.insert(account);
+            continue;
         }
         return Ok(result);
     }
     fail("account capacity overflow exhausted")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_fallback(
     route: &mut Route,
     fallback: &str,

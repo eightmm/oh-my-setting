@@ -144,7 +144,7 @@ fn parse_float_option(options: &Options, name: &str) -> Result<Option<f64>> {
     let val = raw
         .trim()
         .parse::<f64>()
-        .map_err(|_| Error::new(&format!("--{name} must be a non-negative number")))?;
+        .map_err(|_| Error::new(format!("--{name} must be a non-negative number")))?;
     require(
         val.is_finite() && val >= 0.0,
         &format!("--{name} must be a non-negative number"),
@@ -194,7 +194,7 @@ pub fn resolve_repositories_with(
         if !is_git {
             return Err(Error {
                 code: 3,
-                ..Error::new(&format!(
+                ..Error::new(format!(
                     "--repo is not a Git repository: {}",
                     raw_exec.display()
                 ))
@@ -206,7 +206,7 @@ pub fn resolve_repositories_with(
             && let Some(ref room_repo) = env_room
             && &state_repo != room_repo
         {
-            return Err(Error::new(&format!(
+            return Err(Error::new(format!(
                 "--repo ({}) conflicts with OMS_ROOM_REPO ({})",
                 state_repo.display(),
                 room_repo.display()
@@ -406,11 +406,11 @@ pub fn run(
             oms_panel_core::export::write(&path, &text)?;
             return Ok((0, vec![], vec![]));
         }
-        if std::env::var_os("OMS_PANEL_READER_BOARD").is_some() {
-            if let Some(mut tty) = crate::input::TerminalInput::open()? {
-                crate::reader::page(&repo, &report, &mut tty, stop)?;
-                return Ok((0, vec![], vec![]));
-            }
+        if std::env::var_os("OMS_PANEL_READER_BOARD").is_some()
+            && let Some(mut tty) = crate::input::TerminalInput::open()?
+        {
+            crate::reader::page(&repo, &report, &mut tty, stop)?;
+            return Ok((0, vec![], vec![]));
         }
         return plain(text);
     }
@@ -766,12 +766,11 @@ fn routing_inputs(
                     *inputs.running_accounts.entry(acc.to_owned()).or_insert(0) += 1;
                 }
             }
-            if prov == "pi" || text(&row["refs"], "panel_harness") == "pi" {
-                if row["refs"]["daily_cap"] == true || text(row, "error").contains("daily") {
-                    if let Some(installed) = inputs.installed.as_mut() {
-                        installed.remove("pi");
-                    }
-                }
+            if (prov == "pi" || text(&row["refs"], "panel_harness") == "pi")
+                && (row["refs"]["daily_cap"] == true || text(row, "error").contains("daily"))
+                && let Some(installed) = inputs.installed.as_mut()
+            {
+                installed.remove("pi");
             }
         }
     }
@@ -1154,10 +1153,11 @@ fn find_recent_native_session(
             let snippet = String::from_utf8_lossy(&head);
             if snippet.contains(consumer) || name.contains(consumer) {
                 let stem = name.trim_end_matches(".jsonl");
-                if provider == "codex" && stem.starts_with("rollout-") {
-                    if let Some(uuid) = extract_trailing_uuid(stem) {
-                        return Some(uuid);
-                    }
+                if provider == "codex"
+                    && stem.starts_with("rollout-")
+                    && let Some(uuid) = extract_trailing_uuid(stem)
+                {
+                    return Some(uuid);
                 }
                 if let Some(sid) = snippet.lines().find_map(|line| {
                     serde_json::from_str::<Value>(line).ok().and_then(|v| {
@@ -1296,7 +1296,8 @@ fn chats(
         }
     }
 
-    let mut built_rows: Vec<(Value, Option<(String, String, String)>)> = Vec::new();
+    type PanelRow = (Value, Option<(String, String, String)>);
+    let mut built_rows: Vec<PanelRow> = Vec::new();
     for member in rows(&state["participants"]) {
         let participant = text(member, "participant");
         let label = text(member, "label");
@@ -1332,7 +1333,7 @@ fn chats(
                     .filter(|v| !v.is_empty())
             })
             .unwrap_or("");
-        let session_id = find_recent_native_session(&provider, consumer, explicit_session);
+        let session_id = find_recent_native_session(provider, consumer, explicit_session);
         let uri = session_id.as_ref().and_then(|sid| {
             if provider == "codex" {
                 Some(format!("codex://threads/{sid}"))
@@ -1801,8 +1802,7 @@ fn comparison(
         let call = rows(&report["rows"])
             .iter()
             .flat_map(|v| rows(&v["calls"]))
-            .filter(|v| v["attempt_id"] == attempt["attempt_id"] && v["kind"] == "delegate")
-            .next_back();
+            .rfind(|v| v["attempt_id"] == attempt["attempt_id"] && v["kind"] == "delegate");
         let (changes, path_set) = match call.filter(|v| v["patch"].is_string()) {
             None => (Value::Null, None),
             Some(c) => match results::verified_patch(&store, c)
@@ -1921,7 +1921,8 @@ fn next_attention(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
-    let mut boards: Vec<(PathBuf, Option<String>, Option<(String, String, String)>)> = Vec::new();
+    type BoardEntry = (PathBuf, Option<String>, Option<(String, String, String)>);
+    let mut boards: Vec<BoardEntry> = Vec::new();
     let mut seen: std::collections::BTreeSet<(PathBuf, Option<String>)> = Default::default();
     if let Ok(out) = terminals::tmux(
         services,
@@ -1951,18 +1952,17 @@ fn next_attention(
             if brepo.is_empty() {
                 continue;
             }
-            if let Ok(canonical) = state::repository_for(Path::new(brepo), true) {
-                if seen.insert((canonical.clone(), broom.clone())) {
-                    let target = if valid_target(sess, '$')
-                        && valid_target(win, '@')
-                        && valid_target(pane, '%')
+            if let Ok(canonical) = state::repository_for(Path::new(brepo), true)
+                && seen.insert((canonical.clone(), broom.clone()))
+            {
+                let target =
+                    if valid_target(sess, '$') && valid_target(win, '@') && valid_target(pane, '%')
                     {
                         Some((sess.to_owned(), win.to_owned(), pane.to_owned()))
                     } else {
                         None
                     };
-                    boards.push((canonical, broom, target));
-                }
+                boards.push((canonical, broom, target));
             }
         }
     }
@@ -1970,7 +1970,7 @@ fn next_attention(
         boards.push((repo.to_path_buf(), room(options), None));
     }
 
-    let mut chosen: Option<(
+    type AttentionChoice = (
         String,
         String,
         String,
@@ -1978,7 +1978,8 @@ fn next_attention(
         PathBuf,
         Option<(String, String, String)>,
         usize,
-    )> = None;
+    );
+    let mut chosen: Option<AttentionChoice> = None;
     for (board_repo, board_room, target) in boards {
         let board_state = match state::snapshot(&board_repo, board_room.as_deref(), services, stop)
         {

@@ -138,10 +138,10 @@ fn owned_entry(command: &str, executable: &str, script: &str, paths: &Paths) -> 
     if !root.is_absolute() {
         return Ok(false);
     }
-    if let Some(wrapper) = wrapper {
-        if Path::new(wrapper) != root.join("scripts/lib/python-entry.sh") {
-            return Ok(false);
-        }
+    if let Some(wrapper) = wrapper
+        && Path::new(wrapper) != root.join("scripts/lib/python-entry.sh")
+    {
+        return Ok(false);
     }
     Ok(root == paths.source
         || r::physical(root).is_ok_and(|r| r == paths.source)

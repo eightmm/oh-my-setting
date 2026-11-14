@@ -218,28 +218,26 @@ pub(crate) fn run(s: &Store, o: &Options) -> Result<Output> {
     let bytes_cap = cap("OMS_MEMORY_INDEX_CAP_BYTES", 25000)?;
     let index = sources::claude_index(&s.repo);
     let mut caps = Vec::new();
-    if let Ok(m) = std::fs::metadata(&index) {
-        if m.is_file() {
-            let text = read(&index, 4 * 1024 * 1024).unwrap_or_default();
-            let rows: Vec<_> = text.split_inclusive('\n').collect();
-            let (mut used, mut loaded) = (0u64, 0u64);
-            for row in &rows {
-                let width = row.len() as u64;
-                if (lines_cap > 0 && loaded >= lines_cap)
-                    || (bytes_cap > 0 && used + width > bytes_cap)
-                {
-                    break;
-                }
-                loaded += 1;
-                used += width;
+    if let Ok(m) = std::fs::metadata(&index)
+        && m.is_file()
+    {
+        let text = read(&index, 4 * 1024 * 1024).unwrap_or_default();
+        let rows: Vec<_> = text.split_inclusive('\n').collect();
+        let (mut used, mut loaded) = (0u64, 0u64);
+        for row in &rows {
+            let width = row.len() as u64;
+            if (lines_cap > 0 && loaded >= lines_cap) || (bytes_cap > 0 && used + width > bytes_cap)
+            {
+                break;
             }
-            let lines = rows.len() as u64;
-            let over =
-                (lines_cap > 0 && lines > lines_cap) || (bytes_cap > 0 && m.len() > bytes_cap);
-            let near = (lines_cap > 0 && lines as f64 >= lines_cap as f64 * 0.9)
-                || (bytes_cap > 0 && m.len() as f64 >= bytes_cap as f64 * 0.9);
-            caps.push(json!({"provider":"claude","role":"auto-memory index","path":sources::display(&index,&s.repo),"lines":lines,"bytes":m.len(),"cap_lines":if lines_cap>0{Some(lines_cap)}else{None},"cap_bytes":if bytes_cap>0{Some(bytes_cap)}else{None},"status":if over{"over"}else if near{"near"}else{"ok"},"lines_not_loaded":if over{lines-loaded}else{0},"cap_source":"https://code.claude.com/docs/en/memory","cap_overridden":(["OMS_MEMORY_INDEX_CAP_LINES","OMS_MEMORY_INDEX_CAP_BYTES"].iter().any(|k|std::env::var_os(k).is_some_and(|v|!v.is_empty())))}));
+            loaded += 1;
+            used += width;
         }
+        let lines = rows.len() as u64;
+        let over = (lines_cap > 0 && lines > lines_cap) || (bytes_cap > 0 && m.len() > bytes_cap);
+        let near = (lines_cap > 0 && lines as f64 >= lines_cap as f64 * 0.9)
+            || (bytes_cap > 0 && m.len() as f64 >= bytes_cap as f64 * 0.9);
+        caps.push(json!({"provider":"claude","role":"auto-memory index","path":sources::display(&index,&s.repo),"lines":lines,"bytes":m.len(),"cap_lines":if lines_cap>0{Some(lines_cap)}else{None},"cap_bytes":if bytes_cap>0{Some(bytes_cap)}else{None},"status":if over{"over"}else if near{"near"}else{"ok"},"lines_not_loaded":if over{lines-loaded}else{0},"cap_source":"https://code.claude.com/docs/en/memory","cap_overridden":(["OMS_MEMORY_INDEX_CAP_LINES","OMS_MEMORY_INDEX_CAP_BYTES"].iter().any(|k|std::env::var_os(k).is_some_and(|v|!v.is_empty())))}));
     }
     let cold_count = cold.len();
     let dup_count = dup.len();

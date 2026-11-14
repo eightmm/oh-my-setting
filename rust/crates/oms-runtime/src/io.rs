@@ -389,10 +389,11 @@ impl Drop for Temporary<'_> {
         if self.published {
             return;
         }
-        if let Ok(s) = fs::statat(self.anchor.fd(), &self.name, AtFlags::SYMLINK_NOFOLLOW) {
-            if identity(&s, &self.initial) && regular(&s) {
-                let _ = fs::unlinkat(self.anchor.fd(), &self.name, AtFlags::empty());
-            }
+        if let Ok(s) = fs::statat(self.anchor.fd(), &self.name, AtFlags::SYMLINK_NOFOLLOW)
+            && identity(&s, &self.initial)
+            && regular(&s)
+        {
+            let _ = fs::unlinkat(self.anchor.fd(), &self.name, AtFlags::empty());
         }
     }
 }

@@ -231,10 +231,8 @@ pub(crate) fn capture(
             if !err_eof {
                 err_eof = drain(&mut stderr, &mut err)?;
             }
-            if exit.is_none() {
-                if group.exited()? {
-                    exit = Some(group.finish()?);
-                }
+            if exit.is_none() && group.exited()? {
+                exit = Some(group.finish()?);
             }
             if let Some(code) = exit
                 && out_eof

@@ -1358,8 +1358,6 @@ fn run_step_command(
                     (127, "launch-failed")
                 } else if out.code == 124 {
                     (124, "timeout")
-                } else if out.code == 130 && !ctx.interrupted.load(Ordering::Relaxed) {
-                    (out.code, "exit")
                 } else {
                     (out.code, "exit")
                 }
@@ -2101,6 +2099,8 @@ fn validate_outputs(raw: &Value) -> Result<()> {
     };
     require(rows.len() <= 64, "too many output requirements")?;
     let mut paths = BTreeSet::new();
+    let re = regex::Regex::new(r"\$\{(input|port|resource)\.[A-Za-z][A-Za-z0-9_-]{0,63}\}")
+        .expect("static expression");
     for row in rows {
         fields(
             row,
@@ -2108,8 +2108,6 @@ fn validate_outputs(raw: &Value) -> Result<()> {
             &["min_bytes", "max_bytes", "sha256", "fresh"],
         )?;
         let path = row.get("path").str()?;
-        let re = regex::Regex::new(r"\$\{(input|port|resource)\.[A-Za-z][A-Za-z0-9_-]{0,63}\}")
-            .expect("static expression");
         let literal = re.replace_all(path, "bound");
         require(!literal.contains("${"), "unsupported output interpolation")?;
         let relative = helpers::relative(&literal)?;

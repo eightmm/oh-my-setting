@@ -1194,7 +1194,7 @@ fn render_table(
             "lowest"
         }
     );
-    let header = vec![
+    let header = [
         "#".into(),
         "group".into(),
         format!("{metric} (mean ± stdev)"),
@@ -1231,10 +1231,10 @@ fn render_table(
     }
     let n = |v: f64| {
         let s = significant(v, 4, true);
-        if format == "tex" {
-            if let Some((m, e)) = s.split_once('e') {
-                return format!("{m}\\times10^{{{e}}}");
-            }
+        if format == "tex"
+            && let Some((m, e)) = s.split_once('e')
+        {
+            return format!("{m}\\times10^{{{e}}}");
         }
         s
     };

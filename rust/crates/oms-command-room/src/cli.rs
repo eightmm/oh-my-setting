@@ -175,20 +175,20 @@ fn parse(args: &[OsString]) -> Result<Options> {
             "describe accepts only --repo, --id, --participant, --label and --json",
         ));
     }
-    if let Some(role) = options.text("--role")? {
-        if !crate::model::ROLES.contains(&role) {
-            return Err(Error::new("invalid room role"));
-        }
+    if let Some(role) = options.text("--role")?
+        && !crate::model::ROLES.contains(&role)
+    {
+        return Err(Error::new("invalid room role"));
     }
-    if let Some(kind) = options.text("--kind")? {
-        if !crate::model::KINDS.contains(&kind) {
-            return Err(Error::new("invalid message kind"));
-        }
+    if let Some(kind) = options.text("--kind")?
+        && !crate::model::KINDS.contains(&kind)
+    {
+        return Err(Error::new("invalid message kind"));
     }
-    if let Some(app) = options.text("--app")? {
-        if !["codex", "claude"].contains(&app) {
-            return Err(Error::new("invalid app delivery options"));
-        }
+    if let Some(app) = options.text("--app")?
+        && !["codex", "claude"].contains(&app)
+    {
+        return Err(Error::new("invalid app delivery options"));
     }
     let action = options.action.as_str();
     if action == "scope" && (options.values.contains_key("--owns") == options.flag("--clear")) {
@@ -288,23 +288,22 @@ fn execute(
     if o.values.contains_key("--repo")
         && matches!(o.action.as_str(), "list" | "show")
         && session.room.is_some()
+        && let Some(bound) = &session.repository
     {
-        if let Some(bound) = &session.repository {
-            let explicit = std::fs::canonicalize(services.state_repository(&path)?)
-                .map_err(|_| Error::new("explicit repository unavailable"))?;
-            let inherited = std::fs::canonicalize(services.state_repository(bound)?)
-                .map_err(|_| Error::new("inherited room repository unavailable"))?;
-            foreign = explicit != inherited;
-        }
+        let explicit = std::fs::canonicalize(services.state_repository(&path)?)
+            .map_err(|_| Error::new("explicit repository unavailable"))?;
+        let inherited = std::fs::canonicalize(services.state_repository(bound)?)
+            .map_err(|_| Error::new("inherited room repository unavailable"))?;
+        foreign = explicit != inherited;
     }
-    let id = o.text("--id")?.or_else(|| {
+    let id = o.text("--id")?.or({
         if foreign {
             None
         } else {
             session.room.as_deref()
         }
     });
-    let who = o.text("--participant")?.or_else(|| {
+    let who = o.text("--participant")?.or({
         if foreign {
             None
         } else {
@@ -324,41 +323,37 @@ fn execute(
     }
     let room_id = id.unwrap_or("");
     let participant = who.unwrap_or("");
-    if let Some(queue) = &session.relay_queue {
-        if matches!(o.action.as_str(), "send" | "ack") {
-            let mut request = obj([
-                ("action", o.action.clone().into()),
-                ("room", room_id.into()),
-                ("participant", participant.into()),
-            ]);
-            if o.action == "send" {
-                let text = o.text("--text")?.unwrap_or("");
-                if o.values.contains_key("--text-file")
-                    || text.trim().is_empty()
-                    || text.len() > 4000
-                {
-                    return Err(Error::new(
-                        "relay send needs inline text of 1..4000 UTF-8 bytes",
-                    ));
-                }
-                request.set("to", o.text("--to")?.map(str::to_owned));
-                request.set("kind", o.text("--kind")?.unwrap_or("note"));
-                request.set("text", text);
-                for (option, field) in [("--reply-to", "reply_to"), ("--message-id", "message_id")]
-                {
-                    if let Some(v) = o.text(option)? {
-                        request.set(field, v);
-                    }
-                }
-            } else {
-                let mids = o.texts("--message")?;
-                if mids.is_empty() {
-                    return Err(Error::new("ack requires the exact message ids consumed"));
-                }
-                request.set("messages", mids);
+    if let Some(queue) = &session.relay_queue
+        && matches!(o.action.as_str(), "send" | "ack")
+    {
+        let mut request = obj([
+            ("action", o.action.clone().into()),
+            ("room", room_id.into()),
+            ("participant", participant.into()),
+        ]);
+        if o.action == "send" {
+            let text = o.text("--text")?.unwrap_or("");
+            if o.values.contains_key("--text-file") || text.trim().is_empty() || text.len() > 4000 {
+                return Err(Error::new(
+                    "relay send needs inline text of 1..4000 UTF-8 bytes",
+                ));
             }
-            return Ok((relay_request(queue, &request, stop)?, true));
+            request.set("to", o.text("--to")?.map(str::to_owned));
+            request.set("kind", o.text("--kind")?.unwrap_or("note"));
+            request.set("text", text);
+            for (option, field) in [("--reply-to", "reply_to"), ("--message-id", "message_id")] {
+                if let Some(v) = o.text(option)? {
+                    request.set(field, v);
+                }
+            }
+        } else {
+            let mids = o.texts("--message")?;
+            if mids.is_empty() {
+                return Err(Error::new("ack requires the exact message ids consumed"));
+            }
+            request.set("messages", mids);
         }
+        return Ok((relay_request(queue, &request, stop)?, true));
     }
     if o.action == "new" && session.child {
         return Err(Error::new("a worker cannot create a room"));

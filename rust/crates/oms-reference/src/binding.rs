@@ -399,6 +399,7 @@ impl Domain<'_> {
         controller.check()?;
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn bind_admission(
         &self,
         index: &CaptureIndex,
@@ -425,6 +426,7 @@ impl Domain<'_> {
             interrupted,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn bind_admission_with_controller(
         &self,
         index: &CaptureIndex,
@@ -467,6 +469,7 @@ impl Domain<'_> {
 impl Producer {
     /// Binding is an optimization. Missing/stale producer evidence takes the
     /// same fresh reservation/copy path as canonical intake; it is never ADMIT.
+    #[allow(clippy::too_many_arguments)]
     pub fn intake(
         &mut self,
         domain: &Domain<'_>,
@@ -491,6 +494,7 @@ impl Producer {
             Err(_) => self.allocate(source, landing, expected, execution, interrupted),
         }
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn intake_with_controller(
         &mut self,
         domain: &Domain<'_>,

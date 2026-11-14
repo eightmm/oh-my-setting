@@ -1,6 +1,7 @@
 //! Advisory pressure and work health; these observations never authorize a mutation.
 use crate::Value;
 use crate::value::{array, text};
+#[allow(clippy::too_many_arguments)]
 fn item(
     items: &mut Vec<Value>,
     kind: &str,

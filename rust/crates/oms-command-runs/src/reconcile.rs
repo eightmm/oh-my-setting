@@ -256,15 +256,14 @@ pub fn parse_accounting(id: &str, raw: &[u8]) -> Result<Json> {
             put(&mut out, key, string(value));
         }
     }
-    if pending.is_none() {
-        if let Some(end) = newest
+    if pending.is_none()
+        && let Some(end) = newest
             .iter()
             .map(|r| s(r, "end"))
             .filter(|e| !e.is_empty())
             .max()
-        {
-            put(&mut out, "end", string(end));
-        }
+    {
+        put(&mut out, "end", string(end));
     }
     let attempts = elements.values().map(Vec::len).max().unwrap();
     if attempts > 1 {

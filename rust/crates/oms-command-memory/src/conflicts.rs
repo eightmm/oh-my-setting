@@ -145,28 +145,30 @@ pub(crate) fn contradictions(s: &Store, note: &str, paths: &str, source: &Path) 
         let old = statements(&e.body);
         let mut reasons = Vec::new();
         for (key, values) in &new.0 {
-            if let Some(before) = old.0.get(key) {
-                if before.is_disjoint(values) {
-                    reasons.push(format!(
-                        "key \"{key}\" was \"{}\"",
-                        clip(before.first().unwrap(), 60)
-                    ));
-                }
+            if let Some(before) = old.0.get(key)
+                && before.is_disjoint(values)
+            {
+                reasons.push(format!(
+                    "key \"{key}\" was \"{}\"",
+                    clip(before.first().unwrap(), 60)
+                ));
             }
         }
         for (key, signs) in &new.1 {
-            if let Some(before) = old.1.get(key) {
-                if signs.len() == 1 && before.len() == 1 && signs != before {
-                    reasons.push(format!(
-                        "\"{}\" was {}",
-                        key.0,
-                        if before.contains("neg") {
-                            "forbidden"
-                        } else {
-                            "advised"
-                        }
-                    ));
-                }
+            if let Some(before) = old.1.get(key)
+                && signs.len() == 1
+                && before.len() == 1
+                && signs != before
+            {
+                reasons.push(format!(
+                    "\"{}\" was {}",
+                    key.0,
+                    if before.contains("neg") {
+                        "forbidden"
+                    } else {
+                        "advised"
+                    }
+                ));
             }
         }
         if !reasons.is_empty() {

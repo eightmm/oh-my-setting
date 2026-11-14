@@ -49,14 +49,14 @@ pub fn state(
                 .entry(parent.into())
                 .or_insert_with(empty)
                 .set(child, decision.py());
-        } else if let Some(node) = nodes.get_mut(&raw) {
-            if st(node, "status") != "finished" {
-                node.set("status", "finished");
-                node.set("outcome", decision.py());
-                node.set("claimed_outcome", decision.py());
-                node.set("attempts", 1_i64);
-                steps += 1;
-            }
+        } else if let Some(node) = nodes.get_mut(&raw)
+            && st(node, "status") != "finished"
+        {
+            node.set("status", "finished");
+            node.set("outcome", decision.py());
+            node.set("claimed_outcome", decision.py());
+            node.set("attempts", 1_i64);
+            steps += 1;
         }
     }
     let mut child_states = BTreeMap::new();

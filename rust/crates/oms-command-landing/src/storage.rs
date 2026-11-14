@@ -42,13 +42,11 @@ pub(crate) fn lock(path: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Gu
         oms_lock::Settings::from_env().map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
     let lock = oms_lock::Lock::for_file(path, settings)
         .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
-    loop {
-        crate::check(interrupted)?;
-        match lock.try_acquire() {
-            Ok(g) => return Ok(g),
-            Err(oms_lock::Error::Busy) => break,
-            Err(e) => return Err(Error::new(e.exit_code(), e.to_string())),
-        }
+    crate::check(interrupted)?;
+    match lock.try_acquire() {
+        Ok(g) => return Ok(g),
+        Err(oms_lock::Error::Busy) => {}
+        Err(e) => return Err(Error::new(e.exit_code(), e.to_string())),
     }
     let cancel = oms_lock::Cancellation::default();
     let done = std::sync::atomic::AtomicBool::new(false);

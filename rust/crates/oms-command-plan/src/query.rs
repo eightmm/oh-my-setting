@@ -15,10 +15,10 @@ impl Plan<'_> {
         if details {
             v.set("task_sha256", string(json::hash(t)?))?;
             v.set("claim_expired", Value::Bool(self.expired(s, t, false)?))?;
-            if ["claimed", "running", "review"].contains(&t.text("state")) {
-                if let Some(age) = age(t, &self.context.ts) {
-                    v.set("claim_age_s", number(age))?;
-                }
+            if ["claimed", "running", "review"].contains(&t.text("state"))
+                && let Some(age) = age(t, &self.context.ts)
+            {
+                v.set("claim_age_s", number(age))?;
             }
         }
         Ok(v)
@@ -116,10 +116,10 @@ impl Plan<'_> {
                 }
                 v.set("claim_expired", Value::Bool(self.expired(s, &t, false)?))?;
                 v.set("task_sha256", string(json::hash(&t)?))?;
-                if matches!(t.text("state"), "claimed" | "running" | "review") {
-                    if let Some(age) = age(&t, &self.context.ts) {
-                        v.set("claim_age_s", number(age))?;
-                    }
+                if matches!(t.text("state"), "claimed" | "running" | "review")
+                    && let Some(age) = age(&t, &self.context.ts)
+                {
+                    v.set("claim_age_s", number(age))?;
                 }
                 Response::json(&v)
             }
@@ -871,10 +871,10 @@ fn retro_rows(plan: &Plan<'_>) -> Result<(Vec<Value>, bool)> {
     };
     let mut rows = Vec::new();
     for line in raw.split(|b| *b == b'\n') {
-        if let Ok(row) = json::parse_legacy(line, 8 * 1024 * 1024) {
-            if row.object().is_ok() {
-                rows.push(row);
-            }
+        if let Ok(row) = json::parse_legacy(line, 8 * 1024 * 1024)
+            && row.object().is_ok()
+        {
+            rows.push(row);
         }
     }
     Ok((rows, complete))

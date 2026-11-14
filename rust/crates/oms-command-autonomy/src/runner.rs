@@ -446,13 +446,13 @@ pub(crate) fn execute_bound(
     })();
     // Cleanup releases only the lease this call owns, never a replacement
     // claimant or the durable review/repair evidence left by another producer.
-    if claimed && let Ok(current) = show(ctx, &id) {
-        if ["claimed", "running"].contains(&value::text(&current, "state"))
-            && value::text(&current, "lease_id") == lease
-            && current["repair_count"].as_u64().unwrap_or(0) == 0
-        {
-            let _ = action(ctx, Action::Release, &id, &lease);
-        }
+    if claimed
+        && let Ok(current) = show(ctx, &id)
+        && ["claimed", "running"].contains(&value::text(&current, "state"))
+        && value::text(&current, "lease_id") == lease
+        && current["repair_count"].as_u64().unwrap_or(0) == 0
+    {
+        let _ = action(ctx, Action::Release, &id, &lease);
     }
     result
 }

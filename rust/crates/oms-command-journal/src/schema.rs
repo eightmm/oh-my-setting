@@ -85,12 +85,10 @@ pub fn canonical_repo_root(repo: &Path) -> PathBuf {
         .arg(&base)
         .args(["rev-parse", "--show-toplevel"])
         .output()
+        && out.status.success()
+        && let Some(top) = trim_git_path_output(&out.stdout)
     {
-        if out.status.success() {
-            if let Some(top) = trim_git_path_output(&out.stdout) {
-                return fs::canonicalize(&top).unwrap_or(top);
-            }
-        }
+        return fs::canonicalize(&top).unwrap_or(top);
     }
     base
 }
@@ -127,12 +125,11 @@ pub fn git_origin_remote(repo_root: &Path) -> String {
         .arg(repo_root)
         .args(["config", "--get", "remote.origin.url"])
         .output()
+        && out.status.success()
     {
-        if out.status.success() {
-            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !url.is_empty() {
-                return url;
-            }
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !url.is_empty() {
+            return url;
         }
     }
     String::new()
@@ -332,11 +329,11 @@ fn clean_record(value: &Value, allowed: &[&str], required: &[&str]) -> Result<Ma
         .ok_or("structured field must be an object")?;
     let mut output = Map::new();
     for &key in allowed {
-        if let Some(value) = obj.get(key).and_then(|v| sanitize_value(v, Some(key))) {
-            if !is_empty_value(&value) {
-                crate::sanitize::require_scalar_strings(&value)?;
-                output.insert(key.into(), value);
-            }
+        if let Some(value) = obj.get(key).and_then(|v| sanitize_value(v, Some(key)))
+            && !is_empty_value(&value)
+        {
+            crate::sanitize::require_scalar_strings(&value)?;
+            output.insert(key.into(), value);
         }
     }
     for &key in required {
@@ -613,11 +610,11 @@ pub fn normalize_event(
         }
     }
     for field in ["goal", "decision", "blocker", "next_action"] {
-        if let Some(clean) = obj.get(field).and_then(|v| sanitize_value(v, Some(field))) {
-            if matches!(&clean, Value::String(s) if !s.codepoints().is_empty()) {
-                crate::sanitize::require_scalar_strings(&clean)?;
-                out.insert(field.into(), clean);
-            }
+        if let Some(clean) = obj.get(field).and_then(|v| sanitize_value(v, Some(field)))
+            && matches!(&clean, Value::String(s) if !s.codepoints().is_empty())
+        {
+            crate::sanitize::require_scalar_strings(&clean)?;
+            out.insert(field.into(), clean);
         }
     }
     let refs = clean_records(obj.get("refs"), &["type", "id", "path", "url", "label"]);
@@ -756,7 +753,7 @@ pub fn validate_canonical_event(event: &Value) -> Result<(), String> {
         return Err("invalid canonical event_id".into());
     }
     for key in ["occurred_at", "recorded_at"] {
-        parse_rfc3339_utc(&python_str(&obj.at(key)))?;
+        parse_rfc3339_utc(&python_str(obj.at(key)))?;
     }
     let source = obj
         .get("source")

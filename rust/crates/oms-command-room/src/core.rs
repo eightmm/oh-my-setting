@@ -115,15 +115,16 @@ impl<'a> Room<'a> {
         }
         let repo = services.state_repository(repo)?;
         let repo = std::fs::canonicalize(repo).map_err(|_| Error::new("repository unavailable"))?;
-        if !allow_foreign && session.room.is_some() {
-            if let Some(inherited) = &session.repository {
-                let inherited = std::fs::canonicalize(services.state_repository(inherited)?)
-                    .map_err(|_| Error::new("inherited room repository unavailable"))?;
-                if inherited != repo {
-                    return Err(Error::new(
-                        "selected repository conflicts with the inherited room repository",
-                    ));
-                }
+        if !allow_foreign
+            && session.room.is_some()
+            && let Some(inherited) = &session.repository
+        {
+            let inherited = std::fs::canonicalize(services.state_repository(inherited)?)
+                .map_err(|_| Error::new("inherited room repository unavailable"))?;
+            if inherited != repo {
+                return Err(Error::new(
+                    "selected repository conflicts with the inherited room repository",
+                ));
             }
         }
         let threads_exist = match std::fs::symlink_metadata(repo.join(".oms/threads")) {
@@ -165,7 +166,7 @@ impl<'a> Room<'a> {
         if let Some(old) = self.snapshots.borrow().get(id) {
             let s = rustix::fs::statat(
                 &store.threads.fd,
-                &Store::name(id),
+                Store::name(id),
                 rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
             )
             .map_err(|_| Error::new("room log unavailable"))?;
@@ -199,7 +200,7 @@ impl<'a> Room<'a> {
             store.check()?;
             let stat = rustix::fs::statat(
                 &store.threads.fd,
-                &Store::name(id),
+                Store::name(id),
                 rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
             )
             .map_err(|_| Error::new("room log unavailable"))?;
@@ -208,7 +209,7 @@ impl<'a> Room<'a> {
                     .ranges
                     .iter()
                     .take(2)
-                    .last()
+                    .next_back()
                     .map(|r| r.end)
                     .unwrap_or(0);
                 if used > budget {
@@ -336,10 +337,7 @@ impl<'a> Room<'a> {
                         return Ok(out);
                     }
                     Some(next)
-                        if next == current && crate::carry::successor_id(&old) == current =>
-                    {
-                        ()
-                    }
+                        if next == current && crate::carry::successor_id(&old) == current => {}
                     _ => return Err(Error::new("structured result lineage is not sealed")),
                 }
             }
@@ -552,7 +550,13 @@ impl<'a> Room<'a> {
             ("text", stored_title.clone().into()),
             ("live", true.into()),
         ]);
-        self.validate_event_locked(&[header.clone()], &event, title, Carry::No, &mut Vec::new())?;
+        self.validate_event_locked(
+            std::slice::from_ref(&header),
+            &event,
+            title,
+            Carry::No,
+            &mut Vec::new(),
+        )?;
         let row = obj([
             ("schema", 1u64.into()),
             ("ts", now().into()),
@@ -839,16 +843,15 @@ impl<'a> Room<'a> {
                 && !state.list("messages").iter().any(|m| m.text("id") == mid)
             {
                 let found = self.lineage_messages(&state, &BTreeSet::from([mid.clone()]))?;
-                if let Some(original) = found.get(mid) {
-                    if original
+                if let Some(original) = found.get(mid)
+                    && original
                         .list("targets")
                         .iter()
                         .any(|p| p.as_str() == Some(send.sender))
-                        && send.recipient == original.text("sender")
-                    {
-                        self.notices.borrow_mut().push(format!("room: {mid} stayed in a sealed predecessor when it rolled over; sending without --reply-to"));
-                        reply = None;
-                    }
+                    && send.recipient == original.text("sender")
+                {
+                    self.notices.borrow_mut().push(format!("room: {mid} stayed in a sealed predecessor when it rolled over; sending without --reply-to"));
+                    reply = None;
                 }
             }
         }
@@ -1000,36 +1003,34 @@ impl<'a> Room<'a> {
                     ]),
                 );
             }
-            if let Some(call) = m.text("id").strip_prefix("result-") {
-                if m.text("sender") == call
-                    && m.text("message_kind") == "handoff"
-                    && parents.get(call).is_some_and(|p| p == m.text("recipient"))
-                {
-                    let code = m.text("text").strip_prefix("Call exit=").and_then(|rest| {
-                        let digits: String =
-                            rest.chars().take_while(char::is_ascii_digit).collect();
-                        if digits.is_empty()
-                            || digits.len() > 4
-                            || rest[digits.len()..]
-                                .chars()
-                                .next()
-                                .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                        {
-                            None
-                        } else {
-                            digits.parse::<i64>().ok()
-                        }
-                    });
-                    results.set(
-                        call,
-                        obj([
-                            ("exit", code.map(Value::from).unwrap_or(Value::Null)),
-                            ("ts", m["ts"].clone()),
-                            ("seq", m["seq"].clone()),
-                            ("read", m.list("pending_for").is_empty().into()),
-                        ]),
-                    );
-                }
+            if let Some(call) = m.text("id").strip_prefix("result-")
+                && m.text("sender") == call
+                && m.text("message_kind") == "handoff"
+                && parents.get(call).is_some_and(|p| p == m.text("recipient"))
+            {
+                let code = m.text("text").strip_prefix("Call exit=").and_then(|rest| {
+                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    if digits.is_empty()
+                        || digits.len() > 4
+                        || rest[digits.len()..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        None
+                    } else {
+                        digits.parse::<i64>().ok()
+                    }
+                });
+                results.set(
+                    call,
+                    obj([
+                        ("exit", code.map(Value::from).unwrap_or(Value::Null)),
+                        ("ts", m["ts"].clone()),
+                        ("seq", m["seq"].clone()),
+                        ("read", m.list("pending_for").is_empty().into()),
+                    ]),
+                );
             }
         }
         for row in self.structured_rows(id, rows)? {
@@ -1235,12 +1236,11 @@ impl<'a> Room<'a> {
         state: &Value,
         chain: Option<&[LineageEntry]>,
     ) -> Result<Vec<Value>> {
-        let loaded;
-        if chain.is_none() {
-            loaded = self.lineage(state)?;
+        let loaded = if chain.is_none() {
+            self.lineage(state)?
         } else {
-            loaded = Vec::new();
-        }
+            Vec::new()
+        };
         let chain = chain.unwrap_or(&loaded);
         let here: BTreeSet<_> = state
             .list("participants")
@@ -1353,19 +1353,18 @@ impl<'a> Room<'a> {
         lines.push("Consumption is not approval; call exits are not acceptance.".to_owned());
         let text = lines.join("\n");
         let hash = digest(format!("{}{}", text, consumer.as_deref().unwrap_or("")).as_bytes());
-        if let Some(prior) = self.prior_publication(&state, &target)? {
-            if !retry
-                && (prior.text("status") == "pending"
-                    || prior.flag("delivery_unknown")
-                    || prior.text("digest") == hash && prior.text("status") == "persisted")
-            {
-                return Ok(obj([
-                    ("room", id.into()),
-                    ("target", target.into()),
-                    ("receipt", prior),
-                    ("deduplicated", true.into()),
-                ]));
-            }
+        if let Some(prior) = self.prior_publication(&state, &target)?
+            && !retry
+            && (prior.text("status") == "pending"
+                || prior.flag("delivery_unknown")
+                || prior.text("digest") == hash && prior.text("status") == "persisted")
+        {
+            return Ok(obj([
+                ("room", id.into()),
+                ("target", target.into()),
+                ("receipt", prior),
+                ("deduplicated", true.into()),
+            ]));
         }
         if !self.services.delivery_available(app) {
             return Err(Error::new("app delivery service is unavailable"));
@@ -1425,12 +1424,11 @@ impl<'a> Room<'a> {
         caller: &str,
         scopes: &[String],
     ) -> Result<Vec<Value>> {
-        let status;
-        if state.get("call_results").is_none() {
-            status = self.status_rows(id, &self.snapshot(id)?.rows)?;
+        let status = if state.get("call_results").is_none() {
+            self.status_rows(id, &self.snapshot(id)?.rows)?
         } else {
-            status = state.clone();
-        }
+            state.clone()
+        };
         let joined: BTreeSet<_> = state
             .list("participants")
             .iter()

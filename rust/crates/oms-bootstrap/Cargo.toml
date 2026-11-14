@@ -5,8 +5,6 @@ edition = "2024"
 rust-version = "1.99.1"
 publish = false
 
-[workspace]
-resolver = "3"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -168,10 +168,10 @@ pub fn parse(app: App, raw: &[OsString]) -> std::result::Result<Args, CommandRes
                 return Ok(true);
             }
             if command.is_empty() {
-                if arg.starts_with("--") {
-                    let (name, inline) = arg[2..]
+                if let Some(after_dash) = arg.strip_prefix("--") {
+                    let (name, inline) = after_dash
                         .split_once('=')
-                        .map_or((&arg[2..], None), |(a, b)| (a, Some(b)));
+                        .map_or((after_dash, None), |(a, b)| (a, Some(b)));
                     let option = resolve(name, &["repo", "help"])?;
                     if option == "help" {
                         if inline.is_some() {
@@ -326,10 +326,10 @@ fn validate_option(app: App, command: &str, key: &str, value: &std::ffi::OsStr) 
             | "expected-version"
             | "older-than-seconds"
     ) {
-        crate::value::parse_integer(&raw).map_err(|_| {
+        crate::value::parse_integer(raw).map_err(|_| {
             format!(
                 "argument --{key}: invalid int value: {}",
-                crate::value::V::from(raw.as_ref()).repr()
+                crate::value::V::from(raw).repr()
             )
         })?;
     }
@@ -337,7 +337,7 @@ fn validate_option(app: App, command: &str, key: &str, value: &std::ffi::OsStr) 
         raw.trim().parse::<f64>().map_err(|_| {
             format!(
                 "argument --{key}: invalid float value: {}",
-                crate::value::V::from(raw.as_ref()).repr()
+                crate::value::V::from(raw).repr()
             )
         })?;
     }

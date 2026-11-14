@@ -155,6 +155,7 @@ impl Protocol {
             interrupted,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     fn register(
         &self,
         repo: &Path,
@@ -703,7 +704,7 @@ fn bounded<T>(
                 }
             }
         });
-        let result = work(&cancelled, &acquired);
+        let result = work(cancelled, acquired);
         let _ = done.send(());
         result
     });

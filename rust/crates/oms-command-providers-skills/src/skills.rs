@@ -616,17 +616,15 @@ pub(crate) fn doctor(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                     && raw.len() <= 65536
                     && let Ok(meta) = frontmatter(&String::from_utf8_lossy(&raw))
                     && let Some(name) = meta.get("name")
-                {
-                    if names
+                    && names
                         .insert(
                             name.clone(),
                             meta.get("description").cloned().unwrap_or_default(),
                         )
                         .is_some()
-                    {
-                        failed = true;
-                        text.push_str(&format!("fail: duplicate {name} in {label}\n"));
-                    }
+                {
+                    failed = true;
+                    text.push_str(&format!("fail: duplicate {name} in {label}\n"));
                 }
             }
         }

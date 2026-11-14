@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-const STOP: AtomicBool = AtomicBool::new(false);
+static STOP: AtomicBool = AtomicBool::new(false);
 fn output(value: Value) -> CommandOutput {
     CommandOutput {
         stdout: serde_json::to_vec(&value).unwrap(),
@@ -875,7 +875,7 @@ fn supervisor_settlement() {
     let repo = repo("supervisor-settlement");
     let fake = Fake::default();
     let worker = worker("call-current", "review", 1);
-    prepare(&fake, &[worker.clone()]);
+    prepare(&fake, std::slice::from_ref(&worker));
     let request = finalize_request(&repo);
     dispatch_envelopes(&repo, &worker, false, false);
     assert!(results::finalize(&repo, &request, &fake, &STOP).is_err());

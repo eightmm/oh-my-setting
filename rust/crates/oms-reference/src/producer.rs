@@ -116,14 +116,13 @@ impl Producer {
         .into_iter()
         .flatten()
         {
-            if let Ok(candidate) = fs::canonicalize(candidate) {
-                if !candidate.starts_with(&self.index.repo)
-                    && !candidate.starts_with(&execution)
-                    && fs::metadata(&candidate).is_ok_and(|v| v.dev() == device)
-                {
-                    parent = Some(candidate);
-                    break;
-                }
+            if let Ok(candidate) = fs::canonicalize(candidate)
+                && !candidate.starts_with(&self.index.repo)
+                && !candidate.starts_with(&execution)
+                && fs::metadata(&candidate).is_ok_and(|v| v.dev() == device)
+            {
+                parent = Some(candidate);
+                break;
             }
         }
         let parent =

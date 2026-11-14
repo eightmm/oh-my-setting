@@ -392,16 +392,16 @@ pub(crate) fn check_stamp(directory: &Anchor, name: &OsStr, stamp: &Stamp) -> Re
     Ok(())
 }
 fn stat_matches(stat: &fs::Stat, meta: &Metadata) -> bool {
-    stat.st_dev as u64 == meta.dev()
-        && stat.st_ino as u64 == meta.ino()
-        && stat.st_mode as u32 == meta.mode()
+    stat.st_dev == meta.dev()
+        && stat.st_ino == meta.ino()
+        && stat.st_mode == meta.mode()
         && stat.st_uid == meta.uid()
         && stat.st_gid == meta.gid()
-        && stat.st_nlink as u64 == meta.nlink()
+        && stat.st_nlink == meta.nlink()
         && stat.st_size as u64 == meta.len()
-        && stat.st_mtime as i64 == meta.mtime()
+        && stat.st_mtime == meta.mtime()
         && stat.st_mtime_nsec as i64 == meta.mtime_nsec()
-        && stat.st_ctime as i64 == meta.ctime()
+        && stat.st_ctime == meta.ctime()
         && stat.st_ctime_nsec as i64 == meta.ctime_nsec()
 }
 struct Positional<'a> {

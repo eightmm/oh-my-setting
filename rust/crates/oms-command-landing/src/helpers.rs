@@ -23,13 +23,12 @@ pub fn internal_atomic_temp(root: &Path, relative: &str) -> bool {
         }
         "hooks/relay" => matches(r"^claude\.json\.[a-z0-9_]{8}\.tmp$", name),
         "hooks" => {
-            if let Some(date) = name.strip_prefix("state-hint.") {
-                if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            if let Some(date) = name.strip_prefix("state-hint.")
+                && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
                     .is_ok_and(|d| d.format("%Y-%m-%d").to_string() == date)
-                {
-                    return std::fs::symlink_metadata(root.join(path))
-                        .is_ok_and(|m| m.is_file() && m.len() == 0);
-                }
+            {
+                return std::fs::symlink_metadata(root.join(path))
+                    .is_ok_and(|m| m.is_file() && m.len() == 0);
             }
             matches(r"^\.oms-replace\.[a-z0-9_]{8}$", name)
         }

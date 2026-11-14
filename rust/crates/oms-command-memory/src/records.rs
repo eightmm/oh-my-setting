@@ -38,6 +38,7 @@ impl Entry {
     pub(crate) fn field(&self, key: &str) -> &str {
         self.metadata.get(key).map(String::as_str).unwrap_or("")
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn make(
         source: &str,
         ordinal: usize,
@@ -126,13 +127,9 @@ pub fn parse(raw: &[u8], source: &str) -> Vec<Entry> {
     let mut pending = BTreeMap::new();
     let mut block = None;
     let mut out = Vec::new();
-    let mut current: Option<(usize, String, String, BTreeMap<String, String>, Vec<String>)> = None;
-    fn finish(
-        out: &mut Vec<Entry>,
-        c: &mut Option<(usize, String, String, BTreeMap<String, String>, Vec<String>)>,
-        end: usize,
-        offsets: &[usize],
-    ) {
+    type PendingRecord = (usize, String, String, BTreeMap<String, String>, Vec<String>);
+    let mut current: Option<PendingRecord> = None;
+    fn finish(out: &mut Vec<Entry>, c: &mut Option<PendingRecord>, end: usize, offsets: &[usize]) {
         if let Some((start, when, agent, m, mut body)) = c.take() {
             if m.get("link_complete").map(String::as_str) == Some("required") {
                 while body.last().is_some_and(|l| l.trim().is_empty()) {
@@ -165,6 +162,7 @@ pub fn parse(raw: &[u8], source: &str) -> Vec<Entry> {
             ));
         }
     }
+    let iso_header_re = regex::Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d").unwrap();
     for (i, line) in lines.iter().enumerate() {
         let l = *line;
         if l.trim() == START {
@@ -198,23 +196,18 @@ pub fn parse(raw: &[u8], source: &str) -> Vec<Entry> {
             }
             continue;
         }
-        if let Some((when, agent)) = header(l) {
-            if current.is_none()
-                || !pending.is_empty()
-                || regex::Regex::new(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
-                    .unwrap()
-                    .is_match(when)
-            {
-                finish(&mut out, &mut current, i, &offsets);
-                current = Some((
-                    i,
-                    when.into(),
-                    agent.into(),
-                    std::mem::take(&mut pending),
-                    Vec::new(),
-                ));
-                continue;
-            }
+        if let Some((when, agent)) = header(l)
+            && (current.is_none() || !pending.is_empty() || iso_header_re.is_match(when))
+        {
+            finish(&mut out, &mut current, i, &offsets);
+            current = Some((
+                i,
+                when.into(),
+                agent.into(),
+                std::mem::take(&mut pending),
+                Vec::new(),
+            ));
+            continue;
         }
         if let Some((_, _, _, _, ref mut body)) = current {
             body.push(l.into());
@@ -224,16 +217,15 @@ pub fn parse(raw: &[u8], source: &str) -> Vec<Entry> {
         finish(&mut out, &mut current, lines.len(), &offsets);
     }
     for entry in &mut out {
-        if !entry.field("source_path").is_empty() {
-            if let Some(start) = raw[..entry.start]
+        if !entry.field("source_path").is_empty()
+            && let Some(start) = raw[..entry.start]
                 .windows(START.len())
                 .rposition(|w| w == START.as_bytes())
-            {
-                for (a, b) in line_ranges(&raw[start..entry.start]) {
-                    if let Some(value) = raw[start + a..start + b].strip_prefix(b"source_path:") {
-                        entry.raw_source_path = Some(os::from_bytes(value.trim_ascii().to_vec()));
-                        break;
-                    }
+        {
+            for (a, b) in line_ranges(&raw[start..entry.start]) {
+                if let Some(value) = raw[start + a..start + b].strip_prefix(b"source_path:") {
+                    entry.raw_source_path = Some(os::from_bytes(value.trim_ascii().to_vec()));
+                    break;
                 }
             }
         }

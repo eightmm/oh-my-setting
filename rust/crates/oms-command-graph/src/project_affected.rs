@@ -182,6 +182,7 @@ fn runner_edge(edge: &Value, graph: &Graph, extra: &[String]) -> bool {
         && s(target, "kind") == "test"
         && runnable(s(target, "path"), extra)
 }
+#[allow(clippy::too_many_arguments)]
 pub fn report_with_helper(
     repo: &Path,
     graph: &Graph,
@@ -223,15 +224,13 @@ pub fn report_with_helper(
                 None
             };
             suites.insert(path.to_owned(), names);
-        } else if let Some((before, after)) = before.as_deref().zip(after.as_deref()) {
-            if let Some(cases) =
+        } else if let Some((before, after)) = before.as_deref().zip(after.as_deref())
+            && let Some(cases) =
                 super::cases::changed(graph, path, &hunks, before, after, helper, cancel)
-            {
-                if let Some(seeds) = super::cases::seeds(graph, path, &cases) {
-                    containment.extend(seeds);
-                    narrow.insert(path.to_owned(), cases);
-                }
-            }
+            && let Some(seeds) = super::cases::seeds(graph, path, &cases)
+        {
+            containment.extend(seeds);
+            narrow.insert(path.to_owned(), cases);
         }
     }
     paths.retain(|path| !suites.contains_key(path));
@@ -459,11 +458,11 @@ pub fn report_with_helper(
 pub fn limit_blast(value: &mut Value, limit: usize) {
     let mut omitted = json!({});
     for key in ["dependents", "files", "tests", "test_cases", "seeds"] {
-        if let Some(rows) = value[key].as_array_mut() {
-            if rows.len() > limit {
-                omitted[key] = json!(rows.len() - limit);
-                rows.truncate(limit);
-            }
+        if let Some(rows) = value[key].as_array_mut()
+            && rows.len() > limit
+        {
+            omitted[key] = json!(rows.len() - limit);
+            rows.truncate(limit);
         }
     }
     value["limits"] = json!({"per_list":limit});
@@ -629,6 +628,7 @@ fn impact_text(value: &Value) -> String {
     }
     out
 }
+#[allow(clippy::too_many_arguments)]
 pub fn impact_with_helper(
     repo: &Path,
     graph: &Graph,
@@ -801,6 +801,7 @@ fn codeowners(repo: &Path, paths: &[String]) -> Result<(String, Vec<Value>)> {
     Ok((String::new(), vec![]))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn report(
     repo: &Path,
     graph: &Graph,
@@ -813,6 +814,7 @@ pub fn report(
 ) -> Result<Value> {
     report_with_helper(repo, graph, base, head, depth, guards, extra, cancel, None)
 }
+#[allow(clippy::too_many_arguments)]
 pub fn impact(
     repo: &Path,
     graph: &Graph,

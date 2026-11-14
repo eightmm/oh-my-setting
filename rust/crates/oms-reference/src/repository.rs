@@ -56,12 +56,11 @@ impl Resolver {
         interrupted: &AtomicBool,
     ) -> Result<PathBuf> {
         let shared = self.resolve(input, interrupted)?;
-        if !allow_foreign && let Some(inherited) = &self.inherited_room {
-            if self.resolve(inherited, interrupted)? != shared {
-                return Err(
-                    "selected repository conflicts with the inherited room repository".into(),
-                );
-            }
+        if !allow_foreign
+            && let Some(inherited) = &self.inherited_room
+            && self.resolve(inherited, interrupted)? != shared
+        {
+            return Err("selected repository conflicts with the inherited room repository".into());
         }
         Ok(shared)
     }

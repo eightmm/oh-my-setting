@@ -43,10 +43,10 @@ pub fn historical(store: &Store, rel: &str, expected: &str) -> Result<Vec<u8>> {
         json::hex(expected, 64),
         "decision artifact requires a lowercase SHA-256",
     )?;
-    if let Some(raw) = store.optional(rel, 64 * 1024)? {
-        if json::sha(&raw) == expected {
-            return Ok(raw);
-        }
+    if let Some(raw) = store.optional(rel, 64 * 1024)?
+        && json::sha(&raw) == expected
+    {
+        return Ok(raw);
     }
     let raw=store.private_read(format!("{CATALOG}/{expected}"),64*1024).map_err(|_|error("cancellation decision artifact digest changed or exact snapshot is missing/corrupt"))?;
     require(

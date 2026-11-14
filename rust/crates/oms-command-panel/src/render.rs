@@ -312,6 +312,7 @@ pub fn tree(
     }
     let mut seen = BTreeSet::new();
     let mut out = Vec::new();
+    #[allow(clippy::too_many_arguments)]
     fn visit<'a>(
         call: &'a Value,
         level: usize,

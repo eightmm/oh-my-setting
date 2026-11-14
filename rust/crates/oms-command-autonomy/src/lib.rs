@@ -79,10 +79,10 @@ pub fn run_with_services(
             "context-pack",
             "campaign",
         ] {
-            if let Some(raw) = args.values.get_mut(name) {
-                if !Path::new(raw).is_absolute() {
-                    *raw = cwd.join(&*raw).into_os_string();
-                }
+            if let Some(raw) = args.values.get_mut(name)
+                && !Path::new(raw).is_absolute()
+            {
+                *raw = cwd.join(&*raw).into_os_string();
             }
         }
         checkpoint(interrupted)?;

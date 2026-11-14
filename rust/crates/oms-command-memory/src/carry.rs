@@ -70,7 +70,7 @@ pub(crate) fn carry(s: &Store, o: &Options, author: &str, flag: &AtomicBool) -> 
             .repo
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.chars().count() >= 3 && fold(&body).contains(&fold(&n)));
+            .is_some_and(|n| n.chars().count() >= 3 && fold(&body).contains(&fold(n)));
         // The check and append share the canonical source lock, including retry.
         let _g = if o.has("--apply") {
             Some(store::lock(&target.shared, flag)?)

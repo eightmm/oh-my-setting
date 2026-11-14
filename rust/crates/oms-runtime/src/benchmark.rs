@@ -16,10 +16,10 @@ pub fn first_number(value: &Value, keys: &[&str]) -> Option<f64> {
     match value {
         Value::Object(items) => {
             for (k, v) in items {
-                if keys.iter().any(|s| s.as_bytes() == k) {
-                    if let Some(n) = finite(v).filter(|n| *n >= 0.0) {
-                        return Some(n);
-                    }
+                if keys.iter().any(|s| s.as_bytes() == k)
+                    && let Some(n) = finite(v).filter(|n| *n >= 0.0)
+                {
+                    return Some(n);
                 }
                 if let Some(n) = first_number(v, keys) {
                     return Some(n);

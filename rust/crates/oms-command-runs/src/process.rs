@@ -234,6 +234,7 @@ pub fn execute(
 }
 /// Executes with child-local policy using the same group lifetime and bounded
 /// stream handling as `execute`. Cancellation receipts return exit 130.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_policy(
     ctx: &Context<'_>,
     argv: &[OsString],
@@ -250,6 +251,7 @@ pub fn execute_with_policy(
 }
 /// Executes with child-local policy and invokes `on_spawn` with the OS PID
 /// as soon as the child process is spawned and armed under `Lifetime`.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_with_hooks(
     ctx: &Context<'_>,
     argv: &[OsString],
@@ -284,6 +286,7 @@ pub fn merged(
         None,
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn execute_mode(
     ctx: &Context<'_>,
     argv: &[OsString],
@@ -489,10 +492,7 @@ fn execute_mode(
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::Interrupted =>
-                {
-                    ()
-                }
+                        || e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => return Err(Error::io("reading child output")),
             }
         }

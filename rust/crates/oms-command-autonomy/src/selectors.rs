@@ -97,6 +97,7 @@ pub fn validate_with_continuation(
         }
     }
     let suite_pattern = Regex::new(r"^(?:tests|scripts)/[A-Za-z0-9_.-]+\.sh$").unwrap();
+    let section_re = Regex::new(r"(?m)^# OPERATOR_SECTION_BEGIN ([a-z_-]+)$").unwrap();
     let separators = ["&&", "||", ";", "|", "&", ";;", "(", ")"];
     for (index, word) in words.iter().enumerate().take(words.len().saturating_sub(1)) {
         if word != "bash" || !suite_pattern.is_match(&words[index + 1]) {
@@ -123,8 +124,7 @@ pub fn validate_with_continuation(
                     "--verify repeats --section; use one comma-separated list",
                 )?;
                 seen_section = true;
-                let mut names = Regex::new(r"(?m)^# OPERATOR_SECTION_BEGIN ([a-z_-]+)$")
-                    .unwrap()
+                let mut names = section_re
                     .captures_iter(&source)
                     .map(|c| c[1].replace('_', "-"))
                     .filter(|s| !["core", "shared-cache"].contains(&s.as_str()))

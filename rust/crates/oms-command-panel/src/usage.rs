@@ -115,6 +115,7 @@ fn window_level(used: u8, stale: bool, warn_pct: Option<u8>) -> Value {
     Value::Null
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_window(
     name: &str,
     used: u8,
@@ -147,7 +148,7 @@ fn seats_by_provider(report: &Value) -> BTreeMap<String, (usize, usize)> {
     let mut attempt_states: HashMap<String, String> = HashMap::new();
     for key in ["active_recent", "recent"] {
         for attempt in array(&report["attempts"][key]) {
-            let state = vtext(&attempt, "state");
+            let state = vtext(attempt, "state");
             if let Some(id) = attempt["attempt_id"].as_str().filter(|s| !s.is_empty()) {
                 attempt_states.insert(id.to_owned(), state.to_owned());
             }
@@ -171,9 +172,9 @@ fn seats_by_provider(report: &Value) -> BTreeMap<String, (usize, usize)> {
     let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for member in array(&report["room"]["participants"]) {
         let joined = member["joined"].as_bool().unwrap_or(false);
-        let role = vtext(&member, "role");
-        let participant = vtext(&member, "participant");
-        let provider = vtext(&member, "provider");
+        let role = vtext(member, "role");
+        let participant = vtext(member, "participant");
+        let provider = vtext(member, "provider");
         if provider.is_empty() || !joined {
             continue;
         }
@@ -200,8 +201,8 @@ fn seats_by_provider(report: &Value) -> BTreeMap<String, (usize, usize)> {
 fn held_items(report: &Value) -> Value {
     let mut items = Vec::new();
     for worker in array(&report["attempts"]["active_recent"]) {
-        let state = vtext(&worker, "state");
-        let reason = vtext(&worker, "reason");
+        let state = vtext(worker, "state");
+        let reason = vtext(worker, "reason");
         if state == "held" || reason.contains("quota") {
             items.push(json!({
                 "attempt_id": worker["attempt_id"],

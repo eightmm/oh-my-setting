@@ -9,6 +9,7 @@ use crate::adapters::ObserveOverrides;
 use crate::sanitize::{diagnostic_os_str, os_str_to_utf8};
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum JournalCommand {
     Configure {
         data_source_id: Option<String>,
@@ -122,15 +123,15 @@ pub fn normalize_leading_repo(raw_args: &[OsString]) -> Result<Vec<OsString>, St
         }
         return Err("error: --repo requires a path and subcommand".to_string());
     }
-    if let Some(first) = raw_args.first() {
-        if let Some(repo_val) = strip_repo_eq_prefix(first) {
-            if raw_args.len() >= 2 {
-                let mut out = vec![raw_args[1].clone(), OsString::from("--repo"), repo_val];
-                out.extend_from_slice(&raw_args[2..]);
-                return Ok(out);
-            }
-            return Err("error: --repo= requires a subcommand".to_string());
+    if let Some(first) = raw_args.first()
+        && let Some(repo_val) = strip_repo_eq_prefix(first)
+    {
+        if raw_args.len() >= 2 {
+            let mut out = vec![raw_args[1].clone(), OsString::from("--repo"), repo_val];
+            out.extend_from_slice(&raw_args[2..]);
+            return Ok(out);
         }
+        return Err("error: --repo= requires a subcommand".to_string());
     }
     Ok(raw_args.to_vec())
 }
@@ -222,30 +223,28 @@ pub fn parse_command(raw_args: &[OsString]) -> Result<JournalCommand, String> {
     }
 
     for argument in rest {
-        if let Some(value) = argument.to_str() {
-            if let Some((flag, _)) = value.split_once('=') {
-                if [
-                    "--discover",
-                    "--no-validate",
-                    "--managed",
-                    "--json",
-                    "--adopt-detected",
-                    "--local-only",
-                    "--digest",
-                    "--autodistill",
-                    "--apply",
-                    "--today",
-                    "--week",
-                    "--blockers",
-                    "--decisions",
-                    "--force",
-                    "--dry-run",
-                ]
-                .contains(&flag)
-                {
-                    return Err(format!("error: {flag} does not take a value"));
-                }
-            }
+        if let Some(value) = argument.to_str()
+            && let Some((flag, _)) = value.split_once('=')
+            && [
+                "--discover",
+                "--no-validate",
+                "--managed",
+                "--json",
+                "--adopt-detected",
+                "--local-only",
+                "--digest",
+                "--autodistill",
+                "--apply",
+                "--today",
+                "--week",
+                "--blockers",
+                "--decisions",
+                "--force",
+                "--dry-run",
+            ]
+            .contains(&flag)
+        {
+            return Err(format!("error: {flag} does not take a value"));
         }
     }
     if [

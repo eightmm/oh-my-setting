@@ -293,19 +293,19 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             if !oms_command_operations::lock::pid_alive(i64::from(pid)) {
                 continue;
             }
-            if let Some(start) = fields.get("process-start") {
-                if oms_command_operations::lock::process_start(pid).is_some_and(|s| s != *start) {
-                    continue;
-                }
+            if let Some(start) = fields.get("process-start")
+                && oms_command_operations::lock::process_start(pid).is_some_and(|s| s != *start)
+            {
+                continue;
             }
-            if let Ok((repo, worktree)) = validate(c, &base, &entry.path(), &fields, true) {
-                if filter.as_ref().is_none_or(|p| p == &repo) {
-                    out += &format!(
-                        "{}\towner={pid}\trepo={}\n",
-                        worktree.display(),
-                        repo.display()
-                    );
-                }
+            if let Ok((repo, worktree)) = validate(c, &base, &entry.path(), &fields, true)
+                && filter.as_ref().is_none_or(|p| p == &repo)
+            {
+                out += &format!(
+                    "{}\towner={pid}\trepo={}\n",
+                    worktree.display(),
+                    repo.display()
+                );
             }
         }
         return Ok(Output::text(out));

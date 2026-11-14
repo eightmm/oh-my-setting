@@ -1103,32 +1103,31 @@ pub fn results_page(
             if let Some(call) = calls
                 .iter()
                 .find(|v| v["superseded"] != true && v[key].as_i64().is_some_and(|n| n != 0))
+                && let Some(ending) = call_ending(call)
             {
-                if let Some(ending) = call_ending(call) {
-                    let (state, next) = match ending {
-                        "cancelled" => (format!("{stage} cancelled"), "none".into()),
-                        "guard_stop" => (
-                            format!("{stage} guard stop"),
-                            "inspect guard stop and salvage partial work".into(),
-                        ),
-                        "timed_out" => (
-                            "timed out".into(),
-                            if metadata["panel_access"] == "read" {
-                                "continue with --continue TASK_ID".into()
-                            } else {
-                                "salvage (--salvage TASK_ID); --continue if empty, else inspect and re-dispatch with recovered patch".into()
-                            },
-                        ),
-                        "verify_failed" => ("verify failed".into(), "retry verify".into()),
-                        "verify_timed_out" => ("verify timed out".into(), "retry verify".into()),
-                        "provider_error" => {
-                            (format!("{stage} provider error"), format!("retry {stage}"))
-                        }
-                        _ => (representative.clone(), action.clone()),
-                    };
-                    representative = state;
-                    action = next;
-                }
+                let (state, next) = match ending {
+                    "cancelled" => (format!("{stage} cancelled"), "none".into()),
+                    "guard_stop" => (
+                        format!("{stage} guard stop"),
+                        "inspect guard stop and salvage partial work".into(),
+                    ),
+                    "timed_out" => (
+                        "timed out".into(),
+                        if metadata["panel_access"] == "read" {
+                            "continue with --continue TASK_ID".into()
+                        } else {
+                            "salvage (--salvage TASK_ID); --continue if empty, else inspect and re-dispatch with recovered patch".into()
+                        },
+                    ),
+                    "verify_failed" => ("verify failed".into(), "retry verify".into()),
+                    "verify_timed_out" => ("verify timed out".into(), "retry verify".into()),
+                    "provider_error" => {
+                        (format!("{stage} provider error"), format!("retry {stage}"))
+                    }
+                    _ => (representative.clone(), action.clone()),
+                };
+                representative = state;
+                action = next;
             }
         }
         if result.is_object() {
@@ -1169,10 +1168,10 @@ pub fn results_page(
             .or_else(|| result["summary"].as_str().and_then(|v| v.lines().next()))
             .unwrap_or_default();
         let mut projected = serde_json::json!({"task_id":task,"title":crate::eventlog::clean(title,160),"model":metadata["panel_model"],"role":metadata["panel_role"],"location":metadata["panel_location"],"process_state":last["state"],"outcome":result["outcome"],"admitted":admitted,"verification":result["verification"],"acceptance":outcome == "accepted","summary":result["summary"],"revision":result["revision"],"artifact":result_row.map(|v| &v["artifact"]),"evidence":result.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),"calls":&calls[retained..],"delivery":delivery.as_ref().and_then(|v| v["receipt"]["status"].as_str()).unwrap_or("not_requested"),"delivery_unknown":delivery.as_ref().is_some_and(|v| v["receipt"]["delivery_unknown"] == true),"issue":issue,"missing_result":result.is_null(),"stages":stages,"representative_state":representative,"next_action":action,"termination_reason":termination_reason});
-        if request.task_id.is_some() {
-            if let Some(delta) = round_delta(&store, &worker_rows, &rows) {
-                projected["round_delta"] = delta;
-            }
+        if request.task_id.is_some()
+            && let Some(delta) = round_delta(&store, &worker_rows, &rows)
+        {
+            projected["round_delta"] = delta;
         }
         output.push(projected);
     }
@@ -1724,10 +1723,10 @@ fn deliver(
     let task = text(payload, "task_id");
     let revision = text(payload, "revision");
     let rows = index_rows(store.repo())?;
-    if let Some(prior) = last_delivery(store, &rows, &task, &revision)? {
-        if prior["receipt"]["persisted"] == true || !retry {
-            return Ok(prior);
-        }
+    if let Some(prior) = last_delivery(store, &rows, &task, &revision)?
+        && (prior["receipt"]["persisted"] == true || !retry)
+    {
+        return Ok(prior);
     }
     let attempt = crate::value::unique()?[..16].to_owned();
     let mut pending = serde_json::json!({"schema":1,"kind":"oms-panel-delivery","revision":revision,"attempt":attempt,"receipt":{"status":"pending","delivery_unknown":true}});

@@ -159,12 +159,12 @@ impl Room<'_> {
         }
         if kind == "closed" {
             id(e, "participant", "participant")?;
-            if let Some(caller) = &self.session.participant {
-                if caller != e.text("participant") || !self.bound(room_id)? {
-                    return Err(Error::new(
-                        "close must name this session's participant and room",
-                    ));
-                }
+            if let Some(caller) = &self.session.participant
+                && (caller != e.text("participant") || !self.bound(room_id)?)
+            {
+                return Err(Error::new(
+                    "close must name this session's participant and room",
+                ));
             }
             if e["participant"] != state["creator"] {
                 member(&state, e.text("participant"))?;
@@ -338,10 +338,11 @@ impl Room<'_> {
                 }
             }
             "scope" => {
-                if let Some(caller) = &self.session.participant {
-                    if !carry.active() && caller != e.text("participant") {
-                        return Err(Error::new("only a participant can declare its own scope"));
-                    }
+                if let Some(caller) = &self.session.participant
+                    && !carry.active()
+                    && caller != e.text("participant")
+                {
+                    return Err(Error::new("only a participant can declare its own scope"));
                 }
                 let p = member(&state, e.text("participant"))?;
                 let scopes = strings(&e["owns"])?;
@@ -523,20 +524,20 @@ impl Room<'_> {
             }
             "leave" => {
                 let p = member(&state, e.text("participant"))?;
-                if !carry.active() {
-                    if let Some(caller) = &self.session.participant {
-                        if !p.text("parent").is_empty() {
-                            if caller != p.text("parent") || !self.bound(room_id)? {
-                                return Err(Error::new(format!(
-                                    "a call leaves through its parent main {}",
-                                    p.text("parent")
-                                )));
-                            }
-                        } else if caller != e.text("participant") || !self.bound(room_id)? {
-                            return Err(Error::new(
-                                "leave must name this session's participant and room",
-                            ));
+                if !carry.active()
+                    && let Some(caller) = &self.session.participant
+                {
+                    if !p.text("parent").is_empty() {
+                        if caller != p.text("parent") || !self.bound(room_id)? {
+                            return Err(Error::new(format!(
+                                "a call leaves through its parent main {}",
+                                p.text("parent")
+                            )));
                         }
+                    } else if caller != e.text("participant") || !self.bound(room_id)? {
+                        return Err(Error::new(
+                            "leave must name this session's participant and room",
+                        ));
                     }
                 }
             }
@@ -558,10 +559,10 @@ impl Room<'_> {
                 if !e["patch_sha256"].is_null() && !hex(e.text("patch_sha256"), 64) {
                     return Err(Error::new("invalid call result patch digest"));
                 }
-                if let Some(v) = e.get("changed_files") {
-                    if strings(v)?.iter().any(|p| !safe_room_path(p)) {
-                        return Err(Error::new("call result files must be repository-relative"));
-                    }
+                if let Some(v) = e.get("changed_files")
+                    && strings(v)?.iter().any(|p| !safe_room_path(p))
+                {
+                    return Err(Error::new("call result files must be repository-relative"));
                 }
             }
             "review-dispatch" | "review-dispatch-failed" => {

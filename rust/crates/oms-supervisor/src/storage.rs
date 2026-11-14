@@ -252,7 +252,7 @@ impl Directory {
             return Ok(Some(data));
         }
         if data.len() > limit
-            || data.len() as i64 != before.st_size as i64
+            || data.len() as i64 != before.st_size
             || !generation(&before, &fs::fstat(&file).map_err(err)?)
         {
             return Err("supervisor record changed while reading".into());
@@ -562,13 +562,11 @@ pub(crate) fn expand(path: &Path) -> Result<PathBuf> {
     let raw = path.as_os_str().as_bytes();
     if raw == b"~" || raw.starts_with(b"~/") {
         let home = home()?;
-        Ok(
-            PathBuf::from(home).join(OsStr::from_bytes(if raw.len() > 2 {
-                &raw[2..]
-            } else {
-                b""
-            })),
-        )
+        Ok(home.join(OsStr::from_bytes(if raw.len() > 2 {
+            &raw[2..]
+        } else {
+            b""
+        })))
     } else {
         Ok(path.to_owned())
     }

@@ -88,7 +88,7 @@ pub(crate) fn lifecycle_projection(plan: &Plan<'_>, raw: &[u8]) -> Result<Value>
         "unbound lifecycle projection",
     )?;
     result.attempts.object()?;
-    for (id, _) in &seq {
+    for id in seq.keys() {
         let projected = result.attempts.get(id);
         require(
             projected.text("attempt_id") == id
@@ -346,7 +346,8 @@ pub(crate) fn successors(
     }
     Ok(found)
 }
-fn swaps(logs: &[&[Value]], who: &str) -> Result<(BTreeMap<String, (String, String)>, String)> {
+type SwapMap = BTreeMap<String, (String, String)>;
+fn swaps(logs: &[&[Value]], who: &str) -> Result<(SwapMap, String)> {
     let mut provider = None;
     let mut released = BTreeMap::new();
     for log in logs {

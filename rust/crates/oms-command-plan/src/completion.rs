@@ -500,14 +500,14 @@ fn indexed(plan: &Plan<'_>, event: &str, frozen: Option<&Value>) -> Result<Value
         .into_iter()
         .filter(|r| r.text("event_id") == event)
         .collect::<Vec<_>>();
-    if matches.is_empty() {
-        if let Some(row) = frozen {
-            require(
-                row.text("event_id") == event,
-                "receipt lacks exact frozen indexed artifact identity",
-            )?;
-            return Ok(row.clone());
-        }
+    if matches.is_empty()
+        && let Some(row) = frozen
+    {
+        require(
+            row.text("event_id") == event,
+            "receipt lacks exact frozen indexed artifact identity",
+        )?;
+        return Ok(row.clone());
     }
     require(
         matches.len() == 1,
@@ -879,16 +879,15 @@ pub(crate) fn check_bundle(
                 .iter()
                 .skip(proof.get("lifecycle").get("rows").int()? as usize)
             {
-                if event.text("attempt_id") == bundle.get("research").text("attempt_id") {
-                    if let Some(refs) = event.opt("refs") {
-                        for (k, v) in refs.object()? {
-                            let name =
-                                std::str::from_utf8(k).map_err(|_| error("invalid READ ref"))?;
-                            require(
-                                frozen_evidence.get("attempt").get("refs").get(name) == v,
-                                "contradictory READ ref history",
-                            )?;
-                        }
+                if event.text("attempt_id") == bundle.get("research").text("attempt_id")
+                    && let Some(refs) = event.opt("refs")
+                {
+                    for (k, v) in refs.object()? {
+                        let name = std::str::from_utf8(k).map_err(|_| error("invalid READ ref"))?;
+                        require(
+                            frozen_evidence.get("attempt").get("refs").get(name) == v,
+                            "contradictory READ ref history",
+                        )?;
                     }
                 }
             }
@@ -1756,8 +1755,8 @@ pub(crate) fn finalize(
 fn completion_refs(v: &Value, out: &mut Vec<Value>) -> Result<()> {
     match v {
         Value::Object(fields) => {
-            if let Some(path) = v.opt("path") {
-                if path.str().is_ok_and(|p| {
+            if let Some(path) = v.opt("path")
+                && path.str().is_ok_and(|p| {
                     [
                         "completion-captures",
                         "completion-prefixes",
@@ -1766,12 +1765,12 @@ fn completion_refs(v: &Value, out: &mut Vec<Value>) -> Result<()> {
                     ]
                     .iter()
                     .any(|d| p.starts_with(&format!(".oms/plan/{d}/")))
-                }) {
-                    out.push(object([
-                        ("path", path.clone()),
-                        ("sha256", v.get("sha256").clone()),
-                    ]));
-                }
+                })
+            {
+                out.push(object([
+                    ("path", path.clone()),
+                    ("sha256", v.get("sha256").clone()),
+                ]));
             }
             for (k, v) in fields {
                 completion_refs(&Value::String(k.clone()), out)?;
@@ -1791,12 +1790,12 @@ fn completion_refs(v: &Value, out: &mut Vec<Value>) -> Result<()> {
                 "completion-segments",
                 "completions",
             ] {
-                if let Some(name) = p.strip_prefix(&format!(".oms/plan/{d}/")) {
-                    if let Some((hash, suffix)) = name.rsplit_once('.') {
-                        if json::hex(hash, 64) && ["json", "jsonl", "bin"].contains(&suffix) {
-                            out.push(object([("path", string(p)), ("sha256", string(hash))]));
-                        }
-                    }
+                if let Some(name) = p.strip_prefix(&format!(".oms/plan/{d}/"))
+                    && let Some((hash, suffix)) = name.rsplit_once('.')
+                    && json::hex(hash, 64)
+                    && ["json", "jsonl", "bin"].contains(&suffix)
+                {
+                    out.push(object([("path", string(p)), ("sha256", string(hash))]));
                 }
             }
         }
@@ -2101,14 +2100,14 @@ pub fn gc_completion_captures(
                 task.object().is_ok(),
                 "invalid plan during capture collection",
             )?;
-            if let Some(lease_val) = task.opt("lease_id") {
-                if lease_val.truth() {
-                    let lease = lease_val.str()?;
-                    known_leases.insert(lease.to_string());
-                    let state = task.text("state");
-                    if state != "done" && state != "cancelled" {
-                        leases.insert(lease.to_string());
-                    }
+            if let Some(lease_val) = task.opt("lease_id")
+                && lease_val.truth()
+            {
+                let lease = lease_val.str()?;
+                known_leases.insert(lease.to_string());
+                let state = task.text("state");
+                if state != "done" && state != "cancelled" {
+                    leases.insert(lease.to_string());
                 }
             }
         }

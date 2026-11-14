@@ -55,10 +55,7 @@ pub(crate) fn backup(paths: &Paths, tx: &mut Transaction, target: &Path) -> Resu
     if !r::exists(target) {
         return Ok(());
     }
-    let stamp = r::now()
-        .replace(['-', ':'], "")
-        .replace('T', "")
-        .replace('Z', "");
+    let stamp = r::now().replace(['-', ':'], "").replace(['T', 'Z'], "");
     let mut candidate = target.with_file_name(format!(
         "{}.backup.{}",
         target.file_name().unwrap().to_string_lossy(),
@@ -275,10 +272,10 @@ pub(crate) fn apply(
             if enabled.contains(&path) {
                 continue;
             }
-            if let Some(source) = owned_skill_source(paths, &path)? {
-                if owned(&source, &path)? {
-                    restore(paths, tx, &source, &path)?;
-                }
+            if let Some(source) = owned_skill_source(paths, &path)?
+                && owned(&source, &path)?
+            {
+                restore(paths, tx, &source, &path)?;
             }
         }
     }

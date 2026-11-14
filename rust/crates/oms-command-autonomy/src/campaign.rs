@@ -209,14 +209,12 @@ pub fn validate_manifest(
     )?;
     let mut ids = BTreeSet::new();
     let mut normalized = vec![];
+    let group_re = regex::Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$").unwrap();
     for group in groups {
         value::keys(group, &["id", "formulation", "k", "routes"], &[])?;
         let id = value::text(group, "id");
         require(
-            regex::Regex::new(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-                .unwrap()
-                .is_match(id)
-                && ids.insert(id),
+            group_re.is_match(id) && ids.insert(id),
             "group id must be a unique safe slug",
         )?;
         bounded_text(&group["formulation"], "formulation", 4096)?;
@@ -335,6 +333,7 @@ impl<'a> Ledger<'a> {
         )?;
         Ok(manifest)
     }
+    #[allow(clippy::type_complexity)]
     fn view(&self) -> Result<(Vec<Value>, BTreeMap<String, Value>, BTreeSet<String>)> {
         let manifest = self.manifest()?;
         let raw = self.store.read(self.path("events.jsonl"), 16 * MAX_FILE)?;
@@ -989,7 +988,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     ctx,
                     "agent-call",
                     call,
-                    Duration::from_secs((deadline - current_time()).max(1).min(1200) as u64),
+                    Duration::from_secs((deadline - current_time()).clamp(1, 1200) as u64),
                 )
                 .and_then(|out| artifact(ctx, &out, 4 * MAX_FILE));
                 let answer = match answer {

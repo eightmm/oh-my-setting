@@ -113,12 +113,11 @@ fn snapshot(repo: &Path, ctx: &Context<'_>) -> String {
                 && r["review"]["overall"] == 1
                 && !resolved.contains(text(r, "event_id"))
         })
-        .filter(|r| {
+        .rfind(|r| {
             let seats = r["review"]["seats"].as_array().cloned().unwrap_or_default();
             seats.iter().any(|s| s["verdict"] == "pass")
                 && seats.iter().any(|s| s["verdict"] == "fail")
-        })
-        .next_back();
+        });
     if let Some(row) = open {
         out.push_str("\n## Open dissents\n\nThe last review round ended split. Acknowledge each verdict — agree, override with reasons, or escalate — before landing related work; do not silently re-derive consensus.\n\n");
         for seat in row["review"]["seats"].as_array().into_iter().flatten() {

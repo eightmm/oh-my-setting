@@ -158,6 +158,7 @@ fn acquire_blocking_lock(target: &Path) -> Result<oms_lock::Guard, String> {
         .map_err(|e| format!("failed acquiring lock {}: {e}", target.display()))
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TryLockResult {
     Acquired(oms_lock::Guard),
     Busy,
@@ -430,44 +431,38 @@ fn execute_command(
             store.capture_head_commit(now)?;
             store.materialize()?;
             let mut out = String::new();
-            if digest {
-                if let Some(value) = store.prompt_digest(now)? {
-                    out.push_str(&value);
-                    out.push('\n');
+            if digest && let Some(value) = store.prompt_digest(now)? {
+                out.push_str(&value);
+                out.push('\n');
+            }
+            if autodistill
+                && let Ok(true) = store.distill_due_today(now)
+                && let Ok(report) = store.distill(false, memory_append, now)
+            {
+                let mut counts = Vec::new();
+                if report.promoted > 0 {
+                    counts.push(format!("{} promoted", report.promoted));
+                }
+                if report.deduped > 0 {
+                    counts.push(format!("{} already in shared memory", report.deduped));
+                }
+                if !report.skipped_refused.is_empty() {
+                    counts.push(format!(
+                        "{} refused by the memory writer",
+                        report.skipped_refused.len()
+                    ));
+                }
+                if report.dropped > 0 {
+                    counts.push(format!("{} beyond the per-run cap", report.dropped));
+                }
+                if !counts.is_empty() {
+                    out.push_str(&format!("[work-journal] distill: {}\n", counts.join(", ")));
                 }
             }
-            if autodistill {
-                if let Ok(true) = store.distill_due_today(now) {
-                    if let Ok(report) = store.distill(false, memory_append, now) {
-                        let mut counts = Vec::new();
-                        if report.promoted > 0 {
-                            counts.push(format!("{} promoted", report.promoted));
-                        }
-                        if report.deduped > 0 {
-                            counts.push(format!("{} already in shared memory", report.deduped));
-                        }
-                        if !report.skipped_refused.is_empty() {
-                            counts.push(format!(
-                                "{} refused by the memory writer",
-                                report.skipped_refused.len()
-                            ));
-                        }
-                        if report.dropped > 0 {
-                            counts.push(format!("{} beyond the per-run cap", report.dropped));
-                        }
-                        if !counts.is_empty() {
-                            out.push_str(&format!(
-                                "[work-journal] distill: {}\n",
-                                counts.join(", ")
-                            ));
-                        }
-                    }
-                }
-            }
-            if let Ok(signature) = std::env::var("OMS_JOURNAL_PROMPT_STAMP") {
-                if !signature.is_empty() {
-                    store.write_prompt_stamp(&signature, autodistill, now)?;
-                }
+            if let Ok(signature) = std::env::var("OMS_JOURNAL_PROMPT_STAMP")
+                && !signature.is_empty()
+            {
+                store.write_prompt_stamp(&signature, autodistill, now)?;
             }
             Ok((0, out.into_bytes(), Vec::new()))
         }
@@ -535,7 +530,7 @@ fn execute_command(
                     } else {
                         "daily"
                     };
-                    render_show_period(&store, kind, &p, json)
+                    render_show_period(&store, kind, p, json)
                 }
                 ShowMode::Blockers => {
                     let rows = store.open_annotations()?;

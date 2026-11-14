@@ -39,6 +39,7 @@ pub fn scopes_overlap(left: &[String], right: &[String]) -> bool {
     }
     false
 }
+#[allow(clippy::too_many_arguments)]
 pub fn eligible(
     spec: &Value,
     facts: &Value,
@@ -142,15 +143,16 @@ pub fn eligible(
         }
         let task = task(&name, node);
         let agent = st(node, "kind") == "agent";
-        if agent && !task.is_empty() {
-            if let Some(other) = held_tasks.get(&task).or_else(|| selected_tasks.get(&task)) {
-                conflicts.push(obj([
-                    ("node", name.into()),
-                    ("with", other.clone().into()),
-                    ("reason", "same-task".into()),
-                ]));
-                continue;
-            }
+        if agent
+            && !task.is_empty()
+            && let Some(other) = held_tasks.get(&task).or_else(|| selected_tasks.get(&task))
+        {
+            conflicts.push(obj([
+                ("node", name.into()),
+                ("with", other.clone().into()),
+                ("reason", "same-task".into()),
+            ]));
+            continue;
         }
         if selectors.contains(&name) && selector_selected {
             deferred.push(obj([
@@ -175,20 +177,18 @@ pub fn eligible(
             deferred.push(obj([("node", name.into()), ("reason", "exclusive".into())]));
             continue;
         }
-        if write {
-            if let Some(ref scope) = scope {
-                let blocker = held
-                    .iter()
-                    .chain(selected_scopes.iter())
-                    .find(|(_, other)| scopes_overlap(scope, other.as_deref().unwrap_or(&[])));
-                if let Some((other, _)) = blocker {
-                    conflicts.push(obj([
-                        ("node", name.into()),
-                        ("with", other.clone().into()),
-                        ("reason", "scope-overlap".into()),
-                    ]));
-                    continue;
-                }
+        if write && let Some(ref scope) = scope {
+            let blocker = held
+                .iter()
+                .chain(selected_scopes.iter())
+                .find(|(_, other)| scopes_overlap(scope, other.as_deref().unwrap_or(&[])));
+            if let Some((other, _)) = blocker {
+                conflicts.push(obj([
+                    ("node", name.into()),
+                    ("with", other.clone().into()),
+                    ("reason", "scope-overlap".into()),
+                ]));
+                continue;
             }
         }
         if eligible.len() >= capacity.max(1) as usize {

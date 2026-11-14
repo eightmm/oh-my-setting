@@ -266,10 +266,10 @@ fn configure(id: &str, bin: &str, keyring: &str) -> Result<()> {
     {
         row["language"] = json!(language);
     }
-    if let Some(excluded) = prior["notion"]["excluded_repos"].as_array() {
-        if excluded.iter().all(Value::is_string) {
-            row["notion"]["excluded_repos"] = json!(excluded);
-        }
+    if let Some(excluded) = prior["notion"]["excluded_repos"].as_array()
+        && excluded.iter().all(Value::is_string)
+    {
+        row["notion"]["excluded_repos"] = json!(excluded);
     }
     write_locked(&path, &json_bytes(&row)?, false, Some(&old))
 }

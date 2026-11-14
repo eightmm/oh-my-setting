@@ -237,6 +237,7 @@ pub(crate) fn normalize(
         .collect::<BTreeSet<_>>();
     let mut statuses = BTreeMap::new();
     let mut normalized = vec![];
+    let line_re = regex::Regex::new(r"line\s+([0-9]+)").unwrap();
     for candidate in candidates {
         let id = value::text(candidate, "id");
         require(
@@ -284,8 +285,7 @@ pub(crate) fn normalize(
             )?;
             "suppressed_duplicate_task"
         } else if disposition.starts_with("matches rejected hypothesis") {
-            let line = regex::Regex::new(r"line\s+([0-9]+)")
-                .unwrap()
+            let line = line_re
                 .captures(&disposition)
                 .and_then(|m| m[1].parse::<u64>().ok())
                 .ok_or_else(|| Error::new(3, "candidate cites unknown rejected-hypothesis line"))?;

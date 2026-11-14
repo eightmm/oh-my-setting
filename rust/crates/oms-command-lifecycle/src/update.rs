@@ -26,8 +26,8 @@ fn read_state(paths: &Paths) -> Result<Option<Value>> {
         .map_err(|_| r::Error(2, "auto-update state is not UTF-8".into()))?;
     let mut row = serde_json::Map::new();
     for line in text.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            if matches!(
+        if let Some((key, value)) = line.split_once('=')
+            && matches!(
                 key,
                 "last_run"
                     | "mode"
@@ -37,9 +37,9 @@ fn read_state(paths: &Paths) -> Result<Option<Value>> {
                     | "local"
                     | "remote"
                     | "upstream"
-            ) {
-                row.entry(key).or_insert(json!(value));
-            }
+            )
+        {
+            row.entry(key).or_insert(json!(value));
         }
     }
     Ok(Some(Value::Object(row)))
@@ -145,24 +145,22 @@ fn attention(paths: &Paths, flag: &AtomicBool) -> Result<&'static str> {
     if !superseded && status == "skipped" {
         return Ok("blocked");
     }
-    if systemd {
-        if let Some(program) = r::find("loginctl", &paths.cwd) {
-            let output = r::command(
-                program,
-                &[
-                    "show-user".into(),
-                    rustix::process::geteuid().as_raw().to_string().into(),
-                    "--property=Linger".into(),
-                    "--value".into(),
-                ],
-                &paths.cwd,
-                None,
-                flag,
-                Duration::from_secs(5),
-            )?;
-            if output.0 == 0 && output.1.strip_suffix(b"\n").unwrap_or(&output.1) == b"no" {
-                return Ok("session-only");
-            }
+    if systemd && let Some(program) = r::find("loginctl", &paths.cwd) {
+        let output = r::command(
+            program,
+            &[
+                "show-user".into(),
+                rustix::process::geteuid().as_raw().to_string().into(),
+                "--property=Linger".into(),
+                "--value".into(),
+            ],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(5),
+        )?;
+        if output.0 == 0 && output.1.strip_suffix(b"\n").unwrap_or(&output.1) == b"no" {
+            return Ok("session-only");
         }
     }
     let now = chrono::DateTime::parse_from_rfc3339(&r::now())
@@ -312,21 +310,21 @@ pub(crate) fn run(
         || options.tool == "auto-update" && options.action != "apply" && !options.has("--apply");
     if !check {
         let result = apply_update(paths, options, flag, services, &reference);
-        if options.tool == "auto-update" {
-            if let Err(error) = &result {
-                publish_mode(
-                    paths,
-                    if matches!(error.0, 75 | 76) {
-                        "skipped"
-                    } else {
-                        "failed"
-                    },
-                    &current,
-                    "",
-                    &reference,
-                    "apply",
-                )?;
-            }
+        if options.tool == "auto-update"
+            && let Err(error) = &result
+        {
+            publish_mode(
+                paths,
+                if matches!(error.0, 75 | 76) {
+                    "skipped"
+                } else {
+                    "failed"
+                },
+                &current,
+                "",
+                &reference,
+                "apply",
+            )?;
         }
         return result;
     }
@@ -492,10 +490,10 @@ pub(crate) fn fences(paths: &Paths, flag: &AtomicBool) -> Result<()> {
                     "installation deferred: unproven worker identity".into(),
                 ));
             };
-            if let Some((start, _)) = process(pid, flag, &paths.cwd) {
-                if field("process-start").is_none_or(|v| v == start) {
-                    return Err(r::Error(76, "installation deferred: live worker".into()));
-                }
+            if let Some((start, _)) = process(pid, flag, &paths.cwd)
+                && field("process-start").is_none_or(|v| v == start)
+            {
+                return Err(r::Error(76, "installation deferred: live worker".into()));
             }
         }
     }
@@ -525,15 +523,16 @@ pub(crate) fn fences(paths: &Paths, flag: &AtomicBool) -> Result<()> {
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0);
             let saved = text_field(&entry.join("process-start"));
-            if !entry.is_symlink() && entry.is_dir() {
-                if let (Some(pid), Some(saved)) = (pid, saved.filter(|s| !s.is_empty())) {
-                    if let Some((actual, _)) = process(pid, flag, &paths.cwd) {
-                        if actual != saved || ancestor(pid, flag, paths) {
-                            continue;
-                        }
-                    } else if !crate::lifecycle_lock::alive(pid) {
+            if !entry.is_symlink()
+                && entry.is_dir()
+                && let (Some(pid), Some(saved)) = (pid, saved.filter(|s| !s.is_empty()))
+            {
+                if let Some((actual, _)) = process(pid, flag, &paths.cwd) {
+                    if actual != saved || ancestor(pid, flag, paths) {
                         continue;
                     }
+                } else if !crate::lifecycle_lock::alive(pid) {
+                    continue;
                 }
             }
             return Err(r::Error(
@@ -893,8 +892,9 @@ fn apply_update(
     );
     tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
     tx.commit()?;
-    if !options.has("--no-tools") && !options.has("--rollback") {
-        if let Err(error) = gate(
+    if !options.has("--no-tools")
+        && !options.has("--rollback")
+        && let Err(error) = gate(
             paths,
             options,
             flag,
@@ -902,13 +902,12 @@ fn apply_update(
             Phase::RefreshTools,
             &target,
             &row,
-        ) {
-            return Err(r::Error(
-                error.0,
-                "core update succeeded; provider/tool refresh failed and was not rolled back"
-                    .into(),
-            ));
-        }
+        )
+    {
+        return Err(r::Error(
+            error.0,
+            "core update succeeded; provider/tool refresh failed and was not rolled back".into(),
+        ));
     }
     if options.tool == "auto-update" {
         publish_mode(

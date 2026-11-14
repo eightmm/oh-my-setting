@@ -245,8 +245,7 @@ pub fn plan(rt: &Runtime<'_>) -> Result<Value> {
         let retirement = rt
             .rows(".oms/plan/retirements.jsonl")?
             .into_iter()
-            .filter(|r| r.get("schema").is_int(1) && r.text("kind") == "plan-retirement")
-            .last();
+            .rfind(|r| r.get("schema").is_int(1) && r.text("kind") == "plan-retirement");
         let mut out = absent();
         out.set("tasks", a([]))?;
         for k in [

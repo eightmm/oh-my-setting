@@ -107,20 +107,20 @@ pub fn headings_for(lang: &str) -> &'static Headings {
 }
 
 pub fn event_citation(ev: &Value) -> String {
-    let mut parts = vec![text(&ev.at("event_id"))];
-    if truth(&ev.at("source").at("type")) && truth(&ev.at("source").at("id")) {
+    let mut parts = vec![text(ev.at("event_id"))];
+    if truth(ev.at("source").at("type")) && truth(ev.at("source").at("id")) {
         parts.push(format!(
             "source {}:{}",
-            text(&ev.at("source").at("type")),
-            text(&ev.at("source").at("id"))
+            text(ev.at("source").at("type")),
+            text(ev.at("source").at("id"))
         ));
     }
     for item in ev.at("evidence").as_array().into_iter().flatten().take(3) {
-        if truth(&item.at("type")) && truth(&item.at("ref")) {
+        if truth(item.at("type")) && truth(item.at("ref")) {
             parts.push(format!(
                 "evidence {}:{}",
-                text(&item.at("type")),
-                text(&item.at("ref"))
+                text(item.at("type")),
+                text(item.at("ref"))
             ));
         }
     }
@@ -157,18 +157,18 @@ fn sorted(events: &[Value]) -> Vec<&Value> {
 }
 
 pub fn event_work_label(ev: &Value) -> String {
-    if truth(&ev.at("outcome").at("summary")) {
-        display(&text(&ev.at("outcome").at("summary")))
+    if truth(ev.at("outcome").at("summary")) {
+        display(&text(ev.at("outcome").at("summary")))
     } else {
         string(ev, "event_type").replace('_', " ")
     }
 }
 
 pub fn judgment_summary(ev: &Value, field: &str, h: &Headings) -> String {
-    let raw = text(&ev.at(field));
+    let raw = text(ev.at(field));
     let raw = raw.trim();
     let mut rendered = display(raw);
-    let context = text(&ev.at("outcome").at("summary"));
+    let context = text(ev.at("outcome").at("summary"));
     let context = context.trim();
     if !context.is_empty()
         && context != raw
@@ -190,35 +190,35 @@ const FAILED: &[&str] = &[
     "parked",
 ];
 fn event_failed(event: &Value) -> bool {
-    truth(&event.at("blocker"))
+    truth(event.at("blocker"))
         || matches!(
             string(event, "verification_status").as_str(),
             "failed" | "skipped"
         )
         || FAILED.contains(
-            &text(&event.at("outcome").at("status"))
+            &text(event.at("outcome").at("status"))
                 .to_lowercase()
                 .as_str(),
         )
 }
 fn event_commit_sha(event: &Value) -> String {
     if event.at("source").at("type").as_str().as_deref() == Some("git-commit") {
-        return text(&event.at("source").at("id"));
+        return text(event.at("source").at("id"));
     }
-    if truth(&event.at("provenance").at("code_commit")) {
-        return text(&event.at("provenance").at("code_commit"));
+    if truth(event.at("provenance").at("code_commit")) {
+        return text(event.at("provenance").at("code_commit"));
     }
     event
         .at("refs")
         .as_array()
         .into_iter()
         .flatten()
-        .find(|r| r.at("type").as_str().as_deref() == Some("commit") && truth(&r.at("id")))
-        .map(|r| text(&r.at("id")))
+        .find(|r| r.at("type").as_str().as_deref() == Some("commit") && truth(r.at("id")))
+        .map(|r| text(r.at("id")))
         .unwrap_or_default()
 }
 fn ci_run_identity(event: &Value) -> String {
-    let id = text(&event.at("provenance").at("run_id"));
+    let id = text(event.at("provenance").at("run_id"));
     let id = id.trim();
     if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
         return format!("run:{id}");
@@ -228,10 +228,10 @@ fn ci_run_identity(event: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|r| r.at("type").as_str().as_deref() == Some("ci-run") && truth(&r.at("url")))
-        .map(|r| text(&r.at("url")))
+        .filter(|r| r.at("type").as_str().as_deref() == Some("ci-run") && truth(r.at("url")))
+        .map(|r| text(r.at("url")))
         .collect();
-    let source_id = text(&event.at("source").at("id"));
+    let source_id = text(event.at("source").at("id"));
     let run = Regex::new(r"/actions/runs/(\d+)(?:/|$)").expect("pattern");
     let attempt = Regex::new(r"^(.*):attempt:[^:]+:[^:]*$").expect("pattern");
     for (marker, prefix) in [(":run-url:", "url:"), (":run:", "run:")] {
@@ -268,8 +268,8 @@ fn ci_run_identity(event: &Value) -> String {
     }
     format!(
         "event:{}",
-        if truth(&event.at("event_id")) {
-            text(&event.at("event_id"))
+        if truth(event.at("event_id")) {
+            text(event.at("event_id"))
         } else {
             source_id
         }
@@ -326,7 +326,7 @@ fn latest_ci_events(events: &[Value]) -> Vec<&Value> {
         }
         let sha = event_commit_sha(event);
         let sha = if sha.is_empty() {
-            format!("@{}", text(&event.at("event_id")))
+            format!("@{}", text(event.at("event_id")))
         } else {
             sha
         };
@@ -342,15 +342,15 @@ fn latest_ci_events(events: &[Value]) -> Vec<&Value> {
 fn failed_digest_events(events: &[Value]) -> Vec<&Value> {
     let mut latest: Vec<(Vec<String>, &Value, bool)> = Vec::new();
     for event in sorted(events) {
-        let kind = text(&event.at("source").at("type"));
-        let id = if truth(&event.at("source").at("id")) {
-            text(&event.at("source").at("id"))
+        let kind = text(event.at("source").at("type"));
+        let id = if truth(event.at("source").at("id")) {
+            text(event.at("source").at("id"))
         } else {
-            text(&event.at("event_id"))
+            text(event.at("event_id"))
         };
-        let task = text(&event.at("correlation").at("task_id"));
+        let task = text(event.at("correlation").at("task_id"));
         let task = task.trim();
-        let operation = text(&event.at("correlation").at("operation_id"));
+        let operation = text(event.at("correlation").at("operation_id"));
         let verify = kind == "agent-task"
             && (event.at("event_type").as_str().as_deref() == Some("validation")
                 || operation.contains(":verify:"));
@@ -420,9 +420,9 @@ pub fn compute_period_aggregates(events: &[Value]) -> PeriodAggregates {
         aggregate.event_count += 1;
         aggregate.verified += usize::from(string(event, "verification_status") == "passed");
         aggregate.unverified += usize::from(string(event, "verification_status") == "not_verified");
-        aggregate.blockers += usize::from(truth(&event.at("blocker")));
+        aggregate.blockers += usize::from(truth(event.at("blocker")));
         aggregate.commits += usize::from(string(event, "event_type") == "commit");
-        let sid = text(&event.at("correlation").at("session_id"));
+        let sid = text(event.at("correlation").at("session_id"));
         let sid = sid.trim();
         if !sid.is_empty() && !aggregate.sessions.iter().any(|v| v == sid) {
             aggregate.sessions.push(sid.into());
@@ -432,15 +432,15 @@ pub fn compute_period_aggregates(events: &[Value]) -> PeriodAggregates {
     aggregate
 }
 pub fn has_blocker(events: &[Value]) -> bool {
-    events.iter().any(|e| truth(&e.at("blocker")))
+    events.iter().any(|e| truth(e.at("blocker")))
 }
 fn overview(events: &[Value], lang: &str) -> String {
     let a = compute_period_aggregates(events);
     let count = |field: &str| {
         events
             .iter()
-            .filter(|e| truth(&e.at(field)))
-            .map(|e| text(&e.at(field)).trim().to_owned())
+            .filter(|e| truth(e.at(field)))
+            .map(|e| text(e.at(field)).trim().to_owned())
             .collect::<HashSet<_>>()
             .len()
     };
@@ -477,7 +477,7 @@ pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &s
     let h = headings_for(lang);
     let project = rows
         .first()
-        .map(|r| text(&r.at("project_name")))
+        .map(|r| text(r.at("project_name")))
         .unwrap_or("project".into());
     let mut lines = vec![format!("# Daily Work Journal — {period}"), String::new()];
     section(
@@ -511,8 +511,8 @@ pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &s
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|r| truth(&r.at("type")) && truth(&r.at("ref")))
-            .map(|r| format!("{}:{}", text(&r.at("type")), text(&r.at("ref"))))
+            .filter(|r| truth(r.at("type")) && truth(r.at("ref")))
+            .map(|r| format!("{}:{}", text(r.at("type")), text(r.at("ref"))))
             .collect();
         if !refs.is_empty() {
             work.push(format!(
@@ -522,11 +522,11 @@ pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &s
             ));
         }
         for (key, title) in [("status", "result"), ("interpretation", "interpretation")] {
-            if truth(&event.at("outcome").at(key)) {
+            if truth(event.at("outcome").at(key)) {
                 work.push(format!(
                     "  - {}: {}",
                     label(lang, title),
-                    text(&event.at("outcome").at(key))
+                    text(event.at("outcome").at(key))
                 ));
             }
         }
@@ -561,7 +561,7 @@ pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &s
             &mut lines,
             label(lang, heading),
             rows.iter()
-                .filter(|e| truth(&e.at(field)))
+                .filter(|e| truth(e.at(field)))
                 .map(|e| format!("- {} {}", judgment_summary(e, field, h), event_citation(e)))
                 .collect(),
             lang,
@@ -569,7 +569,7 @@ pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &s
     }
     let mut ids = Vec::new();
     for event in &rows {
-        let id = text(&event.at("correlation").at("session_id"));
+        let id = text(event.at("correlation").at("session_id"));
         let id = id.trim();
         if !id.is_empty() && !ids.iter().any(|v| v == id) {
             ids.push(id.to_owned());
@@ -581,7 +581,7 @@ pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &s
             format!(
                 "- {id} ({} event(s))",
                 rows.iter()
-                    .filter(|e| text(&e.at("correlation").at("session_id")) == *id)
+                    .filter(|e| text(e.at("correlation").at("session_id")) == *id)
                     .count()
             )
         })
@@ -598,7 +598,7 @@ pub fn render_weekly(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &
     let h = headings_for(lang);
     let project = rows
         .first()
-        .map(|r| text(&r.at("project_name")))
+        .map(|r| text(r.at("project_name")))
         .unwrap_or("project".into());
     let mut lines = vec![format!("# Weekly Work Journal — {period}"), String::new()];
     section(
@@ -625,9 +625,9 @@ pub fn render_weekly(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &
     );
     let mut blockers: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for event in &rows {
-        if truth(&event.at("blocker")) {
+        if truth(event.at("blocker")) {
             blockers
-                .entry(text(&event.at("blocker")))
+                .entry(text(event.at("blocker")))
                 .or_default()
                 .push(event_citation(event));
         }
@@ -653,11 +653,11 @@ pub fn render_weekly(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &
         &mut lines,
         label(lang, "weekly_decisions"),
         rows.iter()
-            .filter(|e| truth(&e.at("decision")))
+            .filter(|e| truth(e.at("decision")))
             .map(|e| {
                 format!(
                     "- {} · {} {}",
-                    text(&e.at("local_date")),
+                    text(e.at("local_date")),
                     judgment_summary(e, "decision", h),
                     event_citation(e)
                 )
@@ -680,7 +680,7 @@ pub fn render_weekly(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &
             groups
                 .entry(signature)
                 .or_default()
-                .push((text(&metric.at("value")), event_citation(event)));
+                .push((text(metric.at("value")), event_citation(event)));
         }
     }
     let trends = groups
@@ -710,11 +710,11 @@ pub fn render_weekly(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &
         &mut lines,
         label(lang, "weekly_next"),
         rows.iter()
-            .filter(|e| truth(&e.at("next_action")))
+            .filter(|e| truth(e.at("next_action")))
             .map(|e| {
                 format!(
                     "- {} · {} {}",
-                    text(&e.at("local_date")),
+                    text(e.at("local_date")),
                     judgment_summary(e, "next_action", h),
                     event_citation(e)
                 )
@@ -765,7 +765,7 @@ pub fn ci_status_by_sha(events: &[Value]) -> BTreeMap<String, Value> {
     for event in events {
         let sha = event_commit_sha(event);
         if !sha.is_empty() {
-            let state = text(&event.at("outcome").at("status"));
+            let state = text(event.at("outcome").at("status"));
             groups.entry(sha).or_default().push(if state.is_empty() {
                 "pending".into()
             } else {
@@ -805,7 +805,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
         if event.at("source").at("type").as_str().as_deref() != Some("peer-review") {
             continue;
         }
-        let task = text(&event.at("correlation").at("task_id"));
+        let task = text(event.at("correlation").at("task_id"));
         let task = task.trim();
         if task.is_empty() {
             unlinked.push(*event);
@@ -820,7 +820,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
             .iter()
             .copied()
             .filter(|e| e.at("source").at("type").as_str().as_deref() == Some("panel-result")),
-        |e| text(&e.at("correlation").at("task_id")),
+        |e| text(e.at("correlation").at("task_id")),
     );
     let commits = latest_by(
         ordered
@@ -846,11 +846,11 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
     let mut decisions = Vec::new();
     let mut represented = HashSet::new();
     for event in &ordered {
-        if truth(&event.at("decision")) {
+        if truth(event.at("decision")) {
             decisions.push(format!("- {}", judgment_summary(event, "decision", h)));
         }
         let id = string(event, "event_id");
-        if truth(&event.at("blocker")) && failure_ids.contains(&id) {
+        if truth(event.at("blocker")) && failure_ids.contains(&id) {
             failed.push(format!("- {}", judgment_summary(event, "blocker", h)));
             represented.insert(id.to_owned());
         }
@@ -868,9 +868,9 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
     };
     for (task, event) in tasks {
         let id = string(event, "event_id");
-        let raw = text(&event.at("outcome").at("status")).to_lowercase();
+        let raw = text(event.at("outcome").at("status")).to_lowercase();
         let state = status(&raw, lang);
-        let summary = text(&event.at("outcome").at("summary"));
+        let summary = text(event.at("outcome").at("summary"));
         let mut summary = task_prefix
             .replace(summary.lines().next().unwrap_or(""), "")
             .into_owned();
@@ -904,7 +904,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
         let is_failed = failure_ids.contains(&id);
         let outcome_failed = FAILED.contains(&raw.as_str());
         if is_failed && outcome_failed {
-            let reason = if truth(&event.at("blocker")) {
+            let reason = if truth(event.at("blocker")) {
                 &event.at("blocker")
             } else {
                 &event.at("outcome").at("interpretation")
@@ -939,7 +939,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
     let commit_prefix = Regex::new(r"^Commit [0-9a-f]{7,40}:\s*").expect("pattern");
     let mut commit_details = Vec::new();
     for (sha, event) in &commits {
-        let subject = text(&event.at("outcome").at("summary"));
+        let subject = text(event.at("outcome").at("summary"));
         let subject = commit_prefix.replace(&subject, "");
         let mut subject_short: String = subject
             .chars()
@@ -994,7 +994,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
                         "startup_failure",
                     ]
                     .contains(
-                        &text(&event.at("outcome").at("status"))
+                        &text(event.at("outcome").at("status"))
                             .to_lowercase()
                             .as_str(),
                     )
@@ -1014,7 +1014,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
     for event in ci_events {
         let sha = event_commit_sha(event);
         let short: String = sha.chars().take(7).collect();
-        let raw = text(&event.at("outcome").at("status"));
+        let raw = text(event.at("outcome").at("status"));
         let raw = if raw.is_empty() {
             "unknown".into()
         } else {
@@ -1068,7 +1068,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
         let event = rows[rows.len() - 1];
         let passed = string(event, "verification_status") == "passed"
             || ["success", "passed"].contains(
-                &text(&event.at("outcome").at("status"))
+                &text(event.at("outcome").at("status"))
                     .to_lowercase()
                     .as_str(),
             );
@@ -1098,7 +1098,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
             )
         ));
         if !passed && failure_ids.contains(&string(event, "event_id")) {
-            let reason = if truth(&event.at("blocker")) {
+            let reason = if truth(event.at("blocker")) {
                 &event.at("blocker")
             } else {
                 &event.at("outcome").at("interpretation")
@@ -1116,16 +1116,16 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
         }
     }
     for event in unlinked {
-        let id = if truth(&event.at("source").at("id")) {
-            text(&event.at("source").at("id"))
-        } else if truth(&event.at("event_id")) {
-            text(&event.at("event_id"))
+        let id = if truth(event.at("source").at("id")) {
+            text(event.at("source").at("id"))
+        } else if truth(event.at("event_id")) {
+            text(event.at("event_id"))
         } else {
             "unknown review".into()
         };
         let passed = string(event, "verification_status") == "passed"
             || ["success", "passed"].contains(
-                &text(&event.at("outcome").at("status"))
+                &text(event.at("outcome").at("status"))
                     .to_lowercase()
                     .as_str(),
             );
@@ -1146,7 +1146,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
             )
         ));
         if !passed && failure_ids.contains(&string(event, "event_id")) {
-            let reason = if truth(&event.at("blocker")) {
+            let reason = if truth(event.at("blocker")) {
                 &event.at("blocker")
             } else {
                 &event.at("outcome").at("interpretation")
@@ -1168,9 +1168,9 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
         if represented.contains(&id) {
             continue;
         }
-        let summary = sanitize_text(&text(&event.at("outcome").at("summary")), 120);
+        let summary = sanitize_text(&text(event.at("outcome").at("summary")), 120);
         let summary = if summary.is_empty() {
-            let kind = text(&event.at("source").at("type"));
+            let kind = text(event.at("source").at("type"));
             if kind.is_empty() {
                 "Event failed".into()
             } else {
@@ -1179,7 +1179,7 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
         } else {
             summary
         };
-        let raw = text(&event.at("outcome").at("status"));
+        let raw = text(event.at("outcome").at("status"));
         let raw = if raw.is_empty() {
             "unknown".into()
         } else {
@@ -1199,16 +1199,16 @@ fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<Strin
             details.push(templ(
                 lang,
                 "digest_failure_exit",
-                &[text(&event.at("provenance").at("exit_code"))],
+                &[text(event.at("provenance").at("exit_code"))],
             ));
         }
         failed.push(format!("- {summary} ({})", details.join("; ")));
-        represented.insert(id.into());
+        represented.insert(id);
     }
     let mut seen = HashSet::new();
     let mut next = Vec::new();
     for event in ordered {
-        let action = text(&event.at("next_action"));
+        let action = text(event.at("next_action"));
         let action = action.trim();
         if !action.is_empty() && seen.insert(action.to_owned()) {
             next.push(format!("- {}", sanitize_text(action, 120)));

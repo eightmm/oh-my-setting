@@ -167,7 +167,7 @@ pub(crate) fn truth(v: Option<&oms_context::Json>) -> bool {
         Some(Json::String(s)) => !s.is_empty(),
         Some(Json::Array(a)) => !a.is_empty(),
         Some(Json::Object(o)) => !o.is_empty(),
-        Some(Json::Number(n)) => n.parse::<f64>().map_or(true, |n| n != 0.0),
+        Some(Json::Number(n)) => n.parse::<f64>() != Ok(0.0),
         _ => true,
     }
 }

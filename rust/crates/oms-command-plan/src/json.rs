@@ -160,7 +160,7 @@ impl Value {
         match self {
             Self::Null => false,
             Self::Bool(v) => *v,
-            Self::Number(v) => v.parse::<f64>().map_or(true, |n| n != 0.0),
+            Self::Number(v) => v.parse::<f64>() != Ok(0.0),
             Self::String(v) => !v.is_empty(),
             Self::Array(v) => !v.is_empty(),
             Self::Object(v) => !v.is_empty(),

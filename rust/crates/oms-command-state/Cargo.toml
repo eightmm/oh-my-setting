@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 
-[workspace]
-resolver = "3"
 
 [dependencies]
 oms-command-plan = { path = "../oms-command-plan" }
@@ -37,3 +35,7 @@ serde_json = "=1.0.154"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[bin]]
+name = "oms-state-queue-worker"
+path = "src/bin/oms-state-queue-worker.rs"

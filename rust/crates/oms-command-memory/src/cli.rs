@@ -117,12 +117,12 @@ fn parse(args: &[OsString]) -> Result<Options> {
         for arg in args {
             use std::os::unix::ffi::OsStringExt;
             let raw = arg.as_encoded_bytes();
-            if raw.starts_with(b"--") {
-                if let Some(at) = raw.iter().position(|b| *b == b'=') {
-                    expanded.push(OsString::from_vec(raw[..at].to_vec()));
-                    expanded.push(OsString::from_vec(raw[at + 1..].to_vec()));
-                    continue;
-                }
+            if raw.starts_with(b"--")
+                && let Some(at) = raw.iter().position(|b| *b == b'=')
+            {
+                expanded.push(OsString::from_vec(raw[..at].to_vec()));
+                expanded.push(OsString::from_vec(raw[at + 1..].to_vec()));
+                continue;
             }
             expanded.push(arg.clone());
         }
@@ -307,10 +307,10 @@ pub(crate) fn parent_only(what: &str) -> Result<()> {
     }
 }
 fn agent() -> String {
-    if let Ok(s) = std::env::var("OMS_AGENT") {
-        if !s.is_empty() {
-            return s;
-        }
+    if let Ok(s) = std::env::var("OMS_AGENT")
+        && !s.is_empty()
+    {
+        return s;
     }
     if std::env::var_os("CLAUDECODE").is_some_and(|v| !v.is_empty())
         || std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some_and(|v| !v.is_empty())

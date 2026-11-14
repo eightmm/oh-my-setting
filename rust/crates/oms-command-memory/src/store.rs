@@ -433,6 +433,7 @@ impl Store {
         );
         m
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn append(
         &self,
         agent: &str,
@@ -475,6 +476,7 @@ impl Store {
     ) -> Result<String> {
         self.append_impl(agent, note, kind, None, "", None, &[], None, true, flag)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn append_bytes(
         &self,
         agent: &str,
@@ -498,6 +500,7 @@ impl Store {
             flag,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     fn append_impl(
         &self,
         agent: &str,

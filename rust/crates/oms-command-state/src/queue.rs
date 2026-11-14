@@ -535,7 +535,7 @@ fn fallback(
     ctx: &Context<'_>,
     opts: &Options,
     action: &str,
-    services: &mut dyn oms_command_runs::Services,
+    _services: &mut dyn oms_command_runs::Services,
 ) -> Result<Output> {
     let dir = fallback_dir(ctx)?;
     let anchor = root(&dir)?;
@@ -574,7 +574,7 @@ fn fallback(
                         .into_owned();
                     let mut one = Options::default();
                     one.pos.push(job);
-                    fallback(ctx, &one, "cancel", services)?;
+                    fallback(ctx, &one, "cancel", _services)?;
                 }
             }
         }

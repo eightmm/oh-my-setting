@@ -170,6 +170,8 @@ pub fn validate(row: &Value) -> Result<()> {
             && value::commit(value::text(contract, "base_sha")),
         "invalid review base/remote binding",
     )?;
+    let codex_model_re =
+        regex::Regex::new(r"^gpt-([0-9]+)(?:\.[0-9]+)?-(?:astra|sol|terra|luna)$").unwrap();
     value::integer(&contract["max_cycles"], 1, 10, "max cycles")?;
     value::integer(&contract["initial_tasks"], 1, 12, "initial tasks")?;
     value::integer(&contract["replan_tasks"], 1, 2, "replan tasks")?;
@@ -210,13 +212,10 @@ pub fn validate(row: &Value) -> Result<()> {
                     let model = value::text(&row["routing"][role], field);
                     if field == "model" || !model.is_empty() {
                         require(
-                            regex::Regex::new(
-                                r"^gpt-([0-9]+)(?:\.[0-9]+)?-(?:astra|sol|terra|luna)$",
-                            )
-                            .unwrap()
-                            .captures(model)
-                            .and_then(|c| c[1].parse::<u64>().ok())
-                            .is_some_and(|n| n >= 6),
+                            codex_model_re
+                                .captures(model)
+                                .and_then(|c| c[1].parse::<u64>().ok())
+                                .is_some_and(|n| n >= 6),
                             "auto collaboration requires GPT-6 or newer Codex routes",
                         )?;
                     }
@@ -315,10 +314,9 @@ fn base(ctx: &Context<'_>, remote: &str, branch: &str) -> Result<String> {
         format!("refs/heads/{branch}"),
     ] {
         if let Ok(commit) = ctx.git(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+            && value::commit(&commit)
         {
-            if value::commit(&commit) {
-                return Ok(commit);
-            }
+            return Ok(commit);
         }
     }
     Err(Error::new(

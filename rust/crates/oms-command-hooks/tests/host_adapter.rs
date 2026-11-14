@@ -45,11 +45,11 @@ fn strip_group_world_write(root: &Path) {
     if mode & 0o022 != 0 {
         let _ = fs::set_permissions(root, fs::Permissions::from_mode(mode & !0o022));
     }
-    if meta.is_dir() {
-        if let Ok(entries) = fs::read_dir(root) {
-            for entry in entries.flatten() {
-                strip_group_world_write(&entry.path());
-            }
+    if meta.is_dir()
+        && let Ok(entries) = fs::read_dir(root)
+    {
+        for entry in entries.flatten() {
+            strip_group_world_write(&entry.path());
         }
     }
 }

@@ -295,33 +295,29 @@ impl Drop for RequestTempDir {
         };
         if FileType::from_raw_mode(fd_stat.st_mode) != FileType::Directory
             || fd_stat.st_uid != self.uid
-            || (fd_stat.st_dev as u64, fd_stat.st_ino as u64) != (self.dir_dev, self.dir_ino)
+            || ({ fd_stat.st_dev }, { fd_stat.st_ino }) != (self.dir_dev, self.dir_ino)
         {
             return;
         }
-        if let Some(expected_cfg) = self.cfg_id {
-            if let Ok(st) = rfs::statat(&self.dir_fd, "cfg", AtFlags::SYMLINK_NOFOLLOW) {
-                if FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
-                    && st.st_uid == self.uid
-                    && (st.st_dev as u64, st.st_ino as u64) == expected_cfg
-                {
-                    let _ = rfs::unlinkat(&self.dir_fd, "cfg", AtFlags::empty());
-                }
-            }
+        if let Some(expected_cfg) = self.cfg_id
+            && let Ok(st) = rfs::statat(&self.dir_fd, "cfg", AtFlags::SYMLINK_NOFOLLOW)
+            && FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
+            && st.st_uid == self.uid
+            && ({ st.st_dev }, { st.st_ino }) == expected_cfg
+        {
+            let _ = rfs::unlinkat(&self.dir_fd, "cfg", AtFlags::empty());
         }
-        if self.hdr_created {
-            if let Ok(st) = rfs::statat(&self.dir_fd, "hdr", AtFlags::SYMLINK_NOFOLLOW) {
-                if FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
-                    && st.st_uid == self.uid
-                {
-                    let _ = rfs::unlinkat(&self.dir_fd, "hdr", AtFlags::empty());
-                }
-            }
+        if self.hdr_created
+            && let Ok(st) = rfs::statat(&self.dir_fd, "hdr", AtFlags::SYMLINK_NOFOLLOW)
+            && FileType::from_raw_mode(st.st_mode) == FileType::RegularFile
+            && st.st_uid == self.uid
+        {
+            let _ = rfs::unlinkat(&self.dir_fd, "hdr", AtFlags::empty());
         }
-        if let Ok(path_stat) = rfs::lstat(&self.dir_path) {
-            if (path_stat.st_dev as u64, path_stat.st_ino as u64) == (self.dir_dev, self.dir_ino) {
-                let _ = fs::remove_dir(&self.dir_path);
-            }
+        if let Ok(path_stat) = rfs::lstat(&self.dir_path)
+            && ({ path_stat.st_dev }, { path_stat.st_ino }) == (self.dir_dev, self.dir_ino)
+        {
+            let _ = fs::remove_dir(&self.dir_path);
         }
     }
 }
@@ -345,7 +341,7 @@ fn validate_cred_value(cred: &str) -> Result<(), TransportError> {
 }
 
 fn validate_method(method: &str) -> Result<(), TransportError> {
-    if method.is_empty() || !method.bytes().all(|b| matches!(b, b'A'..=b'Z')) {
+    if method.is_empty() || !method.bytes().all(|b: u8| b.is_ascii_uppercase()) {
         return Err(TransportError::Io("invalid Notion HTTP method".into()));
     }
     Ok(())
@@ -728,79 +724,73 @@ fn run_child_bounded(
             )));
         }
 
-        if stdin_ready {
-            if let (Some(pipe), Some(bytes)) = (stdin_opt.as_mut(), stdin_bytes) {
-                for _ in 0..32 {
-                    if stdin_offset >= bytes.len() {
+        if stdin_ready && let (Some(pipe), Some(bytes)) = (stdin_opt.as_mut(), stdin_bytes) {
+            for _ in 0..32 {
+                if stdin_offset >= bytes.len() {
+                    break;
+                }
+                match pipe.write(&bytes[stdin_offset..]) {
+                    Ok(0) => {
+                        let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
+                        return Err(TransportError::Io(format!(
+                            "failed writing {label} stdin: unexpected zero write{diag}"
+                        )));
+                    }
+                    Ok(n) => {
+                        stdin_offset += n;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                        stdin_broken_pipe = true;
+                        stdin_opt = None;
                         break;
                     }
-                    match pipe.write(&bytes[stdin_offset..]) {
-                        Ok(0) => {
-                            let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
-                            return Err(TransportError::Io(format!(
-                                "failed writing {label} stdin: unexpected zero write{diag}"
-                            )));
-                        }
-                        Ok(n) => {
-                            stdin_offset += n;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
-                            stdin_broken_pipe = true;
-                            stdin_opt = None;
-                            break;
-                        }
-                        Err(e) => {
-                            let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
-                            return Err(TransportError::Io(format!(
-                                "failed writing {label} stdin: {e}{diag}"
-                            )));
-                        }
+                    Err(e) => {
+                        let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
+                        return Err(TransportError::Io(format!(
+                            "failed writing {label} stdin: {e}{diag}"
+                        )));
                     }
                 }
-                if stdin_offset >= bytes.len() {
-                    stdin_opt = None;
+            }
+            if stdin_offset >= bytes.len() {
+                stdin_opt = None;
+            }
+        }
+
+        if stdout_ready && let Some(pipe) = stdout_opt.as_mut() {
+            match drain_nonblocking_pipe(
+                pipe,
+                &mut stdout_buf,
+                MAX_CHILD_STDOUT_BYTES,
+                &mut stdout_truncated,
+                label,
+                "stdout",
+            ) {
+                Ok(PipeDrain::Open) => {}
+                Ok(PipeDrain::Eof) => stdout_opt = None,
+                Err(e) => {
+                    let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
+                    return Err(TransportError::Io(format!("{}{diag}", e.message())));
                 }
             }
         }
 
-        if stdout_ready {
-            if let Some(pipe) = stdout_opt.as_mut() {
-                match drain_nonblocking_pipe(
-                    pipe,
-                    &mut stdout_buf,
-                    MAX_CHILD_STDOUT_BYTES,
-                    &mut stdout_truncated,
-                    label,
-                    "stdout",
-                ) {
-                    Ok(PipeDrain::Open) => {}
-                    Ok(PipeDrain::Eof) => stdout_opt = None,
-                    Err(e) => {
-                        let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
-                        return Err(TransportError::Io(format!("{}{diag}", e.message())));
-                    }
-                }
-            }
-        }
-
-        if stderr_ready {
-            if let Some(pipe) = stderr_opt.as_mut() {
-                match drain_nonblocking_pipe(
-                    pipe,
-                    &mut stderr_buf,
-                    MAX_CHILD_STDERR_BYTES,
-                    &mut stderr_truncated,
-                    label,
-                    "stderr",
-                ) {
-                    Ok(PipeDrain::Open) => {}
-                    Ok(PipeDrain::Eof) => stderr_opt = None,
-                    Err(e) => {
-                        let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
-                        return Err(TransportError::Io(format!("{}{diag}", e.message())));
-                    }
+        if stderr_ready && let Some(pipe) = stderr_opt.as_mut() {
+            match drain_nonblocking_pipe(
+                pipe,
+                &mut stderr_buf,
+                MAX_CHILD_STDERR_BYTES,
+                &mut stderr_truncated,
+                label,
+                "stderr",
+            ) {
+                Ok(PipeDrain::Open) => {}
+                Ok(PipeDrain::Eof) => stderr_opt = None,
+                Err(e) => {
+                    let diag = format_partial_diagnostic(&stderr_buf, &stdout_buf);
+                    return Err(TransportError::Io(format!("{}{diag}", e.message())));
                 }
             }
         }
@@ -924,6 +914,7 @@ impl LiveTransport {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn curl_request(
         &self,
         method: &str,
@@ -1022,7 +1013,7 @@ impl LiveTransport {
                 ));
             };
 
-        if !(200..600).contains(&status_code) || status_code < 400 && status_code >= 300 {
+        if !(200..600).contains(&status_code) || (300..400).contains(&status_code) {
             return Err(TransportError::Io(
                 "Notion API returned an unexpected HTTP status".into(),
             ));
@@ -1065,6 +1056,7 @@ impl LiveTransport {
             .map_err(|e| TransportError::Io(format!("invalid JSON from Notion API: {e}")))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ntn_request(
         &self,
         method: &str,
@@ -1157,10 +1149,11 @@ fn parse_retry_after_header(headers: &str) -> Option<f64> {
             continue;
         }
         let raw = val.trim();
-        if let Ok(secs) = raw.parse::<f64>() {
-            if secs.is_finite() && secs >= 0.0 {
-                return Some(secs);
-            }
+        if let Ok(secs) = raw.parse::<f64>()
+            && secs.is_finite()
+            && secs >= 0.0
+        {
+            return Some(secs);
         }
         if let Some(target_epoch) = parse_http_date_epoch(raw) {
             let now_epoch = current_utc_now().timestamp();
@@ -1336,10 +1329,10 @@ impl NotionExporter {
                 .as_array()
                 .ok_or("Notion search response is invalid")?;
             for row in rows {
-                if row.at("object").as_str().as_deref() == Some("data_source") {
-                    if let Some(id) = row.at("id").as_str().filter(|s| !s.is_empty()) {
-                        candidates.push(id.to_owned());
-                    }
+                if row.at("object").as_str().as_deref() == Some("data_source")
+                    && let Some(id) = row.at("id").as_str().filter(|s| !s.is_empty())
+                {
+                    candidates.push(id.to_owned());
                 }
             }
             if response.at("has_more").as_bool() != Some(true) {
@@ -1444,7 +1437,7 @@ impl NotionExporter {
                 .get(name)
                 .and_then(|v| v.get("type"))
                 .and_then(Value::as_str)
-                .map(|kind| (name.clone(), kind.into()))
+                .map(|kind| (name.clone(), kind))
         };
         let schema = TargetSchema {
             is_data_source: !self.settings.data_source_id.is_empty(),
@@ -1524,7 +1517,7 @@ impl NotionExporter {
                 .get(name)
                 .and_then(|v| v.get("type"))
                 .and_then(Value::as_str)
-                .map(|kind| (name.clone(), kind.into()))
+                .map(|kind| (name.clone(), kind))
         };
         let mut result = schema.clone();
         result.project_prop = property(&self.settings.project_property);
@@ -1632,7 +1625,7 @@ impl NotionExporter {
                 .iter()
                 .find(|p| p.get("id").is_some_and(crate::schema::json_truthy))
             {
-                existing_page_id = Some(crate::schema::python_str(&page.at("id")));
+                existing_page_id = Some(crate::schema::python_str(page.at("id")));
                 remote_hash = page
                     .at("properties")
                     .at(&schema.hash_prop)
@@ -1849,60 +1842,61 @@ fn build_page_properties(
         crate::json::json!({"rich_text":[text(key)]}),
     );
     props.insert(schema.hash_prop.as_str().into(),crate::json::json!({"rich_text":content_hash.map(|value|vec![text(value)]).unwrap_or_default()}));
-    if let Some((name, kind)) = &schema.project_prop {
-        if !project_name.is_empty() {
-            if kind == "select" {
-                let option: String = project_name
-                    .replace(',', " ")
-                    .trim()
-                    .chars()
-                    .take(100)
-                    .collect();
-                if !option.is_empty() {
-                    props.insert(
-                        name.as_str().into(),
-                        crate::json::json!({"select":{"name":option}}),
-                    );
-                }
-            } else if kind == "rich_text" {
+    if let Some((name, kind)) = &schema.project_prop
+        && !project_name.is_empty()
+    {
+        if kind == "select" {
+            let option: String = project_name
+                .replace(',', " ")
+                .trim()
+                .chars()
+                .take(100)
+                .collect();
+            if !option.is_empty() {
                 props.insert(
                     name.as_str().into(),
-                    crate::json::json!({"rich_text":[text(project_name)]}),
+                    crate::json::json!({"select":{"name":option}}),
                 );
             }
+        } else if kind == "rich_text" {
+            props.insert(
+                name.as_str().into(),
+                crate::json::json!({"rich_text":[text(project_name)]}),
+            );
         }
     }
-    if let Some((name, kind)) = &schema.sessions_prop {
-        if kind == "rich_text" {
-            let sessions: Vec<_> = aggregates
-                .at("sessions")
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.chars().take(8).collect::<String>())
-                .collect();
-            let listed: String = sessions.join(", ").chars().take(1900).collect();
-            if !listed.is_empty() {
-                props.insert(
-                    name.as_str().into(),
-                    crate::json::json!({"rich_text":[text(&listed)]}),
-                );
-            }
+    if let Some((name, kind)) = &schema.sessions_prop
+        && kind == "rich_text"
+    {
+        let sessions: Vec<_> = aggregates
+            .at("sessions")
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.chars().take(8).collect::<String>())
+            .collect();
+        let listed: String = sessions.join(", ").chars().take(1900).collect();
+        if !listed.is_empty() {
+            props.insert(
+                name.as_str().into(),
+                crate::json::json!({"rich_text":[text(&listed)]}),
+            );
         }
     }
     for (property, field) in [
         (&schema.commits_prop, "commits"),
         (&schema.verified_prop, "verified"),
     ] {
-        if let Some((name, kind)) = property {
-            if kind == "number" && !aggregates.at(field).is_null() {
-                props.insert(
-                    name.as_str().into(),
-                    crate::json::json!({"number":aggregates.at(field)}),
-                );
-            }
+        if let Some((name, kind)) = property
+            && kind == "number"
+            && !aggregates.at(field).is_null()
+        {
+            props.insert(
+                name.as_str().into(),
+                crate::json::json!({"number":aggregates.at(field)}),
+            );
         }
     }
     if let Some((name, _)) = &schema.kind_prop {
@@ -2083,14 +2077,14 @@ impl Blocks {
             let kind = if offset == 0 { kind } else { "paragraph" };
             let chunk: String = chunk.iter().collect();
             let mut payload = crate::json::json!({"rich_text":[text_object(&chunk)]});
-            if offset == 0 {
-                if let Some(attributes) = attributes.as_object() {
-                    for (k, v) in attributes.iter() {
-                        payload
-                            .as_object_mut()
-                            .expect("block payload")
-                            .insert(k.clone(), v.copy());
-                    }
+            if offset == 0
+                && let Some(attributes) = attributes.as_object()
+            {
+                for (k, v) in attributes.iter() {
+                    payload
+                        .as_object_mut()
+                        .expect("block payload")
+                        .insert(k.clone(), v.copy());
                 }
             }
             let block = crate::json::json!({"object":"block","type":kind,kind:payload});
@@ -2314,15 +2308,13 @@ pub fn sync_notion(
     let path = store.root.join("sync/notion.json");
     let mut state =
         crate::json::json!({"schema_version":1,"target_fingerprint":fingerprint,"summaries":{}});
-    if let Some(bytes) = read_regular_no_symlink_bytes(&path)? {
-        if let Ok(loaded) = crate::json::from_slice(&bytes) {
-            if loaded.at("schema_version").as_u64() == Some(1)
-                && loaded.at("target_fingerprint").as_str().as_deref() == Some(&fingerprint)
-                && loaded.at("summaries").is_object()
-            {
-                state = loaded;
-            }
-        }
+    if let Some(bytes) = read_regular_no_symlink_bytes(&path)?
+        && let Ok(loaded) = crate::json::from_slice(&bytes)
+        && loaded.at("schema_version").as_u64() == Some(1)
+        && loaded.at("target_fingerprint").as_str().as_deref() == Some(&fingerprint)
+        && loaded.at("summaries").is_object()
+    {
+        state = loaded;
     }
     let exporter = NotionExporter::from_settings(settings, opts.budget_seconds)?;
     let schema = exporter.schema_descriptor();
@@ -2360,12 +2352,11 @@ pub fn sync_notion(
         if opts.include_today && (row.kind != "daily" || row.period != today_string) {
             continue;
         }
-        if let Some((day, start_week)) = &range {
-            if !((row.kind == "daily" && row.period >= *day && row.period <= today_string)
+        if let Some((day, start_week)) = &range
+            && !((row.kind == "daily" && row.period >= *day && row.period <= today_string)
                 || (row.kind == "weekly" && row.period >= *start_week && row.period <= week))
-            {
-                continue;
-            }
+        {
+            continue;
         }
         let events = store.load_events_for_period(&row.kind, &row.period)?;
         let content = notion_presentation(&row.content, Some(&events), &lang);
@@ -2385,15 +2376,16 @@ pub fn sync_notion(
         if let Some(stamp) = previous.at("next_retry_at").as_str() {
             let changed = previous.at("status").as_str().as_deref() == Some("failed")
                 && previous.at("pending_content_hash").as_str().as_deref() != Some(&hash);
-            if let Ok(retry) = parse_rfc3339_utc(&stamp) {
-                if !changed && retry > now {
-                    report.waiting += 1;
-                    let stamp = utc_rfc3339(retry);
-                    if report.next_retry_at.as_ref().is_none_or(|s| stamp < *s) {
-                        report.next_retry_at = Some(stamp);
-                    }
-                    continue;
+            if let Ok(retry) = parse_rfc3339_utc(&stamp)
+                && !changed
+                && retry > now
+            {
+                report.waiting += 1;
+                let stamp = utc_rfc3339(retry);
+                if report.next_retry_at.as_ref().is_none_or(|s| stamp < *s) {
+                    report.next_retry_at = Some(stamp);
                 }
+                continue;
             }
         }
         if report.attempted >= maximum {

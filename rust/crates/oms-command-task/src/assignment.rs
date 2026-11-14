@@ -121,10 +121,10 @@ pub fn resolve(task: &Json, defaults: &Json) -> Result<Json> {
     let empty = object([] as [(&str, Json); 0]);
     let assignment = validate(if matches!(field(task, "assignment"), Json::Null) {
         // Explicit null is not the same as an absent assignment.
-        if let Json::Object(items) = task {
-            if items.iter().any(|(k, _)| k == b"assignment") {
-                return Err(fail("assignment must be an object"));
-            }
+        if let Json::Object(items) = task
+            && items.iter().any(|(k, _)| k == b"assignment")
+        {
+            return Err(fail("assignment must be an object"));
         }
         &empty
     } else {

@@ -341,7 +341,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
         if !ended && raw == b"--" {
             ended = true;
             i += 1;
-            if selected && spec(&r).tail && r.positionals.len() >= spec(&r).max && !tail_closed {
+            if selected && spec(r).tail && r.positionals.len() >= spec(r).max && !tail_closed {
                 r.tail.extend_from_slice(&argv[i..]);
                 break;
             }
@@ -383,7 +383,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 continue;
             };
             let explicit = split.map(|j| OsString::from_vec(raw[j + 1..].to_vec()));
-            let s = spec(&r);
+            let s = spec(r);
             let mut available = vec!["help", "repo", "pretty"];
             if !selected {
                 available.push("version");
@@ -598,7 +598,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
                 .into();
             r.positionals.push(arg.clone());
         } else {
-            let s = spec(&r);
+            let s = spec(r);
             if s.tail && r.positionals.len() >= s.max {
                 if tail_closed {
                     extras.push(arg.clone());
@@ -657,7 +657,7 @@ fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
         )?;
         r.positionals.clear();
     }
-    let s = spec(&r);
+    let s = spec(r);
     let missing = crate::help::missing(r);
     require(
         missing.is_empty(),

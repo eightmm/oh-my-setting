@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99.1"
 
-[workspace]
-resolver = "3"
 
 [dependencies]
 oms-runtime = { path = "../oms-runtime" }

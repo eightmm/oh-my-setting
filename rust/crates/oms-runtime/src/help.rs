@@ -33,11 +33,11 @@ fn metadata(r: &Request) -> Value {
     let all = SCHEMA
         .get_or_init(|| parse(crate::cli_schema::SCOPES.as_bytes()).expect("native CLI metadata"));
     let wanted = path(r);
-    rows(&all)
+    rows(all)
         .iter()
         .find(|s| s.get("path").strings().ok().as_deref() == Some(wanted.as_slice()))
         .cloned()
-        .unwrap_or_else(|| rows(&all)[0].clone())
+        .unwrap_or_else(|| rows(all)[0].clone())
 }
 pub(crate) fn program(r: &Request) -> String {
     let path = path(r);
@@ -495,23 +495,23 @@ pub(crate) fn validate_positionals(r: &Request) -> crate::Result<()> {
                 .copied()
                 .filter(|a| matches!(a.text("nargs"), "+" | "*"))
         });
-        if let Some(argument) = argument {
-            if !rows(argument.get("choices")).is_empty() {
-                let choices = argument.get("choices").strings()?;
-                crate::require(
-                    raw.to_str().is_some_and(|s| choices.contains(&s)),
-                    format!(
-                        "argument {}: invalid choice: {} (choose from {})",
-                        names(argument)[0],
-                        quote(raw),
-                        choices
-                            .iter()
-                            .map(|v| quote(std::ffi::OsStr::new(v)))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                )?;
-            }
+        if let Some(argument) = argument
+            && !rows(argument.get("choices")).is_empty()
+        {
+            let choices = argument.get("choices").strings()?;
+            crate::require(
+                raw.to_str().is_some_and(|s| choices.contains(&s)),
+                format!(
+                    "argument {}: invalid choice: {} (choose from {})",
+                    names(argument)[0],
+                    quote(raw),
+                    choices
+                        .iter()
+                        .map(|v| quote(std::ffi::OsStr::new(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )?;
         }
     }
     Ok(())
@@ -584,8 +584,7 @@ fn text_lines(text: &str, width: usize) -> Vec<String> {
             size += part.chars().count();
             line.push_str(&part);
         }
-        if chunks.front().is_some_and(|s| s.chars().count() > width) {
-            let part = chunks.pop_front().unwrap();
+        if let Some(part) = chunks.pop_front_if(|s| s.chars().count() > width) {
             let keep = width - size;
             line.extend(part.chars().take(keep));
             let rest = part.chars().skip(keep).collect::<String>();

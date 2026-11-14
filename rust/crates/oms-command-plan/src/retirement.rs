@@ -329,15 +329,13 @@ pub(crate) fn cleanup(plan: &Plan<'_>) -> Result<()> {
     let names = plan.store.names(".oms/plan", 65536, true)?;
     let mut matches = Vec::new();
     for name in names {
-        if let Some(name) = name.to_str() {
-            if let Some(hash) = name
+        if let Some(name) = name.to_str()
+            && let Some(hash) = name
                 .strip_prefix("tasks.")
                 .and_then(|s| s.strip_suffix(".retire-intent.json"))
-            {
-                if json::hex(hash, 64) {
-                    matches.push((hash.to_owned(), format!(".oms/plan/{name}")));
-                }
-            }
+            && json::hex(hash, 64)
+        {
+            matches.push((hash.to_owned(), format!(".oms/plan/{name}")));
         }
     }
     if matches.is_empty() {
@@ -545,49 +543,47 @@ fn preflight(plan: &Plan<'_>, req: &Request) -> Result<PreparedRetirement> {
         None
     };
     let active_snap = plan.store.snapshot(ACTIVE, 1024 * 1024, true)?;
-    if let Some(prior) = &prior {
-        if active_snap
+    if let Some(prior) = &prior
+        && active_snap
             .as_ref()
             .is_none_or(|s| s.generation != *prior.get("plan_generation"))
-        {
-            if let Some(active) = &active_snap {
-                let state = payload(plan, &active.raw)?;
-                require(
-                    json::sha(&active.raw) != expected
-                        && state.get("plan_id") != prior.get("plan_id"),
-                    "active plan still belongs to retired lineage; exact replay required",
-                )?;
-            }
-            if let Some(intent) = &intent {
-                require(
-                    intent == &intent_from_receipt(prior),
-                    "completed retirement conflicting residual intent",
-                )?;
-                let raw = plan.store.read(&intent_path, 64 * 1024)?;
-                plan.store.remove(&intent_path, &raw, None)?;
-            }
-            let response = object([
-                ("schema", number(1)),
-                ("action", string("plan-retire")),
-                ("status", string("already-retired")),
-                ("plan_sha256", string(expected)),
-                ("archive", string(&archive)),
-                ("disposition", string(disposition)),
-                ("active_plan_untouched", Value::Bool(active_snap.is_some())),
-            ]);
-            return Ok(PreparedRetirement {
-                snapshot: crate::json::empty(),
-                raw: vec![],
-                plan: crate::json::empty(),
-                disposition: disposition.into(),
-                reason: reason.into(),
-                archive,
-                intent_path,
-                intent,
-                prior: Some(prior.clone()),
-                already_retired: Some(response),
-            });
+    {
+        if let Some(active) = &active_snap {
+            let state = payload(plan, &active.raw)?;
+            require(
+                json::sha(&active.raw) != expected && state.get("plan_id") != prior.get("plan_id"),
+                "active plan still belongs to retired lineage; exact replay required",
+            )?;
         }
+        if let Some(intent) = &intent {
+            require(
+                intent == &intent_from_receipt(prior),
+                "completed retirement conflicting residual intent",
+            )?;
+            let raw = plan.store.read(&intent_path, 64 * 1024)?;
+            plan.store.remove(&intent_path, &raw, None)?;
+        }
+        let response = object([
+            ("schema", number(1)),
+            ("action", string("plan-retire")),
+            ("status", string("already-retired")),
+            ("plan_sha256", string(expected)),
+            ("archive", string(&archive)),
+            ("disposition", string(disposition)),
+            ("active_plan_untouched", Value::Bool(active_snap.is_some())),
+        ]);
+        return Ok(PreparedRetirement {
+            snapshot: crate::json::empty(),
+            raw: vec![],
+            plan: crate::json::empty(),
+            disposition: disposition.into(),
+            reason: reason.into(),
+            archive,
+            intent_path,
+            intent,
+            prior: Some(prior.clone()),
+            already_retired: Some(response),
+        });
     }
     let active_snap = active_snap
         .ok_or_else(|| error("retirement incomplete but original active plan missing"))?;

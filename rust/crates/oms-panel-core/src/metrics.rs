@@ -224,7 +224,8 @@ pub fn collect_local(
                 .unwrap_or_else(|| "no active consumer".into()),
         );
 
-        let mut codex_log: Option<(Option<f64>, Option<f64>, Option<u8>, Vec<Value>)> = None;
+        type CodexLog = (Option<f64>, Option<f64>, Option<u8>, Vec<Value>);
+        let mut codex_log: Option<CodexLog> = None;
         if provider == "codex" {
             let (weekly_used, resets_at, observed_at, shorts) = codex_readings(None, now, true);
             if let Some(u) = weekly_used {
@@ -533,7 +534,7 @@ fn codex_readings(
     if files.is_empty() {
         return (None, None, None, vec![]);
     }
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|a| std::cmp::Reverse(a.0));
     let mut best_weekly: Option<(u8, f64, Option<f64>)> = None;
     let mut newest_shorts: Vec<Value> = Vec::new();
     let limit = if fallback_older { 64 } else { 1 };

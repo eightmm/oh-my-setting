@@ -464,9 +464,9 @@ fn cite(args: &Args, context: &Context<'_>, root: &Path, path: &Path) -> Result<
                 return fail("export requires --bibtex");
             }
             let mut output = String::new();
+            let key_re = regex::Regex::new("[^A-Za-z0-9]+").unwrap();
             for row in &values {
-                let key = regex::Regex::new("[^A-Za-z0-9]+")
-                    .unwrap()
+                let key = key_re
                     .replace_all(text(row, "id"), "_")
                     .trim_matches('_')
                     .to_string();

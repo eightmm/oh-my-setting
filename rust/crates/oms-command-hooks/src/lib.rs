@@ -162,16 +162,16 @@ pub fn run_with_services(
 }
 fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'_>) -> Output {
     match name {
-        "command-guard-hook" => guards::command(args, stdin, &ctx),
-        "git-move-guard-hook" => guards::git_move(stdin, &ctx),
-        "syntax-guard-hook" => syntax::run(stdin, &ctx),
-        "codex-hud-config" | "codex-usage-config" => config::run(name, args, &ctx),
-        "codex-hook-bridge" => bridge::run(args, stdin, &ctx),
-        "claude-statusline" | "claude-subagent-statusline" => statusline::run(name, stdin, &ctx),
-        "codex-app-notify" => notify::run(args, &ctx),
+        "command-guard-hook" => guards::command(args, stdin, ctx),
+        "git-move-guard-hook" => guards::git_move(stdin, ctx),
+        "syntax-guard-hook" => syntax::run(stdin, ctx),
+        "codex-hud-config" | "codex-usage-config" => config::run(name, args, ctx),
+        "codex-hook-bridge" => bridge::run(args, stdin, ctx),
+        "claude-statusline" | "claude-subagent-statusline" => statusline::run(name, stdin, ctx),
+        "codex-app-notify" => notify::run(args, ctx),
         "claude-app-notify" => common::empty(),
-        "codex-turn-notify" => notify::turn(args, &ctx),
-        "pre-push-check" => push::run(args, stdin, &ctx),
+        "codex-turn-notify" => notify::turn(args, ctx),
+        "pre-push-check" => push::run(args, stdin, ctx),
         "harness-hook" => {
             let Some(tool) = args.first().and_then(|v| v.to_str()) else {
                 return common::empty();
@@ -204,7 +204,7 @@ fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'
             out.0 = 0;
             out
         }
-        "skill-router" => routing::run(stdin, &ctx),
-        _ => lifecycle::run(name, args, stdin, &ctx),
+        "skill-router" => routing::run(stdin, ctx),
+        _ => lifecycle::run(name, args, stdin, ctx),
     }
 }

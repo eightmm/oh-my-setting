@@ -85,13 +85,13 @@ pub fn consumed(records: &[Json]) -> Json {
         .iter()
         .map(|r| seconds(&s(r, "elapsed")))
         .collect::<Vec<_>>();
-    if !elapsed.is_empty() && elapsed.iter().all(Option::is_some) {
-        if let Some(total) = elapsed
+    if !elapsed.is_empty()
+        && elapsed.iter().all(Option::is_some)
+        && let Some(total) = elapsed
             .iter()
             .try_fold(0i128, |acc, x| acc.checked_add(x.unwrap()))
-        {
-            put(&mut out, "elapsed_seconds", num(total));
-        }
+    {
+        put(&mut out, "elapsed_seconds", num(total));
     }
     let waits = records
         .iter()

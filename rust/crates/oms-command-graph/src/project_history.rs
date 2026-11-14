@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+#[allow(clippy::too_many_arguments)]
 pub fn report(
     repo: &Path,
     graph: &Graph,

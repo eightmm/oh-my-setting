@@ -99,13 +99,12 @@ pub fn new_event(attempt_id: &str, seq: V, event_type: &str, fields: V) -> Resul
         return Err("event fields must be an object".into());
     };
     for (key, value) in fields {
-        if !matches!(&value, V::Null | V::Str(_) | V::Obj(_) | V::Arr(_))
+        if (!matches!(&value, V::Null | V::Str(_) | V::Obj(_) | V::Arr(_))
             || value.truth()
-            || key == b"from_state"
+            || key == b"from_state")
+            && let V::Obj(ref mut items) = row
         {
-            if let V::Obj(ref mut items) = row {
-                items.insert(key, value);
-            }
+            items.insert(key, value);
         }
     }
     Ok(row)

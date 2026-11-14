@@ -20,19 +20,19 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     ])?;
     let commits: Vec<_> = raw.lines().filter_map(|l| l.split_once('\t')).collect();
     let mut states = BTreeMap::new();
-    if let Ok(dir) = crate::delivery::state_directory(&git) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.flatten() {
-                if e.path().extension() != Some(std::ffi::OsStr::new("json")) {
-                    continue;
-                }
-                if let Ok(raw) = storage::read_external(&e.path(), false) {
-                    if let Ok(row) = V::parse(&raw) {
-                        let sha = string(&row, "sha");
-                        if states.get(&sha).is_none_or(|s| s != "passed") {
-                            states.insert(sha, string(&row, "state"));
-                        }
-                    }
+    if let Ok(dir) = crate::delivery::state_directory(&git)
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for e in entries.flatten() {
+            if e.path().extension() != Some(std::ffi::OsStr::new("json")) {
+                continue;
+            }
+            if let Ok(raw) = storage::read_external(&e.path(), false)
+                && let Ok(row) = V::parse(&raw)
+            {
+                let sha = string(&row, "sha");
+                if states.get(&sha).is_none_or(|s| s != "passed") {
+                    states.insert(sha, string(&row, "state"));
                 }
             }
         }

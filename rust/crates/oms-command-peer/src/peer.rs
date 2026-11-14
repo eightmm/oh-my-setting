@@ -383,6 +383,7 @@ pub(crate) fn index(repo: &Path, row: &V, context: &Context<'_>) -> Result<()> {
         context.interrupted,
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn call(
     tool: &str,
     args: &Args,
@@ -419,7 +420,7 @@ pub(crate) fn call(
         dir.join(format!(
             "{}-{}-{run}{suffix}.md",
             target.provider,
-            crate::board::slug(&args.value("prompt", "call"))
+            crate::board::slug(args.value("prompt", "call"))
         ))
     };
     let header = format!(
@@ -453,15 +454,15 @@ pub(crate) fn call(
     } else {
         None
     };
-    if let (Some(tree), Ok(patch)) = (&private, &before) {
-        if !patch.is_empty() {
-            process::git_input(
-                context,
-                &tree.path,
-                &["apply", "--binary", "--whitespace=nowarn", "-"],
-                Some(patch.clone()),
-            )?;
-        }
+    if let (Some(tree), Ok(patch)) = (&private, &before)
+        && !patch.is_empty()
+    {
+        process::git_input(
+            context,
+            &tree.path,
+            &["apply", "--binary", "--whitespace=nowarn", "-"],
+            Some(patch.clone()),
+        )?;
     }
     let workdir = private.as_ref().map_or(repo, |tree| tree.path.as_path());
     let result = providers::execute_with_fallback(

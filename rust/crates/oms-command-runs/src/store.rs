@@ -90,7 +90,7 @@ pub(crate) fn open_in(path: &Path, missing: bool, root: &Path) -> Result<Option<
     .map_err(|_| Error::usage("record changed or is unreadable"))?;
     let file = File::from(fd);
     let before = file.metadata()?;
-    if before.dev() != named.st_dev as u64 || before.ino() != named.st_ino as u64 {
+    if before.dev() != named.st_dev || before.ino() != named.st_ino {
         return Err(Error::usage("record identity changed while opening"));
     }
     anchor.verify_file(&file, &before)?;
@@ -269,7 +269,7 @@ fn append_locked(path: &Path, body: &[u8], guard: &oms_lock::Guard, root: &Path)
     let mut file = File::from(fd);
     let before = file.metadata()?;
     if let Some(named) = named {
-        if before.dev() != named.st_dev as u64 || before.ino() != named.st_ino as u64 {
+        if before.dev() != named.st_dev || before.ino() != named.st_ino {
             return Err(Error::usage("append target identity changed"));
         }
         writable(&before)?;

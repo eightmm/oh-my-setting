@@ -69,14 +69,13 @@ pub fn number(v: &Json) -> Option<f64> {
     }
 }
 pub fn integer(v: &Json) -> Option<&str> {
-    if let Json::Number(n) = v {
-        if !n.contains(['.', 'e', 'E'])
-            && n.trim_start_matches('-')
-                .bytes()
-                .all(|c| c.is_ascii_digit())
-        {
-            return Some(n);
-        }
+    if let Json::Number(n) = v
+        && !n.contains(['.', 'e', 'E'])
+        && n.trim_start_matches('-')
+            .bytes()
+            .all(|c| c.is_ascii_digit())
+    {
+        return Some(n);
     }
     None
 }
@@ -274,7 +273,7 @@ fn encoding(v: &Json, ascii: bool, spaced: bool, sorted: bool) -> Result<Vec<u8>
             Json::Object(items) => {
                 let mut items = items.iter().collect::<Vec<_>>();
                 if sorted {
-                    items.sort_by(|a, b| points(&a.0).cmp(&points(&b.0)));
+                    items.sort_by_key(|a| points(&a.0));
                 }
                 out.push(b'{');
                 for (i, (k, v)) in items.iter().enumerate() {

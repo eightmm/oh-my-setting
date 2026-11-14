@@ -430,25 +430,24 @@ pub fn slurm_consumed(records: &[Value]) -> Value {
             .ok()
             .map(|t| t.and_utc().timestamp())
         };
-        if let (Some(start), Some(submit)) = (stamp("start"), stamp("submit")) {
-            if start >= submit {
-                if let Some(next) = wait.checked_add(start - submit) {
-                    wait = next;
-                    wait_count += 1;
-                }
-            }
+        if let (Some(start), Some(submit)) = (stamp("start"), stamp("submit"))
+            && start >= submit
+            && let Some(next) = wait.checked_add(start - submit)
+        {
+            wait = next;
+            wait_count += 1;
         }
         let tres = value::text(row, "alloc_tres");
         let mut exact = None;
         let mut typed = 0u64;
         for field in tres.split(',') {
-            if let Some((key, raw)) = field.split_once('=') {
-                if let Ok(n) = raw.trim().parse::<u64>() {
-                    if key.trim() == "gres/gpu" {
-                        exact = Some(n);
-                    } else if key.trim().starts_with("gres/gpu:") {
-                        typed = typed.saturating_add(n);
-                    }
+            if let Some((key, raw)) = field.split_once('=')
+                && let Ok(n) = raw.trim().parse::<u64>()
+            {
+                if key.trim() == "gres/gpu" {
+                    exact = Some(n);
+                } else if key.trim().starts_with("gres/gpu:") {
+                    typed = typed.saturating_add(n);
                 }
             }
         }
@@ -495,15 +494,15 @@ pub fn slurm_consumed(records: &[Value]) -> Value {
     if let Some(gpu) = gpu {
         out["gpu_hours"] = json!(round(gpu as f64 / 3600.0));
     }
-    if let Some((limit, elapsed)) = limits {
-        if limit > 0 {
-            out["time_efficiency"] = json!(round(elapsed as f64 / limit as f64));
-        }
+    if let Some((limit, elapsed)) = limits
+        && limit > 0
+    {
+        out["time_efficiency"] = json!(round(elapsed as f64 / limit as f64));
     }
-    if let Some((used, given)) = cpu {
-        if given > 0 {
-            out["cpu_efficiency"] = json!(round(used as f64 / given as f64));
-        }
+    if let Some((used, given)) = cpu
+        && given > 0
+    {
+        out["cpu_efficiency"] = json!(round(used as f64 / given as f64));
     }
     out
 }

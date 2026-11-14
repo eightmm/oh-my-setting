@@ -10,19 +10,19 @@ pub(crate) fn display_os(path: &Path, repo: &Path) -> std::ffi::OsString {
     let mut bases = vec![(repo, ""), (&home, "~/")];
     bases.sort_by_key(|(p, _)| std::cmp::Reverse(p.as_os_str().len()));
     for (base, prefix) in bases {
-        if !base.as_os_str().is_empty() {
-            if let Ok(rest) = path.strip_prefix(base) {
-                if rest.as_os_str().is_empty() {
-                    return if prefix.is_empty() {
-                        ".".into()
-                    } else {
-                        prefix.into()
-                    };
-                }
-                let mut out = std::ffi::OsString::from(prefix);
-                out.push(rest);
-                return out;
+        if !base.as_os_str().is_empty()
+            && let Ok(rest) = path.strip_prefix(base)
+        {
+            if rest.as_os_str().is_empty() {
+                return if prefix.is_empty() {
+                    ".".into()
+                } else {
+                    prefix.into()
+                };
             }
+            let mut out = std::ffi::OsString::from(prefix);
+            out.push(rest);
+            return out;
         }
     }
     let mut out = std::ffi::OsString::from("<outside home>/");

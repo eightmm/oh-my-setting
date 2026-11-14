@@ -102,6 +102,7 @@ fn subagent(v: &Value) -> Vec<u8> {
     let width = number(&v["columns"], 20., 500.).unwrap_or(100.) as usize;
     let now = clock();
     let mut result = Vec::new();
+    let date_suffix_re = regex::Regex::new(r"-\d{8}$").unwrap();
     for task in v["tasks"].as_array().into_iter().flatten().take(128) {
         let Some(id) = task["id"]
             .as_str()
@@ -121,10 +122,7 @@ fn subagent(v: &Value) -> Vec<u8> {
         if let Some(s) = model.strip_prefix("claude-") {
             model = s.into();
         }
-        model = regex::Regex::new(r"-\d{8}$")
-            .unwrap()
-            .replace(&model, "")
-            .into_owned();
+        model = date_suffix_re.replace(&model, "").into_owned();
         model = clean(&json!(model), "", 20, true);
         let effort = if ["low", "medium", "high", "xhigh", "max"].contains(&text(task, "effort")) {
             text(task, "effort").into()

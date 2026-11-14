@@ -135,10 +135,10 @@ pub fn outcome(row: &Value) -> Option<&'static str> {
         "skipped" | "skipped_with_reason" => return Some("skipped_with_reason"),
         _ => {}
     }
-    if row.get("review").object().is_ok() {
-        if let Some(v) = outcome(row.get("review")) {
-            return Some(v);
-        }
+    if row.get("review").object().is_ok()
+        && let Some(v) = outcome(row.get("review"))
+    {
+        return Some(v);
     }
     for k in ["verify_exit", "exit", "exit_code"] {
         if let Some(n) = exit(row.get(k)) {
@@ -286,19 +286,19 @@ fn worktree_head(state: &str) -> Option<&str> {
 }
 fn stale(rt: &Runtime<'_>, row: &Value) -> bool {
     let d = dependencies(row);
-    if let Ok(v) = d.object() {
-        if !v.is_empty() {
-            return v.iter().any(|(k, w)| {
-                let path = Value::String(k.clone());
-                let Ok(path) = crate::value::path(&path) else {
-                    return true;
-                };
-                rt.bytes(Path::new(&path), crate::storage::MAX_STATE)
-                    .ok()
-                    .flatten()
-                    .is_none_or(|raw| sha(raw.as_slice()) != text(w))
-            });
-        }
+    if let Ok(v) = d.object()
+        && !v.is_empty()
+    {
+        return v.iter().any(|(k, w)| {
+            let path = Value::String(k.clone());
+            let Ok(path) = crate::value::path(&path) else {
+                return true;
+            };
+            rt.bytes(Path::new(&path), crate::storage::MAX_STATE)
+                .ok()
+                .flatten()
+                .is_none_or(|raw| sha(raw.as_slice()) != text(w))
+        });
     }
     let head = row
         .opt("verified_head")

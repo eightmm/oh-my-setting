@@ -109,6 +109,7 @@ pub fn finish(repo: &Path, attempt: &str, result: &str, interrupted: &AtomicBool
 /// Internal transaction leg. The caller must hold the canonical packet lock
 /// and an actual live reference operation throughout validation/publication.
 /// The note and its raw-input receipt publish together in one replacement.
+#[allow(clippy::too_many_arguments)]
 pub fn append_deduplicated_unlocked(
     index: &CaptureIndex,
     attempt: &str,

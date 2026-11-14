@@ -60,6 +60,7 @@ fn reach(start: &str, adj: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
     }
     seen
 }
+#[allow(clippy::too_many_arguments)]
 fn graph<'a>(
     raw: &'a Value,
     prefix: &str,

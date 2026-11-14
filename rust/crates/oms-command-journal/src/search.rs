@@ -275,14 +275,13 @@ pub fn run_recorded_search(
                 break;
             }
             let mut id = file.path.file_stem().unwrap_or_default().to_os_string();
-            if file.kind == "journal" {
-                if let Some(value) = parsed
+            if file.kind == "journal"
+                && let Some(value) = parsed
                     .as_ref()
                     .and_then(|r| r.get("event_id"))
                     .and_then(Value::as_str)
-                {
-                    id = clean(&value).chars().take(80).collect::<String>().into();
-                }
+            {
+                id = clean(&value).chars().take(80).collect::<String>().into();
             }
             let when = parsed
                 .as_ref()

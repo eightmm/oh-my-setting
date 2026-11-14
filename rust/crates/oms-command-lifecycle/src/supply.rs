@@ -638,7 +638,7 @@ pub(crate) fn install(
             )?;
             tx.publish_external(&target, &package)?;
             if name == "ntn" && target.join("install.cjs").is_file() {
-                let checkpoint = tx.prepare_external(&[target.clone()])?;
+                let checkpoint = tx.prepare_external(std::slice::from_ref(&target))?;
                 let node = if bin.join("node").is_file() {
                     bin.join("node")
                 } else {
@@ -1129,45 +1129,45 @@ pub(crate) fn refresh_optional(
     tx: &mut Transaction,
     flag: &AtomicBool,
 ) -> Result<()> {
-    if let Some(program) = r::find("pi", &paths.cwd).filter(|p| vendor(paths, "pi", p)) {
-        if std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_none() {
-            let before = r::command(
-                &program,
-                &["--version".into()],
-                &paths.cwd,
-                None,
-                flag,
-                Duration::from_secs(10),
-            )?;
-            if before.0 != 0 || version_number(&before.1).is_none() {
-                return r::fail("Pi version unavailable; refresh refused");
-            }
-            let out = r::command(
-                &program,
-                &["update".into(), "self".into()],
-                &paths.cwd,
-                None,
-                flag,
-                Duration::from_secs(180),
-            )?;
-            if out.0 != 0 {
-                return r::fail("Pi vendor refresh failed; its installer retains recovery state");
-            }
-            let after = r::command(
-                &program,
-                &["--version".into()],
-                &paths.cwd,
-                None,
-                flag,
-                Duration::from_secs(10),
-            )?;
-            if after.0 != 0
-                || version_number(&after.1)
-                    .zip(version_number(&before.1))
-                    .is_none_or(|(a, b)| a < b)
-            {
-                return r::fail("Pi refresh could not prove a non-downgraded version");
-            }
+    if let Some(program) = r::find("pi", &paths.cwd).filter(|p| vendor(paths, "pi", p))
+        && std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_none()
+    {
+        let before = r::command(
+            &program,
+            &["--version".into()],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(10),
+        )?;
+        if before.0 != 0 || version_number(&before.1).is_none() {
+            return r::fail("Pi version unavailable; refresh refused");
+        }
+        let out = r::command(
+            &program,
+            &["update".into(), "self".into()],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(180),
+        )?;
+        if out.0 != 0 {
+            return r::fail("Pi vendor refresh failed; its installer retains recovery state");
+        }
+        let after = r::command(
+            &program,
+            &["--version".into()],
+            &paths.cwd,
+            None,
+            flag,
+            Duration::from_secs(10),
+        )?;
+        if after.0 != 0
+            || version_number(&after.1)
+                .zip(version_number(&before.1))
+                .is_none_or(|(a, b)| a < b)
+        {
+            return r::fail("Pi refresh could not prove a non-downgraded version");
         }
     }
     if std::env::var_os("OH_MY_SETTING_TOOL_LOCK").is_some()

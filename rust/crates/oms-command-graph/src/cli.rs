@@ -164,15 +164,14 @@ pub(crate) fn parse(raw: &[OsString]) -> std::result::Result<Args, CommandResult
             if action == "version" {
                 return Err((0, b"0.1.0\n".to_vec(), vec![]));
             }
-            if let Some(group) = option["mutex"].as_u64() {
-                if let Some(old) = mutex.insert((levels.len(), group), name.to_owned()) {
-                    if old != name {
-                        return Err(failure(
-                            parser,
-                            format!("argument {name}: not allowed with argument {old}"),
-                        ));
-                    }
-                }
+            if let Some(group) = option["mutex"].as_u64()
+                && let Some(old) = mutex.insert((levels.len(), group), name.to_owned())
+                && old != name
+            {
+                return Err(failure(
+                    parser,
+                    format!("argument {name}: not allowed with argument {old}"),
+                ));
             }
             let value = if action == "flag" {
                 if inline.is_some() {

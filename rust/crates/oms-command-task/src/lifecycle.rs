@@ -88,14 +88,10 @@ fn overlay(plan: Option<&Json>, rows: &[Json]) -> Option<Json> {
         })
         .filter_map(|row| text(field(row, "run_id")))
         .collect();
-    let (index, last) = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| {
-            text(field(row, "kind")) == Some(b"terminal")
-                && text(field(row, "run_id")).is_some_and(|run| runs.contains(run))
-        })
-        .next_back()?;
+    let (index, last) = rows.iter().enumerate().rfind(|(_, row)| {
+        text(field(row, "kind")) == Some(b"terminal")
+            && text(field(row, "run_id")).is_some_and(|run| runs.contains(run))
+    })?;
     if text(field(last, "status")) != Some(b"park")
         || rows[index + 1..].iter().any(|row| {
             text(field(row, "kind")) == Some(b"acceptance")

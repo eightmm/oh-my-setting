@@ -232,26 +232,23 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
                 let data = json::parse(&data)?;
                 if let Some(task) = data.get("tasks").opt(row.text("task_id"))
                     && ["claimed", "running"].contains(&task.text("state"))
+                    && !row.text("lease_id").is_empty()
+                    && row.text("lease_id") == task.text("lease_id")
                 {
-                    if !row.text("lease_id").is_empty()
-                        && row.text("lease_id") == task.text("lease_id")
-                    {
-                        let mut request =
-                            oms_command_plan::Request::new(oms_command_plan::Action::RecoverLease)
-                                .with("id", row.text("task_id"))
-                                .with("lease-id", row.text("lease_id"))
-                                .with("expected-state", task.text("state"))
-                                .with("markers-dir", ctx.repo.join(".oms/delegations"));
-                        if !apply {
-                            request = request.flag("check");
-                        }
-                        match plan(&ctx, &request) {
-                            Ok(response) if response.code == 0 => {}
-                            _ => {
-                                deferred
-                                    .push(string("orphan task recovery unproven; marker retained"));
-                                continue;
-                            }
+                    let mut request =
+                        oms_command_plan::Request::new(oms_command_plan::Action::RecoverLease)
+                            .with("id", row.text("task_id"))
+                            .with("lease-id", row.text("lease_id"))
+                            .with("expected-state", task.text("state"))
+                            .with("markers-dir", ctx.repo.join(".oms/delegations"));
+                    if !apply {
+                        request = request.flag("check");
+                    }
+                    match plan(&ctx, &request) {
+                        Ok(response) if response.code == 0 => {}
+                        _ => {
+                            deferred.push(string("orphan task recovery unproven; marker retained"));
+                            continue;
                         }
                     }
                 }
@@ -353,14 +350,13 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
         if row.text("tool") == "oms-run" && row.text("event") == "close" {
             closed.insert(id.to_owned());
         }
-        if row.text("tool") == "run-capsule" {
-            if let Some(name) = Path::new(row.text("path"))
+        if row.text("tool") == "run-capsule"
+            && let Some(name) = Path::new(row.text("path"))
                 .parent()
                 .and_then(Path::file_name)
                 .and_then(|s| s.to_str())
-            {
-                capsule_refs.insert(name.into(), id.into());
-            }
+        {
+            capsule_refs.insert(name.into(), id.into());
         }
     }
     for (id, last) in &last {

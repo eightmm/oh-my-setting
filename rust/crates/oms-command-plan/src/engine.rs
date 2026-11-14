@@ -1103,7 +1103,7 @@ impl<'a> Plan<'a> {
         plain(verify, "task verify")?;
         require(
             !(before.get("allowed_paths").truth() && allowed.is_empty())
-                && !(before.text("verify").trim().len() > 0 && verify.trim().is_empty()),
+                && !(!before.text("verify").trim().is_empty() && verify.trim().is_empty()),
             "amend cannot remove a task's path limits or its verify",
         )?;
         lint(verify, &allowed)?;
@@ -1682,10 +1682,10 @@ impl<'a> Plan<'a> {
         for line in String::from_utf8_lossy(&raw).lines() {
             if let Some(name) = line.strip_prefix("+++ b/") {
                 touched.insert(name.trim().to_owned());
-            } else if line.starts_with("diff --git a/") {
-                if let Some((_, name)) = line.rsplit_once(" b/") {
-                    touched.insert(name.trim().to_owned());
-                }
+            } else if line.starts_with("diff --git a/")
+                && let Some((_, name)) = line.rsplit_once(" b/")
+            {
+                touched.insert(name.trim().to_owned());
             }
         }
         let files = contract

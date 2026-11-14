@@ -496,6 +496,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "oms-context",
+ "oms-reference",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
 name = "oms-command-agent-role"
 version = "0.1.0"
 dependencies = [
@@ -519,6 +529,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-autonomy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-room",
+ "oms-command-task",
+ "oms-context",
+ "oms-contract-markdown",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-supervisor",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "oms-command-experiment"
 version = "0.1.0"
 dependencies = [
@@ -534,6 +568,66 @@ dependencies = [
  "oms-failure",
  "oms-json",
  "users",
+]
+
+[[package]]
+name = "oms-command-graph"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-journal",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-task",
+ "oms-context",
+ "oms-context-source",
+ "oms-graph",
+ "oms-graph-python",
+ "oms-graph-resolve",
+ "oms-graph-shell",
+ "oms-json",
+ "oms-lock",
+ "oms-runtime",
+ "oms-safe-fs",
+ "oms-scrub",
+ "regex",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "oms-command-hooks"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-autonomy",
+ "oms-command-journal",
+ "oms-command-landing",
+ "oms-command-lifecycle",
+ "oms-command-memory",
+ "oms-command-operations",
+ "oms-command-peer",
+ "oms-command-room",
+ "oms-command-state",
+ "oms-command-task",
+ "oms-command-telemetry",
+ "oms-context",
+ "oms-json",
+ "oms-lock",
+ "oms-reference",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-toml",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shlex 1.3.0",
+ "unicode-general-category",
 ]
 
 [[package]]
@@ -579,6 +673,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-landing"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-task",
+ "oms-context",
+ "oms-contract-markdown",
+ "oms-json",
+ "oms-lock",
+ "oms-reference",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-supervisor",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
+name = "oms-command-lifecycle"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-bootstrap",
+ "oms-command-failure",
+ "oms-command-memory",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-telemetry",
+ "oms-context",
+ "oms-context-report",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-toml",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "oms-command-memory"
 version = "0.1.0"
 dependencies = [
@@ -612,6 +753,63 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-panel"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-room",
+ "oms-command-task",
+ "oms-json",
+ "oms-lock",
+ "oms-panel-core",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "oms-command-peer"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-agent-role",
+ "oms-command-attempt-bundle",
+ "oms-command-failure",
+ "oms-command-memory",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-room",
+ "oms-command-task",
+ "oms-context",
+ "oms-context-session",
+ "oms-context-source",
+ "oms-contract-markdown",
+ "oms-json",
+ "oms-lock",
+ "oms-output",
+ "oms-output-capture",
+ "oms-runtime",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-supervisor",
+ "oms-toml",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "sha2",
+ "shlex 1.3.0",
+ "unicode-general-category",
+]
+
+[[package]]
 name = "oms-command-plan"
 version = "0.1.0"
 dependencies = [
@@ -623,6 +821,49 @@ dependencies = [
  "oms-safe-fs",
  "oms-scrub",
  "oms-work-inspect",
+ "regex",
+ "rustix",
+ "sha2",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "oms-command-providers-skills"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-agent-role",
+ "oms-command-memory",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-slurm-lint",
+ "oms-command-slurm-submit",
+ "oms-command-task",
+ "oms-context",
+ "oms-contract-markdown",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shlex 1.3.0",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "oms-command-room"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-context",
+ "oms-contract-markdown",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
  "regex",
  "rustix",
  "sha2",
@@ -668,6 +909,38 @@ dependencies = [
  "oms-scrub",
  "regex",
  "rustix",
+ "sha2",
+]
+
+[[package]]
+name = "oms-command-state"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-experiment",
+ "oms-command-failure",
+ "oms-command-journal",
+ "oms-command-memory",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-room",
+ "oms-command-runs",
+ "oms-command-task",
+ "oms-command-telemetry",
+ "oms-context",
+ "oms-contract-markdown",
+ "oms-experiment",
+ "oms-failure",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-toml",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -863,6 +1136,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-panel-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-attempt-bundle",
+ "oms-command-failure",
+ "oms-command-operations",
+ "oms-command-plan",
+ "oms-command-room",
+ "oms-command-task",
+ "oms-command-telemetry",
+ "oms-context",
+ "oms-contract-markdown",
+ "oms-json",
+ "oms-lock",
+ "oms-reference",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-supervisor",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shlex 1.3.0",
+ "unicode-general-category",
+]
+
+[[package]]
+name = "oms-reference"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nix",
+ "oms-command-operations",
+ "oms-command-task",
+ "oms-lock",
+ "oms-safe-fs",
+ "proc_pidinfo",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
+name = "oms-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-experiment",
+ "oms-command-failure",
+ "oms-command-plan",
+ "oms-command-runs",
+ "oms-context",
+ "oms-context-report",
+ "oms-context-session",
+ "oms-context-source",
+ "oms-contract-markdown",
+ "oms-experiment",
+ "oms-failure",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "serde_json",
+]
+
+[[package]]
 name = "oms-safe-fs"
 version = "0.1.0"
 dependencies = [
@@ -876,6 +1220,22 @@ dependencies = [
  "aho-corasick",
  "regex",
 ]
+
+[[package]]
+name = "oms-supervisor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-operations",
+ "regex",
+ "rustix",
+ "sha2",
+ "users",
+]
+
+[[package]]
+name = "oms-toml"
+version = "0.1.0"
 
 [[package]]
 name = "oms-work-inspect"
@@ -964,6 +1324,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proc_pidinfo"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29492a7b48a00ab80202528e235d2f80a04ccff3747540b4ec6881f2f2bc42d1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

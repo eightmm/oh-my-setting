@@ -148,10 +148,10 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
             block.span(&lines)?;
         }
         if hud.span(&lines)?.is_none() && value["tui"].is_null() {
-            if let Some(last) = lines.last_mut() {
-                if !last.ends_with('\n') {
-                    last.push_str(newline)
-                }
+            if let Some(last) = lines.last_mut()
+                && !last.ends_with('\n')
+            {
+                last.push_str(newline)
             }
             lines.push(format!("{newline}[tui]{newline}"));
             lines.extend(hud.lines(newline));
@@ -160,17 +160,15 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
         } else if hud.span(&lines)?.is_none()
             && value["tui"].is_object()
             && value["tui"].get("status_line").is_none()
+            && let Some(i) = header(&lines, "tui")
         {
-            if let Some(i) = header(&lines, "tui") {
-                if !lines[i].ends_with('\n') {
-                    lines[i].push_str(newline);
-                }
-                lines.splice(i + 1..i + 1, hud.lines(newline));
-                expected["tui"]["status_line"] = config::toml(
-                    format!("[tui]\n{}\n", hud.body).as_bytes(),
-                )?["tui"]["status_line"]
-                    .clone();
+            if !lines[i].ends_with('\n') {
+                lines[i].push_str(newline);
             }
+            lines.splice(i + 1..i + 1, hud.lines(newline));
+            expected["tui"]["status_line"] =
+                config::toml(format!("[tui]\n{}\n", hud.body).as_bytes())?["tui"]["status_line"]
+                    .clone();
         }
         let table = &value["features"]["multi_agent_v2"];
         if waits.span(&lines)?.is_none()
@@ -181,15 +179,14 @@ pub(crate) fn codex(tx: &mut Transaction, file: &Path, remove: bool) -> Result<(
             && table
                 .get("max_wait_timeout_ms")
                 .is_none_or(|v| v.as_i64().is_some_and(|n| n >= 300000))
+            && let Some(i) = header(&lines, "features.multi_agent_v2")
         {
-            if let Some(i) = header(&lines, "features.multi_agent_v2") {
-                if !lines[i].ends_with('\n') {
-                    lines[i].push_str(newline);
-                }
-                lines.splice(i + 1..i + 1, waits.lines(newline));
-                expected["features"]["multi_agent_v2"]["min_wait_timeout_ms"] = json!(120000);
-                expected["features"]["multi_agent_v2"]["default_wait_timeout_ms"] = json!(300000);
+            if !lines[i].ends_with('\n') {
+                lines[i].push_str(newline);
             }
+            lines.splice(i + 1..i + 1, waits.lines(newline));
+            expected["features"]["multi_agent_v2"]["min_wait_timeout_ms"] = json!(120000);
+            expected["features"]["multi_agent_v2"]["default_wait_timeout_ms"] = json!(300000);
         }
         if root.span(&lines)?.is_none() && value.get("background_terminal_max_timeout").is_none() {
             lines.splice(0..0, root.lines(newline));

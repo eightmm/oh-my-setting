@@ -178,7 +178,8 @@ pub(crate) fn render(paths: &Paths, flag: &AtomicBool) -> Result<String> {
         clean(&driver),
         clean(&cuda)
     ));
-    for (name, args) in [("uv", &["--version"][..])] {
+    {
+        let (name, args) = ("uv", &["--version"][..]);
         let value = probe(paths, name, args, flag).unwrap_or_else(|| "not detected".into());
         body.push_str(&format!("- {name}: {}\n", clean(&value)));
     }
@@ -332,10 +333,9 @@ pub(crate) fn slurm(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> R
             if fields
                 .get(3)
                 .is_some_and(|p| *p == preferred || p.is_empty())
+                && let Some(v) = fields.get(column).filter(|s| !s.is_empty())
             {
-                if let Some(v) = fields.get(column).filter(|s| !s.is_empty()) {
-                    values.insert((*v).to_owned());
-                }
+                values.insert((*v).to_owned());
             }
         }
         if values.is_empty() {

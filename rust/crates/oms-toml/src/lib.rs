@@ -591,10 +591,10 @@ fn number(text: &str) -> Option<Value> {
         Some(index) => (&body[..index], Some(&body[index + 1..])),
         None => (body, None),
     };
-    if let Some(exponent) = exponent {
-        if !digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent), 10) {
-            return None;
-        }
+    if let Some(exponent) = exponent
+        && !digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent), 10)
+    {
+        return None;
     }
     let fraction = mantissa.find('.');
     if let Some(index) = fraction {

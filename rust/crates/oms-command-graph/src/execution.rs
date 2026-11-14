@@ -248,10 +248,10 @@ fn normalize_shallow<'a>(
                 node.set("mode", node.default("mode", "run"));
             }
             for field in ["bind_task", "plan_task_from", "context"] {
-                if matches!(node.get(field), Value::Null) {
-                    if let Value::Obj(m) = &mut node {
-                        m.remove(field.as_bytes());
-                    }
+                if matches!(node.get(field), Value::Null)
+                    && let Value::Obj(m) = &mut node
+                {
+                    m.remove(field.as_bytes());
                 }
             }
             if matches!(node.get("context"), Value::Obj(_)) {
@@ -270,15 +270,15 @@ fn normalize_shallow<'a>(
         if kind == "tool" {
             node.set("timeout", node.default("timeout", 600_i64));
             node.set("cacheable", node.default("cacheable", false));
-            if matches!(node.get("tool"), Value::Null) {
-                if let Value::Obj(fields) = &mut node {
-                    fields.remove(b"tool".as_slice());
-                }
+            if matches!(node.get("tool"), Value::Null)
+                && let Value::Obj(fields) = &mut node
+            {
+                fields.remove(b"tool".as_slice());
             }
-            if !raw_nodes.get(&id).has("effect") {
-                if let Some(effect) = validate::capability_effect(st(&node, "tool")) {
-                    node.set("effect", effect);
-                }
+            if !raw_nodes.get(&id).has("effect")
+                && let Some(effect) = validate::capability_effect(st(&node, "tool"))
+            {
+                node.set("effect", effect);
             }
         }
         if kind == "gate" {
@@ -462,6 +462,7 @@ pub fn binding_facts(state: &Value, facts: &Value) -> Value {
     }
     result
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch(
     args: &Args,
     repo: &Path,

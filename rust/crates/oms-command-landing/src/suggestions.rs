@@ -78,10 +78,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options, repo: &Path, branch: &str) -
         if ["failure", "timed_out", "startup_failure"].contains(&string(row, "conclusion").as_str())
         {
             red = Some(*row);
-        } else if string(row, "conclusion") == "success" {
-            if let Some(bad) = red {
-                flaky = Some((bad, *row));
-            }
+        } else if string(row, "conclusion") == "success"
+            && let Some(bad) = red
+        {
+            flaky = Some((bad, *row));
         }
     }
     let pr = rows.iter().rev().find_map(|r| {
@@ -98,16 +98,14 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options, repo: &Path, branch: &str) -
                 if !name.starts_with(&format!("pr{pr}-")) || !name.ends_with(".json") {
                     continue;
                 }
-                if let Ok(raw) = storage::read(repo, &file.path(), false) {
-                    if let Ok(row) = V::parse(&raw) {
-                        if matches!(row.get("comments"), V::Arr(_))
-                            && packet.as_ref().is_none_or(|(_, p)| {
-                                string(&row, "read_at") >= string(p, "read_at")
-                            })
-                        {
-                            packet = Some((file.path(), row));
-                        }
-                    }
+                if let Ok(raw) = storage::read(repo, &file.path(), false)
+                    && let Ok(row) = V::parse(&raw)
+                    && matches!(row.get("comments"), V::Arr(_))
+                    && packet
+                        .as_ref()
+                        .is_none_or(|(_, p)| string(&row, "read_at") >= string(p, "read_at"))
+                {
+                    packet = Some((file.path(), row));
                 }
             }
         }

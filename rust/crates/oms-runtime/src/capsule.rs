@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 const MAX: usize = 1024 * 1024;
 fn value_pattern() -> &'static regex::Regex {
     static R: OnceLock<regex::Regex> = OnceLock::new();
-    R.get_or_init(||regex::Regex::new(&concat!(r"(?i)(?:api[_-]?key|access[_-]?to",r"ken|client[_-]?sec",r"ret|pass",r"word|private[_-]?key)\s*[:=]|-----BE",r"GIN [A-Z ]+PRIVATE KEY-----|\b(?:ghp|github_pat|sk)-[A-Za-z0-9_-]{12,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}\b")).unwrap())
+    R.get_or_init(||regex::Regex::new(concat!(r"(?i)(?:api[_-]?key|access[_-]?to",r"ken|client[_-]?sec",r"ret|pass",r"word|private[_-]?key)\s*[:=]|-----BE",r"GIN [A-Z ]+PRIVATE KEY-----|\b(?:ghp|github_pat|sk)-[A-Za-z0-9_-]{12,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,}={0,2}\b")).unwrap())
 }
 fn path_pattern() -> &'static regex::Regex {
     static R: OnceLock<regex::Regex> = OnceLock::new();
@@ -118,13 +118,11 @@ fn validate_fields(value: &Value, location: &str) -> Result<()> {
         return Ok(());
     }
     if location == "envelope.payload.contract.budget" {
+        let key_re = regex::Regex::new(r"^[A-Za-z][A-Za-z0-9_.-]*$").unwrap();
         for (k, v) in value.object()? {
             let k = std::str::from_utf8(k).map_err(error)?;
             require(
-                !blocked(k)
-                    && regex::Regex::new(r"^[A-Za-z][A-Za-z0-9_.-]*$")
-                        .unwrap()
-                        .is_match(k),
+                !blocked(k) && key_re.is_match(k),
                 "portable capsule has an unknown field",
             )?;
             require(

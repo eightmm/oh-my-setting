@@ -427,10 +427,10 @@ pub fn dispatch(
             }
         }
     }
-    if let Some(carried) = &request.carried_patch {
-        if let Some(position) = argv.iter().position(|v| v == "--carried-patch") {
-            argv[position + 1] = store.repo().join(&carried.patch).into_os_string();
-        }
+    if let Some(carried) = &request.carried_patch
+        && let Some(position) = argv.iter().position(|v| v == "--carried-patch")
+    {
+        argv[position + 1] = store.repo().join(&carried.patch).into_os_string();
     }
     if crate::routing::INDEPENDENT.contains(&request.route.role.as_str()) {
         for task in request
@@ -883,6 +883,7 @@ pub struct ContinuationDefaults {
 /// Inherit role, recorded scopes, workload, verifier and purpose from the newest
 /// owned write dispatch for this owner lineage and task. Preserves empty recorded
 /// scope lists rather than silently widening them to repository-wide `"."`.
+#[allow(clippy::too_many_arguments)]
 pub fn continuation_defaults(
     repo: &Path,
     owner: &str,
@@ -964,7 +965,7 @@ pub fn continuation_defaults(
         std::collections::BTreeMap::new()
     };
 
-    for row in owned.into_iter().rev() {
+    if let Some(row) = owned.into_iter().next_back() {
         let refs = &row["refs"];
         let member = text(refs, "panel_room_participant");
         let role = text(refs, "panel_role");
@@ -1007,11 +1008,7 @@ pub fn continuation_defaults(
             .as_ref()
             .and_then(|v| extract_scopes(v).or_else(|| extract_scopes(&v["rework"])))
             .or_else(|| public_launch.as_ref().and_then(extract_scopes))
-            .or_else(|| {
-                room_participants
-                    .get(&member)
-                    .and_then(|p| extract_scopes(p))
-            })
+            .or_else(|| room_participants.get(&member).and_then(extract_scopes))
             .unwrap_or_default();
 
         let pick = |key: &str, ref_key: &str| -> Option<String> {

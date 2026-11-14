@@ -235,10 +235,10 @@ fn scheduler_matrix() {
             command.stdin(std::process::Stdio::piped());
         }
         let mut child = command.spawn().unwrap();
-        if let Some(mut input) = child.stdin.take() {
-            if let Err(err) = input.write_all(b"caller input\n") {
-                assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
-            }
+        if let Some(mut input) = child.stdin.take()
+            && let Err(err) = input.write_all(b"caller input\n")
+        {
+            assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
         }
         let status = child.wait().unwrap();
         if !status.success() {

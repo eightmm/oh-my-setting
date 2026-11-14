@@ -475,22 +475,22 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             let sha = string(row, "sha");
             if red(&string(row, "conclusion")) {
                 bad.insert(sha, row);
-            } else if string(row, "conclusion") == "success" {
-                if let Some(before) = bad.remove(&sha) {
-                    out += &format!(
-                        "{} red {} -> green {}; jobs: {}\n",
-                        &sha[..sha.len().min(12)],
-                        string(before, "ts"),
-                        string(row, "ts"),
-                        before
-                            .get("failed_jobs")
-                            .array()
-                            .iter()
-                            .map(V::py)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
+            } else if string(row, "conclusion") == "success"
+                && let Some(before) = bad.remove(&sha)
+            {
+                out += &format!(
+                    "{} red {} -> green {}; jobs: {}\n",
+                    &sha[..sha.len().min(12)],
+                    string(before, "ts"),
+                    string(row, "ts"),
+                    before
+                        .get("failed_jobs")
+                        .array()
+                        .iter()
+                        .map(V::py)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
         }
         if out.is_empty() {
@@ -654,59 +654,59 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
     } else {
         format!("ci-status: no runs for {branch}\n")
     };
-    if current.is_none() {
-        if let Some(row) = latest {
-            out += &format!(
-                "  history: {} {} on {}  {}\n",
-                string(row, "status"),
-                string(row, "conclusion"),
-                string(row, "headSha").chars().take(12).collect::<String>(),
-                string(row, "url")
-            );
-        }
+    if current.is_none()
+        && let Some(row) = latest
+    {
+        out += &format!(
+            "  history: {} {} on {}  {}\n",
+            string(row, "status"),
+            string(row, "conclusion"),
+            string(row, "headSha").chars().take(12).collect::<String>(),
+            string(row, "url")
+        );
     }
-    if ["record", "tick"].contains(&action.as_str()) {
-        if let Some(run) = chosen {
-            let concl = run
-                .get("conclusion")
-                .text()
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| run.get("status").text().unwrap_or("unknown"));
-            let mut row = obj([
-                ("schema", 1usize.into()),
-                ("ts", now().into()),
-                ("branch", branch.into()),
-                ("sha", run.get("headSha").clone()),
-                ("status", run.get("status").clone()),
-                ("conclusion", concl.into()),
-                ("url", run.get("url").clone()),
-            ]);
-            if run.has("attempt") {
-                row.set("attempt", run.get("attempt").clone());
+    if ["record", "tick"].contains(&action.as_str())
+        && let Some(run) = chosen
+    {
+        let concl = run
+            .get("conclusion")
+            .text()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| run.get("status").text().unwrap_or("unknown"));
+        let mut row = obj([
+            ("schema", 1usize.into()),
+            ("ts", now().into()),
+            ("branch", branch.into()),
+            ("sha", run.get("headSha").clone()),
+            ("status", run.get("status").clone()),
+            ("conclusion", concl.into()),
+            ("url", run.get("url").clone()),
+        ]);
+        if run.has("attempt") {
+            row.set("attempt", run.get("attempt").clone());
+        }
+        if run.get("workflowName").truth() {
+            row.set("workflow", run.get("workflowName").clone());
+        }
+        let _guard = storage::lock(&ledger, c.interrupted)?;
+        let raw = storage::read_external(&ledger, true)?;
+        let prior = storage::parse_rows(&raw)?;
+        if prior.last().is_none_or(|r| {
+            r.get("sha") != row.get("sha") || r.get("conclusion") != row.get("conclusion")
+        }) {
+            let mut next = raw.clone();
+            next.extend(row.json(false)?);
+            next.push(b'\n');
+            let mut ancestor = ledger.parent().unwrap();
+            while !ancestor.exists() {
+                ancestor = ancestor.parent().unwrap();
             }
-            if run.get("workflowName").truth() {
-                row.set("workflow", run.get("workflowName").clone());
-            }
-            let _guard = storage::lock(&ledger, c.interrupted)?;
-            let raw = storage::read_external(&ledger, true)?;
-            let prior = storage::parse_rows(&raw)?;
-            if prior.last().is_none_or(|r| {
-                r.get("sha") != row.get("sha") || r.get("conclusion") != row.get("conclusion")
-            }) {
-                let mut next = raw.clone();
-                next.extend(row.json(false)?);
-                next.push(b'\n');
-                let mut ancestor = ledger.parent().unwrap();
-                while !ancestor.exists() {
-                    ancestor = ancestor.parent().unwrap();
-                }
-                storage::replace(
-                    &std::fs::canonicalize(ancestor)?,
-                    ledger.strip_prefix(ancestor).unwrap(),
-                    if ledger.exists() { Some(&raw) } else { None },
-                    &next,
-                )?;
-            }
+            storage::replace(
+                &std::fs::canonicalize(ancestor)?,
+                ledger.strip_prefix(ancestor).unwrap(),
+                if ledger.exists() { Some(&raw) } else { None },
+                &next,
+            )?;
         }
     }
     drop(tick_lock);

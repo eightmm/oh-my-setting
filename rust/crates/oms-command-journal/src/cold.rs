@@ -315,13 +315,12 @@ pub fn load_cold_manifest(journal_dir: &Path) -> Result<ColdManifest, String> {
             return Err("invalid cold journal manifest".into());
         }
     }
-    if let Some(pending) = &manifest.pending {
-        if !valid_digest(&pending.before)
+    if let Some(pending) = &manifest.pending
+        && (!valid_digest(&pending.before)
             || !valid_digest(&pending.after)
-            || !valid_month(&pending.cutoff)
-        {
-            return Err("invalid cold journal manifest".into());
-        }
+            || !valid_month(&pending.cutoff))
+    {
+        return Err("invalid cold journal manifest".into());
     }
     Ok(manifest)
 }

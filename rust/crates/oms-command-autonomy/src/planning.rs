@@ -105,7 +105,7 @@ pub fn tasks_from_answer(raw: &[u8]) -> Result<Value> {
         let mut stream = serde_json::Deserializer::from_str(&text[begin..]).into_iter::<Value>();
         if let Some(Ok(v)) = stream.next() {
             let end = begin + stream.byte_offset();
-            value::parse(text[begin..end].as_bytes())?;
+            value::parse(&text.as_bytes()[begin..end])?;
             if v.is_object() && v.get("tasks").is_some() {
                 best = Some(v);
             }

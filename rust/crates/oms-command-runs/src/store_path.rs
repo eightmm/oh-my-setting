@@ -42,15 +42,15 @@ pub(super) fn unchanged(left: &Metadata, right: &Metadata) -> bool {
 }
 fn stat_matches(stat: &Stat, meta: &Metadata) -> bool {
     regular(stat)
-        && stat.st_dev as u64 == meta.dev()
-        && stat.st_ino as u64 == meta.ino()
+        && stat.st_dev == meta.dev()
+        && stat.st_ino == meta.ino()
         && stat.st_size as u64 == meta.len()
-        && stat.st_mode as u32 == meta.mode()
-        && stat.st_uid as u32 == meta.uid()
-        && stat.st_gid as u32 == meta.gid()
-        && stat.st_mtime as i64 == meta.mtime()
+        && stat.st_mode == meta.mode()
+        && stat.st_uid == meta.uid()
+        && stat.st_gid == meta.gid()
+        && stat.st_mtime == meta.mtime()
         && stat.st_mtime_nsec as i64 == meta.mtime_nsec()
-        && stat.st_ctime as i64 == meta.ctime()
+        && stat.st_ctime == meta.ctime()
         && stat.st_ctime_nsec as i64 == meta.ctime_nsec()
 }
 pub(super) fn sync_directory(fd: &OwnedFd) -> Result<()> {

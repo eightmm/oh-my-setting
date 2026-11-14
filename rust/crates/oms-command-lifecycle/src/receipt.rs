@@ -77,10 +77,10 @@ impl Paths {
     }
     pub fn require_owner(&self) -> Result<Option<Value>> {
         let row = self.load()?;
-        if let Some(row) = &row {
-            if owner(row)? != self.source {
-                return r::fail("this checkout does not own the canonical installation");
-            }
+        if let Some(row) = &row
+            && owner(row)? != self.source
+        {
+            return r::fail("this checkout does not own the canonical installation");
         }
         Ok(row)
     }
@@ -138,16 +138,16 @@ pub(crate) fn validate(v: &Value) -> Result<()> {
             return r::fail("invalid install component modes");
         }
         for k in ["machine_snapshot", "slurm_snapshot"] {
-            if let Some(x) = v["component_modes"].get(k) {
-                if !matches!(x.as_str(), Some("0" | "1" | "auto")) {
-                    return r::fail("invalid snapshot mode");
-                }
+            if let Some(x) = v["component_modes"].get(k)
+                && !matches!(x.as_str(), Some("0" | "1" | "auto"))
+            {
+                return r::fail("invalid snapshot mode");
             }
         }
-        if let Some(x) = v["component_modes"].get("auto_update") {
-            if !matches!(x.as_str(), Some("check" | "apply")) {
-                return r::fail("invalid auto-update mode");
-            }
+        if let Some(x) = v["component_modes"].get("auto_update")
+            && !matches!(x.as_str(), Some("check" | "apply"))
+        {
+            return r::fail("invalid auto-update mode");
         }
         if v["managed_targets"]
             .as_array()

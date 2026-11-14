@@ -340,10 +340,10 @@ pub(crate) fn execute(
         return crate::agy_hook::run(cwd, source, &options, flag, services);
     }
     let mut paths = Paths::new(cwd, source)?;
-    if tool != "tick" {
-        if let Some(repo) = options.path("--repo", &paths.cwd)? {
-            paths.cwd = r::physical(&repo)?;
-        }
+    if tool != "tick"
+        && let Some(repo) = options.path("--repo", &paths.cwd)?
+    {
+        paths.cwd = r::physical(&repo)?;
     }
     let mutation = !options.preview()
         && (matches!(

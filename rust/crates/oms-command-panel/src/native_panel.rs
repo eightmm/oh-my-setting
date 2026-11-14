@@ -1114,6 +1114,7 @@ fn board_split(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_main_window(
     repo: &Path,
     source: &Path,
@@ -1184,6 +1185,7 @@ fn add_main_window(
     Ok(pane)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bind_window(
     pane: &str,
     policy: &routing::Policy,
@@ -1216,6 +1218,7 @@ fn bind_window(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn launch_command(
     repo: &Path,
     source: &Path,
@@ -1314,6 +1317,7 @@ fn panel_env_prefix() -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn native_command(
     policy: &routing::Policy,
     provider: &str,

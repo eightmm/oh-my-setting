@@ -312,23 +312,24 @@ impl PeerExecutor for SubcommandServices {
         let mut heartbeat_at = Instant::now();
         let mut heartbeat_failed = false;
         loop {
-            if let Some(activity) = &request.heartbeat {
-                if !cancelling && heartbeat_at.elapsed() >= Duration::from_secs(60) {
-                    let output = oms_command_operations::run(
-                        oms_command_operations::App::Events,
-                        &args(&[
-                            "heartbeat",
-                            "--attempt",
-                            &activity.attempt,
-                            "--actor",
-                            &activity.actor,
-                        ]),
-                        &activity.repo,
-                        interrupted,
-                    );
-                    heartbeat_failed |= output.0 != 0;
-                    heartbeat_at = Instant::now();
-                }
+            if let Some(activity) = &request.heartbeat
+                && !cancelling
+                && heartbeat_at.elapsed() >= Duration::from_secs(60)
+            {
+                let output = oms_command_operations::run(
+                    oms_command_operations::App::Events,
+                    &args(&[
+                        "heartbeat",
+                        "--attempt",
+                        &activity.attempt,
+                        "--actor",
+                        &activity.actor,
+                    ]),
+                    &activity.repo,
+                    interrupted,
+                );
+                heartbeat_failed |= output.0 != 0;
+                heartbeat_at = Instant::now();
             }
             if interrupted.load(std::sync::atomic::Ordering::Acquire) && !cancelling {
                 reactor

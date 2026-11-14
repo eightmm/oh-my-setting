@@ -140,6 +140,29 @@ fn lifecycle_idempotence_usage_cas_and_recovery() {
 
 #[test]
 fn approvals_cas_private_grants_and_recovery() {
+    let valid_xdg = std::env::var_os("XDG_STATE_HOME")
+        .is_some_and(|v| PathBuf::from(&v).starts_with(std::env::temp_dir()));
+    if !valid_xdg {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sandbox =
+            std::env::temp_dir().join(format!("oms-ops-xdg-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::approvals_cas_private_grants_and_recovery",
+                "--nocapture",
+            ])
+            .env("XDG_STATE_HOME", &sandbox)
+            .status()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&sandbox);
+        assert!(status.success(), "sandboxed approvals test failed");
+        return;
+    }
     let root = std::env::var_os("XDG_STATE_HOME").expect("disposable XDG_STATE_HOME required");
     assert!(PathBuf::from(root).starts_with(std::env::temp_dir()));
     let f = Fixture::new();

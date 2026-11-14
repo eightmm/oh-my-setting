@@ -503,7 +503,8 @@ fn flat(value: &Value) -> Result<()> {
 fn trigger_plan(ctx: &Context<'_>, definition: &Value, pins: Option<&Value>) -> Result<Value> {
     trigger_definition(definition)?;
     let mut opts = Options::default();
-    for key in ["overlay"] {
+    {
+        let key = "overlay";
         if !definition.text(key).is_empty() {
             opts.values
                 .insert(key.into(), vec![definition.text(key).into()]);

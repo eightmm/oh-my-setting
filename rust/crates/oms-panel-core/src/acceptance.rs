@@ -267,6 +267,7 @@ impl Drop for IndexLock {
         let _ = std::fs::remove_file(&self.0);
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn exact_commit<S: Services + ?Sized>(
     repo: &Path,
     execution: &Path,
@@ -539,7 +540,7 @@ pub(crate) fn run<S: Services + ?Sized>(
     let record_path = format!(
         ".oms/panel/acceptances/{}-{}.json",
         request.task_id,
-        &text(candidate, "patch_sha256")
+        text(candidate, "patch_sha256")
     );
     require(
         tx.json(Path::new(&record_path), MAX_RESULT, true)?
@@ -640,6 +641,7 @@ pub(crate) fn run<S: Services + ?Sized>(
     outcome.map_err(|e| Error { publication_uncertain:true,..Error::new(format!("accept {} failed; preserve state, never reapply blindly; reconcile {record_path} and patch-land --recover: {}",text(&recovery,"stage"),e.message)) })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete<S: Services + ?Sized>(
     repo: &Path,
     execution: &Path,
@@ -666,7 +668,7 @@ fn complete<S: Services + ?Sized>(
             "--patch",
             &text(candidate, "patch"),
         ]),
-        &execution,
+        execution,
     );
     review.environment.push((
         "OMS_PANEL_ACCEPT_RECORD_JSON".into(),

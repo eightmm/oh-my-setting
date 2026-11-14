@@ -485,6 +485,7 @@ pub fn request_job_control(
     Ok(public_job(&changed))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_job(
     repo: &Path,
     session: &str,

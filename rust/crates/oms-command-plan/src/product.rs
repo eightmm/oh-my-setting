@@ -324,12 +324,10 @@ pub(crate) fn landed_paths(plan: &Plan<'_>, proof: &CommitLanding) -> Result<Vec
                 if earlier.is_none()
                     && r.get("push").get("rc").is_int(0)
                     && !r.get("push").get("moved").is_int(0)
+                    && let Ok(Some(b)) = crate::product::base(r)
+                    && b != current
                 {
-                    if let Ok(Some(b)) = crate::product::base(r) {
-                        if b != current {
-                            earlier = Some(b.to_owned());
-                        }
-                    }
+                    earlier = Some(b.to_owned());
                 }
             }
             if prior_passed {
@@ -436,12 +434,11 @@ pub(crate) fn satisfaction(
             current != bundle.text("task_id"),
             "successor depends on original task",
         )?;
-        if visited.insert(current.clone()) {
-            if let Some(t) = tasks.opt(&current) {
-                if let Some(deps) = t.opt("depends") {
-                    pending.extend(deps.strings()?.iter().map(|s| s.to_string()));
-                }
-            }
+        if visited.insert(current.clone())
+            && let Some(t) = tasks.opt(&current)
+            && let Some(deps) = t.opt("depends")
+        {
+            pending.extend(deps.strings()?.iter().map(|s| s.to_string()));
         }
     }
     if kind == "commit" {

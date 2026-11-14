@@ -45,6 +45,7 @@ fn manifest(plan: &Plan<'_>, state: &Value) -> Result<String> {
     }
     Ok(json::sha(json::ascii_canonical(&Value::Array(current))?))
 }
+#[allow(clippy::too_many_arguments)]
 fn reuse(
     plan: &Plan<'_>,
     req: &Request,
@@ -149,8 +150,9 @@ pub fn execute(
     } else {
         String::new()
     };
-    if retirement.is_none() && req.has("reuse-pass") {
-        if let Some(response) = reuse(
+    if retirement.is_none()
+        && req.has("reuse-pass")
+        && let Some(response) = reuse(
             plan,
             req,
             &rows,
@@ -159,9 +161,9 @@ pub fn execute(
             &repo_before,
             &manifest_before,
             command,
-        )? {
-            return Ok(response);
-        }
+        )?
+    {
+        return Ok(response);
     }
     let wall = crate::completion::timeout(
         &std::env::var("OMS_PLAN_ACCEPT_TIMEOUT").unwrap_or_else(|_| "10m".into()),

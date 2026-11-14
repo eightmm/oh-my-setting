@@ -188,6 +188,7 @@ pub fn run_with_services(
 /// and stream merged stdout/stderr. No stored command executes in other modes.
 /// `signal` is the parent's observed HUP/INT/TERM number, never installed here.
 /// No global environment, working directory, signal handler or Git ref changes.
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_io(
     args: &[OsString],
     default_repo: &Path,
@@ -527,6 +528,7 @@ fn journal_enabled() -> bool {
     .contains(&env("OMS_WORK_JOURNAL", b"1").as_slice())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute(
     args: &[OsString],
     cwd: &Path,
@@ -1217,19 +1219,20 @@ fn close(
         if journal_enabled() && decision.is_empty() && next.is_empty() {
             line(err,&[b"hint: no decision or next step recorded; 'agent-task update --decision/--next' before close feeds the Work Journal daily"])?;
         }
-        if env("OMS_SKILL_FORGE_HINT", b"1") == b"1" && task.repo.join(".oms/skills").is_dir() {
-            if let Ok(contracts) = services.skill_contracts(&task.repo) {
-                for (name, command) in contracts {
-                    line(
-                        err,
-                        &[
-                            b"hint: project skill '",
-                            &name,
-                            b"' declares verify contract: ",
-                            &command,
-                        ],
-                    )?;
-                }
+        if env("OMS_SKILL_FORGE_HINT", b"1") == b"1"
+            && task.repo.join(".oms/skills").is_dir()
+            && let Ok(contracts) = services.skill_contracts(&task.repo)
+        {
+            for (name, command) in contracts {
+                line(
+                    err,
+                    &[
+                        b"hint: project skill '",
+                        &name,
+                        b"' declares verify contract: ",
+                        &command,
+                    ],
+                )?;
             }
         }
         if env("OMS_AGENT_TASK_CLOSE_MEMORY", b"1") == b"1" && !goal.is_empty() {

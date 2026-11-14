@@ -53,8 +53,8 @@ fn cursor(s: &Snapshot, offset: usize) -> Result<String> {
     let v = Value::Array(vec![
         1u64.into(),
         s.id.clone().into(),
-        (s.stat.st_dev as u64).into(),
-        (s.stat.st_ino as u64).into(),
+        s.stat.st_dev.into(),
+        s.stat.st_ino.into(),
         offset.into(),
         anchor(s, offset).into(),
     ]);
@@ -83,8 +83,8 @@ fn offset(s: &Snapshot, text: &str) -> Result<usize> {
         .ok_or_else(|| Error::new("invalid thread cursor"))?;
     if a[0].as_u64() != Some(1)
         || a[1].as_str() != Some(&s.id)
-        || a[2].as_u64() != Some(s.stat.st_dev as u64)
-        || a[3].as_u64() != Some(s.stat.st_ino as u64)
+        || a[2].as_u64() != Some(s.stat.st_dev)
+        || a[3].as_u64() != Some(s.stat.st_ino)
         || at > s.bytes.len()
         || a[5].as_str() != Some(anchor(s, at).as_str())
     {
@@ -136,15 +136,15 @@ impl Room<'_> {
             return Err(Error::new("updates projection names another room"));
         }
         let mut after = after;
-        if !after.is_empty() {
-            if let Some(old) = cursor_room(after) {
-                if old != id && self.predecessors(&id, true)?.contains(&old) {
-                    self.notices.borrow_mut().push(format!(
-                        "room: {old} continues as {id}; reading unread mail from its start"
-                    ));
-                    after = "";
-                }
-            }
+        if !after.is_empty()
+            && let Some(old) = cursor_room(after)
+            && old != id
+            && self.predecessors(&id, true)?.contains(&old)
+        {
+            self.notices.borrow_mut().push(format!(
+                "room: {old} continues as {id}; reading unread mail from its start"
+            ));
+            after = "";
         }
         if !after.is_empty() {
             let start = offset(&snapshot, after)?;

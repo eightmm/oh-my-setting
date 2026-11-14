@@ -154,6 +154,7 @@ pub fn duration(raw: &str) -> Result<Duration> {
 }
 
 /// The caller supplies the native helper; limits never modify the embedding process.
+#[allow(clippy::too_many_arguments)]
 pub fn bounded(
     command: &[OsString],
     cwd: &Path,

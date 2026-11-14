@@ -344,20 +344,20 @@ pub(crate) fn permissions(paths: &Paths, tx: &mut Transaction) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     if let Some(allow) = current["permissions"]["allow"].as_array_mut() {
         for rule in rules {
-            if seen.insert(rule.clone()) {
-                if let Some(index) = allow.iter().position(|v| v == &json!(rule)) {
-                    allow.remove(index);
-                }
+            if seen.insert(rule.clone())
+                && let Some(index) = allow.iter().position(|v| v == &json!(rule))
+            {
+                allow.remove(index);
             }
         }
     } else if !current["permissions"]["allow"].is_null() {
         return r::fail("permission allow list is malformed");
     }
     let after = r::bytes(&current)?;
-    if let Some(removal) = state.get("removal") {
-        if removal["after_sha256"] != r::hash(&after) {
-            return r::fail("permission removal recovery bytes do not match");
-        }
+    if let Some(removal) = state.get("removal")
+        && removal["after_sha256"] != r::hash(&after)
+    {
+        return r::fail("permission removal recovery bytes do not match");
     }
     tx.write(&settings, &after, 0o600)?;
     tx.remove(&side)
@@ -423,7 +423,7 @@ fn settings_plan(paths: &Paths, row: &Value, directory: &Path) -> Result<Option<
     if !ownership.is_null() {
         if ownership["schema"] != 1
             || ownership["settings"] != json!(settings)
-            || ownership["home_identity"] != identity(&directory)?
+            || ownership["home_identity"] != identity(directory)?
             || ownership["status"] == "pending"
         {
             return r::fail("ambiguous Claude settings ownership; sidecar retained");
@@ -728,13 +728,13 @@ pub(crate) fn hooks(
             }
             cursor = map.get_mut(part).unwrap();
         }
-        if valid {
-            if let Some(parent) = parent_mut(&mut updated, &parts).and_then(Value::as_object_mut) {
-                let last = parts.last().unwrap();
-                if !parent.contains_key(last) {
-                    parent.insert(last.clone(), value.clone());
-                    leaves.push(json!({"path":parts,"value":value}));
-                }
+        if valid
+            && let Some(parent) = parent_mut(&mut updated, &parts).and_then(Value::as_object_mut)
+        {
+            let last = parts.last().unwrap();
+            if !parent.contains_key(last) {
+                parent.insert(last.clone(), value.clone());
+                leaves.push(json!({"path":parts,"value":value}));
             }
         }
     }

@@ -22,3 +22,7 @@ unsafe_code = "forbid"
 name = "native"
 path = "tests/native.rs"
 harness = false
+
+[[bin]]
+name = "oms-mcp-peer-owner"
+path = "src/bin/oms-mcp-peer-owner.rs"

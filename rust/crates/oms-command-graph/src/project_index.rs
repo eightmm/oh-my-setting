@@ -567,6 +567,7 @@ impl Graph {
         }
         json!({"note":"candidates only: dynamic calls, decorators, entrypoint tables, framework hooks and unparsed files are invisible to the graph, so none of these is a confirmed dead symbol","total":total,"truncated":rows.len()<total,"candidates":rows})
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn visual(
         &self,
         limit: i64,
@@ -632,10 +633,8 @@ impl Graph {
         let mut skipped = 0;
         let mut total = 0;
         let mut groups: BTreeMap<String, Value> = BTreeMap::new();
-        let mut blocks: BTreeMap<
-            String,
-            (Value, usize, BTreeMap<String, usize>, usize, u64, String),
-        > = BTreeMap::new();
+        type GraphBlock = (Value, usize, BTreeMap<String, usize>, usize, u64, String);
+        let mut blocks: BTreeMap<String, GraphBlock> = BTreeMap::new();
         let cap = (limit as usize * 20).max(1000);
         let mut captured = 0;
         for (path, node) in &roots {

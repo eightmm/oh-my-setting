@@ -343,20 +343,20 @@ fn outdated(args: &Args, root: &Path, ctx: &Context<'_>) -> Result<Output> {
                         .filter(|s| !s.is_empty())
                         .unwrap_or("HEAD");
                     let source = p["locator"].as_str().unwrap_or("");
-                    if !source.is_empty() && !source.starts_with('-') && !reference.starts_with('-')
-                    {
-                        if let Ok(result) =
+                    if !source.is_empty()
+                        && !source.starts_with('-')
+                        && !reference.starts_with('-')
+                        && let Ok(result) =
                             git(&["ls-remote", "--", source, reference], ctx.cwd, ctx)
-                            && let Some(revision) = result.split_whitespace().next()
-                        {
-                            row["recorded"] = p["resolved_revision"].clone();
-                            row["remote"] = json!(revision);
-                            row["status"] = json!(if p["resolved_revision"] == revision {
-                                "current"
-                            } else {
-                                "moved"
-                            });
-                        }
+                        && let Some(revision) = result.split_whitespace().next()
+                    {
+                        row["recorded"] = p["resolved_revision"].clone();
+                        row["remote"] = json!(revision);
+                        row["status"] = json!(if p["resolved_revision"] == revision {
+                            "current"
+                        } else {
+                            "moved"
+                        });
                     }
                 } else {
                     row["reason"] =
@@ -388,6 +388,7 @@ fn command_array(value: &Value) -> Result<Vec<String>> {
         })
         .collect()
 }
+#[allow(clippy::too_many_arguments)]
 fn eval_command(
     argv: &[String],
     cwd: &Path,
@@ -560,10 +561,10 @@ fn evaluate(args: &Args, root: &Path, ctx: &Context<'_>) -> Result<Output> {
     {
         return Err(error("skill or suite changed during evaluation"));
     }
-    if let (Some(path), Some(expected)) = (&candidate, &candidate_digest) {
-        if skills::bundle_digest(&skills::entries(path)?) != *expected {
-            return Err(error("candidate changed during evaluation"));
-        }
+    if let (Some(path), Some(expected)) = (&candidate, &candidate_digest)
+        && skills::bundle_digest(&skills::entries(path)?) != *expected
+    {
+        return Err(error("candidate changed during evaluation"));
     }
     let counters = |n: usize| json!({"true_positive":matrix[n][0],"true_negative":matrix[n][1],"false_positive":matrix[n][2],"false_negative":matrix[n][3]});
     let denominator = matrix[1][0] + matrix[1][2];

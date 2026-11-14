@@ -181,12 +181,15 @@ pub fn evaluate(raw: &Value, results: &Value) -> Result<Value> {
     }
     let (noise, band_delta) = noise(&contract, &baseline);
     let threshold = finite(contract.get("success").get("min_improvement")).unwrap_or(0.0);
-    let verdict = if !complete || !invariant_complete || band_delta.is_none() {
-        "inconclusive"
-    } else if improvement >= threshold.max(band_delta.unwrap()) && passed && invariant_pass {
-        "supported"
-    } else {
-        "not_supported"
+    let verdict = match band_delta {
+        Some(band) if complete && invariant_complete => {
+            if improvement >= threshold.max(band) && passed && invariant_pass {
+                "supported"
+            } else {
+                "not_supported"
+            }
+        }
+        _ => "inconclusive",
     };
     let mut out = object([
         ("schema", number(1)),
@@ -718,8 +721,7 @@ pub fn summarize(rt: &Runtime<'_>, name: &str) -> Result<Value> {
     let invariant_result = rt
         .rows(".oms/experiments/invariants.jsonl")?
         .into_iter()
-        .filter(|r| r.text("contract_digest") == digest)
-        .last();
+        .rfind(|r| r.text("contract_digest") == digest);
     let invariant_required = c.get("invariant_pack").truth();
     let invariant_complete = !invariant_required || invariant_result.is_some();
     let invariant_pass = !invariant_required

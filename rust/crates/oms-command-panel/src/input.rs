@@ -97,25 +97,27 @@ impl Decoder {
                         break;
                     }
                 }
-                if used == 0 && self.pending.starts_with(b"\x1b[<") {
-                    if let Some(end) = self.pending.iter().position(|c| matches!(c, b'M' | b'm')) {
-                        let values = std::str::from_utf8(&self.pending[3..end])
-                            .unwrap_or("")
-                            .split(';')
-                            .map(str::parse::<u16>)
-                            .collect::<std::result::Result<Vec<_>, _>>();
-                        if let Ok(v) = values {
-                            if v.len() == 3 && self.pending[end] == b'M' {
-                                found = match v[0] {
-                                    0 => Key::Click(v[1], v[2]),
-                                    64 => Key::Scroll(-3),
-                                    65 => Key::Scroll(3),
-                                    _ => Key::Unbound,
-                                };
-                            }
-                        }
-                        used = end + 1;
+                if used == 0
+                    && self.pending.starts_with(b"\x1b[<")
+                    && let Some(end) = self.pending.iter().position(|c| matches!(c, b'M' | b'm'))
+                {
+                    let values = std::str::from_utf8(&self.pending[3..end])
+                        .unwrap_or("")
+                        .split(';')
+                        .map(str::parse::<u16>)
+                        .collect::<std::result::Result<Vec<_>, _>>();
+                    if let Ok(v) = values
+                        && v.len() == 3
+                        && self.pending[end] == b'M'
+                    {
+                        found = match v[0] {
+                            0 => Key::Click(v[1], v[2]),
+                            64 => Key::Scroll(-3),
+                            65 => Key::Scroll(3),
+                            _ => Key::Unbound,
+                        };
                     }
+                    used = end + 1;
                 }
                 if used == 0 && matches!(self.pending[1], b'[' | b'O') {
                     if let Some(end) = self

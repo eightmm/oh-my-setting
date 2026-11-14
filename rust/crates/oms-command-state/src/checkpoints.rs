@@ -143,10 +143,9 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                 if EXTENSIONS
                     .iter()
                     .any(|ext| name.to_lowercase().ends_with(ext))
+                    && let Ok(metadata) = entry.metadata()
                 {
-                    if let Ok(metadata) = entry.metadata() {
-                        files.push((name, metadata.len()));
-                    }
+                    files.push((name, metadata.len()));
                 }
             }
         }

@@ -659,16 +659,14 @@ pub(crate) fn finish(
             code = 1;
         }
     }
-    if args.has("require-dispositions")
-        || std::env::var_os("OMS_REVIEW_REQUIRE_DISPOSITIONS").is_some_and(|v| v == "1")
-    {
-        if load_findings(repo, dir)?
+    if (args.has("require-dispositions")
+        || std::env::var_os("OMS_REVIEW_REQUIRE_DISPOSITIONS").is_some_and(|v| v == "1"))
+        && load_findings(repo, dir)?
             .iter()
             .any(|r| text(r, "status") == "open")
-        {
-            code = 2;
-            output.push_str("open findings remain; gate incomplete\n");
-        }
+    {
+        code = 2;
+        output.push_str("open findings remain; gate incomplete\n");
     }
     if args.has("confirm") {
         output.push_str(&confirm(args, repo, dir, run, seats, &patch, context)?);

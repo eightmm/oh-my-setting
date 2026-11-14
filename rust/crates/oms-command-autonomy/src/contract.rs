@@ -126,7 +126,7 @@ pub fn parse(raw: &[u8], repo: &Path) -> Result<Contract> {
     let mut files = BTreeSet::new();
     if let Some(list) = field(text, "Verification", "Required check files")? {
         let entries = list
-            .split(|c: char| c == ',' || c == ' ' || c == '\t')
+            .split([',', ' ', '\t'])
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         require(
