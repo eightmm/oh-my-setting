@@ -210,6 +210,136 @@ pub fn plan_status_snapshot(raw: &[u8], task_ids: &[&str]) -> Result<Json> {
     }
     Ok(payload)
 }
+
+fn evidence_ordinal(value: &Json) -> (bool, &str) {
+    let integer = match value {
+        Json::Bool(true) => "1",
+        Json::Number(n)
+            if !n.strip_prefix('-').unwrap_or(n).is_empty()
+                && n.strip_prefix('-')
+                    .unwrap_or(n)
+                    .bytes()
+                    .all(|b| b.is_ascii_digit()) =>
+        {
+            n.as_str()
+        }
+        _ => "0",
+    };
+    let digits = integer
+        .strip_prefix('-')
+        .unwrap_or(integer)
+        .trim_start_matches('0');
+    if digits.is_empty() {
+        (false, "0")
+    } else {
+        (integer.starts_with('-'), digits)
+    }
+}
+
+fn evidence_timestamp(row: &Json) -> &[u8] {
+    match field(row, "ts") {
+        Json::String(s) => s.as_slice(),
+        _ => &[],
+    }
+}
+
+fn evidence_item_cmp(left: &Json, right: &Json) -> std::cmp::Ordering {
+    evidence_timestamp(left)
+        .cmp(evidence_timestamp(right))
+        .then_with(|| {
+            let (a_negative, a) = evidence_ordinal(field(left, "_ordinal"));
+            let (b_negative, b) = evidence_ordinal(field(right, "_ordinal"));
+            b_negative.cmp(&a_negative).then_with(|| {
+                let magnitude = a.len().cmp(&b.len()).then_with(|| a.cmp(b));
+                if a_negative {
+                    magnitude.reverse()
+                } else {
+                    magnitude
+                }
+            })
+        })
+}
+
+fn evidence_has(row: &Json, key: &str, value: &str) -> bool {
+    matches!(field(row, key), Json::String(s) if s == value.as_bytes())
+}
+
+fn evidence_precedence(items: &[&Json]) -> Option<&'static str> {
+    ["failed", "verified", "inconclusive", "skipped_with_reason"]
+        .into_iter()
+        .find(|status| items.iter().any(|row| evidence_has(row, "status", status)))
+}
+
+/// Project one criterion's normalized evidence for the pending native runtime
+/// coverage producer, matching `oms_runtime.evidence._project_status`.
+/// The producer supplies its retained evidence window (currently the latest 20)
+/// after classifying receipts and establishing freshness; this does neither.
+/// Rows must be objects with string timestamps (absent means empty). Timestamps
+/// sort lexically, including WTF-8, then by arbitrary-size signed integer ordinal;
+/// absent/noninteger ordinals mean zero, as in the canonical Python projection.
+/// Unknown statuses default to inconclusive; unknown signals do not qualify as
+/// execution or parent attestation. Advisory success must already be downgraded
+/// by the producer's receipt classification. This only reads the supplied
+/// rows and confers no execution, admission or completion authority.
+pub fn criterion_evidence_status(items: &[Json]) -> Result<&'static str> {
+    for row in items {
+        object(row, "criterion evidence row")?;
+        if let Json::Object(fields) = row
+            && fields.iter().any(|(key, _)| key == b"ts")
+            && !matches!(field(row, "ts"), Json::String(_))
+        {
+            return Err(invalid("criterion evidence timestamp"));
+        }
+    }
+    if items.is_empty() {
+        return Ok("missing");
+    }
+    let mut fresh = items
+        .iter()
+        .filter(|row| !evidence_has(row, "status", "stale"))
+        .collect::<Vec<_>>();
+    fresh.sort_by(|a, b| evidence_item_cmp(a, b));
+    let Some(latest) = fresh.last() else {
+        return Ok("stale");
+    };
+    let latest_items = fresh
+        .iter()
+        .copied()
+        .filter(|row| evidence_item_cmp(row, latest).is_eq())
+        .collect::<Vec<_>>();
+    if latest_items
+        .iter()
+        .any(|row| evidence_has(row, "status", "failed"))
+    {
+        return Ok("failed");
+    }
+    let executed = |row: &&Json| {
+        evidence_has(row, "signal", "execution_feedback")
+            || evidence_has(row, "signal", "parent_attestation")
+    };
+    if latest_items
+        .iter()
+        .all(|row| evidence_has(row, "signal", "advisory"))
+    {
+        let executed_items = fresh.iter().copied().filter(executed).collect::<Vec<_>>();
+        if let Some(last) = executed_items.last() {
+            let tied = executed_items
+                .iter()
+                .copied()
+                .filter(|row| evidence_item_cmp(row, last).is_eq())
+                .collect::<Vec<_>>();
+            if let Some(status) = evidence_precedence(&tied) {
+                return Ok(status);
+            }
+        } else if items
+            .iter()
+            .any(|row| evidence_has(row, "status", "stale") && executed(&row))
+        {
+            return Ok("stale");
+        }
+    }
+    Ok(evidence_precedence(&latest_items).unwrap_or("inconclusive"))
+}
 fn object<'a>(v: &'a Json, name: &str) -> Result<&'a Json> {
     if matches!(v, Json::Object(_)) {
         Ok(v)

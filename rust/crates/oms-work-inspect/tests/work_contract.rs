@@ -301,6 +301,247 @@ fn status_snapshot_lossless_dialect_and_bounds() {
     }
 }
 #[test]
+fn criterion_evidence_status_contract() {
+    use oms_context::{Json, parse_experiment_json};
+    use oms_work_inspect::criterion_evidence_status;
+
+    let project = |value: Value| {
+        let Json::Array(ref items) =
+            parse_experiment_json(&bytes(&value), 4 * 1024 * 1024).unwrap()
+        else {
+            unreachable!()
+        };
+        criterion_evidence_status(items)
+    };
+    let item = |status: &str, signal: &str, ts: &str, ordinal: Value| json!({"status": status, "signal": signal, "ts": ts, "_ordinal": ordinal});
+    let gate = item("verified", "execution_feedback", "a", json!(0));
+    let stale = item("stale", "execution_feedback", "z", json!(0));
+    let advisory = item("inconclusive", "advisory", "z", json!(0));
+    let unknown = item("future", "unknown", "a", json!(0));
+    let failed = item("failed", "execution_feedback", "a", json!(0));
+    let cases = [
+        (json!([]), "missing"),
+        (json!([stale]), "stale"),
+        (json!([stale, stale]), "stale"),
+        (json!([gate, stale]), "verified"),
+        (json!([unknown]), "inconclusive"),
+        (json!([{}]), "inconclusive"),
+        (json!([{"status": null, "signal": 0}]), "inconclusive"),
+        (json!([advisory]), "inconclusive"),
+        (json!([gate, advisory]), "verified"),
+        (json!([stale, advisory]), "stale"),
+        (json!([stale, unknown, advisory]), "stale"),
+        (json!([gate, stale, advisory]), "verified"),
+        (json!([failed, advisory]), "failed"),
+        (
+            json!([
+                failed,
+                item("verified", "execution_feedback", "b", json!(0)),
+                advisory
+            ]),
+            "verified",
+        ),
+        (
+            json!([item("verified", "advisory", "a", json!(0))]),
+            "verified",
+        ),
+        (
+            json!([gate, item("failed", "advisory", "z", json!(0))]),
+            "failed",
+        ),
+        (
+            json!([item("stale", "unknown", "a", json!(0)), advisory]),
+            "inconclusive",
+        ),
+        (json!([unknown, advisory]), "inconclusive"),
+        (
+            json!([
+                gate,
+                item("future", "parent_attestation", "b", json!(0)),
+                stale,
+                item("skipped_with_reason", "advisory", "z", json!(0))
+            ]),
+            "skipped_with_reason",
+        ),
+        (
+            json!([gate, item("inconclusive", "unknown", "z", json!(0))]),
+            "inconclusive",
+        ),
+        (
+            json!([
+                failed,
+                item("verified", "execution_feedback", "a", json!(1))
+            ]),
+            "verified",
+        ),
+        (
+            json!([gate, item("failed", "execution_feedback", "a", json!(1))]),
+            "failed",
+        ),
+        (
+            json!([item("failed", "unknown", "a", json!(-1)), gate]),
+            "verified",
+        ),
+        (
+            json!([gate, item("failed", "unknown", "b", json!(-1))]),
+            "failed",
+        ),
+        (
+            json!([gate, item("failed", "unknown", "a", json!(true))]),
+            "failed",
+        ),
+        (
+            json!([failed, item("verified", "unknown", "a", json!(false))]),
+            "failed",
+        ),
+        (
+            json!([gate, item("failed", "unknown", "a", json!(1.5))]),
+            "failed",
+        ),
+        (
+            json!([gate, item("failed", "unknown", "a", json!("9"))]),
+            "failed",
+        ),
+        (
+            json!([gate, item("failed", "unknown", "a", Value::Null)]),
+            "failed",
+        ),
+        (
+            json!([item("failed", "unknown", "", json!(0)), {"status": "verified"}]),
+            "failed",
+        ),
+        (
+            json!([
+                item("failed", "unknown", "9", json!(0)),
+                item("verified", "unknown", "10", json!(0))
+            ]),
+            "failed",
+        ),
+    ];
+    for (rows, expected) in cases {
+        assert_eq!(project(rows.clone()).unwrap(), expected, "{rows}");
+        let mut reversed = rows.as_array().unwrap().clone();
+        reversed.reverse();
+        assert_eq!(project(json!(reversed)).unwrap(), expected, "{rows}");
+    }
+
+    let statuses = [
+        "failed",
+        "verified",
+        "inconclusive",
+        "skipped_with_reason",
+        "future",
+    ];
+    for (a_index, a) in statuses.iter().enumerate() {
+        for (b_index, b) in statuses.iter().enumerate() {
+            let expected = statuses[a_index.min(b_index)];
+            let expected = if expected == "future" {
+                "inconclusive"
+            } else {
+                expected
+            };
+            let tied = [
+                item(a, "execution_feedback", "a", json!(0)),
+                item(b, "parent_attestation", "a", json!(0)),
+            ];
+            assert_eq!(project(json!(tied)).unwrap(), expected, "{a}, {b}");
+            assert_eq!(
+                project(json!([tied[1], tied[0], advisory])).unwrap(),
+                expected,
+                "advisory fallback: {a}, {b}"
+            );
+        }
+    }
+    for signal in ["execution_feedback", "parent_attestation"] {
+        for status in statuses {
+            let expected = if status == "future" {
+                "inconclusive"
+            } else {
+                status
+            };
+            assert_eq!(
+                project(json!([item(status, signal, "a", json!(0)), advisory])).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            project(json!([item("stale", signal, "a", json!(0)), advisory])).unwrap(),
+            "stale"
+        );
+    }
+    // A mixed latest group does not take the advisory-only fallback.
+    assert_eq!(
+        project(json!([
+            gate,
+            advisory,
+            item("skipped_with_reason", "unknown", "z", json!(0))
+        ]))
+        .unwrap(),
+        "inconclusive"
+    );
+
+    for (raw, expected) in [
+        (
+            r#"[{"status":"failed","_ordinal":-0},{"status":"verified","_ordinal":0}]"#,
+            "failed",
+        ),
+        (
+            r#"[{"status":"failed","_ordinal":99999999999999999999999999999999999999999999999999},{"status":"verified","_ordinal":99999999999999999999999999999999999999999999999998}]"#,
+            "failed",
+        ),
+        (
+            r#"[{"status":"failed","_ordinal":-99999999999999999999999999999999999999999999999999},{"status":"verified","_ordinal":-99999999999999999999999999999999999999999999999998}]"#,
+            "verified",
+        ),
+        (
+            r#"[{"status":"failed","_ordinal":-10},{"status":"verified","_ordinal":-9}]"#,
+            "verified",
+        ),
+        (
+            r#"[{"status":"failed","_ordinal":9},{"status":"verified","_ordinal":10}]"#,
+            "verified",
+        ),
+        (
+            r#"[{"status":"failed","_ordinal":1e0},{"status":"verified","_ordinal":1}]"#,
+            "verified",
+        ),
+        (
+            r#"[{"status":"failed","_ordinal":NaN},{"status":"verified","_ordinal":true}]"#,
+            "verified",
+        ),
+        (
+            r#"[{"status":"failed","ts":"\ud800"},{"status":"verified","ts":"\ue000"}]"#,
+            "verified",
+        ),
+        (
+            r#"[{"status":"failed","ts":"\ue000"},{"status":"verified","ts":"\ud800\udc00"}]"#,
+            "verified",
+        ),
+    ] {
+        let Json::Array(ref items) =
+            parse_experiment_json(raw.as_bytes(), 4 * 1024 * 1024).unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(criterion_evidence_status(items).unwrap(), expected, "{raw}");
+    }
+    for rows in [
+        json!([null]),
+        json!([[]]),
+        json!([0]),
+        json!(["failed"]),
+        json!([{"ts": null}]),
+        json!([{"ts": 0}]),
+        json!([{"ts": true}]),
+        json!([{"ts": []}]),
+        json!([{"ts": {}}]),
+        json!([gate, {"ts": 1}]),
+    ] {
+        assert!(project(rows.clone()).is_err(), "{rows}");
+    }
+}
+
+#[test]
 fn views_and_render() {
     let v = fixture();
     let raw = bytes(&v);
