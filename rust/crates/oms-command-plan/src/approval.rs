@@ -67,7 +67,7 @@ fn argv(plan: &Plan<'_>, bundle: &Value, sha: &str, path: &str) -> Result<Vec<St
         args.extend(["env".into(), format!("OMS_STATE_REPO={state}")]);
     }
     args.extend([
-        "scripts/oms".into(),
+        "oms".into(),
         "agent-plan".into(),
         "approve-main-research".into(),
         "--repo".into(),

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//! Schema-3 plan authority. CLI routing and provider integration belong to the caller.
+//! Schema-3 plan authority and the `agent-plan` CLI entrypoints (`owns`, `run*`).
+//! Process routing and provider integration belong to the caller.
 //!
 //! All state changes enter through `Plan::execute`; receipts are checked again on
 //! reads. No worker exit, room membership, or caller-supplied success flag grants
@@ -7,6 +8,7 @@
 
 pub mod acceptance;
 mod approval;
+mod cli;
 pub mod completion;
 pub mod decision;
 mod engine;
@@ -22,6 +24,7 @@ pub mod retirement;
 pub mod services;
 pub mod storage;
 
+pub use cli::{owns, run, run_with_io, run_with_services};
 pub use engine::{Context, Plan, Snapshot};
 pub use request::{Action, Request};
 pub use services::{Services, UnavailableServices};

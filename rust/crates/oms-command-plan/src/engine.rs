@@ -21,6 +21,8 @@ pub const STATES: &[&str] = &[
 ];
 #[derive(Clone)]
 pub struct Context {
+    /// Caller directory that relative request operands resolve against.
+    pub cwd: PathBuf,
     pub execution_repo: PathBuf,
     pub state_repo: PathBuf,
     pub plan_file: PathBuf,
@@ -40,35 +42,49 @@ pub struct Context {
 }
 impl Context {
     pub fn from_environment(req: &Request, default_repo: &Path) -> Result<Self> {
+        let cwd = std::env::current_dir().map_err(|_| error("cannot resolve working directory"))?;
+        Self::from_environment_at(req, default_repo, &cwd, None)
+    }
+    /// Same as `from_environment`, but relative operands and `OMS_STATE_REPO`
+    /// resolve against `cwd`, and `state_hint` names the shared state root
+    /// (a verified scratch owner) used when `OMS_STATE_REPO` is unset.
+    pub fn from_environment_at(
+        req: &Request,
+        default_repo: &Path,
+        cwd: &Path,
+        state_hint: Option<&Path>,
+    ) -> Result<Self> {
+        Self::resolve(req, default_repo, cwd, &AtomicBool::new(false), &|_| {
+            Ok(state_hint.map(Path::to_path_buf))
+        })
+    }
+    pub(crate) fn resolve(
+        req: &Request,
+        default_repo: &Path,
+        cwd: &Path,
+        interrupted: &AtomicBool,
+        hint: &dyn Fn(&Path) -> Result<Option<PathBuf>>,
+    ) -> Result<Self> {
+        use crate::cli::{physical_dir, physical_leaf, worktree_root};
         let get = |n: &str| std::env::var(n).unwrap_or_default();
         let repo = req.repo.as_deref().unwrap_or(default_repo);
-        let execution_repo = std::fs::canonicalize(repo)
-            .map_err(|_| error("cannot resolve the physical repository"))?;
-        let state = std::env::var_os("OMS_STATE_REPO")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| execution_repo.clone());
-        let state_repo =
-            std::fs::canonicalize(state).map_err(|_| error("cannot resolve plan repository"))?;
-        let plan_file = req.file.clone().unwrap_or_else(|| state_repo.join(ACTIVE));
-        let plan_file = if plan_file.is_absolute() {
-            plan_file
-        } else {
-            std::env::current_dir()
-                .map_err(|_| error("cannot resolve working directory"))?
-                .join(plan_file)
+        let execution_repo = worktree_root(&physical_dir(cwd, repo.as_os_str()), interrupted)?;
+        let state = match std::env::var_os("OMS_STATE_REPO").filter(|s| !s.is_empty()) {
+            Some(s) => worktree_root(&physical_dir(cwd, &s), interrupted)
+                .map_err(|_| error("cannot resolve plan repository"))?,
+            None => match hint(&execution_repo)? {
+                Some(h) => {
+                    std::fs::canonicalize(h).map_err(|_| error("cannot resolve plan repository"))?
+                }
+                None => execution_repo.clone(),
+            },
         };
-        let plan_file = if let Some(parent) = plan_file.parent() {
-            match std::fs::canonicalize(parent) {
-                Ok(parent) => parent.join(
-                    plan_file
-                        .file_name()
-                        .ok_or_else(|| error("plan path has no file name"))?,
-                ),
-                Err(_) => plan_file,
-            }
-        } else {
-            plan_file
+        let state_repo = state;
+        // The default plan path keeps its own spelling so the storage layer's
+        // no-follow anchor still refuses a symlinked `.oms`, `plan` or file.
+        let plan_file = match &req.file {
+            Some(f) => physical_leaf(cwd, f.as_os_str()),
+            None => state_repo.join(ACTIVE),
         };
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -79,6 +95,7 @@ impl Context {
             .to_string();
         let claim_ttl = get("OMS_PLAN_CLAIM_TTL").parse().unwrap_or(3600);
         Ok(Self {
+            cwd: cwd.to_path_buf(),
             execution_repo,
             state_repo,
             plan_file,
@@ -391,30 +408,22 @@ impl<'a> Plan<'a> {
     pub fn execute(&self, req: &Request) -> Result<Response> {
         use Action::*;
         req.validate()?;
-        require(
-            req.repo.is_none()
-                || std::fs::canonicalize(req.repo.as_ref().unwrap())
-                    .is_ok_and(|p| p == self.context.execution_repo),
-            "request repository differs from context",
-        )?;
-        if let Some(file) = &req.file {
-            let file = if file.is_absolute() {
-                file.clone()
-            } else {
-                std::env::current_dir()
-                    .map_err(|_| error("cannot resolve plan file context"))?
-                    .join(file)
-            };
-            let parent = file
-                .parent()
-                .ok_or_else(|| error("plan file has no parent"))?;
-            let physical = std::fs::canonicalize(parent)
-                .map(|parent| parent.join(file.file_name().unwrap()))
-                .unwrap_or(file);
+        {
+            use crate::cli::{physical_dir, physical_leaf, worktree_root};
+            let cwd = &self.context.cwd;
             require(
-                physical == self.context.plan_file,
-                "request plan file differs from context",
+                req.repo.as_ref().is_none_or(|r| {
+                    worktree_root(&physical_dir(cwd, r.as_os_str()), self.interrupted)
+                        .is_ok_and(|p| p == self.context.execution_repo)
+                }),
+                "request repository differs from context",
             )?;
+            if let Some(file) = &req.file {
+                require(
+                    physical_leaf(cwd, file.as_os_str()) == self.context.plan_file,
+                    "request plan file differs from context",
+                )?;
+            }
         }
         if matches!(
             req.action,
@@ -1015,13 +1024,7 @@ impl<'a> Plan<'a> {
     fn markers_directory(&self, req: &Request) -> Result<()> {
         if let Some(path) = req.path("markers-dir") {
             let expected = self.context.state_repo.join(".oms/delegations");
-            let supplied = if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()
-                    .map_err(|_| error("cannot resolve markers directory"))?
-                    .join(path)
-            };
+            let supplied = crate::cli::physical_leaf(&self.context.cwd, path.as_os_str());
             require(
                 supplied == expected,
                 "worker marker directory must be repo-local .oms/delegations directory",

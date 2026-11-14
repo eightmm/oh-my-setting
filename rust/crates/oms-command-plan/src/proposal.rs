@@ -11,13 +11,7 @@ impl Plan<'_> {
         let path = req
             .path("proposal")
             .ok_or_else(|| error("apply-proposal requires --proposal"))?;
-        let absolute = if path.is_absolute() {
-            path
-        } else {
-            std::env::current_dir()
-                .map_err(|_| error("proposal working directory unavailable"))?
-                .join(path)
-        };
+        let absolute = crate::cli::physical_leaf(&self.context.cwd, path.as_os_str());
         let root = crate::storage::Store::open(
             absolute
                 .parent()

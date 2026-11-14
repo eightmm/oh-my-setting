@@ -165,3 +165,13 @@ acceptance composition; `tests/functional-evolution-smoke.sh` covers managed
 capture retention. Those cases, native service integration and platform/failure
 edges remain scheduled verification work. The phase instruction forbids running
 them or reversing the implementation for behavioral probes now.
+
+## CLI entrypoint
+
+`owns("agent-plan", args)`, `run`, `run_with_services` and `run_with_io` drive
+the full `agent-plan` surface (including `-h`/`--help`) for a caller-supplied
+`cwd`: relative `--repo`, `--file`, `--proposal` and `--markers-dir` resolve
+against that `cwd`, never the process cwd. Retirement and decision paths resolve
+against the declared state/execution repository. Interruption is checked before
+any state is opened; the exit code, stdout and stderr stay separate. The main
+research approval command is rendered as `oms agent-plan approve-main-research`.

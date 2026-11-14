@@ -69,6 +69,12 @@ pub struct GroupMembership {
 pub type GroupResolver = fn(u32) -> Result<GroupMembership>;
 
 pub trait Services {
+    /// Verified shared state root for a managed scratch worktree of `repo`
+    /// (the `oms_state_root` contract). `None` keeps the repository's own root.
+    /// Consulted only when `OMS_STATE_REPO` is unset; never inferred here.
+    fn state_root(&self, _repo: &Path) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
     fn group_membership_resolver(&self) -> Option<GroupResolver> {
         None
     }
