@@ -64,23 +64,33 @@
 //! an existing stream of at most 32 MiB, accepts a row of at most 1 MiB including
 //! LF, reads at most one prior EOF byte, and makes one O_APPEND write. It retains
 //! file/parent descriptors, generation and namespace proofs, and refuses torn
-//! tails. This is a static I/O budget, without a measured performance claim.
+//! tails. Append generations are captured under the stream lock; earlier reads
+//! retain compare-and-swap authority only for replacements. Internal JSON writes
+//! include their final LF within the 8 MiB read bound. This is a static I/O budget,
+//! without a measured performance claim.
 //!
 //! Explicit envelope/template `--output`, capsule export `--output`, and context
 //! `--bundle`/`--manifest` alone authorize the separate external atomic writer.
 //! Defaults and every internal state path remain confined. Backend log/receipt
 //! and profile installer receipt flags carry explicit paths to their independent
 //! producers, which must enforce the same protected-publication requirements.
+//! External outputs normalize lexical components before capturing macOS aliases
+//! and resolving existing ancestors like Python atomic_write_bytes. The last
+//! .oms directory and its descendants retain strict no-follow traversal, as do
+//! protected paths. Linked immediate parents and final destinations refuse.
+//! Explicit JSON outputs have no state-file size cap. Prior work snapshots and
+//! acknowledgement envelopes share strict duplicate/non-finite JSON validation.
 //! Existing ancestor permissions are never relaxed. Replacement failures can
 //! leave only a private temporary or an explicitly uncertain published result;
 //! append failures retain prior rows and may leave a torn row or empty new file.
 //!
 //! Remaining integration and compatibility work is explicit. No concrete
-//! producer is wired here. Reused work-inspect byte APIs still strictly reparse
-//! decoded current views at 4 MiB; parent-owned decoded-value entrypoints are
-//! needed to retain larger valid runtime views. Reused Runs bootstrap computes
-//! approximate sample means; its private RNG needs a parent-owned numerical
-//! correction. Local experiment means and sample spread use exact dyadic sums
+//! producer is wired here. Work reports use the decoded-value work-inspect APIs
+//! without imposing an aggregate reparse bound on current runtime views. Default
+//! context layers skip missing files and explicit safety/size refusals; genuine
+//! I/O failures, generation changes and interruption propagate. Reused Runs
+//! bootstrap computes approximate sample means; its private RNG needs a
+//! parent-owned numerical correction. Local experiment means and sample spread use exact dyadic sums
 //! and final nearest-even rounding. General argparse/help/error byte parity,
 //! Unicode version details, numerical/repr corpora and the full frozen context
 //! corpus still need independent comparison. Settlement I/O errors propagate

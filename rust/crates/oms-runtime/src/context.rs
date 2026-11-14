@@ -151,6 +151,21 @@ pub fn slice(data: &[u8], budget: usize, policy: &str) -> (Vec<u8>, usize, Strin
     out.truncate(budget);
     (out, data.len() - usable.min(data.len()), policy.into())
 }
+fn default_source_refusal(e: &crate::Error) -> bool {
+    // Store exposes flattened diagnostics. Only its explicit safety and size
+    // refusals are optional here; I/O, generation changes and service errors fail.
+    e.code == 2
+        && (matches!(
+            e.message.as_str(),
+            "unsafe plan ownership, permissions or links"
+                | "native private-group account proof service unavailable"
+                | "source exceeds read bound"
+                | "plan read: Unsafe"
+                | "plan read: InputTooLarge"
+        ) || [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
+            .iter()
+            .any(|errno| e.message == format!("plan storage: {errno}")))
+}
 pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
     rt.parent_write()?;
     require(
@@ -202,17 +217,23 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             "work-journal",
         ),
     ] {
-        if let Ok(Some(raw)) = rt.bytes(path, MAX_STATE) {
-            let path = PathBuf::from(path);
-            bytes.insert(path.clone(), raw.to_vec());
-            candidates.push(Candidate {
-                label: label(&path)?,
-                path,
-                reason: reason.into(),
-                priority: moved(priority, class, rule),
-                policy,
-            });
-        }
+        let source = rt.bytes(path, MAX_STATE);
+        rt.check()?;
+        let raw = match source {
+            Ok(Some(raw)) => raw,
+            Ok(None) => continue,
+            Err(e) if default_source_refusal(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        let path = PathBuf::from(path);
+        bytes.insert(path.clone(), raw.to_vec());
+        candidates.push(Candidate {
+            label: label(&path)?,
+            path,
+            reason: reason.into(),
+            priority: moved(priority, class, rule),
+            policy,
+        });
     }
     for raw in &request.targets {
         if raw.is_empty() {

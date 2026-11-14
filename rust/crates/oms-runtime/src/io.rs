@@ -98,8 +98,19 @@ impl Anchor {
         let Some(Component::Normal(name)) = path.components().next_back() else {
             return Err(error("runtime destination requires a file name"));
         };
-        #[allow(unused_mut)]
-        let mut absolute = path.to_path_buf();
+        let mut absolute = PathBuf::from("/");
+        for component in path.components().skip(1) {
+            match component {
+                Component::Normal(part) => absolute.push(part),
+                Component::CurDir => (),
+                Component::ParentDir if protected_root.is_none() => {
+                    // Match abspath before inspecting the immediate parent;
+                    // resolving first could conceal a symlink behind `..`.
+                    absolute.pop();
+                }
+                _ => return Err(error("invalid runtime destination component")),
+            }
+        }
         #[allow(unused_mut)]
         let mut aliases = vec![];
         // macOS system aliases are part of the supported host spelling. Capture
@@ -115,6 +126,40 @@ impl Anchor {
                 aliases.push((PathBuf::from(logical), info));
                 absolute = Path::new(physical).join(relative);
                 break;
+            }
+        }
+        let mut external_state_root = None;
+        if protected_root.is_none() {
+            let parent = absolute
+                .parent()
+                .ok_or_else(|| error("destination has no parent"))?;
+            match std::fs::symlink_metadata(parent) {
+                Ok(info) => require(
+                    info.is_dir() && !info.file_type().is_symlink(),
+                    "output directory must be a real directory",
+                )?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(io(e)),
+            }
+            // Like _ensure_state_directory_chain, retain the last .oms suffix
+            // for the no-follow walker rather than resolving its state links.
+            if let Some(state) = parent
+                .ancestors()
+                .find(|part| part.file_name() == Some(OsStr::new(".oms")))
+            {
+                let before = state
+                    .parent()
+                    .expect("absolute state directory has a parent");
+                let resolved = resolve_existing(before)?;
+                external_state_root = Some(resolved.join(".oms"));
+                absolute = resolved.join(
+                    absolute
+                        .strip_prefix(before)
+                        .expect("state ancestor prefixes destination"),
+                );
+            } else {
+                // Keep the final name unresolved so destination links refuse.
+                absolute = resolve_existing(parent)?.join(name);
             }
         }
         let fd = fs::open("/", directory_flags(), Mode::empty()).map_err(io)?;
@@ -145,7 +190,9 @@ impl Anchor {
                 _ => return Err(error("invalid runtime destination component")),
             };
             prefix.push(name);
-            protected |= protected_root.is_some_and(|root| prefix == root);
+            protected |= protected_root
+                .or(external_state_root.as_deref())
+                .is_some_and(|root| prefix == root);
             a.check(rt)?;
             let observed = match fs::statat(a.fd(), name, AtFlags::SYMLINK_NOFOLLOW) {
                 Ok(v) => v,
@@ -246,14 +293,14 @@ fn uncertain(e: impl std::fmt::Display) -> crate::Error {
     ))
 }
 /// Requires the canonical stream lock. Reads zero history bytes and at most one
-/// EOF byte. Exactly one O_APPEND write publishes the complete encoded row.
+/// EOF byte. Captures the current generation under that lock rather than using a
+/// command's earlier read snapshot. One O_APPEND write publishes the encoded row.
 pub(crate) fn append(
     rt: &Runtime<'_>,
     path: &Path,
     root: &Path,
     row: &[u8],
     guard: &oms_lock::Guard,
-    expected: Option<Option<crate::value::Value>>,
 ) -> Result<()> {
     require(
         !row.is_empty()
@@ -266,12 +313,6 @@ pub(crate) fn append(
     guard.check().map_err(io)?;
     let a = Anchor::open(rt, path, Some(root))?;
     let named = a.leaf(rt)?;
-    if let Some(expected) = expected {
-        require(
-            named.as_ref().map(oms_command_plan::storage::generation) == expected,
-            "runtime append snapshot changed before publication",
-        )?;
-    }
     if let Some(s) = &named {
         trusted(rt, s, false)?;
         require(
@@ -499,18 +540,16 @@ fn replace(
     Ok(())
 }
 
-/// common.file_lock uses a runtime-SHA256 namespace and the canonical mkdir
-/// protocol even on hosts with flock. Keep that authority across both writers.
-pub(crate) fn lock(rt: &Runtime<'_>, target: &Path) -> Result<oms_lock::Guard> {
-    let mut cursor = target.to_path_buf();
+fn resolve_existing(path: &Path) -> Result<PathBuf> {
+    let mut cursor = path.to_path_buf();
     let mut missing = vec![];
-    let resolved = loop {
+    loop {
         match std::fs::canonicalize(&cursor) {
             Ok(mut path) => {
                 for name in missing.iter().rev() {
                     path.push(name)
                 }
-                break path;
+                return Ok(path);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 missing.push(
@@ -523,7 +562,13 @@ pub(crate) fn lock(rt: &Runtime<'_>, target: &Path) -> Result<oms_lock::Guard> {
             }
             Err(e) => return Err(io(e)),
         }
-    };
+    }
+}
+
+/// common.file_lock uses a runtime-SHA256 namespace and the canonical mkdir
+/// protocol even on hosts with flock. Keep that authority across both writers.
+pub(crate) fn lock(rt: &Runtime<'_>, target: &Path) -> Result<oms_lock::Guard> {
+    let resolved = resolve_existing(target)?;
     let mut settings = oms_lock::Settings::from_env().map_err(io)?;
     settings.mode = oms_lock::Mode::Mkdir;
     settings.timeout = std::time::Duration::from_secs(15);

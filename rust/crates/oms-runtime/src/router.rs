@@ -117,7 +117,7 @@ fn report(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
         "--pretty applies to JSON, not --format text",
     )?;
     let envelope = crate::projection::envelope(rt)?;
-    let raw = canonical(&envelope)?;
+    let snapshot = to_native(&envelope);
     let task = r
         .os("task")
         .map(|s| {
@@ -126,9 +126,9 @@ fn report(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
         })
         .transpose()?;
     let report = if r.mode == Mode::Evidence {
-        oms_work_inspect::evidence_matrix(&raw, limit as usize, task)
+        oms_work_inspect::evidence_matrix_value(&snapshot, limit as usize, task)
     } else if r.mode == Mode::Next {
-        oms_work_inspect::action_inbox(&raw, limit as usize, task)
+        oms_work_inspect::action_inbox_value(&snapshot, limit as usize, task)
     } else {
         let before = r
             .os("before")
@@ -139,17 +139,32 @@ fn report(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                 let raw = root
                     .read_manifest(&path, 4 * 1024 * 1024)
                     .map_err(|_| error("cannot safely read the selected prior envelope"))?;
-                let value = parse(&raw)?;
-                if value.opt("envelope").is_some() {
-                    keys(&value, &["written", "envelope"], &[])
-                        .map_err(|_| error("invalid envelope-write acknowledgement"))?;
-                    canonical(value.get("envelope"))
-                } else {
-                    Ok(raw)
+                let mut value = oms_context::parse_json(&raw).map_err(|message| {
+                    if message == "cannot read a valid repo-local context manifest" {
+                        error("cannot read a valid prior work snapshot")
+                    } else {
+                        error(message.replace("context manifest", "work snapshot"))
+                    }
+                })?;
+                match &mut value {
+                    oms_context::Json::Object(entries)
+                        if entries.iter().any(|(key, _)| key == b"envelope") =>
+                    {
+                        require(
+                            entries.len() == 2 && entries.iter().any(|(key, _)| key == b"written"),
+                            "invalid envelope-write acknowledgement",
+                        )?;
+                        let index = entries
+                            .iter()
+                            .position(|(key, _)| key == b"envelope")
+                            .expect("validated acknowledgement envelope");
+                        Ok(entries.swap_remove(index).1)
+                    }
+                    _ => Ok(value),
                 }
             })
             .transpose()?;
-        oms_work_inspect::return_brief(&raw, before.as_deref(), limit as usize)
+        oms_work_inspect::return_brief_value(&snapshot, before.as_ref(), limit as usize)
     }
     .map_err(error)?;
     if format == "text" {

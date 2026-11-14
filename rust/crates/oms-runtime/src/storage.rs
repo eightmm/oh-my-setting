@@ -198,6 +198,7 @@ impl<'a> Runtime<'a> {
         result
     }
     pub fn write_json_output(&self, path: &Path, value: &Value) -> Result<()> {
+        // Python atomic_write_json has no state read bound for explicit outputs.
         let mut raw = sorted_pretty(value)?;
         raw.push(b'\n');
         self.write_output(path, &raw, raw.len())
@@ -205,7 +206,7 @@ impl<'a> Runtime<'a> {
     pub fn write_json(&self, path: &Path, value: &Value) -> Result<()> {
         let mut raw = sorted_pretty(value)?;
         raw.push(b'\n');
-        self.write(path, &raw, raw.len())
+        self.write(path, &raw, MAX_STATE)
     }
     pub fn append(&self, path: &Path, row: &Value) -> Result<()> {
         self.parent_write()?;
@@ -243,8 +244,9 @@ impl<'a> Runtime<'a> {
         )?;
         let root = self.owner(path).repo();
         let absolute = root.join(path);
-        let generation = self.generations.borrow().get(&absolute).cloned();
-        let result = crate::io::append(self, &absolute, root, encoded, guard, generation);
+        // Unlike replacements, appends publish against the current stream under
+        // its lock, even when a command read an older generation hours earlier.
+        let result = crate::io::append(self, &absolute, root, encoded, guard);
         self.invalidate(path);
         result
     }
