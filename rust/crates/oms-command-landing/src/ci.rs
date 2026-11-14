@@ -1,0 +1,1015 @@
+//! Exact-commit CI observations. An unreadable lookup is unknown, and an old
+//! green run never certifies an unpushed or different commit.
+use crate::{
+    Context, Error, Output, Result, V,
+    cli::Options,
+    git::{Git, process},
+    now, obj, require, safe, storage, string,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    path::Path,
+    time::Duration,
+};
+pub(crate) fn gh(c: &Context<'_>, args: &[&str], timeout: Duration) -> Result<V> {
+    let bin = std::env::var_os("OMS_GH_BIN").unwrap_or_else(|| OsString::from("gh"));
+    let out = process(
+        c.cwd,
+        std::iter::once(bin)
+            .chain(args.iter().map(OsString::from))
+            .collect(),
+        None,
+        timeout,
+        c.interrupted,
+        &[("GH_HOST".into(), "github.com".into())],
+    )?;
+    require(
+        out.code == 0,
+        "gh not authenticated, unreachable or unreadable",
+    )?;
+    V::parse(&out.stdout).map_err(Error::from)
+}
+pub(crate) fn api(c: &Context<'_>, endpoint: &str) -> Result<V> {
+    gh(
+        c,
+        &[
+            "api",
+            "--method",
+            "GET",
+            "-H",
+            "Accept: application/vnd.github+json",
+            endpoint,
+        ],
+        Duration::from_secs(30),
+    )
+}
+pub fn query_repo(destination: &str) -> Result<String> {
+    require(
+        !destination.trim().is_empty() && !destination.chars().any(char::is_control),
+        "invalid repository destination",
+    )?;
+    if !destination.contains(':') && !destination.contains('@') {
+        return Ok(destination
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .into());
+    }
+    if let Some(path) = destination.strip_prefix("file:///") {
+        return Ok(format!(
+            "/{}",
+            path.trim_end_matches('/').trim_end_matches(".git")
+        ));
+    }
+    let (scheme, rest) = destination
+        .split_once("://")
+        .unwrap_or(("ssh", destination));
+    let (authority, path) = if rest.contains('/') {
+        if destination.contains("://") {
+            rest.split_once('/')
+                .ok_or_else(|| Error::new(2, "invalid repository destination"))?
+        } else {
+            rest.rsplit('@')
+                .next()
+                .unwrap_or(rest)
+                .split_once(':')
+                .ok_or_else(|| Error::new(2, "invalid repository destination"))?
+        }
+    } else {
+        return Err(Error::new(2, "invalid repository destination"));
+    };
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(h, p)| (h, Some(p)));
+    let host = host.to_ascii_lowercase();
+    require(
+        !host.is_empty()
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)),
+        "invalid repository destination host",
+    )?;
+    let port = port
+        .map(|p| {
+            p.parse::<u16>()
+                .map_err(|_| Error::new(2, "invalid repository destination port"))
+        })
+        .transpose()?;
+    require(port != Some(0), "invalid repository destination port")?;
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_matches('/');
+    let parts: Vec<_> = path.split('/').collect();
+    require(parts.len() == 2, "invalid repository destination path")?;
+    let slug = crate::report::github_slug(parts[0], parts[1])?;
+    let host = if ["github.com", "ssh.github.com", "www.github.com"].contains(&host.as_str()) {
+        "github.com".into()
+    } else {
+        host
+    };
+    let port = if scheme == "ssh"
+        || scheme == "https" && port == Some(443)
+        || scheme == "http" && port == Some(80)
+        || host == "github.com"
+    {
+        None
+    } else {
+        port
+    };
+    Ok(format!(
+        "{host}{}/{slug}",
+        port.map(|p| format!(":{p}")).unwrap_or_default()
+    ))
+}
+fn public_destination(destination: &str) -> bool {
+    [
+        "https://github.com/eightmm/oh-my-setting",
+        "https://github.com/eightmm/oh-my-setting.git",
+        "ssh://git@github.com/eightmm/oh-my-setting",
+        "ssh://git@github.com/eightmm/oh-my-setting.git",
+        "git@github.com:eightmm/oh-my-setting",
+        "git@github.com:eightmm/oh-my-setting.git",
+        "eightmm/oh-my-setting",
+        "github.com/eightmm/oh-my-setting",
+    ]
+    .contains(&destination)
+}
+fn component(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+fn public_json(c: &Context<'_>, endpoint: &str) -> Result<V> {
+    let url = format!("https://api.github.com/repos/eightmm/oh-my-setting/{endpoint}");
+    let result = process(
+        c.cwd,
+        vec![
+            "curl".into(),
+            "--disable".into(),
+            "--fail".into(),
+            "--silent".into(),
+            "--show-error".into(),
+            "--max-time".into(),
+            "30".into(),
+            "--proto".into(),
+            "=https".into(),
+            "-H".into(),
+            "Accept: application/vnd.github+json".into(),
+            "-H".into(),
+            "User-Agent: oms-native-ci".into(),
+            url.into(),
+        ],
+        None,
+        Duration::from_secs(35),
+        c.interrupted,
+        &[],
+    )?;
+    require(
+        result.code == 0 && result.stdout.len() <= 1024 * 1024,
+        "public CI API unavailable or exceeds bound",
+    )?;
+    V::parse(&result.stdout).map_err(Error::from)
+}
+pub(crate) fn run_details(c: &Context<'_>, destination: &str, id: &V, sha: &str) -> Result<V> {
+    let destination_arg = query_repo(destination)?;
+    match gh(
+        c,
+        &[
+            "run",
+            "view",
+            &id.py(),
+            "--repo",
+            &destination_arg,
+            "--json",
+            "headSha,status,conclusion,jobs",
+        ],
+        Duration::from_secs(30),
+    ) {
+        Ok(row) => {
+            conclusion(&row, sha)?;
+            Ok(row)
+        }
+        Err(e) if !public_destination(destination) => Err(e),
+        Err(_) => {
+            require(id.integer(true), "invalid CI run id")?;
+            let run = public_json(c, &format!("actions/runs/{}", id.py()))?;
+            require(
+                run.get("id") == id
+                    && run.get("head_sha").text() == Some(sha)
+                    && run.get("repository").get("full_name").text()
+                        == Some("eightmm/oh-my-setting"),
+                "mismatched public CI run",
+            )?;
+            let attempt = run.get("run_attempt");
+            require(attempt.integer(true), "invalid public CI run attempt")?;
+            let jobs = public_json(
+                c,
+                &format!(
+                    "actions/runs/{}/attempts/{}/jobs?per_page=100",
+                    id.py(),
+                    attempt.py()
+                ),
+            )?;
+            require(
+                matches!(jobs.get("jobs"), V::Arr(_))
+                    && jobs.get("total_count").py() == jobs.get("jobs").array().len().to_string(),
+                "incomplete public CI jobs",
+            )?;
+            require(
+                jobs.get("jobs").array().iter().all(|j| {
+                    j.get("run_id") == id
+                        && j.get("head_sha").text() == Some(sha)
+                        && j.get("run_attempt") == attempt
+                }),
+                "mismatched public CI jobs",
+            )?;
+            let row = obj([
+                ("headSha", sha.into()),
+                ("status", run.get("status").clone()),
+                ("conclusion", run.get("conclusion").clone()),
+                ("jobs", jobs.get("jobs").clone()),
+            ]);
+            conclusion(&row, sha)?;
+            Ok(row)
+        }
+    }
+}
+fn red(v: &str) -> bool {
+    [
+        "failure",
+        "timed_out",
+        "startup_failure",
+        "cancelled",
+        "action_required",
+    ]
+    .contains(&v)
+}
+pub fn conclusion(run: &V, sha: &str) -> Result<String> {
+    require(
+        run.get("headSha").text() == Some(sha),
+        "CI run describes another SHA",
+    )?;
+    let status = string(run, "status");
+    require(
+        [
+            "completed",
+            "queued",
+            "in_progress",
+            "pending",
+            "waiting",
+            "requested",
+        ]
+        .contains(&status.as_str()),
+        "invalid CI run status",
+    )?;
+    if status == "completed" {
+        let value = string(run, "conclusion");
+        require(
+            !value.is_empty() && value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+            "invalid CI conclusion",
+        )?;
+        Ok(value)
+    } else {
+        Ok("pending".into())
+    }
+}
+pub(crate) fn latest(
+    c: &Context<'_>,
+    destination: &str,
+    sha: &str,
+    branch: &str,
+    event: &str,
+) -> Result<Option<V>> {
+    let destination_arg = query_repo(destination)?;
+    let queried = gh(
+        c,
+        &[
+            "run",
+            "list",
+            "--repo",
+            &destination_arg,
+            "--commit",
+            sha,
+            "--event",
+            event,
+            "--limit",
+            "1",
+            "--json",
+            "databaseId,status,conclusion,headSha",
+            "--branch",
+            branch,
+            "--workflow",
+            "test.yml",
+        ],
+        Duration::from_secs(30),
+    );
+    let rows = match queried {
+        Ok(rows) => rows,
+        Err(e) if !public_destination(destination) => return Err(e),
+        Err(_) => {
+            let payload = public_json(
+                c,
+                &format!(
+                    "actions/workflows/test.yml/runs?head_sha={}&branch={}&event={}&per_page=1",
+                    component(sha),
+                    component(branch),
+                    component(event)
+                ),
+            )?;
+            require(
+                matches!(payload.get("workflow_runs"), V::Arr(_)),
+                "invalid public CI run list",
+            )?;
+            let mut rows = vec![];
+            for row in payload.get("workflow_runs").array() {
+                require(
+                    row.get("head_sha").text() == Some(sha)
+                        && row.get("head_branch").text() == Some(branch)
+                        && row.get("event").text() == Some(event)
+                        && row.get("repository").get("full_name").text()
+                            == Some("eightmm/oh-my-setting")
+                        && row.get("path").text() == Some(".github/workflows/test.yml"),
+                    "mismatched public CI evidence",
+                )?;
+                rows.push(obj([
+                    ("databaseId", row.get("id").clone()),
+                    ("headSha", row.get("head_sha").clone()),
+                    ("status", row.get("status").clone()),
+                    ("conclusion", row.get("conclusion").clone()),
+                ]));
+            }
+            V::Arr(rows)
+        }
+    };
+    require(
+        matches!(rows, V::Arr(_)) && rows.array().len() <= 1,
+        "invalid CI run list",
+    )?;
+    if let Some(run) = rows.array().first() {
+        require(run.get("databaseId").integer(true), "invalid CI run id")?;
+        conclusion(run, sha)?;
+        Ok(Some(run.clone()))
+    } else {
+        Ok(None)
+    }
+}
+pub fn full_scope(run: &V, sha: &str) -> Result<&'static str> {
+    require(
+        conclusion(run, sha)? == "success",
+        "CI scope requires successful exact-SHA evidence",
+    )?;
+    let jobs = run.get("jobs");
+    require(matches!(jobs, V::Arr(_)), "CI jobs unavailable")?;
+    let mut names = BTreeMap::new();
+    for job in jobs.array() {
+        let name = string(job, "name");
+        require(
+            !name.is_empty() && names.insert(name, string(job, "conclusion")).is_none(),
+            "unnamed or duplicate CI job",
+        )?;
+    }
+    let mut required: Vec<String> = [
+        "lint",
+        "affected_plan",
+        "gate",
+        "native (ubuntu-latest, copy)",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    for lane in 1..=4 {
+        for family in ["focused", "scripts-smoke", "operator-tools"] {
+            required.push(format!("{family} ({lane}/4)"));
+        }
+    }
+    if required
+        .iter()
+        .all(|n| names.get(n).is_some_and(|c| c == "success"))
+    {
+        let optional=regex::Regex::new(r"^(?:python311|native \((?:macos|windows)-latest, auto\)|operator-tools \(affected\)|affected checks)$").unwrap();
+        require(
+            names.iter().all(|(name, value)| {
+                required.contains(name)
+                    || value == "success"
+                    || value == "skipped" && optional.is_match(name)
+            }),
+            "unexpected CI job results make scope ambiguous",
+        )?;
+        return Ok("full");
+    }
+    require(
+        names.get("lint").is_some_and(|s| s == "skipped")
+            && names.get("affected_plan").is_some_and(|s| s == "success")
+            && names.get("gate").is_some_and(|s| s == "success"),
+        "CI selection is incomplete or failed",
+    )?;
+    Ok("affected")
+}
+pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
+    let known = [
+        "status",
+        "record",
+        "tick",
+        "history",
+        "flaky",
+        "protection",
+        "triage",
+        "suggest",
+    ];
+    let mut words = o.words.clone();
+    let action = if words.first().is_some_and(|s| known.contains(&s.as_str())) {
+        words.remove(0)
+    } else if o.has("record") {
+        String::from("record")
+    } else {
+        String::from("status")
+    };
+    require(words.len() <= 1, "unexpected CI argument")?;
+    require(
+        !o.has("sha") || action == "triage",
+        "--sha is only read by triage",
+    )?;
+    require(
+        action == "suggest" || (!o.has("json") && !o.has("refresh")),
+        "--json and --refresh are only read by suggest",
+    )?;
+    let limit = o
+        .value("limit", "20")
+        .parse::<usize>()
+        .map_err(|_| Error::new(2, "--limit must be a positive integer"))?;
+    require(limit > 0, "--limit must be a positive integer")?;
+    if o.has("sha") {
+        require(
+            (7..=40).contains(&o.get("sha").len())
+                && o.get("sha").bytes().all(|b| b.is_ascii_hexdigit()),
+            "--sha must be 7 to 40 hexadecimal characters",
+        )?;
+    }
+    let repo = Git::root(c.cwd, c.interrupted)?;
+    let state = c.state(&repo)?;
+    let git = Git::new(&repo, c.interrupted);
+    let branch = words.first().cloned().unwrap_or_else(|| {
+        git.text(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|_| "main".into())
+    });
+    if action == "record" {
+        storage::ensure_ignore(&state, c.interrupted)?;
+    }
+    if action == "suggest" {
+        return crate::suggestions::execute(c, o, &state, &branch);
+    }
+    if action == "flaky" {
+        let rows = storage::rows(&state, Path::new(".oms/ci.jsonl"))?;
+        let mut bad = BTreeMap::new();
+        let mut out = String::new();
+        for row in rows.iter().filter(|r| string(r, "branch") == branch) {
+            let sha = string(row, "sha");
+            if red(&string(row, "conclusion")) {
+                bad.insert(sha, row);
+            } else if string(row, "conclusion") == "success" {
+                if let Some(before) = bad.remove(&sha) {
+                    out += &format!(
+                        "{} red {} -> green {}; jobs: {}\n",
+                        &sha[..sha.len().min(12)],
+                        string(before, "ts"),
+                        string(row, "ts"),
+                        before
+                            .get("failed_jobs")
+                            .array()
+                            .iter()
+                            .map(V::py)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+        }
+        if out.is_empty() {
+            out = "ci-status flaky: no recorded red-to-green commits\n".into();
+        }
+        return Ok(Output::text(out));
+    }
+    if action == "protection" {
+        return protection(c, &git, words.first().map(String::as_str));
+    }
+    if action == "history" {
+        let rows = gh(
+            c,
+            &[
+                "run",
+                "list",
+                "--branch",
+                &branch,
+                "--status",
+                "completed",
+                "--limit",
+                &limit.to_string(),
+                "--json",
+                "databaseId,headSha,conclusion,createdAt,updatedAt",
+            ],
+            Duration::from_secs(30),
+        )?;
+        require(matches!(rows, V::Arr(_)), "unreadable run list")?;
+        let mut out = String::new();
+        for row in rows.array() {
+            out += &format!(
+                "{}  {}\n",
+                string(row, "headSha").chars().take(12).collect::<String>(),
+                string(row, "conclusion")
+            );
+        }
+        return Ok(Output::text(out));
+    }
+    if action == "triage" {
+        return triage(c, &git, &branch, o.get("sha"));
+    }
+    let head = git.commit(&branch).unwrap_or_default();
+    let ledger = std::env::var_os("OMS_CI_LEDGER")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.join(".oms/ci.jsonl"));
+    let mut tick_lock = None;
+    if action == "tick" {
+        if !state.join(".oms").is_dir() {
+            return Ok(Output::default());
+        }
+        let marker = state.join(".oms/hooks/ci-tick");
+        let interval = std::env::var("OMS_CI_TICK_INTERVAL")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120);
+        let settings =
+            oms_lock::Settings::from_env().map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+        let lock = oms_lock::Lock::for_file(&marker, settings)
+            .map_err(|e| Error::new(e.exit_code(), e.to_string()))?;
+        let Ok(guard) = lock.try_acquire() else {
+            return Ok(Output::default());
+        };
+        tick_lock = Some(guard);
+        let old = storage::read_external(&marker, true)?;
+        if String::from_utf8_lossy(&old)
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|t| crate::timestamp().saturating_sub(t) < interval)
+        {
+            return Ok(Output::default());
+        }
+        let rows = storage::read_external(&ledger, true)
+            .and_then(|r| storage::parse_rows(&r))
+            .unwrap_or_default();
+        if rows
+            .iter()
+            .rev()
+            .find(|r| string(r, "branch") == branch && string(r, "sha") == head)
+            .is_some_and(|r| string(r, "status") == "completed")
+        {
+            return Ok(Output::default());
+        }
+        let mut ancestor = marker.parent().unwrap();
+        while !ancestor.exists() {
+            ancestor = ancestor.parent().unwrap();
+        }
+        storage::replace(
+            &std::fs::canonicalize(ancestor)?,
+            marker.strip_prefix(ancestor).unwrap(),
+            if marker.exists() { Some(&old) } else { None },
+            crate::timestamp().to_string().as_bytes(),
+        )?;
+    }
+    let query = gh(
+        c,
+        &[
+            "run",
+            "list",
+            "--branch",
+            &branch,
+            "--limit",
+            "10",
+            "--json",
+            "status,conclusion,workflowName,headSha,url,attempt,databaseId",
+        ],
+        if action == "tick" {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(30)
+        },
+    );
+    let rows = match query {
+        Ok(rows) => rows,
+        Err(_) if action == "tick" => return Ok(Output::default()),
+        Err(e) => return Err(e),
+    };
+    require(
+        matches!(rows, V::Arr(_)),
+        "gh returned an unreadable run list (lookup failed)",
+    )?;
+    let ahead = if git
+        .text(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .as_deref()
+        == Some(&branch)
+    {
+        git.text(&["rev-list", "--count", "@{upstream}..HEAD"])
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+    } else {
+        None
+    };
+    let matched = rows.array().iter().find(|r| string(r, "headSha") == head);
+    let latest = rows.array().first();
+    let current = if ahead.is_some_and(|n| n > 0) {
+        None
+    } else {
+        matched.or(if ahead.is_none() { latest } else { None })
+    };
+    let chosen = current.or(latest);
+    let mut out = if let Some(n) = ahead.filter(|n| *n > 0) {
+        format!(
+            "ci-status [{branch}]: unpushed ({n} commit{} ahead of the upstream — push to get CI)\n",
+            if n == 1 { "" } else { "s" }
+        )
+    } else if let Some(run) = current {
+        format!(
+            "ci-status [{branch}]: {} {}  {}\n",
+            string(run, "status"),
+            run.get("conclusion")
+                .text()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| run.get("status").text().unwrap_or("?")),
+            string(run, "url")
+        )
+    } else if latest.is_some() {
+        format!(
+            "ci-status [{branch}]: no run yet for HEAD {} (pending or not started)\n",
+            &head[..head.len().min(12)]
+        )
+    } else {
+        format!("ci-status: no runs for {branch}\n")
+    };
+    if current.is_none() {
+        if let Some(row) = latest {
+            out += &format!(
+                "  history: {} {} on {}  {}\n",
+                string(row, "status"),
+                string(row, "conclusion"),
+                string(row, "headSha").chars().take(12).collect::<String>(),
+                string(row, "url")
+            );
+        }
+    }
+    if ["record", "tick"].contains(&action.as_str()) {
+        if let Some(run) = chosen {
+            let concl = run
+                .get("conclusion")
+                .text()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| run.get("status").text().unwrap_or("unknown"));
+            let mut row = obj([
+                ("schema", 1usize.into()),
+                ("ts", now().into()),
+                ("branch", branch.into()),
+                ("sha", run.get("headSha").clone()),
+                ("status", run.get("status").clone()),
+                ("conclusion", concl.into()),
+                ("url", run.get("url").clone()),
+            ]);
+            if run.has("attempt") {
+                row.set("attempt", run.get("attempt").clone());
+            }
+            if run.get("workflowName").truth() {
+                row.set("workflow", run.get("workflowName").clone());
+            }
+            let _guard = storage::lock(&ledger, c.interrupted)?;
+            let raw = storage::read_external(&ledger, true)?;
+            let prior = storage::parse_rows(&raw)?;
+            if prior.last().is_none_or(|r| {
+                r.get("sha") != row.get("sha") || r.get("conclusion") != row.get("conclusion")
+            }) {
+                let mut next = raw.clone();
+                next.extend(row.json(false)?);
+                next.push(b'\n');
+                let mut ancestor = ledger.parent().unwrap();
+                while !ancestor.exists() {
+                    ancestor = ancestor.parent().unwrap();
+                }
+                storage::replace(
+                    &std::fs::canonicalize(ancestor)?,
+                    ledger.strip_prefix(ancestor).unwrap(),
+                    if ledger.exists() { Some(&raw) } else { None },
+                    &next,
+                )?;
+            }
+        }
+    }
+    drop(tick_lock);
+    Ok(Output {
+        code: i32::from(current.is_some_and(|r| red(&string(r, "conclusion")))),
+        stdout: if action == "tick" {
+            vec![]
+        } else {
+            out.into_bytes()
+        },
+        stderr: vec![],
+    })
+}
+fn protection(c: &Context<'_>, git: &Git<'_>, branch: Option<&str>) -> Result<Output> {
+    let slug = crate::report::github_remote(&git.text(&["remote", "get-url", "origin"])?)?;
+    let branch = match branch {
+        Some(b) => b.to_owned(),
+        None => string(&api(c, &format!("repos/{slug}"))?, "default_branch"),
+    };
+    require(!branch.is_empty(), "default branch unavailable")?;
+    let encoded = component(&branch);
+    let result = api(
+        c,
+        &format!("repos/{slug}/branches/{encoded}/protection/required_status_checks"),
+    );
+    let mut required = BTreeSet::new();
+    let mut unknown = false;
+    match result {
+        Ok(row) => {
+            for context in row.get("contexts").array() {
+                if let Some(s) = context.text() {
+                    required.insert(s.to_owned());
+                }
+            }
+            for check in row.get("checks").array() {
+                required.insert(string(check, "context"));
+            }
+        }
+        Err(_) => unknown = true,
+    };
+    match api(c, &format!("repos/{slug}/rules/branches/{encoded}")) {
+        Ok(rows) => {
+            require(matches!(rows, V::Arr(_)), "unreadable branch rules")?;
+            for rule in rows.array() {
+                if string(rule, "type") == "required_status_checks" {
+                    for check in rule.get("parameters").get("required_status_checks").array() {
+                        required.insert(string(check, "context"));
+                    }
+                }
+            }
+        }
+        Err(_) => unknown = true,
+    };
+    let proven = required.contains("gate");
+    let code = if proven {
+        0
+    } else if unknown {
+        2
+    } else {
+        1
+    };
+    Ok(Output {
+        code,
+        stdout: format!(
+            "ci-status protection [{branch}]: {}\n",
+            if proven {
+                "gate required"
+            } else if unknown {
+                "unknown"
+            } else {
+                "gate not required"
+            }
+        )
+        .into_bytes(),
+        stderr: vec![],
+    })
+}
+fn triage(c: &Context<'_>, git: &Git<'_>, branch: &str, sha: &str) -> Result<Output> {
+    let head = if sha.is_empty() {
+        git.commit(branch)?
+    } else {
+        git.commit(sha)?
+    };
+    let runs = gh(
+        c,
+        &[
+            "run",
+            "list",
+            "--branch",
+            branch,
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,status,conclusion,workflowName,headSha,url",
+        ],
+        Duration::from_secs(20),
+    )?;
+    let Some(run) = runs.array().iter().find(|r| string(r, "headSha") == head) else {
+        return Err(Error::new(2, "no run for requested commit"));
+    };
+    if string(run, "status") != "completed" {
+        return Err(Error::new(2, "CI run is pending"));
+    }
+    if !red(&string(run, "conclusion")) {
+        return Ok(Output::text("ci-status triage: nothing red\n"));
+    }
+    let jobs = gh(
+        c,
+        &["run", "view", &run.get("databaseId").py(), "--json", "jobs"],
+        Duration::from_secs(20),
+    )?;
+    let mut out = format!(
+        "ci-status triage [{branch}]: {} on {}\n",
+        string(run, "conclusion"),
+        &head[..12]
+    );
+    if let Ok(comparison) = comparison(git.repo, branch, &head, c.interrupted) {
+        out += &format!(
+            "  base comparison: {} ({})\n",
+            string(&comparison, "class"),
+            string(&comparison, "note")
+        );
+        for job in comparison.get("jobs").array() {
+            out += &format!(
+                "  job: {}; base: {}\n",
+                string(job, "job"),
+                string(job, "base")
+            );
+        }
+    }
+    for job in jobs
+        .get("jobs")
+        .array()
+        .iter()
+        .filter(|j| red(&string(j, "conclusion")))
+    {
+        out += &format!(
+            "  failed job: {}\n",
+            oms_contract_markdown::bounded_line(&string(job, "name"), 160)
+        );
+        for step in job
+            .get("steps")
+            .array()
+            .iter()
+            .filter(|s| red(&string(s, "conclusion")))
+        {
+            out += &format!(
+                "    {}\n",
+                oms_contract_markdown::bounded_line(&string(step, "name"), 160)
+            );
+        }
+    }
+    let bin = std::env::var_os("OMS_GH_BIN").unwrap_or_else(|| "gh".into());
+    let log = process(
+        c.cwd,
+        vec![
+            bin,
+            "run".into(),
+            "view".into(),
+            run.get("databaseId").py().into(),
+            "--log-failed".into(),
+        ],
+        None,
+        Duration::from_secs(60),
+        c.interrupted,
+        &[],
+    )?;
+    if log.code == 0 && safe(&log.stdout).is_ok() {
+        out += &String::from_utf8_lossy(&log.stdout)
+            .lines()
+            .rev()
+            .take(80)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push('\n');
+    } else {
+        out += "[failed log unavailable or withheld]\n";
+    }
+    Ok(Output {
+        code: 1,
+        stdout: out.into_bytes(),
+        stderr: vec![],
+    })
+}
+
+/// Read-only comparison used by explicit suggestion refresh and triage. A
+/// missing counterpart is unknown, never evidence of a preexisting failure.
+pub fn comparison(
+    repo: &Path,
+    branch: &str,
+    sha: &str,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> Result<V> {
+    let c = Context {
+        cwd: repo,
+        source: repo,
+        interrupted,
+        services: &crate::Unavailable,
+    };
+    let fields = "databaseId,status,conclusion,workflowName,headSha,url";
+    let runs = gh(
+        &c,
+        &[
+            "run", "list", "--branch", branch, "--limit", "20", "--json", fields,
+        ],
+        Duration::from_secs(20),
+    )?;
+    let run = runs
+        .array()
+        .iter()
+        .find(|r| {
+            string(r, "headSha") == sha
+                && string(r, "status") == "completed"
+                && red(&string(r, "conclusion"))
+        })
+        .ok_or_else(|| Error::new(2, "no completed red run for comparison"))?;
+    let jobs = gh(
+        &c,
+        &["run", "view", &run.get("databaseId").py(), "--json", "jobs"],
+        Duration::from_secs(20),
+    )?;
+    let failed: Vec<_> = jobs
+        .get("jobs")
+        .array()
+        .iter()
+        .filter(|j| red(&string(j, "conclusion")))
+        .collect();
+    let info = gh(
+        &c,
+        &["repo", "view", "--json", "defaultBranchRef"],
+        Duration::from_secs(20),
+    )?;
+    let default = string(info.get("defaultBranchRef"), "name");
+    require(!default.is_empty(), "base branch unknown")?;
+    let base_runs = gh(
+        &c,
+        &[
+            "run", "list", "--branch", &default, "--limit", "20", "--json", fields,
+        ],
+        Duration::from_secs(20),
+    )?;
+    let base = base_runs
+        .array()
+        .iter()
+        .find(|r| {
+            string(r, "status") == "completed"
+                && string(r, "headSha") != sha
+                && string(r, "workflowName") == string(run, "workflowName")
+        })
+        .ok_or_else(|| Error::new(2, "comparable base run unavailable"))?;
+    let base_jobs = gh(
+        &c,
+        &[
+            "run",
+            "view",
+            &base.get("databaseId").py(),
+            "--json",
+            "jobs",
+        ],
+        Duration::from_secs(20),
+    )?;
+    let mut rows = vec![];
+    let (mut same, mut regression) = (0usize, false);
+    for job in &failed {
+        let name = string(job, "name");
+        let status = base_jobs
+            .get("jobs")
+            .array()
+            .iter()
+            .find(|j| string(j, "name") == name)
+            .map(|j| string(j, "conclusion"))
+            .unwrap_or_else(|| "unknown".into());
+        same += usize::from(red(&status));
+        regression |= status == "success";
+        rows.push(obj([
+            (
+                "job",
+                oms_contract_markdown::bounded_line(&name, 160).into(),
+            ),
+            ("base", status.into()),
+        ]));
+    }
+    let class = if regression {
+        "regression"
+    } else if !failed.is_empty() && same == failed.len() {
+        "preexisting"
+    } else {
+        "unknown"
+    };
+    Ok(obj([
+        ("class", class.into()),
+        (
+            "note",
+            format!(
+                "{} {}",
+                oms_contract_markdown::bounded_line(&default, 40),
+                string(base, "headSha").chars().take(12).collect::<String>()
+            )
+            .into(),
+        ),
+        ("jobs", V::Arr(rows)),
+    ]))
+}
