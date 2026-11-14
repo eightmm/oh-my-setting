@@ -233,6 +233,7 @@ pub(crate) fn run(command: &str, args: &Args, root: &Path, ctx: &Context<'_>) ->
         .ok_or_else(|| error("skill name is missing"))?;
     skills::name(skill, true)?;
     skills::validate(body, skill, true)?;
+    skills::check_references(&base, &format!(".oms/skill-store/{skill}"), None)?;
     let digest = skills::bundle_digest(&files);
     let report = json!({"schema":1,"status":"preview","name":skill,"description":meta.get("description"),"bundle_sha256":digest,"files":files.len(),"bytes":files.iter().map(|(_,b,_)|b.len()).sum::<usize>(),"provenance":provenance,"risk_summary":skills::risk(&files)});
     if command == "preview" || !args.has("--apply") {
@@ -490,6 +491,7 @@ fn evaluate(args: &Args, root: &Path, ctx: &Context<'_>) -> Result<Output> {
     if let Some(candidate) = &candidate {
         let raw = read(&candidate.join("SKILL.md"), 256 * 1024)?;
         skills::validate(&raw, skill, false)?;
+        skills::check_references(candidate, "candidate", None)?;
     }
     let candidate_digest = candidate
         .as_ref()

@@ -2,7 +2,7 @@ use crate::common::*;
 use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -347,6 +347,7 @@ pub(crate) fn link(root: &Path, ctx: &Context<'_>) -> Result<usize> {
         if entries(&path)
             .and_then(|_| read(&path.join("SKILL.md"), 256 * 1024))
             .and_then(|raw| validate(&raw, &skill, false))
+            .and_then(|_| check_references(&path, &skill, None))
             .is_ok()
         {
             preflight(root, &skill)?;
@@ -448,6 +449,7 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                 data
             };
             validate(&bytes, skill, true)?;
+            check_references(&destination, &format!(".oms/skills/{skill}"), Some(&bytes))?;
             no_links(&root, Path::new(".oms/.gitignore"))?;
             store.write(&root.join(".oms/.gitignore"), b"*\n", true)?;
             store.write(&destination.join("SKILL.md"), &bytes, true)?;
@@ -536,7 +538,11 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                 }
                 let result = entries(path)
                     .and_then(|_| read(&path.join("SKILL.md"), 256 * 1024))
-                    .and_then(|raw| validate(&raw, skill, false));
+                    .and_then(|raw| validate(&raw, skill, false))
+                    .and_then(|meta| {
+                        let label = path.strip_prefix(&root).unwrap_or(path).to_string_lossy();
+                        check_references(path, &label, None).map(|()| meta)
+                    });
                 let state = if result.is_ok() {
                     "valid"
                 } else {
@@ -588,6 +594,276 @@ pub(crate) fn run(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         }
         _ => Err(error("unknown skill-forge command")),
     }
+}
+/// Lexical equivalent of `os.path.abspath`: collapse `.` and `..` without touching the disk.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+/// Walk `SKILL.md` -> `references/**.md` links; returns linked labels and errors
+/// (parity with `linked_references` in `scripts/validate-skills.py`).
+pub(crate) fn linked_references(
+    skill_dir: &Path,
+    source: &str,
+    skill_body: Option<&[u8]>,
+) -> Result<(BTreeSet<String>, Vec<String>)> {
+    let skill_dir = lexical(&std::path::absolute(skill_dir)?);
+    let refs = skill_dir.join("references");
+    let link = Regex::new(r"\]\(([^)#]+)(?:#[^)]+)?\)").map_err(|_| error("bad pattern"))?;
+    let scheme = Regex::new(r"^[a-zA-Z][a-zA-Z0-9+.-]*:").map_err(|_| error("bad pattern"))?;
+    let mut pending = vec![skill_dir.join("SKILL.md")];
+    let (mut seen, mut linked, mut errors) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let raw = match skill_body {
+            Some(body) if path == skill_dir.join("SKILL.md") => body.to_vec(),
+            _ => read(&path, 4 * 1024 * 1024)?,
+        };
+        let text = std::str::from_utf8(&raw).map_err(|_| error("skill file is not UTF-8"))?;
+        for m in link.captures_iter(text) {
+            let target = &m[1];
+            if scheme.is_match(target) || target.starts_with('/') {
+                continue;
+            }
+            let candidate = lexical(&path.parent().unwrap_or(&skill_dir).join(target));
+            let Ok(relative) = candidate.strip_prefix(&refs) else {
+                if target.starts_with("references/") {
+                    errors.push(format!("unsafe local reference: {source}/{target}"));
+                }
+                continue;
+            };
+            let label = format!(
+                "references/{}",
+                relative
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
+            linked.insert(label.clone());
+            let symlinked = candidate
+                .ancestors()
+                .take_while(|p| p.starts_with(&skill_dir))
+                .any(|p| std::fs::symlink_metadata(p).is_ok_and(|i| i.file_type().is_symlink()));
+            if symlinked {
+                errors.push(format!("symlink local reference: {source}/{label}"));
+            } else if !candidate.is_file() {
+                if !label.ends_with(".generated.md") {
+                    errors.push(format!("missing local reference: {source}/{label}"));
+                }
+            } else if candidate.extension().is_some_and(|e| e == "md") {
+                pending.push(candidate);
+            }
+        }
+    }
+    Ok((linked, errors))
+}
+const MAX_REFERENCE_FILES: usize = 10_000;
+const MAX_REFERENCE_DEPTH: usize = 32;
+/// Collect `.md` files under `dir`; every symlink entry (any name, linked or not) goes to `links`
+/// and is never followed.
+fn markdown_files(
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+    links: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if depth > MAX_REFERENCE_DEPTH {
+        return Err(error("references/ nests too deeply"));
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            links.push(path);
+        } else if kind.is_dir() {
+            markdown_files(&path, depth + 1, out, links)?;
+        } else if path.extension().is_some_and(|e| e == "md") {
+            out.push(path);
+        }
+        if out.len() + links.len() > MAX_REFERENCE_FILES {
+            return Err(error("references/ holds too many files"));
+        }
+    }
+    Ok(())
+}
+/// Reference-graph errors for one skill: broken/unsafe/symlinked links plus orphans.
+/// `skill_body` replaces the on-disk `SKILL.md` for candidates not yet written.
+pub(crate) fn reference_errors(
+    skill_dir: &Path,
+    source: &str,
+    skill_body: Option<&[u8]>,
+) -> Result<Vec<String>> {
+    let (linked, mut errors) = linked_references(skill_dir, source, skill_body)?;
+    let refs = skill_dir.join("references");
+    match std::fs::symlink_metadata(&refs) {
+        Ok(info) if info.file_type().is_symlink() => {
+            errors.push(format!("symlink local reference: {source}/references"));
+            return Ok(errors);
+        }
+        Ok(info) if info.is_dir() => {}
+        Ok(_) => return Ok(errors),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(errors),
+        Err(e) => return Err(e.into()),
+    }
+    let (mut files, mut links) = (Vec::new(), Vec::new());
+    markdown_files(&refs, 0, &mut files, &mut links)?;
+    files.sort();
+    links.sort();
+    let label_of = |file: &Path| {
+        file.strip_prefix(skill_dir).ok().map(|relative| {
+            relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+    };
+    for link in links {
+        if let Some(label) = label_of(&link) {
+            let message = format!("symlink local reference: {source}/{label}");
+            if !errors.contains(&message) {
+                errors.push(message);
+            }
+        }
+    }
+    for file in files {
+        let Ok(relative) = file.strip_prefix(skill_dir) else {
+            continue;
+        };
+        let label = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if !label.ends_with(".generated.md") && !linked.contains(&label) {
+            errors.push(format!("orphan local reference: {source}/{label}"));
+        }
+    }
+    Ok(errors)
+}
+/// Fail when a skill's reference graph has any error (shared by link, add, validate, lifecycle).
+pub(crate) fn check_references(
+    skill_dir: &Path,
+    source: &str,
+    skill_body: Option<&[u8]>,
+) -> Result<()> {
+    let errors = reference_errors(skill_dir, source, skill_body)?;
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(error(errors.join("; ")))
+    }
+}
+/// Claude Code marketplace manifest must offer exactly the enabled custom skills
+/// (parity with `marketplace_errors` in `scripts/validate-skills.py`).
+pub(crate) fn marketplace_errors(root: &Path) -> Vec<String> {
+    let path = root.join(".claude-plugin/marketplace.json");
+    if !path.is_file() {
+        return vec![];
+    }
+    let place = ".claude-plugin/marketplace.json";
+    let doc: Value = match read(&path, 1024 * 1024).and_then(|raw| json(&raw)) {
+        Ok(v) => v,
+        Err(e) => return vec![format!("invalid {place}: {}", e.message)],
+    };
+    let plugins = doc["plugins"].as_array();
+    if doc["name"].as_str().is_none_or(str::is_empty)
+        || !doc["owner"].is_object()
+        || plugins.is_none()
+    {
+        return vec![format!(
+            "invalid {place}: name, owner and plugins are required"
+        )];
+    }
+    let safe = |v: &str| v.starts_with("./") && !v.split('/').any(|p| p == "..");
+    let (mut found, mut offered) = (Vec::new(), BTreeSet::new());
+    for plugin in plugins.into_iter().flatten() {
+        let Some(items) = plugin["skills"].as_array() else {
+            continue;
+        };
+        let name = plugin["name"].as_str().unwrap_or("");
+        let source = plugin["source"].as_str().filter(|s| safe(s));
+        let Some(source) = source else {
+            found.push(format!(
+                "{place}: plugin {name} must use a relative ./ source inside this repository"
+            ));
+            continue;
+        };
+        if plugin["strict"] != json!(false) {
+            found.push(format!("{place}: plugin {name} lists skills without a plugin.json, so it needs \"strict\": false"));
+        }
+        if !plugin["description"].as_str().unwrap_or("").contains("oms") {
+            found.push(format!(
+                "{place}: plugin {name} must say its skills need the oms command"
+            ));
+        }
+        for item in items {
+            let Some(item) = item.as_str().filter(|s| safe(s)) else {
+                found.push(format!(
+                    "{place}: plugin {name} has an unsafe skill path: {}",
+                    item.as_str().map_or(item.to_string(), str::to_owned)
+                ));
+                continue;
+            };
+            let relative = Path::new(source)
+                .join(item)
+                .components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(v) => Some(v.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            if !root.join(&relative).join("SKILL.md").is_file() {
+                found.push(format!(
+                    "{place}: plugin {name} lists a path with no SKILL.md: {relative}"
+                ));
+            }
+            offered.insert(relative);
+        }
+    }
+    let manifest = match read(&root.join("skills.manifest.json"), 4 * 1024 * 1024)
+        .and_then(|raw| json(&raw))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            found.push(format!("invalid skills.manifest.json: {}", e.message));
+            return found;
+        }
+    };
+    let expected: BTreeSet<String> = manifest["skills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["enabled"] != json!(false))
+        .filter_map(|e| e["source"].as_str())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| s.starts_with("custom-skills/"))
+        .collect();
+    for s in expected.difference(&offered) {
+        found.push(format!(
+            "{place}: enabled skill is not offered by any plugin: {s}"
+        ));
+    }
+    for s in offered.difference(&expected) {
+        found.push(format!(
+            "{place}: offers a skill skills.manifest.json does not enable: {s}"
+        ));
+    }
+    found
 }
 pub(crate) fn doctor(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     Args::parse(raw, &[], &[])?.count(0)?;
@@ -685,12 +961,54 @@ pub(crate) fn doctor(raw: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                 if entry.path().join("references").is_dir() && !body.contains("references/") {
                     text.push_str("warn: references/ is not linked by SKILL.md\n");
                 }
+                let source = format!("custom-skills/{}", entry.file_name().to_string_lossy());
+                match reference_errors(&entry.path(), &source, None) {
+                    Ok(errors) => {
+                        for e in errors {
+                            failed = true;
+                            text.push_str(&format!("fail: {e}\n"));
+                        }
+                    }
+                    Err(_) => {
+                        failed = true;
+                        text.push_str(&format!("fail: unreadable skill reference in {source}\n"));
+                    }
+                }
                 if let Ok(meta) = frontmatter(&body) {
                     listing_bytes += meta.get("description").map(String::len).unwrap_or(0);
                     count += 1;
                 }
             }
         }
+    }
+    if let Ok(templates) = std::fs::read_dir(ctx.source.join("templates/project-skills")) {
+        let mut dirs: Vec<_> = templates.flatten().filter(|e| e.path().is_dir()).collect();
+        dirs.sort_by_key(|e| e.file_name());
+        for entry in dirs {
+            let source = format!(
+                "templates/project-skills/{}",
+                entry.file_name().to_string_lossy()
+            );
+            if !entry.path().join("SKILL.md").is_file() {
+                continue;
+            }
+            match reference_errors(&entry.path(), &source, None) {
+                Ok(errors) => {
+                    for e in errors {
+                        failed = true;
+                        text.push_str(&format!("fail: {e}\n"));
+                    }
+                }
+                Err(_) => {
+                    failed = true;
+                    text.push_str(&format!("fail: unreadable skill reference in {source}\n"));
+                }
+            }
+        }
+    }
+    for e in marketplace_errors(ctx.source) {
+        failed = true;
+        text.push_str(&format!("fail: {e}\n"));
     }
     let rules = read(&ctx.source.join("rules/global-AGENTS.md"), LIMIT)
         .map(|v| v.len())
