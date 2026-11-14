@@ -558,6 +558,30 @@ impl Store {
         sync_dir(a.parent())?;
         a.check()
     }
+    pub(crate) fn lstat_regular(&self, path: impl AsRef<Path>) -> Result<(Value, i128)> {
+        let a = self.anchor(path.as_ref())?;
+        let s = a.stat()?.ok_or_else(|| error("plan object is missing"))?;
+        self.trusted(&s, false, false)?;
+        let g = generation(&s);
+        let mtime_ns = g.get("mtime_ns").int()?;
+        Ok((g, mtime_ns))
+    }
+    pub(crate) fn remove_generation(
+        &self,
+        path: impl AsRef<Path>,
+        expected_generation: &Value,
+    ) -> Result<()> {
+        let a = self.anchor(path.as_ref())?;
+        let s = a.stat()?.ok_or_else(|| error("missing remove target"))?;
+        self.trusted(&s, false, false)?;
+        require(
+            &generation(&s) == expected_generation,
+            "plan generation changed before unlink",
+        )?;
+        fs::unlinkat(a.parent(), &a.leaf, AtFlags::empty()).map_err(io)?;
+        sync_dir(a.parent())?;
+        a.check()
+    }
     pub fn sync(&self, path: impl AsRef<Path>) -> Result<()> {
         let a = self.anchor(path.as_ref())?;
         let fd = fs::openat(

@@ -18,6 +18,8 @@ pub struct ProcessPolicy {
     pub null_stdin: bool,
     /// Inherited output is neither captured nor hashed; the empty hash is returned.
     pub inherit_stdio: bool,
+    /// Merge child stderr into stdout on a single capture pipe.
+    pub merged: bool,
     pub rlimit_as: Option<u64>,
     /// Cancellation is enabled only by an explicit directory, never by child env.
     pub cancel_dir: Option<PathBuf>,
@@ -332,6 +334,7 @@ fn execute_mode(
         command.env_clear();
     }
     command.envs(&ctx.env).envs(&policy.env);
+    let merged = merged || policy.merged;
     let mut streams = if policy.inherit_stdio {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         [None, None]

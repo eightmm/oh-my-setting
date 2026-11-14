@@ -1925,3 +1925,445 @@ pub fn commit_landing(
 pub fn landed_paths(plan: &Plan<'_>, proof: &CommitLanding) -> Result<Vec<String>> {
     crate::product::landed_paths(plan, proof)
 }
+
+const MAX_COMPLETION_GC_OBJECTS: usize = 8192;
+const MAX_COMPLETION_GC_BYTES: usize = 64 * 1024 * 1024;
+const COMPLETION_GC_DIRS: [&str; 4] = [
+    "completion-captures",
+    "completion-prefixes",
+    "completion-segments",
+    "completions",
+];
+
+fn is_valid_plan_id(id: &str) -> bool {
+    id.strip_prefix("plan_")
+        .is_some_and(|hex| json::hex(hex, 32))
+}
+
+fn is_tmp_suffix(rest: &str) -> bool {
+    let Some((pid, token)) = rest.split_once('.') else {
+        return false;
+    };
+    !pid.is_empty()
+        && pid.bytes().all(|b| b.is_ascii_digit())
+        && !token.is_empty()
+        && token.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+fn is_pin_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((id, tail)) = rest.split_once(".json.tmp.") else {
+        return false;
+    };
+    json::hex(id, 32) && is_tmp_suffix(tail)
+}
+
+fn is_lease_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".lease_") else {
+        return false;
+    };
+    let Some((id, tail)) = rest.split_once(".json.tmp.") else {
+        return false;
+    };
+    json::hex(id, 32) && is_tmp_suffix(tail)
+}
+
+fn parse_completion_object_name(name: &str) -> Option<(&str, &str)> {
+    let (hash, ext) = name.rsplit_once('.')?;
+    (json::hex(hash, 64) && matches!(ext, "json" | "jsonl" | "bin")).then_some((hash, ext))
+}
+
+fn is_valid_completion_ref(value: &Value) -> bool {
+    if json::keys(value, &["path", "sha256"], &[]).is_err() {
+        return false;
+    }
+    let (Ok(path), Ok(sha)) = (value.get("path").str(), json::digest(value.get("sha256"))) else {
+        return false;
+    };
+    if relative(path).is_err() {
+        return false;
+    }
+    COMPLETION_GC_DIRS.iter().any(|dir| {
+        path.strip_prefix(&format!(".oms/plan/{dir}/"))
+            .and_then(parse_completion_object_name)
+            .is_some_and(|(hash, _)| hash == sha)
+    })
+}
+
+fn legacy_completion_veto(
+    store: &crate::storage::Store,
+    leases: &BTreeSet<String>,
+) -> Result<bool> {
+    let names = store.names(".oms/delegations", MAX_COMPLETION_GC_OBJECTS, true)?;
+    for entry in names {
+        let Some(name) = entry.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let rel = format!(".oms/delegations/{name}");
+        let Some(raw) = store.optional(&rel, 64 * 1024)? else {
+            continue;
+        };
+        let marker = json::parse(&raw)?;
+        require(
+            marker.object().is_ok(),
+            format!("invalid completion worker marker: {rel}"),
+        )?;
+        let lease_id = match marker.opt("lease_id") {
+            None => "",
+            Some(v) => v
+                .str()
+                .map_err(|_| error(format!("invalid completion worker marker: {rel}")))?,
+        };
+        if !lease_id.is_empty() && leases.contains(lease_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn collect_refs(value: &Value, objects: &BTreeMap<String, Value>) -> Result<Vec<String>> {
+    let mut refs = Vec::new();
+    completion_refs(value, &mut refs)?;
+    let mut out = Vec::with_capacity(refs.len());
+    for item in refs {
+        let path = item.get("path").str()?.to_string();
+        let sha = item.get("sha256").str()?;
+        let valid_hash = path
+            .rsplit('/')
+            .next()
+            .and_then(parse_completion_object_name)
+            .is_some_and(|(hash, _)| hash == sha);
+        require(
+            objects.contains_key(&path) && valid_hash,
+            "missing or malformed retained completion reference",
+        )?;
+        out.push(path);
+    }
+    Ok(out)
+}
+
+fn read_completion_json(
+    store: &crate::storage::Store,
+    path: &str,
+    expected_sha: Option<&str>,
+    scanned_bytes: &mut usize,
+    limit: usize,
+) -> Result<(crate::storage::FileSnapshot, Value)> {
+    let snap = store
+        .snapshot(path, limit, false)?
+        .ok_or_else(|| error(format!("missing completion object: {path}")))?;
+    if let Some(sha) = expected_sha {
+        require(
+            json::sha(&snap.raw) == sha,
+            format!("corrupt completion object hash: {path}"),
+        )?;
+    }
+    *scanned_bytes = scanned_bytes.saturating_add(snap.raw.len());
+    require(
+        *scanned_bytes <= MAX_COMPLETION_GC_BYTES,
+        "completion collection metadata bound exceeded",
+    )?;
+    let value = json::parse(&snap.raw)?;
+    Ok((snap, value))
+}
+
+/// Garbage-collect aged unreferenced completion captures, pins, pin-leases,
+/// prefixes, segments, and retired-plan receipts under active plan/worker vetoes.
+pub fn gc_completion_captures(
+    repo: &std::path::Path,
+    cutoff_epoch: i64,
+    apply: bool,
+    groups: Option<crate::services::GroupResolver>,
+) -> Result<Vec<(String, String)>> {
+    let store = crate::storage::Store::open(repo)?.with_group_resolver(groups);
+    let cutoff_ns = i128::from(cutoff_epoch) * 1_000_000_000;
+
+    let mut plan = json::object([]);
+    let mut leases = BTreeSet::new();
+    let mut known_leases = BTreeSet::new();
+    if let Some(raw) = store.optional(".oms/plan/tasks.json", MAX_JSON)? {
+        plan = json::parse(&raw)?;
+        require(
+            plan.object().is_ok(),
+            "invalid plan during capture collection",
+        )?;
+        let tasks = plan
+            .get("tasks")
+            .object()
+            .map_err(|_| error("invalid plan during capture collection"))?;
+        for (_, task) in tasks {
+            require(
+                task.object().is_ok(),
+                "invalid plan during capture collection",
+            )?;
+            if let Some(lease_val) = task.opt("lease_id") {
+                if lease_val.truth() {
+                    let lease = lease_val.str()?;
+                    known_leases.insert(lease.to_string());
+                    let state = task.text("state");
+                    if state != "done" && state != "cancelled" {
+                        leases.insert(lease.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let current_plan_id = match plan.opt("plan_id") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let s = v
+                .str()
+                .map_err(|_| error("invalid completion collection plan"))?;
+            if s.is_empty() {
+                None
+            } else {
+                require(is_valid_plan_id(s), "invalid completion collection plan")?;
+                Some(s.to_string())
+            }
+        }
+    };
+
+    let mut selected: BTreeMap<String, (&'static str, Value)> = BTreeMap::new();
+    let mut pins: BTreeMap<String, (Value, i128, Value)> = BTreeMap::new();
+    let mut pinned_leases = BTreeSet::new();
+    let mut scanned_bytes: usize = 0;
+
+    for entry in store.names(
+        ".oms/plan/completion-pins",
+        MAX_COMPLETION_GC_OBJECTS * 2,
+        true,
+    )? {
+        let name = entry
+            .to_str()
+            .ok_or_else(|| error("invalid completion pin filename"))?;
+        let path = format!(".oms/plan/completion-pins/{name}");
+        if is_pin_temp_name(name) {
+            let (generation, mtime_ns) = store.lstat_regular(&path)?;
+            if mtime_ns < cutoff_ns {
+                selected.insert(path, ("completion-pin-temp", generation));
+            }
+            continue;
+        }
+        let valid_pin = name
+            .strip_suffix(".json")
+            .is_some_and(|hex| json::hex(hex, 32));
+        require(
+            pins.len() < MAX_COMPLETION_GC_OBJECTS && valid_pin,
+            format!("unknown or oversized completion pin namespace: {path}"),
+        )?;
+        let (snap, value) =
+            read_completion_json(&store, &path, None, &mut scanned_bytes, MAX_JSON)?;
+        json::keys(&value, &["schema", "lease_id", "objects"], &[])?;
+        require(
+            value.get("schema").is_int(1)
+                && lineage(value.text("lease_id"), "lease_")
+                && value.get("objects").array().is_ok(),
+            "invalid completion pin",
+        )?;
+        for item in value.get("objects").array()? {
+            require(
+                is_valid_completion_ref(item),
+                "invalid pinned completion reference",
+            )?;
+        }
+        let mtime_ns = snap.generation.get("mtime_ns").int()?;
+        pinned_leases.insert(value.text("lease_id").to_string());
+        pins.insert(path, (snap.generation, mtime_ns, value));
+    }
+
+    if !leases.is_empty()
+        && ((current_plan_id.is_none() && leases.iter().any(|l| !pinned_leases.contains(l)))
+            || legacy_completion_veto(&store, &leases)?)
+    {
+        return Ok(vec![]);
+    }
+
+    let mut objects: BTreeMap<String, Value> = BTreeMap::new();
+    let mut values: BTreeMap<String, Value> = BTreeMap::new();
+    let mut roots: BTreeSet<String> = BTreeSet::new();
+
+    for dir in COMPLETION_GC_DIRS {
+        let rel_dir = format!(".oms/plan/{dir}");
+        for entry in store.names(&rel_dir, MAX_COMPLETION_GC_OBJECTS + 1, true)? {
+            let name = entry
+                .to_str()
+                .ok_or_else(|| error("invalid completion object filename"))?;
+            let Some((expected_sha, _ext)) = parse_completion_object_name(name) else {
+                return Err(error(
+                    "unknown or oversized completion collection namespace",
+                ));
+            };
+            require(
+                objects.len() < MAX_COMPLETION_GC_OBJECTS,
+                "unknown or oversized completion collection namespace",
+            )?;
+            let path = format!("{rel_dir}/{name}");
+            if dir == "completion-captures" || dir == "completions" {
+                let (snap, value) = read_completion_json(
+                    &store,
+                    &path,
+                    Some(expected_sha),
+                    &mut scanned_bytes,
+                    crate::storage::MAX_STREAM,
+                )?;
+                require(
+                    value.object().is_ok(),
+                    "invalid completion collection metadata",
+                )?;
+                let mtime_ns = snap.generation.get("mtime_ns").int()?;
+                if mtime_ns >= cutoff_ns {
+                    roots.insert(path.clone());
+                }
+                if dir == "completions" {
+                    let receipt_plan_id = value
+                        .opt("bundle")
+                        .and_then(|b| b.opt("plan_id"))
+                        .and_then(|p| p.str().ok());
+                    let retired_receipt = current_plan_id.as_deref().is_some_and(|cid| {
+                        receipt_plan_id.is_some_and(|rid| is_valid_plan_id(rid) && rid != cid)
+                    });
+                    if !retired_receipt {
+                        roots.insert(path.clone());
+                    }
+                } else {
+                    let exact_capture = json::keys(
+                        &value,
+                        &[
+                            "schema",
+                            "repository_sha256",
+                            "room_id",
+                            "room",
+                            "lifecycle",
+                        ],
+                        &[],
+                    )
+                    .is_ok();
+                    if !exact_capture {
+                        roots.insert(path.clone());
+                    }
+                }
+                objects.insert(path.clone(), snap.generation);
+                values.insert(path, value);
+            } else {
+                let (generation, mtime_ns) = store.lstat_regular(&path)?;
+                if mtime_ns >= cutoff_ns {
+                    roots.insert(path.clone());
+                }
+                objects.insert(path, generation);
+            }
+        }
+    }
+
+    for path in collect_refs(&plan, &objects)? {
+        roots.insert(path);
+    }
+    for (_, _, pin_val) in pins.values() {
+        for path in collect_refs(pin_val.get("objects"), &objects)? {
+            roots.insert(path);
+        }
+    }
+
+    let mut kept = BTreeSet::new();
+    let mut pending: Vec<String> = roots.into_iter().collect();
+    while let Some(path) = pending.pop() {
+        if !kept.insert(path.clone()) {
+            continue;
+        }
+        if path.ends_with(".json") && !values.contains_key(&path) {
+            let expected_sha = path
+                .rsplit('/')
+                .next()
+                .and_then(parse_completion_object_name)
+                .map(|(h, _)| h.to_string())
+                .ok_or_else(|| error("invalid completion reference path"))?;
+            let (_, value) = read_completion_json(
+                &store,
+                &path,
+                Some(&expected_sha),
+                &mut scanned_bytes,
+                crate::storage::MAX_STREAM,
+            )?;
+            values.insert(path.clone(), value);
+        }
+        if let Some(v) = values.get(&path) {
+            pending.extend(collect_refs(v, &objects)?);
+        }
+    }
+
+    for (path, generation) in objects {
+        if !kept.contains(&path) {
+            selected.insert(path, ("completion-provenance", generation));
+        }
+    }
+    for (path, (generation, mtime_ns, val)) in &pins {
+        if !known_leases.contains(val.text("lease_id")) && *mtime_ns < cutoff_ns {
+            selected.insert(path.clone(), ("completion-pin", generation.clone()));
+        }
+    }
+
+    let mut lease_count: usize = 0;
+    for entry in store.names(
+        ".oms/plan/completion-pin-leases",
+        MAX_COMPLETION_GC_OBJECTS * 2,
+        true,
+    )? {
+        let name = entry
+            .to_str()
+            .ok_or_else(|| error("invalid completion pin lease filename"))?;
+        let path = format!(".oms/plan/completion-pin-leases/{name}");
+        if is_lease_temp_name(name) {
+            let (generation, mtime_ns) = store.lstat_regular(&path)?;
+            if mtime_ns < cutoff_ns {
+                selected.insert(path, ("completion-pin-index", generation));
+            }
+            continue;
+        }
+        lease_count += 1;
+        require(
+            lease_count <= MAX_COMPLETION_GC_OBJECTS,
+            format!("oversized completion pin lease index namespace: {path}"),
+        )?;
+        let Some(lease_id) = name.strip_suffix(".json") else {
+            return Err(error(format!(
+                "unknown completion pin lease index entry: {path}"
+            )));
+        };
+        require(
+            lineage(lease_id, "lease_"),
+            format!("unknown completion pin lease index entry: {path}"),
+        )?;
+        let (snap, value) =
+            read_completion_json(&store, &path, None, &mut scanned_bytes, MAX_JSON)?;
+        let identities = pin_ids(&value)?;
+        let mtime_ns = snap.generation.get("mtime_ns").int()?;
+        let has_live_pin = identities
+            .iter()
+            .any(|ident| pins.contains_key(&format!(".oms/plan/completion-pins/{ident}.json")));
+        if mtime_ns < cutoff_ns && (!known_leases.contains(lease_id) || !has_live_pin) {
+            selected.insert(path, ("completion-pin-index", snap.generation));
+        }
+    }
+
+    if apply {
+        for (path, (_, expected_gen)) in &selected {
+            let (now_gen, _) = store.lstat_regular(path)?;
+            require(
+                &now_gen == expected_gen,
+                format!("completion collection object changed: {path}"),
+            )?;
+        }
+        for (path, (_, expected_gen)) in &selected {
+            store.remove_generation(path, expected_gen)?;
+        }
+    }
+
+    Ok(selected
+        .into_iter()
+        .map(|(path, (kind, _))| (kind.to_string(), path))
+        .collect())
+}
