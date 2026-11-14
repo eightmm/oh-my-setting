@@ -1,0 +1,192 @@
+use crate::{Output, common::*};
+use std::{ffi::OsString, time::Duration};
+fn zero(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b == b'0')
+}
+fn full(ctx: &Context<'_>, reason: Option<&str>) -> Output {
+    gate(ctx, None, None, reason)
+}
+fn gate(ctx: &Context<'_>, base: Option<&str>, head: Option<&str>, reason: Option<&str>) -> Output {
+    let mut argv = vec![
+        OsString::from("bash"),
+        ctx.source.join("scripts/check.sh").into_os_string(),
+    ];
+    if let (Some(base), Some(head)) = (base, head) {
+        argv.extend([
+            "--quick".into(),
+            "--changed-from".into(),
+            base.into(),
+            "--changed-to".into(),
+            head.into(),
+        ]);
+    }
+    match invocation(
+        argv,
+        None,
+        ctx.source,
+        Duration::from_secs(24 * 3600),
+        64 * INPUT_MAX,
+        ctx,
+    ) {
+        Ok(p) => {
+            let mut err = reason
+                .map(|r| format!("pre-push: {r}; running the full local gate\n").into_bytes())
+                .unwrap_or_default();
+            err.extend(p.stderr);
+            (
+                if p.complete {
+                    p.code
+                } else if p.code == 0 {
+                    1
+                } else {
+                    p.code
+                },
+                p.stdout,
+                err,
+            )
+        }
+        Err(e) => fail(format!("pre-push: check runner unavailable ({e})")),
+    }
+}
+pub fn run(args: &[OsString], raw: &[u8], ctx: &Context<'_>) -> Output {
+    let full_mode = args.first().is_some_and(|a| a == "--full");
+    let index = usize::from(full_mode);
+    let remote = args.get(index).and_then(|s| s.to_str()).unwrap_or("origin");
+    let remote_valid = git(
+        ctx.source,
+        &["check-ref-format", &format!("refs/remotes/{remote}/probe")],
+        ctx,
+    )
+    .is_some();
+    let refs = if remote_valid {
+        git(
+            ctx.source,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                &format!("refs/remotes/{remote}/"),
+            ],
+            ctx,
+        )
+    } else {
+        None
+    };
+    let mut tag_only = refs.is_some();
+    let refs = refs.unwrap_or_default();
+    let mut records = 0;
+    let mut updates = Vec::new();
+    let mut malformed = false;
+    for line in String::from_utf8_lossy(raw).lines() {
+        records += 1;
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 4 {
+            malformed = true;
+            tag_only = false;
+            continue;
+        }
+        let (local_ref, local_oid, remote_ref, remote_oid) =
+            (fields[0], fields[1], fields[2], fields[3]);
+        if !local_ref.starts_with("refs/tags/") || !remote_ref.starts_with("refs/tags/") {
+            tag_only = false;
+        }
+        if zero(local_oid) {
+            tag_only = false;
+            continue;
+        }
+        if !zero(remote_oid) && remote_oid != local_oid {
+            tag_only = false;
+        }
+        if tag_only {
+            let commit = git(
+                ctx.source,
+                &["rev-parse", "--verify", &format!("{local_oid}^{{commit}}")],
+                ctx,
+            );
+            let published = commit.as_ref().is_some_and(|commit| {
+                refs.lines().any(|tip| {
+                    git(
+                        ctx.source,
+                        &["merge-base", "--is-ancestor", commit, tip],
+                        ctx,
+                    )
+                    .is_some()
+                })
+            });
+            if !published {
+                tag_only = false;
+            }
+        }
+        updates.push((
+            local_ref.to_owned(),
+            local_oid.to_owned(),
+            remote_ref.to_owned(),
+            remote_oid.to_owned(),
+        ));
+    }
+    if records > 0 && tag_only {
+        return out("pre-push: tag-only push of published commits; gate skipped\n");
+    }
+    if !malformed && updates.is_empty() && (records > 0 || !full_mode) {
+        return out("pre-push: deletion-only update; no local gate needed\n");
+    }
+    if full_mode || malformed {
+        return full(ctx, None);
+    }
+    if updates.len() != 1 {
+        return full(ctx, Some("multiple refs are being pushed"));
+    }
+    let (local_ref, local_oid, remote_ref, remote_oid) = &updates[0];
+    if !local_ref.starts_with("refs/heads/") {
+        return full(ctx, Some("a non-branch ref is being pushed"));
+    }
+    if !remote_ref.starts_with("refs/heads/") {
+        return full(ctx, Some("the destination is not a branch ref"));
+    }
+    if git(
+        ctx.source,
+        &["cat-file", "-e", &format!("{local_oid}^{{commit}}")],
+        ctx,
+    )
+    .is_none()
+    {
+        return full(ctx, Some("the pushed commit is unavailable locally"));
+    }
+    if git(ctx.source, &["rev-parse", "HEAD"], ctx).as_deref() != Some(local_oid) {
+        return full(ctx, Some("the pushed tip is not the checked-out HEAD"));
+    }
+    if git(ctx.source, &["diff", "--quiet", local_oid, "--"], ctx).is_none() {
+        return(1,vec![],b"pre-push: quick mode requires a clean tracked working tree\ncommit or stash tracked changes so the checked files equal the pushed commit\n".to_vec());
+    }
+    let base = if !zero(remote_oid) {
+        if git(
+            ctx.source,
+            &["cat-file", "-e", &format!("{remote_oid}^{{tree}}")],
+            ctx,
+        )
+        .is_none()
+        {
+            return full(ctx, Some("the remote base is unavailable locally"));
+        }
+        remote_oid.clone()
+    } else {
+        let main = format!("refs/remotes/{remote}/main");
+        let base = if git(ctx.source, &["show-ref", "--verify", "--quiet", &main], ctx).is_some() {
+            git(ctx.source, &["merge-base", local_oid, &main], ctx)
+        } else {
+            None
+        };
+        base.unwrap_or_else(|| {
+            git(ctx.source, &["hash-object", "-t", "tree", "/dev/null"], ctx).unwrap_or_default()
+        })
+    };
+    if base.is_empty() {
+        return full(ctx, Some("the remote base is unavailable locally"));
+    }
+    let mut result = gate(ctx, Some(&base), Some(local_oid), None);
+    let mut output =
+        b"pre-push: quick local checks only; the full GitHub Actions gate remains required\n"
+            .to_vec();
+    output.extend(result.1);
+    result.1 = output;
+    result
+}
