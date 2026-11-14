@@ -1,35 +1,42 @@
 #![forbid(unsafe_code)]
 
 use crate::sanitize::{
-    DETAIL_CHAR_LIMIT, SCHEMA_VERSION, VALUE_CHAR_LIMIT, canonical_json_bytes, sanitize_multiline,
-    sanitize_text, sanitize_value, sha256_hex,
+    SCHEMA_VERSION, canonical_json_bytes, sanitize_text, sanitize_value, sha256_hex,
 };
 use crate::tz::{TimeZoneSpec, parse_rfc3339_utc, utc_rfc3339};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
-use std::io::Write as _;
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub const EVENT_TYPES: &[&str] = &[
-    "run_started",
-    "run_finished",
-    "run_recovered",
-    "validation",
-    "commit",
     "agent_state",
-    "decision",
-    "handoff",
-    "experiment",
-    "research",
+    "annotation",
+    "ci",
+    "commit",
     "correction",
+    "experiment",
+    "handoff",
+    "job",
+    "patch_admit",
+    "patch_review",
+    "phase_outcome",
+    "pull_request",
+    "run",
+    "task_outcome",
+    "validation",
 ];
-
-pub const VERIFICATION_STATUSES: &[&str] = &["not_verified", "failed", "passed", "running"];
+pub const VERIFICATION_STATUSES: &[&str] = &[
+    "failed",
+    "not_applicable",
+    "not_verified",
+    "passed",
+    "skipped",
+];
 
 pub fn is_valid_event_type(s: &str) -> bool {
     EVENT_TYPES.contains(&s)
@@ -89,61 +96,29 @@ pub fn canonical_repo_root(repo: &Path) -> PathBuf {
 }
 
 pub fn canonical_github_repository(remote_url: &str) -> Option<(String, String)> {
-    let trimmed = remote_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    let cleaned = if let Some(stripped) = trimmed.strip_suffix(".git") {
-        stripped
+    let value = remote_url.trim().replace('\\', "/");
+    let (host, path) = if let Some((_, rest)) = value.split_once("://") {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?.split(':').next()?, path)
     } else {
-        trimmed
+        let (authority, path) = value.split_once(':')?;
+        (authority.rsplit('@').next()?, path)
     };
-
-    let (host, path_part) = if let Some(rest) = cleaned.strip_prefix("git@") {
-        let (h, p) = rest.split_once(':')?;
-        (h, p)
-    } else if let Some(idx) = cleaned.find("://") {
-        let after_scheme = &cleaned[idx + 3..];
-        let after_auth = after_scheme
-            .rsplit_once('@')
-            .map(|(_, r)| r)
-            .unwrap_or(after_scheme);
-        let (h, p) = after_auth.split_once('/')?;
-        let host_no_port = h.split(':').next().unwrap_or(h);
-        (host_no_port, p)
-    } else {
-        return None;
-    };
-
     if !host.eq_ignore_ascii_case("github.com") {
         return None;
     }
-    let parts: Vec<&str> = path_part
-        .trim_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    if parts.len() != 2 {
+    let path = path.split(['?', '#']).next()?.trim_matches('/');
+    let path = if path.to_ascii_lowercase().ends_with(".git") {
+        &path[..path.len() - 4]
+    } else {
+        path
+    };
+    let parts: Vec<_> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() != 2 || parts.iter().any(|p| matches!(*p, "." | "..")) {
         return None;
     }
-    let slug = format!(
-        "{}/{}",
-        parts[0].to_ascii_lowercase(),
-        parts[1].to_ascii_lowercase()
-    );
-    let canonical_url = format!("https://github.com/{slug}");
-    Some((slug, canonical_url))
-}
-
-fn sanitize_remote_for_display(remote: &str) -> String {
-    let trimmed = remote.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if let Some((_, url)) = canonical_github_repository(trimmed) {
-        return url;
-    }
-    sanitize_text(trimmed, VALUE_CHAR_LIMIT)
+    let slug = format!("{}/{}", parts[0].to_lowercase(), parts[1].to_lowercase());
+    Some((format!("github.com/{slug}"), slug))
 }
 
 pub fn git_origin_remote(repo_root: &Path) -> String {
@@ -185,20 +160,39 @@ pub fn detected_project_id(
     format!("proj_{}", &digest[..20])
 }
 
+pub(crate) fn detected_identity(repo: &Path) -> (String, String) {
+    let origin = git_origin_remote(repo);
+    let github = canonical_github_repository(&origin);
+    let key = github
+        .as_ref()
+        .map(|(key, _)| key.clone())
+        .unwrap_or_default();
+    let name = github.map(|(_, name)| name).unwrap_or_else(|| {
+        let name = sanitize_text(
+            &repo
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or_default(),
+            120,
+        );
+        if name.is_empty() {
+            "project".into()
+        } else {
+            name
+        }
+    });
+    (
+        detected_project_id(&key, &sanitize_text(&origin, 1000), repo),
+        name,
+    )
+}
+
 pub fn work_journal_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".oms").join("work-journal")
 }
 
 pub fn project_id_path(repo_root: &Path) -> PathBuf {
-    work_journal_dir(repo_root).join("project-id")
-}
-
-fn read_regular_no_symlink_string(path: &Path) -> Option<String> {
-    let meta = fs::symlink_metadata(path).ok()?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return None;
-    }
-    fs::read_to_string(path).ok()
+    work_journal_dir(repo_root).join("project.json")
 }
 
 pub fn resolve_project_identity(
@@ -209,212 +203,243 @@ pub fn resolve_project_identity(
     explicit_name: Option<&str>,
 ) -> Result<ProjectIdentity, String> {
     let raw_origin = git_origin_remote(repo_root);
-    let github_pair = canonical_github_repository(&raw_origin);
-    let github_repository = github_pair
+    let github = canonical_github_repository(&raw_origin);
+    let origin_remote = sanitize_text(&raw_origin, 1000);
+    let github_repository = github
         .as_ref()
-        .map(|(_, url)| url.clone())
+        .map(|(identity, _)| identity.clone())
         .unwrap_or_default();
-    let origin_remote = sanitize_remote_for_display(&raw_origin);
-
-    let default_name = explicit_name
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .or_else(|| github_pair.as_ref().map(|(slug, _)| slug.clone()))
-        .or_else(|| {
-            repo_root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(ToOwned::to_owned)
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "repo".to_string());
-
-    let pid_file = project_id_path(repo_root);
-    let mut recovered_name: Option<String> = None;
-    let id = if let Some(forced) = explicit_id.map(str::trim).filter(|s| !s.is_empty()) {
-        forced.to_string()
-    } else if let Some(stored) = read_regular_no_symlink_string(&pid_file) {
-        let trimmed = stored.trim();
-        if trimmed.starts_with('{') {
-            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(trimmed) {
-                recovered_name = map
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(ToOwned::to_owned);
-                map.get("id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_default()
+    let detected_name = github
+        .as_ref()
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| {
+            let name = sanitize_text(
+                &repo_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default(),
+                120,
+            );
+            if name.is_empty() {
+                "project".into()
             } else {
-                String::new()
+                name
             }
-        } else {
-            trimmed.to_string()
-        }
-    } else {
-        String::new()
-    };
-
-    let (resolved_id, resolved_name) = if !id.is_empty() {
-        (id, recovered_name.unwrap_or(default_name))
-    } else if let Some((ev_id, ev_name)) = recover_project_from_events(existing_events) {
-        let name = if github_pair.is_some() {
-            default_name
-        } else {
-            ev_name.unwrap_or(default_name)
-        };
-        if persist_if_missing {
-            let _ = persist_project_id(&pid_file, &ev_id);
-        }
-        (ev_id, name)
-    } else {
-        let computed = detected_project_id(&github_repository, &origin_remote, repo_root);
-        if persist_if_missing && explicit_id.is_none() {
-            persist_project_id(&pid_file, &computed)?;
-        }
-        (computed, default_name)
-    };
-
+        });
+    let project_path = project_id_path(repo_root);
+    let stored = crate::cold::read_regular_no_symlink_bytes(&project_path)?
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .filter(|row| row.get("schema_version").and_then(Value::as_u64) == Some(1))
+        .and_then(|row| {
+            Some((
+                row.get("project_id")?.as_str()?.to_owned(),
+                row.get("project_name")?.as_str()?.to_owned(),
+            ))
+        });
+    let recovered = stored.or_else(|| {
+        existing_events.iter().find_map(|event| {
+            validate_canonical_event(event).ok()?;
+            Some((
+                event.get("project_id")?.as_str()?.to_owned(),
+                event.get("project_name")?.as_str()?.to_owned(),
+            ))
+        })
+    });
+    let id = explicit_id
+        .map(str::to_owned)
+        .or_else(|| recovered.as_ref().map(|(id, _)| id.clone()))
+        .unwrap_or_else(|| detected_project_id(&github_repository, &origin_remote, repo_root));
+    let name = explicit_name
+        .map(str::to_owned)
+        .or_else(|| recovered.map(|(_, name)| name))
+        .unwrap_or(detected_name);
+    if persist_if_missing && crate::cold::read_regular_no_symlink_bytes(&project_path)?.is_none() {
+        let value =
+            serde_json::json!({"schema_version": 1, "project_id": id, "project_name": name});
+        atomic_write_bytes(&project_path, &crate::sanitize::pretty_json_bytes(&value)?)?;
+    }
     Ok(ProjectIdentity {
-        id: resolved_id,
-        name: sanitize_text(&resolved_name, 200),
+        id,
+        name,
         origin_remote,
         github_repository,
         repo_root: repo_root.to_path_buf(),
     })
 }
 
-fn recover_project_from_events(events: &[Value]) -> Option<(String, Option<String>)> {
-    for ev in events {
-        if let Some(proj) = ev.get("project").and_then(Value::as_object) {
-            if let Some(id) = proj.get("id").and_then(Value::as_str) {
-                let id_t = id.trim();
-                if !id_t.is_empty() {
-                    let name = proj
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned);
-                    return Some((id_t.to_string(), name));
+pub fn ensure_oms_gitignore(journal_dir: &Path) -> Result<(), String> {
+    let Some(oms) = journal_dir.parent() else {
+        return Ok(());
+    };
+    if oms.file_name().is_none_or(|n| n != ".oms") {
+        return Ok(());
+    }
+    let path = oms.join(".gitignore");
+    if crate::cold::read_regular_no_symlink_bytes(&path)?.is_none() {
+        atomic_write_bytes(&path, b"*\n")?;
+    }
+    Ok(())
+}
+
+/// Anchor journal paths above .oms so none of its components can resolve through links.
+/// Other explicit file adapters anchor at the nearest existing parent; the shared
+/// core proves its physical spelling and checks every relative component.
+pub(crate) fn storage_root(path: &Path) -> Result<(oms_safe_fs::Root, PathBuf), String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let components: Vec<_> = absolute.components().collect();
+    let boundary = components.iter().position(|p| p.as_os_str() == ".oms");
+    let mut base = if let Some(index) = boundary {
+        components[..index].iter().collect::<PathBuf>()
+    } else {
+        absolute
+            .parent()
+            .ok_or("missing storage parent")?
+            .to_path_buf()
+    };
+    loop {
+        match fs::symlink_metadata(&base) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !base.pop() {
+                    return Err("missing storage root".into());
                 }
             }
+            Err(e) => return Err(format!("storage root unavailable: {e}")),
         }
     }
-    None
-}
-
-fn persist_project_id(pid_file: &Path, project_id: &str) -> Result<(), String> {
-    let Some(parent) = pid_file.parent() else {
-        return Err("invalid project-id path".to_string());
-    };
-    ensure_oms_gitignore(parent)?;
-    fs::create_dir_all(parent).map_err(|e| {
-        format!(
-            "failed to create {}: {e}",
-            crate::sanitize::diagnostic_os_str(parent.as_os_str())
-        )
-    })?;
-    atomic_write_bytes(pid_file, format!("{project_id}\n").as_bytes())
-}
-
-pub fn ensure_oms_gitignore(journal_dir: &Path) -> Result<(), String> {
-    let Some(oms_dir) = journal_dir.parent() else {
-        return Ok(());
-    };
-    if oms_dir.file_name().and_then(|n| n.to_str()) != Some(".oms") {
-        return Ok(());
-    }
-    fs::create_dir_all(oms_dir).map_err(|e| {
-        format!(
-            "failed to create {}: {e}",
-            crate::sanitize::diagnostic_os_str(oms_dir.as_os_str())
-        )
-    })?;
-    let gi = oms_dir.join(".gitignore");
-    if gi.exists() {
-        return Ok(());
-    }
-    let content = b"# Created automatically by oh-my-setting harness tools.\n*\n!.gitignore\n";
-    atomic_write_bytes(&gi, content)
-}
-
-fn tmp_sibling_name(file_name: &OsStr, pid: u32, attempt: u32) -> OsString {
-    let suffix = format!(".tmp.{pid}.{attempt}");
-    let mut name = OsString::from(".");
-    name.push(file_name);
-    name.push(suffix);
-    name
+    let relative = absolute
+        .strip_prefix(&base)
+        .map_err(|_| "invalid storage path")?
+        .to_path_buf();
+    let root =
+        oms_safe_fs::Root::open(&base).map_err(|e| format!("storage root unavailable: {e:?}"))?;
+    Ok((root, relative))
 }
 
 pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| {
-        format!(
-            "missing parent directory for {}",
-            crate::sanitize::diagnostic_os_str(path.as_os_str())
-        )
-    })?;
-    fs::create_dir_all(parent).map_err(|e| {
-        format!(
-            "failed to create {}: {e}",
-            crate::sanitize::diagnostic_os_str(parent.as_os_str())
-        )
-    })?;
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to overwrite symlink {}",
-                crate::sanitize::diagnostic_os_str(path.as_os_str())
-            ));
+    crate::files::replace_bytes(path, content)
+}
+
+fn clean_record(
+    value: &Value,
+    allowed: &[&str],
+    required: &[&str],
+) -> Result<Map<String, Value>, String> {
+    let obj = value
+        .as_object()
+        .ok_or("structured field must be an object")?;
+    let mut output = Map::new();
+    for &key in allowed {
+        if let Some(value) = obj.get(key).and_then(|v| sanitize_value(v, Some(key))) {
+            if !is_empty_value(&value) {
+                output.insert(key.into(), value);
+            }
         }
     }
-    let pid = std::process::id();
-    let file_name = path.file_name().unwrap_or_else(|| OsStr::new("tmp"));
-    let mut attempt = 0u32;
-    let tmp_path = loop {
-        let candidate = parent.join(tmp_sibling_name(file_name, pid, attempt));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(mut f) => {
-                if let Err(e) = f.write_all(content).and_then(|()| f.sync_all()) {
-                    let _ = fs::remove_file(&candidate);
-                    return Err(format!(
-                        "failed writing {}: {e}",
-                        crate::sanitize::diagnostic_os_str(candidate.as_os_str())
-                    ));
+    for &key in required {
+        if !output.get(key).is_some_and(json_truthy) {
+            return Err(format!("missing required field: {key}"));
+        }
+    }
+    Ok(output)
+}
+
+fn clean_records(value: Option<&Value>, allowed: &[&str]) -> Vec<Value> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(64)
+        .filter_map(|v| clean_record(v, allowed, &[]).ok())
+        .filter(|row| !row.is_empty())
+        .map(Value::Object)
+        .collect()
+}
+
+pub(crate) fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(m) => !m.is_empty(),
+    }
+}
+
+fn python_repr(value: &Value) -> String {
+    match value {
+        Value::String(text) => {
+            let quote = if text.contains('\'') && !text.contains('"') {
+                '"'
+            } else {
+                '\''
+            };
+            let mut out = String::new();
+            out.push(quote);
+            for ch in text.chars() {
+                match ch {
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    ch if ch == quote => {
+                        out.push('\\');
+                        out.push(ch);
+                    }
+                    ch if !crate::unicode::printable(ch) => {
+                        use std::fmt::Write;
+                        let point = u32::from(ch);
+                        if point <= 0xff {
+                            let _ = write!(&mut out, "\\x{point:02x}");
+                        } else if point <= 0xffff {
+                            let _ = write!(&mut out, "\\u{point:04x}");
+                        } else {
+                            let _ = write!(&mut out, "\\U{point:08x}");
+                        }
+                    }
+                    _ => out.push(ch),
                 }
-                break candidate;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 64 => {
-                attempt += 1;
-            }
-            Err(e) => {
-                return Err(format!(
-                    "failed creating temp file {}: {e}",
-                    crate::sanitize::diagnostic_os_str(candidate.as_os_str())
-                ));
-            }
+            out.push(quote);
+            out
         }
-    };
-    if let Err(e) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(format!(
-            "failed replacing {}: {e}",
-            crate::sanitize::diagnostic_os_str(path.as_os_str())
-        ));
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(python_repr).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Object(object) => format!(
+            "{{{}}}",
+            object
+                .iter()
+                .map(|(k, v)| format!(
+                    "{}: {}",
+                    python_repr(&Value::String(k.clone())),
+                    python_repr(v)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => python_str(value),
     }
-    if let Ok(dir) = fs::File::open(parent) {
-        let _ = dir.sync_all();
+}
+pub(crate) fn python_str(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::String(s) => s.clone(),
+        Value::Number(_) => {
+            crate::sanitize::canonical_json_string(value).unwrap_or_else(|_| value.to_string())
+        }
+        _ => python_repr(value),
     }
-    Ok(())
 }
 
 pub fn normalize_event(
@@ -423,644 +448,272 @@ pub fn normalize_event(
     tz: &TimeZoneSpec,
     recorded_at: DateTime<Utc>,
 ) -> Result<Value, String> {
-    let Some(obj) = raw.as_object() else {
-        return Err("schema error: event payload must be a JSON object".to_string());
-    };
-
-    let event_type = obj
-        .get("event_type")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "schema error: event_type is required".to_string())?;
-    if !is_valid_event_type(event_type) {
-        return Err(format!(
-            "schema error: unsupported event_type '{event_type}'; allowed: {}",
-            EVENT_TYPES.join(", ")
-        ));
-    }
-
-    let occurred_dt = match obj.get("occurred_at").and_then(Value::as_str) {
-        Some(raw_ts) if !raw_ts.trim().is_empty() => parse_rfc3339_utc(raw_ts)
-            .map_err(|e| format!("schema error: occurred_at invalid ({e})"))?,
-        Some(_) | None => recorded_at,
-    };
-    let occurred_at = utc_rfc3339(occurred_dt);
-    let recorded_at_str = utc_rfc3339(recorded_at);
-    let (_, local_date, iso_week) = tz.local_date_and_week(occurred_dt);
-
-    // Source
-    let source_obj = obj
-        .get("source")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "schema error: source object is required".to_string())?;
-    let source_type = source_obj
-        .get("type")
-        .and_then(Value::as_str)
-        .map(|s| sanitize_text(s, 120))
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "schema error: source.type is required".to_string())?;
-    let raw_source_id = source_obj
-        .get("id")
-        .and_then(Value::as_str)
-        .map(|s| sanitize_text(s, 400))
-        .unwrap_or_default();
-
-    // Verification status
-    let verification_status = match obj.get("verification_status") {
-        None | Some(Value::Null) => "not_verified".to_string(),
-        Some(Value::String(s)) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                "not_verified".to_string()
-            } else if is_valid_verification_status(trimmed) {
-                trimmed.to_string()
-            } else {
-                return Err(format!(
-                    "schema error: invalid verification-status '{trimmed}'; allowed: {}",
-                    allowed_verification_statuses_text()
-                ));
-            }
-        }
-        Some(_) => {
-            return Err(format!(
-                "schema error: verification_status must be one of {}",
-                allowed_verification_statuses_text()
-            ));
-        }
-    };
-
-    // Correlation
-    let correlation = sanitize_correlation(obj.get("correlation"));
-
-    // Outcome
-    let outcome = sanitize_outcome(obj.get("outcome"));
-
-    // Textual judgment fields
-    let decision = opt_sanitized_multiline(obj.get("decision"), DETAIL_CHAR_LIMIT);
-    let blocker = opt_sanitized_multiline(obj.get("blocker"), DETAIL_CHAR_LIMIT);
-    let next_action = opt_sanitized_multiline(obj.get("next_action"), DETAIL_CHAR_LIMIT);
-    let note = opt_sanitized_multiline(obj.get("note"), DETAIL_CHAR_LIMIT);
-
-    // Work item
-    let work_item = sanitize_optional_object(obj.get("work_item"));
-
-    // Evidence
-    let evidence = sanitize_evidence(obj.get("evidence"));
-
-    // Metrics: drop if no evidence
-    let metrics = if evidence.is_empty() {
-        Vec::new()
-    } else {
-        sanitize_metrics(obj.get("metrics"))
-    };
-
-    // Structural research fields only
-    let research = sanitize_research(obj.get("research"));
-
-    // Artifacts
-    let artifacts = sanitize_artifacts(obj.get("artifacts"));
-
-    // Tags
-    let tags = sanitize_tags(obj.get("tags"));
-
-    // Superseding
-    let supersedes_event_id = obj
-        .get("supersedes_event_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| sanitize_text(s, 128));
-
-    if event_type == "correction" && supersedes_event_id.is_none() {
-        return Err("schema error: correction event requires supersedes_event_id".to_string());
-    }
-
-    // Event ID & synthesized source ID priority:
-    // 1. explicit event_id (if starting with wj_)
-    // 2. source.id non-empty -> deterministic ID from (project.id, event_type, source.type, source.id)
-    // 3. correlation.operation_id -> source.id = op_<24>, event_id from same
-    // 4. fallback stable content fields (EXCLUDING occurred_at / recorded_at) -> source.id = legacy-<24>
-    let (final_source_id, event_id) = compute_event_identity(
-        obj.get("event_id").and_then(Value::as_str),
-        &project.id,
-        event_type,
-        &source_type,
-        &raw_source_id,
-        &correlation,
-        &outcome,
-        &verification_status,
-        decision.as_deref(),
-        blocker.as_deref(),
-        next_action.as_deref(),
-        &evidence,
-        &metrics,
-        supersedes_event_id.as_deref(),
-    )?;
-
-    let mut source_out = Map::new();
-    source_out.insert("type".to_string(), Value::String(source_type));
-    source_out.insert("id".to_string(), Value::String(final_source_id));
-    for extra_key in ["record_path", "tool", "agent", "command", "detail", "scope"] {
-        if let Some(v) = source_obj.get(extra_key) {
-            if let Some(cleaned) = sanitize_value(v, Some(extra_key)) {
-                if !is_empty_value(&cleaned) {
-                    source_out.insert(extra_key.to_string(), cleaned);
-                }
-            }
-        }
-    }
-
-    let mut project_out = Map::new();
-    project_out.insert("id".to_string(), Value::String(project.id.clone()));
-    project_out.insert("name".to_string(), Value::String(project.name.clone()));
-    if !project.github_repository.is_empty() {
-        project_out.insert(
-            "github_repository".to_string(),
-            Value::String(project.github_repository.clone()),
-        );
-    }
-    if !project.origin_remote.is_empty() {
-        project_out.insert(
-            "origin_remote".to_string(),
-            Value::String(project.origin_remote.clone()),
-        );
-    }
-
-    let mut out = Map::new();
-    out.insert(
-        "schema_version".to_string(),
-        Value::String(SCHEMA_VERSION.to_string()),
-    );
-    out.insert("event_id".to_string(), Value::String(event_id));
-    out.insert(
-        "event_type".to_string(),
-        Value::String(event_type.to_string()),
-    );
-    out.insert("occurred_at".to_string(), Value::String(occurred_at));
-    out.insert("recorded_at".to_string(), Value::String(recorded_at_str));
-    out.insert("local_date".to_string(), Value::String(local_date));
-    out.insert("iso_week".to_string(), Value::String(iso_week));
-    out.insert("timezone".to_string(), Value::String(tz.name().to_string()));
-    out.insert("project".to_string(), Value::Object(project_out));
-    out.insert("source".to_string(), Value::Object(source_out));
-    if !correlation.is_empty() {
-        out.insert("correlation".to_string(), Value::Object(correlation));
-    }
-    if let Some(wi) = work_item {
-        out.insert("work_item".to_string(), Value::Object(wi));
-    }
-    if !outcome.is_empty() {
-        out.insert("outcome".to_string(), Value::Object(outcome));
-    }
-    out.insert(
-        "verification_status".to_string(),
-        Value::String(verification_status),
-    );
-    if let Some(d) = decision {
-        out.insert("decision".to_string(), Value::String(d));
-    }
-    if let Some(b) = blocker {
-        out.insert("blocker".to_string(), Value::String(b));
-    }
-    if let Some(na) = next_action {
-        out.insert("next_action".to_string(), Value::String(na));
-    }
-    if let Some(n) = note {
-        out.insert("note".to_string(), Value::String(n));
-    }
-    if !evidence.is_empty() {
-        out.insert("evidence".to_string(), Value::Array(evidence));
-    }
-    if !metrics.is_empty() {
-        out.insert("metrics".to_string(), Value::Array(metrics));
-    }
-    if let Some(r) = research {
-        out.insert("research".to_string(), Value::Object(r));
-    }
-    if !artifacts.is_empty() {
-        out.insert("artifacts".to_string(), Value::Array(artifacts));
-    }
-    if !tags.is_empty() {
-        out.insert("tags".to_string(), Value::Array(tags));
-    }
-    if let Some(sup) = supersedes_event_id {
-        out.insert("supersedes_event_id".to_string(), Value::String(sup));
-    }
-
-    let event = Value::Object(out);
-    validate_canonical_event(&event)?;
-    Ok(event)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn compute_event_identity(
-    explicit_event_id: Option<&str>,
-    project_id: &str,
-    event_type: &str,
-    source_type: &str,
-    source_id: &str,
-    correlation: &Map<String, Value>,
-    outcome: &Map<String, Value>,
-    verification_status: &str,
-    decision: Option<&str>,
-    blocker: Option<&str>,
-    next_action: Option<&str>,
-    evidence: &[Value],
-    metrics: &[Value],
-    supersedes_event_id: Option<&str>,
-) -> Result<(String, String), String> {
-    let resolved_source_id = if !source_id.is_empty() {
-        source_id.to_string()
-    } else if let Some(op_id) = correlation.get("operation_id").and_then(Value::as_str) {
-        let mut basis = Map::new();
-        basis.insert("project_id".into(), Value::String(project_id.into()));
-        basis.insert("event_type".into(), Value::String(event_type.into()));
-        basis.insert("source_type".into(), Value::String(source_type.into()));
-        basis.insert("operation_id".into(), Value::String(op_id.into()));
-        let bytes = canonical_json_bytes(&Value::Object(basis))?;
-        format!("op_{}", &sha256_hex(&bytes)[..24])
-    } else {
-        let mut stable = Map::new();
-        stable.insert("project_id".into(), Value::String(project_id.into()));
-        stable.insert("event_type".into(), Value::String(event_type.into()));
-        stable.insert("source_type".into(), Value::String(source_type.into()));
-        stable.insert("outcome".into(), Value::Object(outcome.clone()));
-        stable.insert(
-            "verification_status".into(),
-            Value::String(verification_status.into()),
-        );
-        if let Some(d) = decision {
-            stable.insert("decision".into(), Value::String(d.into()));
-        }
-        if let Some(b) = blocker {
-            stable.insert("blocker".into(), Value::String(b.into()));
-        }
-        if let Some(na) = next_action {
-            stable.insert("next_action".into(), Value::String(na.into()));
-        }
-        if !evidence.is_empty() {
-            stable.insert("evidence".into(), Value::Array(evidence.to_vec()));
-        }
-        if !metrics.is_empty() {
-            stable.insert("metrics".into(), Value::Array(metrics.to_vec()));
-        }
-        if let Some(sup) = supersedes_event_id {
-            stable.insert("supersedes_event_id".into(), Value::String(sup.into()));
-        }
-        let bytes = canonical_json_bytes(&Value::Object(stable))?;
-        format!("legacy-{}", &sha256_hex(&bytes)[..24])
-    };
-
-    let event_id = if let Some(explicit) = explicit_event_id
-        .map(str::trim)
-        .filter(|s| s.starts_with("wj_"))
+    let obj = raw.as_object().ok_or("event must be an object")?;
+    if obj
+        .get("schema_version")
+        .is_some_and(|v| v.as_u64() != Some(SCHEMA_VERSION))
     {
-        sanitize_text(explicit, 128)
-    } else {
-        let mut id_basis = Map::new();
-        id_basis.insert("project_id".into(), Value::String(project_id.into()));
-        id_basis.insert("event_type".into(), Value::String(event_type.into()));
-        id_basis.insert("source_type".into(), Value::String(source_type.into()));
-        id_basis.insert(
-            "source_id".into(),
-            Value::String(resolved_source_id.clone()),
-        );
-        let bytes = canonical_json_bytes(&Value::Object(id_basis))?;
-        format!("wj_{}", &sha256_hex(&bytes)[..32])
-    };
-
-    Ok((resolved_source_id, event_id))
-}
-
-fn sanitize_correlation(val: Option<&Value>) -> Map<String, Value> {
-    let mut out = Map::new();
-    let Some(obj) = val.and_then(Value::as_object) else {
-        return out;
-    };
-    for (k, v) in obj {
-        if crate::sanitize::is_forbidden_raw_key(k) {
-            continue;
-        }
-        if let Some(cleaned) = sanitize_value(v, Some(k)) {
-            if !is_empty_value(&cleaned) {
-                out.insert(k.clone(), cleaned);
-            }
-        }
+        return Err("unsupported schema version".into());
     }
-    out
-}
-
-fn sanitize_outcome(val: Option<&Value>) -> Map<String, Value> {
-    let mut out = Map::new();
-    let Some(obj) = val.and_then(Value::as_object) else {
-        return out;
-    };
-    if let Some(summary) = obj.get("summary").and_then(Value::as_str) {
-        let cleaned = sanitize_multiline(summary, DETAIL_CHAR_LIMIT);
-        if !cleaned.is_empty() {
-            out.insert("summary".into(), Value::String(cleaned));
-        }
+    let event_type = sanitize_text(
+        &obj.get("event_type").map(python_str).unwrap_or_default(),
+        80,
+    );
+    if !is_valid_event_type(&event_type) {
+        return Err("invalid event_type".into());
     }
-    if let Some(status) = obj.get("status").and_then(Value::as_str) {
-        let cleaned = sanitize_text(status, 64).to_ascii_lowercase();
-        if !cleaned.is_empty() {
-            out.insert("status".into(), Value::String(cleaned));
-        }
-    }
-    if let Some(exit_code) = obj.get("exit_code").and_then(Value::as_i64) {
-        out.insert("exit_code".into(), Value::Number(exit_code.into()));
-    }
-    if let Some(duration_ms) = obj.get("duration_ms").and_then(Value::as_f64) {
-        if duration_ms.is_finite() {
-            if let Some(num) = serde_json::Number::from_f64(duration_ms) {
-                out.insert("duration_ms".into(), Value::Number(num));
-            }
-        }
-    }
-    for (k, v) in obj {
-        if matches!(
-            k.as_str(),
-            "summary" | "status" | "exit_code" | "duration_ms"
-        ) || crate::sanitize::is_forbidden_raw_key(k)
-        {
-            continue;
-        }
-        if let Some(cleaned) = sanitize_value(v, Some(k)) {
-            if !is_empty_value(&cleaned) {
-                out.insert(k.clone(), cleaned);
-            }
-        }
-    }
-    out
-}
-
-fn sanitize_optional_object(val: Option<&Value>) -> Option<Map<String, Value>> {
-    let obj = val.and_then(Value::as_object)?;
-    let mut out = Map::new();
-    for (k, v) in obj {
-        if crate::sanitize::is_forbidden_raw_key(k) {
-            continue;
-        }
-        if let Some(cleaned) = sanitize_value(v, Some(k)) {
-            if !is_empty_value(&cleaned) {
-                out.insert(k.clone(), cleaned);
-            }
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn sanitize_evidence(val: Option<&Value>) -> Vec<Value> {
-    let Some(items) = val.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for item in items.iter().take(64) {
-        if let Some(obj) = item.as_object() {
-            let mut row = Map::new();
-            for (k, v) in obj {
-                if crate::sanitize::is_forbidden_raw_key(k) {
-                    continue;
-                }
-                if let Some(cleaned) = sanitize_value(v, Some(k)) {
-                    if !is_empty_value(&cleaned) {
-                        row.insert(k.clone(), cleaned);
-                    }
-                }
-            }
-            if !row.is_empty() {
-                out.push(Value::Object(row));
-            }
-        }
-    }
-    out
-}
-
-fn sanitize_metrics(val: Option<&Value>) -> Vec<Value> {
-    let Some(items) = val.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for item in items.iter().take(64) {
-        let Some(obj) = item.as_object() else {
-            continue;
+    let occurred = parse_rfc3339_utc(&obj.get("occurred_at").map(python_str).unwrap_or_default())?;
+    let (_, local_date, iso_week) = tz.local_date_and_week(occurred);
+    let mut source = clean_record(
+        obj.get("source").unwrap_or(&Value::Null),
+        &["type", "id", "path", "url"],
+        &["type"],
+    )?;
+    let authoritative = source.get("id").is_some_and(json_truthy);
+    let empty = serde_json::json!({});
+    let correlation = clean_record(
+        obj.get("correlation").unwrap_or(&empty),
+        &[
+            "task_id",
+            "session_id",
+            "phase_id",
+            "run_id",
+            "operation_id",
+        ],
+        &[],
+    )?;
+    let operation = correlation
+        .get("operation_id")
+        .filter(|v| json_truthy(v))
+        .map(python_str);
+    if !authoritative {
+        let id = if let Some(operation) = &operation {
+            format!("op_{}", &sha256_hex(operation.as_bytes())[..24])
+        } else {
+            let stable: Map<String, Value> = obj
+                .iter()
+                .filter(|(k, _)| {
+                    !matches!(k.as_str(), "recorded_at" | "occurred_at" | "schema_version")
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let clean = sanitize_value(&Value::Object(stable), None).unwrap_or(Value::Null);
+            format!("src_{}", &sha256_hex(&canonical_json_bytes(&clean)?)[..24])
         };
-        let Some(name) = obj
-            .get("name")
-            .and_then(Value::as_str)
-            .map(|s| sanitize_text(s, 120))
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        let Some(num) = obj.get("value").and_then(|v| {
-            if let Some(i) = v.as_i64() {
-                Some(Value::Number(i.into()))
-            } else if let Some(f) = v.as_f64() {
-                if f.is_finite() {
-                    serde_json::Number::from_f64(f).map(Value::Number)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }) else {
-            continue;
-        };
-        let mut row = Map::new();
-        row.insert("name".into(), Value::String(name));
-        row.insert("value".into(), num);
-        for field in [
-            "unit",
-            "scope",
-            "split",
-            "dataset",
-            "higher_is_better",
-            "direction",
-        ] {
-            if let Some(v) = obj.get(field) {
-                if let Some(cleaned) = sanitize_value(v, Some(field)) {
-                    if !is_empty_value(&cleaned) {
-                        row.insert(field.into(), cleaned);
-                    }
-                }
-            }
-        }
-        out.push(Value::Object(row));
+        source.insert("id".into(), Value::String(id));
     }
-    out
-}
-
-fn sanitize_research(val: Option<&Value>) -> Option<Map<String, Value>> {
-    let obj = val.and_then(Value::as_object)?;
-    let mut out = Map::new();
-    for field in [
-        "question",
-        "hypothesis",
-        "findings",
-        "confidence",
-        "open_questions",
-        "next_step",
-        "conclusion",
-        "sources",
+    let verification = sanitize_text(
+        &obj.get("verification_status")
+            .map(python_str)
+            .unwrap_or_default(),
+        40,
+    );
+    if !is_valid_verification_status(&verification) {
+        return Err("invalid verification_status".into());
+    }
+    let mut normalized = serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "project_id": sanitize_text(&project.id, 120),
+        "project_name": sanitize_text(&project.name, 120),
+        "event_type": event_type,
+        "occurred_at": utc_rfc3339(occurred),
+        "recorded_at": utc_rfc3339(recorded_at),
+        "timezone": sanitize_text(tz.name(), 120),
+        "local_date": local_date, "iso_week": iso_week,
+        "source": source, "verification_status": verification
+    });
+    let out = normalized.as_object_mut().expect("object");
+    if !correlation.is_empty() {
+        out.insert("correlation".into(), Value::Object(correlation));
+    }
+    for (field, allowed) in [
+        ("outcome", &["summary", "status", "interpretation"][..]),
+        (
+            "provenance",
+            &[
+                "code_commit",
+                "config_path",
+                "config_hash",
+                "dataset",
+                "split",
+                "seed",
+                "checkpoint",
+                "artifact_id",
+                "job_id",
+                "run_id",
+                "gpu",
+                "execution_environment",
+                "verdict",
+                "command_summary",
+                "exit_code",
+                "duration_seconds",
+                "workflow",
+                "attempt",
+                "hypothesis",
+                "prediction",
+                "baseline",
+                "primary_metric",
+                "success_criterion",
+                "independent_change",
+            ][..],
+        ),
     ] {
-        if let Some(v) = obj.get(field) {
-            if let Some(cleaned) = sanitize_value(v, Some(field)) {
-                if !is_empty_value(&cleaned) {
-                    out.insert(field.into(), cleaned);
-                }
+        if let Some(value) = obj.get(field) {
+            let row = clean_record(value, allowed, &[])?;
+            if !row.is_empty() {
+                out.insert(field.into(), Value::Object(row));
             }
         }
     }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn sanitize_artifacts(val: Option<&Value>) -> Vec<Value> {
-    let Some(items) = val.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for item in items.iter().take(64) {
-        if let Some(s) = item.as_str() {
-            let cleaned = sanitize_text(s, VALUE_CHAR_LIMIT);
-            if !cleaned.is_empty() {
-                out.push(Value::String(cleaned));
-            }
-        } else if let Some(cleaned) = sanitize_value(item, None) {
-            if !is_empty_value(&cleaned) {
-                out.push(cleaned);
+    for field in ["goal", "decision", "blocker", "next_action"] {
+        if let Some(Value::String(clean)) =
+            obj.get(field).and_then(|v| sanitize_value(v, Some(field)))
+        {
+            if !clean.is_empty() {
+                out.insert(field.into(), Value::String(clean));
             }
         }
     }
-    out
-}
-
-fn sanitize_tags(val: Option<&Value>) -> Vec<Value> {
-    let Some(items) = val.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for item in items.iter().take(32) {
-        if let Some(s) = item.as_str() {
-            let cleaned = sanitize_text(s, 80);
-            if !cleaned.is_empty()
-                && !out
-                    .iter()
-                    .any(|v: &Value| v.as_str() == Some(cleaned.as_str()))
-            {
-                out.push(Value::String(cleaned));
-            }
-        }
+    let refs = clean_records(obj.get("refs"), &["type", "id", "path", "url", "label"]);
+    if !refs.is_empty() {
+        out.insert("refs".into(), Value::Array(refs));
     }
-    out
-}
-
-fn opt_sanitized_multiline(val: Option<&Value>, limit: usize) -> Option<String> {
-    let s = val.and_then(Value::as_str)?;
-    let cleaned = sanitize_multiline(s, limit);
-    if cleaned.is_empty() {
-        None
+    let evidence = clean_records(obj.get("evidence"), &["type", "ref", "label"]);
+    let has_evidence = !evidence.is_empty();
+    if has_evidence {
+        out.insert("evidence".into(), Value::Array(evidence));
+    }
+    let metrics: Vec<Value> = clean_records(
+        obj.get("metrics"),
+        &[
+            "name",
+            "value",
+            "unit",
+            "dataset",
+            "split",
+            "conditions",
+            "evidence_ref",
+        ],
+    )
+    .into_iter()
+    .filter(|row| {
+        row.get("name").is_some_and(json_truthy)
+            && row.get("value").is_some_and(Value::is_number)
+            && (row.get("evidence_ref").is_some_and(json_truthy) || has_evidence)
+    })
+    .collect();
+    if !metrics.is_empty() {
+        out.insert("metrics".into(), Value::Array(metrics));
+    }
+    let supersedes = sanitize_text(
+        &obj.get("supersedes_event_id")
+            .map(python_str)
+            .unwrap_or_default(),
+        120,
+    );
+    if !supersedes.is_empty() {
+        if event_type != "correction" {
+            return Err("only correction events may supersede".into());
+        }
+        out.insert("supersedes_event_id".into(), Value::String(supersedes));
+    }
+    let basis = if authoritative {
+        serde_json::json!({"project_id": out["project_id"], "source_type": out["source"]["type"], "source_id": out["source"]["id"]})
+    } else if let Some(operation) = operation {
+        serde_json::json!({"project_id": out["project_id"], "operation_id": operation, "event_type": out["event_type"]})
     } else {
-        Some(cleaned)
-    }
+        Value::Object(
+            out.iter()
+                .filter(|(k, _)| {
+                    !matches!(
+                        k.as_str(),
+                        "event_id"
+                            | "recorded_at"
+                            | "occurred_at"
+                            | "local_date"
+                            | "iso_week"
+                            | "timezone"
+                    )
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    };
+    out.insert(
+        "event_id".into(),
+        Value::String(format!(
+            "wj_{}",
+            &sha256_hex(&canonical_json_bytes(&basis)?)[..32]
+        )),
+    );
+    validate_canonical_event(&normalized)?;
+    Ok(normalized)
 }
 
 fn is_empty_value(v: &Value) -> bool {
-    match v {
-        Value::Null => true,
-        Value::String(s) => s.is_empty(),
-        Value::Array(a) => a.is_empty(),
-        Value::Object(m) => m.is_empty(),
-        _ => false,
-    }
+    matches!(v, Value::Null)
+        || matches!(v, Value::String(s) if s.is_empty())
+        || matches!(v, Value::Array(a) if a.is_empty())
+        || matches!(v, Value::Object(m) if m.is_empty())
 }
 
 pub fn validate_canonical_event(event: &Value) -> Result<(), String> {
-    let Some(obj) = event.as_object() else {
-        return Err("schema error: canonical event must be an object".to_string());
-    };
-    if obj.get("schema_version").and_then(Value::as_str) != Some(SCHEMA_VERSION) {
-        return Err("schema error: unsupported or missing schema_version".to_string());
+    let obj = event.as_object().ok_or("invalid canonical object")?;
+    if obj.get("schema_version").and_then(Value::as_u64) != Some(SCHEMA_VERSION) {
+        return Err("unsupported schema version".into());
     }
-    let event_id = obj
-        .get("event_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "schema error: missing event_id".to_string())?;
-    if !event_id.starts_with("wj_") || event_id.len() < 10 {
-        return Err("schema error: invalid event_id format".to_string());
+    for key in [
+        "event_id",
+        "project_id",
+        "project_name",
+        "event_type",
+        "occurred_at",
+        "recorded_at",
+        "timezone",
+        "local_date",
+        "iso_week",
+        "source",
+        "verification_status",
+    ] {
+        if !obj.contains_key(key) {
+            return Err("missing canonical field".into());
+        }
     }
-    let event_type = obj
+    if !obj
         .get("event_type")
         .and_then(Value::as_str)
-        .ok_or_else(|| "schema error: missing event_type".to_string())?;
-    if !is_valid_event_type(event_type) {
-        return Err(format!("schema error: invalid event_type '{event_type}'"));
+        .is_some_and(is_valid_event_type)
+    {
+        return Err("invalid canonical event_type".into());
     }
-    let occurred_at = obj
-        .get("occurred_at")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "schema error: missing occurred_at".to_string())?;
-    parse_rfc3339_utc(occurred_at).map_err(|e| format!("schema error: {e}"))?;
-    let vs = obj
+    if !obj
         .get("verification_status")
         .and_then(Value::as_str)
-        .ok_or_else(|| "schema error: missing verification_status".to_string())?;
-    if !is_valid_verification_status(vs) {
-        return Err(format!(
-            "schema error: invalid verification_status '{vs}'; allowed: {}",
-            allowed_verification_statuses_text()
-        ));
+        .is_some_and(is_valid_verification_status)
+    {
+        return Err("invalid canonical verification_status".into());
     }
-    let src = obj
+    let id = obj
+        .get("event_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if id.len() != 35
+        || !id.starts_with("wj_")
+        || !id.as_bytes()[3..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    {
+        return Err("invalid canonical event_id".into());
+    }
+    for key in ["occurred_at", "recorded_at"] {
+        parse_rfc3339_utc(&python_str(&obj[key]))?;
+    }
+    let source = obj
         .get("source")
         .and_then(Value::as_object)
-        .ok_or_else(|| "schema error: missing source".to_string())?;
-    if src
-        .get("type")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .is_empty()
-        || src
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-    {
-        return Err("schema error: source.type and source.id must be non-empty".to_string());
-    }
-    let proj = obj
-        .get("project")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "schema error: missing project".to_string())?;
-    if proj
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .is_empty()
-        || proj
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-    {
-        return Err("schema error: project.id and project.name must be non-empty".to_string());
-    }
-    if event_type == "correction" {
-        let sup = obj
-            .get("supersedes_event_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !sup.starts_with("wj_") {
-            return Err(
-                "schema error: correction requires a valid supersedes_event_id".to_string(),
-            );
-        }
+        .ok_or("invalid canonical source")?;
+    if !source.get("type").is_some_and(json_truthy) || !source.get("id").is_some_and(json_truthy) {
+        return Err("invalid canonical source".into());
     }
     Ok(())
 }

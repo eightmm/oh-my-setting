@@ -1,14 +1,11 @@
 #![forbid(unsafe_code)]
 
-use crate::cold::{
-    ensure_regular_dir_no_symlink, journal_storage, read_regular_no_symlink_bytes,
-    read_verified_cold_events, seal_events,
-};
+use crate::cold::{ensure_regular_dir_no_symlink, read_regular_no_symlink_bytes};
 use crate::config::{journal_language, notion_repo_excluded, notion_settings};
 use crate::render::{compute_period_aggregates, has_blocker, render_daily, render_weekly};
 use crate::sanitize::{
-    DIGEST_MAX_BYTES, INDEX_SCHEMA_VERSION, RENDERER_VERSION, canonical_json_bytes,
-    pretty_json_bytes, sanitize_text, sha256_hex, truncate_utf8_bytes,
+    INDEX_SCHEMA_VERSION, RENDERER_VERSION, canonical_json_bytes, pretty_json_bytes, sanitize_text,
+    sha256_hex,
 };
 use crate::schema::{
     ProjectIdentity, atomic_write_bytes, ensure_oms_gitignore, normalize_event,
@@ -16,16 +13,14 @@ use crate::schema::{
 };
 use crate::tz::{
     TimeZoneSpec, iso_week_range, naive_date_to_string, parse_date_ymd, parse_rfc3339_utc,
-    resolve_timezone, utc_rfc3339,
+    utc_rfc3339,
 };
 use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
-use std::os::unix::fs::MetadataExt as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -40,8 +35,10 @@ pub type MemoryAppendFn<'a> = &'a dyn Fn(&Path, &str, &str) -> Result<MemoryAppe
 
 fn event_id_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^wj_[0-9a-f]{16,64}$").expect("valid regex"))
+    RE.get_or_init(|| Regex::new(r"^wj_[0-9a-f]{32}$").expect("valid regex"))
 }
+
+type SourceSnapshot = (crate::cold::ColdManifest, Vec<Value>, Option<Vec<u8>>);
 
 pub struct JournalStore {
     pub repo_root: PathBuf,
@@ -54,6 +51,11 @@ pub struct JournalStore {
     pub weekly_dir: PathBuf,
     pub tz: TimeZoneSpec,
     pub project: ProjectIdentity,
+    last_head: std::cell::RefCell<String>,
+    repo_anchor: oms_safe_fs::Root,
+    rendering: std::cell::Cell<bool>,
+    storage_checked: std::cell::Cell<bool>,
+    snapshot: std::cell::RefCell<Option<std::rc::Rc<SourceSnapshot>>>,
 }
 
 impl JournalStore {
@@ -68,20 +70,44 @@ impl JournalStore {
     fn open_internal(
         repo_root: &Path,
         timezone_name: Option<&str>,
-        persist_project: bool,
+        _persist_project: bool,
     ) -> Result<Self, String> {
         let root = work_journal_dir(repo_root);
         let events_path = root.join("events.jsonl");
-        let quarantine_path = root.join("quarantine.jsonl");
+        let quarantine_path = root.join("quarantine/index.json");
         let index_json_path = root.join("index.json");
         let db_path = root.join("index.sqlite3");
         let daily_dir = root.join("daily");
         let weekly_dir = root.join("weekly");
-        let tz = resolve_timezone(timezone_name);
+        let tz = crate::tz::checked_timezone(timezone_name)?;
 
-        let seed_events = read_live_seed_events(&events_path);
-        let project =
-            resolve_project_identity(repo_root, &seed_events, persist_project, None, None)?;
+        let pinned = read_regular_no_symlink_bytes(&crate::schema::project_id_path(repo_root))?
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|row| {
+                row["schema_version"].as_u64() == Some(1)
+                    && row["project_id"].is_string()
+                    && row["project_name"].is_string()
+            });
+        let (manifest, cold, live) = if pinned {
+            let (manifest, cold) = crate::cold::read_verified_cold_events(&root)?;
+            (manifest, cold, None)
+        } else {
+            let (manifest, cold, live) = crate::cold::replay_snapshot(&root)?;
+            (manifest, cold, Some(live))
+        };
+        let mut seed_events = cold.clone();
+        if let Some(live) = &live {
+            for raw in crate::cold::byte_lines(live) {
+                if let Ok(row) = serde_json::from_slice::<Value>(raw) {
+                    if validate_canonical_event(&row).is_ok() {
+                        crate::sanitize::require_exact_integers(raw)?;
+                    }
+                    seed_events.push(row);
+                }
+            }
+        }
+        let snapshot = (manifest, cold, live);
+        let project = resolve_project_identity(repo_root, &seed_events, false, None, None)?;
 
         Ok(Self {
             repo_root: repo_root.to_path_buf(),
@@ -94,74 +120,127 @@ impl JournalStore {
             weekly_dir,
             tz,
             project,
+            last_head: std::cell::RefCell::new(String::new()),
+            rendering: std::cell::Cell::new(false),
+            storage_checked: std::cell::Cell::new(false),
+            repo_anchor: oms_safe_fs::Root::open(repo_root)
+                .map_err(|e| format!("journal repository unavailable: {e:?}"))?,
+            snapshot: std::cell::RefCell::new(Some(std::rc::Rc::new(snapshot))),
         })
     }
 
-    pub fn load_all_events_verified(&self, record_quarantine: bool) -> Result<Vec<Value>, String> {
-        let (_manifest, cold_events) = read_verified_cold_events(&self.root)?;
-        let mut by_id: BTreeMap<String, Value> = BTreeMap::new();
-        let mut ordered = Vec::new();
-        for ev in cold_events {
-            if let Some(eid) = ev.get("event_id").and_then(Value::as_str) {
-                if !by_id.contains_key(eid) {
-                    by_id.insert(eid.to_string(), ev.clone());
-                    ordered.push(ev);
-                }
-            }
-        }
-
-        let mut bad_lines = Vec::new();
-        if let Some(bytes) = read_regular_no_symlink_bytes(&self.events_path)? {
-            let text = String::from_utf8_lossy(&bytes);
-            for raw_line in text.lines() {
-                let t = raw_line.trim();
-                if t.is_empty() {
-                    continue;
-                }
-                let Ok(val) = serde_json::from_str::<Value>(t) else {
-                    bad_lines.push(t.to_string());
-                    continue;
-                };
-                if validate_canonical_event(&val).is_err() {
-                    bad_lines.push(t.to_string());
-                    continue;
-                }
-                if let Some(eid) = val.get("event_id").and_then(Value::as_str) {
-                    if !by_id.contains_key(eid) {
-                        by_id.insert(eid.to_string(), val.clone());
-                        ordered.push(val);
+    pub(crate) fn pinned_identity(&self) -> Result<Option<(String, String)>, String> {
+        if let Some(bytes) =
+            read_regular_no_symlink_bytes(&crate::schema::project_id_path(&self.repo_root))?
+        {
+            if let Ok(row) = serde_json::from_slice::<Value>(&bytes) {
+                if row["schema_version"].as_u64() == Some(1) {
+                    if let (Some(id), Some(name)) =
+                        (row["project_id"].as_str(), row["project_name"].as_str())
+                    {
+                        return Ok(Some((id.into(), name.into())));
                     }
                 }
             }
         }
+        let snapshot = self.replay_source_snapshot()?;
+        for event in snapshot.1.iter().cloned().chain(
+            crate::cold::byte_lines(snapshot.2.as_ref().expect("replayed live snapshot"))
+                .filter_map(|r| serde_json::from_slice::<Value>(r).ok()),
+        ) {
+            if validate_canonical_event(&event).is_ok() {
+                if let (Some(id), Some(name)) =
+                    (event["project_id"].as_str(), event["project_name"].as_str())
+                {
+                    return Ok(Some((id.into(), name.into())));
+                }
+            }
+        }
+        Ok(None)
+    }
 
-        if record_quarantine && !bad_lines.is_empty() {
-            ensure_oms_gitignore(&self.root)?;
-            fs::create_dir_all(&self.root)
-                .map_err(|e| format!("failed creating {}: {e}", self.root.display()))?;
-            let existing_q = read_regular_no_symlink_bytes(&self.quarantine_path)?
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
-            let existing_set: HashSet<&str> = existing_q.lines().collect();
-            let mut to_add = Vec::new();
-            for line in &bad_lines {
-                if !existing_set.contains(line.as_str()) {
-                    to_add.push(line.as_str());
-                }
+    fn verify_repo(&self) -> Result<(), String> {
+        self.repo_anchor
+            .read_no_follow(
+                Path::new(".oms/work-journal/project.json"),
+                oms_safe_fs::ByteReadOptions {
+                    missing_ok: true,
+                    max_bytes: usize::MAX,
+                },
+            )
+            .map(|_| ())
+            .map_err(|e| format!("journal repository namespace changed: {e:?}"))
+    }
+
+    fn source_snapshot(&self) -> Result<std::rc::Rc<SourceSnapshot>, String> {
+        self.verify_repo()?;
+        let current = crate::cold::load_cold_manifest(&self.root)?;
+        if let Some(snapshot) = self.snapshot.borrow().as_ref() {
+            if snapshot.0 == current {
+                return Ok(snapshot.clone());
             }
-            if !to_add.is_empty() {
-                let mut f = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.quarantine_path)
-                    .map_err(|e| {
-                        format!("failed opening {}: {e}", self.quarantine_path.display())
-                    })?;
-                for line in to_add {
-                    writeln!(f, "{line}").map_err(|e| format!("failed writing quarantine: {e}"))?;
+        }
+        let (manifest, events) = crate::cold::read_verified_cold_events(&self.root)?;
+        let live = if manifest.pending.is_some() {
+            Some(crate::cold::journal_live(&self.root, &manifest)?)
+        } else {
+            None
+        };
+        let snapshot = std::rc::Rc::new((manifest, events, live));
+        self.snapshot.replace(Some(snapshot.clone()));
+        Ok(snapshot)
+    }
+    fn replay_source_snapshot(&self) -> Result<std::rc::Rc<SourceSnapshot>, String> {
+        for _ in 0..8 {
+            let snapshot = self.source_snapshot()?;
+            if snapshot.2.is_some() {
+                if snapshot.0 == crate::cold::load_cold_manifest(&self.root)? {
+                    return Ok(snapshot);
                 }
-                let _ = f.sync_all();
+                continue;
             }
+            let live = crate::cold::journal_live(&self.root, &snapshot.0);
+            if snapshot.0 != crate::cold::load_cold_manifest(&self.root)? {
+                continue;
+            }
+            let snapshot = std::rc::Rc::new((snapshot.0.clone(), snapshot.1.clone(), Some(live?)));
+            self.snapshot.replace(Some(snapshot.clone()));
+            return Ok(snapshot);
+        }
+        Err("journal layout kept changing during read".into())
+    }
+
+    pub fn load_all_events_verified(&self, record_quarantine: bool) -> Result<Vec<Value>, String> {
+        let snapshot = self.replay_source_snapshot()?;
+        let mut ordered = snapshot.1.clone();
+        let live = snapshot.2.as_ref().expect("replayed live snapshot");
+        let mut quarantine = Vec::new();
+        let offset = ordered.len();
+        for (index, raw) in crate::cold::byte_lines(&live).enumerate() {
+            if raw.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let parsed = serde_json::from_slice::<Value>(raw);
+            let reason = match parsed {
+                Ok(value) => match validate_canonical_event(&value) {
+                    Ok(()) => {
+                        crate::sanitize::require_exact_integers(raw)?;
+                        ordered.push(value);
+                        continue;
+                    }
+                    Err(error) if error.contains("unsupported schema") => "unsupported_schema",
+                    Err(_) => "invalid_schema",
+                },
+                Err(_) => "malformed",
+            };
+            quarantine.push(serde_json::json!({"record": offset+index+1, "sha256": sha256_hex(raw), "reason": reason}));
+        }
+        if record_quarantine
+            && (!quarantine.is_empty()
+                || read_regular_no_symlink_bytes(&self.quarantine_path)?.is_some())
+        {
+            let value = serde_json::json!({"schema_version": 1, "entries": quarantine});
+            atomic_write_bytes(&self.quarantine_path, &pretty_json_bytes(&value)?)?;
         }
 
         ordered.sort_by(|a, b| {
@@ -178,28 +257,20 @@ impl JournalStore {
         Ok(ordered)
     }
 
-    fn open_db_connection(&self, create: bool) -> Result<Connection, String> {
-        if !create && !self.db_path.exists() {
-            return Err("sqlite index does not exist".to_string());
+    fn open_db_connection(&self, _create: bool) -> Result<Connection, String> {
+        let parent = crate::files::Parent::open(&self.db_path)?;
+        let before = parent.stat()?.ok_or("sqlite index does not exist")?;
+        let conn = Connection::open_with_flags(
+            &self.db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|e| format!("failed opening sqlite index: {e}"))?;
+        let after = parent.stat()?.ok_or("sqlite index disappeared")?;
+        if before.st_dev != after.st_dev || before.st_ino != after.st_ino {
+            return Err("sqlite index replaced during open".into());
         }
-        if let Ok(meta) = fs::symlink_metadata(&self.db_path) {
-            if meta.file_type().is_symlink() {
-                return Err(format!("refusing symlink index {}", self.db_path.display()));
-            }
-        }
-        if create {
-            ensure_oms_gitignore(&self.root)?;
-            fs::create_dir_all(&self.root)
-                .map_err(|e| format!("failed creating {}: {e}", self.root.display()))?;
-        }
-        let conn = Connection::open(&self.db_path).map_err(|e| {
-            format!(
-                "failed opening sqlite index {}: {e}",
-                self.db_path.display()
-            )
-        })?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|e| format!("sqlite busy_timeout failed: {e}"))?;
+            .map_err(|e| e.to_string())?;
         Ok(conn)
     }
 
@@ -222,8 +293,8 @@ impl JournalStore {
                 active INTEGER NOT NULL,
                 payload TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS events_day_active ON events(local_date, active, occurred_at);
-            CREATE INDEX IF NOT EXISTS events_week_active ON events(iso_week, active, occurred_at);
+            CREATE INDEX IF NOT EXISTS events_day_active ON events(local_date, active, occurred_at, event_id);
+            CREATE INDEX IF NOT EXISTS events_week_active ON events(iso_week, active, occurred_at, event_id);
             CREATE TABLE IF NOT EXISTS dirty_periods (
                 kind TEXT NOT NULL,
                 period TEXT NOT NULL,
@@ -242,60 +313,90 @@ impl JournalStore {
         .map_err(|e| format!("sqlite schema init failed: {e}"))
     }
 
-    fn live_stat(&self) -> (u64, i128) {
-        match fs::symlink_metadata(&self.events_path) {
-            Ok(m) if !m.file_type().is_symlink() && m.is_file() => {
-                let mtime_ns = i128::from(m.mtime()) * 1_000_000_000 + i128::from(m.mtime_nsec());
-                (m.len(), mtime_ns)
-            }
-            _ => (0, 0),
+    fn live_stat(&self) -> Result<(u64, i128), String> {
+        let parent = crate::files::Parent::open(&self.events_path)?;
+        match parent.stat()? {
+            Some(stat) => Ok((
+                u64::try_from(stat.st_size).map_err(|_| "invalid journal size")?,
+                i128::from(stat.st_mtime) * 1_000_000_000 + i128::from(stat.st_mtime_nsec),
+            )),
+            None => Ok((0, 0)),
         }
     }
 
-    fn cold_digest(&self) -> Result<String, String> {
-        let (manifest, _) = read_verified_cold_events(&self.root)?;
-        let parts: Vec<String> = manifest
-            .segments
-            .iter()
-            .map(|s| format!("{}:{}", s.rel_path, s.sha256))
-            .collect();
-        Ok(sha256_hex(parts.join("|").as_bytes()))
+    fn events_fingerprint(&self) -> Result<(u64, i128), String> {
+        for _ in 0..8 {
+            let snapshot = self.source_snapshot()?;
+            let manifest = &snapshot.0;
+            let stat = self.live_stat();
+            if *manifest != crate::cold::load_cold_manifest(&self.root)? {
+                continue;
+            }
+            let (size, modified) = stat?;
+            if manifest.segments.is_empty() {
+                return Ok((size, modified));
+            }
+            let mut bytes = canonical_json_bytes(&crate::cold::manifest_value(manifest)?)?;
+            bytes.extend_from_slice(format!("{size}:{modified}").as_bytes());
+            let digest = sha256_hex(&bytes);
+            return Ok((
+                size,
+                i128::from(u64::from_str_radix(&digest[..16], 16).map_err(|e| e.to_string())?),
+            ));
+        }
+        Err("journal layout kept changing during read".into())
+    }
+
+    fn ensure_layout(&self) -> Result<(), String> {
+        ensure_oms_gitignore(&self.root)?;
+        let project = crate::schema::project_id_path(&self.repo_root);
+        if read_regular_no_symlink_bytes(&project)?.is_none() {
+            atomic_write_bytes(
+                &project,
+                &pretty_json_bytes(
+                    &serde_json::json!({"schema_version":1,"project_id":self.project.id,"project_name":self.project.name}),
+                )?,
+            )?;
+        }
+        Ok(())
     }
 
     fn ensure_index_current(&self, allow_create: bool) -> Result<Connection, String> {
-        let cold_digest = self.cold_digest()?;
+        ensure_oms_gitignore(&self.root)?;
+        self.ensure_layout()?;
         if !self.db_path.exists() {
             if !allow_create {
-                return self.rebuild_index_into_conn();
+                return self.rebuild_with_views();
             }
-            return self.rebuild_index_into_conn();
+            return self.rebuild_with_views();
         }
         let conn = self.open_db_connection(true)?;
         if Self::init_db_schema(&conn).is_err() {
             drop(conn);
-            return self.rebuild_index_into_conn();
+            return self.rebuild_with_views();
         }
-        let meta = load_db_metadata(&conn);
-        let (size, mtime_ns) = self.live_stat();
+        let meta = load_db_metadata(&conn)?;
+        let (size, mtime_ns) = self.events_fingerprint()?;
         let needs_rebuild = meta.get("schema_version").map(String::as_str)
             != Some(INDEX_SCHEMA_VERSION)
             || meta.get("events_size").map(String::as_str) != Some(&size.to_string())
-            || meta.get("events_mtime_ns").map(String::as_str) != Some(&mtime_ns.to_string())
-            || meta.get("cold_digest").map(String::as_str) != Some(&cold_digest);
+            || meta.get("events_mtime_ns").map(String::as_str) != Some(&mtime_ns.to_string());
         if needs_rebuild {
             let old_rv = meta.get("renderer_version").cloned();
-            let old_periods = list_all_summary_periods(&conn);
+            let old_periods = list_all_summary_periods(&conn)?;
             drop(conn);
             let rebuilt = self.rebuild_index_into_conn()?;
             if old_rv.as_deref() != Some(RENDERER_VERSION) {
                 for (k, p) in old_periods {
-                    let _ = rebuilt.execute(
-                        "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES (?1, ?2)",
-                        params![k, p],
-                    );
+                    rebuilt
+                        .execute(
+                            "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES (?1, ?2)",
+                            params![k, p],
+                        )
+                        .map_err(|e| e.to_string())?;
                 }
             }
-            return Ok(rebuilt);
+            return self.finish_rebuild_views(rebuilt);
         }
         if meta.get("renderer_version").map(String::as_str) != Some(RENDERER_VERSION) {
             mark_all_periods_dirty(&conn)?;
@@ -303,30 +404,60 @@ impl JournalStore {
         Ok(conn)
     }
 
+    fn rebuild_with_views(&self) -> Result<Connection, String> {
+        let connection = self.rebuild_index_into_conn()?;
+        self.finish_rebuild_views(connection)
+    }
+    fn finish_rebuild_views(&self, connection: Connection) -> Result<Connection, String> {
+        if !self.source_snapshot()?.0.segments.is_empty() && !self.rendering.get() {
+            drop(connection);
+            self.rendering.set(true);
+            let result = self.materialize_indexed();
+            self.rendering.set(false);
+            result?;
+            return self.open_db_connection(false);
+        }
+        Ok(connection)
+    }
+    fn check_storage(&self) -> Result<(), String> {
+        if self.storage_checked.get() {
+            return Ok(());
+        }
+        let snapshot = self.source_snapshot()?;
+        if !crate::cold::storage_health(&self.repo_root, true, Some(&snapshot.0)).healthy {
+            return Err("journal storage is unhealthy".into());
+        }
+        self.storage_checked.set(true);
+        Ok(())
+    }
+
     fn rebuild_index_into_conn(&self) -> Result<Connection, String> {
+        let before = self.events_fingerprint()?;
+        if let Some(snapshot) = self.snapshot.borrow_mut().as_mut() {
+            std::rc::Rc::make_mut(snapshot).2 = None;
+        }
         let events = self.load_all_events_verified(true)?;
-        let (size, mtime_ns) = self.live_stat();
-        let cold_digest = self.cold_digest()?;
+        let (size, mtime_ns) = self.events_fingerprint()?;
+        if before != (size, mtime_ns) {
+            return Err("journal changed during index replay".into());
+        }
         ensure_oms_gitignore(&self.root)?;
         fs::create_dir_all(&self.root)
             .map_err(|e| format!("failed creating {}: {e}", self.root.display()))?;
 
-        let tmp_db = self
-            .root
-            .join(format!(".index.sqlite3.tmp.{}", std::process::id()));
-        if tmp_db.exists() {
-            let _ = fs::remove_file(&tmp_db);
-        }
-        let mut conn = Connection::open(&tmp_db)
-            .map_err(|e| format!("failed opening temp index {}: {e}", tmp_db.display()))?;
+        let private = crate::files::PrivateIndex::new(&self.db_path)?;
+        let mut conn = Connection::open_with_flags(
+            private.path(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|e| format!("failed opening private index: {e}"))?;
+        private.validate()?;
         Self::init_db_schema(&conn)?;
 
         let mut superseded_ids: HashSet<String> = HashSet::new();
         for ev in &events {
-            if ev.get("event_type").and_then(Value::as_str) == Some("correction") {
-                if let Some(sup) = ev.get("supersedes_event_id").and_then(Value::as_str) {
-                    superseded_ids.insert(sup.to_string());
-                }
+            if let Some(sup) = ev.get("supersedes_event_id").and_then(Value::as_str) {
+                superseded_ids.insert(sup.to_string());
             }
         }
 
@@ -373,7 +504,7 @@ impl JournalStore {
                 let payload = String::from_utf8(canonical_json_bytes(ev)?)
                     .map_err(|e| format!("UTF-8 error: {e}"))?;
                 tx.execute(
-                    "INSERT OR REPLACE INTO events
+                    "INSERT INTO events
                     (event_id, occurred_at, local_date, iso_week, event_type, source_type, source_id, supersedes_event_id, active, payload)
                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![eid, occ, ld, iw, et, st, sid, sup, active, payload],
@@ -398,7 +529,6 @@ impl JournalStore {
                 ("renderer_version", RENDERER_VERSION.to_string()),
                 ("events_size", size.to_string()),
                 ("events_mtime_ns", mtime_ns.to_string()),
-                ("cold_digest", cold_digest),
             ] {
                 tx.execute(
                     "INSERT OR REPLACE INTO metadata(key, value) VALUES (?1, ?2)",
@@ -411,17 +541,16 @@ impl JournalStore {
         }
         drop(conn);
 
-        if let Ok(meta) = fs::symlink_metadata(&self.db_path) {
-            if meta.file_type().is_symlink() {
-                let _ = fs::remove_file(&tmp_db);
-                return Err(format!(
-                    "refusing to replace symlink {}",
-                    self.db_path.display()
-                ));
-            }
+        if before != self.events_fingerprint()? {
+            return Err("journal changed before index publication".into());
         }
-        fs::rename(&tmp_db, &self.db_path)
-            .map_err(|e| format!("failed installing {}: {e}", self.db_path.display()))?;
+        self.verify_repo()?;
+        private.install()?;
+        if before != self.events_fingerprint()? {
+            return Err(
+                "journal changed after index publication; index requires reconciliation".into(),
+            );
+        }
         self.open_db_connection(true)
     }
 
@@ -433,6 +562,12 @@ impl JournalStore {
             .ok_or_else(|| "missing normalized event_id".to_string())?
             .to_string();
 
+        if crate::cold::load_cold_manifest(&self.root)?
+            .pending
+            .is_some()
+        {
+            return Err("pending journal seal requires oms journal seal --apply".into());
+        }
         let mut conn = self.ensure_index_current(true)?;
         if let Some(existing_payload) = conn
             .query_row(
@@ -444,72 +579,70 @@ impl JournalStore {
             .map_err(|e| format!("sqlite lookup failed: {e}"))?
         {
             if let Ok(val) = serde_json::from_str::<Value>(&existing_payload) {
+                validate_canonical_event(&val)?;
                 return Ok((val, false));
             }
-            return Ok((normalized, false));
+            return Err("indexed duplicate is unavailable".into());
         }
 
         ensure_oms_gitignore(&self.root)?;
         fs::create_dir_all(&self.root)
             .map_err(|e| format!("failed creating {}: {e}", self.root.display()))?;
-        if let Ok(meta) = fs::symlink_metadata(&self.events_path) {
-            if meta.file_type().is_symlink() || (!meta.is_file()) {
-                return Err(format!(
-                    "refusing non-regular log {}",
-                    self.events_path.display()
-                ));
-            }
-        }
-
-        let line_bytes = canonical_json_bytes(&normalized)?;
-        let line_str =
-            String::from_utf8(line_bytes.clone()).map_err(|e| format!("UTF-8 error: {e}"))?;
+        if crate::cold::load_cold_manifest(&self.root)?
+            .pending
+            .is_some()
         {
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.events_path)
-                .map_err(|e| format!("failed opening {}: {e}", self.events_path.display()))?;
-            let mut write_buf = line_bytes;
-            write_buf.push(b'\n');
-            file.write_all(&write_buf)
-                .and_then(|()| file.sync_all())
-                .map_err(|e| format!("failed appending {}: {e}", self.events_path.display()))?;
+            return Err("pending journal seal requires oms journal seal --apply".into());
         }
+        let line_bytes = canonical_json_bytes(&normalized)?;
+        let line_str = String::from_utf8(line_bytes.clone()).map_err(|e| e.to_string())?;
+        self.verify_repo()?;
+        crate::files::append_event(&self.events_path, &line_bytes)?;
+        let result = (|| -> Result<(Value, bool), String> {
+            self.storage_checked.set(false);
+            if let Some(snapshot) = self.snapshot.borrow_mut().as_mut() {
+                if let Some(live) = std::rc::Rc::make_mut(snapshot).2.as_mut() {
+                    if !live.is_empty() && !live.ends_with(b"\n") {
+                        live.push(b'\n');
+                    }
+                    live.extend_from_slice(&line_bytes);
+                    live.push(b'\n');
+                }
+            }
 
-        let (new_size, new_mtime_ns) = self.live_stat();
-        let occ = normalized
-            .get("occurred_at")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let ld = normalized
-            .get("local_date")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let iw = normalized
-            .get("iso_week")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let et = normalized
-            .get("event_type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let st = normalized
-            .pointer("/source/type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let sid = normalized
-            .pointer("/source/id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let sup = normalized
-            .get("supersedes_event_id")
-            .and_then(Value::as_str);
+            let (new_size, new_mtime_ns) = self.events_fingerprint()?;
+            let occ = normalized
+                .get("occurred_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let ld = normalized
+                .get("local_date")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let iw = normalized
+                .get("iso_week")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let et = normalized
+                .get("event_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let st = normalized
+                .pointer("/source/type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let sid = normalized
+                .pointer("/source/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let sup = normalized
+                .get("supersedes_event_id")
+                .and_then(Value::as_str);
 
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("sqlite transaction failed: {e}"))?;
-        tx.execute(
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("sqlite transaction failed: {e}"))?;
+            tx.execute(
             "INSERT OR IGNORE INTO events
             (event_id, occurred_at, local_date, iso_week, event_type, source_type, source_id, supersedes_event_id, active, payload)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
@@ -517,114 +650,103 @@ impl JournalStore {
         )
         .map_err(|e| format!("sqlite insert failed: {e}"))?;
 
-        if let Some(target_id) = sup {
-            if let Some((t_ld, t_iw)) = tx
-                .query_row(
-                    "SELECT local_date, iso_week FROM events WHERE event_id = ?1",
-                    params![target_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-                .map_err(|e| format!("sqlite superseded lookup failed: {e}"))?
-            {
-                tx.execute(
-                    "UPDATE events SET active = 0 WHERE event_id = ?1",
-                    params![target_id],
-                )
-                .map_err(|e| format!("sqlite deactivate failed: {e}"))?;
+            if let Some(target_id) = sup {
+                if let Some((t_ld, t_iw)) = tx
+                    .query_row(
+                        "SELECT local_date, iso_week FROM events WHERE event_id = ?1",
+                        params![target_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .map_err(|e| format!("sqlite superseded lookup failed: {e}"))?
+                {
+                    tx.execute(
+                        "UPDATE events SET active = 0 WHERE event_id = ?1",
+                        params![target_id],
+                    )
+                    .map_err(|e| format!("sqlite deactivate failed: {e}"))?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('daily', ?1)",
+                        params![t_ld],
+                    )
+                    .map_err(|e| {
+                        format!("canonical append completed; derived index update failed: {e}")
+                    })?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('weekly', ?1)",
+                        params![t_iw],
+                    )
+                    .map_err(|e| {
+                        format!("canonical append completed; derived index update failed: {e}")
+                    })?;
+                }
+            }
+
+            if !ld.is_empty() {
                 tx.execute(
                     "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('daily', ?1)",
-                    params![t_ld],
+                    params![ld],
                 )
-                .ok();
+                .map_err(|e| format!("sqlite dirty insert failed: {e}"))?;
+            }
+            if !iw.is_empty() {
                 tx.execute(
                     "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('weekly', ?1)",
-                    params![t_iw],
+                    params![iw],
                 )
-                .ok();
+                .map_err(|e| format!("sqlite dirty insert failed: {e}"))?;
             }
-        }
-
-        if !ld.is_empty() {
             tx.execute(
-                "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('daily', ?1)",
-                params![ld],
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('events_size', ?1)",
+                params![new_size.to_string()],
             )
-            .map_err(|e| format!("sqlite dirty insert failed: {e}"))?;
-        }
-        if !iw.is_empty() {
+            .map_err(|e| format!("canonical append completed; derived index update failed: {e}"))?;
             tx.execute(
-                "INSERT OR IGNORE INTO dirty_periods(kind, period) VALUES ('weekly', ?1)",
-                params![iw],
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES ('events_mtime_ns', ?1)",
+                params![new_mtime_ns.to_string()],
             )
-            .map_err(|e| format!("sqlite dirty insert failed: {e}"))?;
-        }
-        tx.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES ('events_size', ?1)",
-            params![new_size.to_string()],
-        )
-        .ok();
-        tx.execute(
-            "INSERT OR REPLACE INTO metadata(key, value) VALUES ('events_mtime_ns', ?1)",
-            params![new_mtime_ns.to_string()],
-        )
-        .ok();
-        tx.commit()
-            .map_err(|e| format!("sqlite commit failed: {e}"))?;
+            .map_err(|e| format!("canonical append completed; derived index update failed: {e}"))?;
+            tx.commit()
+                .map_err(|e| format!("sqlite commit failed: {e}"))?;
 
-        Ok((normalized, true))
+            Ok((normalized, true))
+        })();
+        result.map_err(|error|format!("canonical append completed; derived state requires reconciliation before retry: {error}"))
     }
 
     pub fn capture_head_commit(&self, now: DateTime<Utc>) -> Result<Option<Value>, String> {
-        let out = Command::new("git")
+        let output = Command::new("git")
             .arg("-C")
             .arg(&self.repo_root)
-            .args(["log", "-1", "--format=%H%n%cI%n%s"])
+            .args(["show", "-s", "--format=%H%x00%cI%x00%s", "HEAD"])
             .output();
-        let Ok(out) = out else {
-            return Ok(None);
+        let output = match output {
+            Ok(value) if value.status.success() => value,
+            _ => return Ok(None),
         };
-        if !out.status.success() {
+        let decoded = String::from_utf8_lossy(&output.stdout);
+        let fields: Vec<_> = decoded.trim().splitn(3, '\0').collect();
+        if fields.len() != 3 || fields[0].is_empty() || fields[1].is_empty() {
             return Ok(None);
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut lines = text.lines();
-        let Some(sha) = lines.next().map(str::trim).filter(|s| s.len() >= 7) else {
-            return Ok(None);
-        };
-        let committed_at = lines.next().map(str::trim).unwrap_or("");
-        let subject = lines.next().map(str::trim).unwrap_or("commit");
-
-        let last_head_path = self.root.join("last-head");
-        if let Some(prev) = read_regular_no_symlink_bytes(&last_head_path)? {
-            if String::from_utf8_lossy(&prev).trim() == sha {
-                return Ok(None);
-            }
-        }
-
-        let short: String = sha.chars().take(12).collect();
-        let occurred = if let Ok(dt) = parse_rfc3339_utc(committed_at) {
-            utc_rfc3339(dt)
-        } else {
-            utc_rfc3339(now)
-        };
-        let payload = serde_json::json!({
-            "event_type": "commit",
-            "occurred_at": occurred,
-            "source": {"type": "git-commit", "id": sha},
-            "correlation": {"commit": sha},
-            "outcome": {"summary": format!("Commit {short}: {subject}"), "status": "recorded"},
-            "verification_status": "not_verified",
-            "evidence": [{"type": "git-commit", "ref": sha}],
-        });
-        let (event, _created) = self.record_event(&payload, now)?;
-        atomic_write_bytes(&last_head_path, format!("{sha}\n").as_bytes())?;
-        Ok(Some(event))
+        let sha = fields[0];
+        self.last_head.replace(sha.into());
+        let payload = serde_json::json!({"event_type":"commit","occurred_at":utc_rfc3339(parse_rfc3339_utc(fields[1])?),"source":{"type":"git-commit","id":sha},
+            "outcome":{"summary":format!("Commit {}: {}",sha.chars().take(12).collect::<String>(),sanitize_text(fields[2],500)),"status":"recorded"},"verification_status":"not_verified",
+            "refs":[{"type":"commit","id":sha}],"evidence":[{"type":"git-commit","ref":sha}],"provenance":{"code_commit":sha}});
+        let (event, created) = self.record_event(&payload, now)?;
+        Ok(created.then_some(event))
     }
 
     pub fn materialize(&self) -> Result<MaterializeReport, String> {
+        self.check_storage()?;
+        self.materialize_indexed()
+    }
+    fn materialize_indexed(&self) -> Result<MaterializeReport, String> {
         let mut conn = self.ensure_index_current(true)?;
-        let meta = load_db_metadata(&conn);
+        crate::files::ensure_directory(&self.daily_dir)?;
+        crate::files::ensure_directory(&self.weekly_dir)?;
+        let meta = load_db_metadata(&conn)?;
         let renderer_changed =
             meta.get("renderer_version").map(String::as_str) != Some(RENDERER_VERSION);
         if renderer_changed {
@@ -652,6 +774,11 @@ impl JournalStore {
 
         for (kind, period) in &dirty {
             let events = load_active_events_for_period(&conn, kind, period)?;
+            let events = if kind == "daily" {
+                crate::adapters::enrich_reviews(&self.repo_root, events)
+            } else {
+                events
+            };
             let md_path = if kind == "daily" {
                 self.daily_dir.join(format!("{period}.md"))
             } else {
@@ -659,13 +786,13 @@ impl JournalStore {
             };
             if events.is_empty() {
                 if md_path.exists() {
-                    let _ = fs::remove_file(&md_path);
+                    crate::files::remove_owned_file(&md_path)?;
                 }
                 conn.execute(
                     "DELETE FROM summaries WHERE kind = ?1 AND period = ?2",
                     params![kind, period],
                 )
-                .ok();
+                .map_err(|e| format!("derived index update failed: {e}"))?;
                 removed += 1;
                 continue;
             }
@@ -674,13 +801,12 @@ impl JournalStore {
             } else {
                 render_weekly(period, &events, &self.tz, &lang)
             };
-            let content_hash = sha256_hex(rendered.as_bytes());
+            let exported = crate::render::bounded_export(&rendered, &lang);
+            let content_hash = sha256_hex(exported.as_bytes());
             let blocker_flag = i64::from(has_blocker(&events));
 
-            let needs_disk_write = match read_regular_no_symlink_bytes(&md_path) {
-                Ok(Some(existing)) => existing != rendered.as_bytes(),
-                _ => true,
-            };
+            let needs_disk_write =
+                read_regular_no_symlink_bytes(&md_path)?.as_deref() != Some(rendered.as_bytes());
             if needs_disk_write {
                 atomic_write_bytes(&md_path, rendered.as_bytes())?;
                 written += 1;
@@ -688,7 +814,7 @@ impl JournalStore {
             conn.execute(
                 "INSERT OR REPLACE INTO summaries(kind, period, content_hash, content, has_blocker)
                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![kind, period, content_hash, rendered, blocker_flag],
+                params![kind, period, content_hash, exported, blocker_flag],
             )
             .map_err(|e| format!("sqlite summary update failed: {e}"))?;
         }
@@ -702,11 +828,11 @@ impl JournalStore {
             "INSERT OR REPLACE INTO metadata(key, value) VALUES ('renderer_version', ?1)",
             params![RENDERER_VERSION],
         )
-        .ok();
+        .map_err(|e| format!("derived index metadata update failed: {e}"))?;
         tx.commit()
             .map_err(|e| format!("sqlite commit failed: {e}"))?;
 
-        let report = write_index_json(&conn, &self.index_json_path, &self.root)?;
+        let report = write_index_json(&conn, &self.index_json_path, &self.project.id)?;
         Ok(MaterializeReport {
             event_count: report.event_count,
             written_periods: written,
@@ -717,6 +843,8 @@ impl JournalStore {
     }
 
     pub fn rebuild(&self) -> Result<MaterializeReport, String> {
+        self.check_storage()?;
+        self.ensure_layout()?;
         let _conn = self.rebuild_index_into_conn()?;
         // Remove stale markdown summaries that do not belong to any active period
         let report = self.materialize()?;
@@ -726,9 +854,6 @@ impl JournalStore {
     }
 
     pub fn summary_text(&self, kind: &str, period: &str) -> Result<Option<String>, String> {
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(None);
-        }
         let conn = self.ensure_index_current(false)?;
         let content: Option<String> = conn
             .query_row(
@@ -742,9 +867,6 @@ impl JournalStore {
     }
 
     pub fn recent_events(&self, limit: usize) -> Result<Vec<Value>, String> {
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(Vec::new());
-        }
         let conn = self.ensure_index_current(false)?;
         let mut stmt = conn
             .prepare(
@@ -752,81 +874,66 @@ impl JournalStore {
             )
             .map_err(|e| format!("sqlite recent query failed: {e}"))?;
         let rows = stmt
-            .query_map(params![limit as i64], |row| row.get::<_, String>(0))
+            .query_map(params![limit.clamp(1, 256) as i64], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(|e| format!("sqlite recent query map failed: {e}"))?;
         let mut out = Vec::new();
         for r in rows {
             let s = r.map_err(|e| format!("sqlite recent row failed: {e}"))?;
-            if let Ok(v) = serde_json::from_str::<Value>(&s) {
-                out.push(v);
-            }
+            let value = decode_indexed(&s)?;
+            out.push(value);
         }
         Ok(out)
     }
 
     pub fn load_events_for_period(&self, kind: &str, period: &str) -> Result<Vec<Value>, String> {
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(Vec::new());
-        }
         let conn = self.ensure_index_current(false)?;
-        load_active_events_for_period(&conn, kind, period)
+        let events = load_active_events_for_period(&conn, kind, period)?;
+        Ok(if kind == "daily" {
+            crate::adapters::enrich_reviews(&self.repo_root, events)
+        } else {
+            events
+        })
     }
 
     pub fn open_annotations(&self) -> Result<OpenAnnotations, String> {
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(OpenAnnotations::default());
-        }
-        let conn = self.ensure_index_current(false)?;
-        let mut stmt = conn
-            .prepare("SELECT payload FROM events WHERE active = 1 ORDER BY occurred_at DESC, event_id DESC")
-            .map_err(|e| format!("sqlite annotations query failed: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("sqlite annotations map failed: {e}"))?;
-
+        self.open_annotations_at(crate::tz::current_utc_now())
+    }
+    fn open_annotations_at(&self, now: DateTime<Utc>) -> Result<OpenAnnotations, String> {
+        let (today, _, _) = self.tz.local_date_and_week(now);
+        let since = naive_date_to_string(today - Duration::days(6));
+        let conn = self.ensure_index_current(true)?;
+        let mut statement=conn.prepare("SELECT payload FROM events WHERE active=1 AND local_date>=?1 ORDER BY occurred_at DESC,event_id DESC").map_err(|e|e.to_string())?;
+        let rows = statement
+            .query_map(params![since], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
         let mut blockers = Vec::new();
         let mut next_actions = Vec::new();
-        for r in rows {
-            let s = r.map_err(|e| format!("sqlite annotations row failed: {e}"))?;
-            let Ok(ev) = serde_json::from_str::<Value>(&s) else {
-                continue;
-            };
-            let eid = ev
-                .get("event_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let date = ev
-                .get("local_date")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if let Some(blk) = ev
-                .get("blocker")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+        let mut seen = [HashSet::new(), HashSet::new()];
+        for row in rows {
+            let event = decode_indexed(&row.map_err(|e| e.to_string())?)?;
+            for (index, (field, bucket)) in [
+                ("blocker", &mut blockers),
+                ("next_action", &mut next_actions),
+            ]
+            .into_iter()
+            .enumerate()
             {
-                blockers.push(AnnotationRow {
-                    event_id: eid.clone(),
-                    local_date: date.clone(),
-                    text: blk.to_string(),
-                });
-            }
-            if let Some(na) = ev
-                .get("next_action")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                next_actions.push(AnnotationRow {
-                    event_id: eid,
-                    local_date: date,
-                    text: na.to_string(),
-                });
+                if let Some(text) = event[field].as_str().filter(|t| !t.is_empty()) {
+                    if seen[index].insert(text.to_owned()) {
+                        bucket.push(AnnotationRow {
+                            event_id: event["event_id"].as_str().unwrap_or("").into(),
+                            occurred_at: event["occurred_at"].as_str().unwrap_or("").into(),
+                            local_date: event["local_date"].as_str().unwrap_or("").into(),
+                            text: text.into(),
+                        });
+                    }
+                }
             }
         }
         Ok(OpenAnnotations {
+            since,
             blockers,
             next_actions,
         })
@@ -834,12 +941,12 @@ impl JournalStore {
 
     pub fn decisions(&self, since: Option<&str>, limit: usize) -> Result<DecisionsResult, String> {
         if let Some(s) = since {
-            if parse_date_ymd(s).is_none() {
+            if s.len() != 10
+                || parse_date_ymd(s).is_none()
+                || parse_date_ymd(s).map(naive_date_to_string).as_deref() != Some(s)
+            {
                 return Err(format!("invalid --since date '{s}'; expected YYYY-MM-DD"));
             }
-        }
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(DecisionsResult::default());
         }
         let conn = self.ensure_index_current(false)?;
         let mut stmt = conn
@@ -855,9 +962,7 @@ impl JournalStore {
 
         for r in rows {
             let s = r.map_err(|e| format!("sqlite decisions row failed: {e}"))?;
-            let Ok(ev) = serde_json::from_str::<Value>(&s) else {
-                continue;
-            };
+            let ev = decode_indexed(&s)?;
             let ld = ev.get("local_date").and_then(Value::as_str).unwrap_or("");
             if let Some(since_date) = since {
                 if ld < since_date {
@@ -867,7 +972,6 @@ impl JournalStore {
             let Some(dec) = ev
                 .get("decision")
                 .and_then(Value::as_str)
-                .map(str::trim)
                 .filter(|d| !d.is_empty())
             else {
                 continue;
@@ -892,6 +996,8 @@ impl JournalStore {
                     .to_string(),
                 local_date: ld.to_string(),
                 decision: dec.to_string(),
+                event_type: ev["event_type"].as_str().unwrap_or("").into(),
+                task_id: ev["correlation"]["task_id"].as_str().unwrap_or("").into(),
                 source_type: ev
                     .pointer("/source/type")
                     .and_then(Value::as_str)
@@ -913,52 +1019,35 @@ impl JournalStore {
         how: &str,
         now: DateTime<Utc>,
     ) -> Result<ResolveResult, String> {
-        let eid = event_id.trim();
-        if !event_id_re().is_match(eid) {
-            return Err(format!("invalid event ID '{eid}'; expected wj_<hex>"));
-        }
-        let how_clean = how.trim();
+        let eid = event_id;
+        let how_clean = how.split_whitespace().collect::<Vec<_>>().join(" ");
         if how_clean.is_empty() {
-            return Err("--how must be non-empty".to_string());
+            return Err("resolve requires --how TEXT".into());
         }
-
+        if !event_id_re().is_match(eid) {
+            return Err("no active journal event with that ID carries a blocker (see: oms journal show --blockers)".into());
+        }
         let conn = self.ensure_index_current(true)?;
         let target_payload: Option<String> = conn
             .query_row(
-                "SELECT payload FROM events WHERE event_id = ?1 AND active = 1",
+                "SELECT payload FROM events WHERE event_id=?1 AND active=1",
                 params![eid],
-                |row| row.get(0),
+                |r| r.get(0),
             )
             .optional()
-            .map_err(|e| format!("sqlite lookup failed: {e}"))?;
-        let Some(raw_target) = target_payload else {
-            return Err(format!("no active event found with ID '{eid}'"));
-        };
-        let target: Value = serde_json::from_str(&raw_target)
-            .map_err(|e| format!("corrupt target event JSON: {e}"))?;
-        if target.get("event_type").and_then(Value::as_str) == Some("correction") {
-            return Err(format!("cannot resolve correction event '{eid}'"));
+            .map_err(|e| e.to_string())?;
+        let target=decode_indexed(&target_payload.ok_or("no active journal event with that ID carries a blocker (see: oms journal show --blockers)")?)?;
+        let target_blocker=target["blocker"].as_str().filter(|b|!b.is_empty()).ok_or("no active journal event with that ID carries a blocker (see: oms journal show --blockers)")?.to_owned();
+        let short: String = target_blocker.chars().take(200).collect();
+        let mut correction_payload = serde_json::json!({"event_type":"correction","occurred_at":utc_rfc3339(now),"source":{"type":"journal-resolve","id":format!("resolve:{eid}")},"supersedes_event_id":eid,
+            "outcome":{"summary":format!("Blocker resolved: {short}"),"status":"resolved"},"decision":format!("Resolved blocker \"{short}\": {}",how_clean.chars().take(400).collect::<String>()),"verification_status":"not_verified"});
+        if crate::schema::json_truthy(&target["correlation"]["task_id"]) {
+            correction_payload["correlation"] =
+                serde_json::json!({"task_id":target["correlation"]["task_id"]});
         }
-        let target_blocker = target
-            .get("blocker")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .to_string();
-
-        let correction_payload = serde_json::json!({
-            "event_type": "correction",
-            "occurred_at": utc_rfc3339(now),
-            "source": {"type": "resolve", "id": format!("resolve-{eid}")},
-            "supersedes_event_id": eid,
-            "outcome": {"summary": format!("Resolved {eid}: {how_clean}"), "status": "resolved"},
-            "verification_status": "not_verified",
-            "decision": how_clean,
-            "evidence": [{"type": "journal-event", "ref": eid}],
-        });
         drop(conn);
 
-        let (correction, _) = self.record_event(&correction_payload, now)?;
+        let (correction, created) = self.record_event(&correction_payload, now)?;
         self.materialize()?;
 
         // Check for other remaining active events with the exact same blocker text
@@ -966,27 +1055,25 @@ impl JournalStore {
         if !target_blocker.is_empty() {
             let conn2 = self.ensure_index_current(true)?;
             let mut stmt = conn2
-                .prepare("SELECT event_id, payload FROM events WHERE active = 1")
+                .prepare("SELECT event_id, payload FROM events WHERE active = 1 ORDER BY occurred_at DESC, event_id DESC")
                 .map_err(|e| format!("sqlite remaining blocker query failed: {e}"))?;
             let rows = stmt
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(|e| format!("sqlite remaining map failed: {e}"))?;
-            for r in rows {
-                if let Ok((other_id, payload_s)) = r {
-                    if let Ok(v) = serde_json::from_str::<Value>(&payload_s) {
-                        if v.get("blocker").and_then(Value::as_str).map(str::trim)
-                            == Some(target_blocker.as_str())
-                        {
-                            remaining_matching.push(other_id);
-                        }
-                    }
+            for row in rows {
+                let (other_id, payload) = row.map_err(|e| e.to_string())?;
+                let value = decode_indexed(&payload)?;
+                if value["blocker"].as_str() == Some(&target_blocker) {
+                    remaining_matching.push(other_id);
                 }
             }
         }
 
         Ok(ResolveResult {
+            blocker: target_blocker,
+            created,
             superseded_event_id: eid.to_string(),
             correction_event_id: correction
                 .get("event_id")
@@ -998,13 +1085,10 @@ impl JournalStore {
     }
 
     pub fn summary_rows(&self) -> Result<Vec<SummaryRow>, String> {
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(Vec::new());
-        }
         let conn = self.ensure_index_current(false)?;
         let mut stmt = conn
             .prepare(
-                "SELECT kind, period, content_hash, content, has_blocker FROM summaries ORDER BY period DESC, kind ASC",
+                "SELECT kind, period, content_hash, content, has_blocker FROM summaries ORDER BY kind, period",
             )
             .map_err(|e| format!("sqlite summary_rows failed: {e}"))?;
         let rows = stmt
@@ -1038,113 +1122,139 @@ impl JournalStore {
             "sessions": agg.sessions,
             "commits": agg.commits,
             "verified": agg.verified,
-            "events": agg.event_count,
         }))
     }
 
     pub fn write_prompt_stamp(
         &self,
-        kind: &str,
-        has_digest: bool,
+        signature: &str,
+        autodistill: bool,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        ensure_oms_gitignore(&self.root)?;
-        fs::create_dir_all(&self.root)
-            .map_err(|e| format!("failed creating {}: {e}", self.root.display()))?;
-        let until_epoch = self.tz.next_local_midnight_epoch(now);
-        let flag = if has_digest { "1" } else { "0" };
-        let content = format!("{until_epoch}\n{flag}\n");
-        let name = if kind == "tick" {
-            "prompt-tick"
-        } else {
-            "prompt-digest"
-        };
-        atomic_write_bytes(&self.root.join(name), content.as_bytes())
+        let path = self.root.join("prompt-tick");
+        let head = self.last_head.borrow().clone();
+        if head.is_empty() || (autodistill && self.distill_due_today(now)?) {
+            return crate::files::remove_owned_file(&path);
+        }
+        let mut lines = vec![self.tz.next_local_midnight_epoch(now).to_string(), head];
+        for name in ["events.jsonl", "digest.json", "distill.json"] {
+            let parent = crate::files::Parent::open(&self.root.join(name))?;
+            lines.push(
+                parent
+                    .stat()?
+                    .map(|s| s.st_size.to_string())
+                    .unwrap_or_default(),
+            );
+        }
+        lines.push(signature.into());
+        atomic_write_bytes(&path, format!("{}\n", lines.join("\n")).as_bytes())
     }
 
     pub fn prompt_digest(&self, now: DateTime<Utc>) -> Result<Option<String>, String> {
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
+        let (_, today, _) = self.tz.local_date_and_week(now);
+        let path = self.root.join("digest.json");
+        if let Some(bytes) = read_regular_no_symlink_bytes(&path)? {
+            if let Ok(row) = serde_json::from_slice::<Value>(&bytes) {
+                if row["schema_version"].as_u64() == Some(1)
+                    && row["last_date"].as_str() == Some(&today)
+                {
+                    return Ok(None);
+                }
+            }
+        }
+        let recent = self.recent_events(256)?;
+        if recent.is_empty() {
             return Ok(None);
         }
-        let conn = self.ensure_index_current(false)?;
-        let (today_date, _, _) = self.tz.local_date_and_week(now);
-        let cutoff = naive_date_to_string(today_date - Duration::days(7));
-        let mut stmt = conn
-            .prepare("SELECT payload FROM events WHERE active = 1 AND local_date >= ?1 ORDER BY occurred_at DESC")
-            .map_err(|e| format!("sqlite digest query failed: {e}"))?;
-        let rows = stmt
-            .query_map(params![cutoff], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("sqlite digest map failed: {e}"))?;
-
-        let mut newest_handoff: Option<(String, String)> = None;
-        let mut blockers: Vec<String> = Vec::new();
-        let mut nexts: Vec<String> = Vec::new();
-        let mut event_count = 0usize;
-        for r in rows {
-            let s = r.map_err(|e| format!("sqlite digest row failed: {e}"))?;
-            let Ok(ev) = serde_json::from_str::<Value>(&s) else {
-                continue;
-            };
-            event_count += 1;
-            if newest_handoff.is_none()
-                && ev.get("event_type").and_then(Value::as_str) == Some("handoff")
+        let annotations = self.open_annotations_at(now)?;
+        let previous: BTreeSet<_> = recent
+            .iter()
+            .filter_map(|e| e["local_date"].as_str())
+            .filter(|d| *d < today.as_str())
+            .collect();
+        if annotations.blockers.is_empty()
+            && annotations.next_actions.is_empty()
+            && previous.is_empty()
+        {
+            return Ok(None);
+        }
+        let mut lines = vec![format!("[work-journal] {} — {today}", self.project.name)];
+        for (heading, rows) in [
+            ("Open blockers", &annotations.blockers),
+            ("Next priorities", &annotations.next_actions),
+        ] {
+            if !rows.is_empty() {
+                lines.push(format!("{heading} (last 7d):"));
+                lines.extend(
+                    rows.iter()
+                        .take(3)
+                        .map(|r| format!("- {} [{}]", r.text, r.event_id)),
+                );
+            }
+        }
+        if let Some(day) = previous.last() {
+            let rows: Vec<_> = recent
+                .iter()
+                .filter(|e| e["local_date"].as_str() == Some(day))
+                .collect();
+            let verified = rows
+                .iter()
+                .filter(|e| e["verification_status"].as_str() == Some("passed"))
+                .count();
+            lines.push(format!(
+                "Last journal day {day}: {} events, {verified} verified.",
+                rows.len()
+            ));
+            let all = self.load_events_for_period("daily", day)?;
+            if !all
+                .iter()
+                .any(|e| crate::schema::json_truthy(&e["decision"]))
             {
-                let summary = ev
-                    .pointer("/outcome/summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let date = ev
-                    .get("local_date")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if !summary.is_empty() {
-                    newest_handoff = Some((date, sanitize_text(&summary, 180)));
-                }
+                lines.push("That day recorded no decision: 'oms agent-task update --decision TEXT [--next TEXT]' is what keeps the summary readable.".into());
             }
-            if blockers.len() < 3 {
-                if let Some(b) = ev
-                    .get("blocker")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|x| !x.is_empty())
-                {
-                    let clean = sanitize_text(b, 140);
-                    if !blockers.contains(&clean) {
-                        blockers.push(clean);
-                    }
+        }
+        let handoffs = self.repo_root.join(".oms/handoffs");
+        let mut newest = None;
+        if let Ok(entries) = fs::read_dir(handoffs) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|v| v != "md") {
+                    continue;
                 }
-            }
-            if nexts.len() < 3 {
-                if let Some(n) = ev
-                    .get("next_action")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|x| !x.is_empty())
-                {
-                    let clean = sanitize_text(n, 140);
-                    if !nexts.contains(&clean) {
-                        nexts.push(clean);
+                let Ok(info) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if !info.is_file() || info.file_type().is_symlink() {
+                    continue;
+                }
+                if let Ok(modified) = info.modified() {
+                    if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
+                        newest = Some((modified, entry.file_name()));
                     }
                 }
             }
         }
-        if event_count == 0 {
-            return Ok(None);
+        if let Some((modified, name)) = newest {
+            if let Ok(duration) = std::time::SystemTime::UNIX_EPOCH
+                .checked_add(std::time::Duration::from_secs(now.timestamp().max(0) as u64))
+                .ok_or("invalid clock")?
+                .duration_since(modified)
+            {
+                if duration.as_secs_f64() <= 48.0 * 3600.0 {
+                    lines.push(format!(
+                        "Newest handoff ({}h old): oms session-handoff show {}",
+                        duration.as_secs() / 3600,
+                        sanitize_text(&crate::sanitize::diagnostic_os_str(&name), 200)
+                    ));
+                }
+            }
         }
-        let mut lines = vec![format!("Work Journal ({event_count} recent events):")];
-        if let Some((d, h)) = newest_handoff {
-            lines.push(format!("- Latest handoff ({d}): {h}"));
-        }
-        for b in blockers {
-            lines.push(format!("- Blocker: {b}"));
-        }
-        for n in nexts {
-            lines.push(format!("- Next: {n}"));
-        }
-        let joined = lines.join("\n");
-        Ok(Some(truncate_utf8_bytes(&joined, DIGEST_MAX_BYTES)))
+        lines.push("Details: oms journal show --today | --blockers | --recent 20".into());
+        atomic_write_bytes(
+            &path,
+            &pretty_json_bytes(&serde_json::json!({"schema_version":1,"last_date":today}))?,
+        )?;
+        Ok(Some(lines.join("\n")))
     }
 
     pub fn distill(
@@ -1166,9 +1276,6 @@ impl JournalStore {
                 Some((occ, eid))
             });
 
-        if !self.events_path.exists() && !ensure_regular_dir_no_symlink(&self.root.join("cold"))? {
-            return Ok(DistillReport::default());
-        }
         let conn = self.ensure_index_current(false)?;
         let mut stmt = conn
             .prepare(
@@ -1189,9 +1296,7 @@ impl JournalStore {
         let mut pending = Vec::new();
         for r in rows {
             let (eid, occ, payload_s) = r.map_err(|e| format!("sqlite distill row failed: {e}"))?;
-            let Ok(ev) = serde_json::from_str::<Value>(&payload_s) else {
-                continue;
-            };
+            let ev = decode_indexed(&payload_s)?;
             let key = (occ, eid);
             let is_pending = match &marker {
                 None => true,
@@ -1230,14 +1335,6 @@ impl JournalStore {
                 "native memory append adapter is not wired; parent CLI must supply MemoryAppendFn via run_with_services".to_string()
             })?;
             for lesson in &lessons {
-                if lesson.contains("<!-- oms-memory")
-                    || oms_scrub::scan(lesson.as_bytes(), &[])
-                        .map(|hits| !hits.is_empty())
-                        .unwrap_or(true)
-                {
-                    skipped_refused.push(lesson.clone());
-                    continue;
-                }
                 match append_fn(&self.repo_root, "journal", lesson) {
                     Ok(MemoryAppendOutcome::Appended) => {
                         promoted_lessons.push(lesson.clone());
@@ -1289,64 +1386,63 @@ impl JournalStore {
                 }
             }
         }
-        let report = self.distill(true, None, now)?;
-        Ok(report.promoted > 0 || report.dropped > 0 || report.deduped > 0)
+        Ok(true)
     }
 
     pub fn status_report(&self) -> Result<Value, String> {
-        let storage = journal_storage(&self.repo_root);
-        let mut active_events = 0usize;
-        let mut daily_periods = Vec::new();
-        let mut weekly_periods = Vec::new();
-        if self.db_path.exists() {
-            if let Ok(conn) = self.ensure_index_current(false) {
-                active_events = conn
-                    .query_row("SELECT COUNT(*) FROM events WHERE active = 1", [], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                    .unwrap_or(0) as usize;
-                let all = list_all_summary_periods(&conn);
-                for (k, p) in all {
-                    if k == "daily" {
-                        daily_periods.push(p);
-                    } else if k == "weekly" {
-                        weekly_periods.push(p);
+        let conn = self.ensure_index_current(true)?;
+        let summary = index_summary(&conn, &self.project.id)?;
+        let snapshot = self.source_snapshot()?;
+        let storage = crate::cold::storage_health(&self.repo_root, false, Some(&snapshot.0));
+        let dirty: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dirty_periods", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut synced = 0;
+        let mut pending = 0;
+        let mut failed = 0;
+        if let Some(bytes) = read_regular_no_symlink_bytes(&self.root.join("sync/notion.json"))? {
+            match serde_json::from_slice::<Value>(&bytes) {
+                Ok(state) => {
+                    if let Some(rows) = state["summaries"].as_object() {
+                        for row in rows.values() {
+                            match row["status"].as_str() {
+                                Some("synced") => synced += 1,
+                                Some("pending") => pending += 1,
+                                Some("failed") => failed += 1,
+                                _ => {}
+                            }
+                        }
                     }
                 }
+                Err(_) => failed += 1,
             }
         }
-        let settings = notion_settings();
-        let excluded = notion_repo_excluded(&self.repo_root);
-        let sync_state = read_regular_no_symlink_bytes(&self.root.join("notion-sync-state.json"))?
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        Ok(serde_json::json!({
-            "project": {
-                "id": self.project.id,
-                "name": self.project.name,
-                "github_repository": self.project.github_repository,
-                "origin_remote": self.project.origin_remote,
-            },
-            "timezone": self.tz.name(),
-            "language": journal_language(Some(&self.tz)),
-            "active_events": active_events,
-            "daily_periods": daily_periods,
-            "weekly_periods": weekly_periods,
-            "storage": storage.to_json(),
-            "notion": {
-                "configured": settings.is_configured(),
-                "excluded": excluded,
-                "transport": settings.transport,
-                "auth_mode": settings.auth_mode,
-                "data_source_id": settings.target_id(),
-                "sync_state": sync_state,
-            }
-        }))
+        let (detected_id, detected_name) = crate::schema::detected_identity(&self.repo_root);
+        let settings = notion_settings()?;
+        Ok(
+            serde_json::json!({"repo":crate::sanitize::diagnostic_os_str(self.repo_root.as_os_str()),"enabled":true,
+            "project":{"id":self.project.id,"name":self.project.name,"detected_id":detected_id,"detected_name":detected_name,"drift":self.project.id!=detected_id||self.project.name!=detected_name},
+            "event_count":summary["event_count"],"active_event_count":summary["active_event_count"],"events_bytes":self.live_stat()?.0,"storage":storage.to_json(),
+            "daily_count":summary["daily"].as_array().map(Vec::len).unwrap_or(0),"weekly_count":summary["weekly"].as_array().map(Vec::len).unwrap_or(0),"dirty_period_count":dirty,"index_ready":true,
+            "notion":{"configured":!settings.target_id().is_empty(),"excluded":notion_repo_excluded(&self.repo_root),"credential_present":crate::config::notion_auth_available(&settings),"auth_mode":settings.auth_mode,
+                "target_kind":if !settings.data_source_id.is_empty(){"data_source"}else if !settings.database_id.is_empty(){"database"}else{""},"data_source_id":settings.data_source_id,"sync_mode":"finalized","synced":synced,"pending":pending,"failed":failed}}),
+        )
     }
 
     pub fn seal(&self, apply: bool, now: DateTime<Utc>) -> Result<usize, String> {
-        seal_events(&self.repo_root, &self.tz, now, apply)
+        self.check_storage()?;
+        let manifest = self.source_snapshot()?.0.clone();
+        if apply {
+            self.ensure_layout()?;
+        }
+        let count = crate::cold::seal_verified(&self.repo_root, &self.tz, now, apply, manifest)?;
+        if apply {
+            self.snapshot.replace(None);
+            if count > 0 {
+                self.ensure_index_current(true)?;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -1364,10 +1460,12 @@ pub struct AnnotationRow {
     pub event_id: String,
     pub local_date: String,
     pub text: String,
+    pub occurred_at: String,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct OpenAnnotations {
+    pub since: String,
     pub blockers: Vec<AnnotationRow>,
     pub next_actions: Vec<AnnotationRow>,
 }
@@ -1378,6 +1476,8 @@ pub struct DecisionRow {
     pub occurred_at: String,
     pub local_date: String,
     pub decision: String,
+    pub event_type: String,
+    pub task_id: String,
     pub source_type: String,
     pub source_id: String,
 }
@@ -1390,6 +1490,8 @@ pub struct DecisionsResult {
 
 #[derive(Clone, Debug)]
 pub struct ResolveResult {
+    pub blocker: String,
+    pub created: bool,
     pub superseded_event_id: String,
     pub correction_event_id: String,
     pub remaining_matching_blocker_ids: Vec<String>,
@@ -1414,55 +1516,25 @@ pub struct DistillReport {
     pub lessons: Vec<String>,
 }
 
-fn read_live_seed_events(events_path: &Path) -> Vec<Value> {
-    let Ok(Some(bytes)) = read_regular_no_symlink_bytes(events_path) else {
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&bytes);
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(t) {
-            if v.is_object() {
-                out.push(v);
-            }
-        }
-    }
-    out
+fn load_db_metadata(conn: &Connection) -> Result<BTreeMap<String, String>, String> {
+    let mut statement = conn
+        .prepare("SELECT key,value FROM metadata")
+        .map_err(|e| e.to_string())?;
+    statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())
 }
-
-fn load_db_metadata(conn: &Connection) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT key, value FROM metadata") else {
-        return map;
-    };
-    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-    else {
-        return map;
-    };
-    for r in rows.flatten() {
-        map.insert(r.0, r.1);
-    }
-    map
-}
-
-fn list_all_summary_periods(conn: &Connection) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let Ok(mut stmt) = conn.prepare("SELECT kind, period FROM summaries ORDER BY kind, period")
-    else {
-        return out;
-    };
-    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-    else {
-        return out;
-    };
-    for r in rows.flatten() {
-        out.push(r);
-    }
-    out
+fn list_all_summary_periods(conn: &Connection) -> Result<Vec<(String, String)>, String> {
+    let mut statement = conn
+        .prepare("SELECT kind,period FROM summaries ORDER BY kind,period")
+        .map_err(|e| e.to_string())?;
+    statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn mark_all_periods_dirty(conn: &Connection) -> Result<(), String> {
@@ -1500,51 +1572,94 @@ fn load_active_events_for_period(
     let mut out = Vec::new();
     for r in rows {
         let s = r.map_err(|e| format!("sqlite period row failed: {e}"))?;
-        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-            out.push(v);
-        }
+        let value = decode_indexed(&s)?;
+        out.push(value);
     }
     Ok(out)
 }
 
-fn write_index_json(
-    conn: &Connection,
-    index_json_path: &Path,
-    journal_dir: &Path,
-) -> Result<MaterializeReport, String> {
+fn decode_indexed(payload: &str) -> Result<Value, String> {
+    crate::sanitize::require_exact_integers(payload.as_bytes())?;
+    let value: Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    validate_canonical_event(&value)?;
+    Ok(value)
+}
+fn index_summary(conn: &Connection, project_id: &str) -> Result<Value, String> {
     let event_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM events WHERE active = 1", [], |r| {
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let active: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events WHERE active=1", [], |r| {
             r.get(0)
         })
-        .unwrap_or(0);
-    let mut daily_periods = Vec::new();
-    let mut weekly_periods = Vec::new();
-    for (k, p) in list_all_summary_periods(conn) {
-        if k == "daily" {
-            daily_periods.push(p);
-        } else if k == "weekly" {
-            weekly_periods.push(p);
-        }
+        .map_err(|e| e.to_string())?;
+    let mut periods = Vec::new();
+    for field in ["local_date", "iso_week"] {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT DISTINCT {field} FROM events WHERE active=1 ORDER BY {field}"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        periods.push(
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?,
+        );
     }
-    let cold_segments = crate::cold::load_cold_manifest(journal_dir)
-        .map(|m| m.segments.len())
-        .unwrap_or(0);
-    let obj = serde_json::json!({
-        "schema_version": INDEX_SCHEMA_VERSION,
-        "renderer_version": RENDERER_VERSION,
-        "event_count": event_count,
-        "daily_periods": daily_periods,
-        "weekly_periods": weekly_periods,
-        "cold_segments": cold_segments,
-    });
-    let bytes = pretty_json_bytes(&obj)?;
-    atomic_write_bytes(index_json_path, &bytes)?;
+    let mut statement=conn.prepare("SELECT payload FROM events WHERE active=1 ORDER BY occurred_at DESC,event_id DESC LIMIT 256").map_err(|e|e.to_string())?;
+    let rows = statement
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let mut events = Vec::new();
+    for row in rows {
+        let value = decode_indexed(&row.map_err(|e| e.to_string())?)?;
+        let descriptor: Map<String, Value> = [
+            "event_id",
+            "occurred_at",
+            "local_date",
+            "iso_week",
+            "event_type",
+            "source",
+        ]
+        .into_iter()
+        .map(|k| (k.into(), value[k].clone()))
+        .collect();
+        events.push(Value::Object(descriptor));
+    }
+    events.reverse();
+    Ok(
+        serde_json::json!({"schema_version":1,"renderer_version":3,"project_id":project_id,"event_count":event_count,"active_event_count":active,"events_truncated":active>events.len() as i64,"events":events,"daily":periods[0],"weekly":periods[1]}),
+    )
+}
+fn write_index_json(
+    conn: &Connection,
+    path: &Path,
+    project_id: &str,
+) -> Result<MaterializeReport, String> {
+    let value = index_summary(conn, project_id)?;
+    let bytes = pretty_json_bytes(&value)?;
+    if read_regular_no_symlink_bytes(path)?.as_deref() != Some(bytes.as_slice()) {
+        atomic_write_bytes(path, &bytes)?;
+    }
     Ok(MaterializeReport {
-        event_count: event_count as usize,
-        written_periods: 0,
-        removed_periods: 0,
-        daily_periods,
-        weekly_periods,
+        event_count: value["event_count"].as_u64().unwrap_or(0) as usize,
+        daily_periods: value["daily"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        weekly_periods: value["weekly"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        ..Default::default()
     })
 }
 
@@ -1552,21 +1667,17 @@ fn prune_stale_markdown(dir: &Path, keep_periods: &[String]) -> Result<(), Strin
     if !ensure_regular_dir_no_symlink(dir)? {
         return Ok(());
     }
-    let keep: HashSet<String> = keep_periods.iter().map(|p| format!("{p}.md")).collect();
-    let entries =
-        fs::read_dir(dir).map_err(|e| format!("failed reading {}: {e}", dir.display()))?;
-    for entry in entries.flatten() {
-        let fname_os = entry.file_name();
-        let Some(fname) = fname_os.to_str() else {
-            continue;
-        };
-        if fname.ends_with(".md") && !keep.contains(fname) {
-            let p = entry.path();
-            if fs::symlink_metadata(&p)
-                .map(|m| m.is_file() && !m.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                let _ = fs::remove_file(&p);
+    let keep: HashSet<_> = keep_periods
+        .iter()
+        .map(|p| std::ffi::OsString::from(format!("{p}.md")))
+        .collect();
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "md") && !keep.contains(&entry.file_name()) {
+            let info = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+            if info.is_file() || info.file_type().is_symlink() {
+                crate::files::remove_owned_file(&path)?;
             }
         }
     }
@@ -1574,10 +1685,7 @@ fn prune_stale_markdown(dir: &Path, keep_periods: &[String]) -> Result<(), Strin
 }
 
 fn distill_normalized_text(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    crate::unicode::casefold(&text.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn distill_candidates(events: &[Value], promoted_norm: &str) -> (Vec<String>, usize, usize) {

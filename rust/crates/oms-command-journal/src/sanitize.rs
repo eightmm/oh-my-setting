@@ -7,155 +7,101 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::sync::OnceLock;
 
-pub const SCHEMA_VERSION: &str = "2.0";
+pub const SCHEMA_VERSION: u64 = 1;
 pub const INDEX_SCHEMA_VERSION: &str = "2";
 pub const RENDERER_VERSION: &str = "3";
-pub const COLD_SCHEMA_VERSION: &str = "1";
+pub const COLD_SCHEMA_VERSION: u64 = 1;
 
-pub const SUMMARY_ITEM_CHAR_LIMIT: usize = 400;
-pub const VALUE_CHAR_LIMIT: usize = 1000;
-pub const DETAIL_CHAR_LIMIT: usize = 4000;
-pub const SUMMARY_BYTE_LIMIT: usize = 64 * 1024;
 pub const LIVE_FILE_BYTE_LIMIT: u64 = 5 * 1024 * 1024;
 pub const LIVE_EVENT_LINE_LIMIT: usize = 1000;
-pub const JOURNAL_FILE_COUNT_LIMIT: usize = 200;
-pub const DAILY_ITEM_LIMIT: usize = 12;
-pub const WEEKLY_ITEM_LIMIT: usize = 20;
-pub const DIGEST_MAX_BYTES: usize = 1800;
-pub const DIGEST_RECENT_DAYS: i64 = 7;
-pub const DEFAULT_TIMEZONE: &str = "UTC";
+pub const JOURNAL_FILE_COUNT_LIMIT: usize = 100;
 
-fn ansi_escape_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("valid regex"))
+fn pattern(expression: &str) -> Regex {
+    Regex::new(expression).expect("canonical sanitizer expression")
 }
 
 fn pem_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(concat!(
-            r"(?s)-----BE",
-            r"GIN [A-Z0-9 ]*PRI",
-            r"VATE KEY-----.*?-----END [A-Z0-9 ]*PRI",
-            r"VATE KEY-----",
-        ))
-        .expect("valid regex")
-    })
-}
-
-fn known_token_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Split prefixes so outbound diff scans never mistake test/regex patterns for secrets.
-        let pattern = concat!(
-            r"(?:",
-            "ntn_",
-            r"[A-Za-z0-9]{10,}|",
-            "secr",
-            "et_",
-            r"[A-Za-z0-9]{10,}|",
-            "gh[pousr]_",
-            r"[A-Za-z0-9_]{12,}|",
-            "github_pat_",
-            r"[A-Za-z0-9_]{20,}|",
-            "sk-",
-            r"[A-Za-z0-9_-]{16,}|",
-            "xox[baprs]-",
-            r"[A-Za-z0-9-]{10,}|",
-            "AIza",
-            r"[0-9A-Za-z_-]{20,}|",
-            "AKIA",
-            r"[0-9A-Z]{16}",
-            r")",
-        );
-        Regex::new(pattern).expect("valid regex")
-    })
-}
-
-fn url_creds_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(https?://)([^/\s:@]+):([^/\s@]+)@").expect("valid regex"))
-}
-
-fn bearer_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._/+~=-]{8,}").expect("valid regex")
-    })
-}
-
-fn secret_assignment_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        // Keep keyword names separate from '=' syntax in source literals.
-        let pattern = concat!(
-            r"(?i)\b(",
-            "tok",
-            "en|",
-            "pass",
-            "word|",
-            "pass",
-            "wd|",
-            "secr",
-            "et|",
-            "api",
-            "_key|",
-            "api",
-            "key|",
-            "authoriz",
-            "ation|",
-            "access",
-            "_key|",
-            "private",
-            "_key",
-            r")(\s*[:",
-            "=",
-            r"]\s*|\s+)([A-Za-z0-9._/+~=-]{6,})",
-        );
-        Regex::new(pattern).expect("valid regex")
+        pattern(
+            r"-----BE[G]IN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)",
+        )
     })
 }
 
 fn raw_field_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| pattern(r"(?i)^(?:raw|stdout|stderr|transcript|conversation|environment|env|diff|output_log|log_text|full_log|workspace_dump)$"))
+}
+
+fn sensitive_field(key: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        let pattern = concat!(
-            r"(?i)^(",
-            "raw|stdout|stderr|transcript|prompt|body|payload|diff|patch|",
-            "env|environment|environ|headers|auth|authorization|cookie|cookies|",
-            "credential|credentials|",
-            "pass",
-            "word|",
-            "secr",
-            "et|",
-            "tok",
-            "en|",
-            "api",
-            "_key|",
-            "api",
-            "key",
-            r")$",
-        );
-        Regex::new(pattern).expect("valid regex")
+        pattern(concat!(
+            r"(?i)(?:^|_)(?:authorization|api_?key|to",
+            "ken|se",
+            "cret|pass",
+            "word|passwd|credential)s?(?:_|$)"
+        ))
     })
+    .is_match(key)
+}
+
+fn redact_text(text: &str) -> String {
+    let mut s = pem_re().replace_all(text, "[REDACTED]").into_owned();
+    for (expression, replacement) in [
+        (
+            concat!(r"(?i)(authoriz", r"ation\s*[:=]\s*).*$"),
+            "${1}[REDACTED]",
+        ),
+        (
+            r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}",
+            "Bearer [REDACTED]",
+        ),
+        (
+            r"(?i)\b(machin[e]\s+\S+\s+logi[n]\s+\S+\s+passwor[d]\s+)\S+",
+            "${1}[REDACTED]",
+        ),
+        (
+            r"(?i)(?:hook[s]\.slac[k]\.com/service[s]/|disc[o]rd(?:app)?\.com/api/webhook[s]/)\S*",
+            "[REDACTED]",
+        ),
+    ] {
+        s = pattern(expression)
+            .replace_all(&s, replacement)
+            .into_owned();
+    }
+    let assignment = pattern(concat!(
+        r#"(?i)(^|[^A-Za-z0-9_])([A-Za-z0-9_]*(?:t[o]ken|s[e]cret|passw(?:or)?[d]|credentia[l]s?|(?:ap[i]|s[e]cret|privat[e])[-_ ]?(?:ke[y]|t[o]ken)|aws_s[e]cret_access_[k]ey))(["']?)\s*[:"#,
+        "=",
+        r#"]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)"#
+    ));
+    s = assignment
+        .replace_all(&s, |c: &Captures| {
+            format!("{}{}{}{}[REDACTED]", &c[1], &c[2], &c[3], char::from(61))
+        })
+        .into_owned();
+    let shapes = pattern(concat!(
+        r"(?:gh[pousr]_[A-Za-z0-9_.-]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-(?:live|test)?[_-]?[A-Za-z0-9_-]{10,}|",
+        r"xox[bap]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{20,}|n[t]n_[0-9]{11}[A-Za-z0-9]{35}|",
+        r"[sr]k_(?:liv[e]|tes[t])_[A-Za-z0-9]{16,}|AK[I]A[0-9A-Z]{16}|AI[z]a[0-9A-Za-z_-]{35}|",
+        r"glpa[t]-[A-Za-z0-9_-]{20,}|np[m]_[A-Za-z0-9]{36,}|\bey[J][A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})"
+    ));
+    s = shapes.replace_all(&s, "[REDACTED]").into_owned();
+    let urls =
+        pattern(r"(^|[^A-Za-z0-9+.-])([0-9+.-]*)([A-Za-z][A-Za-z0-9+.-]*://)[^/\s@]+@([^/\s]+)");
+    s = urls
+        .replace_all(&s, "${1}${2}${3}[REDACTED]@${4}")
+        .into_owned();
+    let paths = pattern(concat!(r"(?:/ho", r"me|/Us", r"ers)/[^/\s]+(?:/[^\s]*)?"));
+    s = paths.replace_all(&s, "<private-path>").into_owned();
+    pattern(r"(?i)[A-Z]:\\Us[e]rs\\[^\\\s]+(?:\\[^\s]*)?")
+        .replace_all(&s, "<private-path>")
+        .into_owned()
 }
 
 pub fn redact_secrets(text: &str) -> String {
-    let mut s = ansi_escape_re().replace_all(text, "").into_owned();
-    s = pem_re()
-        .replace_all(&s, "[REDACTED PRIVATE KEY]")
-        .into_owned();
-    s = known_token_re().replace_all(&s, "[REDACTED]").into_owned();
-    s = url_creds_re()
-        .replace_all(&s, "${1}[REDACTED]:[REDACTED]@")
-        .into_owned();
-    s = bearer_re().replace_all(&s, "${1} [REDACTED]").into_owned();
-    s = secret_assignment_re()
-        .replace_all(&s, |caps: &Captures| {
-            format!("{}{}[REDACTED]", &caps[1], &caps[2])
-        })
-        .into_owned();
-    s
+    redact_text(text)
 }
 
 pub fn truncate_chars(text: &str, limit: usize) -> String {
@@ -184,80 +130,81 @@ pub fn truncate_utf8_bytes(text: &str, max_bytes: usize) -> String {
     text[..end].to_string()
 }
 
+pub(crate) fn canonical_truncate(text: &str, maximum: usize) -> String {
+    if text.len() <= maximum {
+        return text.into();
+    }
+    if maximum < "…".len() {
+        return truncate_utf8_bytes(text, maximum);
+    }
+    format!("{}…", truncate_utf8_bytes(text, maximum - "…".len()))
+}
+
 pub fn sanitize_text(raw: &str, limit: usize) -> String {
-    let cleaned = redact_secrets(raw);
-    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_chars(&collapsed, limit)
+    let controlled: String = raw
+        .chars()
+        .map(|c| if c >= ' ' || c == '\t' { c } else { ' ' })
+        .collect();
+    let clean = redact_text(&controlled);
+    let folded = pattern(r"[ \t]+").replace_all(&clean, " ");
+    canonical_truncate(folded.trim(), limit)
 }
 
 pub fn sanitize_multiline(raw: &str, limit: usize) -> String {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let cleaned = redact_secrets(&normalized);
-    let lines: Vec<&str> = cleaned
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
+    let clean = pem_re().replace_all(raw, "[REDACTED]");
+    let lines: Vec<String> = crate::unicode::text_lines(&clean)
+        .map(|line| {
+            let leading: String = line
+                .chars()
+                .take_while(|c| matches!(c, ' ' | '\t'))
+                .collect();
+            let content = sanitize_text(&line[leading.len()..], 2000);
+            if content.is_empty() {
+                String::new()
+            } else {
+                format!("{}{}", leading.chars().take(8).collect::<String>(), content)
+            }
+        })
         .collect();
-    let joined = lines.join("\n");
-    truncate_chars(&joined, limit)
+    canonical_truncate(&lines.join("\n"), limit)
 }
 
 pub fn bounded_summary(raw: &str, limit: usize) -> String {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let mut cleaned_lines = Vec::new();
-    for line in normalized.lines() {
-        let cleaned = sanitize_text(line, VALUE_CHAR_LIMIT);
-        if !cleaned.is_empty() {
-            cleaned_lines.push(cleaned);
-        }
-    }
-    truncate_chars(&cleaned_lines.join("\n"), limit)
+    sanitize_multiline(raw, limit)
 }
 
 pub fn is_forbidden_raw_key(key: &str) -> bool {
-    key.starts_with('_') || raw_field_re().is_match(key)
+    raw_field_re().is_match(key)
 }
 
 pub fn sanitize_value(value: &Value, key_hint: Option<&str>) -> Option<Value> {
+    if key_hint.is_some_and(is_forbidden_raw_key) {
+        return None;
+    }
+    if key_hint.is_some_and(sensitive_field) {
+        return Some(Value::String("[REDACTED]".into()));
+    }
     match value {
-        Value::Null => Some(Value::Null),
-        Value::Bool(b) => Some(Value::Bool(*b)),
-        Value::Number(n) => Some(Value::Number(n.clone())),
-        Value::String(s) => {
-            let limit = match key_hint {
-                Some("summary" | "note" | "decision" | "blocker" | "next_action") => {
-                    DETAIL_CHAR_LIMIT
-                }
-                _ => VALUE_CHAR_LIMIT,
-            };
-            let cleaned = match key_hint {
-                Some("summary" | "note") => sanitize_multiline(s, limit),
-                _ => sanitize_text(s, limit),
-            };
-            Some(Value::String(cleaned))
-        }
-        Value::Array(items) => {
-            let mut out = Vec::new();
-            for item in items.iter().take(64) {
-                if let Some(cleaned) = sanitize_value(item, None) {
-                    out.push(cleaned);
-                }
-            }
-            Some(Value::Array(out))
-        }
+        Value::Null => None,
+        Value::Bool(_) | Value::Number(_) => Some(value.clone()),
+        Value::String(s) => Some(Value::String(sanitize_text(s, 2000))),
+        Value::Array(items) => Some(Value::Array(
+            items
+                .iter()
+                .take(64)
+                .filter_map(|v| sanitize_value(v, None))
+                .collect(),
+        )),
         Value::Object(map) => {
-            let mut sorted: BTreeMap<String, Value> = BTreeMap::new();
-            for (k, v) in map {
-                if is_forbidden_raw_key(k) {
+            let mut out = Map::new();
+            for (key, value) in map.iter().take(64) {
+                let key = sanitize_text(key, 120);
+                if key.is_empty() || is_forbidden_raw_key(&key) {
                     continue;
                 }
-                if let Some(cleaned) = sanitize_value(v, Some(k.as_str())) {
-                    sorted.insert(k.clone(), cleaned);
+                if let Some(value) = sanitize_value(value, Some(&key)) {
+                    out.insert(key, value);
                 }
-            }
-            let mut out = Map::new();
-            for (k, v) in sorted {
-                out.insert(k, v);
             }
             Some(Value::Object(out))
         }
@@ -560,4 +507,87 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(&mut hex, "{b:02x}");
     }
     hex
+}
+
+/// Refuse a number the current public JSON value type would silently round.
+/// The canonical Python contract has unbounded integers; this refusal is an
+/// explicit interface limitation, never permission to quarantine or migrate it.
+pub(crate) fn require_exact_integers(bytes: &[u8]) -> Result<(), String> {
+    let mut index = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\x5c' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            quoted = true;
+            index += 1;
+            continue;
+        }
+        if byte == b'-' || byte.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_digit()
+                    || matches!(bytes[index], b'.' | b'e' | b'E' | b'+' | b'-'))
+            {
+                index += 1;
+            }
+            let number = &bytes[start..index];
+            let digits = number.strip_prefix(b"-").unwrap_or(number);
+            if !digits.is_empty() && digits.iter().all(u8::is_ascii_digit) {
+                let text = std::str::from_utf8(number).map_err(|_| "invalid JSON number")?;
+                let representable = if number.starts_with(b"-") {
+                    text.parse::<i64>().is_ok()
+                } else {
+                    text.parse::<u64>().is_ok()
+                };
+                if !representable {
+                    return Err("canonical integer exceeds the current native JSON interface; original data was not converted".into());
+                }
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn default_json_bytes(value: &oms_json::Value) -> Result<Vec<u8>, String> {
+    let input = pretty_json_with_surrogates(value)?;
+    let mut output = Vec::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in input {
+        if quoted {
+            output.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\x5c' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else if byte == b'"' {
+            quoted = true;
+            output.push(byte);
+        } else if !byte.is_ascii_whitespace() {
+            output.push(byte);
+            if matches!(byte, b',' | b':') {
+                output.push(b' ');
+            }
+        }
+    }
+    output.push(b'\n');
+    Ok(output)
 }

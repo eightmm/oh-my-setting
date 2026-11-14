@@ -1,16 +1,12 @@
 #![forbid(unsafe_code)]
 
-use crate::sanitize::{
-    DETAIL_CHAR_LIMIT, VALUE_CHAR_LIMIT, bounded_summary, diagnostic_os_str, os_str_to_utf8,
-    sanitize_text,
-};
-use crate::tz::{parse_rfc3339_utc, utc_rfc3339};
+use crate::sanitize::{canonical_json_bytes, sanitize_text, sha256_hex};
+use crate::schema::{json_truthy, python_str};
+use crate::tz::utc_rfc3339;
 use chrono::{DateTime, Utc};
 use regex::Regex;
-use serde_json::{Map, Value};
-use std::fs;
+use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 pub const KNOWN_SOURCE_TYPES: &[&str] = &[
     "agent-task",
@@ -49,1151 +45,586 @@ pub struct ObserveOverrides {
     pub operation: Option<String>,
 }
 
-fn read_regular_text(path: &Path) -> Result<String, String> {
-    let meta = fs::symlink_metadata(path).map_err(|e| {
-        format!(
-            "failed to inspect {}: {e}",
-            diagnostic_os_str(path.as_os_str())
-        )
-    })?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err(format!(
-            "refusing non-regular source file {}",
-            diagnostic_os_str(path.as_os_str())
-        ));
-    }
-    let bytes = fs::read(path).map_err(|e| {
-        format!(
-            "failed reading {}: {e}",
-            diagnostic_os_str(path.as_os_str())
-        )
-    })?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn read_source(path: &Path) -> Result<Vec<u8>, String> {
+    let (root, relative) = crate::schema::storage_root(path)?;
+    root.read_path(
+        &relative,
+        2 * 1024 * 1024,
+        oms_safe_fs::Policy {
+            single_link: true,
+            owner: None,
+            max_components: None,
+        },
+    )
+    .map_err(|e| match e {
+        oms_safe_fs::Error::Oversize => "source record exceeds Work Journal bound".into(),
+        _ => format!("source record unavailable: {e:?}"),
+    })
 }
-
-pub fn build_source_payload(
-    repo_root: &Path,
-    overrides: &ObserveOverrides,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let source_type = overrides.source_type.trim();
-    if source_type.is_empty() {
-        return Err("source_type is required".to_string());
+fn read_json(path: &Path) -> Result<Value, String> {
+    let bytes = read_source(path)?;
+    crate::sanitize::require_exact_integers(&bytes)?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| "source record is not JSON")?;
+    if !value.is_object() {
+        return Err("source record is not an object".into());
     }
-
-    if let Some(vs) = overrides.verification_status.as_deref() {
-        let trimmed = vs.trim();
-        if !trimmed.is_empty() && !crate::schema::is_valid_verification_status(trimmed) {
-            return Err(format!(
-                "invalid --verification-status '{trimmed}'; allowed values: {}",
-                crate::schema::allowed_verification_statuses_text()
-            ));
-        }
-    }
-
-    let record_path_label = resolve_record_path_label(repo_root, overrides.record_path.as_deref())?;
-
-    let mut payload = if let Some(sf) = overrides.source_file.as_deref() {
-        let content = read_regular_text(sf)?;
-        parse_adapter_payload(
-            repo_root,
-            source_type,
-            sf,
-            &content,
-            overrides,
-            record_path_label.as_deref(),
-            now,
-        )?
+    Ok(value)
+}
+fn nonempty(value: &Value) -> Option<&Value> {
+    json_truthy(value).then_some(value)
+}
+fn text(value: &Value) -> String {
+    nonempty(value).map(python_str).unwrap_or_default()
+}
+fn first<'a>(values: &[&'a Value]) -> Value {
+    values
+        .iter()
+        .find(|v| json_truthy(v))
+        .map(|v| (*v).clone())
+        .unwrap_or(Value::Null)
+}
+fn relative(repo: &Path, path: &Path) -> Option<String> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
     } else {
-        let mut base = Map::new();
-        base.insert(
-            "event_type".into(),
-            Value::String(
-                overrides
-                    .event_type
-                    .clone()
-                    .unwrap_or_else(|| "agent_state".to_string()),
-            ),
-        );
-        let mut src = Map::new();
-        src.insert("type".into(), Value::String(source_type.to_string()));
-        if let Some(sid) = overrides
-            .source_id
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            src.insert("id".into(), Value::String(sid.trim().to_string()));
-        }
-        if let Some(rp) = record_path_label.as_deref() {
-            src.insert("record_path".into(), Value::String(rp.to_string()));
-        }
-        base.insert("source".into(), Value::Object(src));
-        Value::Object(base)
+        std::env::current_dir().ok()?.join(path)
     };
-
-    // Apply CLI explicit overrides cleanly
-    if let Some(obj) = payload.as_object_mut() {
-        if let Some(et) = overrides
-            .event_type
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            obj.insert("event_type".into(), Value::String(et.trim().to_string()));
-        }
-        if let Some(occ) = overrides
-            .occurred_at
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            let parsed = parse_rfc3339_utc(occ)?;
-            obj.insert("occurred_at".into(), Value::String(utc_rfc3339(parsed)));
-        } else if !obj.contains_key("occurred_at") {
-            obj.insert("occurred_at".into(), Value::String(utc_rfc3339(now)));
-        }
-        if let Some(vs) = overrides
-            .verification_status
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            obj.insert(
-                "verification_status".into(),
-                Value::String(vs.trim().to_string()),
-            );
-        }
-        if let Some(sid) = overrides
-            .source_id
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            let src = obj
-                .entry("source")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(smap) = src.as_object_mut() {
-                smap.insert("id".into(), Value::String(sid.trim().to_string()));
-            }
-        }
-        if let Some(rp) = record_path_label.as_deref() {
-            let src = obj
-                .entry("source")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(smap) = src.as_object_mut() {
-                smap.insert("record_path".into(), Value::String(rp.to_string()));
-            }
-        }
-        if let Some(op_id) = overrides
-            .operation_id
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            let corr = obj
-                .entry("correlation")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(cmap) = corr.as_object_mut() {
-                cmap.insert(
-                    "operation_id".into(),
-                    Value::String(op_id.trim().to_string()),
-                );
-            }
-        }
-        if let Some(dec) = overrides
-            .decision
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            obj.insert("decision".into(), Value::String(dec.trim().to_string()));
-        }
-        if let Some(blk) = overrides
-            .blocker
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            obj.insert("blocker".into(), Value::String(blk.trim().to_string()));
-        }
-        if let Some(na) = overrides
-            .next_action
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            obj.insert("next_action".into(), Value::String(na.trim().to_string()));
-        }
-        if overrides.outcome.is_some() || overrides.outcome_status.is_some() {
-            let out_entry = obj
-                .entry("outcome")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(omap) = out_entry.as_object_mut() {
-                if let Some(text) = overrides
-                    .outcome
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                {
-                    omap.insert("summary".into(), Value::String(text.trim().to_string()));
-                }
-                if let Some(st) = overrides
-                    .outcome_status
-                    .as_deref()
-                    .filter(|s| !s.trim().is_empty())
-                {
-                    omap.insert("status".into(), Value::String(st.trim().to_string()));
-                }
-            }
-        }
-        if let Some(op) = overrides
-            .operation
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            let src = obj
-                .entry("source")
-                .or_insert_with(|| Value::Object(Map::new()));
-            if let Some(smap) = src.as_object_mut() {
-                smap.insert("command".into(), Value::String(op.trim().to_string()));
-            }
-        }
-    }
-
-    Ok(payload)
+    let canonical = std::fs::canonicalize(&absolute).unwrap_or(absolute);
+    let root = std::fs::canonicalize(repo).ok()?;
+    let rel = canonical.strip_prefix(root).ok()?;
+    Some(crate::sanitize::diagnostic_os_str(rel.as_os_str()))
 }
-
-fn parse_adapter_payload(
-    repo_root: &Path,
-    source_type: &str,
-    source_file: &Path,
-    content: &str,
-    overrides: &ObserveOverrides,
-    record_path_label: Option<&str>,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let rel_ref = if let Some(rp_path) = overrides.record_path.as_deref() {
-        if let Some(stripped) = strip_relative_utf8(repo_root, rp_path) {
-            stripped
-        } else if let Some(rp) = record_path_label {
-            rp.to_string()
-        } else {
-            relative_ref(repo_root, source_file)?
-        }
+fn source_ref(repo: &Path, path: &Path, id: &str) -> String {
+    relative(repo, path)
+        .map(|p| format!("{p}#{id}"))
+        .unwrap_or_else(|| id.into())
+}
+fn command_summary(value: &Value) -> Value {
+    let Some(parts) = value.as_array() else {
+        return Value::Null;
+    };
+    let parts: Vec<_> = parts
+        .iter()
+        .take(12)
+        .map(|p| sanitize_text(&python_str(p), 160))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let summary = sanitize_text(&parts.join(" "), 500);
+    if summary.is_empty() {
+        Value::Null
     } else {
-        relative_ref(repo_root, source_file)?
-    };
-    let trimmed = content.trim();
-
-    if source_type == "session-handoff" {
-        return adapt_session_handoff(source_file, overrides, &rel_ref, content, now);
-    }
-    if source_type == "peer-review" {
-        return adapt_peer_review(repo_root, source_file, overrides, &rel_ref, content, now);
-    }
-    if source_type == "agent-task" && !trimmed.starts_with('{') {
-        return adapt_agent_task_markdown(source_file, &rel_ref, content, overrides, now);
-    }
-
-    // Try single JSON object or last non-empty JSONL object
-    let record_opt = parse_json_or_last_jsonl(trimmed);
-    let Some(record) = record_opt else {
-        if KNOWN_SOURCE_TYPES.contains(&source_type) {
-            return adapt_markdown_fallback(
-                source_type,
-                source_file,
-                overrides,
-                &rel_ref,
-                content,
-                now,
-            );
-        }
-        return Err(format!(
-            "unsupported source_type '{source_type}': source file '{}' is not a valid JSON record",
-            diagnostic_os_str(source_file.as_os_str())
-        ));
-    };
-
-    // If caller already supplied canonical-like event_type + source object
-    if record.get("event_type").is_some()
-        && record
-            .get("source")
-            .and_then(Value::as_object)
-            .and_then(|s| s.get("type"))
-            .is_some()
-    {
-        return Ok(record);
-    }
-
-    match source_type {
-        "run-ledger" => adapt_run_ledger(&record, &rel_ref, now),
-        "run-capsule" => adapt_run_capsule(&record, &rel_ref, now),
-        "ci-status" => adapt_ci_status(&record, &rel_ref, now),
-        "experiment-board" => adapt_experiment_board(&record, &rel_ref, now),
-        "panel-result" => adapt_panel_result(&record, &rel_ref, now),
-        "agent-task" => adapt_json_generic("agent-task", "agent_state", &record, &rel_ref, now),
-        "autopilot" => adapt_json_generic("autopilot", "agent_state", &record, &rel_ref, now),
-        "goal-drive" => adapt_json_generic("goal-drive", "agent_state", &record, &rel_ref, now),
-        "handoff" => adapt_json_generic("handoff", "handoff", &record, &rel_ref, now),
-        "intent" => adapt_json_generic("intent", "decision", &record, &rel_ref, now),
-        "oms-run" => adapt_json_generic("oms-run", "run_finished", &record, &rel_ref, now),
-        "patch-admit" => adapt_json_generic("patch-admit", "validation", &record, &rel_ref, now),
-        "patch-land" => adapt_json_generic("patch-land", "run_finished", &record, &rel_ref, now),
-        "run-reconcile" => {
-            adapt_json_generic("run-reconcile", "run_recovered", &record, &rel_ref, now)
-        }
-        _ => adapt_json_generic(source_type, "agent_state", &record, &rel_ref, now),
+        Value::String(summary)
     }
 }
+fn metrics(value: &Value, id: &str) -> Vec<Value> {
+    value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .take(64)
+        .map(|(k, v)| json!({"name":k,"value":v,"evidence_ref":id}))
+        .collect()
+}
 
-fn parse_json_or_last_jsonl(trimmed: &str) -> Option<Value> {
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-        if val.is_object() {
-            return Some(val);
+fn handoff_summary(path: &Path) -> Result<String, String> {
+    let maximum = 2 * 1024 * 1024;
+    let bytes = match crate::files::read_prefix(path, 4 * maximum + 4) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok("Session handoff captured".into()),
+    };
+    let valid = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let valid = std::str::from_utf8(&bytes[..error.valid_up_to()])
+                .map_err(|_| "handoff is not UTF-8")?;
+            if valid.chars().count() < maximum {
+                return Err("handoff is not UTF-8".into());
+            }
+            valid
         }
-    }
-    for line in trimmed.lines().rev() {
-        let l = line.trim();
-        if l.is_empty() {
+    };
+    let end = valid
+        .char_indices()
+        .nth(maximum)
+        .map(|(index, _)| index)
+        .unwrap_or(valid.len());
+    let text = &valid[..end];
+    let historical = "## Original request (historical)";
+    let modern = crate::unicode::text_lines(text).any(|line| line == historical);
+    let stop = Regex::new(
+        r"^## (?:Goal|Recent user turns.*|Files touched|Resume contract|Open dissents)$",
+    )
+    .expect("pattern");
+    let heading = Regex::new(r"^#{1,6}\s+").expect("pattern");
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for line in crate::unicode::text_lines(text) {
+        if line == "## Last assistant summary" {
+            inside = true;
             continue;
         }
-        if let Ok(val) = serde_json::from_str::<Value>(l) {
-            if val.is_object() {
-                return Some(val);
-            }
-        }
-    }
-    None
-}
-
-fn strip_relative_utf8(repo_root: &Path, path: &Path) -> Option<String> {
-    let abs_path = fs::canonicalize(path).unwrap_or_else(|_| {
-        path.parent()
-            .and_then(|p| fs::canonicalize(p).ok())
-            .map(|p| path.file_name().map_or_else(|| p.clone(), |f| p.join(f)))
-            .unwrap_or_else(|| path.to_path_buf())
-    });
-    let abs_repo = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    if let Ok(rel) = abs_path.strip_prefix(&abs_repo) {
-        if let Some(s) = rel.to_str() {
-            return Some(s.to_string());
-        }
-    }
-    if let Ok(rel) = path.strip_prefix(repo_root) {
-        if let Some(s) = rel.to_str() {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
-fn resolve_record_path_label(
-    repo_root: &Path,
-    rp: Option<&Path>,
-) -> Result<Option<String>, String> {
-    let Some(path) = rp else {
-        return Ok(None);
-    };
-    if path.as_os_str().is_empty() {
-        return Ok(None);
-    }
-    if let Some(s) = path.to_str() {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            return Ok(None);
-        }
-        return Ok(Some(trimmed.to_string()));
-    }
-    if let Some(rel) = strip_relative_utf8(repo_root, path) {
-        let trimmed = rel.trim();
-        if !trimmed.is_empty() {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-    os_str_to_utf8(path.as_os_str(), "--record-path").map(|s| Some(s.trim().to_string()))
-}
-
-fn relative_ref(repo_root: &Path, path: &Path) -> Result<String, String> {
-    let abs_path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let abs_repo = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
-    if let Ok(rel) = abs_path.strip_prefix(&abs_repo) {
-        return os_str_to_utf8(rel.as_os_str(), "--source-file").map(ToOwned::to_owned);
-    }
-    if let Ok(rel) = path.strip_prefix(repo_root) {
-        return os_str_to_utf8(rel.as_os_str(), "--source-file").map(ToOwned::to_owned);
-    }
-    let name = path.file_name().unwrap_or_else(|| path.as_os_str());
-    os_str_to_utf8(name, "--source-file").map(ToOwned::to_owned)
-}
-
-fn file_stem_for_event(
-    path: &Path,
-    overrides: &ObserveOverrides,
-    fallback: &str,
-) -> Result<String, String> {
-    if let Some(stem) = path.file_stem() {
-        if let Some(s) = stem.to_str() {
-            return Ok(s.to_string());
-        }
-    } else {
-        return Ok(fallback.to_string());
-    }
-    if let Some(sid) = overrides
-        .source_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return Ok(sid.to_string());
-    }
-    if let Some(rp_stem) = overrides
-        .record_path
-        .as_deref()
-        .and_then(Path::file_stem)
-        .and_then(|s| s.to_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return Ok(rp_stem.to_string());
-    }
-    match path.file_stem() {
-        Some(stem) => os_str_to_utf8(stem, "--source-file").map(ToOwned::to_owned),
-        None => Ok(fallback.to_string()),
-    }
-}
-
-fn pick_str(obj: &Map<String, Value>, keys: &[&str]) -> Option<String> {
-    for k in keys {
-        if let Some(s) = obj
-            .get(*k)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
-fn pick_occurred_at(obj: &Map<String, Value>, now: DateTime<Utc>) -> String {
-    for k in [
-        "occurred_at",
-        "timestamp",
-        "finished_at",
-        "completed_at",
-        "updated_at",
-        "created_at",
-        "started_at",
-        "ts",
-    ] {
-        if let Some(raw) = obj.get(k).and_then(Value::as_str) {
-            if let Ok(dt) = parse_rfc3339_utc(raw) {
-                return utc_rfc3339(dt);
-            }
-        }
-    }
-    utc_rfc3339(now)
-}
-
-fn adapt_run_ledger(record: &Value, rel_ref: &str, now: DateTime<Utc>) -> Result<Value, String> {
-    let obj = record
-        .as_object()
-        .ok_or_else(|| "run-ledger record must be an object".to_string())?;
-    let run_id = pick_str(obj, &["run_id", "id", "entry_id"]).unwrap_or_default();
-    let seq = obj
-        .get("seq")
-        .or_else(|| obj.get("index"))
-        .and_then(Value::as_u64);
-    let src_id = if !run_id.is_empty() {
-        if run_id.starts_with("ledger-") {
-            run_id.clone()
-        } else {
-            format!("ledger-{run_id}")
-        }
-    } else if let Some(n) = seq {
-        format!("ledger-{rel_ref}#{n}")
-    } else {
-        format!("ledger-{rel_ref}")
-    };
-    let ev_ref = if !run_id.is_empty() {
-        format!("{rel_ref}#{run_id}")
-    } else {
-        rel_ref.to_string()
-    };
-
-    let exit_code = obj
-        .get("exit_code")
-        .or_else(|| obj.get("returncode"))
-        .and_then(Value::as_i64);
-    let status = pick_str(obj, &["status", "state"]).unwrap_or_else(|| match exit_code {
-        Some(0) => "success".to_string(),
-        Some(_) => "failed".to_string(),
-        None => "recorded".to_string(),
-    });
-    let event_type = match status.as_str() {
-        "started" | "running" => "run_started",
-        "recovered" => "run_recovered",
-        _ => "run_finished",
-    };
-    let summary = pick_str(obj, &["summary", "note", "command", "cmd", "label"])
-        .unwrap_or_else(|| format!("Run ledger {status}"));
-    let vs = match exit_code {
-        Some(0) => "not_verified",
-        Some(_) => "failed",
-        None => "not_verified",
-    };
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String(event_type.into()));
-    out.insert(
-        "occurred_at".into(),
-        Value::String(pick_occurred_at(obj, now)),
-    );
-    let mut src = Map::new();
-    src.insert("type".into(), Value::String("run-ledger".into()));
-    src.insert("id".into(), Value::String(src_id));
-    src.insert("record_path".into(), Value::String(rel_ref.into()));
-    out.insert("source".into(), Value::Object(src));
-
-    let mut outcome = Map::new();
-    outcome.insert("summary".into(), Value::String(summary));
-    outcome.insert("status".into(), Value::String(status));
-    if let Some(ec) = exit_code {
-        outcome.insert("exit_code".into(), Value::Number(ec.into()));
-    }
-    out.insert("outcome".into(), Value::Object(outcome));
-    out.insert("verification_status".into(), Value::String(vs.into()));
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "run-ledger", "ref": ev_ref}),
-        ]),
-    );
-    extract_correlation(obj, &mut out);
-    Ok(Value::Object(out))
-}
-
-fn adapt_run_capsule(record: &Value, rel_ref: &str, now: DateTime<Utc>) -> Result<Value, String> {
-    let obj = record
-        .as_object()
-        .ok_or_else(|| "run-capsule record must be an object".to_string())?;
-    let cid = pick_str(obj, &["capsule_id", "run_id", "id"]).unwrap_or_else(|| rel_ref.into());
-    let exit_code = obj.get("exit_code").and_then(Value::as_i64);
-    let status = pick_str(obj, &["status"]).unwrap_or_else(|| match exit_code {
-        Some(0) => "success".to_string(),
-        Some(_) => "failed".to_string(),
-        None => "recorded".to_string(),
-    });
-    let summary = pick_str(obj, &["note", "summary", "command"])
-        .unwrap_or_else(|| format!("Experiment capsule {cid}"));
-    let vs = if status == "failed" || exit_code.is_some_and(|c| c != 0) {
-        "failed"
-    } else {
-        "not_verified"
-    };
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("experiment".into()));
-    out.insert(
-        "occurred_at".into(),
-        Value::String(pick_occurred_at(obj, now)),
-    );
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": "run-capsule", "id": cid, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({"summary": summary, "status": status}),
-    );
-    out.insert("verification_status".into(), Value::String(vs.into()));
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "run-capsule", "ref": rel_ref}),
-        ]),
-    );
-    if let Some(m) = obj.get("metrics") {
-        out.insert("metrics".into(), m.clone());
-    }
-    extract_correlation(obj, &mut out);
-    Ok(Value::Object(out))
-}
-
-fn adapt_ci_status(record: &Value, rel_ref: &str, now: DateTime<Utc>) -> Result<Value, String> {
-    let obj = record
-        .as_object()
-        .ok_or_else(|| "ci-status record must be an object".to_string())?;
-    let sha = pick_str(obj, &["sha", "commit", "head_sha"]).unwrap_or_default();
-    let short_sha: String = sha.chars().take(7).collect();
-    let conclusion = pick_str(obj, &["conclusion", "status", "state"])
-        .unwrap_or_else(|| "unknown".into())
-        .to_ascii_lowercase();
-    let run_id = pick_str(obj, &["run_id", "id"]).unwrap_or_default();
-    let workflow = pick_str(obj, &["workflow", "name"]).unwrap_or_else(|| "CI".into());
-    let src_id = if !run_id.is_empty() {
-        format!("ci-{run_id}")
-    } else if !sha.is_empty() {
-        format!("ci-{sha}")
-    } else {
-        format!("ci-{rel_ref}")
-    };
-
-    let (vs, out_status) = match conclusion.as_str() {
-        "success" | "passed" => ("passed", "success"),
-        "failure" | "failed" | "timed_out" | "cancelled" => ("failed", "failed"),
-        "in_progress" | "queued" | "running" | "pending" => ("running", "running"),
-        _ => ("not_verified", "recorded"),
-    };
-
-    let summary = if !short_sha.is_empty() {
-        format!("CI {conclusion} for commit {sha} ({workflow})")
-    } else {
-        format!("CI {conclusion} ({workflow})")
-    };
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("validation".into()));
-    out.insert(
-        "occurred_at".into(),
-        Value::String(pick_occurred_at(obj, now)),
-    );
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": "ci-status", "id": src_id, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({"summary": summary, "status": out_status}),
-    );
-    out.insert("verification_status".into(), Value::String(vs.into()));
-    if out_status == "failed" {
-        out.insert(
-            "blocker".into(),
-            Value::String(format!("CI {conclusion} for commit {short_sha}")),
-        );
-    }
-    let ev_ref = pick_str(obj, &["url", "html_url"]).unwrap_or_else(|| rel_ref.into());
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "ci-status", "ref": ev_ref}),
-        ]),
-    );
-    extract_correlation(obj, &mut out);
-    if !sha.is_empty() {
-        let corr = out
-            .entry("correlation")
-            .or_insert_with(|| Value::Object(Map::new()));
-        if let Some(cmap) = corr.as_object_mut() {
-            cmap.entry("commit").or_insert_with(|| Value::String(sha));
-        }
-    }
-    Ok(Value::Object(out))
-}
-
-fn adapt_experiment_board(
-    record: &Value,
-    rel_ref: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let mut base = adapt_json_generic("experiment-board", "experiment", record, rel_ref, now)?;
-    if let (Some(obj), Some(rec)) = (base.as_object_mut(), record.as_object()) {
-        if let Some(m) = rec.get("metrics") {
-            obj.insert("metrics".into(), m.clone());
-        }
-    }
-    Ok(base)
-}
-
-fn adapt_panel_result(record: &Value, rel_ref: &str, now: DateTime<Utc>) -> Result<Value, String> {
-    let obj = record
-        .as_object()
-        .ok_or_else(|| "panel-result record must be an object".to_string())?;
-    let sid = pick_str(obj, &["panel_id", "review_id", "id"]).unwrap_or_else(|| rel_ref.into());
-    let verdict =
-        pick_str(obj, &["verdict", "status", "outcome"]).unwrap_or_else(|| "recorded".into());
-    let summary = pick_str(obj, &["summary", "synthesis", "note"])
-        .unwrap_or_else(|| format!("Panel result ({verdict})"));
-    let task_id = pick_str(obj, &["task_id"]);
-    let vs = match verdict.to_ascii_lowercase().as_str() {
-        "pass" | "passed" | "approve" | "approved" => "passed",
-        "fail" | "failed" | "reject" | "rejected" | "block" => "failed",
-        _ => "not_verified",
-    };
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("validation".into()));
-    out.insert(
-        "occurred_at".into(),
-        Value::String(pick_occurred_at(obj, now)),
-    );
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": "panel-result", "id": sid, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({"summary": summary, "status": verdict}),
-    );
-    out.insert("verification_status".into(), Value::String(vs.into()));
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "panel-result", "ref": rel_ref}),
-        ]),
-    );
-    extract_correlation(obj, &mut out);
-    if let Some(tid) = task_id {
-        let corr = out
-            .entry("correlation")
-            .or_insert_with(|| Value::Object(Map::new()));
-        if let Some(cmap) = corr.as_object_mut() {
-            cmap.entry("task_id").or_insert_with(|| Value::String(tid));
-        }
-    }
-    Ok(Value::Object(out))
-}
-
-fn adapt_json_generic(
-    source_type: &str,
-    default_event_type: &str,
-    record: &Value,
-    rel_ref: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let obj = record
-        .as_object()
-        .ok_or_else(|| format!("{source_type} record must be a JSON object"))?;
-    let event_type = pick_str(obj, &["event_type"]).unwrap_or_else(|| default_event_type.into());
-    let src_id = pick_str(obj, &["id", "source_id", "run_id", "task_id", "handoff_id"])
-        .unwrap_or_else(|| rel_ref.into());
-    let summary = pick_str(obj, &["summary", "note", "message", "title", "goal"])
-        .unwrap_or_else(|| format!("{source_type} event ({src_id})"));
-    let status =
-        pick_str(obj, &["status", "state", "verdict"]).unwrap_or_else(|| "recorded".into());
-    let vs = pick_str(obj, &["verification_status"])
-        .filter(|s| crate::schema::is_valid_verification_status(s))
-        .unwrap_or_else(|| "not_verified".into());
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String(event_type));
-    out.insert(
-        "occurred_at".into(),
-        Value::String(pick_occurred_at(obj, now)),
-    );
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": source_type, "id": src_id, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({"summary": summary, "status": status}),
-    );
-    out.insert("verification_status".into(), Value::String(vs));
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": source_type, "ref": rel_ref}),
-        ]),
-    );
-    for field in [
-        "decision",
-        "blocker",
-        "next_action",
-        "note",
-        "research",
-        "work_item",
-    ] {
-        if let Some(v) = obj.get(field) {
-            out.insert(field.into(), v.clone());
-        }
-    }
-    extract_correlation(obj, &mut out);
-    Ok(Value::Object(out))
-}
-
-fn adapt_session_handoff(
-    source_file: &Path,
-    overrides: &ObserveOverrides,
-    rel_ref: &str,
-    content: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    // Parse JSON or JSONL session handoff/transcript: summary is the last assistant line
-    let sid = file_stem_for_event(source_file, overrides, rel_ref)?;
-
-    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(content.trim()) {
-        return adapt_json_generic(
-            "session-handoff",
-            "handoff",
-            &Value::Object(obj),
-            rel_ref,
-            now,
-        );
-    }
-
-    let mut last_assistant = String::new();
-    let mut session_id = sid.clone();
-    let mut occurred = utc_rfc3339(now);
-
-    for line in content.lines() {
-        let t = line.trim();
-        if t.is_empty() {
+        if !inside {
             continue;
         }
-        if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(t) {
-            if let Some(s) = pick_str(&obj, &["session_id", "thread_id"]) {
-                session_id = s;
-            }
-            if let Some(ts) = pick_str(&obj, &["timestamp", "occurred_at", "ts"]) {
-                if let Ok(dt) = parse_rfc3339_utc(&ts) {
-                    occurred = utc_rfc3339(dt);
-                }
-            }
-            let role = obj
-                .get("role")
-                .or_else(|| obj.get("message").and_then(|m| m.get("role")))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if role == "assistant" {
-                let text = extract_assistant_text(&obj);
-                if !text.is_empty() {
-                    if let Some(last_line) = text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
-                        last_assistant = sanitize_text(last_line, VALUE_CHAR_LIMIT);
-                    }
-                }
-            }
+        if line == historical || (!modern && stop.is_match(line)) {
+            break;
+        }
+        let clean = heading.replace(line.trim(), "");
+        let clean = clean.trim_matches(['*', ' ']);
+        if !clean.is_empty() {
+            lines.push(clean.to_owned());
         }
     }
-
-    if last_assistant.is_empty() {
-        let fallback_line = content
-            .lines()
-            .map(str::trim)
-            .rfind(|l| !l.is_empty())
-            .unwrap_or("Session handoff");
-        last_assistant = sanitize_text(fallback_line, VALUE_CHAR_LIMIT);
-    }
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("handoff".into()));
-    out.insert("occurred_at".into(), Value::String(occurred));
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": "session-handoff", "id": sid, "record_path": rel_ref}),
-    );
-    out.insert(
-        "correlation".into(),
-        serde_json::json!({"session_id": session_id}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({"summary": last_assistant, "status": "recorded"}),
-    );
-    out.insert(
-        "verification_status".into(),
-        Value::String("not_verified".into()),
-    );
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "session-handoff", "ref": rel_ref}),
-        ]),
-    );
-    Ok(Value::Object(out))
-}
-
-fn extract_assistant_text(obj: &Map<String, Value>) -> String {
-    if let Some(s) = obj
-        .get("text")
-        .or_else(|| obj.get("content"))
-        .and_then(Value::as_str)
-    {
-        return s.to_string();
-    }
-    if let Some(arr) = obj
-        .get("content")
-        .or_else(|| obj.get("message").and_then(|m| m.get("content")))
-        .and_then(Value::as_array)
-    {
-        let mut parts = Vec::new();
-        for item in arr {
-            if let Some(s) = item.get("text").and_then(Value::as_str) {
-                parts.push(s.to_string());
-            }
+    let joined = lines.join(" ");
+    let mut end = joined.len();
+    for (i, ch) in joined.char_indices() {
+        if matches!(ch, '.' | '!' | '?' | '。')
+            && joined[i + ch.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            end = i + ch.len_utf8();
+            break;
         }
-        return parts.join("\n");
     }
-    String::new()
-}
-
-fn adapt_peer_review(
-    repo_root: &Path,
-    source_file: &Path,
-    overrides: &ObserveOverrides,
-    rel_ref: &str,
-    content: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let trimmed = content.trim();
-    if let Some(json_rec) = parse_json_or_last_jsonl(trimmed) {
-        return adapt_json_generic("peer-review", "validation", &json_rec, rel_ref, now);
-    }
-    let stem = file_stem_for_event(source_file, overrides, rel_ref)?;
-    let summary = bounded_summary(trimmed, DETAIL_CHAR_LIMIT);
-    let summary_text = if summary.is_empty() {
-        format!("Peer review ({stem})")
+    let clean = sanitize_text(&joined[..end].replace(" | ", " "), 120);
+    Ok(if clean.is_empty() {
+        "Session handoff captured".into()
     } else {
-        summary
-    };
-    let task_id = infer_review_task_id(repo_root, source_file, content);
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("validation".into()));
-    out.insert("occurred_at".into(), Value::String(utc_rfc3339(now)));
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": "peer-review", "id": stem, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({"summary": summary_text, "status": "recorded"}),
-    );
-    out.insert(
-        "verification_status".into(),
-        Value::String("not_verified".into()),
-    );
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "peer-review", "ref": rel_ref}),
-        ]),
-    );
-    if let Some(tid) = task_id {
-        out.insert("correlation".into(), serde_json::json!({"task_id": tid}));
-    }
-    Ok(Value::Object(out))
-}
-
-fn task_id_line_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)\btask[ _-]?id\b\s*[:=]\s*`?([A-Za-z0-9._-]+)`?").expect("valid regex")
+        clean
     })
 }
 
-pub fn infer_review_task_id(repo_root: &Path, source_file: &Path, content: &str) -> Option<String> {
-    if let Some(caps) = task_id_line_re().captures(content) {
-        return Some(caps[1].to_string());
+pub fn infer_review_task_id(
+    _repo_root: &Path,
+    source_file: &Path,
+    _content: &str,
+) -> Option<String> {
+    let name = source_file.file_name()?.to_str()?;
+    let pattern = Regex::new(r"-(\d{8}T\d{6}Z-\d+)\.md$").expect("pattern");
+    let captures = pattern.captures(name)?;
+    let row = read_json(
+        &source_file
+            .parent()?
+            .join(format!("_scope-{}.json", &captures[1])),
+    )
+    .ok()?;
+    fn find(row: &Value) -> Option<String> {
+        match row {
+            Value::Object(map) => {
+                if let Some(id) = map
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    return Some(sanitize_text(id, 160));
+                }
+                map.values().find_map(find)
+            }
+            Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
     }
-    // Check companion scope markdown for _synthesis-review-<stamp>.md
-    if let Some(fname) = source_file.file_name().and_then(|n| n.to_str()) {
-        if let Some(stamp) = fname
-            .strip_prefix("_synthesis-review-")
-            .and_then(|s| s.strip_suffix(".md"))
-        {
-            if let Some(parent) = source_file.parent() {
-                for candidate in [
-                    parent.join(format!("_scope-{stamp}.md")),
-                    parent.join(format!("scope-{stamp}.md")),
-                    repo_root
-                        .join(".oms/artifacts/review")
-                        .join(format!("_scope-{stamp}.md")),
-                ] {
-                    if let Ok(scope_text) = read_regular_text(&candidate) {
-                        if let Some(caps) = task_id_line_re().captures(&scope_text) {
-                            return Some(caps[1].to_string());
-                        }
+    find(&row)
+}
+
+fn last_section(text: &str, section: &str) -> Option<String> {
+    let stamped = Regex::new(r"^-\s+\d{4}-\d\d-\d\dT[0-9:]+Z\s+\[[^\]]+\]\s*").expect("pattern");
+    let mut inside = false;
+    let mut value = None;
+    for line in crate::unicode::text_lines(text) {
+        if line == section {
+            inside = true;
+            continue;
+        }
+        if inside && line.starts_with("## ") {
+            break;
+        }
+        if inside && !line.trim().is_empty() {
+            let clean = stamped.replace(line.trim(), "");
+            value = Some(clean.strip_prefix("- ").unwrap_or(&clean).trim().to_owned());
+        }
+    }
+    value
+}
+fn task_payload(path: &Path, operation: &str, occurred: &str) -> Result<Value, String> {
+    let bytes = read_source(path)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let pattern = Regex::new(r"^-\s+([a-z_]+):\s*(.*)$").expect("pattern");
+    let mut metadata = Map::new();
+    for line in crate::unicode::text_lines(&text).take_while(|l| !l.starts_with("## ")) {
+        if let Some(c) = pattern.captures(line) {
+            metadata.insert(c[1].into(), Value::String(c[2].trim().into()));
+        }
+    }
+    let task_id = metadata
+        .get("task_id")
+        .filter(|v| json_truthy(v))
+        .map(python_str)
+        .unwrap_or_else(|| format!("task-{}", &sha256_hex(text.as_bytes())[..16]));
+    let goal = last_section(&text, "## Goal");
+    let result = last_section(&text, "## Current State");
+    let decision = last_section(&text, "## Decisions");
+    let blocker = last_section(&text, "## Last Failure");
+    let next = last_section(&text, "## Next Step");
+    let verification = last_section(&text, "## Verification");
+    let status = metadata.get("status").cloned().unwrap_or(Value::Null);
+    let stable = json!({"task_id":task_id,"operation":operation,"goal":goal,"result":result,"decision":decision,"blocker":blocker,"next":next,"verification":verification,"status":status});
+    let id = format!(
+        "{task_id}:{operation}:{}",
+        &sha256_hex(&canonical_json_bytes(&stable)?)[..16]
+    );
+    let verified = status.as_str() == Some("verified");
+    let verification_status = if operation == "verify" {
+        if verified {
+            "passed"
+        } else if verification.as_ref().is_some_and(|v| v.contains("SKIPPED")) {
+            "skipped"
+        } else {
+            "failed"
+        }
+    } else if operation == "close" && verified {
+        "passed"
+    } else {
+        "not_verified"
+    };
+    let summary = result
+        .or(goal.clone())
+        .unwrap_or_else(|| format!("Agent State {operation}"));
+    let mut payload = json!({"event_type":if operation=="close" {"task_outcome"} else {"agent_state"},"occurred_at":occurred,
+        "source":{"type":"agent-task","id":id},"correlation":{"task_id":task_id,"operation_id":id},
+        "outcome":{"summary":summary,"status":nonempty(&status).cloned().unwrap_or(json!(operation))},
+        "verification_status":verification_status,"evidence":[{"type":"agent-state","ref":task_id}]});
+    for (key, value) in [
+        ("goal", goal),
+        ("decision", decision),
+        ("blocker", blocker),
+        ("next_action", next),
+    ] {
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            payload[key] = json!(value);
+        }
+    }
+    Ok(payload)
+}
+
+pub fn build_source_payload(
+    repo: &Path,
+    o: &ObserveOverrides,
+    now: DateTime<Utc>,
+) -> Result<Value, String> {
+    let path = o
+        .source_file
+        .as_deref()
+        .ok_or("--source-file is required")?;
+    let kind = o.source_type.as_str();
+    let evidence = o.record_path.as_deref().unwrap_or(path);
+    let occurred = o.occurred_at.clone().unwrap_or_else(|| utc_rfc3339(now));
+    let supplied_id = o.source_id.as_deref().filter(|s| !s.is_empty());
+    let mut payload = if kind == "agent-task" {
+        task_payload(path, o.operation.as_deref().unwrap_or("update"), &occurred)?
+    } else if [
+        "autopilot",
+        "goal-drive",
+        "handoff",
+        "intent",
+        "oms-run",
+        "patch-admit",
+        "patch-land",
+        "peer-review",
+        "session-handoff",
+    ]
+    .contains(&kind)
+    {
+        let sid = supplied_id.map(str::to_owned).unwrap_or_else(|| {
+            path.file_stem()
+                .map(crate::sanitize::diagnostic_os_str)
+                .unwrap_or_default()
+        });
+        let event = match kind {
+            "autopilot" | "goal-drive" | "oms-run" | "patch-land" => "phase_outcome",
+            "handoff" | "session-handoff" => "handoff",
+            "intent" => "annotation",
+            "patch-admit" => "patch_admit",
+            _ => "patch_review",
+        };
+        let summary = if let Some(summary) = &o.outcome {
+            summary.clone()
+        } else if ["handoff", "session-handoff"].contains(&kind) {
+            handoff_summary(path)?
+        } else {
+            kind.replace('-', " ")
+        };
+        let mut payload = json!({"event_type":event,"occurred_at":occurred,"source":{"type":kind,"id":sid},
+            "outcome":{"summary":summary,"status":o.outcome_status.as_deref().unwrap_or("recorded")},
+            "verification_status":o.verification_status.as_deref().unwrap_or(if ["handoff","session-handoff"].contains(&kind){"not_applicable"}else{"not_verified"}),
+            "evidence":[{"type":kind,"ref":sid}]});
+        if kind == "peer-review" {
+            if let Some(task) = infer_review_task_id(repo, path, "") {
+                payload["correlation"] = json!({"task_id":task});
+                payload["outcome"]["summary"] = json!(format!("{summary}: {task}"));
+            }
+        }
+        if let Some(relative) = relative(repo, evidence) {
+            payload["refs"] = json!([{"type":kind,"path":relative,"id":sid}]);
+        }
+        payload
+    } else {
+        let row = read_json(path)?;
+        let occurred = nonempty(&row["ts"]).cloned().unwrap_or(json!(occurred));
+        match kind {
+            "panel-result" => {
+                let sid = supplied_id.map(str::to_owned).unwrap_or_else(|| {
+                    text(&first(&[
+                        &row["revision"],
+                        &row["task_id"],
+                        &json!(
+                            path.file_stem()
+                                .map(crate::sanitize::diagnostic_os_str)
+                                .unwrap_or_default()
+                        ),
+                    ]))
+                });
+                let task = sanitize_text(&text(&row["task_id"]), 160);
+                let summary =
+                    sanitize_text(text(&row["summary"]).lines().next().unwrap_or(""), 120);
+                let status = nonempty(&row["outcome"])
+                    .cloned()
+                    .unwrap_or(json!("completed"));
+                json!({"event_type":"phase_outcome","occurred_at":o.occurred_at.clone().unwrap_or_else(||utc_rfc3339(now)),"source":{"type":kind,"id":sid},"correlation":{"task_id":task},
+                    "outcome":{"summary":o.outcome.clone().unwrap_or_else(||format!("Task {} {}: {summary}",if task.is_empty(){"unknown"}else{&task},python_str(&status))),"status":status},
+                    "verification_status":"not_verified","evidence":[{"type":kind,"ref":sid}]})
+            }
+            "run-ledger" => {
+                let sid = if let Some(id) = supplied_id {
+                    id.to_owned()
+                } else if json_truthy(&row["id"]) {
+                    python_str(&row["id"])
+                } else {
+                    let stable: Map<String, Value> = [
+                        "git_sha",
+                        "dirty_hash",
+                        "cmd",
+                        "exit",
+                        "duration_s",
+                        "note",
+                        "slurm_job_id",
+                    ]
+                    .into_iter()
+                    .map(|k| (k.into(), row[k].clone()))
+                    .collect();
+                    format!(
+                        "legacy-{}",
+                        &sha256_hex(&canonical_json_bytes(&Value::Object(stable))?)[..24]
+                    )
+                };
+                let exit = &row["exit"];
+                let research = &row["research"];
+                let note = sanitize_text(&text(&row["note"]), 800);
+                let summary = if json_truthy(&research["question"]) {
+                    format!("Research run: {}", python_str(&research["question"]))
+                } else if !note.is_empty() {
+                    note
+                } else {
+                    format!("Command completed with exit {}", python_str(exit))
+                };
+                let mut payload = json!({"event_type":"run","occurred_at":occurred,"source":{"type":kind,"id":sid},"correlation":{"run_id":row["run_id"],"operation_id":row["operation_id"]},
+                    "outcome":{"summary":summary,"status":if exit.as_i64()==Some(0){"success"}else{"failure"}},"verification_status":if !exit.is_null()&&exit.as_i64()!=Some(0){"failed"}else{"not_verified"},
+                    "evidence":[{"type":"run-ledger","ref":source_ref(repo,evidence,&sid)}],"provenance":{"code_commit":row["git_sha"],"job_id":row["slurm_job_id"],"command_summary":command_summary(&row["cmd"]),"exit_code":exit,"duration_seconds":row["duration_s"],
+                    "hypothesis":research["hypothesis"],"prediction":research["prediction"],"baseline":research["baseline"],"primary_metric":research["metric"],"success_criterion":research["success"],"independent_change":research["change"]}});
+                if json_truthy(&research["question"]) {
+                    payload["goal"] = research["question"].clone();
+                }
+                let metrics = metrics(&row["metrics"], &sid);
+                if !metrics.is_empty() {
+                    payload["metrics"] = json!(metrics);
+                }
+                payload
+            }
+            "run-capsule" => {
+                let sid = supplied_id
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| text(&row["id"]));
+                let result = &row["result"];
+                let exit = &result["exit"];
+                let mut payload = json!({"event_type":"experiment","occurred_at":occurred,"source":{"type":kind,"id":sid},"correlation":{"run_id":sid},
+                    "outcome":{"summary":nonempty(&row["note"]).cloned().unwrap_or(json!("Experiment run completed")),"status":if exit.as_i64()==Some(0){"success"}else{"failure"}},
+                    "verification_status":if !exit.is_null()&&exit.as_i64()!=Some(0){"failed"}else{"not_verified"},"evidence":[{"type":"capsule","ref":source_ref(repo,evidence,&sid)}],
+                    "provenance":{"run_id":sid,"job_id":row["slurm_job_id"],"seed":row["seeds"].as_array().and_then(|a|a.first()),"code_commit":first(&[&row["git"]["commit"],&row["git"]["commit_short"]]),
+                    "command_summary":command_summary(&row["command"]),"exit_code":exit,"duration_seconds":result["duration_s"],"gpu":row["env"]["gpu"],"execution_environment":row["env"]["platform"]}});
+                let refs: Vec<Value> = [("configs", "config"), ("outputs", "artifact")]
+                    .into_iter()
+                    .flat_map(|(field, kind)| {
+                        row[field]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .take(64)
+                            .filter(|r| r.is_object())
+                            .map(move |r| json!({"type":kind,"path":r["path"],"id":r["sha256"]}))
+                    })
+                    .collect();
+                if !refs.is_empty() {
+                    payload["refs"] = json!(refs);
+                }
+                if result["metrics"].is_object() {
+                    payload["metrics"] = json!(metrics(&result["metrics"], &sid));
+                }
+                payload
+            }
+            "run-reconcile" => {
+                let sid = supplied_id
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| text(&row["job_id"]));
+                let state = text(&row["state"]);
+                json!({"event_type":"job","occurred_at":o.occurred_at.clone().map(Value::String).unwrap_or_else(||nonempty(&row["reconciled_at"]).cloned().unwrap_or(json!(utc_rfc3339(now)))),"source":{"type":kind,"id":sid},
+                    "outcome":{"summary":format!("Job {sid} finished: {state}"),"status":if state=="COMPLETED"{"success"}else{"failure"}},"verification_status":if state=="COMPLETED"{"not_verified"}else{"failed"},
+                    "evidence":[{"type":"job-reconcile","ref":source_ref(repo,evidence,&sid)}],"provenance":{"job_id":sid,"exit_code":row["exit_code"],"duration_seconds":row["elapsed"]}})
+            }
+            "experiment-board" => {
+                let id = text(&row["id"]);
+                let state = text(&row["status"]);
+                let sid = supplied_id
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{id}:{state}"));
+                let result = first(&[&row["result"], &row["reason"]]);
+                let mut payload = json!({"event_type":"experiment","occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":if json_truthy(&result){format!("Experiment {id} {state}: {}",python_str(&result))}else{format!("Experiment {id} {state}")},"status":state},
+                    "verification_status":"not_verified","evidence":[{"type":kind,"ref":source_ref(repo,evidence,&sid)}],"provenance":{"job_id":row["job"],"verdict":row["result"]}});
+                for (field, key) in [("reason", "blocker"), ("next", "next_action")] {
+                    if json_truthy(&row[field]) {
+                        payload[key] = row[field].clone();
                     }
                 }
+                payload
+            }
+            "ci-status" => {
+                let conclusion = text(&first(&[&row["conclusion"], &row["status"]]));
+                let run = first(&[&row["databaseId"], &row["run_id"], &row["id"]]);
+                let url = &row["url"];
+                let attempt = &row["attempt"];
+                let sid = if let Some(id) = supplied_id {
+                    id.to_owned()
+                } else if json_truthy(&run) || json_truthy(url) {
+                    let identity = if json_truthy(&run) {
+                        format!("{}:run:{}", python_str(&row["sha"]), python_str(&run))
+                    } else {
+                        format!("{}:run-url:{}", python_str(&row["sha"]), python_str(url))
+                    };
+                    if !attempt.is_null() {
+                        format!("{identity}:attempt:{}:{conclusion}", python_str(attempt))
+                    } else {
+                        format!("{identity}:{conclusion}")
+                    }
+                } else {
+                    format!("{}:{conclusion}", python_str(&row["sha"]))
+                };
+                let failed = ["failure", "timed_out", "cancelled", "startup_failure"]
+                    .contains(&conclusion.as_str());
+                let (status, verification) = if conclusion == "success" {
+                    ("success", "passed")
+                } else if failed {
+                    ("failure", "failed")
+                } else {
+                    ("pending", "not_verified")
+                };
+                let mut refs = vec![
+                    json!({"type":"commit","id":row["sha"]}),
+                    json!({"type":"ci-run","url":url}),
+                ];
+                if json_truthy(&row["pr_number"]) || json_truthy(&row["pr_url"]) {
+                    refs.push(
+                        json!({"type":"pull_request","id":row["pr_number"],"url":row["pr_url"]}),
+                    );
+                }
+                json!({"event_type":"ci","occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":format!("CI {conclusion} for commit {}",python_str(&row["sha"])),"status":status},"verification_status":verification,
+                    "refs":refs,"evidence":[{"type":"ci","ref":source_ref(repo,evidence,&sid)}],"provenance":{"workflow":row["workflow"],"attempt":attempt,"run_id":run}})
+            }
+            _ => {
+                let sid = supplied_id
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| text(&first(&[&row["id"], &row["event_id"]])));
+                json!({"event_type":o.event_type.as_deref().unwrap_or("annotation"),"occurred_at":occurred,"source":{"type":kind,"id":sid},"outcome":{"summary":o.outcome.clone().map(Value::String).unwrap_or_else(||nonempty(&row["summary"]).cloned().unwrap_or(json!(kind))),
+                    "status":o.outcome_status.clone().map(Value::String).unwrap_or_else(||nonempty(&row["status"]).cloned().unwrap_or(json!("recorded")))},"verification_status":"not_verified","evidence":[{"type":kind,"ref":sid}]})
             }
         }
-    }
-    // Fallback to .oms/task/current.md task_id
-    let current_task = repo_root.join(".oms").join("task").join("current.md");
-    if let Ok(text) = read_regular_text(&current_task) {
-        if let Some(caps) = task_id_line_re().captures(&text) {
-            return Some(caps[1].to_string());
-        }
-    }
-    None
-}
-
-fn adapt_agent_task_markdown(
-    source_file: &Path,
-    rel_ref: &str,
-    content: &str,
-    overrides: &ObserveOverrides,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let mut task_id = String::new();
-    let mut goal = String::new();
-    let mut status = String::new();
-    let mut result_text = String::new();
-    let mut decision = String::new();
-    let mut blocker = String::new();
-    let mut next_action = String::new();
-    let mut session_hash = String::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(v) = trimmed.strip_prefix("task_id:") {
-            task_id = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- task_id:") {
-            task_id = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("status:") {
-            status = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- status:") {
-            status = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("source_session:") {
-            session_hash = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- Goal:") {
-            goal = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- Result:") {
-            result_text = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- Decision:") {
-            decision = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- Blocker:") {
-            blocker = v.trim().to_string();
-        } else if let Some(v) = trimmed.strip_prefix("- Next:") {
-            next_action = v.trim().to_string();
-        }
-    }
-    if goal.is_empty() {
-        if let Some(idx) = content.find("## Goal") {
-            let after = &content[idx + 7..];
-            for line in after.lines().map(str::trim) {
-                if line.starts_with("## ") {
-                    break;
-                }
-                if !line.is_empty() {
-                    goal = line.trim_start_matches("- ").to_string();
-                    break;
-                }
-            }
-        }
-    }
-    let summary = if !result_text.is_empty() {
-        result_text
-    } else if !goal.is_empty() {
-        goal
-    } else {
-        file_stem_for_event(source_file, overrides, "agent-task")?
     };
-    let op = overrides
-        .operation
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("update");
-    let src_id = if !task_id.is_empty() {
-        format!("{task_id}:{op}")
-    } else {
-        rel_ref.to_string()
-    };
-
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("agent_state".into()));
-    out.insert("occurred_at".into(), Value::String(utc_rfc3339(now)));
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": "agent-task", "id": src_id, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({
-            "summary": summary,
-            "status": if status.is_empty() { "recorded".to_string() } else { status }
-        }),
-    );
-    out.insert(
-        "verification_status".into(),
-        Value::String("not_verified".into()),
-    );
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": "agent-task", "ref": rel_ref}),
-        ]),
-    );
-    if !decision.is_empty() && decision != "none" {
-        out.insert("decision".into(), Value::String(decision));
-    }
-    if !blocker.is_empty() && blocker != "none" {
-        out.insert("blocker".into(), Value::String(blocker));
-    }
-    if !next_action.is_empty() && next_action != "none" {
-        out.insert("next_action".into(), Value::String(next_action));
-    }
-    let mut corr = Map::new();
-    if !task_id.is_empty() {
-        corr.insert("task_id".into(), Value::String(task_id));
-    }
-    if !session_hash.is_empty() {
-        corr.insert("session_id".into(), Value::String(session_hash));
-    }
-    if !corr.is_empty() {
-        out.insert("correlation".into(), Value::Object(corr));
-    }
-    Ok(Value::Object(out))
-}
-
-fn adapt_markdown_fallback(
-    source_type: &str,
-    source_file: &Path,
-    overrides: &ObserveOverrides,
-    rel_ref: &str,
-    content: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, String> {
-    let summary = bounded_summary(content, DETAIL_CHAR_LIMIT);
-    let sid = file_stem_for_event(source_file, overrides, rel_ref)?;
-    let mut out = Map::new();
-    out.insert("event_type".into(), Value::String("agent_state".into()));
-    out.insert("occurred_at".into(), Value::String(utc_rfc3339(now)));
-    out.insert(
-        "source".into(),
-        serde_json::json!({"type": source_type, "id": sid, "record_path": rel_ref}),
-    );
-    out.insert(
-        "outcome".into(),
-        serde_json::json!({
-            "summary": if summary.is_empty() { format!("{source_type} observation") } else { summary },
-            "status": "recorded"
-        }),
-    );
-    out.insert(
-        "verification_status".into(),
-        Value::String("not_verified".into()),
-    );
-    out.insert(
-        "evidence".into(),
-        Value::Array(vec![
-            serde_json::json!({"type": source_type, "ref": rel_ref}),
-        ]),
-    );
-    Ok(Value::Object(out))
-}
-
-fn extract_correlation(obj: &Map<String, Value>, out: &mut Map<String, Value>) {
-    let mut corr = obj
-        .get("correlation")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    for key in [
-        "operation_id",
-        "task_id",
-        "session_id",
-        "thread_id",
-        "run_id",
-        "commit",
-        "branch",
-        "pr_number",
+    for (field, value) in [
+        ("event_type", &o.event_type),
+        ("occurred_at", &o.occurred_at),
+        ("verification_status", &o.verification_status),
+        ("decision", &o.decision),
+        ("blocker", &o.blocker),
+        ("next_action", &o.next_action),
     ] {
-        if let Some(v) = obj.get(key) {
-            if !corr.contains_key(key) {
-                corr.insert(key.into(), v.clone());
-            }
+        if let Some(value) = value.as_ref().filter(|v| !v.is_empty()) {
+            payload[field] = json!(value);
         }
     }
-    if !corr.is_empty() {
-        out.insert("correlation".into(), Value::Object(corr));
+    if let Some(value) = supplied_id {
+        payload["source"]["id"] = json!(value);
     }
+    if let Some(value) = o.operation_id.as_ref().filter(|v| !v.is_empty()) {
+        if !payload["correlation"].is_object() {
+            payload["correlation"] = json!({});
+        }
+        payload["correlation"]["operation_id"] = json!(value);
+    }
+    if let Some(value) = o.outcome.as_ref().filter(|v| !v.is_empty()) {
+        payload["outcome"]["summary"] = json!(if kind == "peer-review"
+            && json_truthy(&payload["correlation"]["task_id"])
+        {
+            format!(
+                "{value}: {}",
+                python_str(&payload["correlation"]["task_id"])
+            )
+        } else {
+            value.clone()
+        });
+    }
+    if let Some(value) = o.outcome_status.as_ref().filter(|v| !v.is_empty()) {
+        payload["outcome"]["status"] = json!(value);
+    }
+    Ok(payload)
+}
+
+pub(crate) fn enrich_reviews(repo: &Path, events: Vec<Value>) -> Vec<Value> {
+    events
+        .into_iter()
+        .map(|mut event| {
+            if event["source"]["type"].as_str() == Some("peer-review")
+                && !json_truthy(&event["correlation"]["task_id"])
+            {
+                let path = event["refs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|r| r["type"].as_str() == Some("peer-review") && json_truthy(&r["path"]))
+                    .and_then(|r| r["path"].as_str());
+                if let Some(task) =
+                    path.and_then(|path| infer_review_task_id(repo, &repo.join(path), ""))
+                {
+                    if !event["correlation"].is_object() {
+                        event["correlation"] = json!({});
+                    }
+                    event["correlation"]["task_id"] = json!(task);
+                    let summary = if json_truthy(&event["outcome"]["summary"]) {
+                        python_str(&event["outcome"]["summary"])
+                    } else {
+                        "Peer review outcome".into()
+                    };
+                    if !event["outcome"].is_object() {
+                        event["outcome"] = json!({});
+                    }
+                    event["outcome"]["summary"] =
+                        json!(if summary.ends_with(&format!(": {task}")) {
+                            summary
+                        } else {
+                            format!("{summary}: {task}")
+                        });
+                }
+            }
+            event
+        })
+        .collect()
 }

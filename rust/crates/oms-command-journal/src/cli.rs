@@ -87,7 +87,7 @@ pub enum ShowMode {
     Decisions {
         since: Option<String>,
     },
-    Recent(usize),
+    Recent(i64),
     Grep {
         query: String,
         kinds: Vec<String>,
@@ -143,16 +143,63 @@ pub fn help_text() -> &'static str {
         "  disconnect   Remove persisted Notion configuration\n",
         "  identity     Show or adopt detected repository journal identity\n",
         "  status       Show journal storage, index, and sync status\n",
-        "  observe      Record an event from a source file or CLI fields\n",
+        "  observe      Record an event from a source file\n",
         "  tick         Capture HEAD commit, materialize dirty periods, emit prompt digest/distill\n",
         "  materialize  Materialize dirty daily and weekly markdown summaries\n",
         "  rebuild      Rebuild SQLite index and all markdown summaries from canonical events\n",
         "  seal         Partition closed-month events into cold storage (default dry-run, --apply to write)\n",
         "  show         Display summaries, blockers, decisions, recent events, or --grep search\n",
-        "  resolve      Record a correction event superseding an active event\n",
+        "  resolve      Record a correction event resolving an active blocker\n",
         "  sync         Explicitly export closed/recent summaries to Notion\n",
         "  distill      Promote distilled decisions/blockers into project shared memory\n"
     )
+}
+
+pub(crate) fn contextual_help(args: &[OsString]) -> String {
+    let normalized = normalize_leading_repo(args).unwrap_or_default();
+    let command = normalized.first().and_then(|s| s.to_str()).unwrap_or("");
+    let options = match command {
+        "configure" => {
+            "(--data-source-id ID | --discover | --exclude-repo PATH | --include-repo PATH | --lang {en,ko}) [--no-validate]"
+        }
+        "disconnect" => "[--managed]",
+        "identity" => "[--repo PATH] [--json] [--adopt-detected]",
+        "status" => "[--repo PATH] [--json]",
+        "observe" => {
+            "--repo PATH --source-type TYPE --source-file PATH [--record-path PATH] [--event-type TYPE] [--source-id ID] [--operation-id ID] [--occurred-at TIMESTAMP] [--verification-status STATUS] [--outcome TEXT] [--outcome-status STATUS] [--decision TEXT] [--blocker TEXT] [--next-action TEXT] [--operation OPERATION]"
+        }
+        "tick" => "--repo PATH [--local-only] [--digest] [--autodistill]",
+        "materialize" | "rebuild" => "[--repo PATH]",
+        "seal" => "[--repo PATH] [--apply]",
+        "show" => {
+            "[--repo PATH] [--today | --week | --period PERIOD | --blockers | --decisions | --recent N | --grep TEXT] [--since YYYY-MM-DD] [--kind {journal,handoff,thread,dispatch,result}] [--limit N] [--json]"
+        }
+        "resolve" => "EVENT_ID [--repo PATH] --how TEXT",
+        "sync" => {
+            "[--repo PATH] [--force] [--today | --recent-days N] [--budget SECONDS] [--max-per-tick N]"
+        }
+        "distill" => "[--repo PATH] [--dry-run]",
+        _ => return help_text().into(),
+    };
+    let mut output = format!(
+        "usage: oms journal {command} [-h] {options}\n\n-h, --help  show this help message and exit\n"
+    );
+    if command == "observe" {
+        output.push_str(&format!(
+            "event types: {}\nverification statuses: {}\n",
+            crate::schema::EVENT_TYPES.join(", "),
+            crate::schema::VERIFICATION_STATUSES.join(", ")
+        ));
+    }
+    if command == "show" {
+        output.push_str(
+            "--since applies to --decisions; --kind and --limit apply only with --grep.\n",
+        );
+    }
+    if command == "seal" {
+        output.push_str("Default: dry-run. --apply seals prior local months.\n");
+    }
+    output
 }
 
 pub fn parse_command(raw_args: &[OsString]) -> Result<JournalCommand, String> {
@@ -174,6 +221,53 @@ pub fn parse_command(raw_args: &[OsString]) -> Result<JournalCommand, String> {
         return Ok(JournalCommand::Help);
     }
 
+    for argument in rest {
+        if let Some(value) = argument.to_str() {
+            if let Some((flag, _)) = value.split_once('=') {
+                if [
+                    "--discover",
+                    "--no-validate",
+                    "--managed",
+                    "--json",
+                    "--adopt-detected",
+                    "--local-only",
+                    "--digest",
+                    "--autodistill",
+                    "--apply",
+                    "--today",
+                    "--week",
+                    "--blockers",
+                    "--decisions",
+                    "--force",
+                    "--dry-run",
+                ]
+                .contains(&flag)
+                {
+                    return Err(format!("error: {flag} does not take a value"));
+                }
+            }
+        }
+    }
+    if [
+        "configure",
+        "disconnect",
+        "identity",
+        "status",
+        "observe",
+        "tick",
+        "materialize",
+        "rebuild",
+        "seal",
+        "show",
+        "resolve",
+        "sync",
+        "distill",
+    ]
+    .contains(&sub)
+        && rest.iter().any(|a| a == "--help" || a == "-h")
+    {
+        return Ok(JournalCommand::Help);
+    }
     match sub {
         "configure" => parse_configure(rest),
         "disconnect" => parse_disconnect(rest),
@@ -312,6 +406,14 @@ fn parse_configure(args: &[OsString]) -> Result<JournalCommand, String> {
             }
         }
         i += 1;
+    }
+    let targets = usize::from(data_source_id.is_some())
+        + usize::from(discover)
+        + usize::from(!exclude_repos.is_empty())
+        + usize::from(!include_repos.is_empty())
+        + usize::from(lang.is_some());
+    if targets != 1 {
+        return Err("error: configure requires exactly one of --data-source-id, --discover, --exclude-repo, --include-repo or --lang".into());
     }
     Ok(JournalCommand::Configure {
         data_source_id,
@@ -466,6 +568,26 @@ fn parse_observe(args: &[OsString]) -> Result<JournalCommand, String> {
     if inner.source_type.trim().is_empty() {
         return Err("error: observe requires --source-type".to_string());
     }
+    if repo.is_none() {
+        return Err("error: observe requires --repo".into());
+    }
+    if inner.source_file.is_none() {
+        return Err("error: observe requires --source-file".into());
+    }
+    if inner
+        .event_type
+        .as_deref()
+        .is_some_and(|s| !crate::schema::is_valid_event_type(s))
+    {
+        return Err("error: invalid --event-type".into());
+    }
+    if inner
+        .verification_status
+        .as_deref()
+        .is_some_and(|s| !crate::schema::is_valid_verification_status(s))
+    {
+        return Err("error: invalid --verification-status".into());
+    }
     Ok(JournalCommand::Observe(ObserveOverridesWithRepo {
         repo,
         inner,
@@ -489,6 +611,9 @@ fn parse_tick(args: &[OsString]) -> Result<JournalCommand, String> {
             other => return Err(format!("error: unrecognized argument '{other}' for tick")),
         }
         i += 1;
+    }
+    if repo.is_none() {
+        return Err("error: tick requires --repo".into());
     }
     Ok(JournalCommand::Tick {
         repo,
@@ -524,10 +649,11 @@ fn parse_show(args: &[OsString]) -> Result<JournalCommand, String> {
     let mut blockers = false;
     let mut decisions = false;
     let mut since: Option<String> = None;
-    let mut recent: Option<usize> = None;
+    let mut recent: Option<i64> = None;
     let mut grep: Option<String> = None;
     let mut kinds: Vec<String> = Vec::new();
     let mut limit: usize = crate::search::DEFAULT_LIMIT;
+    let mut supplied_limit = false;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -544,17 +670,15 @@ fn parse_show(args: &[OsString]) -> Result<JournalCommand, String> {
             "--since" => since = Some(take_val_str(args, &mut i, flag, inline)?.to_string()),
             "--recent" => {
                 let raw = take_val_str(args, &mut i, flag, inline)?;
-                let n: usize = raw.parse().map_err(|_| {
-                    format!("error: --recent expects positive integer, got '{raw}'")
-                })?;
-                if n == 0 {
-                    return Err("error: --recent must be >= 1".to_string());
-                }
+                let n: i64 = raw
+                    .parse()
+                    .map_err(|_| format!("error: --recent expects an integer, got '{raw}'"))?;
                 recent = Some(n);
             }
             "--grep" => grep = Some(take_val_str(args, &mut i, flag, inline)?.to_string()),
             "--kind" => kinds.push(take_val_str(args, &mut i, flag, inline)?.to_string()),
             "--limit" => {
+                supplied_limit = true;
                 let raw = take_val_str(args, &mut i, flag, inline)?;
                 limit = raw
                     .parse()
@@ -578,8 +702,8 @@ fn parse_show(args: &[OsString]) -> Result<JournalCommand, String> {
     if since.is_some() && !decisions {
         return Err("error: --since applies only to show --decisions".to_string());
     }
-    if !kinds.is_empty() && grep.is_none() {
-        return Err("error: --kind applies only to show --grep".to_string());
+    if (!kinds.is_empty() || supplied_limit) && grep.is_none() {
+        return Err("error: --kind and --limit apply only with --grep".to_string());
     }
 
     let mode = if let Some(q) = grep {
@@ -649,8 +773,23 @@ fn parse_sync(args: &[OsString]) -> Result<JournalCommand, String> {
     let mut force = false;
     let mut today = false;
     let mut recent_days = None;
-    let mut budget = 180.0f64;
-    let mut max_per_tick = None;
+    let mut budget = std::env::var("OMS_WORK_JOURNAL_NOTION_BUDGET_SECONDS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f64>())
+        .transpose()
+        .map_err(|_| "error: invalid Notion budget")?
+        .unwrap_or(180.0f64);
+    let mut max_per_tick = Some(
+        std::env::var("OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<i64>())
+            .transpose()
+            .map_err(|_| "error: invalid Notion maximum")?
+            .unwrap_or(20)
+            .clamp(1, 200) as usize,
+    );
     let mut i = 0usize;
     while i < args.len() {
         let (flag, inline) = split_flag(&args[i], "sync")?;
@@ -664,8 +803,8 @@ fn parse_sync(args: &[OsString]) -> Result<JournalCommand, String> {
                 let d: i64 = raw
                     .parse()
                     .map_err(|_| format!("error: --recent-days expects integer, got '{raw}'"))?;
-                if d < 0 {
-                    return Err("error: --recent-days must be >= 0".to_string());
+                if d < 1 {
+                    return Err("error: --recent-days requires a positive integer".to_string());
                 }
                 recent_days = Some(d);
             }
@@ -681,17 +820,17 @@ fn parse_sync(args: &[OsString]) -> Result<JournalCommand, String> {
             }
             "--max-per-tick" => {
                 let raw = take_val_str(args, &mut i, flag, inline)?;
-                let n: usize = raw
+                let n: i64 = raw
                     .parse()
                     .map_err(|_| format!("error: --max-per-tick expects integer, got '{raw}'"))?;
-                if n == 0 {
-                    return Err("error: --max-per-tick must be >= 1".to_string());
-                }
-                max_per_tick = Some(n);
+                max_per_tick = Some(n.clamp(1, 200) as usize);
             }
             other => return Err(format!("error: unrecognized argument '{other}' for sync")),
         }
         i += 1;
+    }
+    if today && recent_days.is_some() {
+        return Err("error: --today and --recent-days cannot be used together".into());
     }
     Ok(JournalCommand::Sync {
         repo,

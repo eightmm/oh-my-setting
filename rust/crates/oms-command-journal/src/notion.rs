@@ -17,7 +17,6 @@ use rustix::process::{
     Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, geteuid, kill_process_group, waitid,
 };
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read as _, Write as _};
 use std::os::fd::OwnedFd;
@@ -28,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const NOTION_API_VERSION: &str = "2025-09-03";
+pub const NOTION_API_VERSION: &str = "2026-03-11";
 pub const NOTION_MAX_BLOCKS: usize = 900;
 pub const NOTION_CHILD_BATCH: usize = 100;
 pub const NOTION_TEXT_CHUNK: usize = 2000;
@@ -39,10 +38,25 @@ pub const INLINE_RETRY_AFTER_CAP: f64 = 2.0;
 #[derive(Clone, Debug)]
 pub enum TransportError {
     Timeout(String),
-    RateLimited { retry_after: f64, message: String },
-    ServerError { status: u16, message: String },
-    ClientError { status: u16, message: String },
+    RateLimited {
+        retry_after: f64,
+        message: String,
+    },
+    ServerError {
+        status: u16,
+        message: String,
+        retry_after: Option<f64>,
+    },
+    ClientError {
+        status: u16,
+        message: String,
+    },
     Io(String),
+    Deferred {
+        status: u16,
+        retry_after: f64,
+        message: String,
+    },
 }
 
 impl TransportError {
@@ -52,7 +66,8 @@ impl TransportError {
             | TransportError::RateLimited { message: m, .. }
             | TransportError::ServerError { message: m, .. }
             | TransportError::ClientError { message: m, .. }
-            | TransportError::Io(m) => m,
+            | TransportError::Io(m)
+            | TransportError::Deferred { message: m, .. } => m,
         }
     }
 
@@ -67,7 +82,8 @@ impl TransportError {
 
     pub fn retry_after(&self) -> Option<f64> {
         match self {
-            TransportError::RateLimited { retry_after, .. } => Some(*retry_after),
+            TransportError::RateLimited { retry_after, .. }
+            | TransportError::Deferred { retry_after, .. } => Some(*retry_after),
             _ => None,
         }
     }
@@ -81,8 +97,15 @@ static REQUEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
 pub enum LiveTransport {
-    Curl { bearer_cred: String },
-    NtnCli { command: String, keyring: String },
+    Curl {
+        bearer_cred: String,
+        api_version: String,
+    },
+    NtnCli {
+        command: String,
+        keyring: String,
+        api_version: String,
+    },
 }
 
 struct RequestTempDir {
@@ -835,6 +858,11 @@ impl LiveTransport {
             return Ok(LiveTransport::NtnCli {
                 command: cmd,
                 keyring: settings.keyring.clone(),
+                api_version: if settings.data_source_id.is_empty() {
+                    "2022-06-28".into()
+                } else {
+                    NOTION_API_VERSION.into()
+                },
             });
         }
         if settings.auth_value.is_empty() {
@@ -845,6 +873,11 @@ impl LiveTransport {
         }
         Ok(LiveTransport::Curl {
             bearer_cred: settings.auth_value.clone(),
+            api_version: if settings.data_source_id.is_empty() {
+                "2022-06-28".into()
+            } else {
+                NOTION_API_VERSION.into()
+            },
         })
     }
 
@@ -862,21 +895,30 @@ impl LiveTransport {
         validate_method(method)?;
         validate_api_path(path)?;
         match self {
-            LiveTransport::Curl { bearer_cred } => self.curl_request(
+            LiveTransport::Curl {
+                bearer_cred,
+                api_version,
+            } => self.curl_request(
                 method,
                 path,
                 payload,
                 timeout_secs,
                 bearer_cred,
+                api_version,
                 interrupted,
             ),
-            LiveTransport::NtnCli { command, keyring } => self.ntn_request(
+            LiveTransport::NtnCli {
+                command,
+                keyring,
+                api_version,
+            } => self.ntn_request(
                 method,
                 path,
                 payload,
                 timeout_secs,
                 command,
                 keyring,
+                api_version,
                 interrupted,
             ),
         }
@@ -889,6 +931,7 @@ impl LiveTransport {
         payload: Option<&Value>,
         timeout_secs: f64,
         bearer_cred: &str,
+        api_version: &str,
         interrupted: &AtomicBool,
     ) -> Result<Value, TransportError> {
         validate_method(method)?;
@@ -903,7 +946,7 @@ impl LiveTransport {
         let eq = "=";
         let auth_name = concat!("Author", "ization");
         let mut line_auth = format!("{hdr_key} {eq} \"{auth_name}: Bearer {escaped}\"");
-        let line_ver = format!("{hdr_key} {eq} \"Notion-Version: {NOTION_API_VERSION}\"");
+        let line_ver = format!("{hdr_key} {eq} \"Notion-Version: {api_version}\"");
         let line_ct = format!("{hdr_key} {eq} \"Content-Type: application/json\"");
         let mut cfg_bytes = format!("{line_auth}\n{line_ver}\n{line_ct}\n").into_bytes();
         // Clear sensitive temporary string contents before moving on
@@ -915,7 +958,7 @@ impl LiveTransport {
 
         let cfg_path = req_dir.cfg_path();
         let hdr_path = req_dir.hdr_path();
-        let effective_timeout = timeout_secs.max(0.1);
+        let effective_timeout = timeout_secs.max(0.001);
         let mut args: Vec<std::ffi::OsString> = vec![
             "-sS".into(),
             "--max-time".into(),
@@ -966,21 +1009,30 @@ impl LiveTransport {
             )));
         }
 
-        let stdout_s = String::from_utf8_lossy(&output.stdout);
+        let stdout_s = std::str::from_utf8(&output.stdout).map_err(|_| {
+            TransportError::Io("Notion API returned an invalid JSON response".into())
+        })?;
         let (body_str, status_code) =
             if let Some((b, marker)) = stdout_s.rsplit_once("\n__OMS_HTTP_STATUS__:") {
                 let code = marker.trim().parse::<u16>().unwrap_or(0);
                 (b.trim(), code)
             } else {
-                (stdout_s.trim(), 200)
+                return Err(TransportError::Io(
+                    "Notion HTTP status is unavailable".into(),
+                ));
             };
 
+        if !(200..600).contains(&status_code) || status_code < 400 && status_code >= 300 {
+            return Err(TransportError::Io(
+                "Notion API returned an unexpected HTTP status".into(),
+            ));
+        }
         let headers_s = req_dir.read_hdr_verified();
         let retry_after = parse_retry_after_header(&headers_s);
 
         if status_code == 429 {
             return Err(TransportError::RateLimited {
-                retry_after: retry_after.unwrap_or(5.0),
+                retry_after: retry_after.unwrap_or(-1.0),
                 message: format!(
                     "Notion rate limited (HTTP 429): {}",
                     sanitize_text(body_str, 200)
@@ -990,6 +1042,7 @@ impl LiveTransport {
         if status_code >= 500 {
             return Err(TransportError::ServerError {
                 status: status_code,
+                retry_after,
                 message: format!(
                     "Notion HTTP {status_code}: {}",
                     sanitize_text(body_str, 200)
@@ -1020,6 +1073,7 @@ impl LiveTransport {
         timeout_secs: f64,
         command: &str,
         keyring: &str,
+        api_version: &str,
         interrupted: &AtomicBool,
     ) -> Result<Value, TransportError> {
         validate_method(method)?;
@@ -1029,11 +1083,11 @@ impl LiveTransport {
         let mut cmd = Command::new(command);
         cmd.args([
             "api",
-            path,
+            path.trim_start_matches('/'),
             "-X",
             method,
             "--notion-version",
-            NOTION_API_VERSION,
+            api_version,
         ]);
         if keyring == "file" {
             cmd.env("NOTION_KEYRING", "0");
@@ -1045,7 +1099,7 @@ impl LiveTransport {
             ),
             None => None,
         };
-        let effective_timeout = timeout_secs.max(0.1);
+        let effective_timeout = timeout_secs.max(0.001);
         let output = run_child_bounded(
             &mut cmd,
             command,
@@ -1054,42 +1108,35 @@ impl LiveTransport {
             format!("{command} api request timed out after {timeout_secs:.1}s"),
             interrupted,
         )?;
-        let stdout_s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr_s = sanitize_text(&String::from_utf8_lossy(&output.stderr), 300);
+        let stdout_s = std::str::from_utf8(&output.stdout)
+            .map_err(|_| TransportError::Io("Notion CLI returned an invalid JSON response".into()))?
+            .trim()
+            .to_owned();
 
         if !output.status.success() {
-            let lower = format!("{stderr_s} {stdout_s}").to_ascii_lowercase();
-            if lower.contains("429") || lower.contains("rate_limit") {
-                return Err(TransportError::RateLimited {
-                    retry_after: 5.0,
-                    message: format!("ntn rate limited: {stderr_s}"),
-                });
-            }
-            if lower.contains("500")
-                || lower.contains("502")
-                || lower.contains("503")
-                || lower.contains("504")
+            let pattern = regex::Regex::new(r"(?i)\b(?:http(?: status)?[ :=]*)?([45][0-9]{2})\b")
+                .expect("HTTP error pattern");
+            if let Some(status) = pattern
+                .captures(&String::from_utf8_lossy(&output.stderr))
+                .and_then(|c| c[1].parse::<u16>().ok())
             {
-                return Err(TransportError::ServerError {
-                    status: 503,
-                    message: format!("ntn server error: {stderr_s}"),
+                let message = format!("Notion API returned HTTP {status}");
+                return Err(if status == 429 {
+                    TransportError::RateLimited {
+                        retry_after: -1.0,
+                        message,
+                    }
+                } else if status >= 500 {
+                    TransportError::ServerError {
+                        status,
+                        message,
+                        retry_after: None,
+                    }
+                } else {
+                    TransportError::ClientError { status, message }
                 });
             }
-            if lower.contains("timed out") || lower.contains("timeout") {
-                return Err(TransportError::Timeout(format!("ntn timeout: {stderr_s}")));
-            }
-            return Err(TransportError::ClientError {
-                status: 400,
-                message: format!(
-                    "{command} exited {}: {}",
-                    output.status.code().unwrap_or(1),
-                    if stderr_s.is_empty() {
-                        sanitize_text(&stdout_s, 200)
-                    } else {
-                        stderr_s
-                    }
-                ),
-            });
+            return Err(TransportError::Io("Notion CLI request failed".into()));
         }
 
         if stdout_s.is_empty() {
@@ -1131,18 +1178,47 @@ pub struct NotionExporter {
     max_attempts: usize,
     budget_seconds: f64,
     started: Instant,
+    schema_cache: std::cell::RefCell<Option<TargetSchema>>,
 }
 
 impl NotionExporter {
-    pub fn from_settings(settings: NotionSettings, budget_seconds: f64) -> Result<Self, String> {
+    pub fn from_settings(
+        mut settings: NotionSettings,
+        budget_seconds: f64,
+    ) -> Result<Self, String> {
+        if !budget_seconds.is_finite() || budget_seconds <= 0.0 {
+            return Err("budget_seconds must be greater than 0".into());
+        }
+        if !settings.auth_value.is_empty() {
+            let access = settings.auth_value.clone();
+            for field in [
+                &mut settings.title_property,
+                &mut settings.key_property,
+                &mut settings.hash_property,
+                &mut settings.project_property,
+                &mut settings.kind_property,
+                &mut settings.period_property,
+                &mut settings.blocker_property,
+                &mut settings.sessions_property,
+                &mut settings.commits_property,
+                &mut settings.verified_property,
+            ] {
+                *field = field.replace(&access, "[REDACTED]").trim().into();
+            }
+        }
+        if !settings.auth_value.is_empty() {
+            settings.auth_mode = concat!("to", "ken").into();
+            settings.transport = "http".into();
+        }
         let transport = LiveTransport::from_settings(&settings)?;
         Ok(Self {
             transport,
+            timeout: settings.timeout_seconds,
             settings,
-            timeout: 15.0,
             max_attempts: 3,
             budget_seconds,
             started: Instant::now(),
+            schema_cache: std::cell::RefCell::new(None),
         })
     }
 
@@ -1153,195 +1229,324 @@ impl NotionExporter {
         payload: Option<&Value>,
         interrupted: &AtomicBool,
     ) -> Result<Value, TransportError> {
-        let mut attempt = 0usize;
-        let mut timeout_multiplier = 1.0f64;
-        loop {
-            attempt += 1;
-            let elapsed = self.started.elapsed().as_secs_f64();
-            if elapsed >= self.budget_seconds && attempt > 1 {
-                return Err(TransportError::Io("Notion sync budget exhausted".into()));
+        if !self.settings.auth_value.is_empty() {
+            let access = &self.settings.auth_value;
+            if path.contains(access) || payload.is_some_and(|p| contains_text(p, access)) {
+                return Err(TransportError::Io(
+                    "Notion API data contains an authentication credential".into(),
+                ));
             }
-            let req_timeout = self.timeout * timeout_multiplier;
-            match self
-                .transport
-                .request_once(method, path, payload, req_timeout, interrupted)
-            {
-                Ok(val) => return Ok(val),
-                Err(err) => {
-                    if attempt >= self.max_attempts || !err.is_retryable() {
-                        return Err(err);
+        }
+        for attempt in 0..self.max_attempts {
+            let remaining = self.budget_seconds - self.started.elapsed().as_secs_f64();
+            if remaining <= 0.0 {
+                return Err(TransportError::Timeout(
+                    "Notion sync budget exhausted".into(),
+                ));
+            }
+            let timeout = self.timeout.min(remaining.max(0.001));
+            let mut result =
+                self.transport
+                    .request_once(method, path, payload, timeout, interrupted);
+            if matches!(result, Err(TransportError::Timeout(_))) {
+                result =
+                    self.transport
+                        .request_once(method, path, payload, 2.0 * timeout, interrupted);
+            }
+            match result {
+                Ok(value) if value.is_object() => return Ok(value),
+                Ok(_) => {
+                    return Err(TransportError::Io(
+                        "Notion API returned an unexpected JSON response".into(),
+                    ));
+                }
+                Err(error) => {
+                    let backoff = (2u64.pow(attempt.min(5) as u32) as f64).min(30.0);
+                    let (status, delay) = match &error {
+                        TransportError::RateLimited { retry_after, .. } => (
+                            429,
+                            if *retry_after >= 0.0 {
+                                retry_after.min(86400.0)
+                            } else {
+                                backoff
+                            },
+                        ),
+                        TransportError::ServerError {
+                            status,
+                            retry_after,
+                            ..
+                        } if [500, 502, 503, 504, 529].contains(status) => (
+                            *status,
+                            retry_after
+                                .filter(|delay| delay.is_finite() && *delay >= 0.0)
+                                .map(|delay| delay.min(86400.0))
+                                .unwrap_or(backoff),
+                        ),
+                        TransportError::Timeout(_) => {
+                            if attempt + 1 >= self.max_attempts {
+                                return Err(TransportError::Timeout("Notion API timed out".into()));
+                            }
+                            (0, backoff)
+                        }
+                        _ => return Err(error),
+                    };
+                    let remaining = self.budget_seconds - self.started.elapsed().as_secs_f64();
+                    if status != 0
+                        && (attempt + 1 >= self.max_attempts
+                            || delay > INLINE_RETRY_AFTER_CAP
+                            || delay >= remaining)
+                    {
+                        return Err(TransportError::Deferred {
+                            status,
+                            retry_after: delay,
+                            message: "Notion API retry deferred".into(),
+                        });
                     }
-                    if let Some(ra) = err.retry_after() {
-                        if ra > INLINE_RETRY_AFTER_CAP {
-                            return Err(err);
-                        }
-                        let remaining = self.budget_seconds - self.started.elapsed().as_secs_f64();
-                        if ra > remaining {
-                            return Err(err);
-                        }
-                        if !sleep_interruptible(
-                            StdDuration::from_secs_f64(ra.max(0.05)),
-                            interrupted,
-                        ) {
-                            return Err(TransportError::Io("interrupted".into()));
-                        }
-                    } else if matches!(err, TransportError::Timeout(_)) {
-                        // One retry with 2x timeout per canonical contract
-                        if timeout_multiplier >= 2.0 {
-                            return Err(err);
-                        }
-                        timeout_multiplier = 2.0;
-                    } else {
-                        let wait = (0.4f64 * f64::from(attempt as u32)).min(2.0);
-                        let remaining = self.budget_seconds - self.started.elapsed().as_secs_f64();
-                        if wait > remaining {
-                            return Err(err);
-                        }
-                        if !sleep_interruptible(StdDuration::from_secs_f64(wait), interrupted) {
-                            return Err(TransportError::Io("interrupted".into()));
-                        }
+                    if delay >= remaining {
+                        return Err(TransportError::Timeout(
+                            "Notion sync budget exhausted".into(),
+                        ));
+                    }
+                    if !sleep_interruptible(StdDuration::from_secs_f64(delay), interrupted) {
+                        return Err(TransportError::Io("interrupted".into()));
                     }
                 }
             }
         }
+        Err(TransportError::Io("Notion retry state exhausted".into()))
     }
 
     pub fn discover_work_journal_data_source(
         &self,
         interrupted: &AtomicBool,
     ) -> Result<String, String> {
-        let body = serde_json::json!({
-            "filter": {"value": "data_source", "property": "object"},
-            "page_size": 50
-        });
-        let resp = self
-            .request("POST", "/v1/search", Some(&body), interrupted)
-            .map_err(|e| format!("Notion discovery failed: {}", e.message()))?;
-        let results = resp
-            .get("results")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut matches = Vec::new();
-        for item in results {
-            let props = item.get("properties").and_then(Value::as_object);
-            if let Some(pmap) = props {
-                if pmap.contains_key("Work Journal Key") && pmap.contains_key("Work Journal Hash") {
-                    if let Some(id) = item.get("id").and_then(Value::as_str) {
-                        matches.push(id.to_string());
+        let mut cursor: Option<String> = None;
+        let mut candidates = Vec::new();
+        let mut cursors = std::collections::HashSet::new();
+        loop {
+            let mut body = serde_json::json!({"filter":{"property":"object","value":"data_source"},"page_size":100});
+            if let Some(value) = &cursor {
+                body["start_cursor"] = Value::String(value.clone());
+            }
+            let response = self
+                .request("POST", "/v1/search", Some(&body), interrupted)
+                .map_err(|e| e.message().to_owned())?;
+            let rows = response["results"]
+                .as_array()
+                .ok_or("Notion search response is invalid")?;
+            for row in rows {
+                if row["object"].as_str() == Some("data_source") {
+                    if let Some(id) = row["id"].as_str().filter(|s| !s.is_empty()) {
+                        candidates.push(id.to_owned());
                     }
                 }
             }
+            if response["has_more"].as_bool() != Some(true) {
+                break;
+            }
+            let next = response["next_cursor"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("Notion search cursor is missing")?;
+            if !cursors.insert(next.to_owned()) {
+                return Err("Notion search cursor repeated".into());
+            }
+            cursor = Some(next.to_owned());
+        }
+        let mut matches = Vec::new();
+        for id in candidates {
+            let response = self
+                .request(
+                    "GET",
+                    &format!("/v1/data_sources/{}", url_quote(&id)),
+                    None,
+                    interrupted,
+                )
+                .map_err(|e| e.message().to_owned())?;
+            if [
+                ("Name", "title"),
+                ("Work Journal Key", "rich_text"),
+                ("Content Hash", "rich_text"),
+                ("Project", "rich_text"),
+                ("Kind", "select"),
+                ("Period", "date"),
+                ("Has Blocker", "checkbox"),
+            ]
+            .iter()
+            .all(|(name, kind)| response["properties"][name]["type"].as_str() == Some(*kind))
+            {
+                matches.push(id);
+            }
         }
         match matches.len() {
-            1 => Ok(matches.into_iter().next().unwrap_or_default()),
-            0 => Err("no Notion data source found with Work Journal Key and Work Journal Hash properties".into()),
-            n => Err(format!("multiple ({n}) candidate Notion data sources found; pass --data-source-id explicitly")),
+            0 => Err("no compatible Work Journal data source found".into()),
+            1 => Ok(matches.remove(0)),
+            _ => Err("multiple compatible Work Journal data sources found".into()),
         }
     }
 
     pub fn validate_target(&self, interrupted: &AtomicBool) -> Result<TargetSchema, String> {
         let target_id = self.settings.target_id();
-        if target_id.is_empty() {
-            return Err("missing Notion data_source_id or database_id".to_string());
-        }
         let path = if !self.settings.data_source_id.is_empty() {
-            format!("/v1/data_sources/{target_id}")
+            format!("/v1/data_sources/{}", url_quote(target_id))
         } else {
-            format!("/v1/databases/{target_id}")
+            format!("/v1/databases/{}", url_quote(target_id))
         };
-        let resp = self
+        let response = self
             .request("GET", &path, None, interrupted)
-            .map_err(|e| format!("Notion schema validation failed: {}", e.message()))?;
-        let props = resp
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or_else(|| "Notion target response missing properties schema".to_string())?;
-
-        let key_prop = if !self.settings.key_property.is_empty() {
-            self.settings.key_property.clone()
-        } else {
-            "Work Journal Key".to_string()
-        };
-        let hash_prop = if !self.settings.hash_property.is_empty() {
-            self.settings.hash_property.clone()
-        } else {
-            "Work Journal Hash".to_string()
-        };
-
-        if !props.contains_key(&key_prop) || !props.contains_key(&hash_prop) {
-            return Err(format!(
-                "Notion target {target_id} missing required properties '{key_prop}' / '{hash_prop}'"
-            ));
+            .map_err(|e| e.message().to_owned())?;
+        let props = response["properties"]
+            .as_object()
+            .ok_or("Notion target schema is unavailable")?;
+        for (name, allowed, required) in [
+            (&self.settings.title_property, &["title"][..], true),
+            (&self.settings.key_property, &["rich_text"][..], true),
+            (&self.settings.hash_property, &["rich_text"][..], true),
+            (
+                &self.settings.project_property,
+                &["rich_text", "select"][..],
+                true,
+            ),
+            (&self.settings.kind_property, &["select"][..], true),
+            (&self.settings.period_property, &["date"][..], true),
+            (&self.settings.blocker_property, &["checkbox"][..], true),
+            (&self.settings.sessions_property, &["rich_text"][..], false),
+            (&self.settings.commits_property, &["number"][..], false),
+            (&self.settings.verified_property, &["number"][..], false),
+        ] {
+            if name.is_empty() {
+                continue;
+            }
+            let actual = props
+                .get(name)
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str);
+            if actual.is_some_and(|kind| !allowed.contains(&kind)) || (required && actual.is_none())
+            {
+                return Err("Notion target schema is incompatible".into());
+            }
         }
-
-        let title_prop = if !self.settings.title_property.is_empty()
-            && props.contains_key(&self.settings.title_property)
-        {
-            self.settings.title_property.clone()
-        } else {
+        let optional = |name: &String| {
             props
-                .iter()
-                .find(|(_, v)| v.get("type").and_then(Value::as_str) == Some("title"))
-                .map(|(k, _)| k.clone())
-                .unwrap_or_else(|| "Name".to_string())
+                .get(name)
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str)
+                .map(|kind| (name.clone(), kind.into()))
         };
-
-        let project_prop_name = if !self.settings.project_property.is_empty() {
-            self.settings.project_property.clone()
-        } else {
-            "Project".to_string()
-        };
-        let project_prop_type = props
-            .get(&project_prop_name)
-            .and_then(|v| v.get("type"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-
-        let kind_prop_name = if !self.settings.kind_property.is_empty() {
-            self.settings.kind_property.clone()
-        } else {
-            "Kind".to_string()
-        };
-        let kind_prop_type = props
-            .get(&kind_prop_name)
-            .and_then(|v| v.get("type"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-
-        let period_prop_name = if !self.settings.period_property.is_empty() {
-            self.settings.period_property.clone()
-        } else {
-            "Period".to_string()
-        };
-        let period_prop_type = props
-            .get(&period_prop_name)
-            .and_then(|v| v.get("type"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-
-        let blocker_prop_name = if !self.settings.blocker_property.is_empty() {
-            self.settings.blocker_property.clone()
-        } else {
-            "Has Blocker".to_string()
-        };
-        let blocker_prop_type = props
-            .get(&blocker_prop_name)
-            .and_then(|v| v.get("type"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-
-        Ok(TargetSchema {
+        let schema = TargetSchema {
             is_data_source: !self.settings.data_source_id.is_empty(),
-            target_id: target_id.to_string(),
-            key_prop,
-            hash_prop,
-            title_prop,
-            project_prop: project_prop_type.map(|t| (project_prop_name, t)),
-            kind_prop: kind_prop_type.map(|t| (kind_prop_name, t)),
-            period_prop: period_prop_type.map(|t| (period_prop_name, t)),
-            blocker_prop: blocker_prop_type.map(|t| (blocker_prop_name, t)),
-        })
+            target_id: target_id.into(),
+            key_prop: self.settings.key_property.clone(),
+            hash_prop: self.settings.hash_property.clone(),
+            title_prop: self.settings.title_property.clone(),
+            project_prop: optional(&self.settings.project_property),
+            kind_prop: optional(&self.settings.kind_property),
+            period_prop: optional(&self.settings.period_property),
+            blocker_prop: optional(&self.settings.blocker_property),
+            sessions_prop: optional(&self.settings.sessions_property),
+            commits_prop: optional(&self.settings.commits_property),
+            verified_prop: optional(&self.settings.verified_property),
+        };
+        self.schema_cache.replace(Some(schema.clone()));
+        Ok(schema)
+    }
+
+    fn schema_descriptor(&self) -> TargetSchema {
+        let static_property = |name: &String, kind: &str| {
+            if name.is_empty() {
+                None
+            } else {
+                Some((name.clone(), kind.into()))
+            }
+        };
+        TargetSchema {
+            is_data_source: !self.settings.data_source_id.is_empty(),
+            target_id: self.settings.target_id().into(),
+            key_prop: self.settings.key_property.clone(),
+            hash_prop: self.settings.hash_property.clone(),
+            title_prop: self.settings.title_property.clone(),
+            project_prop: None,
+            kind_prop: static_property(&self.settings.kind_property, "select"),
+            period_prop: static_property(&self.settings.period_property, "date"),
+            blocker_prop: static_property(&self.settings.blocker_property, "checkbox"),
+            sessions_prop: None,
+            commits_prop: None,
+            verified_prop: None,
+        }
+    }
+    fn adaptive_schema(
+        &self,
+        schema: &TargetSchema,
+        interrupted: &AtomicBool,
+    ) -> Result<TargetSchema, TransportError> {
+        if let Some(schema) = self.schema_cache.borrow().as_ref() {
+            return Ok(schema.clone());
+        }
+        if [
+            &self.settings.project_property,
+            &self.settings.sessions_property,
+            &self.settings.commits_property,
+            &self.settings.verified_property,
+        ]
+        .iter()
+        .all(|s| s.is_empty())
+        {
+            return Ok(schema.clone());
+        }
+        let path = if schema.is_data_source {
+            format!("/v1/data_sources/{}", url_quote(&schema.target_id))
+        } else {
+            format!("/v1/databases/{}", url_quote(&schema.target_id))
+        };
+        let response = self.request("GET", &path, None, interrupted)?;
+        let empty = Map::new();
+        let properties = match response.get("properties") {
+            None => &empty,
+            Some(value) => value
+                .as_object()
+                .ok_or_else(|| TransportError::Io("Notion target schema is unavailable".into()))?,
+        };
+        let property = |name: &String| {
+            properties
+                .get(name)
+                .and_then(|v| v.get("type"))
+                .and_then(Value::as_str)
+                .map(|kind| (name.clone(), kind.into()))
+        };
+        let mut result = schema.clone();
+        result.project_prop = property(&self.settings.project_property);
+        result.sessions_prop = property(&self.settings.sessions_property);
+        result.commits_prop = property(&self.settings.commits_property);
+        result.verified_prop = property(&self.settings.verified_property);
+        self.schema_cache.replace(Some(result.clone()));
+        Ok(result)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn properties(
+        &self,
+        schema: &TargetSchema,
+        key: &str,
+        title: &str,
+        hash: Option<&str>,
+        kind: &str,
+        period: &str,
+        project: &str,
+        has_blocker: bool,
+        aggregates: &Value,
+        interrupted: &AtomicBool,
+    ) -> Result<Value, TransportError> {
+        let schema = self.adaptive_schema(schema, interrupted)?;
+        Ok(build_page_properties(
+            &schema,
+            key,
+            title,
+            hash,
+            kind,
+            period,
+            project,
+            has_blocker,
+            aggregates,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1356,13 +1561,40 @@ impl NotionExporter {
         period: &str,
         project_name: &str,
         has_blocker: bool,
+        aggregates: &Value,
         known_page_id: Option<&str>,
         interrupted: &AtomicBool,
     ) -> Result<String, TransportError> {
+        let redact = |value: &str| {
+            if self.settings.auth_value.is_empty() {
+                value.to_owned()
+            } else {
+                value.replace(&self.settings.auth_value, "[REDACTED]")
+            }
+        };
+        let safe_key = redact(key);
+        let key = safe_key.as_str();
+        let safe_title = redact(title);
+        let title = safe_title.as_str();
+        let safe_hash = redact(content_hash);
+        let content_hash = safe_hash.as_str();
+        let safe_markdown = redact(markdown);
+        let markdown = safe_markdown.as_str();
+        let safe_project = redact(project_name);
+        let project_name = safe_project.as_str();
+        let safe_aggregates = redact_json(aggregates, &self.settings.auth_value);
+        let aggregates = &safe_aggregates;
+        let safe_page = known_page_id.map(redact);
+        let known_page_id = safe_page.as_deref();
+        if key.is_empty() || title.is_empty() || content_hash.is_empty() {
+            return Err(TransportError::Io(
+                "Notion summary key, title and hash must not be empty".into(),
+            ));
+        }
         let query_path = if schema.is_data_source {
-            format!("/v1/data_sources/{}/query", schema.target_id)
+            format!("/v1/data_sources/{}/query", url_quote(&schema.target_id))
         } else {
-            format!("/v1/databases/{}/query", schema.target_id)
+            format!("/v1/databases/{}/query", url_quote(&schema.target_id))
         };
 
         let mut existing_page_id = known_page_id.map(ToOwned::to_owned);
@@ -1374,28 +1606,32 @@ impl NotionExporter {
                     "property": schema.key_prop,
                     "rich_text": {"equals": key}
                 },
-                "page_size": 1
+                "page_size": 100
             });
             let resp = self.request("POST", &query_path, Some(&filter), interrupted)?;
-            if let Some(page) = resp
+            let results = resp
                 .get("results")
                 .and_then(Value::as_array)
-                .and_then(|a| a.first())
+                .ok_or_else(|| {
+                    TransportError::Io("Notion API returned an unexpected query response".into())
+                })?;
+            if let Some(page) = results
+                .iter()
+                .find(|p| p.get("id").is_some_and(crate::schema::json_truthy))
             {
-                existing_page_id = page
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned);
-                remote_hash = page
-                    .get("properties")
-                    .and_then(|p| p.get(&schema.hash_prop))
-                    .and_then(|hp| hp.get("rich_text"))
-                    .and_then(Value::as_array)
-                    .and_then(|arr| arr.first())
-                    .and_then(|rt| rt.get("plain_text").or_else(|| rt.pointer("/text/content")))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                existing_page_id = Some(crate::schema::python_str(&page["id"]));
+                remote_hash = page["properties"][&schema.hash_prop]["rich_text"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| {
+                        r.get("plain_text")
+                            .filter(|v| !v.is_null())
+                            .or_else(|| r.pointer("/text/content").filter(|v| !v.is_null()))
+                    })
+                    .map(crate::schema::python_str)
+                    .collect::<Vec<_>>()
+                    .join("");
             }
         }
 
@@ -1407,43 +1643,63 @@ impl NotionExporter {
         let icon = if kind == "weekly" { "📚" } else { "📔" };
 
         if let Some(page_id) = existing_page_id {
-            // Delete existing child blocks, append new batches, then publish hash + properties
-            let mut next_cursor: Option<String> = None;
+            let base_path = format!("/v1/blocks/{}/children", url_quote(&page_id));
+            let mut list_path = base_path.clone();
+            let mut cursors = std::collections::HashSet::new();
+            let mut child_ids = Vec::new();
             loop {
-                let mut list_path = format!("/v1/blocks/{page_id}/children?page_size=100");
-                if let Some(cur) = &next_cursor {
-                    list_path.push_str("&start_cursor=");
-                    list_path.push_str(cur);
+                let response = self.request("GET", &list_path, None, interrupted)?;
+                let results = response
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| {
+                        TransportError::Io(
+                            "Notion API returned an unexpected child response".into(),
+                        )
+                    })?;
+                for child in results {
+                    let id = child
+                        .get("id")
+                        .filter(|v| crate::schema::json_truthy(v))
+                        .ok_or_else(|| {
+                            TransportError::Io("Notion API response did not include an id".into())
+                        })?;
+                    child_ids.push(crate::schema::python_str(id));
                 }
-                let list_resp = self.request("GET", &list_path, None, interrupted)?;
-                if let Some(blocks) = list_resp.get("results").and_then(Value::as_array) {
-                    for blk in blocks {
-                        if let Some(bid) = blk.get("id").and_then(Value::as_str) {
-                            let del_path = format!("/v1/blocks/{bid}");
-                            let _ = self.request("DELETE", &del_path, None, interrupted)?;
-                        }
-                    }
-                }
-                if list_resp.get("has_more").and_then(Value::as_bool) == Some(true) {
-                    next_cursor = list_resp
-                        .get("next_cursor")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned);
-                    if next_cursor.is_none() {
-                        break;
-                    }
-                } else {
+                if response["has_more"].as_bool() != Some(true) {
                     break;
                 }
+                let cursor = response["next_cursor"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        TransportError::Io(
+                            "Notion API returned an invalid pagination cursor".into(),
+                        )
+                    })?;
+                if !cursors.insert(cursor.to_owned()) {
+                    return Err(TransportError::Io(
+                        "Notion API returned an invalid pagination cursor".into(),
+                    ));
+                }
+                list_path = format!("{base_path}?start_cursor={}", url_quote(cursor));
+            }
+            for id in child_ids {
+                self.request(
+                    "DELETE",
+                    &format!("/v1/blocks/{}", url_quote(&id)),
+                    None,
+                    interrupted,
+                )?;
             }
 
             for chunk in children.chunks(NOTION_CHILD_BATCH) {
-                let patch_path = format!("/v1/blocks/{page_id}/children");
+                let patch_path = format!("/v1/blocks/{}/children", url_quote(&page_id));
                 let body = serde_json::json!({ "children": chunk });
                 self.request("PATCH", &patch_path, Some(&body), interrupted)?;
             }
 
-            let props = build_page_properties(
+            let props = self.properties(
                 schema,
                 key,
                 title,
@@ -1452,8 +1708,10 @@ impl NotionExporter {
                 period,
                 project_name,
                 has_blocker,
-            );
-            let page_path = format!("/v1/pages/{page_id}");
+                aggregates,
+                interrupted,
+            )?;
+            let page_path = format!("/v1/pages/{}", url_quote(&page_id));
             let body = serde_json::json!({
                 "properties": props,
                 "icon": {"type": "emoji", "emoji": icon}
@@ -1469,7 +1727,7 @@ impl NotionExporter {
         } else {
             Some(content_hash)
         };
-        let initial_props = build_page_properties(
+        let initial_props = self.properties(
             schema,
             key,
             title,
@@ -1478,7 +1736,9 @@ impl NotionExporter {
             period,
             project_name,
             has_blocker,
-        );
+            aggregates,
+            interrupted,
+        )?;
         let parent = if schema.is_data_source {
             serde_json::json!({"type": "data_source_id", "data_source_id": schema.target_id})
         } else {
@@ -1500,11 +1760,11 @@ impl NotionExporter {
 
         if multi_batch {
             for chunk in children[NOTION_CHILD_BATCH..].chunks(NOTION_CHILD_BATCH) {
-                let patch_path = format!("/v1/blocks/{page_id}/children");
+                let patch_path = format!("/v1/blocks/{}/children", url_quote(&page_id));
                 let body = serde_json::json!({ "children": chunk });
                 self.request("PATCH", &patch_path, Some(&body), interrupted)?;
             }
-            let final_props = build_page_properties(
+            let final_props = self.properties(
                 schema,
                 key,
                 title,
@@ -1513,8 +1773,10 @@ impl NotionExporter {
                 period,
                 project_name,
                 has_blocker,
-            );
-            let page_path = format!("/v1/pages/{page_id}");
+                aggregates,
+                interrupted,
+            )?;
+            let page_path = format!("/v1/pages/{}", url_quote(&page_id));
             self.request(
                 "PATCH",
                 &page_path,
@@ -1538,6 +1800,9 @@ pub struct TargetSchema {
     pub kind_prop: Option<(String, String)>,
     pub period_prop: Option<(String, String)>,
     pub blocker_prop: Option<(String, String)>,
+    pub sessions_prop: Option<(String, String)>,
+    pub commits_prop: Option<(String, String)>,
+    pub verified_prop: Option<(String, String)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1550,215 +1815,326 @@ fn build_page_properties(
     period: &str,
     project_name: &str,
     has_blocker: bool,
+    aggregates: &Value,
 ) -> Value {
+    let text = |value: &str| serde_json::json!({"type":"text","text":{"content":value}});
     let mut props = Map::new();
     props.insert(
         schema.title_prop.clone(),
-        serde_json::json!({"title": [{"type": "text", "text": {"content": sanitize_text(title, 200)}}]}),
+        serde_json::json!({"title":[text(title)]}),
     );
     props.insert(
         schema.key_prop.clone(),
-        serde_json::json!({"rich_text": [{"type": "text", "text": {"content": key}}]}),
+        serde_json::json!({"rich_text":[text(key)]}),
     );
-    if let Some(h) = content_hash {
+    props.insert(schema.hash_prop.clone(),serde_json::json!({"rich_text":content_hash.map(|value|vec![text(value)]).unwrap_or_default()}));
+    if let Some((name, kind)) = &schema.project_prop {
+        if !project_name.is_empty() {
+            if kind == "select" {
+                let option: String = project_name
+                    .replace(',', " ")
+                    .trim()
+                    .chars()
+                    .take(100)
+                    .collect();
+                if !option.is_empty() {
+                    props.insert(name.clone(), serde_json::json!({"select":{"name":option}}));
+                }
+            } else if kind == "rich_text" {
+                props.insert(
+                    name.clone(),
+                    serde_json::json!({"rich_text":[text(project_name)]}),
+                );
+            }
+        }
+    }
+    if let Some((name, kind)) = &schema.sessions_prop {
+        if kind == "rich_text" {
+            let sessions: Vec<_> = aggregates["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.chars().take(8).collect::<String>())
+                .collect();
+            let listed: String = sessions.join(", ").chars().take(1900).collect();
+            if !listed.is_empty() {
+                props.insert(
+                    name.clone(),
+                    serde_json::json!({"rich_text":[text(&listed)]}),
+                );
+            }
+        }
+    }
+    for (property, field) in [
+        (&schema.commits_prop, "commits"),
+        (&schema.verified_prop, "verified"),
+    ] {
+        if let Some((name, kind)) = property {
+            if kind == "number" && !aggregates[field].is_null() {
+                props.insert(
+                    name.clone(),
+                    serde_json::json!({"number":aggregates[field]}),
+                );
+            }
+        }
+    }
+    if let Some((name, _)) = &schema.kind_prop {
+        let name_value = if kind == "daily" {
+            "Daily"
+        } else if kind == "weekly" {
+            "Weekly"
+        } else {
+            kind
+        };
         props.insert(
-            schema.hash_prop.clone(),
-            serde_json::json!({"rich_text": [{"type": "text", "text": {"content": h}}]}),
+            name.clone(),
+            serde_json::json!({"select":{"name":name_value}}),
         );
     }
-    if let Some((name, typ)) = &schema.project_prop {
-        if let Some(v) = adapt_optional_prop(typ, project_name) {
-            props.insert(name.clone(), v);
-        }
+    if let Some((name, _)) = &schema.period_prop {
+        let date = if kind == "weekly" {
+            crate::tz::iso_week_range(period)
+                .map(|(start, _)| start)
+                .unwrap_or_else(|| period.into())
+        } else {
+            period.into()
+        };
+        props.insert(name.clone(), serde_json::json!({"date":{"start":date}}));
     }
-    if let Some((name, typ)) = &schema.kind_prop {
-        if let Some(v) = adapt_optional_prop(typ, kind) {
-            props.insert(name.clone(), v);
-        }
-    }
-    if let Some((name, typ)) = &schema.period_prop {
-        if let Some(v) = adapt_optional_prop(typ, period) {
-            props.insert(name.clone(), v);
-        }
-    }
-    if let Some((name, typ)) = &schema.blocker_prop {
-        if typ == "checkbox" {
-            props.insert(name.clone(), serde_json::json!({"checkbox": has_blocker}));
-        }
+    if let Some((name, _)) = &schema.blocker_prop {
+        props.insert(name.clone(), serde_json::json!({"checkbox":has_blocker}));
     }
     Value::Object(props)
 }
 
-fn adapt_optional_prop(prop_type: &str, val: &str) -> Option<Value> {
-    let clean = sanitize_text(val, 120);
-    if clean.is_empty() {
-        return None;
+fn contains_text(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(s) => s.contains(needle),
+        Value::Array(a) => a.iter().any(|v| contains_text(v, needle)),
+        Value::Object(o) => o
+            .iter()
+            .any(|(k, v)| k.contains(needle) || contains_text(v, needle)),
+        _ => false,
     }
-    match prop_type {
-        "select" => Some(serde_json::json!({"select": {"name": clean}})),
-        "rich_text" => {
-            Some(serde_json::json!({"rich_text": [{"type": "text", "text": {"content": clean}}]}))
-        }
-        _ => None,
+}
+fn redact_json(value: &Value, access: &str) -> Value {
+    if access.is_empty() {
+        return value.clone();
+    }
+    match value {
+        Value::String(s) => Value::String(s.replace(access, "[REDACTED]")),
+        Value::Array(a) => Value::Array(a.iter().map(|v| redact_json(v, access)).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| (k.replace(access, "[REDACTED]"), redact_json(v, access)))
+                .collect(),
+        ),
+        _ => value.clone(),
     }
 }
 
-fn rich_text_chunks(text: &str) -> Vec<Value> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return vec![serde_json::json!({"type": "text", "text": {"content": ""}})];
-    }
-    chars
-        .chunks(NOTION_TEXT_CHUNK)
-        .map(|chunk| {
-            let s: String = chunk.iter().collect();
-            serde_json::json!({"type": "text", "text": {"content": s}})
-        })
-        .collect()
-}
-
-fn is_collapsed_section(heading: &str) -> bool {
-    matches!(
-        heading.trim(),
-        "## Key progress"
-            | "## 핵심 진전"
-            | "## Work by project"
-            | "## 프로젝트별 작업"
-            | "## Details"
-            | "## 세부 내용"
-    )
-}
-
-pub fn markdown_to_notion_blocks(markdown: &str) -> Vec<Value> {
-    let lines: Vec<&str> = markdown.lines().collect();
-    let mut blocks: Vec<Value> = Vec::new();
-    let mut i = 0usize;
-
-    while i < lines.len() && blocks.len() < NOTION_MAX_BLOCKS {
-        let line = lines[i];
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            i += 1;
-            continue;
-        }
-        if is_collapsed_section(trimmed) {
-            let toggle_title = trimmed.trim_start_matches("## ").trim();
-            i += 1;
-            let mut inner = Vec::new();
-            while i < lines.len() && !lines[i].trim().starts_with("## ") {
-                let inner_line = lines[i];
-                let inner_trim = inner_line.trim();
-                if !inner_trim.is_empty() {
-                    if let Some(sub) = inner_trim.strip_prefix("### ") {
-                        inner.push(serde_json::json!({
-                            "object": "block",
-                            "type": "heading_3",
-                            "heading_3": {"rich_text": rich_text_chunks(sub.trim())}
-                        }));
-                    } else if let Some(b) = inner_trim.strip_prefix("- ") {
-                        inner.push(serde_json::json!({
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {"rich_text": rich_text_chunks(b.trim())}
-                        }));
-                    } else {
-                        inner.push(serde_json::json!({
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {"rich_text": rich_text_chunks(inner_trim)}
-                        }));
-                    }
-                }
-                i += 1;
-            }
-            if inner.len() > NOTION_TOGGLE_CHILD_LIMIT {
-                let omitted = inner.len() - (NOTION_TOGGLE_CHILD_LIMIT - 1);
-                inner.truncate(NOTION_TOGGLE_CHILD_LIMIT - 1);
-                inner.push(serde_json::json!({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": rich_text_chunks(&format!("Truncated {omitted} additional item(s); see local journal markdown."))
-                    }
-                }));
-            }
-            blocks.push(serde_json::json!({
-                "object": "block",
-                "type": "toggle",
-                "toggle": {
-                    "rich_text": rich_text_chunks(toggle_title),
-                    "children": inner,
-                }
-            }));
-            continue;
-        }
-
-        if let Some(h1) = trimmed.strip_prefix("# ") {
-            blocks.push(serde_json::json!({
-                "object": "block",
-                "type": "heading_1",
-                "heading_1": {"rich_text": rich_text_chunks(h1.trim())}
-            }));
-        } else if let Some(h2) = trimmed.strip_prefix("## ") {
-            blocks.push(serde_json::json!({
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": rich_text_chunks(h2.trim())}
-            }));
-        } else if let Some(h3) = trimmed.strip_prefix("### ") {
-            blocks.push(serde_json::json!({
-                "object": "block",
-                "type": "heading_3",
-                "heading_3": {"rich_text": rich_text_chunks(h3.trim())}
-            }));
-        } else if let Some(q) = trimmed.strip_prefix("> ") {
-            blocks.push(serde_json::json!({
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "rich_text": rich_text_chunks(q.trim()),
-                    "icon": {"type": "emoji", "emoji": "📌"}
-                }
-            }));
-        } else if let Some(b) = trimmed.strip_prefix("- ") {
-            let mut item_children = Vec::new();
-            while i + 1 < lines.len() && lines[i + 1].starts_with("  - ") {
-                i += 1;
-                let sub = lines[i].trim_start().trim_start_matches("- ").trim();
-                item_children.push(serde_json::json!({
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": {"rich_text": rich_text_chunks(sub)}
-                }));
-            }
-            let mut bullet = serde_json::json!({
-                "object": "block",
-                "type": "bulleted_list_item",
-                "bulleted_list_item": {"rich_text": rich_text_chunks(b.trim())}
-            });
-            if !item_children.is_empty() {
-                bullet["bulleted_list_item"]["children"] = Value::Array(item_children);
-            }
-            blocks.push(bullet);
+fn url_quote(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-' | b'~') {
+            output.push(char::from(byte));
         } else {
-            blocks.push(serde_json::json!({
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": rich_text_chunks(trimmed)}
-            }));
+            use std::fmt::Write;
+            let _ = write!(&mut output, "%{byte:02X}");
         }
-        i += 1;
     }
+    output
+}
 
-    if blocks.len() >= NOTION_MAX_BLOCKS {
-        blocks.truncate(NOTION_MAX_BLOCKS - 1);
-        blocks.push(serde_json::json!({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": rich_text_chunks("Truncated remaining content at Notion block limit.")}
-        }));
+fn text_object(content: &str) -> Value {
+    serde_json::json!({"type":"text","text":{"content":content}})
+}
+fn note_block(content: &str) -> Value {
+    serde_json::json!({"object":"block","type":"paragraph","paragraph":{"rich_text":[text_object(content)]}})
+}
+struct Blocks {
+    children: Vec<Value>,
+    total: usize,
+    toggle: Option<usize>,
+    toggle_full: bool,
+    last: Option<(Option<usize>, usize)>,
+}
+impl Blocks {
+    fn close(&mut self) {
+        self.toggle = None;
+        self.toggle_full = false;
+        self.last = None;
     }
-    blocks
+    fn emit(&mut self, block: Value) -> Option<(Option<usize>, usize)> {
+        if self.total >= NOTION_MAX_BLOCKS {
+            return None;
+        }
+        let location = if let Some(index) = self.toggle {
+            let nested = self.children[index]["toggle"]["children"]
+                .as_array_mut()
+                .expect("toggle children");
+            if nested.len() >= NOTION_TOGGLE_CHILD_LIMIT {
+                if !self.toggle_full {
+                    self.toggle_full = true;
+                    let n = nested.len() - 1;
+                    nested[n] = note_block(
+                        "Truncated at the nested block limit; the full listing stays in the local journal file.",
+                    );
+                }
+                return None;
+            }
+            let next = nested.len();
+            nested.push(block);
+            (Some(index), next)
+        } else {
+            let next = self.children.len();
+            self.children.push(block);
+            (None, next)
+        };
+        self.total += 1;
+        Some(location)
+    }
+    fn append(
+        &mut self,
+        kind: &str,
+        text: &str,
+        attributes: Value,
+    ) -> Option<(Option<usize>, usize)> {
+        let chars: Vec<_> = text.chars().collect();
+        let mut first = None;
+        for (offset, chunk) in chars.chunks(NOTION_TEXT_CHUNK).enumerate() {
+            let kind = if offset == 0 { kind } else { "paragraph" };
+            let chunk: String = chunk.iter().collect();
+            let mut payload = serde_json::json!({"rich_text":[text_object(&chunk)]});
+            if offset == 0 {
+                if let Some(attributes) = attributes.as_object() {
+                    for (k, v) in attributes {
+                        payload[k] = v.clone();
+                    }
+                }
+            }
+            let block = serde_json::json!({"object":"block","type":kind,kind:payload});
+            let Some(location) = self.emit(block) else {
+                return first;
+            };
+            if first.is_none() {
+                first = Some(location);
+            }
+        }
+        first
+    }
+    fn detail(&mut self, location: (Option<usize>, usize), text: &str) {
+        let block = if let (Some(toggle), index) = location {
+            &mut self.children[toggle]["toggle"]["children"][index]
+        } else {
+            &mut self.children[location.1]
+        };
+        let kind = block["type"].as_str().unwrap_or("").to_owned();
+        let array = block[&kind]["rich_text"].as_array_mut().expect("rich text");
+        let chars: Vec<_> = text.chars().collect();
+        for chunk in chars.chunks(NOTION_TEXT_CHUNK - 3) {
+            if array.len() >= NOTION_CHILD_BATCH {
+                return;
+            }
+            let text: String = chunk.iter().collect();
+            array.push(text_object(&format!("\n↳ {text}")));
+        }
+    }
+}
+pub fn markdown_to_notion_blocks(markdown: &str) -> Vec<Value> {
+    let heading = regex::Regex::new(r"^(#{1,3})\s+(.+)$").expect("pattern");
+    let todo = regex::Regex::new(r"^-\s+\[([ xX])\]\s+(.+)$").expect("pattern");
+    let bullet = regex::Regex::new(r"^-\s+(.+)$").expect("pattern");
+    let numbered = regex::Regex::new(r"^\d+\.\s+(.+)$").expect("pattern");
+    let quote = regex::Regex::new(r"^>\s+(.+)$").expect("pattern");
+    let collapsed = [
+        "핵심 진전",
+        "Key progress",
+        "프로젝트별 작업",
+        "Work by project",
+        "프로젝트별 진전",
+        "Progress by project",
+        "완료하거나 검증한 작업",
+        "Completed or verified",
+        "아직 검증되지 않은 것",
+        "Not yet verified",
+        "세션",
+        "Sessions",
+        "리뷰",
+        "Reviews",
+        "커밋",
+        "Commits",
+    ];
+    let mut state = Blocks {
+        children: Vec::new(),
+        total: 0,
+        toggle: None,
+        toggle_full: false,
+        last: None,
+    };
+    for raw in crate::unicode::text_lines(markdown) {
+        if state.total >= NOTION_MAX_BLOCKS {
+            break;
+        }
+        let indented = raw.starts_with([' ', '\t']);
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "---" {
+            state.close();
+            state.emit(serde_json::json!({"object":"block","type":"divider","divider":{}}));
+        } else if let Some(c) = heading.captures(line) {
+            let level = c[1].len();
+            let title = &c[2];
+            if level >= 3 && state.toggle.is_some() {
+                state.last = None;
+                state.append(&format!("heading_{level}"), title, Value::Null);
+                continue;
+            }
+            state.close();
+            if level == 2 && collapsed.contains(&title.trim()) {
+                let block = serde_json::json!({"object":"block","type":"toggle","toggle":{"rich_text":[text_object(title.trim())],"children":[]}});
+                if let Some((_, index)) = state.emit(block) {
+                    state.toggle = Some(index);
+                }
+            } else {
+                state.append(&format!("heading_{level}"), title, Value::Null);
+            }
+        } else if let Some(c) = todo.captures(line) {
+            state.last = state.append(
+                "to_do",
+                &c[2],
+                serde_json::json!({"checked":c[1].eq_ignore_ascii_case("x")}),
+            );
+        } else if let Some(c) = quote.captures(line) {
+            state.last = None;
+            state.append(
+                "callout",
+                &c[1],
+                serde_json::json!({"icon":{"type":"emoji","emoji":"💡"}}),
+            );
+        } else if let Some(c) = bullet.captures(line) {
+            if let Some(location) = state.last.filter(|_| indented) {
+                state.detail(location, &c[1]);
+            } else {
+                state.last = state.append("bulleted_list_item", &c[1], Value::Null);
+            }
+        } else if let Some(c) = numbered.captures(line) {
+            state.last = state.append("numbered_list_item", &c[1], Value::Null);
+        } else {
+            state.last = None;
+            state.append("paragraph", line, Value::Null);
+        }
+    }
+    if state.total >= NOTION_MAX_BLOCKS && !state.children.is_empty() {
+        let last = state.children.len() - 1;
+        state.children[last] =
+            note_block("Work Journal content was truncated at the safe block limit.");
+    }
+    state.children
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1770,22 +2146,52 @@ pub struct SyncReport {
     pub deferred: usize,
     pub waiting: usize,
     pub skipped: usize,
+    pub remaining: usize,
     pub next_retry_at: Option<String>,
     pub message: String,
 }
-
 impl SyncReport {
     pub fn to_summary_line(&self) -> String {
-        if !self.message.is_empty() {
-            return format!("{}\n", self.message);
+        if !self.enabled {
+            return "journal sync: Notion is not configured for this repository\n".into();
         }
-        format!(
-            "sync: enabled={} attempted={} exported={} deferred={} failed={} waiting={}\n",
-            self.enabled, self.attempted, self.exported, self.deferred, self.failed, self.waiting
-        )
+        if self.attempted == 0 && self.waiting == 0 {
+            return "journal sync: already up to date\n".into();
+        }
+        let mut output = format!(
+            "journal sync: {} summar{} updated\n",
+            self.exported,
+            if self.exported == 1 { "y" } else { "ies" }
+        );
+        if self.failed > 0 {
+            output.push_str(&format!(
+                "journal sync: {} failed ({}); next: oms journal sync\n",
+                self.failed,
+                if self.message.is_empty() {
+                    "unknown error"
+                } else {
+                    &self.message
+                }
+            ));
+        }
+        if self.deferred > 0 {
+            output.push_str(&format!(
+                "journal sync: {} deferred by the remote; next: oms journal sync\n",
+                self.deferred
+            ));
+        }
+        if self.remaining > 0 {
+            output.push_str(&format!(
+                "journal sync: {} beyond this tick's cap; next: oms journal sync\n",
+                self.remaining
+            ));
+        }
+        if self.waiting > 0 {
+            output.push_str(&format!("journal sync: {} waiting for a retry window (earliest {}); next: oms journal sync after that, or new content for the period\n",self.waiting,self.next_retry_at.as_deref().unwrap_or("unknown")));
+        }
+        output
     }
 }
-
 pub struct SyncOptions {
     pub force: bool,
     pub include_today: bool,
@@ -1800,219 +2206,201 @@ pub fn sync_notion(
     now: DateTime<Utc>,
     interrupted: &AtomicBool,
 ) -> Result<SyncReport, String> {
+    use chrono::Datelike;
+    if opts.recent_days.is_some_and(|d| d < 1) {
+        return Err("recent days must be a positive integer".into());
+    }
+    if opts.include_today && opts.recent_days.is_some() {
+        return Err("today and recent days are mutually exclusive".into());
+    }
+    let mut report = SyncReport::default();
     if notion_repo_excluded(&store.repo_root) {
-        return Ok(SyncReport {
-            enabled: false,
-            message: "sync skipped: repository is in excluded_repos".into(),
-            ..Default::default()
-        });
+        return Ok(report);
     }
-    let settings = notion_settings();
-    if !settings.is_configured() {
-        return Ok(SyncReport {
-            enabled: false,
-            message: "sync disabled: Notion target or credentials not configured".into(),
-            ..Default::default()
-        });
+    let settings = notion_settings()?;
+    if !crate::config::notion_auth_available(&settings) || settings.target_id().is_empty() {
+        return Ok(report);
     }
-
-    let state_path = store.root.join("notion-sync-state.json");
-    let mut state: BTreeMap<String, Value> = read_regular_no_symlink_bytes(&state_path)?
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .and_then(|v| {
-            v.get("periods")
-                .and_then(Value::as_object)
-                .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    report.enabled = true;
+    let properties = serde_json::json!({"title_property":settings.title_property,"key_property":settings.key_property,"hash_property":settings.hash_property,"project_property":settings.project_property,"kind_property":settings.kind_property,"period_property":settings.period_property,"blocker_property":settings.blocker_property,"sessions_property":settings.sessions_property,"commits_property":settings.commits_property,"verified_property":settings.verified_property});
+    let target = serde_json::json!({"kind":if !settings.data_source_id.is_empty(){"data_source"}else{"database"},"id":settings.target_id(),"properties":properties});
+    let fingerprint = crate::sanitize::sha256_hex(&crate::sanitize::canonical_json_bytes(&target)?);
+    let path = store.root.join("sync/notion.json");
+    let mut state =
+        serde_json::json!({"schema_version":1,"target_fingerprint":fingerprint,"summaries":{}});
+    if let Some(bytes) = read_regular_no_symlink_bytes(&path)? {
+        if let Ok(loaded) = serde_json::from_slice::<Value>(&bytes) {
+            if loaded["schema_version"].as_u64() == Some(1)
+                && loaded["target_fingerprint"].as_str() == Some(&fingerprint)
+                && loaded["summaries"].is_object()
+            {
+                state = loaded;
+            }
+        }
+    }
+    let exporter = NotionExporter::from_settings(settings, opts.budget_seconds)?;
+    let schema = exporter.schema_descriptor();
+    let maximum = opts
+        .max_per_tick
+        .unwrap_or_else(|| {
+            std::env::var("OMS_WORK_JOURNAL_NOTION_MAX_PER_TICK")
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(4)
+                .clamp(1, 200) as usize
         })
-        .unwrap_or_default();
-
-    let (today_date, today_str, current_week) = store.tz.local_date_and_week(now);
-    let cutoff_date = opts
-        .recent_days
-        .map(|days| naive_date_to_string(today_date - Duration::days(days.max(0))));
-    let summary_rows = store.summary_rows()?;
-
-    let mut candidates = Vec::new();
-    for row in summary_rows {
-        let is_live = (row.kind == "daily" && row.period == today_str)
-            || (row.kind == "weekly" && row.period == current_week);
-        if is_live
-            && !opts.force
-            && !(opts.include_today && row.kind == "daily" && row.period == today_str)
+        .clamp(1, 200);
+    let (today, today_string, week) = store.tz.local_date_and_week(now);
+    let range = if let Some(days) = opts.recent_days {
+        let start = today
+            .checked_sub_signed(Duration::days(days - 1))
+            .ok_or("recent days is outside the supported date range")?;
+        let calendar = start.iso_week();
+        Some((
+            naive_date_to_string(start),
+            format!("{:04}-W{:02}", calendar.year(), calendar.week()),
+        ))
+    } else {
+        None
+    };
+    let lang = journal_language(Some(&store.tz));
+    for row in store.summary_rows()? {
+        if !opts.force
+            && ((row.kind == "daily" && row.period >= today_string)
+                || (row.kind == "weekly" && row.period >= week))
         {
             continue;
         }
-        if let Some(ref cutoff) = cutoff_date {
-            if row.kind == "daily" && row.period < *cutoff {
-                continue;
-            }
-            if row.kind == "weekly" {
-                if let Some((_start, end)) = crate::tz::iso_week_range(&row.period) {
-                    if end < *cutoff {
-                        continue;
-                    }
-                }
-            }
-        }
-        candidates.push(row);
-    }
-
-    if candidates.is_empty() {
-        return Ok(SyncReport {
-            enabled: true,
-            message: "sync: nothing to export".into(),
-            ..Default::default()
-        });
-    }
-
-    let exporter = NotionExporter::from_settings(settings, opts.budget_seconds)?;
-    let schema = exporter.validate_target(interrupted)?;
-    let lang = journal_language(Some(&store.tz));
-
-    let mut report = SyncReport {
-        enabled: true,
-        ..Default::default()
-    };
-
-    let deadline = Instant::now() + StdDuration::from_secs_f64(opts.budget_seconds.max(1.0));
-    for row in candidates {
-        if interrupted.load(Ordering::Relaxed) || Instant::now() >= deadline {
-            break;
-        }
-        if let Some(cap) = opts.max_per_tick {
-            if report.attempted >= cap {
-                break;
-            }
-        }
-
-        let key = format!("{}:{}:{}", store.project.id, row.kind, row.period);
-        let prev = state.get(&key).and_then(Value::as_object).cloned();
-        let prev_hash = prev
-            .as_ref()
-            .and_then(|p| p.get("content_hash").and_then(Value::as_str))
-            .unwrap_or("");
-        let prev_status = prev
-            .as_ref()
-            .and_then(|p| p.get("status").and_then(Value::as_str))
-            .unwrap_or("");
-        let prev_page_id = prev
-            .as_ref()
-            .and_then(|p| p.get("page_id").and_then(Value::as_str))
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned);
-
-        let same_hash = !prev_hash.is_empty() && prev_hash == row.content_hash;
-        if same_hash && prev_status == "synced" && !opts.force {
-            report.skipped += 1;
+        if opts.include_today && (row.kind != "daily" || row.period != today_string) {
             continue;
         }
-
-        if same_hash && !opts.force {
-            if let Some(next_retry_str) = prev
-                .as_ref()
-                .and_then(|p| p.get("next_retry_at").and_then(Value::as_str))
+        if let Some((day, start_week)) = &range {
+            if !((row.kind == "daily" && row.period >= *day && row.period <= today_string)
+                || (row.kind == "weekly" && row.period >= *start_week && row.period <= week))
             {
-                if let Ok(next_dt) = parse_rfc3339_utc(next_retry_str) {
-                    if now < next_dt {
-                        report.waiting += 1;
-                        if report.next_retry_at.is_none() {
-                            report.next_retry_at = Some(next_retry_str.to_string());
-                        }
-                        continue;
+                continue;
+            }
+        }
+        let events = store.load_events_for_period(&row.kind, &row.period)?;
+        let content = notion_presentation(&row.content, Some(&events), &lang);
+        let hash = crate::sanitize::sha256_hex(content.as_bytes());
+        let key = format!("{}:{}:{}", store.project.id, row.kind, row.period);
+        let previous = state["summaries"]
+            .get(&key)
+            .filter(|v| v.is_object())
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        if previous["status"].as_str() == Some("synced")
+            && previous["content_hash"].as_str() == Some(&hash)
+        {
+            continue;
+        }
+        if let Some(stamp) = previous["next_retry_at"].as_str() {
+            let changed = previous["status"].as_str() == Some("failed")
+                && previous["pending_content_hash"].as_str() != Some(&hash);
+            if let Ok(retry) = parse_rfc3339_utc(stamp) {
+                if !changed && retry > now {
+                    report.waiting += 1;
+                    let stamp = utc_rfc3339(retry);
+                    if report.next_retry_at.as_ref().is_none_or(|s| stamp < *s) {
+                        report.next_retry_at = Some(stamp);
                     }
+                    continue;
                 }
             }
         }
-
+        if report.attempted >= maximum {
+            report.remaining += 1;
+            continue;
+        }
+        if interrupted.load(Ordering::Relaxed) {
+            return Err("interrupted".into());
+        }
         report.attempted += 1;
-        let period_events = if row.kind == "daily" {
-            store.load_events_for_period("daily", &row.period).ok()
-        } else {
-            None
-        };
-        let body_md = notion_presentation(&row.content, period_events.as_deref(), &lang);
-        let title = format!("{} {} ({})", store.project.name, row.kind, row.period);
-
-        match exporter.upsert(
-            &schema,
-            &key,
-            &title,
-            &row.content_hash,
-            &body_md,
-            &row.kind,
-            &row.period,
-            &store.project.name,
-            row.has_blocker,
-            prev_page_id.as_deref(),
-            interrupted,
-        ) {
-            Ok(page_id) => {
+        let result = (|| -> Result<String, TransportError> {
+            let aggregates = store
+                .period_aggregates(&row.kind, &row.period)
+                .map_err(TransportError::Io)?;
+            let title = format!(
+                "{} Work Journal — {}",
+                if row.kind == "daily" {
+                    "Daily"
+                } else {
+                    "Weekly"
+                },
+                row.period
+            );
+            exporter.upsert(
+                &schema,
+                &key,
+                &title,
+                &hash,
+                &content,
+                &row.kind,
+                &row.period,
+                &store.project.name,
+                row.has_blocker,
+                &aggregates,
+                previous["page_id"].as_str(),
+                interrupted,
+            )
+        })();
+        let entry = match result {
+            Ok(page) => {
                 report.exported += 1;
-                let mut entry = Map::new();
-                entry.insert("status".into(), Value::String("synced".into()));
-                entry.insert("content_hash".into(), Value::String(row.content_hash));
-                entry.insert("page_id".into(), Value::String(page_id));
-                entry.insert("synced_at".into(), Value::String(utc_rfc3339(now)));
-                state.insert(key, Value::Object(entry));
+                serde_json::json!({"status":"synced","page_id":if page.is_empty(){previous["page_id"].clone()}else{Value::String(page)},"content_hash":hash,"period":row.period,"kind":row.kind})
             }
-            Err(err) => {
-                let prev_attempts = if same_hash {
-                    prev.as_ref()
-                        .and_then(|p| p.get("attempts").and_then(Value::as_u64))
-                        .unwrap_or(0)
-                } else {
-                    0
+            Err(error) => {
+                let error_name = match &error {
+                    TransportError::Timeout(_) => "TimeoutError",
+                    TransportError::Deferred { .. } => "NotionDeferredError",
+                    TransportError::RateLimited { .. }
+                    | TransportError::ServerError { .. }
+                    | TransportError::ClientError { .. } => "NotionHTTPError",
+                    TransportError::Io(_) => "NotionTransportError",
                 };
-                let attempts = prev_attempts + 1;
-                let mut entry = Map::new();
-                entry.insert("content_hash".into(), Value::String(row.content_hash));
-                if let Some(pid) = prev_page_id {
-                    entry.insert("page_id".into(), Value::String(pid));
-                }
-                entry.insert("attempts".into(), Value::Number(attempts.into()));
-                entry.insert(
-                    "last_error".into(),
-                    Value::String(sanitize_text(err.message(), 300)),
+                let missing = matches!(
+                    error,
+                    TransportError::ClientError { status: 404, .. }
+                        | TransportError::Deferred { status: 404, .. }
                 );
-
-                if let Some(ra) = err.retry_after() {
-                    report.deferred += 1;
-                    let wait_secs = (ra.ceil() as i64).clamp(1, MAX_RETRY_WAIT_SECS);
-                    let next_dt = now + Duration::seconds(wait_secs);
-                    let next_s = utc_rfc3339(next_dt);
-                    entry.insert("status".into(), Value::String("deferred".into()));
-                    entry.insert("next_retry_at".into(), Value::String(next_s.clone()));
-                    if report.next_retry_at.is_none() {
-                        report.next_retry_at = Some(next_s);
-                    }
+                let mut entry = serde_json::json!({"status":"failed","page_id":if missing{Value::Null}else{previous["page_id"].clone()},"content_hash":previous["content_hash"],"pending_content_hash":hash,"period":row.period,"kind":row.kind,"error":error_name});
+                let scheduled = if let TransportError::Deferred { retry_after, .. } = error {
+                    (retry_after.is_finite() && retry_after > 0.0).then_some(retry_after)
                 } else {
-                    report.failed += 1;
-                    entry.insert("status".into(), Value::String("failed".into()));
-                    // 1st failure allows 1 immediate retry (no next_retry_at); >=2 backs off 60 * 2^(attempts-2) capped at 1 day
+                    None
+                };
+                if let Some(seconds) = scheduled {
+                    entry["status"] = serde_json::json!("pending");
+                    entry["next_retry_at"] = serde_json::json!(utc_rfc3339(
+                        now + Duration::microseconds((seconds * 1_000_000.0).round() as i64)
+                    ));
+                    report.deferred += 1;
+                } else {
+                    let previous_attempts = if previous["status"].as_str() == Some("failed")
+                        && previous["pending_content_hash"].as_str() == Some(&hash)
+                    {
+                        previous["attempts"].as_u64().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let attempts = previous_attempts.saturating_add(1);
+                    entry["attempts"] = serde_json::json!(attempts);
                     if attempts >= 2 {
-                        let exp = (attempts - 2).min(12) as u32;
-                        let wait_secs = (60i64.saturating_mul(2i64.saturating_pow(exp)))
-                            .min(MAX_RETRY_WAIT_SECS);
-                        let next_dt = now + Duration::seconds(wait_secs);
-                        let next_s = utc_rfc3339(next_dt);
-                        entry.insert("next_retry_at".into(), Value::String(next_s.clone()));
-                        if report.next_retry_at.is_none() {
-                            report.next_retry_at = Some(next_s);
-                        }
+                        let seconds = 60u64
+                            .saturating_mul(1u64 << attempts.saturating_sub(2).min(20))
+                            .min(86400);
+                        entry["next_retry_at"] =
+                            serde_json::json!(utc_rfc3339(now + Duration::seconds(seconds as i64)));
                     }
+                    report.failed += 1;
                 }
-                state.insert(key, Value::Object(entry));
+                report.message = error_name.into();
+                entry
             }
-        }
+        };
+        state["summaries"][&key] = entry;
+        atomic_write_bytes(&path, &pretty_json_bytes(&state)?)?;
     }
-
-    let mut root = Map::new();
-    root.insert("schema".into(), Value::Number(1.into()));
-    root.insert("updated_at".into(), Value::String(utc_rfc3339(now)));
-    let periods_map: Map<String, Value> = state.into_iter().collect();
-    root.insert("periods".into(), Value::Object(periods_map));
-    let bytes = pretty_json_bytes(&Value::Object(root))?;
-    atomic_write_bytes(&state_path, &bytes)?;
-
     Ok(report)
 }

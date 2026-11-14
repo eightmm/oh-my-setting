@@ -1,14 +1,11 @@
 #![forbid(unsafe_code)]
 
-use crate::sanitize::{
-    DAILY_ITEM_LIMIT, SUMMARY_BYTE_LIMIT, SUMMARY_ITEM_CHAR_LIMIT, WEEKLY_ITEM_LIMIT,
-    bounded_summary, sanitize_text, truncate_utf8_bytes,
-};
-use crate::tz::{TimeZoneSpec, format_hhmm, parse_rfc3339_utc};
+use crate::labels::label;
+use crate::sanitize::sanitize_text;
+use crate::tz::TimeZoneSpec;
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Headings {
@@ -110,101 +107,252 @@ pub fn headings_for(lang: &str) -> &'static Headings {
 }
 
 pub fn event_citation(ev: &Value) -> String {
-    let eid = ev
-        .get("event_id")
-        .and_then(Value::as_str)
-        .unwrap_or("wj_unknown");
-    let src_type = ev
-        .pointer("/source/type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let src_id = ev
-        .pointer("/source/id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let short_src_id = sanitize_text(src_id, 48);
-    let ev_refs: Vec<String> = ev
-        .get("evidence")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .take(3)
-                .filter_map(|item| {
-                    let r = item.get("ref").and_then(Value::as_str)?;
-                    Some(sanitize_text(r, 48))
-                })
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    let ev_part = if ev_refs.is_empty() {
-        "none".to_string()
+    let mut parts = vec![text(&ev["event_id"])];
+    if truth(&ev["source"]["type"]) && truth(&ev["source"]["id"]) {
+        parts.push(format!(
+            "source {}:{}",
+            text(&ev["source"]["type"]),
+            text(&ev["source"]["id"])
+        ));
+    }
+    for item in ev["evidence"].as_array().into_iter().flatten().take(3) {
+        if truth(&item["type"]) && truth(&item["ref"]) {
+            parts.push(format!(
+                "evidence {}:{}",
+                text(&item["type"]),
+                text(&item["ref"])
+            ));
+        }
+    }
+    format!("[{}]", parts.join("; "))
+}
+fn display(value: &str) -> String {
+    let value = value.trim();
+    if !value.ends_with('…') && value.len() >= 1997 {
+        format!("{value}…")
     } else {
-        ev_refs.join(",")
-    };
-    format!("[{eid}; source {src_type}:{short_src_id}; evidence {ev_part}]")
+        value.into()
+    }
+}
+fn text(value: &Value) -> String {
+    if value.is_null() {
+        String::new()
+    } else {
+        crate::schema::python_str(value)
+    }
+}
+fn truth(value: &Value) -> bool {
+    crate::schema::json_truthy(value)
+}
+fn string<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
+}
+fn order(value: &Value) -> (&str, &str) {
+    (string(value, "occurred_at"), string(value, "event_id"))
+}
+fn sorted(events: &[Value]) -> Vec<&Value> {
+    let mut rows: Vec<_> = events.iter().collect();
+    rows.sort_by_key(|r| order(r));
+    rows
 }
 
 pub fn event_work_label(ev: &Value) -> String {
-    if let Some(summary) = ev
-        .pointer("/outcome/summary")
-        .and_then(Value::as_str)
-        .map(|s| bounded_summary(s, 180))
-        .filter(|s| !s.is_empty())
-    {
-        return summary.lines().next().unwrap_or("").to_string();
-    }
-    if let Some(title) = ev
-        .pointer("/work_item/title")
-        .and_then(Value::as_str)
-        .map(|s| sanitize_text(s, 160))
-        .filter(|s| !s.is_empty())
-    {
-        return title;
-    }
-    if let Some(note) = ev
-        .get("note")
-        .and_then(Value::as_str)
-        .map(|s| sanitize_text(s, 160))
-        .filter(|s| !s.is_empty())
-    {
-        return note;
-    }
-    let et = ev
-        .get("event_type")
-        .and_then(Value::as_str)
-        .unwrap_or("event");
-    let src_id = ev
-        .pointer("/source/id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if src_id.is_empty() {
-        et.to_string()
+    if truth(&ev["outcome"]["summary"]) {
+        display(&text(&ev["outcome"]["summary"]))
     } else {
-        format!("{et} ({src_id})")
+        string(ev, "event_type").replace('_', " ")
     }
 }
 
 pub fn judgment_summary(ev: &Value, field: &str, h: &Headings) -> String {
-    let raw = ev.get(field).and_then(Value::as_str).unwrap_or("").trim();
-    if raw.is_empty() {
-        return String::new();
-    }
-    let clean_field = sanitize_text(raw, SUMMARY_ITEM_CHAR_LIMIT);
-    let summary_text = ev
-        .pointer("/outcome/summary")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    if summary_text.is_empty() {
-        return clean_field;
-    }
-    let compact_work = sanitize_text(summary_text, 120);
-    if compact_work.is_empty() || summary_text.chars().count() > 200 || compact_work == clean_field
+    let raw = text(&ev[field]);
+    let raw = raw.trim();
+    let mut rendered = display(raw);
+    let context = text(&ev["outcome"]["summary"]);
+    let context = context.trim();
+    if !context.is_empty()
+        && context != raw
+        && raw.chars().count() <= 96
+        && context.chars().count() <= 180
     {
-        return clean_field;
+        rendered.push_str(&format!(" — {}: {context}", label(h.lang, "context")));
     }
-    format!("{clean_field} — {}: {compact_work}", h.work_label)
+    rendered
+}
+
+const FAILED: &[&str] = &[
+    "failure",
+    "failed",
+    "rejected",
+    "deferred",
+    "cancelled",
+    "aborted",
+    "parked",
+];
+fn event_failed(event: &Value) -> bool {
+    truth(&event["blocker"])
+        || matches!(string(event, "verification_status"), "failed" | "skipped")
+        || FAILED.contains(&text(&event["outcome"]["status"]).to_lowercase().as_str())
+}
+fn event_commit_sha(event: &Value) -> String {
+    if event["source"]["type"].as_str() == Some("git-commit") {
+        return text(&event["source"]["id"]);
+    }
+    if truth(&event["provenance"]["code_commit"]) {
+        return text(&event["provenance"]["code_commit"]);
+    }
+    event["refs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["type"].as_str() == Some("commit") && truth(&r["id"]))
+        .map(|r| text(&r["id"]))
+        .unwrap_or_default()
+}
+fn ci_run_identity(event: &Value) -> String {
+    let id = text(&event["provenance"]["run_id"]);
+    let id = id.trim();
+    if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+        return format!("run:{id}");
+    }
+    let urls: Vec<_> = event["refs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["type"].as_str() == Some("ci-run") && truth(&r["url"]))
+        .map(|r| text(&r["url"]))
+        .collect();
+    let source_id = text(&event["source"]["id"]);
+    let run = Regex::new(r"/actions/runs/(\d+)(?:/|$)").expect("pattern");
+    let attempt = Regex::new(r"^(.*):attempt:[^:]+:[^:]*$").expect("pattern");
+    for (marker, prefix) in [(":run-url:", "url:"), (":run:", "run:")] {
+        if let Some((_, tail)) = source_id.split_once(marker) {
+            let id = attempt
+                .captures(tail)
+                .map(|c| c[1].to_owned())
+                .unwrap_or_else(|| {
+                    tail.rsplit_once(':')
+                        .map(|(s, _)| s)
+                        .unwrap_or(tail)
+                        .to_owned()
+                });
+            if !id.is_empty() {
+                if prefix == "run:" && id.chars().all(|c| c.is_ascii_digit()) {
+                    return format!("run:{id}");
+                }
+                if prefix == "url:" {
+                    return run
+                        .captures(&id)
+                        .map(|c| format!("run:{}", &c[1]))
+                        .unwrap_or_else(|| format!("url:{id}"));
+                }
+            }
+        }
+    }
+    for url in &urls {
+        if let Some(c) = run.captures(url) {
+            return format!("run:{}", &c[1]);
+        }
+    }
+    if let Some(url) = urls.first() {
+        return format!("url:{url}");
+    }
+    format!(
+        "event:{}",
+        if truth(&event["event_id"]) {
+            text(&event["event_id"])
+        } else {
+            source_id
+        }
+    )
+}
+fn latest_ci_events(events: &[Value]) -> Vec<&Value> {
+    let mut ordered = sorted(events);
+    ordered.sort_by_key(|r| {
+        text(&r["provenance"]["attempt"])
+            .parse::<i128>()
+            .unwrap_or(0)
+    });
+    let mut latest: Vec<((String, String), &Value)> = Vec::new();
+    for event in ordered {
+        if event["source"]["type"].as_str() != Some("ci-status") {
+            continue;
+        }
+        let sha = event_commit_sha(event);
+        let sha = if sha.is_empty() {
+            format!("@{}", text(&event["event_id"]))
+        } else {
+            sha
+        };
+        let key = (sha, ci_run_identity(event));
+        if let Some((_, value)) = latest.iter_mut().find(|(k, _)| *k == key) {
+            *value = event;
+        } else {
+            latest.push((key, event));
+        }
+    }
+    latest.into_iter().map(|(_, v)| v).collect()
+}
+fn failed_digest_events(events: &[Value]) -> Vec<&Value> {
+    let mut latest: Vec<(Vec<String>, &Value, bool)> = Vec::new();
+    for event in sorted(events) {
+        let kind = text(&event["source"]["type"]);
+        let id = if truth(&event["source"]["id"]) {
+            text(&event["source"]["id"])
+        } else {
+            text(&event["event_id"])
+        };
+        let task = text(&event["correlation"]["task_id"]);
+        let task = task.trim();
+        let operation = text(&event["correlation"]["operation_id"]);
+        let verify = kind == "agent-task"
+            && (event["event_type"].as_str() == Some("validation")
+                || operation.contains(":verify:"));
+        if kind == "ci-status" {
+            continue;
+        }
+        let target = if task.is_empty() {
+            id.clone()
+        } else {
+            task.into()
+        };
+        let key = if kind == "peer-review" {
+            vec!["review".into(), target]
+        } else if kind == "patch-land" {
+            let sha = event_commit_sha(event);
+            vec!["land".into(), if sha.is_empty() { target } else { sha }]
+        } else if verify {
+            vec!["verify".into(), target]
+        } else if !task.is_empty() {
+            vec!["worker".into(), kind, task.into()]
+        } else {
+            vec!["event".into(), kind, id]
+        };
+        if let Some((_, value, verification)) = latest.iter_mut().find(|(k, _, _)| *k == key) {
+            *value = event;
+            *verification = verify;
+        } else {
+            latest.push((key, event, verify));
+        }
+    }
+    for event in latest_ci_events(events) {
+        latest.push((vec![], event, false));
+    }
+    let ids: HashSet<_> = latest
+        .into_iter()
+        .filter(|(_, e, v)| {
+            if *v {
+                matches!(string(e, "verification_status"), "failed" | "skipped")
+            } else {
+                event_failed(e)
+            }
+        })
+        .map(|(_, e, _)| string(e, "event_id"))
+        .collect();
+    events
+        .iter()
+        .filter(|e| ids.contains(string(e, "event_id")))
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -217,667 +365,993 @@ pub struct PeriodAggregates {
     pub commits: usize,
     pub sessions: Vec<String>,
 }
-
 pub fn compute_period_aggregates(events: &[Value]) -> PeriodAggregates {
-    let mut agg = PeriodAggregates::default();
-    let mut session_set = BTreeSet::new();
-    for ev in events {
-        agg.event_count += 1;
-        let vs = ev
-            .get("verification_status")
-            .and_then(Value::as_str)
-            .unwrap_or("not_verified");
-        let outcome_status = ev
-            .pointer("/outcome/status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if vs == "passed" {
-            agg.verified += 1;
-        } else if vs == "failed" || outcome_status == "failed" {
-            agg.failed += 1;
-        } else {
-            agg.unverified += 1;
-        }
-        if ev
-            .get("blocker")
-            .and_then(Value::as_str)
-            .is_some_and(|b| !b.trim().is_empty())
-        {
-            agg.blockers += 1;
-        }
-        if ev.get("event_type").and_then(Value::as_str) == Some("commit") {
-            agg.commits += 1;
-        }
-        if let Some(sid) = ev
-            .pointer("/correlation/session_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            session_set.insert(sid.to_string());
+    let mut aggregate = PeriodAggregates::default();
+    for event in events {
+        aggregate.event_count += 1;
+        aggregate.verified += usize::from(string(event, "verification_status") == "passed");
+        aggregate.unverified += usize::from(string(event, "verification_status") == "not_verified");
+        aggregate.blockers += usize::from(truth(&event["blocker"]));
+        aggregate.commits += usize::from(string(event, "event_type") == "commit");
+        let sid = text(&event["correlation"]["session_id"]);
+        let sid = sid.trim();
+        if !sid.is_empty() && !aggregate.sessions.iter().any(|v| v == sid) {
+            aggregate.sessions.push(sid.into());
         }
     }
-    agg.sessions = session_set.into_iter().collect();
-    agg
+    aggregate.failed = failed_digest_events(events).len();
+    aggregate
 }
-
 pub fn has_blocker(events: &[Value]) -> bool {
-    events.iter().any(|ev| {
-        let blocker_nonempty = ev
-            .get("blocker")
-            .and_then(Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty());
-        let vs_failed = ev.get("verification_status").and_then(Value::as_str) == Some("failed");
-        let out_failed = ev.pointer("/outcome/status").and_then(Value::as_str) == Some("failed");
-        blocker_nonempty || vs_failed || out_failed
-    })
+    events.iter().any(|e| truth(&e["blocker"]))
 }
-
-fn format_overview_line(agg: &PeriodAggregates, h: &Headings) -> String {
-    let mut parts = vec![
-        format!("{} {}", h.events_word, agg.event_count),
-        format!("{} {}", h.verified_word, agg.verified),
-        format!("{} {}", h.unverified_word, agg.unverified),
-    ];
-    if agg.failed > 0 {
-        parts.push(format!("{} {}", h.failed_word, agg.failed));
-    }
-    if agg.blockers > 0 {
-        parts.push(format!("{} {}", h.blocker_word, agg.blockers));
-    }
-    if !agg.sessions.is_empty() {
-        parts.push(format!("{} {}", h.session_word, agg.sessions.len()));
-    }
-    if agg.commits > 0 {
-        parts.push(format!("{} {}", h.commit_word, agg.commits));
-    }
-    format!("- {}", parts.join(" · "))
-}
-
-pub fn render_daily(date: &str, events: &[Value], tz: &TimeZoneSpec, lang: &str) -> String {
-    let h = headings_for(lang);
-    let mut sorted: Vec<&Value> = events.iter().collect();
-    sorted.sort_by_key(|ev| {
-        (
-            ev.get("occurred_at").and_then(Value::as_str).unwrap_or(""),
-            ev.get("event_id").and_then(Value::as_str).unwrap_or(""),
-        )
-    });
-
-    let agg = compute_period_aggregates(events);
-    let mut out = String::new();
-    out.push_str(h.daily_title);
-    out.push_str(date);
-    out.push_str("\n\n");
-
-    out.push_str(h.overview);
-    out.push('\n');
-    out.push_str(&format_overview_line(&agg, h));
-    out.push_str("\n\n");
-
-    // Key progress
-    let mut progress_lines = Vec::new();
-    let mut verified_lines = Vec::new();
-    let mut decision_lines = Vec::new();
-    let mut blocker_lines = Vec::new();
-    let mut next_lines = Vec::new();
-    let mut experiment_lines = Vec::new();
-    let mut session_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut by_project: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
-
-    for ev in &sorted {
-        let cite = event_citation(ev);
-        let label = event_work_label(ev);
-        let vs = ev
-            .get("verification_status")
-            .and_then(Value::as_str)
-            .unwrap_or("not_verified");
-        let et = ev
-            .get("event_type")
-            .and_then(Value::as_str)
-            .unwrap_or("event");
-        let outcome_status = ev
-            .pointer("/outcome/status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let hhmm = ev
-            .get("occurred_at")
-            .and_then(Value::as_str)
-            .and_then(|s| parse_rfc3339_utc(s).ok())
-            .map(|dt| format_hhmm(dt, tz))
-            .unwrap_or_else(|| "--:--".to_string());
-
-        if progress_lines.len() < DAILY_ITEM_LIMIT
-            && vs != "failed"
-            && outcome_status != "failed"
-            && et != "correction"
-        {
-            progress_lines.push(format!("- [{hhmm}] {label} {cite}"));
-        }
-
-        if vs == "passed" && verified_lines.len() < DAILY_ITEM_LIMIT {
-            verified_lines.push(format!("- {label} {cite}"));
-        }
-
-        if let Some(dec) = Some(judgment_summary(ev, "decision", h)).filter(|s| !s.is_empty()) {
-            decision_lines.push(format!("- {dec} {cite}"));
-        }
-
-        if let Some(blk) = Some(judgment_summary(ev, "blocker", h)).filter(|s| !s.is_empty()) {
-            blocker_lines.push(format!("- {blk} {cite}"));
-        } else if (vs == "failed" || outcome_status == "failed")
-            && blocker_lines.len() < DAILY_ITEM_LIMIT
-        {
-            blocker_lines.push(format!("- {label} {cite}"));
-        }
-
-        if let Some(na) = Some(judgment_summary(ev, "next_action", h)).filter(|s| !s.is_empty()) {
-            next_lines.push(format!("- {na} {cite}"));
-        }
-
-        if matches!(et, "experiment" | "research") && experiment_lines.len() < DAILY_ITEM_LIMIT {
-            let mut exp_block = vec![format!("- {label} {cite}")];
-            if let Some(research) = ev.get("research").and_then(Value::as_object) {
-                for (rk, rv) in research {
-                    if let Some(s) = rv.as_str() {
-                        exp_block.push(format!("  - {rk}: {}", sanitize_text(s, 200)));
-                    }
-                }
-            }
-            if let Some(metrics) = ev.get("metrics").and_then(Value::as_array) {
-                for m in metrics.iter().take(5) {
-                    if let (Some(mn), Some(mv)) =
-                        (m.get("name").and_then(Value::as_str), m.get("value"))
-                    {
-                        let unit = m.get("unit").and_then(Value::as_str).unwrap_or("");
-                        exp_block.push(format!("  - metric {mn}: {mv}{unit}"));
-                    }
-                }
-            }
-            experiment_lines.push(exp_block.join("\n"));
-        }
-
-        if let Some(sid) = ev
-            .pointer("/correlation/session_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            *session_counts.entry(sid.to_string()).or_insert(0) += 1;
-        }
-
-        let proj_name = ev
-            .pointer("/project/name")
-            .and_then(Value::as_str)
-            .unwrap_or("project")
-            .to_string();
-        let mut work_entry = Vec::new();
-        let first_line = label.lines().next().unwrap_or(&label).to_string();
-        let prefix = if lang == "ko" {
-            "- 작업: "
-        } else {
-            "- Work: "
-        };
-        work_entry.push(format!("{prefix}{first_line} {cite}"));
-        if !outcome_status.is_empty() {
-            let res_prefix = if lang == "ko" {
-                "  - 결과: "
-            } else {
-                "  - result: "
-            };
-            work_entry.push(format!("{res_prefix}{outcome_status}"));
-        }
-        if let Some(summary) = ev.pointer("/outcome/summary").and_then(Value::as_str) {
-            for extra in summary.lines().skip(1).take(6) {
-                let cleaned = sanitize_text(extra, 300);
-                if !cleaned.is_empty() {
-                    work_entry.push(format!("  - {cleaned}"));
-                }
-            }
-        }
-        if let Some(note) = ev
-            .get("note")
-            .and_then(Value::as_str)
-            .map(|s| sanitize_text(s, 300))
-            .filter(|s| !s.is_empty())
-        {
-            let note_prefix = if lang == "ko" {
-                "  - 해석: "
-            } else {
-                "  - note: "
-            };
-            work_entry.push(format!("{note_prefix}{note}"));
-        }
-        if let Some(evs) = ev.get("evidence").and_then(Value::as_array) {
-            for item in evs.iter().take(2) {
-                if let Some(r) = item.get("ref").and_then(Value::as_str) {
-                    let ev_prefix = if lang == "ko" {
-                        "  - 관련 evidence: "
-                    } else {
-                        "  - evidence: "
-                    };
-                    let t = item.get("type").and_then(Value::as_str).unwrap_or("ref");
-                    work_entry.push(format!("{ev_prefix}{t}:{}", sanitize_text(r, 120)));
-                }
-            }
-        }
-        by_project.entry(proj_name).or_default().push(work_entry);
-    }
-
-    append_section(&mut out, h.progress, &progress_lines);
-    append_section(&mut out, h.verified, &verified_lines);
-    append_section(&mut out, h.decisions, &decision_lines);
-    append_section(&mut out, h.blockers, &blocker_lines);
-    append_section(&mut out, h.next_actions, &next_lines);
-    append_section(&mut out, h.experiments, &experiment_lines);
-
-    if !session_counts.is_empty() {
-        let mut s_lines: Vec<String> = session_counts
-            .into_iter()
-            .map(|(sid, count)| format!("- {sid} ({count} event(s))"))
-            .collect();
-        s_lines.push("  - inspect: oms session-handoff list".to_string());
-        append_section(&mut out, h.sessions, &s_lines);
-    }
-
-    // By project
-    if !by_project.is_empty() {
-        let mut body = Vec::new();
-        for (proj, entries) in by_project {
-            body.push(format!("### {proj}"));
-            for entry in entries.into_iter().take(WEEKLY_ITEM_LIMIT) {
-                body.extend(entry);
-            }
-        }
-        append_section(&mut out, h.by_project, &body);
-    }
-
-    bound_markdown(&out, h)
-}
-
-pub fn render_weekly(week: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &str) -> String {
-    let h = headings_for(lang);
-    let mut sorted: Vec<&Value> = events.iter().collect();
-    sorted.sort_by_key(|ev| {
-        (
-            ev.get("occurred_at").and_then(Value::as_str).unwrap_or(""),
-            ev.get("event_id").and_then(Value::as_str).unwrap_or(""),
-        )
-    });
-
-    let agg = compute_period_aggregates(events);
-    let mut out = String::new();
-    out.push_str(h.weekly_title);
-    out.push_str(week);
-    out.push_str("\n\n");
-
-    out.push_str(h.overview);
-    out.push('\n');
-    out.push_str(&format_overview_line(&agg, h));
-    out.push_str("\n\n");
-
-    let mut progress_lines = Vec::new();
-    let mut verified_lines = Vec::new();
-    let mut decision_lines = Vec::new();
-    let mut next_lines = Vec::new();
-    let mut experiment_lines = Vec::new();
-
-    // Group repeated blockers across the week
-    let mut blocker_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut by_date: BTreeMap<String, usize> = BTreeMap::new();
-
-    for ev in &sorted {
-        let date = ev.get("local_date").and_then(Value::as_str).unwrap_or("");
-        *by_date.entry(date.to_string()).or_insert(0) += 1;
-        let cite = event_citation(ev);
-        let label = event_work_label(ev);
-        let vs = ev
-            .get("verification_status")
-            .and_then(Value::as_str)
-            .unwrap_or("not_verified");
-        let et = ev
-            .get("event_type")
-            .and_then(Value::as_str)
-            .unwrap_or("event");
-        let outcome_status = ev
-            .pointer("/outcome/status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        if progress_lines.len() < WEEKLY_ITEM_LIMIT && vs != "failed" && outcome_status != "failed"
-        {
-            progress_lines.push(format!("- {date} · {label} {cite}"));
-        }
-        if vs == "passed" && verified_lines.len() < WEEKLY_ITEM_LIMIT {
-            verified_lines.push(format!("- {date} · {label} {cite}"));
-        }
-        if let Some(dec) = Some(judgment_summary(ev, "decision", h)).filter(|s| !s.is_empty()) {
-            decision_lines.push(format!("- {date} · {dec} {cite}"));
-        }
-        if let Some(raw_blk) = ev
-            .get("blocker")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let key = sanitize_text(raw_blk, SUMMARY_ITEM_CHAR_LIMIT);
-            blocker_groups.entry(key).or_default().push(cite.clone());
-        } else if vs == "failed" || outcome_status == "failed" {
-            let key = sanitize_text(&label, SUMMARY_ITEM_CHAR_LIMIT);
-            blocker_groups.entry(key).or_default().push(cite.clone());
-        }
-        if let Some(na) = Some(judgment_summary(ev, "next_action", h)).filter(|s| !s.is_empty()) {
-            next_lines.push(format!("- {date} · {na} {cite}"));
-        }
-        if matches!(et, "experiment" | "research") && experiment_lines.len() < WEEKLY_ITEM_LIMIT {
-            experiment_lines.push(format!("- {date} · {label} {cite}"));
-        }
-    }
-
-    let mut blocker_lines = Vec::new();
-    for (blk_text, cites) in blocker_groups {
-        if cites.len() > 1 {
-            if lang == "ko" {
-                blocker_lines.push(format!(
-                    "- {blk_text} ({} {}회) {}",
-                    h.repeated_label,
-                    cites.len(),
-                    cites.join(" ")
-                ));
-            } else {
-                blocker_lines.push(format!(
-                    "- {blk_text} ({} {}x) {}",
-                    h.repeated_label,
-                    cites.len(),
-                    cites.join(" ")
-                ));
-            }
-        } else {
-            blocker_lines.push(format!("- {blk_text} {}", cites.join(" ")));
-        }
-    }
-
-    append_section(&mut out, h.progress, &progress_lines);
-    append_section(&mut out, h.verified, &verified_lines);
-    append_section(&mut out, h.decisions, &decision_lines);
-    append_section(&mut out, h.blockers, &blocker_lines);
-    append_section(&mut out, h.next_actions, &next_lines);
-    append_section(&mut out, h.experiments, &experiment_lines);
-
-    if !by_date.is_empty() {
-        let heading = if lang == "ko" {
-            "## 일자별 요약"
-        } else {
-            "## By day"
-        };
-        let lines: Vec<String> = by_date
-            .into_iter()
-            .map(|(d, count)| format!("- {d}: {count} event(s)"))
-            .collect();
-        append_section(&mut out, heading, &lines);
-    }
-
-    bound_markdown(&out, h)
-}
-
-fn append_section(out: &mut String, heading: &str, lines: &[String]) {
-    if lines.is_empty() {
-        return;
-    }
-    out.push_str(heading);
-    out.push('\n');
-    for line in lines {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push('\n');
-}
-
-fn bound_markdown(raw: &str, h: &Headings) -> String {
-    if raw.len() <= SUMMARY_BYTE_LIMIT {
-        return raw.trim_end().to_string() + "\n";
-    }
-    // Keep judgment sections first, then truncate trailing detail sections cleanly
-    let budget = SUMMARY_BYTE_LIMIT.saturating_sub(h.omitted_note.len() + 16);
-    let truncated = truncate_utf8_bytes(raw, budget);
-    let cut = match truncated.rfind('\n') {
-        Some(idx) => &truncated[..idx],
-        None => truncated.as_str(),
+fn overview(events: &[Value], lang: &str) -> String {
+    let a = compute_period_aggregates(events);
+    let count = |field: &str| {
+        events
+            .iter()
+            .filter(|e| truth(&e[field]))
+            .map(|e| text(&e[field]).trim().to_owned())
+            .collect::<HashSet<_>>()
+            .len()
     };
-    format!("{}\n\n{}\n", cut.trim_end(), h.omitted_note)
+    crate::labels::format(
+        label(lang, "overview_line"),
+        &[
+            a.event_count,
+            a.verified,
+            a.unverified,
+            a.failed,
+            count("decision"),
+            count("blocker"),
+            count("next_action"),
+        ]
+        .map(|v| v.to_string()),
+    )
 }
-
-fn citation_suffix_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\s*\[wj_[A-Za-z0-9_-]+;\s*source\s+[^\]]*\]").expect("valid regex")
-    })
-}
-
-fn commit_prefix_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"Commit [0-9a-fA-F]{7,40}:\s*").expect("valid regex"))
-}
-
-fn long_hash_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\b([0-9a-f]{40})\b").expect("valid regex"))
-}
-
-fn clean_presentation_line(line: &str) -> String {
-    let mut s = citation_suffix_re().replace_all(line, "").into_owned();
-    s = commit_prefix_re().replace_all(&s, "").into_owned();
-    s = long_hash_re()
-        .replace_all(&s, |caps: &regex::Captures| caps[1][..7].to_string())
-        .into_owned();
-    s.trim_end().to_string()
-}
-
-fn is_evidence_detail_line(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("- 관련 evidence:") || t.starts_with("- evidence:")
-}
-
-/// Produce Notion-facing Markdown presentation:
-/// - When `events` is `Some` and `markdown` begins with `# Daily Work Journal`, prepends
-///   `Completed / Failed or blocked / Next` (localized) and `## Details\n\n<daily>` (or `## 세부 내용` when `ko`).
-/// - Cleans citations, commit hashes, drops evidence sub-bullets, folds duplicate bullets + their detail lines
-///   across presented section order, and formats decision bullets (non-date-prefixed) as blockquotes `> ...`.
-pub fn notion_presentation(markdown: &str, events: Option<&[Value]>, lang: &str) -> String {
-    let h = headings_for(lang);
-    let trimmed = markdown.trim();
-    if let Some(evs) = events {
-        if trimmed.starts_with(h.daily_title) || trimmed.starts_with("# Daily Work Journal") {
-            let mut done = Vec::new();
-            let mut failed = Vec::new();
-            let mut nexts = Vec::new();
-            for ev in evs {
-                let vs = ev
-                    .get("verification_status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("not_verified");
-                let out_s = ev
-                    .pointer("/outcome/status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let label = clean_presentation_line(&event_work_label(ev));
-                if vs == "failed" || out_s == "failed" {
-                    failed.push(format!("- {label}"));
-                } else if ev
-                    .get("blocker")
-                    .and_then(Value::as_str)
-                    .is_some_and(|b| !b.trim().is_empty())
-                {
-                    let b = clean_presentation_line(
-                        ev.get("blocker").and_then(Value::as_str).unwrap_or(""),
-                    );
-                    failed.push(format!("- {b}"));
-                } else {
-                    done.push(format!("- {label}"));
-                }
-                if let Some(na) = ev
-                    .get("next_action")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    nexts.push(format!("- {}", clean_presentation_line(na)));
-                }
-            }
-            if done.is_empty() {
-                done.push(format!("- {}", h.none_recorded));
-            }
-            if failed.is_empty() {
-                failed.push(format!("- {}", h.none_recorded));
-            }
-            if nexts.is_empty() {
-                nexts.push(format!("- {}", h.none_recorded));
-            }
-            let mut prefix = String::new();
-            append_section(&mut prefix, h.notion_done, &done);
-            append_section(&mut prefix, h.notion_failed, &failed);
-            append_section(&mut prefix, h.notion_next, &nexts);
-            let details_heading = h.notion_details;
-            let body = present_markdown_sections(markdown, h);
-            let _ = body;
-            // Preserve exact original daily body under Details as expected by tests
-            return format!("{prefix}{details_heading}\n\n{markdown}");
-        }
-    }
-
-    present_markdown_sections(markdown, h)
-}
-
-fn present_markdown_sections(markdown: &str, h: &Headings) -> String {
-    // Parse top-level `## ` sections while preserving any leading header before first `## `
-    let mut preamble: Vec<String> = Vec::new();
-    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
-    let mut current_heading: Option<String> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-
-    for line in markdown.lines() {
-        if line.starts_with("## ") {
-            if let Some(ch) = current_heading.take() {
-                sections.push((ch, std::mem::take(&mut current_lines)));
-            }
-            current_heading = Some(line.to_string());
-        } else if current_heading.is_some() {
-            current_lines.push(line.to_string());
-        } else {
-            preamble.push(line.to_string());
-        }
-    }
-    if let Some(ch) = current_heading.take() {
-        sections.push((ch, current_lines));
-    }
-
-    // Order decisions ahead of progress when both appear in standalone presentation
-    let section_priority = |heading: &str| -> usize {
-        if heading == h.overview || heading == "## 한눈에 보기" || heading == "## Overview" {
-            0
-        } else if heading == h.decisions || heading == "## 의사결정" || heading == "## Decisions"
-        {
-            1
-        } else if heading == h.blockers
-            || heading == "## Blocker / 미해결 이슈"
-            || heading == "## Blockers & open issues"
-        {
-            2
-        } else if heading == h.next_actions
-            || heading == "## 다음 액션"
-            || heading == "## Next actions"
-        {
-            3
-        } else {
-            4
-        }
-    };
-    let mut indexed_sections: Vec<(usize, String, Vec<String>)> = sections
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (hd, lines))| (idx, hd, lines))
-        .collect();
-    indexed_sections.sort_by_key(|(idx, hd, _)| (section_priority(hd), *idx));
-
-    let mut seen_bullets: HashSet<String> = HashSet::new();
-    let mut out_lines: Vec<String> = Vec::new();
-    out_lines.extend(preamble);
-
-    for (_idx, heading, lines) in indexed_sections {
-        let is_decision_section =
-            heading == h.decisions || heading == "## 의사결정" || heading == "## Decisions";
-        let mut rendered_section_lines: Vec<String> = Vec::new();
-        let mut skip_indented_for_dropped = false;
-
-        for line in lines {
-            if is_evidence_detail_line(&line) {
-                continue;
-            }
-            if line.starts_with("  ") {
-                if !skip_indented_for_dropped {
-                    rendered_section_lines.push(clean_presentation_line(&line));
-                }
-                continue;
-            }
-            skip_indented_for_dropped = false;
-
-            if line.starts_with("### ") {
-                rendered_section_lines.push(line);
-                continue;
-            }
-
-            if let Some(body) = line.strip_prefix("- ") {
-                let cleaned_body = clean_presentation_line(body);
-                if cleaned_body.is_empty() {
-                    skip_indented_for_dropped = true;
-                    continue;
-                }
-                if !seen_bullets.insert(cleaned_body.clone()) {
-                    skip_indented_for_dropped = true;
-                    continue;
-                }
-                let is_date_prefixed = cleaned_body.len() >= 13
-                    && cleaned_body.as_bytes()[4] == b'-'
-                    && cleaned_body.as_bytes()[7] == b'-'
-                    && cleaned_body[10..].starts_with(" · ");
-                if is_decision_section && !is_date_prefixed {
-                    rendered_section_lines.push(format!("> {cleaned_body}"));
-                } else {
-                    rendered_section_lines.push(format!("- {cleaned_body}"));
-                }
-            } else {
-                rendered_section_lines.push(clean_presentation_line(&line));
-            }
-        }
-
-        if rendered_section_lines.iter().any(|l| !l.trim().is_empty()) {
-            out_lines.push(heading);
-            out_lines.extend(rendered_section_lines);
-        }
-    }
-
-    let joined = out_lines.join("\n").trim_end().to_string();
-    if joined.is_empty() {
-        String::new()
+fn section(lines: &mut Vec<String>, heading: &str, body: Vec<String>, lang: &str) {
+    lines.push(format!("## {heading}"));
+    lines.push(String::new());
+    if body.is_empty() {
+        lines.push(label(lang, "empty").into());
     } else {
-        format!("{joined}\n")
+        lines.extend(body);
     }
+    lines.push(String::new());
+}
+fn cited(event: &Value) -> String {
+    format!("- {} {}", event_work_label(event), event_citation(event))
 }
 
-pub fn ci_status_by_sha(events: &[Value]) -> BTreeMap<String, Value> {
-    let mut latest = BTreeMap::new();
-    for ev in events {
-        if ev.pointer("/source/type").and_then(Value::as_str) != Some("ci-status") {
+pub fn render_daily(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &str) -> String {
+    let rows = sorted(events);
+    let h = headings_for(lang);
+    let project = rows
+        .first()
+        .map(|r| text(&r["project_name"]))
+        .unwrap_or("project".into());
+    let mut lines = vec![format!("# Daily Work Journal — {period}"), String::new()];
+    section(
+        &mut lines,
+        label(lang, "overview"),
+        vec![overview(events, lang)],
+        lang,
+    );
+    section(
+        &mut lines,
+        label(lang, "daily_progress"),
+        rows.iter()
+            .filter(|e| string(e, "event_type") != "handoff")
+            .map(|e| cited(e))
+            .collect(),
+        lang,
+    );
+    let mut work = vec![format!("### {project}"), String::new()];
+    if rows.is_empty() {
+        work.push(label(lang, "empty").into());
+    }
+    for event in &rows {
+        work.push(format!(
+            "- {}: {} {}",
+            label(lang, "work"),
+            event_work_label(event),
+            event_citation(event)
+        ));
+        let refs: Vec<_> = event["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|r| truth(&r["type"]) && truth(&r["ref"]))
+            .map(|r| format!("{}:{}", text(&r["type"]), text(&r["ref"])))
+            .collect();
+        if !refs.is_empty() {
+            work.push(format!(
+                "  - {}: {}",
+                label(lang, "evidence"),
+                refs.join(", ")
+            ));
+        }
+        for (key, title) in [("status", "result"), ("interpretation", "interpretation")] {
+            if truth(&event["outcome"][key]) {
+                work.push(format!(
+                    "  - {}: {}",
+                    label(lang, title),
+                    text(&event["outcome"][key])
+                ));
+            }
+        }
+    }
+    section(&mut lines, label(lang, "daily_by_project"), work, lang);
+    for (heading, status) in [("verified", "passed"), ("unverified", "not_verified")] {
+        section(
+            &mut lines,
+            label(lang, heading),
+            rows.iter()
+                .filter(|e| string(e, "verification_status") == status)
+                .map(|e| cited(e))
+                .collect(),
+            lang,
+        );
+    }
+    section(
+        &mut lines,
+        label(lang, "failed"),
+        rows.iter()
+            .filter(|e| event_failed(e))
+            .map(|e| cited(e))
+            .collect(),
+        lang,
+    );
+    for (field, heading) in [
+        ("decision", "decisions"),
+        ("blocker", "blockers"),
+        ("next_action", "next"),
+    ] {
+        section(
+            &mut lines,
+            label(lang, heading),
+            rows.iter()
+                .filter(|e| truth(&e[field]))
+                .map(|e| format!("- {} {}", judgment_summary(e, field, h), event_citation(e)))
+                .collect(),
+            lang,
+        );
+    }
+    let mut ids = Vec::new();
+    for event in &rows {
+        let id = text(&event["correlation"]["session_id"]);
+        let id = id.trim();
+        if !id.is_empty() && !ids.iter().any(|v| v == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    let mut sessions: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            format!(
+                "- {id} ({} event(s))",
+                rows.iter()
+                    .filter(|e| text(&e["correlation"]["session_id"]) == *id)
+                    .count()
+            )
+        })
+        .collect();
+    if !sessions.is_empty() {
+        sessions.push(format!("- {}", label(lang, "sessions_restore")));
+    }
+    section(&mut lines, label(lang, "sessions"), sessions, lang);
+    lines.join("\n")
+}
+
+pub fn render_weekly(period: &str, events: &[Value], _tz: &TimeZoneSpec, lang: &str) -> String {
+    let rows = sorted(events);
+    let h = headings_for(lang);
+    let project = rows
+        .first()
+        .map(|r| text(&r["project_name"]))
+        .unwrap_or("project".into());
+    let mut lines = vec![format!("# Weekly Work Journal — {period}"), String::new()];
+    section(
+        &mut lines,
+        label(lang, "overview"),
+        vec![overview(events, lang)],
+        lang,
+    );
+    let mut progress = vec![format!("### {project}"), String::new()];
+    if rows.is_empty() {
+        progress.push(label(lang, "empty").into());
+    } else {
+        progress.extend(rows.iter().map(|e| cited(e)));
+    }
+    section(&mut lines, label(lang, "weekly_by_project"), progress, lang);
+    section(
+        &mut lines,
+        label(lang, "weekly_verified"),
+        rows.iter()
+            .filter(|e| string(e, "verification_status") == "passed")
+            .map(|e| cited(e))
+            .collect(),
+        lang,
+    );
+    let mut blockers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for event in &rows {
+        if truth(&event["blocker"]) {
+            blockers
+                .entry(text(&event["blocker"]))
+                .or_default()
+                .push(event_citation(event));
+        }
+    }
+    let recurring = blockers
+        .into_iter()
+        .filter(|(_, v)| v.len() >= 2)
+        .map(|(b, c)| {
+            format!(
+                "- {b} ({}) {}",
+                crate::labels::format(label(lang, "repeated"), &[c.len().to_string()]),
+                c.join(" ")
+            )
+        })
+        .collect();
+    section(
+        &mut lines,
+        label(lang, "recurring_blockers"),
+        recurring,
+        lang,
+    );
+    section(
+        &mut lines,
+        label(lang, "weekly_decisions"),
+        rows.iter()
+            .filter(|e| truth(&e["decision"]))
+            .map(|e| {
+                format!(
+                    "- {} · {} {}",
+                    text(&e["local_date"]),
+                    judgment_summary(e, "decision", h),
+                    event_citation(e)
+                )
+            })
+            .collect(),
+        lang,
+    );
+    let mut groups: BTreeMap<Vec<String>, Vec<(String, String)>> = BTreeMap::new();
+    for event in &rows {
+        for metric in event["metrics"].as_array().into_iter().flatten() {
+            let signature = ["name", "unit", "dataset", "split", "conditions"]
+                .iter()
+                .map(|k| {
+                    metric
+                        .get(k)
+                        .map(crate::schema::python_str)
+                        .unwrap_or_default()
+                })
+                .collect();
+            groups
+                .entry(signature)
+                .or_default()
+                .push((text(&metric["value"]), event_citation(event)));
+        }
+    }
+    let trends = groups
+        .into_iter()
+        .filter(|(s, p)| p.len() >= 2 && s.iter().all(|v| !v.is_empty()))
+        .map(|(s, p)| {
+            format!(
+                "- {} (unit={}, dataset={}, split={}, conditions={}): {} {}",
+                s[0],
+                s[1],
+                s[2],
+                s[3],
+                s[4],
+                p.iter()
+                    .map(|(v, _)| v.clone())
+                    .collect::<Vec<_>>()
+                    .join(" → "),
+                p.iter()
+                    .map(|(_, c)| c.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .collect();
+    section(&mut lines, label(lang, "trends"), trends, lang);
+    section(
+        &mut lines,
+        label(lang, "weekly_next"),
+        rows.iter()
+            .filter(|e| truth(&e["next_action"]))
+            .map(|e| {
+                format!(
+                    "- {} · {} {}",
+                    text(&e["local_date"]),
+                    judgment_summary(e, "next_action", h),
+                    event_citation(e)
+                )
+            })
+            .collect(),
+        lang,
+    );
+    lines.join("\n")
+}
+
+fn status(value: &str, lang: &str) -> String {
+    let normalized = value.trim().to_lowercase();
+    let value = if normalized.is_empty() {
+        "unknown"
+    } else {
+        &normalized
+    };
+    let translated = label(lang, &format!("digest_status_{value}"));
+    if translated.is_empty() {
+        value.into()
+    } else {
+        translated.into()
+    }
+}
+fn templ(lang: &str, key: &str, args: &[String]) -> String {
+    crate::labels::format(label(lang, key), args)
+}
+fn latest_by<'a>(
+    events: impl Iterator<Item = &'a Value>,
+    key: impl Fn(&Value) -> String,
+) -> Vec<(String, &'a Value)> {
+    let mut latest: Vec<(String, &Value)> = Vec::new();
+    for event in events {
+        let k = key(event);
+        if k.is_empty() {
             continue;
         }
-        if let Some(sha) = ev
-            .pointer("/correlation/commit")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            latest.insert(sha.to_string(), ev.clone());
+        if let Some((_, v)) = latest.iter_mut().find(|(id, _)| *id == k) {
+            *v = event;
+        } else {
+            latest.push((k, event));
         }
     }
     latest
+}
+pub fn ci_status_by_sha(events: &[Value]) -> BTreeMap<String, Value> {
+    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for event in events {
+        let sha = event_commit_sha(event);
+        if !sha.is_empty() {
+            let state = text(&event["outcome"]["status"]);
+            groups.entry(sha).or_default().push(if state.is_empty() {
+                "pending".into()
+            } else {
+                state.to_lowercase()
+            });
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(sha, values)| {
+            let result = if values.iter().any(|v| {
+                [
+                    "failure",
+                    "failed",
+                    "cancelled",
+                    "timed_out",
+                    "startup_failure",
+                ]
+                .contains(&v.as_str())
+            }) {
+                "failure"
+            } else if values.iter().any(|v| v != "success") {
+                "pending"
+            } else {
+                "success"
+            };
+            (sha, Value::String(result.into()))
+        })
+        .collect()
+}
+fn daily_notion_sections(events: &[Value], lang: &str) -> Vec<(String, Vec<String>)> {
+    let ordered = sorted(events);
+    let h = headings_for(lang);
+    let mut reviews: Vec<(String, Vec<&Value>)> = Vec::new();
+    let mut unlinked = Vec::new();
+    for event in &ordered {
+        if event["source"]["type"].as_str() != Some("peer-review") {
+            continue;
+        }
+        let task = text(&event["correlation"]["task_id"]);
+        let task = task.trim();
+        if task.is_empty() {
+            unlinked.push(*event);
+        } else if let Some((_, rows)) = reviews.iter_mut().find(|(id, _)| id == task) {
+            rows.push(*event);
+        } else {
+            reviews.push((task.into(), vec![*event]));
+        }
+    }
+    let tasks = latest_by(
+        ordered
+            .iter()
+            .copied()
+            .filter(|e| e["source"]["type"].as_str() == Some("panel-result")),
+        |e| text(&e["correlation"]["task_id"]),
+    );
+    let commits = latest_by(
+        ordered
+            .iter()
+            .copied()
+            .filter(|e| string(e, "event_type") == "commit"),
+        event_commit_sha,
+    );
+    let ci_events = latest_ci_events(events);
+    let ci_values: Vec<_> = ci_events.iter().map(|e| (*e).clone()).collect();
+    let mut ci = ci_status_by_sha(&ci_values);
+    for (sha, value) in ci.clone() {
+        ci.entry(sha.chars().take(7).collect()).or_insert(value);
+    }
+    let failures = failed_digest_events(events);
+    let failure_ids: HashSet<_> = failures.iter().map(|e| string(e, "event_id")).collect();
+    let mut completed = Vec::new();
+    let mut failed = Vec::new();
+    let mut decisions = Vec::new();
+    let mut represented = HashSet::new();
+    for event in &ordered {
+        if truth(&event["decision"]) {
+            decisions.push(format!("- {}", judgment_summary(event, "decision", h)));
+        }
+        let id = string(event, "event_id");
+        if truth(&event["blocker"]) && failure_ids.contains(id) {
+            failed.push(format!("- {}", judgment_summary(event, "blocker", h)));
+            represented.insert(id.to_owned());
+        }
+    }
+    let task_prefix =
+        Regex::new(r"^Task [^ ]+ (?:completed|accepted|failed|rejected):\s*").expect("pattern");
+    let landed = Regex::new(r"landed commit ([0-9a-f]{7,40})").expect("pattern");
+    let landed_suffix = Regex::new(r"\s*\(landed commit [0-9a-f]{7,40}\)").expect("pattern");
+    let mut linked = HashSet::new();
+    let ci_lookup = |sha: &str| ci.get(sha).and_then(Value::as_str).unwrap_or("").to_owned();
+    for (task, event) in tasks {
+        let id = string(event, "event_id");
+        let raw = text(&event["outcome"]["status"]).to_lowercase();
+        let state = status(&raw, lang);
+        let summary = text(&event["outcome"]["summary"]);
+        let mut summary = task_prefix
+            .replace(summary.lines().next().unwrap_or(""), "")
+            .into_owned();
+        let mut note = String::new();
+        if let Some(c) = landed.captures(&summary) {
+            let sha = &c[1];
+            let short: String = sha.chars().take(7).collect();
+            linked.insert(short.clone());
+            let ci_state = ci_lookup(sha);
+            let ci_state = if ci_state.is_empty() {
+                ci_lookup(&short)
+            } else {
+                ci_state
+            };
+            note = templ(
+                lang,
+                "digest_commit_note",
+                &[
+                    short,
+                    if ci_state.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", CI {}", status(&ci_state, lang))
+                    },
+                ],
+            );
+            summary = landed_suffix.replace_all(&summary, "").into_owned();
+        }
+        let task = crate::sanitize::canonical_truncate(&task, 120);
+        let line = format!("- {task}: {state} — {summary}{note}");
+        let is_failed = failure_ids.contains(id);
+        let outcome_failed = FAILED.contains(&raw.as_str());
+        if is_failed && outcome_failed {
+            let reason = if truth(&event["blocker"]) {
+                &event["blocker"]
+            } else {
+                &event["outcome"]["interpretation"]
+            };
+            failed.push(format!(
+                "{line}{}",
+                if truth(reason) {
+                    format!(" — {}", sanitize_text(&text(reason), 120))
+                } else {
+                    String::new()
+                }
+            ));
+        } else if !outcome_failed {
+            completed.push(line.clone());
+        }
+        if is_failed
+            && !outcome_failed
+            && matches!(string(event, "verification_status"), "failed" | "skipped")
+        {
+            failed.push(format!(
+                "{line} — {}",
+                label(lang, "digest_verification_failed")
+            ));
+        }
+        if is_failed {
+            represented.insert(id.to_owned());
+        }
+    }
+    let commit_prefix = Regex::new(r"^Commit [0-9a-f]{7,40}:\s*").expect("pattern");
+    let mut commit_details = Vec::new();
+    for (sha, event) in &commits {
+        let subject = text(&event["outcome"]["summary"]);
+        let subject = commit_prefix.replace(&subject, "");
+        let mut subject_short: String = subject
+            .chars()
+            .take(80)
+            .collect::<String>()
+            .trim_end()
+            .into();
+        if subject.chars().count() > 80 {
+            subject_short.push('…');
+        }
+        let raw = ci_lookup(sha);
+        let state = status(&raw, lang);
+        let short: String = sha.chars().take(7).collect();
+        let suffix = if raw.is_empty() {
+            String::new()
+        } else {
+            templ(
+                lang,
+                "digest_ci_status_suffix",
+                std::slice::from_ref(&state),
+            )
+        };
+        let line = templ(
+            lang,
+            "digest_commit_line",
+            &[subject_short.clone(), short.clone(), suffix],
+        );
+        commit_details.push(line.clone());
+        if raw == "success" && !linked.contains(&short) {
+            completed.push(templ(
+                lang,
+                "digest_ci_success_line",
+                &[subject_short, short],
+            ));
+        } else if [
+            "failure",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "startup_failure",
+        ]
+        .contains(&raw.as_str())
+        {
+            failed.push(line);
+            for event in &ci_events {
+                if event_commit_sha(event) == *sha
+                    && [
+                        "failure",
+                        "failed",
+                        "cancelled",
+                        "timed_out",
+                        "startup_failure",
+                    ]
+                    .contains(&text(&event["outcome"]["status"]).to_lowercase().as_str())
+                {
+                    represented.insert(string(event, "event_id").to_owned());
+                }
+            }
+        }
+    }
+    let known: HashSet<String> = commits
+        .iter()
+        .map(|(sha, _)| sha.clone())
+        .chain(linked)
+        .collect();
+    let mut unmatched = Vec::new();
+    let mut completed_ci = HashSet::new();
+    for event in ci_events {
+        let sha = event_commit_sha(event);
+        let short: String = sha.chars().take(7).collect();
+        let raw = text(&event["outcome"]["status"]);
+        let raw = if raw.is_empty() {
+            "unknown".into()
+        } else {
+            raw.to_lowercase()
+        };
+        let aggregate = if sha.is_empty() {
+            raw.clone()
+        } else {
+            let state = ci_lookup(&sha);
+            if state.is_empty() { raw.clone() } else { state }
+        };
+        let state = status(&raw, lang);
+        let matched = known
+            .iter()
+            .any(|s| s == &sha || s.chars().take(7).collect::<String>() == short);
+        let covered = commits
+            .iter()
+            .any(|(s, _)| s == &sha || s.chars().take(7).collect::<String>() == short);
+        let line = |key: &str, state: &str| {
+            if short.is_empty() {
+                templ(lang, "digest_ci_unlinked", &[state.into()])
+            } else {
+                templ(lang, key, &[state.into(), short.clone()])
+            }
+        };
+        if [
+            "failure",
+            "failed",
+            "cancelled",
+            "timed_out",
+            "startup_failure",
+        ]
+        .contains(&raw.as_str())
+            && !covered
+        {
+            failed.push(line("digest_ci_for_commit", &state));
+            represented.insert(string(event, "event_id").to_owned());
+        }
+        if !matched {
+            if aggregate == "success" && !completed_ci.contains(&sha) {
+                completed.push(line("digest_ci_for_commit", &status(&aggregate, lang)));
+                if !sha.is_empty() {
+                    completed_ci.insert(sha);
+                }
+            }
+            unmatched.push(line("digest_ci_detail", &state));
+        }
+    }
+    let mut review_details = Vec::new();
+    for (task, rows) in reviews {
+        let event = rows[rows.len() - 1];
+        let passed = string(event, "verification_status") == "passed"
+            || ["success", "passed"]
+                .contains(&text(&event["outcome"]["status"]).to_lowercase().as_str());
+        let verdict = label(
+            lang,
+            if passed {
+                "digest_review_passed"
+            } else {
+                "digest_review_failed"
+            },
+        );
+        let count = if rows.len() > 1 {
+            format!(
+                " ({})",
+                templ(lang, "digest_review_count", &[rows.len().to_string()])
+            )
+        } else {
+            String::new()
+        };
+        let task = crate::sanitize::canonical_truncate(&task, 120);
+        review_details.push(format!(
+            "- {}",
+            templ(
+                lang,
+                "digest_review_linked",
+                &[task.clone(), verdict.into(), count.clone()]
+            )
+        ));
+        if !passed && failure_ids.contains(string(event, "event_id")) {
+            let reason = if truth(&event["blocker"]) {
+                &event["blocker"]
+            } else {
+                &event["outcome"]["interpretation"]
+            };
+            let suffix = if truth(reason) {
+                format!(" — {}", sanitize_text(&text(reason), 120))
+            } else {
+                String::new()
+            };
+            failed.push(format!(
+                "- {}{count}",
+                templ(lang, "digest_review_linked_failure", &[task, suffix])
+            ));
+            represented.insert(string(event, "event_id").to_owned());
+        }
+    }
+    for event in unlinked {
+        let id = if truth(&event["source"]["id"]) {
+            text(&event["source"]["id"])
+        } else if truth(&event["event_id"]) {
+            text(&event["event_id"])
+        } else {
+            "unknown review".into()
+        };
+        let passed = string(event, "verification_status") == "passed"
+            || ["success", "passed"]
+                .contains(&text(&event["outcome"]["status"]).to_lowercase().as_str());
+        let verdict = label(
+            lang,
+            if passed {
+                "digest_review_passed"
+            } else {
+                "digest_review_failed"
+            },
+        );
+        review_details.push(format!(
+            "- {}",
+            templ(
+                lang,
+                "digest_review_unlinked",
+                &[id.clone(), verdict.into()]
+            )
+        ));
+        if !passed && failure_ids.contains(string(event, "event_id")) {
+            let reason = if truth(&event["blocker"]) {
+                &event["blocker"]
+            } else {
+                &event["outcome"]["interpretation"]
+            };
+            let suffix = if truth(reason) {
+                format!(" — {}", sanitize_text(&text(reason), 120))
+            } else {
+                String::new()
+            };
+            failed.push(format!(
+                "- {}",
+                templ(lang, "digest_review_unlinked_failure", &[id, suffix])
+            ));
+            represented.insert(string(event, "event_id").to_owned());
+        }
+    }
+    for event in failures {
+        let id = string(event, "event_id");
+        if represented.contains(id) {
+            continue;
+        }
+        let summary = sanitize_text(&text(&event["outcome"]["summary"]), 120);
+        let summary = if summary.is_empty() {
+            let kind = text(&event["source"]["type"]);
+            if kind.is_empty() {
+                "Event failed".into()
+            } else {
+                kind
+            }
+        } else {
+            summary
+        };
+        let raw = text(&event["outcome"]["status"]);
+        let raw = if raw.is_empty() {
+            "unknown".into()
+        } else {
+            raw.to_lowercase()
+        };
+        let state = if matches!(string(event, "verification_status"), "failed" | "skipped")
+            && !FAILED.contains(&raw.as_str())
+        {
+            label(lang, "digest_verification_failed").into()
+        } else {
+            status(&raw, lang)
+        };
+        let mut details = vec![templ(lang, "digest_failure_status", &[state])];
+        if !event["provenance"]["exit_code"].is_null() {
+            details.push(templ(
+                lang,
+                "digest_failure_exit",
+                &[text(&event["provenance"]["exit_code"])],
+            ));
+        }
+        failed.push(format!("- {summary} ({})", details.join("; ")));
+        represented.insert(id.into());
+    }
+    let mut seen = HashSet::new();
+    let mut next = Vec::new();
+    for event in ordered {
+        let action = text(&event["next_action"]);
+        let action = action.trim();
+        if !action.is_empty() && seen.insert(action.to_owned()) {
+            next.push(format!("- {}", sanitize_text(action, 120)));
+        }
+    }
+    let mut sections = Vec::new();
+    for (key, mut lines, required) in [
+        ("digest_completed", completed, true),
+        ("digest_failed", failed, true),
+        ("digest_next", next, true),
+        ("digest_decisions", decisions, false),
+        ("digest_reviews", review_details, false),
+        ("digest_commits", commit_details, false),
+        ("digest_ci", unmatched, false),
+    ] {
+        if lines.is_empty() {
+            if required {
+                lines.push(label(lang, "digest_no_records").into());
+            } else {
+                continue;
+            }
+        }
+        sections.push((label(lang, key).into(), lines));
+    }
+    sections
+}
+fn rank(title: &str) -> i32 {
+    match title {
+        "한눈에 보기" | "At a glance" => -1,
+        "의사결정" | "Decisions" | "주요 의사결정" | "Key decisions" => 0,
+        "Blockers" | "반복 Blockers" | "Recurring blockers" => 1,
+        "다음 우선순위" | "Next priorities" | "다음 주 우선순위" | "Next week priorities" => {
+            2
+        }
+        "실패하거나 보류한 접근" | "Failed or parked approaches" => 4,
+        "핵심 진전"
+        | "Key progress"
+        | "프로젝트별 작업"
+        | "Work by project"
+        | "프로젝트별 진전"
+        | "Progress by project" => 5,
+        "세션" | "Sessions" => 6,
+        _ => 3,
+    }
+}
+fn empty(line: &str) -> bool {
+    ["- 기록 없음", "- none", "- none recorded"].contains(&line)
+}
+fn partition(content: &str) -> (Vec<String>, Vec<(String, Vec<String>)>) {
+    let mut preamble = Vec::new();
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    for line in crate::unicode::text_lines(content) {
+        if let Some(title) = line.strip_prefix("## ") {
+            sections.push((title.trim().into(), vec![line.into()]));
+        } else if let Some((_, body)) = sections.last_mut() {
+            body.push(line.into());
+        } else {
+            preamble.push(line.into());
+        }
+    }
+    (preamble, sections)
+}
+pub fn notion_presentation(content: &str, events: Option<&[Value]>, lang: &str) -> String {
+    if content.trim_start().starts_with("# Daily Work Journal") {
+        let Some(events) = events else {
+            return content.into();
+        };
+        let work: Vec<_> = events
+            .iter()
+            .filter(|e| e["source"]["type"].as_str() != Some("session-handoff"))
+            .cloned()
+            .collect();
+        let mut sections = daily_notion_sections(events, lang);
+        sections.insert(
+            0,
+            (label(lang, "overview").into(), vec![overview(&work, lang)]),
+        );
+        let mut lines = Vec::new();
+        for (title, body) in sections {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(format!("## {title}"));
+            lines.extend(body.into_iter().map(|line| {
+                if rank(&title) == 0 {
+                    line.strip_prefix("- ")
+                        .map(|v| format!("> {v}"))
+                        .unwrap_or(line)
+                } else {
+                    line
+                }
+            }));
+        }
+        return format!(
+            "{}\n\n## {}\n\n{content}",
+            lines.join("\n"),
+            label(lang, "digest_details")
+        );
+    }
+    let citation = Regex::new(r"\s*\[wj_[0-9a-f]{8,}.*\]\s*$").expect("pattern");
+    let prefix = Regex::new(r"^- ((?:작업|work): )?Commit [0-9a-f]{7,40}: ").expect("pattern");
+    let hash = Regex::new(r"\b([0-9a-f]{7})[0-9a-f]{33}\b").expect("pattern");
+    let evidence = Regex::new(r"^\s*- (관련 evidence|related evidence): ").expect("pattern");
+    let long = Regex::new(r"(Commit [0-9a-f]{7,40}: )(.{80})[^\s]*").expect("pattern");
+    let mut lines = Vec::new();
+    for raw in crate::unicode::text_lines(content) {
+        if evidence.is_match(raw) {
+            continue;
+        }
+        let mut line = raw.to_owned();
+        if line.starts_with("- ") {
+            line = long
+                .replace_all(&line, |c: &regex::Captures| {
+                    format!("{}{}…", &c[1], c[2].trim_end())
+                })
+                .into_owned();
+            line = citation.replace_all(&line, "").into_owned();
+            line = prefix
+                .replace_all(&line, |c: &regex::Captures| {
+                    format!("- {}", c.get(1).map(|m| m.as_str()).unwrap_or(""))
+                })
+                .into_owned();
+        }
+        lines.push(hash.replace_all(&line, "${1}").into_owned());
+    }
+    let (mut preamble, mut sections) = partition(&lines.join("\n"));
+    sections.sort_by_key(|(title, _)| rank(title));
+    let weekly = preamble
+        .iter()
+        .any(|l| l.starts_with("# Weekly Work Journal"));
+    let mut seen = HashSet::new();
+    let mut fold = |body: Vec<String>| {
+        let mut kept = Vec::new();
+        let mut dropping = false;
+        for line in body {
+            if line.starts_with("- ") && !empty(&line) {
+                dropping = !seen.insert(line.clone());
+                if dropping {
+                    continue;
+                }
+            } else if dropping {
+                if line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+                    continue;
+                }
+                dropping = false;
+            }
+            kept.push(line);
+        }
+        kept
+    };
+    preamble = fold(preamble);
+    let mut output = preamble;
+    for (title, body) in sections {
+        let mut body = fold(body);
+        let meaningful: Vec<_> = body
+            .iter()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .collect();
+        if meaningful.is_empty() || meaningful.iter().all(|l| empty(l)) {
+            continue;
+        }
+        if !weekly && rank(&title) == 0 {
+            for line in &mut body {
+                if line.starts_with('-') && !empty(line) {
+                    *line = format!("> {}", line.get(2..).unwrap_or(""));
+                }
+            }
+        }
+        while output.last().is_some_and(|l| l.trim().is_empty()) {
+            output.pop();
+        }
+        output.push(String::new());
+        output.extend(body);
+    }
+    output.join("\n").trim_matches('\n').into()
+}
+
+pub(crate) fn bounded_export(content: &str, lang: &str) -> String {
+    let bound = 65536;
+    let sanitized = crate::sanitize::sanitize_multiline(
+        content,
+        content
+            .len()
+            .saturating_add(8 * (content.bytes().filter(|b| *b == b'\n').count() + 1))
+            .max(bound),
+    );
+    if sanitized.len() <= bound {
+        return sanitized;
+    }
+    let (mut lines, mut sections) = partition(&sanitized);
+    sections.sort_by_key(|(title, _)| rank(title));
+    for (_, body) in sections {
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        lines.push(String::new());
+        lines.extend(body);
+    }
+    let marker = label(lang, "truncated");
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0;
+    for line in lines {
+        let separator = usize::from(!kept.is_empty());
+        let marker_separator = usize::from(!kept.is_empty() || !line.is_empty());
+        if used + separator + line.len() + marker_separator + marker.len() > bound {
+            break;
+        }
+        used += separator + line.len();
+        kept.push(line);
+    }
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
+    }
+    if kept.is_empty() {
+        return crate::sanitize::canonical_truncate(marker, bound);
+    }
+    kept.push(marker.into());
+    kept.join("\n")
 }

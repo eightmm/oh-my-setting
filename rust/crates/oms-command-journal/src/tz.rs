@@ -117,6 +117,51 @@ impl TimeZoneSpec {
     }
 }
 
+pub(crate) fn checked_timezone(requested: Option<&str>) -> Result<TimeZoneSpec, String> {
+    let environment = std::env::var("OMS_WORK_JOURNAL_TIMEZONE").ok();
+    let explicit = requested
+        .filter(|s| !s.is_empty())
+        .or(environment.as_deref().filter(|s| !s.is_empty()));
+    if let Some(name) = explicit {
+        if name == "UTC" {
+            return Ok(TimeZoneSpec::Utc);
+        }
+        if name == "Etc/UTC" {
+            return Ok(TimeZoneSpec::Fixed(
+                FixedOffset::east_opt(0).expect("UTC offset"),
+                name.into(),
+            ));
+        }
+        let has_database = [
+            "/usr/share/zoneinfo/Etc/UTC",
+            "/usr/lib/zoneinfo/Etc/UTC",
+            "/var/db/timezone/zoneinfo/Etc/UTC",
+            "/etc/zoneinfo/Etc/UTC",
+        ]
+        .iter()
+        .any(|p| Path::new(p).is_file());
+        if is_safe_zone_name(name) {
+            for base in [
+                "/usr/share/zoneinfo",
+                "/usr/lib/zoneinfo",
+                "/var/db/timezone/zoneinfo",
+                "/etc/zoneinfo",
+            ] {
+                if let Ok(bytes) = fs::read(Path::new(base).join(name)) {
+                    if let Some(zone) = parse_tzif(name, &bytes) {
+                        return Ok(TimeZoneSpec::Tzif(zone));
+                    }
+                }
+            }
+        }
+        if has_database {
+            return Err("invalid Work Journal timezone".into());
+        }
+        return Ok(TimeZoneSpec::SystemLocal);
+    }
+    Ok(resolve_timezone(None))
+}
+
 pub fn resolve_timezone(requested: Option<&str>) -> TimeZoneSpec {
     let env_tz = std::env::var("OMS_WORK_JOURNAL_TIMEZONE").ok();
     let candidate = requested
@@ -132,8 +177,22 @@ pub fn resolve_timezone(requested: Option<&str>) -> TimeZoneSpec {
     }
 
     if let Some(system_name) = detect_system_timezone_name() {
-        if let Some(spec) = resolve_named_timezone(&system_name) {
-            return spec;
+        if system_name == "UTC" {
+            return TimeZoneSpec::Utc;
+        }
+        if is_safe_zone_name(&system_name) {
+            for base in [
+                "/usr/share/zoneinfo",
+                "/usr/lib/zoneinfo",
+                "/var/db/timezone/zoneinfo",
+                "/etc/zoneinfo",
+            ] {
+                if let Ok(bytes) = fs::read(Path::new(base).join(&system_name)) {
+                    if let Some(zone) = parse_tzif(&system_name, &bytes) {
+                        return TimeZoneSpec::Tzif(zone);
+                    }
+                }
+            }
         }
     }
 
@@ -145,8 +204,14 @@ fn resolve_named_timezone(name: &str) -> Option<TimeZoneSpec> {
     if trimmed.is_empty() {
         return None;
     }
-    if matches!(trimmed, "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT" | "Z") {
+    if trimmed == "UTC" {
         return Some(TimeZoneSpec::Utc);
+    }
+    if trimmed == "Etc/UTC" {
+        return Some(TimeZoneSpec::Fixed(
+            FixedOffset::east_opt(0)?,
+            trimmed.into(),
+        ));
     }
     if trimmed.eq_ignore_ascii_case("system-local") {
         return Some(TimeZoneSpec::SystemLocal);
@@ -633,36 +698,46 @@ fn days_in_month(year: i32, month: u8) -> u32 {
 }
 
 pub fn parse_rfc3339_utc(raw: &str) -> Result<DateTime<Utc>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("occurred_at cannot be empty".to_string());
+    if raw.is_empty() {
+        return Err("occurred_at must be an RFC 3339 timestamp".into());
     }
-    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
-        return Ok(dt.with_timezone(&Utc));
-    }
-    // Support space separator or +HHMM / -HHMM / missing seconds just like Python's fromisoformat
-    let normalized = if trimmed.ends_with('Z') || trimmed.ends_with('z') {
-        format!("{}+00:00", &trimmed[..trimmed.len() - 1])
-    } else {
-        trimmed.to_string()
+    let valid = |date: DateTime<FixedOffset>| {
+        date.year() >= 1 && date.year() <= 9999 && date.nanosecond() < 1_000_000_000
     };
-    for fmt in [
-        "%Y-%m-%d %H:%M:%S%.f%:z",
-        "%Y-%m-%dT%H:%M:%S%.f%:z",
-        "%Y-%m-%d %H:%M:%S%:z",
-        "%Y-%m-%dT%H:%M:%S%:z",
-        "%Y-%m-%dT%H:%M%:z",
-        "%Y-%m-%d %H:%M%:z",
-        "%Y-%m-%dT%H:%M:%S%.f%z",
-        "%Y-%m-%d %H:%M:%S%.f%z",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%d %H:%M:%S%z",
-    ] {
-        if let Ok(dt) = DateTime::parse_from_str(&normalized, fmt) {
-            return Ok(dt.with_timezone(&Utc));
+    if !raw.ends_with('z') {
+        if let Ok(date) = DateTime::parse_from_rfc3339(raw) {
+            if valid(date) {
+                return Ok(date.with_timezone(&Utc));
+            }
         }
     }
-    Err(format!("invalid timezone-aware ISO timestamp: {raw}"))
+    let normalized = raw
+        .strip_suffix('Z')
+        .map(|s| format!("{s}+00:00"))
+        .unwrap_or_else(|| raw.into());
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f%:z",
+        "%Y-%m-%dT%H:%M:%S%.f%:z",
+        "%Y-%m-%dT%H:%M%:z",
+        "%Y-%m-%d %H:%M%:z",
+        "%Y-%m-%dT%H%:z",
+        "%Y-%m-%dT%H:%M:%S%.f%z",
+        "%Y-%m-%d %H:%M:%S%.f%z",
+        "%Y%m%dT%H%M%S%.f%z",
+        "%Y%m%dT%H%M%z",
+        "%Y-%m-%dT%H:%M:%S%.f%::z",
+        "%G-W%V-%uT%H:%M:%S%.f%:z",
+    ] {
+        if let Ok(date) = DateTime::parse_from_str(&normalized, format) {
+            if valid(date) {
+                return Ok(date.with_timezone(&Utc));
+            }
+        }
+    }
+    if !raw.contains(['+', 'Z']) && raw.get(10..).is_none_or(|s| !s.contains('-')) {
+        return Err("occurred_at must include timezone".into());
+    }
+    Err("occurred_at must be an RFC 3339 timestamp".into())
 }
 
 pub fn utc_rfc3339(dt: DateTime<Utc>) -> String {
