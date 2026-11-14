@@ -96,7 +96,8 @@ fn span(
     let owned = if b.notify {
         inner.len() == 1
             && inner[0].starts_with("notify = [")
-            && inner[0].ends_with("codex_turn_notify.py\"]")
+            && (inner[0].ends_with("codex_turn_notify.py\"]")
+                || inner[0].ends_with("\"codex-turn-notify\"]"))
     } else {
         inner == b.lines.iter().map(String::as_str).collect::<Vec<_>>()
     };
@@ -313,17 +314,21 @@ fn usage(
     );
     let mut notifier = Block::usage("notify", &[]);
     if let Some(script) = notify {
-        // Keep the existing Python notifier's explicit interpreter contract;
-        // the native executable can be passed as the notifier path by callers.
-        let interpreter = env_path("OMS_PYTHON")
-            .or_else(|| executable(std::ffi::OsStr::new("python3")))
-            .ok_or("Python notifier interpreter unavailable")?;
-        let command = vec![
-            interpreter.to_string_lossy().into_owned(),
-            absolute(ctx.cwd, Path::new(script))
-                .to_string_lossy()
-                .into_owned(),
-        ];
+        let target = absolute(ctx.cwd, Path::new(script));
+        let command = if Path::new(script).extension().is_some_and(|ext| ext == "py") {
+            let interpreter = env_path("OMS_PYTHON")
+                .or_else(|| executable(std::ffi::OsStr::new("python3")))
+                .ok_or("Python notifier interpreter unavailable")?;
+            vec![
+                interpreter.to_string_lossy().into_owned(),
+                target.to_string_lossy().into_owned(),
+            ]
+        } else {
+            vec![
+                target.to_string_lossy().into_owned(),
+                "codex-turn-notify".into(),
+            ]
+        };
         notifier.lines = vec![format!(
             "notify = {}",
             serde_json::to_string(&command).map_err(|_| "invalid notifier path")?

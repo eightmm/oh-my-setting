@@ -304,13 +304,13 @@ fn resolve(
     }
     Ok((tasks, unavailable, scopes, selectors))
 }
-fn build_command(
+fn build_invocation(
     repo: &Path,
     node: &Value,
     task: &str,
     args: &Args,
     dry: bool,
-) -> Result<Vec<String>> {
+) -> Result<(&'static str, Vec<String>)> {
     if !oms_command_operations::projection::id(task) || task == "next" {
         return Err(Error::new(
             "an agent node reaches plan-run only with a concrete plan task",
@@ -340,13 +340,7 @@ fn build_command(
             return Err(Error::new(format!("{label} is not a supported value")));
         }
     }
-    let root = install_root()
-        .ok_or_else(|| Error::new("packaged OMS installation root was not supplied"))?;
     let mut command = vec![
-        "bash".into(),
-        root.join("scripts/plan-run.sh")
-            .to_string_lossy()
-            .into_owned(),
         "--repo".into(),
         repo.to_string_lossy().into_owned(),
         "--to".into(),
@@ -368,7 +362,7 @@ fn build_command(
     if dry {
         command.push("--dry-run".into());
     }
-    Ok(command)
+    Ok(("plan-run", command))
 }
 fn claimed_outcome(node: &Value, task: &Value, facts: &Value) -> &'static str {
     let state = st(task, "state");
@@ -669,6 +663,38 @@ impl WorkOutput {
         }
     }
 }
+fn node_env(
+    run: &str,
+    id: &str,
+    attempt: i64,
+    goal: &str,
+    bindings: &Value,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("OMS_GRAPH_RUN_ID".into(), run.into()),
+        ("OMS_GRAPH_NODE".into(), id.into()),
+        ("OMS_GRAPH_ATTEMPT".into(), attempt.to_string()),
+        ("OMS_GRAPH_GOAL".into(), goal.into()),
+    ];
+    for (name, entry) in map(bindings) {
+        if validate::valid_binding(&name.clone().into()) {
+            env.push((
+                format!("OMS_GRAPH_TASK_{}", name.to_uppercase().replace('-', "_")),
+                st(&entry, "task_id").into(),
+            ));
+        }
+    }
+    env
+}
+
+fn append_context_pack(argv: &mut Vec<String>, context: Option<&Value>) {
+    if let Some(context) = context
+        && st(context, "status") == "ready"
+    {
+        argv.extend(["--context-pack".into(), st(context, "path").into()]);
+    }
+}
+
 fn work(
     repo: &Path,
     run: &str,
@@ -677,6 +703,7 @@ fn work(
     helper: Option<&Path>,
     job: &Job,
     services: &(dyn oms_command_plan::Services + Sync),
+    host: &dyn crate::HostServices,
 ) -> Result<WorkOutput> {
     if let Some(cached) = &job.cached {
         return Ok(WorkOutput::native((
@@ -729,15 +756,25 @@ fn work(
                     "--repo".into(),
                 ];
                 argv.push(repo.as_os_str().to_owned());
-                Some(Ok(crate::run_with_helper(&argv, repo, cancel, helper)))
+                Some(Ok(crate::run_with_host(
+                    &argv, repo, cancel, helper, None, services, host,
+                )))
             }
             "commit_bound" => Some(
-                super::commit::bound(repo, st(&node, "binding"), &run, "", cancel, services)
-                    .and_then(|v| {
-                        v.json(false)
-                            .map(|raw| (0, raw, vec![]))
-                            .map_err(Error::new)
-                    }),
+                super::commit::bound_with_host(
+                    repo,
+                    st(&node, "binding"),
+                    run,
+                    "",
+                    cancel,
+                    services,
+                    host,
+                )
+                .and_then(|v| {
+                    v.json(false)
+                        .map(|raw| (0, raw, vec![]))
+                        .map_err(Error::new)
+                }),
             ),
             _ => None,
         }
@@ -745,53 +782,48 @@ fn work(
     if let Some(result) = native {
         return result.map(WorkOutput::native);
     }
-    let mut command = if st(&node, "kind") == "agent" {
-        build_command(repo, &node, task, args, false)?
-    } else if !st(&node, "tool").is_empty() {
-        match st(&node, "tool") {
-            "plan_acceptance" => {
-                let root = install_root()
-                    .ok_or_else(|| Error::new("packaged OMS installation root was not supplied"))?;
+    let env = node_env(run, &id, attempt, args.text("goal"), &job.bindings);
+    let host_call = |tool: &str, mut argv: Vec<String>| -> Result<WorkOutput> {
+        append_context_pack(&mut argv, context.as_ref());
+        let os_args: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+        host.invoke_command(
+            tool,
+            &os_args,
+            repo,
+            &env,
+            Some(Duration::from_secs(timeout)),
+            cancel,
+        )
+        .map(|(exit, stdout, stderr, timed_out)| WorkOutput {
+            exit,
+            stdout,
+            stderr,
+            timed_out,
+        })
+    };
+    if st(&node, "kind") == "agent" {
+        let (tool, argv) = build_invocation(repo, &node, task, args, false)?;
+        return host_call(tool, argv);
+    }
+    if !st(&node, "tool").is_empty() {
+        return match st(&node, "tool") {
+            "plan_acceptance" => host_call(
+                "agent-plan",
                 vec![
-                    "bash".into(),
-                    root.join("scripts/agent-plan.sh")
-                        .to_string_lossy()
-                        .into_owned(),
                     "--repo".into(),
                     repo.to_string_lossy().into_owned(),
                     "accept".into(),
-                ]
-            }
-            _ => {
-                return Err(Error::new(
-                    "tool capability requires its canonical service adapter",
-                ));
-            }
-        }
-    } else {
-        vec!["bash".into(), "-c".into(), st(&node, "command").into()]
-    };
-    if let Some(context) = &context {
-        if st(context, "status") == "ready" {
-            command.extend(["--context-pack".into(), st(context, "path").into()]);
-        }
+                ],
+            ),
+            _ => Err(Error::new(
+                "tool capability requires its canonical service adapter",
+            )),
+        };
     }
-    let mut process = Command::new(&command[0]);
-    process
-        .args(&command[1..])
-        .current_dir(repo)
-        .env("OMS_GRAPH_RUN_ID", &run)
-        .env("OMS_GRAPH_NODE", &id)
-        .env("OMS_GRAPH_ATTEMPT", attempt.to_string())
-        .env("OMS_GRAPH_GOAL", args.text("goal"));
-    for (name, entry) in map(&job.bindings) {
-        if validate::valid_binding(&name.clone().into()) {
-            process.env(
-                format!("OMS_GRAPH_TASK_{}", name.to_uppercase().replace('-', "_")),
-                st(&entry, "task_id"),
-            );
-        }
-    }
+    let mut command = vec!["-c".into(), st(&node, "command").into()];
+    append_context_pack(&mut command, context.as_ref());
+    let mut process = Command::new("bash");
+    process.args(&command).current_dir(repo).envs(env);
     util::process_detail(&mut process, Duration::from_secs(timeout), cancel).map(
         |(exit, stdout, stderr, timed_out)| WorkOutput {
             exit,
@@ -801,18 +833,19 @@ fn work(
         },
     )
 }
-pub fn run(
+pub fn run_with_host(
     args: &Args,
     repo: &Path,
     cwd: &Path,
     cancel: &AtomicBool,
     helper: Option<&Path>,
     services: &(dyn oms_command_plan::Services + Sync),
+    host: &dyn crate::HostServices,
 ) -> Result<Value> {
     let mut spec = if args.action == "resume" {
         events::load(repo, args.text("run"))?
     } else {
-        load(&args.text("spec").into(), cwd)?
+        load_with_root(&args.text("spec").into(), cwd, host.install_root())?
     };
     let verdict = validate(&spec);
     if !verdict.get("ok").truth() {
@@ -846,13 +879,10 @@ pub fn run(
             let id = id.py();
             let node = spec.get("nodes").get(&id);
             if st(node, "kind") == "agent" {
-                commands.push(list(build_command(
-                    repo,
-                    node,
-                    st(&tasks, &id),
-                    args,
-                    true,
-                )?));
+                let (tool, invocation) = build_invocation(repo, node, st(&tasks, &id), args, true)?;
+                let mut command = vec!["oms".to_owned(), tool.to_owned()];
+                command.extend(invocation);
+                commands.push(list(command));
             }
         }
         return Ok(obj([
@@ -1201,7 +1231,7 @@ pub fn run(
                 let run = &run;
                 scope.spawn(move || {
                     let raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        work(repo, run, args, cancel, helper, job, services)
+                        work(repo, run, args, cancel, helper, job, services, host)
                     }))
                     .unwrap_or_else(|_| Err(Error::new("graph worker supervision failed")));
                     let _ = sender.send((index, raw));

@@ -128,15 +128,20 @@ pub fn write(path: &Path, value: &Value) -> Result<()> {
 pub fn install_root() -> Option<PathBuf> {
     std::env::var_os("OMS_INSTALL_ROOT")
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute() && p.join("scripts/oms").is_file())
+        .filter(|p| {
+            p.is_absolute() && (p.join("config/graphs").is_dir() || p.join("scripts/oms").is_file())
+        })
         .or_else(|| {
             std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().and_then(Path::parent).map(Path::to_path_buf))
-                .filter(|p| p.join("scripts/oms").is_file())
+                .filter(|p| p.join("config/graphs").is_dir() || p.join("scripts/oms").is_file())
         })
 }
 pub fn load(source: &Value, cwd: &Path) -> Result<Value> {
+    load_with_root(source, cwd, None)
+}
+pub fn load_with_root(source: &Value, cwd: &Path, root: Option<&Path>) -> Result<Value> {
     let raw = if matches!(source, Value::Obj(_)) {
         source.clone()
     } else if let Some(text) = source.text() {
@@ -147,7 +152,9 @@ pub fn load(source: &Value, cwd: &Path) -> Result<Value> {
         let path = util::at(cwd, text);
         if path.is_file() {
             read(&path)?
-        } else if let Some(path) = install_root()
+        } else if let Some(path) = root
+            .map(Path::to_path_buf)
+            .or_else(install_root)
             .map(|r| r.join("config/graphs").join(format!("{text}.json")))
             .filter(|p| p.is_file())
         {
@@ -461,14 +468,16 @@ pub(crate) fn dispatch(
     cwd: &Path,
     cancel: &AtomicBool,
     helper: Option<&Path>,
+    _runtime_services: Option<&dyn oms_runtime::Services>,
     services: &(dyn oms_command_plan::Services + Sync),
+    host: &dyn crate::HostServices,
 ) -> Result<CommandResult> {
     let mut text = String::new();
     let mut code = 0;
     let err = String::new();
     let value = match args.action.as_str() {
         "validate" => {
-            let spec = load(&args.text("spec").into(), cwd)?;
+            let spec = load_with_root(&args.text("spec").into(), cwd, host.install_root())?;
             let verdict = validate(&spec);
             if !verdict.get("ok").truth() {
                 code = 3;
@@ -493,7 +502,7 @@ pub(crate) fn dispatch(
             verdict
         }
         "render" => {
-            let spec = load(&args.text("spec").into(), cwd)?;
+            let spec = load_with_root(&args.text("spec").into(), cwd, host.install_root())?;
             text = render::exec(&spec, None, None, args.flag("mermaid"));
             spec
         }
@@ -501,7 +510,7 @@ pub(crate) fn dispatch(
             let (spec, state, facts) = if !args.text("run").is_empty() {
                 runner::view(repo, args.text("run"), cancel, services)?
             } else if !args.text("spec").is_empty() {
-                let spec = load(&args.text("spec").into(), cwd)?;
+                let spec = load_with_root(&args.text("spec").into(), cwd, host.install_root())?;
                 let outcomes = option(args.text("outcomes"), cwd)?;
                 let state = route::state(&spec, &outcomes, &empty(), &empty(), &empty())?;
                 let facts = if args.text("facts").is_empty() {
@@ -671,7 +680,7 @@ pub(crate) fn dispatch(
             ])
         }
         "run" | "resume" => {
-            let result = runner::run(args, repo, cwd, cancel, helper, services)?;
+            let result = runner::run_with_host(args, repo, cwd, cancel, helper, services, host)?;
             if result.get("dry_run").truth() {
                 text = format!(
                     "run: dry-run status={} primary={}\n",
@@ -727,13 +736,14 @@ pub(crate) fn dispatch(
             result
         }
         "commit" => {
-            let result = commit::bound(
+            let result = commit::bound_with_host(
                 repo,
                 args.text("binding"),
                 args.text("run"),
                 args.text("message"),
                 cancel,
                 services,
+                host,
             )?;
             text = format!(
                 "commit: {} task={} status={} paths={}\n",

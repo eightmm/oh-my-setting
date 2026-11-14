@@ -460,6 +460,7 @@ dependencies = [
  "oms-command-failure",
  "oms-command-memory",
  "oms-command-operations",
+ "oms-command-plan",
  "oms-command-room",
  "oms-command-task",
  "oms-context",
@@ -470,9 +471,11 @@ dependencies = [
  "oms-lock",
  "oms-output",
  "oms-output-capture",
+ "oms-runtime",
  "oms-safe-fs",
  "oms-scrub",
  "oms-supervisor",
+ "oms-toml",
  "oms-work-inspect",
  "regex",
  "rustix",
@@ -712,6 +715,32 @@ dependencies = [
  "proc_pidinfo",
  "rustix",
  "sha2",
+]
+
+[[package]]
+name = "oms-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-command-experiment",
+ "oms-command-failure",
+ "oms-command-plan",
+ "oms-command-runs",
+ "oms-context",
+ "oms-context-report",
+ "oms-context-session",
+ "oms-context-source",
+ "oms-contract-markdown",
+ "oms-experiment",
+ "oms-failure",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "oms-work-inspect",
+ "regex",
+ "rustix",
+ "serde_json",
 ]
 
 [[package]]

@@ -55,6 +55,32 @@ pub fn owns(_: &[OsString]) -> bool {
     true
 }
 
+/// Host adapters for packaged data paths and native OMS tool invocations.
+pub trait HostServices: Send + Sync {
+    fn install_root(&self) -> Option<&Path> {
+        None
+    }
+
+    fn invoke_command(
+        &self,
+        tool: &str,
+        _args: &[OsString],
+        _cwd: &Path,
+        _env: &[(String, String)],
+        _timeout: Option<std::time::Duration>,
+        _cancel: &AtomicBool,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool)> {
+        Err(Error::new(format!(
+            "tool capability '{tool}' requires its canonical host adapter"
+        )))
+    }
+}
+
+/// Fail-closed default host adapter when no packaged host supplies `HostServices`.
+pub struct NoHostServices;
+
+impl HostServices for NoHostServices {}
+
 pub fn run(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> CommandResult {
     run_with_helper(args, cwd, interrupted, None)
 }
@@ -99,6 +125,27 @@ pub fn run_with_services(
     runtime_services: Option<&dyn oms_runtime::Services>,
     plan_services: &(dyn oms_command_plan::Services + Sync),
 ) -> CommandResult {
+    run_with_host(
+        args,
+        cwd,
+        interrupted,
+        python_helper,
+        runtime_services,
+        plan_services,
+        &NoHostServices,
+    )
+}
+
+/// Execute graph commands with explicit host data-root and tool-invocation adapters.
+pub fn run_with_host(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
+    plan_services: &(dyn oms_command_plan::Services + Sync),
+    host: &dyn HostServices,
+) -> CommandResult {
     let args = match cli::parse(args) {
         Ok(v) => v,
         Err(result) => return result,
@@ -135,6 +182,7 @@ pub fn run_with_services(
                 interrupted,
                 python_helper,
                 runtime_services,
+                host,
             ),
             "exec" => execution::dispatch(
                 &args,
@@ -142,7 +190,9 @@ pub fn run_with_services(
                 &cwd,
                 interrupted,
                 python_helper,
+                runtime_services,
                 plan_services,
+                host,
             ),
             _ => Err(Error::new("unknown graph group")),
         }

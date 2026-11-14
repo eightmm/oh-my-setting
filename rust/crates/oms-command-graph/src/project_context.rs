@@ -593,7 +593,22 @@ pub fn compile_bundle_with_services(
     services: &dyn oms_runtime::Services,
     cancel: &AtomicBool,
 ) -> Result<Value> {
-    let install = crate::execution::install_root()
+    compile_bundle_with_host(repo, state_repo, pack, max_bytes, None, services, cancel)
+}
+
+/// Compile a runtime context bundle using an optional host-supplied install root.
+pub fn compile_bundle_with_host(
+    repo: &Path,
+    state_repo: &Path,
+    pack: &Value,
+    max_bytes: usize,
+    install_root: Option<&Path>,
+    services: &dyn oms_runtime::Services,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let install = install_root
+        .map(Path::to_path_buf)
+        .or_else(crate::execution::install_root)
         .ok_or_else(|| Error::new("packaged OMS installation root was not supplied"))?;
     let runtime =
         oms_runtime::storage::Runtime::open(repo, state_repo, &install, services, cancel)?;
@@ -652,14 +667,25 @@ pub fn compile_bundle(
     max_bytes: usize,
     cancel: &AtomicBool,
 ) -> Result<Value> {
+    compile_bundle_with_root(repo, pack, max_bytes, None, cancel)
+}
+
+pub fn compile_bundle_with_root(
+    repo: &Path,
+    pack: &Value,
+    max_bytes: usize,
+    install_root: Option<&Path>,
+    cancel: &AtomicBool,
+) -> Result<Value> {
     let mut request = oms_command_plan::Request::new(oms_command_plan::Action::Status);
     request.repo = Some(repo.into());
     let context = oms_command_plan::Context::from_environment(&request, repo)?;
-    compile_bundle_with_services(
+    compile_bundle_with_host(
         repo,
         &context.state_repo,
         pack,
         max_bytes,
+        install_root,
         &LocalRuntime(cancel),
         cancel,
     )

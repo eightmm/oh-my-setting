@@ -154,6 +154,7 @@ pub(crate) fn dispatch(
     cancel: &AtomicBool,
     helper: Option<&Path>,
     runtime_services: Option<&dyn oms_runtime::Services>,
+    host: &dyn crate::HostServices,
 ) -> Result<CommandResult> {
     bounds(args)?;
     if args.action == "benchmark" {
@@ -462,16 +463,23 @@ pub(crate) fn dispatch(
                             oms_command_plan::Request::new(oms_command_plan::Action::Status);
                         request.repo = Some(repo.into());
                         let roots = oms_command_plan::Context::from_environment(&request, repo)?;
-                        context::compile_bundle_with_services(
+                        context::compile_bundle_with_host(
                             repo,
                             &roots.state_repo,
                             &pack,
                             64 * 1024,
+                            host.install_root(),
                             services,
                             cancel,
                         )?
                     } else {
-                        context::compile_bundle(repo, &pack, 64 * 1024, cancel)?
+                        context::compile_bundle_with_root(
+                            repo,
+                            &pack,
+                            64 * 1024,
+                            host.install_root(),
+                            cancel,
+                        )?
                     };
                 }
                 if args.flag("ui_model") || !args.text("html_fragment").is_empty() {

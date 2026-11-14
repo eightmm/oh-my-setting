@@ -16,10 +16,16 @@ use std::{
 };
 
 const FRAME_MAX: usize = 1024 * 1024;
-fn state_path() -> PathBuf {
+pub(crate) fn state_path() -> PathBuf {
     env_path("XDG_STATE_HOME")
         .unwrap_or_else(|| home().join(".local/state"))
         .join("oh-my-setting/codex-notify.json")
+}
+pub(crate) fn turn_state_path(session_hash_hex: &str) -> PathBuf {
+    state_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("/"))
+        .join(format!("codex-notify-sessions/{session_hash_hex}.json"))
 }
 pub fn socket_path() -> PathBuf {
     env_path("OMS_CODEX_NOTIFY_SOCK").unwrap_or_else(|| {

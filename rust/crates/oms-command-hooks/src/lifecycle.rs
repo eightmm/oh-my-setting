@@ -391,7 +391,12 @@ fn usage(_v: &Value, command: &str, repo: &Path, ctx: &Context<'_>) {
     {
         return;
     }
-    let families = load(&ctx.source.join("scripts/lib/usage-families.json"));
+    let primary_families = ctx.source.join("config/usage-families.json");
+    let families = if primary_families.is_file() {
+        load(&primary_families)
+    } else {
+        load(&ctx.source.join("scripts/lib/usage-families.json"))
+    };
     let day = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
         .format("%Y-%m-%d")
         .to_string();
@@ -427,19 +432,22 @@ pub(crate) fn capture(
         Ok(captured) => captured,
         Err(summary) => {
             let summary = safe_text(&summary, 160);
+            let cmd = format!("session-handoff capture --agent {agent}");
+            let next = format!("run manually: oms session-handoff capture --agent {agent}");
+            ctx.host.record_hook_failure(repo, &cmd, 1, &summary, &next);
             let _ = ledger(
                 &[
                     "record",
                     "--kind",
                     "hook",
                     "--cmd",
-                    &format!("session-handoff capture --agent {agent}"),
+                    &cmd,
                     "--exit",
                     "1",
                     "--summary",
                     &summary,
                     "--next",
-                    &format!("run manually: oms session-handoff capture --agent {agent}"),
+                    &next,
                 ],
                 repo,
                 ctx,
@@ -597,8 +605,7 @@ pub(crate) fn stop(v: &Value, ctx: &Context<'_>) -> Output {
                 return out(raw);
             }
             Err(_) => {
-                relay(v, &repo, ctx);
-                let _ = journal(&repo, false, ctx);
+                finish_stop(v, &repo, ctx);
                 return out(json_line(
                     &json!({"systemMessage":"oh-my-setting turn guard: unavailable (helper error); this turn was not checked."}),
                 ));
@@ -606,9 +613,108 @@ pub(crate) fn stop(v: &Value, ctx: &Context<'_>) -> Output {
             _ => {}
         }
     }
-    relay(v, &repo, ctx);
-    let _ = journal(&repo, false, ctx);
+    finish_stop(v, &repo, ctx);
     empty()
+}
+fn finish_stop(v: &Value, repo: &Path, ctx: &Context<'_>) {
+    relay(v, repo, ctx);
+    let _ = journal(repo, false, ctx);
+    defer_finish(repo, ctx);
+}
+fn journal_config_path() -> std::path::PathBuf {
+    if let Some(p) = env_path("OMS_WORK_JOURNAL_CONFIG") {
+        return p;
+    }
+    env_path("XDG_CONFIG_HOME")
+        .unwrap_or_else(|| home().join(".config"))
+        .join("oh-my-setting/work-journal.json")
+}
+fn journal_sync_configured() -> bool {
+    !env("OMS_WORK_JOURNAL_NOTION_DATA_SOURCE_ID").is_empty()
+        || !env("OMS_WORK_JOURNAL_NOTION_DATABASE_ID").is_empty()
+        || journal_config_path().is_file()
+}
+fn defer_finish(repo: &Path, ctx: &Context<'_>) {
+    if !ctx.host.supports_detach()
+        || child()
+        || env("OMS_WORK_JOURNAL_ACTIVE") == "1"
+        || !adopted(repo)
+    {
+        return;
+    }
+    let do_journal = !off("OMS_WORK_JOURNAL")
+        && env("OMS_WORK_JOURNAL_SUPPRESS") != "1"
+        && journal_sync_configured();
+    let mut do_ci = false;
+    let gh_raw = env("OMS_GH_BIN");
+    let gh_bin = if gh_raw.is_empty() {
+        "gh"
+    } else {
+        gh_raw.as_str()
+    };
+    if enabled("OMS_CI_TICK") && executable(std::ffi::OsStr::new(gh_bin)).is_some() {
+        let remote = git(repo, &["remote", "get-url", "origin"], ctx).unwrap_or_default();
+        if remote.contains("github.com:") || remote.contains("github.com/") {
+            do_ci = true;
+        }
+    }
+    let current_head = if do_ci { head(repo) } else { None };
+    let ledger = env_path("OMS_CI_LEDGER").unwrap_or_else(|| repo.join(".oms/ci.jsonl"));
+    defer_finish_with(
+        repo,
+        do_journal,
+        do_ci,
+        current_head.as_deref(),
+        &ledger,
+        ctx,
+    );
+}
+fn defer_finish_with(
+    repo: &Path,
+    do_journal: bool,
+    mut do_ci: bool,
+    current_head: Option<&str>,
+    ci_ledger: &Path,
+    ctx: &Context<'_>,
+) {
+    if !ctx.host.supports_detach() {
+        return;
+    }
+    if do_ci
+        && let Some(current_head) = current_head
+        && let Ok(raw) = read(ci_ledger, 64 * INPUT_MAX)
+    {
+        let mut latest: Option<Value> = None;
+        for line in raw.split(|b| *b == b'\n') {
+            if let Some(row) = document(line) {
+                latest = Some(row);
+            }
+        }
+        if let Some(row) = latest
+            && text(&row, "sha") == current_head
+            && text(&row, "status") == "completed"
+        {
+            do_ci = false;
+        }
+    }
+    if do_journal {
+        let _ = ctx.host.detach_command(
+            "journal",
+            &[
+                OsString::from("sync"),
+                OsString::from("--repo"),
+                repo.as_os_str().to_owned(),
+                OsString::from("--force"),
+                OsString::from("--today"),
+            ],
+            repo,
+        );
+    }
+    if do_ci {
+        let _ = ctx
+            .host
+            .detach_command("ci-status", &[OsString::from("tick")], repo);
+    }
 }
 fn budget(v: &Value, repo: &Path, ctx: &Context<'_>) -> Result<Option<String>, String> {
     let path = state_path(repo, v, "");
@@ -677,9 +783,178 @@ fn budget(v: &Value, repo: &Path, ctx: &Context<'_>) -> Result<Option<String>, S
         }
     )))
 }
+fn claude_session_project(v: &Value, ctx: &Context<'_>) -> Option<std::path::PathBuf> {
+    let mut project = env("CLAUDE_PROJECT_DIR");
+    if project.is_empty() {
+        let transcript = first(v, &["transcript_path", "transcriptPath"]);
+        if !transcript.is_empty()
+            && let Ok(file) = fs::File::open(transcript)
+        {
+            use std::io::{BufRead, BufReader, Read};
+            let reader = BufReader::new(file.take(1024 * 1024));
+            for line in reader.lines().take(50).map_while(Result::ok) {
+                if let Some(row) = document(line.as_bytes()) {
+                    let cwd = text(&row, "cwd");
+                    if !cwd.is_empty() {
+                        project = cwd.to_owned();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    (!project.is_empty())
+        .then(|| root(Path::new(&project), ctx.cwd))
+        .flatten()
+}
+pub(crate) fn pending_background(v: &Value, max_age_secs: f64) -> usize {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io::{BufRead, BufReader, Read};
+    let transcript = first(v, &["transcript_path", "transcriptPath"]);
+    if transcript.is_empty() {
+        return 0;
+    }
+    let Ok(file) = fs::File::open(transcript) else {
+        return 0;
+    };
+    let launch_re = regex::Regex::new(
+        r"^(?:Command running in background with ID: |Monitor started \(task )([A-Za-z0-9_-]+)",
+    )
+    .unwrap();
+    let end_re =
+        regex::Regex::new(r"(?s)<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>")
+            .unwrap();
+    let mut launched: BTreeMap<String, f64> = BTreeMap::new();
+    let mut ended: BTreeSet<String> = BTreeSet::new();
+    let reader = BufReader::new(file.take(16 * 1024 * 1024));
+    for line in reader.lines().map_while(Result::ok) {
+        if !(line.contains("background with ID")
+            || line.contains("Monitor started")
+            || line.contains("<task-notification>")
+            || line.contains("TaskStop"))
+        {
+            continue;
+        }
+        let Some(row) = document(line.as_bytes()) else {
+            continue;
+        };
+        let Some(content_val) = row.get("message").and_then(|m| m.get("content")) else {
+            continue;
+        };
+        let items: Vec<Value> = match content_val {
+            Value::String(s) => vec![json!({"type": "text", "text": s})],
+            Value::Array(arr) => arr.clone(),
+            _ => continue,
+        };
+        for item in items {
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            if obj.get("type").and_then(Value::as_str) == Some("tool_use")
+                && obj.get("name").and_then(Value::as_str) == Some("TaskStop")
+            {
+                if let Some(tid) = obj
+                    .get("input")
+                    .and_then(|i| i.get("task_id"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    ended.insert(tid.to_owned());
+                }
+                continue;
+            }
+            let raw_text = if obj.get("type").and_then(Value::as_str) == Some("tool_result") {
+                obj.get("content")
+            } else {
+                obj.get("text")
+            };
+            let extracted = match raw_text {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Array(parts)) => parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect::<String>(),
+                _ => String::new(),
+            };
+            let text = extracted.trim_start();
+            if let Some(cap) = launch_re.captures(text) {
+                if let Some(at) = epoch(self::text(&row, "timestamp"))
+                    && let Some(tid) = cap.get(1)
+                {
+                    launched.insert(tid.as_str().to_owned(), at);
+                }
+            } else if text.starts_with("<task-notification>") {
+                for cap in end_re.captures_iter(text) {
+                    if let (Some(tid), Some(status)) = (cap.get(1), cap.get(2))
+                        && status.as_str() != "running"
+                    {
+                        ended.insert(tid.as_str().to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let now = seconds();
+    launched
+        .into_iter()
+        .filter(|(tid, at)| !ended.contains(tid) && (now - *at) <= max_age_secs)
+        .count()
+}
+fn start_codex_notify(target: &Path, v: &Value, message: &str, ctx: &Context<'_>) {
+    if env("OMS_PANEL_RESULTS") == "1" || env("OMS_CODEX_NOTIFY") == "0" {
+        return;
+    }
+    let turn_state = crate::notify::turn_state_path(&session_hash(v));
+    let socket_exists = crate::notify::socket_path().exists();
+    start_codex_notify_with(target, v, message, &turn_state, socket_exists, ctx);
+}
+fn start_codex_notify_with(
+    target: &Path,
+    v: &Value,
+    message: &str,
+    turn_state: &Path,
+    socket_exists: bool,
+    ctx: &Context<'_>,
+) {
+    if !socket_exists || !ctx.host.supports_detach() {
+        return;
+    }
+    let state = load(turn_state);
+    let Some(started) = state["prompt_at"].as_f64() else {
+        return;
+    };
+    let elapsed = seconds() - started;
+    if elapsed < 30.0 || pending_background(v, 86400.0) > 0 {
+        return;
+    }
+    let elapsed_secs = elapsed as u64;
+    let minutes = elapsed_secs / 60;
+    let duration = if minutes > 0 {
+        format!("{minutes}분")
+    } else {
+        format!("{elapsed_secs}초")
+    };
+    let tail: String = message
+        .chars()
+        .skip(message.chars().count().saturating_sub(2000))
+        .collect();
+    let dir_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let body = format!(
+        "🔔 Claude Code 작업 완료 · {dir_name} ({duration})\n{}",
+        safe_text(&tail, 300)
+    );
+    let _ = ctx.host.detach_command(
+        "codex-app-notify",
+        &[
+            OsString::from("send"),
+            target.as_os_str().to_owned(),
+            OsString::from(body),
+        ],
+        target,
+    );
+}
 fn relay(v: &Value, repo: &Path, ctx: &Context<'_>) {
-    if !on("OMS_RELAY")
-        || !adopted(repo)
+    if child()
         || v["stop_hook_active"] == true
         || v["stopHookActive"] == true
         || agent(v, ctx) != "claude"
@@ -688,6 +963,11 @@ fn relay(v: &Value, repo: &Path, ctx: &Context<'_>) {
     }
     let message = text(v, "last_assistant_message").trim();
     if message.is_empty() {
+        return;
+    }
+    let project = claude_session_project(v, ctx);
+    start_codex_notify(project.as_deref().unwrap_or(repo), v, message, ctx);
+    if !on("OMS_RELAY") || !adopted(repo) {
         return;
     }
     let tail = message
@@ -1121,5 +1401,231 @@ fn unpublished(repo: &Path, ctx: &Context<'_>) -> String {
         String::new()
     } else {
         format!("- unpublished: {}", parts.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
+
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let n = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir()
+                .join(format!("oms-hooks-unit-{label}-{}-{n}", std::process::id()));
+            fs::create_dir_all(&p).expect("mkdir temp");
+            Self(p)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Default)]
+    struct MockHost {
+        detached: Mutex<Vec<(String, Vec<String>)>>,
+        failures: Mutex<Vec<(String, i32, String)>>,
+    }
+
+    impl crate::HostServices for MockHost {
+        fn supports_detach(&self) -> bool {
+            true
+        }
+
+        fn detach_command(&self, tool: &str, args: &[OsString], _cwd: &Path) -> Result<(), String> {
+            self.detached.lock().expect("lock").push((
+                tool.to_owned(),
+                args.iter()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            ));
+            Ok(())
+        }
+
+        fn record_hook_failure(
+            &self,
+            _repo: &Path,
+            cmd: &str,
+            exit: i32,
+            summary: &str,
+            _next: &str,
+        ) {
+            self.failures
+                .lock()
+                .expect("lock")
+                .push((cmd.to_owned(), exit, summary.to_owned()));
+        }
+    }
+
+    fn rfc3339_secs_ago(offset: i64) -> String {
+        let ts = (seconds() as i64 - offset).max(0);
+        chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
+    #[test]
+    fn pending_background_tracks_launches_and_stops() {
+        let tmp = TempDir::new("pending");
+        let transcript = tmp.0.join("session.jsonl");
+        let recent = rfc3339_secs_ago(120);
+        let stale = rfc3339_secs_ago(90_000);
+        let rows = [
+            json!({"timestamp": recent, "message": {"content": [{"type": "tool_result", "content": "Command running in background with ID: bg_active"}]}}),
+            json!({"timestamp": recent, "message": {"content": [{"type": "tool_result", "content": "Monitor started (task bg_stopped"}]}}),
+            json!({"timestamp": recent, "message": {"content": [{"type": "tool_use", "name": "TaskStop", "input": {"task_id": "bg_stopped"}}]}}),
+            json!({"timestamp": recent, "message": {"content": [{"type": "tool_result", "content": "Command running in background with ID: bg_notified"}]}}),
+            json!({"timestamp": recent, "message": {"content": [{"type": "text", "text": "<task-notification><task-id>bg_notified</task-id><status>completed</status></task-notification>"}]}}),
+            json!({"timestamp": stale, "message": {"content": [{"type": "tool_result", "content": "Command running in background with ID: bg_stale"}]}}),
+        ];
+        fs::write(
+            &transcript,
+            rows.iter()
+                .map(|r| r.to_string() + "\n")
+                .collect::<String>(),
+        )
+        .expect("write transcript");
+
+        let payload = json!({"transcript_path": transcript});
+        assert_eq!(pending_background(&payload, 86400.0), 1);
+    }
+
+    #[test]
+    fn start_codex_notify_obeys_elapsed_and_pending_background_gates() {
+        let tmp = TempDir::new("codex-notify");
+        let repo = tmp.0.join("project");
+        fs::create_dir_all(&repo).expect("mkdir repo");
+        let turn_state = tmp.0.join("turn.json");
+        let transcript = tmp.0.join("session.jsonl");
+        let recent = rfc3339_secs_ago(45);
+        fs::write(
+            &transcript,
+            json!({"timestamp": recent, "message": {"content": [{"type": "tool_result", "content": "Command running in background with ID: bg_live"}]}}).to_string() + "\n",
+        )
+        .expect("write transcript");
+
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let ctx = Context {
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+
+        // Too fast (< 30s): silent.
+        write(
+            &turn_state,
+            &json!({"schema": 1, "prompt_at": seconds() - 5.0}),
+        )
+        .expect("write");
+        start_codex_notify_with(&repo, &json!({}), "done", &turn_state, true, &ctx);
+        assert!(host.detached.lock().expect("lock").is_empty());
+
+        // Elapsed >= 30s, but pending background task open: silent.
+        write(
+            &turn_state,
+            &json!({"schema": 1, "prompt_at": seconds() - 45.0}),
+        )
+        .expect("write");
+        start_codex_notify_with(
+            &repo,
+            &json!({"transcript_path": transcript}),
+            "done",
+            &turn_state,
+            true,
+            &ctx,
+        );
+        assert!(host.detached.lock().expect("lock").is_empty());
+
+        // Elapsed >= 30s and zero pending background: detaches notify send.
+        start_codex_notify_with(
+            &repo,
+            &json!({}),
+            "All checks passed",
+            &turn_state,
+            true,
+            &ctx,
+        );
+        let calls = host.detached.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "codex-app-notify");
+        assert_eq!(calls[0].1[0], "send");
+        assert!(calls[0].1[2].contains("All checks passed"));
+    }
+
+    #[test]
+    fn defer_finish_detaches_journal_and_skips_completed_ci_sha() {
+        let tmp = TempDir::new("defer-finish");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(&repo).expect("mkdir repo");
+        let ledger = tmp.0.join("ci.jsonl");
+        fs::write(&ledger, "{\"sha\":\"abc123\",\"status\":\"completed\"}\n").expect("write ci");
+
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let ctx = Context {
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+
+        defer_finish_with(&repo, true, true, Some("abc123"), &ledger, &ctx);
+        let calls = host.detached.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "journal");
+        assert_eq!(calls[0].1[0], "sync");
+
+        defer_finish_with(&repo, false, true, Some("def456"), &ledger, &ctx);
+        let calls = host.detached.lock().expect("lock");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, "ci-status");
+        assert_eq!(calls[1].1, vec!["tick"]);
+    }
+
+    #[test]
+    fn capture_records_hook_failure_through_host_adapter() {
+        let tmp = TempDir::new("capture-err");
+        let repo = tmp.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).expect("mkdir .oms");
+        // Occupy .oms/handoffs with a regular file so antigravity/claude capture returns Err.
+        fs::write(repo.join(".oms/handoffs"), "not a directory\n").expect("block handoffs");
+
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let ctx = Context {
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+
+        let ok = capture(
+            &json!({"session_id": "missing-session-id"}),
+            &repo,
+            "claude",
+            "auto: pre-compact snapshot",
+            false,
+            &ctx,
+        );
+        assert!(!ok);
+        let failures = host.failures.lock().expect("lock");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "session-handoff capture --agent claude");
+        assert_eq!(failures[0].1, 1);
     }
 }

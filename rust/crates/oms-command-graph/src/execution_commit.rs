@@ -30,13 +30,14 @@ pub fn patch_paths(text: &str) -> Result<Vec<String>> {
     }
     Ok(paths)
 }
-pub fn bound(
+pub fn bound_with_host(
     repo: &Path,
     binding: &str,
     run: &str,
     message: &str,
     cancel: &AtomicBool,
     services: &(dyn oms_command_plan::Services + Sync),
+    host: &dyn crate::HostServices,
 ) -> Result<Value> {
     if std::env::var_os("OMS_HARNESS_CHILD").as_deref() == Some(std::ffi::OsStr::new("1")) {
         return Err(Error::new(
@@ -97,27 +98,23 @@ pub fn bound(
         .chars()
         .take(72)
         .collect::<String>();
-    let root = install_root()
-        .ok_or_else(|| Error::new("packaged OMS installation root was not supplied"))?;
     let head = util::git(repo, &["rev-parse", "HEAD"], cancel);
-    let command = vec![
-        root.join("scripts/goal-drive.sh")
-            .to_string_lossy()
-            .into_owned(),
-        "--repo".into(),
-        repo.to_string_lossy().into_owned(),
-        "--commit-task".into(),
-        task.clone(),
-        "--commit-message".into(),
-        subject,
+    let args = vec![
+        std::ffi::OsString::from("--repo"),
+        repo.as_os_str().to_owned(),
+        std::ffi::OsString::from("--commit-task"),
+        std::ffi::OsString::from(&task),
+        std::ffi::OsString::from("--commit-message"),
+        std::ffi::OsString::from(&subject),
     ];
-    let refs: Vec<&str> = command.iter().map(String::as_str).collect();
-    let (code, stdout, stderr) = util::command(repo, "bash", &refs, cancel).map_err(|e| {
-        Error::new(format!(
-            "exact commit could not complete; retry to reconcile: {}",
-            e.message
-        ))
-    })?;
+    let (code, stdout, stderr, _) = host
+        .invoke_command("goal-drive", &args, repo, &[], None, cancel)
+        .map_err(|e| {
+            Error::new(format!(
+                "exact commit could not complete; retry to reconcile: {}",
+                e.message
+            ))
+        })?;
     if code != 0 {
         let body = if stderr.is_empty() { stdout } else { stderr };
         let detail = String::from_utf8_lossy(&body)

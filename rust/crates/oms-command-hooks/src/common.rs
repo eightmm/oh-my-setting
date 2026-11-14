@@ -19,6 +19,7 @@ pub struct Context<'a> {
     pub cwd: &'a Path,
     pub source: &'a Path,
     pub interrupted: &'a AtomicBool,
+    pub host: &'a dyn crate::HostServices,
 }
 pub fn empty() -> Output {
     (0, vec![], vec![])

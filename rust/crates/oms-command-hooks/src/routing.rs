@@ -242,13 +242,23 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
     }
     if agent(&v, ctx) == "claude" && on("OMS_CODEX_NOTIFY") && crate::notify::socket_path().exists()
     {
-        let path = env_path("XDG_STATE_HOME")
-            .unwrap_or_else(|| home().join(".local/state"))
-            .join(format!(
-                "oh-my-setting/codex-notify-sessions/{}.json",
-                session_hash(&v)
-            ));
+        let path = crate::notify::turn_state_path(&session_hash(&v));
         let _ = write(&path, &json!({"schema":1,"prompt_at":seconds()}));
+        if let Some(dir) = path.parent() {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|e| e == "json")
+                    && entry
+                        .metadata()
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age.as_secs() > 7 * 86400)
+                {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
     }
     let prompt = text(&v, "prompt");
     if !skip(prompt) {
@@ -498,6 +508,39 @@ fn peers(v: &Value, repo: &Path) -> String {
         ((now_secs - when) / 60.).max(0.) as u64
     )
 }
+fn trigger_pressure_capture(
+    v: &Value,
+    repo: &Path,
+    source: &str,
+    left: f64,
+    ctx: &Context<'_>,
+) -> bool {
+    if !on("OMS_CTX_CAPTURE") || child() || !adopted(repo) {
+        return false;
+    }
+    let note = format!("auto: context pressure (~{}% left)", left as u64);
+    if ctx.host.supports_detach() {
+        let cwd = payload_cwd(v, repo);
+        let mut args: Vec<OsString> = vec![
+            "capture".into(),
+            "--agent".into(),
+            source.into(),
+            "--cwd".into(),
+            cwd.as_os_str().into(),
+            "--note".into(),
+            note.into(),
+        ];
+        let sid = session(v);
+        if !sid.is_empty() {
+            args.extend(["--session".into(), sid.into()]);
+        }
+        return ctx
+            .host
+            .detach_command("session-handoff", &args, repo)
+            .is_ok();
+    }
+    lifecycle::capture(v, repo, source, &note, false, ctx)
+}
 pub(crate) fn tail(path: &Path, limit: usize) -> Vec<u8> {
     use std::io::{Seek, SeekFrom};
     let Ok(fd) = rustix::fs::open(
@@ -627,15 +670,7 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     };
     if new_stage.is_empty() || rank(new_stage) <= rank(stage) {
         if left <= capture && state["captured"] != true {
-            let started = on("OMS_CTX_CAPTURE")
-                && lifecycle::capture(
-                    v,
-                    repo,
-                    source,
-                    &format!("auto: context pressure (~{}% left)", left as u64),
-                    false,
-                    ctx,
-                );
+            let started = trigger_pressure_capture(v, repo, source, left, ctx);
             save(stage, started || !on("OMS_CTX_CAPTURE"));
             event_row(
                 repo,
@@ -652,15 +687,7 @@ fn pressure(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         }
         return String::new();
     }
-    let captured = on("OMS_CTX_CAPTURE")
-        && lifecycle::capture(
-            v,
-            repo,
-            source,
-            &format!("auto: context pressure (~{}% left)", left as u64),
-            false,
-            ctx,
-        );
+    let captured = trigger_pressure_capture(v, repo, source, left, ctx);
     save(new_stage, state["captured"] == true || captured);
     event_row(
         repo,
