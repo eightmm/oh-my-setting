@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 mod ledger;
 pub mod metrics;
-mod process;
+pub mod process;
 mod reconcile;
 mod store;
 mod store_path;
