@@ -1186,11 +1186,19 @@ fn validate(raw: &Json) -> Result<Value> {
         json!({"_instant":instant,"_raw": match field(raw,"generated_at") {Json::String(b)=>b, _=>unreachable!()},"generated_at":generated,"state_digest":state,"plan_id":pid,"active_task_id":tid,"tasks":tasks,"criteria":criteria,"actions":actions,"actionable":actionable,"contract":cv,"sources":sources,"head":head}),
     )
 }
-fn parse(raw: &[u8], limit: usize) -> Result<Value> {
+fn check_limit(limit: usize) -> Result<()> {
     if !(1..=100).contains(&limit) {
         return Err(err("limit must be an integer from 1 to 100"));
     }
+    Ok(())
+}
+fn parse(raw: &[u8], limit: usize) -> Result<Value> {
+    check_limit(limit)?;
     validate(&parse_json(raw).map_err(|e| err(e.replace("context manifest", "work snapshot")))?)
+}
+fn validate_value(raw: &Json, limit: usize) -> Result<Value> {
+    check_limit(limit)?;
+    validate(raw)
 }
 fn bounded(mut a: Vec<Value>, limit: usize) -> Value {
     let total = a.len();
@@ -1405,24 +1413,56 @@ fn raw_time(v: &Value) -> Vec<u8> {
 /// Create an evidence matrix from bounded JSON input.
 pub fn evidence_matrix(raw: &[u8], limit: usize, task_id: Option<&str>) -> Result<Report> {
     let v = parse(raw, limit)?;
+    matrix_report(&v, limit, task_id)
+}
+/// Create an evidence matrix from a decoded work snapshot.
+pub fn evidence_matrix_value(raw: &Json, limit: usize, task_id: Option<&str>) -> Result<Report> {
+    let v = validate_value(raw, limit)?;
+    matrix_report(&v, limit, task_id)
+}
+fn matrix_report(v: &Value, limit: usize, task_id: Option<&str>) -> Result<Report> {
     Ok(Report {
-        value: matrix(&v, limit, task_id)?,
-        current: raw_time(&v),
+        value: matrix(v, limit, task_id)?,
+        current: raw_time(v),
         before: None,
     })
 }
 /// Explain canonical actions without executing them.
 pub fn action_inbox(raw: &[u8], limit: usize, task_id: Option<&str>) -> Result<Report> {
     let v = parse(raw, limit)?;
+    inbox_report(&v, limit, task_id)
+}
+/// Explain canonical actions from a decoded work snapshot.
+pub fn action_inbox_value(raw: &Json, limit: usize, task_id: Option<&str>) -> Result<Report> {
+    let v = validate_value(raw, limit)?;
+    inbox_report(&v, limit, task_id)
+}
+fn inbox_report(v: &Value, limit: usize, task_id: Option<&str>) -> Result<Report> {
     Ok(Report {
-        value: inbox(&v, limit, task_id)?,
-        current: raw_time(&v),
+        value: inbox(v, limit, task_id)?,
+        current: raw_time(v),
         before: None,
     })
 }
 /// Compare snapshots without inferring intermediate events.
 pub fn return_brief(current: &[u8], before: Option<&[u8]>, limit: usize) -> Result<Report> {
     let now = parse(current, limit)?;
+    brief_report(now, limit, || {
+        before.map(|raw| parse(raw, limit)).transpose()
+    })
+}
+/// Compare decoded work snapshots without inferring intermediate events.
+pub fn return_brief_value(current: &Json, before: Option<&Json>, limit: usize) -> Result<Report> {
+    let now = validate_value(current, limit)?;
+    brief_report(now, limit, || {
+        before.map(|raw| validate_value(raw, limit)).transpose()
+    })
+}
+fn brief_report(
+    now: Value,
+    limit: usize,
+    before: impl FnOnce() -> Result<Option<Value>>,
+) -> Result<Report> {
     let mut r = base("oms-return-brief", &now);
     r["baseline"] = json!("absent");
     r["history_complete"] = json!(false);
@@ -1431,14 +1471,13 @@ pub fn return_brief(current: &[u8], before: Option<&[u8]>, limit: usize) -> Resu
     r["limitation"] = json!(
         "Snapshot differences, not event history. Repeated states and intermediate failures cannot be reconstructed."
     );
-    let Some(before) = before else {
+    let Some(old) = before()? else {
         return Ok(Report {
             value: r,
             current: raw_time(&now),
             before: None,
         });
     };
-    let old = parse(before, limit)?;
     let mut reasons = Vec::new();
     if old["_instant"].as_i64() > now["_instant"].as_i64() {
         reasons.push("baseline-in-future")
