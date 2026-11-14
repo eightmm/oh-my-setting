@@ -21,26 +21,9 @@ const SCRIPTS: &[&str] = &[
 fn norm(s: &str) -> String {
     s.replace('\\', "/").trim_end_matches('/').into()
 }
-pub fn entry_command(root: &Path, executable: &str, path: &Path) -> Result<String, String> {
-    [
-        "bash".to_owned(),
-        root.join("scripts/lib/python-entry.sh")
-            .to_string_lossy()
-            .into_owned(),
-        executable.into(),
-        path.to_string_lossy().into_owned(),
-    ]
-    .iter()
-    .map(|s| {
-        shlex::try_quote(s)
-            .map(|s| s.into_owned())
-            .map_err(|_| "invalid command path".into())
-    })
-    .collect::<Result<Vec<_>, _>>()
-    .map(|s| s.join(" "))
-}
-pub fn hook_command(root: &Path, script: &str) -> Result<String, String> {
-    entry_command(root, "bash", &root.join("scripts").join(script))
+/// Native invocation for a managed hook script name (`syntax-guard-hook.sh`).
+pub fn hook_command(script: &str) -> String {
+    format!("oms {}", script.strip_suffix(".sh").unwrap_or(script))
 }
 pub fn entry_path(command: &str, executable: &str) -> Option<PathBuf> {
     let argv = shlex::split(command)?;
@@ -70,7 +53,16 @@ pub fn is_oms_root(candidate: &Path, roots: &[PathBuf]) -> bool {
         .iter()
         .any(|p| p.canonicalize().ok().as_ref() == Some(&real))
         || real.join(".agents/plugins/marketplace.json").is_file()
-            && real.join("scripts/install-claude-hooks.sh").is_file()
+            && (real.join("rust/Cargo.toml").is_file()
+                || real.join("scripts/install-claude-hooks.sh").is_file())
+}
+fn native_script(command: &str) -> Option<String> {
+    let argv = shlex::split(command)?;
+    let name = argv
+        .get(1)
+        .filter(|_| argv.len() == 2 && argv[0] == "oms")?;
+    let script = format!("{name}.sh");
+    SCRIPTS.contains(&script.as_str()).then_some(script)
 }
 fn script_path(command: &str) -> Option<PathBuf> {
     entry_path(command, "bash").or_else(|| {
@@ -95,6 +87,9 @@ pub fn owned_script(hook: &Value, roots: &[PathBuf]) -> Option<String> {
         return None;
     }
     let command = obj.get("command")?.as_str()?;
+    if let Some(script) = native_script(command) {
+        return Some(script);
+    }
     let path = script_path(command)?;
     let n = norm(&path.to_string_lossy());
     let parts = n.rsplitn(3, '/').collect::<Vec<_>>();
@@ -115,11 +110,11 @@ fn matcher_ok(entry: &Value, matcher: &Value) -> bool {
         entry.get("matcher") == Some(matcher)
     }
 }
-fn desired(hook: &Value, surface: &Value, root: &Path) -> Result<Value, String> {
+fn desired(hook: &Value, surface: &Value) -> Result<Value, String> {
     let mut hook = hook.as_object().cloned().unwrap_or_default();
     hook.insert("type".into(), json!("command"));
     let script = surface["script"].as_str().ok_or("surface script missing")?;
-    hook.insert("command".into(), json!(hook_command(root, script)?));
+    hook.insert("command".into(), json!(hook_command(script)));
     if surface["timeout"].is_null() {
         hook.remove("timeout");
     } else {
@@ -131,12 +126,7 @@ fn desired(hook: &Value, surface: &Value, root: &Path) -> Result<Value, String> 
     Ok(Value::Object(hook))
 }
 /// Converges owned rows in place, preserving sibling order and entry metadata.
-pub fn converge(
-    hooks: &mut Value,
-    surfaces: &[Value],
-    root: &Path,
-    roots: &[PathBuf],
-) -> Result<(), String> {
+pub fn converge(hooks: &mut Value, surfaces: &[Value], roots: &[PathBuf]) -> Result<(), String> {
     let hooks = hooks.as_object_mut().ok_or("hooks must be an object")?;
     let mut want = BTreeMap::new();
     for row in surfaces {
@@ -167,7 +157,7 @@ pub fn converge(
                         continue;
                     };
                     seen.insert(key);
-                    item = desired(hook, surface, root)?;
+                    item = desired(hook, surface)?;
                     changed |= item != *hook;
                     if !matcher_ok(entry, &surface["matcher"]) {
                         matcher = Some(surface["matcher"].clone());
@@ -211,7 +201,7 @@ pub fn converge(
         if seen.contains(&(event.into(), script.into())) {
             continue;
         }
-        let mut entry = json!({"hooks":[desired(&json!({}),row,root)?]});
+        let mut entry = json!({"hooks":[desired(&json!({}),row)?]});
         if !row["matcher"].is_null() {
             entry["matcher"] = row["matcher"].clone();
         }
@@ -322,7 +312,6 @@ pub type AuditProblems = BTreeMap<(String, String), Vec<(String, String)>>;
 pub fn audit(
     hooks: &Value,
     surfaces: &[Value],
-    root: &Path,
     roots: &[PathBuf],
 ) -> Result<(AuditProblems, Vec<(String, String)>), String> {
     let mut found = BTreeMap::<(String, String), Vec<(&Value, &Value)>>::new();
@@ -352,7 +341,7 @@ pub fn audit(
             issues.push(("duplicate".into(), format!("{} registrations", rows.len())));
         }
         for (entry, hook) in rows {
-            let desired = desired(hook, row, root)?;
+            let desired = desired(hook, row)?;
             for key in ["type", "command", "timeout", "onFailure"] {
                 if hook.get(key) != desired.get(key) {
                     issues.push((

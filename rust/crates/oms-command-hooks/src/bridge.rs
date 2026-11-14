@@ -50,6 +50,7 @@ fn expected(native: &Path, id: &str) -> Result<BTreeMap<String, String>, String>
                     let command = text(hook, "command");
                     let label = command
                         .split_once("harness-hook.sh\" ")
+                        .or_else(|| command.strip_prefix("oms harness-hook ").map(|s| ("", s)))
                         .map_or(event.as_str(), |(_, s)| s);
                     result.insert(format!("{id}:hooks.json:{snake}:{gi}:{hi}"), label.into());
                 }
@@ -260,19 +261,19 @@ fn verified(raw: &[u8], native: &Path, source: &Path, id: &str) -> bool {
         {
             continue;
         }
-        let command =
+        let legacy =
             format!("bash \"${{CLAUDE_PLUGIN_ROOT:-.}}/scripts/harness-hook.sh\" {action}");
+        let native = format!("oms harness-hook {action}");
         if !hooks["hooks"][event]
             .as_array()
             .into_iter()
             .flatten()
             .any(|g| {
                 text(g, "matcher") == *matcher
-                    && g["hooks"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|h| text(h, "type") == "command" && text(h, "command") == command)
+                    && g["hooks"].as_array().into_iter().flatten().any(|h| {
+                        text(h, "type") == "command"
+                            && [legacy.as_str(), native.as_str()].contains(&text(h, "command"))
+                    })
             })
         {
             return false;
@@ -301,6 +302,7 @@ fn known(event: &str, matcher: &str, hook: &Value, source: &Path) -> bool {
                 .as_u64()
                 .is_some_and(|n| timeouts.contains(&n))
             && (text(hook, "command") == format!("env {prefix}{action}")
+                || text(hook, "command") == format!("oms harness-hook {action}")
                 || *action == "turn-guard"
                     && text(hook, "command")
                         == format!("env OMS_TURN_GUARD_MAX_BLOCKS_PER_TURN=0 {prefix}{action}"))

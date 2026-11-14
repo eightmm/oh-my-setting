@@ -767,12 +767,67 @@ pub fn deliver_claude(repo: &Path, text_value: &str, consumer: &str, allow_wakeu
     }
     row
 }
+/// `claude-app-notify send --wakeup [--consumer HEX32] REPO TEXT` posts to the
+/// enrolled Claude inbox and prints the receipt. Without `--wakeup` nothing is
+/// sent: a post can start a paid model turn. The consumer defaults to the
+/// caller's own exported session.
+pub(crate) fn claude(args: &[OsString], ctx: &Context<'_>) -> Output {
+    let usage = || {
+        (
+            2,
+            vec![],
+            b"usage: claude-app-notify send [--wakeup] [--consumer HEX32] REPO TEXT\n".to_vec(),
+        )
+    };
+    if args.first().is_none_or(|a| a != "send") {
+        return usage();
+    }
+    let (mut wakeup, mut consumer, mut rest) = (false, None::<String>, Vec::new());
+    let mut it = args[1..].iter();
+    while let Some(a) = it.next() {
+        let Some(t) = a.to_str() else {
+            if a.as_encoded_bytes().starts_with(b"-") && a.len() > 1 {
+                return usage();
+            }
+            rest.push(a);
+            continue;
+        };
+        match t {
+            "--" => {
+                rest.extend(it.by_ref());
+                break;
+            }
+            "--wakeup" => wakeup = true,
+            "--consumer" => match it.next().and_then(|v| v.to_str()) {
+                Some(v) if !v.starts_with('-') => consumer = Some(v.to_owned()),
+                _ => return usage(),
+            },
+            _ if t.starts_with("--consumer=") => consumer = Some(t[11..].to_owned()),
+            _ if t.starts_with('-') && t.len() > 1 => return usage(),
+            _ => rest.push(a),
+        }
+    }
+    if rest.len() != 2 {
+        return usage();
+    }
+    let repo = absolute(ctx.cwd, Path::new(rest[0]));
+    // Session discovery scans the live registry; only a wakeup needs it.
+    let consumer = match consumer {
+        Some(c) => c,
+        None if wakeup && env("OMS_CLAUDE_NOTIFY") != "0" => current_claude_session()
+            .map(|s| hash(s)[..32].to_owned())
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let receipt = deliver_claude(&repo, &rest[1].to_string_lossy(), &consumer, wakeup);
+    out(json_line(&receipt))
+}
 pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Output {
     if args.len() != 3 || args[0] != "send" {
         return (
             2,
             vec![],
-            b"usage: codex_app_notify.py send REPO TEXT\n".to_vec(),
+            b"usage: codex-app-notify send REPO TEXT\n".to_vec(),
         );
     }
     let repo = absolute(ctx.cwd, Path::new(&args[1]));

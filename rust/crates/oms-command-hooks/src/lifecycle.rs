@@ -374,6 +374,8 @@ fn failure(v: &Value, ctx: &Context<'_>) -> Output {
         (2, vec![], format!("{}\n", lines.join("\n")).into_bytes())
     }
 }
+/// Canonical default; `config/usage-families.json` under the source may override it.
+pub(crate) const EMBEDDED_USAGE_FAMILIES: &str = include_str!("usage-families.json");
 fn usage(_v: &Value, command: &str, repo: &Path, ctx: &Context<'_>) {
     if env("OMS_USAGE_TRACK").is_empty() || off("OMS_USAGE_TRACK") {
         return;
@@ -391,11 +393,11 @@ fn usage(_v: &Value, command: &str, repo: &Path, ctx: &Context<'_>) {
     {
         return;
     }
-    let primary_families = ctx.source.join("config/usage-families.json");
-    let families = if primary_families.is_file() {
-        load(&primary_families)
+    let override_path = ctx.source.join("config/usage-families.json");
+    let families = if override_path.is_file() {
+        load(&override_path)
     } else {
-        load(&ctx.source.join("scripts/lib/usage-families.json"))
+        serde_json::from_str(EMBEDDED_USAGE_FAMILIES).unwrap_or_else(|_| json!({}))
     };
     let day = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
         .format("%Y-%m-%d")
@@ -953,7 +955,7 @@ fn start_codex_notify_with(
         target,
     );
 }
-fn relay(v: &Value, repo: &Path, ctx: &Context<'_>) {
+pub(crate) fn relay(v: &Value, repo: &Path, ctx: &Context<'_>) {
     if child()
         || v["stop_hook_active"] == true
         || v["stopHookActive"] == true
@@ -1162,6 +1164,7 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
             &state_path(&repo, v, ".resume"),
             &json!({"schema":1,"updated_at":now(),"source":text(v,"source")}),
         );
+        let _ = std::fs::remove_file(state_path(&repo, v, ".hint"));
     }
     if text(v, "source") == "compact" && !lines.is_empty() {
         lines.push("- after compaction: the lines above were re-read from .oms state, not from the summary; OMS skills are invoked by name (/oms-<skill>), and oms state shows the rest".into());
@@ -1411,6 +1414,20 @@ mod tests {
         Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
+
+    #[test]
+    fn embedded_usage_families_parse_and_compile() {
+        let v: Value = serde_json::from_str(EMBEDDED_USAGE_FAMILIES).unwrap();
+        let families = v["families"].as_object().unwrap();
+        assert!(!families.is_empty());
+        for (name, spec) in families {
+            assert!(
+                regex::Regex::new(text(spec, "pattern")).is_ok()
+                    && !text(spec, "pattern").is_empty(),
+                "{name}"
+            );
+        }
+    }
 
     static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
 

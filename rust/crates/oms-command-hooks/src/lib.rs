@@ -160,6 +160,86 @@ pub fn run_with_services(
     };
     dispatch(name, args, stdin, &ctx)
 }
+/// Pi extension safe points. Pi enrolls as Codex; tool events only refresh
+/// presence so mail output is never discarded before the agent sees it.
+fn pi_hook(tool: &str, stdin: &[u8], ctx: &common::Context<'_>) -> Output {
+    let Some(v) = common::document(stdin) else {
+        return common::empty();
+    };
+    let Some(repo) = common::repo(&v, ctx) else {
+        return common::empty();
+    };
+    let ctx = &common::Context {
+        cwd: ctx.cwd,
+        source: ctx.source,
+        interrupted: ctx.interrupted,
+        provider: Some("codex"),
+        host: ctx.host,
+    };
+    let mut text = String::new();
+    match tool {
+        "panel-hook" => {
+            if !common::panel() {
+                return common::empty();
+            }
+            lifecycle::activity(&v, &repo, ctx);
+            if common::event(&v) == "UserPromptSubmit" {
+                for hint in [
+                    routing::panel_hint(&v, &repo, ctx),
+                    routing::collaboration(&v, &repo, ctx),
+                ] {
+                    if !hint.is_empty() {
+                        text.push_str(&hint);
+                        text.push('\n');
+                    }
+                }
+            }
+        }
+        "relay" => {
+            lifecycle::activity(&v, &repo, ctx);
+            lifecycle::relay(&v, &repo, ctx);
+        }
+        _ if common::adopted(&repo) => {
+            let hint = routing::relay_hint(&v, &repo, ctx);
+            if !hint.is_empty() {
+                text = format!("{hint}\n");
+            }
+            let source = common::text(&v, "source");
+            if common::panel()
+                && common::event(&v) == "SessionStart"
+                && ["startup", "compact", "clear", "resume"].contains(&source)
+            {
+                // Context loss re-arms the control-tower hint for the next prompt.
+                let _ = common::write(
+                    &common::state_path(&repo, &v, ".resume"),
+                    &serde_json::json!({"schema":1,"updated_at":common::now(),"source":source}),
+                );
+                let _ = std::fs::remove_file(common::state_path(&repo, &v, ".hint"));
+                if ["compact", "clear"].contains(&source) {
+                    let line = routing::panel_resume_line(&v, &repo, ctx, source);
+                    if !line.is_empty() {
+                        text.push_str(&line);
+                        text.push('\n');
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    if text.is_empty() {
+        common::empty()
+    } else {
+        if common::adopted(&repo) && tool != "relay" {
+            let kind = if tool == "panel-hook" {
+                "panel"
+            } else {
+                "session-start"
+            };
+            common::injection(&repo, &v, kind, text.as_bytes());
+        }
+        common::out(text)
+    }
+}
 fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'_>) -> Output {
     match name {
         "command-guard-hook" => guards::command(args, stdin, ctx),
@@ -169,13 +249,16 @@ fn dispatch(name: &str, args: &[OsString], stdin: &[u8], ctx: &common::Context<'
         "codex-hook-bridge" => bridge::run(args, stdin, ctx),
         "claude-statusline" | "claude-subagent-statusline" => statusline::run(name, stdin, ctx),
         "codex-app-notify" => notify::run(args, ctx),
-        "claude-app-notify" => common::empty(),
+        "claude-app-notify" => notify::claude(args, ctx),
         "codex-turn-notify" => notify::turn(args, ctx),
         "pre-push-check" => push::run(args, stdin, ctx),
         "harness-hook" => {
             let Some(tool) = args.first().and_then(|v| v.to_str()) else {
                 return common::empty();
             };
+            if ["panel-hook", "relay", "relay-hint"].contains(&tool) {
+                return pi_hook(tool, stdin, ctx);
+            }
             if ![
                 "skill-router",
                 "turn-guard",

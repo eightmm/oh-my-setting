@@ -926,7 +926,7 @@ fn legacy_collaboration(
     let _ = ctx;
     message
 }
-fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
+pub(crate) fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     if !panel()
         || event(v) != "UserPromptSubmit"
         || v.get("prompt")
@@ -938,8 +938,16 @@ fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     let mut resumed = load(&pending);
     let long = agent(v, ctx) == "codex" && resumed["delivered"] != true
         || !resumed.as_object().is_none_or(|m| m.is_empty()) && resumed["delivered"] != true;
+    let resume_source = text(&resumed, "source").to_owned();
     let mut message = if long {
-        format!(
+        let mut head = String::new();
+        if ["compact", "clear", "resume"].contains(&resume_source.as_str()) {
+            let line = panel_resume_line(v, repo, ctx, &resume_source);
+            if !line.is_empty() {
+                head = format!("{line}\n");
+            }
+        }
+        head + &format!(
             "[oms panel] You are a control-tower main. Keep scope, briefs, review, patch admission, integration and coordination yourself. Delegate implementation, investigation and test repair with oms panel --dispatch ROLE --owner {} --room {} --access write --brief-file PATH --verify COMMAND --scope PATH. Declare shared scope with oms room scope --owns PATH before editing. Direct edits are for local known-cause fixes, admitted-patch integration, or recovery after two failures of the same bounded worker task. Use the same review and landing gates. Start independent non-overlapping ready tasks concurrently; review and integrate each result as it arrives. Serialize shared release bookkeeping. Workers cannot widen authority or publish. Experiments require explicit compute authority. Never commit in a shared checkout. Publication requires explicit authority and oms land. Carry the authorized goal through recovery, integration, checks and owner finalization; a worker exit does not end your turn. Record plan progress in OMS_ROOM_REPO. To inspect a land use oms land status --repo PATH, never pgrep.",
             agent(v, ctx),
             env("OMS_ROOM_ID")
@@ -1037,6 +1045,83 @@ fn panel_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
         let _ = write(&pending, &resumed);
     }
     message
+}
+/// Who a compacted or cleared panel main is, from room state and the plan. The tmux
+/// window number of the original line is not reproduced. A rolled-over room
+/// is followed to its successor.
+pub(crate) fn panel_resume_line(v: &Value, repo: &Path, ctx: &Context<'_>, source: &str) -> String {
+    let (me, room_id) = (env("OMS_ROOM_PARTICIPANT"), env("OMS_ROOM_ID"));
+    if me.is_empty() || room_id.is_empty() {
+        return String::new();
+    }
+    let selected = env_path("OMS_ROOM_REPO").unwrap_or_else(|| repo.into());
+    let services = oms_command_room::LocalServices;
+    let Ok(room) = oms_command_room::Room::open(
+        &selected,
+        oms_command_room::Session::from_env(),
+        &services,
+        ctx.interrupted,
+        false,
+        false,
+    ) else {
+        return String::new();
+    };
+    let Ok(state) = room.status(&room_id, false) else {
+        return String::new();
+    };
+    let members = state.list("participants");
+    let member = members.iter().find(|p| p.text("participant") == me);
+    let model = match member.map_or("", |m| m.text("model")) {
+        "" => agent(v, ctx),
+        m => m,
+    };
+    let done = state.get("call_results");
+    let workers = members
+        .iter()
+        .filter(|p| {
+            p.text("role") == "worker"
+                && p.text("parent") == me
+                && done.and_then(|d| d.get(p.text("participant"))).is_none()
+        })
+        .count();
+    let questions = state
+        .list("open_questions")
+        .iter()
+        .filter(|q| q.text("recipient") == me)
+        .count();
+    let status = state
+        .get("statuses")
+        .and_then(|s| s.get(&me))
+        .map_or("", |s| s.text("text"));
+    let plain = |s: &str, n: usize| clip(&flat(s), n);
+    let plan = load(&selected.join(".oms/plan/tasks.json"));
+    let mine = plan_tasks(&plan).into_iter().find(|t| {
+        text(t, "claimed_by_participant") == me
+            && ["claimed", "running", "review", "landing"].contains(&text(t, "state"))
+    });
+    let task = mine.as_ref().map_or("none".to_owned(), |t| {
+        format!(
+            "{} ({})",
+            plain(text(t, "id"), 40),
+            plain(text(t, "state"), 12)
+        )
+    });
+    format!(
+        "[oms panel] resumed after {}: you are {} in room {}; your plan task: {}; {} open question{} to you; {} worker{} running for you; status: {}.",
+        source,
+        plain(model, 40),
+        plain(&room_id, 60),
+        task,
+        questions,
+        if questions == 1 { "" } else { "s" },
+        workers,
+        if workers == 1 { "" } else { "s" },
+        if status.is_empty() {
+            "not set — set it".to_owned()
+        } else {
+            plain(status, 80)
+        }
+    )
 }
 pub(crate) fn relay_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     if !on("OMS_RELAY") || child() || panel() || session(v).is_empty() || !adopted(repo) {
