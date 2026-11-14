@@ -76,7 +76,7 @@ impl Policy {
 }
 /// Indexed private captures live outside the repository, where `read_patch`
 /// refuses them; read those through the index and keep the same size bound.
-fn capture_bytes(index: &CaptureIndex, path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn capture_bytes(index: &CaptureIndex, path: &Path) -> Result<Vec<u8>> {
     match index.indexed_bytes(path)? {
         Some(raw) => {
             require(raw.len() <= storage::MAX, "patch exceeds the size bound")?;

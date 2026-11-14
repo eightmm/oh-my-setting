@@ -18,8 +18,9 @@ fn clean_env_child(command: &mut Command) -> &mut Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
 }
+const CHILD_ENV: &str = "CONTRACT_CHILD";
 fn isolated(name: &str, body: impl FnOnce()) {
-    if std::env::var("CONTRACT_CHILD").as_deref() == Ok(name) {
+    if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
         body();
         return;
     }
@@ -28,15 +29,16 @@ fn isolated(name: &str, body: impl FnOnce()) {
     let output = clean_env_child(&mut command)
         .args(["--exact", name, "--nocapture"])
         .env("HOME", &home.0)
-        .env("CONTRACT_CHILD", name)
+        .env(CHILD_ENV, name)
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
+    let out = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(output.status.success(), "{out}");
+    assert!(out.contains("1 passed;"), "child ran no test: {out}");
 }
 struct Repo(PathBuf);
 impl Repo {

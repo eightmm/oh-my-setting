@@ -13,12 +13,41 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
+fn ambient(key: &std::ffi::OsStr) -> bool {
+    let key = key.to_string_lossy();
+    key.starts_with("OMS_") || key.starts_with("OH_MY_SETTING_")
+}
+
+/// The install plan reads OMS_* and OH_MY_SETTING_* switches in-process, which
+/// cannot be cleared under `forbid(unsafe_code)`: rerun in a scrubbed child.
+fn scrubbed_child(name: &str) -> bool {
+    if std::env::vars_os().all(|(k, _)| !ambient(&k)) {
+        return false;
+    }
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+        command.env_remove(key);
+    }
+    let out = command
+        .args(["--exact", name, "--test-threads=1", "--nocapture"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("1 passed;"), "child ran no test: {text}");
+    true
+}
+
 struct Repo(PathBuf);
 impl Repo {
     fn new() -> Self {
         let path = std::env::temp_dir().join(value::random("oms-autonomy-").unwrap());
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        let repo = Self(path);
+        let repo = Self(path.canonicalize().unwrap());
         assert!(
             Command::new("git")
                 .arg("init")
@@ -68,7 +97,7 @@ impl Repo {
 }
 impl Drop for Repo {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 struct Unavailable;
@@ -253,6 +282,9 @@ fn continuation_selectors_bind_exact_reviewed_bytes() {
 
 #[test]
 fn install_plan_reports_native_runtime_without_writing() {
+    if scrubbed_child("install_plan_reports_native_runtime_without_writing") {
+        return;
+    }
     let repo = Repo::new();
     for mode in ["--install", "--update"] {
         let (code, out, err) = repo.call("install-plan", &[mode]);
@@ -447,6 +479,9 @@ fn autopilot_transitions_and_immutable_projection() {
 
 #[test]
 fn install_preview_injects_only_native_read_only_producers() {
+    if scrubbed_child("install_preview_injects_only_native_read_only_producers") {
+        return;
+    }
     struct Preview(std::sync::Mutex<Vec<Invocation>>);
     impl oms_command_plan::Services for Preview {}
     impl Services for Preview {
@@ -492,6 +527,16 @@ fn install_preview_injects_only_native_read_only_producers() {
         assert!(output.contains("links: note: preview detail"));
     }
     let calls = service.0.lock().unwrap();
+    for tool in [
+        "install-profile",
+        "install-claude-hooks",
+        "install-autoupdate",
+    ] {
+        assert!(
+            calls.iter().any(|call| call.tool == tool),
+            "{tool} producer was not previewed"
+        );
+    }
     for call in calls.iter() {
         let flag = match call.tool.as_str() {
             "install-profile" | "link" => "--plan",

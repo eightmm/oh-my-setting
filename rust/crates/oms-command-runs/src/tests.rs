@@ -1100,6 +1100,19 @@ fn metadata_contract_and_capture_limit_edges() {
         s(get(&b, "m").unwrap(), "digest")
     );
 }
+/// A parallel test thread can fork while this script's write fd is open, making
+/// the immediate exec fail with ETXTBSY; `process` reports that as `Ok(126)`.
+fn query_script(c: &Context<'_>, f: &Fixture) -> Result<process::Output> {
+    for _ in 0..100 {
+        let r = process::query(c, &[f.0.join("query").into_os_string()], 7)?;
+        if r.code != 126 || !String::from_utf8_lossy(&r.stderr).contains("busy") {
+            return Ok(r);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("query script stayed busy");
+}
+
 #[test]
 fn query_output_byte_limit_edges() {
     let f = Fixture::new();
@@ -1107,15 +1120,20 @@ fn query_output_byte_limit_edges() {
     let c = f.context(&flag);
     for (body, ok) in [("", true), ("1234567", true), ("12345678", false)] {
         f.executable("query", &format!("#!/bin/sh\nprintf '%s' '{body}'\n"));
-        let r = process::query(&c, &[f.0.join("query").into_os_string()], 7);
+        let r = query_script(&c, &f);
         assert_eq!(r.is_ok(), ok);
+        if let Ok(r) = r {
+            assert_eq!(r.code, 0);
+            assert_eq!(r.bytes, body.as_bytes());
+        }
     }
     for (size, ok) in [(0, true), (65536, true), (65537, false)] {
         f.write("diagnostic", vec![b'x'; size]);
         f.executable("query", "#!/bin/sh\ncat diagnostic >&2\n");
-        let r = process::query(&c, &[f.0.join("query").into_os_string()], 7);
+        let r = query_script(&c, &f);
         assert_eq!(r.is_ok(), ok);
         if let Ok(r) = r {
+            assert_eq!(r.code, 0);
             assert_eq!(r.stderr.len(), size);
         }
     }

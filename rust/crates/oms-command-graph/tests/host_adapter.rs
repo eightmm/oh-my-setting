@@ -116,6 +116,35 @@ impl HostServices for RecordingHost {
     }
 }
 
+fn harness_env(key: &std::ffi::OsStr) -> bool {
+    key.to_string_lossy().starts_with("OMS_")
+}
+
+/// `Context::from_environment` reads OMS_* variables (state repository, harness
+/// child marker) that cannot be cleared in-process under `forbid(unsafe_code)`:
+/// rerun the test in a child without any of them.
+fn scrubbed_child(name: &str) -> bool {
+    if std::env::vars_os().all(|(k, _)| !harness_env(&k)) {
+        return false;
+    }
+    let mut command = Command::new(std::env::current_exe().expect("current exe"));
+    for (key, _) in std::env::vars_os().filter(|(k, _)| harness_env(k)) {
+        command.env_remove(key);
+    }
+    let out = command
+        .args(["--exact", name, "--test-threads=1", "--nocapture"])
+        .output()
+        .expect("run scrubbed child");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("1 passed;"), "child ran no test: {text}");
+    true
+}
+
 fn git(repo: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)
@@ -179,6 +208,9 @@ fn write_private(path: &Path, contents: &str) {
 
 #[test]
 fn dry_run_emits_native_plan_run_invocation_without_scripts() {
+    if scrubbed_child("dry_run_emits_native_plan_run_invocation_without_scripts") {
+        return;
+    }
     let tmp = TempDir::new("dry");
     init_git_repo(tmp.path());
     init_sample_plan(tmp.path());
@@ -247,6 +279,9 @@ fn dry_run_emits_native_plan_run_invocation_without_scripts() {
 
 #[test]
 fn agent_and_acceptance_nodes_dispatch_through_host_services() {
+    if scrubbed_child("agent_and_acceptance_nodes_dispatch_through_host_services") {
+        return;
+    }
     let tmp = TempDir::new("exec");
     init_git_repo(tmp.path());
     init_sample_plan(tmp.path());
@@ -329,6 +364,9 @@ fn agent_and_acceptance_nodes_dispatch_through_host_services() {
 
 #[test]
 fn acceptance_node_fails_closed_without_host_services() {
+    if scrubbed_child("acceptance_node_fails_closed_without_host_services") {
+        return;
+    }
     let tmp = TempDir::new("nohost");
     init_git_repo(tmp.path());
 
@@ -415,6 +453,9 @@ fn acceptance_node_fails_closed_without_host_services() {
 
 #[test]
 fn bundled_graph_loads_from_host_install_root_without_scripts_dir() {
+    if scrubbed_child("bundled_graph_loads_from_host_install_root_without_scripts_dir") {
+        return;
+    }
     let tmp = TempDir::new("install-root");
     init_git_repo(tmp.path());
     let install_root = tmp.path().join("packaged");
@@ -464,6 +505,9 @@ fn bundled_graph_loads_from_host_install_root_without_scripts_dir() {
 
 #[test]
 fn commit_bound_dispatches_goal_drive_through_host_services() {
+    if scrubbed_child("commit_bound_dispatches_goal_drive_through_host_services") {
+        return;
+    }
     let tmp = TempDir::new("commit-bound");
     init_git_repo(tmp.path());
     init_sample_plan(tmp.path());

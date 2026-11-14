@@ -10,6 +10,7 @@ use crate::{
     services::LandingRequest,
     storage, string,
 };
+use oms_reference::capture::CaptureIndex;
 use std::path::Path;
 const LOG: &str = ".oms/landings.jsonl";
 fn append(repo: &Path, row: &V, _interrupted: &std::sync::atomic::AtomicBool) -> Result<()> {
@@ -80,8 +81,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
                 "--patch is required unless the plan task has a stored patch",
             )
         })?;
-    let raw =
-        oms_reference::capture::CaptureIndex::load(&state)?.read_patch(&source, storage::MAX)?;
+    let raw = admission::capture_bytes(&CaptureIndex::load(&state)?, &source)?;
     let sha = digest(&raw);
     if let Some(plan) = &plan {
         require(
@@ -89,8 +89,10 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "plan task must be in review",
         )?;
         require(plan.get("patch").truth(), "plan task has no reviewed patch")?;
-        let reviewed = oms_reference::capture::CaptureIndex::load(&state)?
-            .read_patch(&state.join(string(plan, "patch")), storage::MAX)?;
+        let reviewed = admission::capture_bytes(
+            &CaptureIndex::load(&state)?,
+            &state.join(string(plan, "patch")),
+        )?;
         require(
             reviewed == raw,
             "patch bytes differ from the plan task review",
@@ -266,8 +268,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
         "HEAD, tracked tree or index changed after admission; intent left outstanding",
     )?;
     git.clean()?;
-    let fresh =
-        oms_reference::capture::CaptureIndex::load(&state)?.read_patch(&captured, storage::MAX)?;
+    let fresh = admission::capture_bytes(&CaptureIndex::load(&state)?, &captured)?;
     require(
         fresh == raw,
         "frozen patch changed after admission; intent left outstanding",
@@ -372,9 +373,7 @@ fn recover(c: &Context<'_>, repo: &Path, state: &Path, task: &str) -> Result<Out
             continue;
         }
         let path = state.join(string(intent, "patch"));
-        let bytes = match oms_reference::capture::CaptureIndex::load(state)?
-            .read_patch(&path, storage::MAX)
-        {
+        let bytes = match admission::capture_bytes(&CaptureIndex::load(state)?, &path) {
             Ok(b) if digest(&b) == string(intent, "patch_sha") => b,
             _ => {
                 failed = true;
