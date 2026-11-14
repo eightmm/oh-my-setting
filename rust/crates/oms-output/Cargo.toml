@@ -9,7 +9,7 @@ oms-json = { path = "../oms-json" }
 oms-safe-fs = { path = "../oms-safe-fs" }
 regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = { version = "=1.0.154", features = ["preserve_order", "raw_value", "arbitrary_precision"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.10.9"
 unicode-general-category = "=0.6.0"
 

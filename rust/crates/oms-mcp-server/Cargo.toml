@@ -7,7 +7,7 @@ rust-version = "1.99.1"
 [dependencies]
 oms-context = { path = "../oms-context" }
 ryu = "=1.0.23"
-serde_json = { version = "=1.0.154", features = ["preserve_order", "arbitrary_precision"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.10.9"
 regex = "=1.13.1"
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }

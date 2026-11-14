@@ -197,67 +197,56 @@ fn details(raw: &[u8]) -> (String, Transformations) {
     )
 }
 
-// Parse each row through a visitor so duplicate source keys cannot disappear.
-struct UniqueRow(serde_json::Map<String, serde_json::Value>);
-impl<'de> serde::Deserialize<'de> for UniqueRow {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = UniqueRow;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("object with unique scalar fields")
-            }
-            fn visit_map<M: serde::de::MapAccess<'de>>(
-                self,
-                mut map: M,
-            ) -> Result<UniqueRow, M::Error> {
-                let mut row = serde_json::Map::new();
-                while let Some((key, raw)) =
-                    map.next_entry::<String, Box<serde_json::value::RawValue>>()?
-                {
-                    if row.contains_key(&key) {
-                        return Err(serde::de::Error::custom("duplicate key"));
-                    }
-                    let numeric_lexeme = raw.get();
-                    if numeric_lexeme.starts_with(['{', '[']) {
-                        return Err(serde::de::Error::custom("non-scalar"));
-                    }
-                    let mut value: serde_json::Value =
-                        serde_json::from_str(numeric_lexeme).map_err(serde::de::Error::custom)?;
-                    if !value.is_null()
-                        && !value.is_boolean()
-                        && !value.is_string()
-                        && !value.is_number()
-                    {
-                        return Err(serde::de::Error::custom("non-scalar"));
-                    }
-                    if value.is_number()
-                        && !numeric_lexeme.contains(['.', 'e', 'E'])
-                        && numeric_lexeme.trim_start_matches('-').len() > 4300
-                    {
-                        return Err(serde::de::Error::custom("integer conversion limit"));
-                    }
-                    if numeric_lexeme == "-0" {
-                        value = serde_json::json!(0);
-                    }
-                    if value.is_number() && numeric_lexeme.contains(['.', 'e', 'E']) {
-                        let parsed: f64 =
-                            numeric_lexeme.parse().map_err(serde::de::Error::custom)?;
-                        if !parsed.is_finite()
-                            || decimal(numeric_lexeme) != decimal(&python_float(parsed))
-                        {
-                            return Err(serde::de::Error::custom("float value changed"));
-                        }
-                        value = serde_json::from_str(&python_float(parsed))
-                            .map_err(serde::de::Error::custom)?;
-                    }
-                    row.insert(key, value);
-                }
-                Ok(UniqueRow(row))
-            }
-        }
-        d.deserialize_map(Visitor)
+fn scalar_cell(value: &oms_json::OrderedValue) -> Option<oms_json::Value> {
+    match value {
+        oms_json::OrderedValue::Null => Some(oms_json::Value::Null),
+        oms_json::OrderedValue::Bool(v) => Some(oms_json::Value::Bool(*v)),
+        oms_json::OrderedValue::Integer(n) => Some(oms_json::Value::Integer(n.clone())),
+        oms_json::OrderedValue::Float(f) => Some(oms_json::Value::Float(*f)),
+        oms_json::OrderedValue::String(s) => Some(oms_json::Value::String(s.clone())),
+        oms_json::OrderedValue::Array(_) | oms_json::OrderedValue::Object(_) => None,
     }
+}
+fn all_floats_exact(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                {
+                    i += 1;
+                }
+                let tok = &text[start..i];
+                if tok.contains(['.', 'e', 'E']) {
+                    let Ok(parsed) = tok.parse::<f64>() else {
+                        return false;
+                    };
+                    if !parsed.is_finite() || decimal(tok) != decimal(&python_float(parsed)) {
+                        return false;
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    true
 }
 fn python_float(value: f64) -> String {
     String::from_utf8(
@@ -265,7 +254,7 @@ fn python_float(value: f64) -> String {
     )
     .expect("numeric JSON is ASCII")
 }
-// Numeric tokens have already been validated by serde_json; compare their decimal values.
+// Numeric tokens preserve exact decimal identity under IEEE-754 float parsing.
 fn decimal(numeric_lexeme: &str) -> Option<(bool, String, i64)> {
     let (negative, value) = numeric_lexeme
         .strip_prefix('-')
@@ -286,77 +275,75 @@ fn decimal(numeric_lexeme: &str) -> Option<(bool, String, i64)> {
     }
     Some((negative, digits, exponent))
 }
-struct TableSeed {
-    limit: usize,
-}
-impl<'de> serde::de::DeserializeSeed<'de> for TableSeed {
-    type Value = Vec<UniqueRow>;
-    fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        struct Visitor {
-            limit: usize,
-        }
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Vec<UniqueRow>;
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("bounded array of objects")
-            }
-            fn visit_seq<S: serde::de::SeqAccess<'de>>(
-                self,
-                mut seq: S,
-            ) -> Result<Self::Value, S::Error> {
-                let mut rows = Vec::new();
-                while let Some(row) = seq.next_element()? {
-                    if rows.len() == self.limit {
-                        return Err(serde::de::Error::custom("table exceeds budget"));
-                    }
-                    rows.push(row);
-                }
-                Ok(rows)
-            }
-        }
-        d.deserialize_seq(Visitor { limit: self.limit })
-    }
-}
 fn json_table(text: &str, budget: usize) -> Option<(String, usize)> {
-    use serde::de::DeserializeSeed;
-    let mut parser = serde_json::Deserializer::from_str(text);
-    let rows = TableSeed { limit: budget / 2 }
-        .deserialize(&mut parser)
-        .ok()?;
-    parser.end().ok()?;
-    if rows.len() < 2 {
+    let limit = budget / 2;
+    let mut options = oms_json::ParseOptions::strict();
+    options.max_depth = 4;
+    options.max_bytes = text.len().max(1);
+    let parsed = oms_json::parse_ordered_with_options(text.as_bytes(), &options).ok()?;
+    let oms_json::OrderedValue::Array(ref rows) = parsed else {
+        return None;
+    };
+    if rows.len() < 2 || rows.len() >= limit {
         return None;
     }
-    let mut keys = Vec::<String>::new();
+    let row_count = rows.len();
+    let mut keys = Vec::<&oms_json::PyString>::new();
     let mut seen = std::collections::HashSet::new();
-    for row in &rows {
-        for key in row.0.keys() {
+    let mut objects = Vec::with_capacity(row_count);
+    for row in rows {
+        let items = row.as_object()?;
+        for (key, value) in items.iter() {
+            if matches!(
+                value,
+                oms_json::OrderedValue::Array(_) | oms_json::OrderedValue::Object(_)
+            ) {
+                return None;
+            }
             if seen.insert(key) {
-                keys.push(key.clone());
-                if keys.len().checked_mul(rows.len())?.checked_mul(2)? > budget {
+                keys.push(key);
+                if keys.len().checked_mul(row_count)?.checked_mul(2)? > budget {
                     return None;
                 }
             }
         }
+        objects.push(items);
     }
-    if keys.is_empty() {
+    if keys.is_empty() || !all_floats_exact(text) {
         return None;
     }
-    let cells: Vec<Vec<serde_json::Value>> = rows
-        .iter()
+    let cells = objects
+        .into_iter()
         .map(|row| {
-            keys.iter()
-                .map(|key| {
-                    row.0
-                        .get(key)
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!([]))
-                })
-                .collect()
+            oms_json::Value::Array(
+                keys.iter()
+                    .map(|key| {
+                        row.get_key(key)
+                            .and_then(scalar_cell)
+                            .unwrap_or_else(|| oms_json::Value::Array(Vec::new()))
+                    })
+                    .collect(),
+            )
         })
         .collect();
-    let encoded = serde_json::to_string(&serde_json::json!({"keys": keys, "rows": cells})).ok()?;
-    Some((encoded, rows.len()))
+    let mut payload = std::collections::BTreeMap::new();
+    payload.insert(
+        oms_json::PyString::from("keys"),
+        oms_json::Value::Array(
+            keys.into_iter()
+                .cloned()
+                .map(oms_json::Value::String)
+                .collect(),
+        ),
+    );
+    payload.insert(
+        oms_json::PyString::from("rows"),
+        oms_json::Value::Array(cells),
+    );
+    let encoded =
+        String::from_utf8(oms_json::canonical_json(&oms_json::Value::Object(payload)).ok()?)
+            .ok()?;
+    Some((encoded, row_count))
 }
 
 fn ansi() -> &'static Regex {
