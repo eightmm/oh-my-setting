@@ -247,3 +247,81 @@ fn domain(value: &J, depth: usize) -> Result<oms_json::Value> {
 pub fn canonical(value: &J) -> Result<Vec<u8>> {
     oms_json::canonical_json(&domain(value, 0)?).map_err(|_| UNSAFE)
 }
+
+/// `oms_context::Json` has no `Clone`; the bytes below keep every value exact.
+pub fn dup(value: &J) -> J {
+    match value {
+        J::Null => J::Null,
+        J::Bool(b) => J::Bool(*b),
+        J::Number(n) => J::Number(n.clone()),
+        J::String(s) => J::String(s.clone()),
+        J::Array(values) => J::Array(values.iter().map(dup).collect()),
+        J::Object(fields) => J::Object(fields.iter().map(|(k, v)| (k.clone(), dup(v))).collect()),
+    }
+}
+pub fn get<'a>(value: &'a J, key: &str) -> Option<&'a J> {
+    let J::Object(fields) = value else {
+        return None;
+    };
+    fields
+        .iter()
+        .find(|(k, _)| k == key.as_bytes())
+        .map(|(_, v)| v)
+}
+pub fn get_mut<'a>(value: &'a mut J, key: &str) -> Option<&'a mut J> {
+    let J::Object(fields) = value else {
+        return None;
+    };
+    fields
+        .iter_mut()
+        .find(|(k, _)| k == key.as_bytes())
+        .map(|(_, v)| v)
+}
+pub fn set(value: &mut J, key: &str, new: J) {
+    let J::Object(fields) = value else {
+        return;
+    };
+    if let Some(slot) = fields.iter_mut().find(|(k, _)| k == key.as_bytes()) {
+        slot.1 = new;
+    } else {
+        fields.push((key.as_bytes().to_vec(), new));
+    }
+}
+pub fn remove(value: &mut J, key: &str) {
+    if let J::Object(fields) = value {
+        fields.retain(|(k, _)| k != key.as_bytes());
+    }
+}
+/// A string field, or None when absent or not a string.
+pub fn str_of<'a>(value: &'a J, key: &str) -> Option<&'a str> {
+    match get(value, key) {
+        Some(J::String(bytes)) => std::str::from_utf8(bytes).ok(),
+        _ => None,
+    }
+}
+pub fn int_of(value: &J, key: &str) -> Option<i64> {
+    match get(value, key) {
+        Some(J::Number(raw)) if !raw.contains(['.', 'e', 'E']) => raw.parse().ok(),
+        _ => None,
+    }
+}
+pub fn array_of<'a>(value: &'a J, key: &str) -> Option<&'a Vec<J>> {
+    match get(value, key) {
+        Some(J::Array(values)) => Some(values),
+        _ => None,
+    }
+}
+/// Python equality: object key order and number spelling are irrelevant.
+pub fn same(a: &J, b: &J) -> bool {
+    match (canonical(a), canonical(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+/// Python `json.dumps(ensure_ascii=False, sort_keys=True, indent=2)` plus a newline.
+pub fn encode_state(value: &J) -> Result<Vec<u8>> {
+    let mut output = String::new();
+    emit(value, 0, true, false, &mut output)?;
+    output.push('\n');
+    Ok(output.into_bytes())
+}

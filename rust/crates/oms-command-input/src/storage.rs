@@ -153,18 +153,32 @@ pub fn bounded_git(
     interrupted: &AtomicBool,
 ) -> Result<Vec<u8>> {
     checkpoint(interrupted)?;
-    let child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["-c", "core.fsmonitor=false"])
         .arg("-C")
         .arg(repo)
         .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    run_bounded(command, limit, interrupted, 5, UNSAFE, UNSAFE, UNSAFE)
+}
+/// Run one fixed read-only program in its own process group under byte and time bounds.
+pub fn run_bounded(
+    mut command: Command,
+    limit: usize,
+    interrupted: &AtomicBool,
+    seconds: u64,
+    unavailable: &'static str,
+    oversize: &'static str,
+    failed: &'static str,
+) -> Result<Vec<u8>> {
+    let child = command
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| UNSAFE)?;
+        .map_err(|_| unavailable)?;
     let group = Pid::from_raw(child.id() as i32).ok_or(UNSAFE)?;
     let mut owned = GitChild { child, group };
     let pipe = owned.child.stdout.take().ok_or(UNSAFE)?;
@@ -172,7 +186,7 @@ pub fn bounded_git(
     fs::fcntl_setfl(&pipe, flags | OFlags::NONBLOCK).map_err(|_| UNSAFE)?;
     let mut reader = pipe;
     let mut output = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(seconds);
     let progress = || {
         checkpoint(interrupted)?;
         if Instant::now() >= deadline {
@@ -189,7 +203,7 @@ pub fn bounded_git(
             Ok(count) => {
                 output.extend_from_slice(&bytes[..count]);
                 if output.len() > limit {
-                    return Err(UNSAFE);
+                    return Err(oversize);
                 }
             }
             Err(error)
@@ -209,7 +223,7 @@ pub fn bounded_git(
                 return if status.exit_status() == Some(0) {
                     Ok(output)
                 } else {
-                    Err(UNSAFE)
+                    Err(failed)
                 };
             }
             Ok(None) | Err(rustix::io::Errno::INTR) => {}
@@ -226,21 +240,7 @@ fn inputs(repo: &Path, create: bool) -> Result<Directory> {
         .open_child(OsStr::new(".oms"), create, false)?
         .child(OsStr::new("inputs"), create)
 }
-pub fn create(
-    repo: &Path,
-    interrupted: &AtomicBool,
-    record: impl FnOnce(&str) -> json::J,
-    content: &[u8],
-) -> Result<json::J> {
-    create_with_hook(repo, interrupted, record, content, || {})
-}
-fn create_with_hook(
-    repo: &Path,
-    interrupted: &AtomicBool,
-    record: impl FnOnce(&str) -> json::J,
-    content: &[u8],
-    after_content: impl FnOnce(),
-) -> Result<json::J> {
+fn ensure_ignored(repo: &Path, interrupted: &AtomicBool) -> Result<Directory> {
     let inputs = inputs(repo, true)?;
     if !inputs.exists(OsStr::new(".gitignore"))? {
         let name = format!(".ignore-{}", random_id()?);
@@ -263,7 +263,6 @@ fn create_with_hook(
     }
     inputs.verify()?;
     fs::fsync(&inputs.fd).map_err(|_| UNSAFE)?;
-    let id = format!("attachment-{}", random_id()?);
     bounded_git(
         repo,
         &[
@@ -276,6 +275,29 @@ fn create_with_hook(
         interrupted,
     )
     .map_err(|_| "private inputs must be ignored by Git")?;
+    Ok(inputs)
+}
+fn prepare_private(repo: &Path, interrupted: &AtomicBool) -> Result<(Directory, String)> {
+    let inputs = ensure_ignored(repo, interrupted)?;
+    let id = format!("attachment-{}", random_id()?);
+    Ok((inputs, id))
+}
+pub fn create(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    record: impl FnOnce(&str) -> json::J,
+    content: &[u8],
+) -> Result<json::J> {
+    create_with_hook(repo, interrupted, record, content, || {})
+}
+fn create_with_hook(
+    repo: &Path,
+    interrupted: &AtomicBool,
+    record: impl FnOnce(&str) -> json::J,
+    content: &[u8],
+    after_content: impl FnOnce(),
+) -> Result<json::J> {
+    let (inputs, id) = prepare_private(repo, interrupted)?;
     for name in ["content.txt", ".meta.pending", "meta.json"] {
         let path = PathBuf::from(".oms/inputs/attachments")
             .join(&id)
@@ -332,6 +354,9 @@ fn create_with_hook(
     result?;
     Ok(record)
 }
+pub fn random_hex() -> Result<String> {
+    random_id()
+}
 fn random_id() -> Result<String> {
     let mut bytes = [0u8; 10];
     File::open("/dev/urandom")
@@ -377,6 +402,58 @@ pub fn metadata_exists(repo: &Path, id: &OsStr) -> Result<bool> {
         Err(rustix::io::Errno::NOENT) => Ok(false),
         Err(_) => Err(UNSAFE),
     }
+}
+
+const QUEUE: &str = "queue.json";
+/// Stable file holding the exclusive queue lock; `queue.json` itself is replaced by rename.
+const LOCK: &str = ".queue.lock";
+pub const LOCK_SECONDS: u64 = 15;
+pub struct Lock(#[allow(dead_code)] OwnedFd);
+/// The caller has already refused a Git-tracked `.oms/inputs`.
+pub fn lock(repo: &Path, interrupted: &AtomicBool) -> Result<Lock> {
+    let inputs = ensure_ignored(repo, interrupted)?;
+    let fd = fs::openat(
+        &inputs.fd,
+        LOCK,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(|_| UNSAFE)?;
+    let info = fs::fstat(&fd).map_err(|_| UNSAFE)?;
+    if FileType::from_raw_mode(info.st_mode) != FileType::RegularFile
+        || info.st_uid != rustix::process::getuid().as_raw()
+    {
+        return Err(UNSAFE);
+    }
+    let deadline = Instant::now() + Duration::from_secs(LOCK_SECONDS);
+    loop {
+        checkpoint(interrupted)?;
+        match fs::flock(&fd, fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(Lock(fd)),
+            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR) => {}
+            Err(_) => return Err(UNSAFE),
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::LOCK_TIMEOUT);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+/// Fsync a private temporary, then rename it over `queue.json`; readers see the old or new file.
+pub fn write_queue(repo: &Path, bytes: &[u8], interrupted: &AtomicBool) -> Result<()> {
+    let inputs = ensure_ignored(repo, interrupted)?;
+    let temporary = format!(".{QUEUE}.{}", random_id()?);
+    let written = (|| {
+        inputs.write_new(&temporary, bytes, interrupted)?;
+        inputs.verify()?;
+        checkpoint(interrupted)?;
+        fs::renameat(&inputs.fd, &temporary, &inputs.fd, QUEUE).map_err(|_| UNSAFE)?;
+        fs::fsync(&inputs.fd).map_err(|_| UNSAFE)
+    })();
+    if written.is_err() {
+        let _ = fs::unlinkat(&inputs.fd, &temporary, AtFlags::empty());
+    }
+    written
 }
 
 #[cfg(test)]

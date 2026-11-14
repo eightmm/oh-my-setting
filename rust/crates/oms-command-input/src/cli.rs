@@ -1,37 +1,59 @@
-//! Bounded native parser for the owned leaves of the canonical argparse tree.
-const FILE_USAGE: &str = "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n";
-const FILE_HELP: &str = "usage: oms input attach file [-h] [--repo REPO] [--json]\n                             [--start-line START_LINE] [--end-line END_LINE]\n                             path\n\npositional arguments:\n  path\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --start-line START_LINE\n  --end-line END_LINE\n";
-const SELECTION_USAGE: &str = "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\n";
-const SELECTION_HELP: &str = "usage: oms input attach selection [-h] [--repo REPO] [--json] --source\n                                  {browser,chat,text} --origin ORIGIN\n                                  (--text TEXT | --text-file TEXT_FILE)\n\noptions:\n  -h, --help            show this help message and exit\n  --repo REPO\n  --json                JSON output (default)\n  --source {browser,chat,text}\n  --origin ORIGIN\n  --text TEXT\n  --text-file TEXT_FILE\n";
-const ONE_USAGE: &str = "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\n";
-const ONE_HELP: &str = "usage: oms input attachment [-h] [--repo REPO] [--json] [--full] id\n\npositional arguments:\n  id\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n  --full       return the full bounded snapshot instead of its first 8 KiB\n";
-const MANY_USAGE: &str = "usage: oms input attachments [-h] [--repo REPO] [--json]\n";
-const MANY_HELP: &str = "usage: oms input attachments [-h] [--repo REPO] [--json]\n\noptions:\n  -h, --help   show this help message and exit\n  --repo REPO\n  --json       JSON output (default)\n";
-const ROOT_USAGE: &str = "usage: oms input [-h] [--repo REPO] [--json]\n                 {attach,attachment,attachments,add,edit,move,list,show,preview,cancel,deliver,reconcile,feedback}\n                 ...\n";
-
-const ATTACH_USAGE: &str = "usage: oms input attach [-h] [--repo REPO] [--json]\n                        {file,selection,terminal} ...\n";
-
+//! Bounded native parser for the canonical argparse tree of `oms input`.
+use crate::help::TEXTS;
 use crate::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
 pub type Exit = (i32, Vec<u8>, Vec<u8>);
 #[derive(Default)]
 pub struct Options {
+    pub level: Option<Level>,
     pub positional: Vec<OsString>,
     pub values: BTreeMap<String, OsString>,
-    pub full: bool,
+    pub lists: BTreeMap<String, Vec<OsString>>,
+    pub flags: BTreeSet<&'static str>,
 }
-#[derive(Clone, Copy, PartialEq)]
-enum Level {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Level {
     Root,
     Attach,
     File,
     Selection,
+    Terminal,
     One,
     Many,
+    Add,
+    Edit,
+    Move,
+    List,
+    Show,
+    Preview,
+    Cancel,
+    Deliver,
+    Reconcile,
+    Feedback,
 }
+const ROOT_CHOICES: &[(&str, Level)] = &[
+    ("attach", Level::Attach),
+    ("attachment", Level::One),
+    ("attachments", Level::Many),
+    ("add", Level::Add),
+    ("edit", Level::Edit),
+    ("move", Level::Move),
+    ("list", Level::List),
+    ("show", Level::Show),
+    ("preview", Level::Preview),
+    ("cancel", Level::Cancel),
+    ("deliver", Level::Deliver),
+    ("reconcile", Level::Reconcile),
+    ("feedback", Level::Feedback),
+];
+const ATTACH_CHOICES: &[(&str, Level)] = &[
+    ("file", Level::File),
+    ("selection", Level::Selection),
+    ("terminal", Level::Terminal),
+];
 impl Level {
     fn name(self) -> &'static str {
         match self {
@@ -39,28 +61,33 @@ impl Level {
             Self::Attach => "oms input attach",
             Self::File => "oms input attach file",
             Self::Selection => "oms input attach selection",
+            Self::Terminal => "oms input attach terminal",
             Self::One => "oms input attachment",
             Self::Many => "oms input attachments",
+            Self::Add => "oms input add",
+            Self::Edit => "oms input edit",
+            Self::Move => "oms input move",
+            Self::List => "oms input list",
+            Self::Show => "oms input show",
+            Self::Preview => "oms input preview",
+            Self::Cancel => "oms input cancel",
+            Self::Deliver => "oms input deliver",
+            Self::Reconcile => "oms input reconcile",
+            Self::Feedback => "oms input feedback",
         }
+    }
+    fn texts(self) -> (&'static str, &'static str) {
+        TEXTS
+            .iter()
+            .find(|(name, _, _)| *name == self.name())
+            .map(|(_, usage, help)| (*usage, *help))
+            .unwrap_or(("", ""))
     }
     fn usage(self) -> &'static str {
-        match self {
-            Self::Root => ROOT_USAGE,
-            Self::Attach => ATTACH_USAGE,
-            Self::File => FILE_USAGE,
-            Self::Selection => SELECTION_USAGE,
-            Self::One => ONE_USAGE,
-            Self::Many => MANY_USAGE,
-        }
+        self.texts().0
     }
     fn help(self) -> &'static str {
-        match self {
-            Self::File => FILE_HELP,
-            Self::Selection => SELECTION_HELP,
-            Self::One => ONE_HELP,
-            Self::Many => MANY_HELP,
-            _ => "",
-        }
+        self.texts().1
     }
     fn flags(self) -> &'static [&'static str] {
         match self {
@@ -74,9 +101,70 @@ impl Level {
                 "--text",
                 "--text-file",
             ],
+            Self::Terminal => &["--help", "--repo", "--json", "--pane", "--lines"],
             Self::One => &["--help", "--repo", "--json", "--full"],
+            Self::Add => &[
+                "--help",
+                "--repo",
+                "--json",
+                "--room",
+                "--from",
+                "--to",
+                "--mode",
+                "--text",
+                "--text-file",
+                "--attachment",
+            ],
+            Self::Edit => &[
+                "--help",
+                "--repo",
+                "--json",
+                "--text",
+                "--text-file",
+                "--mode",
+                "--attachment",
+                "--clear-attachments",
+            ],
+            Self::Move => &["--help", "--repo", "--json", "--before"],
+            Self::Deliver => &[
+                "--help",
+                "--repo",
+                "--json",
+                "--apply",
+                "--at-boundary",
+                "--expected-sha256",
+            ],
+            Self::Feedback => &[
+                "--help", "--repo", "--json", "--batch", "--room", "--from", "--to", "--mode",
+            ],
             _ => &["--help", "--repo", "--json"],
         }
+    }
+    fn positional(self) -> Option<&'static str> {
+        match self {
+            Self::File => Some("path"),
+            Self::One
+            | Self::Edit
+            | Self::Move
+            | Self::Show
+            | Self::Preview
+            | Self::Cancel
+            | Self::Deliver
+            | Self::Reconcile => Some("id"),
+            _ => None,
+        }
+    }
+    fn required(self) -> &'static [&'static str] {
+        match self {
+            Self::Selection => &["--source", "--origin"],
+            Self::Terminal => &["--pane"],
+            Self::Add => &["--room", "--from", "--to"],
+            Self::Feedback => &["--batch", "--room", "--from", "--to"],
+            _ => &[],
+        }
+    }
+    fn text_group_required(self) -> bool {
+        matches!(self, Self::Selection | Self::Add)
     }
     fn error(self, message: impl AsRef<str>) -> Exit {
         (
@@ -91,6 +179,12 @@ impl Level {
             .into_bytes(),
         )
     }
+}
+fn boolean(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--help" | "--json" | "--full" | "--clear-attachments" | "--apply" | "--at-boundary"
+    )
 }
 fn display(raw: &OsStr) -> String {
     let json::J::String(bytes) = &json::os_string(raw) else {
@@ -273,7 +367,7 @@ fn parse_level(
                 continue;
             };
             let label = if flag == "--help" { "-h/--help" } else { flag };
-            if matches!(flag, "--help" | "--json" | "--full") {
+            if boolean(flag) {
                 if flag == "--help" && name.starts_with(b"-h") && at.is_none() {
                     return Err((0, level.help().as_bytes().to_vec(), vec![]));
                 }
@@ -286,9 +380,7 @@ fn parse_level(
                 if flag == "--help" {
                     return Err((0, level.help().as_bytes().to_vec(), vec![]));
                 }
-                if flag == "--full" {
-                    options.full = true;
-                }
+                options.flags.insert(flag);
             } else {
                 let value = if let Some(at) = at {
                     OsStr::from_bytes(&bytes[at + 1..]).to_owned()
@@ -302,7 +394,7 @@ fn parse_level(
                     };
                     next.clone()
                 };
-                let value = if matches!(flag, "--start-line" | "--end-line") {
+                let value = if matches!(flag, "--start-line" | "--end-line" | "--lines") {
                     integer(&value).ok_or_else(|| {
                         level.error(format!(
                             "argument {label}: invalid int value: {}",
@@ -312,12 +404,16 @@ fn parse_level(
                 } else {
                     value
                 };
-                if flag == "--source"
-                    && !matches!(value.to_str(), Some("browser" | "chat" | "text"))
-                {
+                let choices: &[&str] = match flag {
+                    "--source" => &["browser", "chat", "text"],
+                    "--mode" => &["steer", "next"],
+                    _ => &[],
+                };
+                if !choices.is_empty() && !value.to_str().is_some_and(|v| choices.contains(&v)) {
                     return Err(level.error(format!(
-                        "argument --source: invalid choice: {} (choose from browser, chat, text)",
-                        repr(&value)
+                        "argument {flag}: invalid choice: {} (choose from {})",
+                        repr(&value),
+                        choices.join(", ")
                     )));
                 }
                 if matches!(flag, "--text" | "--text-file") {
@@ -328,54 +424,71 @@ fn parse_level(
                     }
                     text_flag = Some(flag);
                 }
-                options.values.insert(flag.to_owned(), value);
+                if flag == "--attachment" {
+                    options
+                        .lists
+                        .entry(flag.to_owned())
+                        .or_default()
+                        .push(value);
+                } else {
+                    options.values.insert(flag.to_owned(), value);
+                }
             }
         } else {
-            match level {
-                Level::Root | Level::Attach => {
-                    let next = match (level, raw.to_str()) {
-                        (Level::Root, Some("attach")) => Level::Attach,
-                        (Level::Root, Some("attachment")) => Level::One,
-                        (Level::Root, Some("attachments")) => Level::Many,
-                        (Level::Attach, Some("file")) => Level::File,
-                        (Level::Attach, Some("selection")) => Level::Selection,
-                        _ => return Err(level.error("invalid input action")),
-                    };
-                    options.positional.push(raw.clone());
-                    return parse_level(next, &args[i + 1..], options, unknown);
+            let choices = match level {
+                Level::Root => Some((ROOT_CHOICES, "action")),
+                Level::Attach => Some((ATTACH_CHOICES, "attachment_kind")),
+                _ => None,
+            };
+            if let Some((choices, dest)) = choices {
+                let Some((_, next)) = choices.iter().find(|(name, _)| raw.to_str() == Some(*name))
+                else {
+                    let names: Vec<_> = choices.iter().map(|(n, _)| *n).collect();
+                    return Err(level.error(format!(
+                        "argument {dest}: invalid choice: {} (choose from {})",
+                        repr(raw),
+                        names.join(", ")
+                    )));
+                };
+                options.positional.push(raw.clone());
+                if *next != Level::Attach {
+                    options.level = Some(*next);
                 }
-                Level::File | Level::One if !positional => {
-                    options.positional.push(raw.clone());
-                    positional = true;
-                }
-                _ => unknown.push(display(raw)),
+                return parse_level(*next, &args[i + 1..], options, unknown);
+            }
+            if level.positional().is_some() && !positional {
+                options.positional.push(raw.clone());
+                positional = true;
+            } else {
+                unknown.push(display(raw));
             }
         }
         i += 1;
     }
     match level {
-        Level::File if !positional => {
-            return Err(level.error("the following arguments are required: path"));
-        }
-        Level::One if !positional => {
-            return Err(level.error("the following arguments are required: id"));
-        }
-        Level::Selection => {
-            let required: Vec<_> = ["--source", "--origin"]
-                .into_iter()
-                .filter(|key| !options.values.contains_key(*key))
-                .collect();
-            if !required.is_empty() {
-                return Err(level.error(format!(
-                    "the following arguments are required: {}",
-                    required.join(", ")
-                )));
-            }
-            if text_flag.is_none() {
-                return Err(level.error("one of the arguments --text --text-file is required"));
-            }
+        Level::Root => return Err(level.error("the following arguments are required: action")),
+        Level::Attach => {
+            return Err(level.error("the following arguments are required: attachment_kind"));
         }
         _ => {}
+    }
+    if let Some(name) = level.positional().filter(|_| !positional) {
+        return Err(level.error(format!("the following arguments are required: {name}")));
+    }
+    let required: Vec<_> = level
+        .required()
+        .iter()
+        .filter(|key| !options.values.contains_key(**key))
+        .copied()
+        .collect();
+    if !required.is_empty() {
+        return Err(level.error(format!(
+            "the following arguments are required: {}",
+            required.join(", ")
+        )));
+    }
+    if level.text_group_required() && text_flag.is_none() {
+        return Err(level.error("one of the arguments --text --text-file is required"));
     }
     Ok(())
 }

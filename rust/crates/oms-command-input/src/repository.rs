@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 pub fn state(work: &Path, interrupted: &AtomicBool) -> Result<PathBuf> {
+    // A delegated worker never maps its scratch checkout onto shared state.
+    if crate::child() {
+        return Ok(work.to_owned());
+    }
     let Some(parent) = work.parent() else {
         return Ok(work.to_owned());
     };

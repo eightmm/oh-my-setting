@@ -1,13 +1,18 @@
-//! Native immutable input snapshots. Queue and terminal actions remain unowned.
+//! Native `oms input`: immutable attachments, the editable queue and explicit delivery.
 #![forbid(unsafe_code)]
 
 mod cli;
+mod feedback;
+mod help;
 mod json;
+mod queue;
 mod repository;
+mod room;
 mod storage;
+mod terminal;
 
 use chrono::{DateTime, Utc};
-use cli::Options;
+use cli::{Level, Options};
 use json::{J, field, number, object, os_string, string, text};
 use oms_safe_fs::{Policy, Root};
 use regex::Regex;
@@ -24,43 +29,174 @@ const MAX_FEEDBACK: usize = 1024 * 1024;
 type Result<T> = std::result::Result<T, &'static str>;
 const UNSAFE: &str = "invalid, unavailable, or unsafe local input state";
 
-fn action(args: &[OsString]) -> Option<(usize, &str)> {
-    let mut i = 0;
-    while i < args.len() {
-        let bytes = args[i].as_bytes();
-        let at = bytes.iter().position(|b| *b == b'=');
-        let name = &bytes[..at.unwrap_or(bytes.len())];
-        if name.len() > 2 && b"--repo".starts_with(name) {
-            i += if at.is_some() { 1 } else { 2 };
-        } else if name.len() > 2 && b"--json".starts_with(name) && at.is_none() {
-            i += 1;
-        } else {
-            return Some((i, args[i].to_str()?));
-        }
-    }
-    None
+/// Host effects the input queue cannot perform itself.
+pub trait HostServices: Send + Sync {
+    /// Append one `note` message with a stable ID to a room, as `oms room send` would.
+    fn send_room_note(
+        &self,
+        repo: &Path,
+        room: &str,
+        from: &str,
+        to: &str,
+        text: &str,
+        message_id: &str,
+    ) -> std::result::Result<(), String>;
+    /// Run `action` while holding the exclusive queue lock for `queue_path`.
+    ///
+    /// A wait past the lock timeout must return [`LOCK_TIMEOUT`] without running `action`;
+    /// the command then exits 75. The host may take the canonical runtime lock (see
+    /// [`runtime_lock_path`]) so native and legacy writers exclude each other.
+    fn with_queue_lock(
+        &self,
+        queue_path: &Path,
+        interrupted: &AtomicBool,
+        action: &mut dyn FnMut() -> std::result::Result<(), &'static str>,
+    ) -> std::result::Result<(), &'static str>;
+}
+/// Exit-75 message for a queue lock wait that timed out.
+pub const LOCK_TIMEOUT: &str = "timed out waiting for state lock";
+
+/// Canonical runtime lock file for a queue: `<lock_dir>/runtime-<sha256(path)[:32]>.lock`,
+/// as `oms_runtime.common.file_lock` derives it. `lock_dir_override` stands for `OMS_LOCK_DIR`;
+/// without it the directory is `$HOME/.cache/oh-my-setting/locks`.
+pub fn runtime_lock_path(queue_path: &Path, lock_dir_override: Option<&Path>) -> Option<PathBuf> {
+    let dir = match lock_dir_override {
+        Some(dir) => dir.to_path_buf(),
+        None => PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?)
+            .join(".cache/oh-my-setting/locks"),
+    };
+    let resolved = resolve_lenient(queue_path)?;
+    let digest = hash(resolved.as_os_str().as_bytes());
+    Some(dir.join(format!("runtime-{}.lock", &digest[..32])))
 }
 
-/// Classify without environment access, filesystem reads, or any action execution.
-pub fn owns(args: &[OsString]) -> bool {
-    match action(args) {
-        Some((_, "attachment" | "attachments")) => true,
-        Some((i, "attach")) => {
-            matches!(action(&args[i + 1..]), Some((_, "file" | "selection")))
+/// `Path.resolve(strict=False)`: components are applied left to right, symbolic links are
+/// resolved as they are met, and `..` pops the already-resolved prefix.
+fn resolve_lenient(path: &Path) -> Option<PathBuf> {
+    let mut hops = 0;
+    let mut resolved = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        std::env::current_dir().ok()?.canonicalize().ok()?
+    };
+    let mut pending: Vec<OsString> = path
+        .components()
+        .rev()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_owned()),
+            Component::ParentDir => Some(OsString::from("..")),
+            _ => None,
+        })
+        .collect();
+    while let Some(name) = pending.pop() {
+        if name == ".." {
+            resolved.pop();
+            continue;
         }
-        _ => false,
+        let candidate = resolved.join(&name);
+        match std::fs::symlink_metadata(&candidate) {
+            Ok(info) if info.file_type().is_symlink() => {
+                hops += 1;
+                if hops > 40 {
+                    return None;
+                }
+                let target = std::fs::read_link(&candidate).ok()?;
+                if target.is_absolute() {
+                    resolved = PathBuf::from("/");
+                }
+                for c in target.components().rev() {
+                    match c {
+                        Component::Normal(n) => pending.push(n.to_owned()),
+                        Component::ParentDir => pending.push(OsString::from("..")),
+                        _ => {}
+                    }
+                }
+            }
+            _ => resolved = candidate,
+        }
+    }
+    Some(resolved)
+}
+
+/// Appends through the native `oms room send`, with no Python in the path.
+///
+/// Standalone fallback: queue mutations lock a private `.queue.lock` (flock). That does not
+/// interlock with the legacy Python runtime lock; until the `oms` entrypoint injects
+/// `oms-lock` (`Mode::Mkdir`) on [`runtime_lock_path`] and `scripts/lib/oms_inputs` is retired,
+/// do not run legacy and native writers on one queue concurrently.
+pub struct DefaultHostServices;
+impl HostServices for DefaultHostServices {
+    fn with_queue_lock(
+        &self,
+        queue_path: &Path,
+        interrupted: &AtomicBool,
+        action: &mut dyn FnMut() -> std::result::Result<(), &'static str>,
+    ) -> std::result::Result<(), &'static str> {
+        let repo = queue_path.ancestors().nth(3).ok_or(UNSAFE)?;
+        let _lock = storage::lock(repo, interrupted)?;
+        action()
+    }
+    fn send_room_note(
+        &self,
+        repo: &Path,
+        room: &str,
+        from: &str,
+        to: &str,
+        text: &str,
+        message_id: &str,
+    ) -> std::result::Result<(), String> {
+        let program = std::env::current_exe()
+            .ok()
+            .filter(|p| p.file_name().is_some_and(|n| n == "oms"))
+            .unwrap_or_else(|| PathBuf::from("oms"));
+        let mut command = std::process::Command::new(program);
+        command
+            .args(["room", "send", "--repo"])
+            .arg(repo)
+            .args(["--id", room, "--participant", from, "--to", to])
+            .args(["--kind", "note", "--message-id", message_id, "--text", text]);
+        // Python sent in-process: no inherited relay queue or carry marker may reroute it.
+        for key in [
+            "OMS_ROOM_RELAY_QUEUE",
+            "OMS_ROOM_RELAY_ALLOWED",
+            "OMS_ROOM_CARRY",
+            "OMS_ROOM_CARRY_TS",
+        ] {
+            command.env_remove(key);
+        }
+        storage::run_bounded(
+            command,
+            1024 * 1024,
+            &AtomicBool::new(false),
+            60,
+            "room append is unavailable",
+            "room append output exceeded its bound",
+            "room append failed",
+        )
+        .map(drop)
+        .map_err(str::to_owned)
     }
 }
 
-/// Return exit status, stdout, stderr. An unowned action returns 75 before reads.
+/// Every `oms input` invocation is native, including help and argument errors.
+pub fn owns(_args: &[OsString]) -> bool {
+    true
+}
+
+/// Return exit status, stdout, stderr.
 pub fn run(
     args: &[OsString],
     default_repo: &Path,
     interrupted: &AtomicBool,
 ) -> (i32, Vec<u8>, Vec<u8>) {
-    if !owns(args) {
-        return (75, Vec::new(), Vec::new());
-    }
+    run_with_services(args, default_repo, interrupted, &DefaultHostServices)
+}
+pub fn run_with_services(
+    args: &[OsString],
+    default_repo: &Path,
+    interrupted: &AtomicBool,
+    services: &dyn HostServices,
+) -> (i32, Vec<u8>, Vec<u8>) {
     if let Err(message) = clean_git_environment() {
         return (2, vec![], format!("error: {message}\n").into_bytes());
     }
@@ -68,14 +204,17 @@ pub fn run(
         Ok(options) => options,
         Err(exit) => return exit,
     };
-    let result = execute(options, default_repo, interrupted);
-    match result {
-        Ok(output) => (0, output, Vec::new()),
-        Err(message) => (2, Vec::new(), format!("error: {message}\n").into_bytes()),
+    match execute(options, default_repo, interrupted, services) {
+        Ok((code, output)) => (code, output, Vec::new()),
+        Err(message) => (
+            if message == LOCK_TIMEOUT { 75 } else { 2 },
+            Vec::new(),
+            format!("error: {message}\n").into_bytes(),
+        ),
     }
 }
 
-fn child() -> bool {
+pub(crate) fn child() -> bool {
     std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1")
         || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| v != "0")
 }
@@ -104,27 +243,78 @@ fn clean_git_environment() -> Result<()> {
     }
     Ok(())
 }
-fn execute(o: Options, default_repo: &Path, interrupted: &AtomicBool) -> Result<Vec<u8>> {
+fn utc_now() -> String {
+    let now: DateTime<Utc> = std::time::SystemTime::now().into();
+    now.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+fn tracked_inputs(repo: &Path, interrupted: &AtomicBool) -> Result<Vec<u8>> {
+    git(
+        repo,
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--"),
+            OsStr::new(".oms/inputs"),
+        ],
+        MAX_SOURCE,
+        interrupted,
+    )
+}
+fn text_option(o: &Options, limit: usize, base: &Path) -> Result<Option<String>> {
+    if let Some(raw) = o.values.get("--text-file").filter(|v| !v.is_empty()) {
+        let data = read_absolute(&expand_user(raw, base)?, limit)?;
+        let body = String::from_utf8(data).map_err(|_| UNSAFE)?;
+        safe_text(&body, limit)?;
+        return Ok(Some(body));
+    }
+    o.values
+        .get("--text")
+        .map(|raw| {
+            let body = raw.to_str().ok_or(UNSAFE)?;
+            safe_text(body, limit)?;
+            Ok(body.to_owned())
+        })
+        .transpose()
+}
+fn value_of<'a>(o: &'a Options, key: &str) -> Result<&'a str> {
+    option_text(o, key)
+}
+fn texts(o: &Options, key: &str) -> Result<Vec<String>> {
+    o.lists
+        .get(key)
+        .map(|values| {
+            values
+                .iter()
+                .map(|v| v.to_str().map(str::to_owned).ok_or(UNSAFE))
+                .collect()
+        })
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+fn execute(
+    o: Options,
+    default_repo: &Path,
+    interrupted: &AtomicBool,
+    services: &dyn HostServices,
+) -> Result<(i32, Vec<u8>)> {
+    let level = o.level.ok_or(UNSAFE)?;
     let words: Vec<&OsStr> = o.positional.iter().map(OsString::as_os_str).collect();
-    let mode = words.first().and_then(|s| s.to_str()).ok_or(UNSAFE)?;
-    if child() {
-        if mode != "attachment" {
-            return Err(
-                "workers may retrieve only explicitly addressed attachment IDs; queue inspection is parent-only",
-            );
-        }
-        // Never infer a grant from queue payloads or room membership. Native room
-        // lineage, enrollment binding and immutable receipt verification must land
-        // together before this branch may read an attachment or its metadata.
+    let target = words.last().copied().unwrap_or_default();
+    let read_only = matches!(
+        level,
+        Level::One | Level::Many | Level::List | Level::Show | Level::Preview
+    ) || level == Level::Deliver && !o.flags.contains("--apply");
+    let child = child();
+    if child && level != Level::One {
         return Err(
-            "worker attachment reads require native sealed-room identity and delivery-receipt verification",
+            "workers may retrieve only explicitly addressed attachment IDs; queue inspection is parent-only",
         );
     }
     checkpoint(interrupted)?;
+    let inherited_default = std::env::var_os("OMS_ROOM_REPO").filter(|_| read_only && child);
     let selected = o
         .values
         .get("--repo")
         .map(Path::new)
+        .or(inherited_default.as_deref().map(Path::new))
         .unwrap_or(default_repo);
     let selected = if selected.is_absolute() {
         selected.to_path_buf()
@@ -144,14 +334,32 @@ fn execute(o: Options, default_repo: &Path, interrupted: &AtomicBool) -> Result<
     }
     checkpoint(interrupted)?;
     let root = Root::open(&repo).map_err(|_| UNSAFE)?;
-    let report = match mode {
-        "attachments" => object([
+    let ctx = queue::Ctx {
+        repo: &repo,
+        root: &root,
+        work: &work,
+        interrupted,
+        services,
+    };
+    let key = || Ok::<&str, &'static str>(target.to_str().unwrap_or("\u{fffd}"));
+    let report = match level {
+        Level::Many => object([
             ("schema", number(1)),
             ("attachments", J::Array(listing(&root)?)),
         ]),
-        "attachment" => retrieve(&root, valid_id(words[1])?, o.full)?,
-        "attach" if words[1] == "file" => {
-            let relative = relative_source(Path::new(words[2]))?;
+        Level::One => {
+            if child {
+                queue::authorize_child_attachment(&ctx, key()?)?;
+            }
+            retrieve(
+                &root,
+                valid_id(target)?,
+                o.flags.contains("--full"),
+                interrupted,
+            )?
+        }
+        Level::File => {
+            let relative = relative_source(Path::new(words[words.len() - 1]))?;
             let source_root = Root::open(&work).map_err(|_| UNSAFE)?;
             let data = read(&source_root, &relative, MAX_SOURCE)?;
             let body = std::str::from_utf8(&data).map_err(|_| UNSAFE)?;
@@ -183,22 +391,14 @@ fn execute(o: Options, default_repo: &Path, interrupted: &AtomicBool) -> Result<
             ]);
             create(&repo, "file", source, &selected, interrupted)?
         }
-        "attach" => {
+        Level::Selection => {
             let kind = option_text(&o, "--source")?;
             if !matches!(kind, "browser" | "chat" | "text") {
                 return Err("invalid selection source");
             }
             let origin = option_text(&o, "--origin")?;
             validate_origin(origin)?;
-            let content = match (o.values.get("--text"), o.values.get("--text-file")) {
-                (Some(raw), None) => raw.to_str().ok_or(UNSAFE)?.to_owned(),
-                (None, Some(raw)) => {
-                    let path = expand_user(raw, default_repo)?;
-                    let data = read_absolute(&path, MAX_ATTACHMENT)?;
-                    String::from_utf8(data).map_err(|_| UNSAFE)?
-                }
-                _ => return Err("choose exactly one of --text and --text-file"),
-            };
+            let content = text_option(&o, MAX_ATTACHMENT, default_repo)?.ok_or(EMPTY_TEXT)?;
             let source = object([
                 ("verified", J::Bool(false)),
                 ("kind", string(kind)),
@@ -212,9 +412,106 @@ fn execute(o: Options, default_repo: &Path, interrupted: &AtomicBool) -> Result<
             ]);
             create(&repo, "selection", source, &content, interrupted)?
         }
-        _ => return Err(UNSAFE),
+        Level::Terminal => {
+            let lines = line_option(&o, "--lines")?.unwrap_or(80);
+            let (source, content) =
+                terminal::capture(&work, option_text(&o, "--pane")?, lines, interrupted)?;
+            create(&repo, "terminal", source, &content, interrupted)?
+        }
+        Level::List => queue::list(&ctx)?,
+        Level::Add => queue::add(
+            &ctx,
+            value_of(&o, "--room")?,
+            value_of(&o, "--from")?,
+            value_of(&o, "--to")?,
+            &text_option(&o, 3500, default_repo)?.ok_or(EMPTY_TEXT)?,
+            o.values
+                .get("--mode")
+                .and_then(|m| m.to_str())
+                .unwrap_or("next"),
+            &texts(&o, "--attachment")?,
+        )?,
+        Level::Edit => {
+            let replacements = texts(&o, "--attachment")?;
+            let clear = o.flags.contains("--clear-attachments");
+            if clear && !replacements.is_empty() {
+                return Err("choose replacement attachments or --clear-attachments");
+            }
+            let keys = if clear {
+                Some(Vec::new())
+            } else {
+                o.lists.get("--attachment").map(|_| replacements)
+            };
+            queue::edit(
+                &ctx,
+                key()?,
+                text_option(&o, 3500, default_repo)?.as_deref(),
+                o.values.get("--mode").and_then(|m| m.to_str()),
+                keys.as_deref(),
+            )?
+        }
+        Level::Move => queue::move_item(
+            &ctx,
+            key()?,
+            o.values
+                .get("--before")
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_str().ok_or(UNSAFE))
+                .transpose()?,
+        )?,
+        Level::Cancel => queue::cancel(&ctx, key()?)?,
+        Level::Show => queue::item(&queue::state(&ctx)?, key()?)?,
+        Level::Preview => queue::preview(&ctx, &queue::item(&queue::state(&ctx)?, key()?)?)?,
+        Level::Deliver => {
+            let expected = o
+                .values
+                .get("--expected-sha256")
+                .filter(|v| !v.is_empty())
+                .map(|v| feedback::digest(v.to_str().ok_or(UNSAFE)?))
+                .transpose()?;
+            queue::deliver(
+                &ctx,
+                key()?,
+                o.flags.contains("--apply"),
+                o.flags.contains("--at-boundary"),
+                expected,
+            )?
+        }
+        Level::Reconcile => queue::reconcile(&ctx, key()?)?,
+        Level::Feedback => feedback::enqueue(
+            &ctx,
+            value_of(&o, "--batch")?,
+            value_of(&o, "--room")?,
+            value_of(&o, "--from")?,
+            value_of(&o, "--to")?,
+            o.values
+                .get("--mode")
+                .and_then(|m| m.to_str())
+                .unwrap_or("next"),
+        )?,
+        Level::Root | Level::Attach => return Err(UNSAFE),
     };
-    json::encode(&report)
+    let code = if json::str_of(&report, "status") == Some("uncertain") {
+        3
+    } else {
+        0
+    };
+    Ok((code, json::encode(&report)?))
+}
+const EMPTY_TEXT: &str = "text is empty, oversized, or contains unsupported control characters";
+fn read_opt(root: &Root, path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+    match root.read_path(
+        path,
+        limit,
+        Policy {
+            max_components: None,
+            ..Policy::manifest()
+        },
+    ) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(oms_safe_fs::Error::Missing) => Ok(None),
+        Err(_) => Err("input file is missing, unreadable, or unsafe"),
+    }
 }
 
 fn option_text<'a>(o: &'a Options, key: &str) -> Result<&'a str> {
@@ -348,6 +645,27 @@ fn valid_id(raw: &OsStr) -> Result<&str> {
     Ok(id)
 }
 
+fn secret_rule() -> &'static Regex {
+    static RULE: OnceLock<Regex> = OnceLock::new();
+    RULE.get_or_init(|| {
+        let names = [
+            "api[_-]?key",
+            "access[_-]?token",
+            "client[_-]?secret",
+            "passwor[d]",
+            "private[_-]?key",
+        ]
+        .join("|");
+        Regex::new(&format!(r#"(?i)(?:{names})["']?\s*[:=]|-----BE[G]IN [A-Z ]+PRIVATE KEY-----|\b(?:ghp|github_pat|sk)-[A-Za-z0-9_-]{{12,}}\b|\bBearer\s+[A-Za-z0-9._~+/-]{{12,}}={{0,2}}\b|(?-i:\b(?:gh[pousr]_|github_[p]at_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{{12,}})"#)).unwrap()
+    })
+}
+/// Refuse text that reads as a credential assignment, token or private key.
+fn reject_secrets(value: &str) -> Result<()> {
+    if secret_rule().is_match(value) {
+        return Err("input contains secret-like content; redact it before attachment or delivery");
+    }
+    Ok(())
+}
 fn safe_text(value: &str, limit: usize) -> Result<()> {
     if value.len() > limit
         || value.trim().is_empty()
@@ -357,20 +675,7 @@ fn safe_text(value: &str, limit: usize) -> Result<()> {
     {
         return Err("text is empty, oversized, or contains unsupported control characters");
     }
-    static RULE: OnceLock<Regex> = OnceLock::new();
-    let rule = RULE.get_or_init(|| {
-        let names = [
-            "api[_-]?key",
-            "access[_-]?token",
-            "client[_-]?secret",
-            "passwor[d]",
-            "private[_-]?key",
-        ].join("|");
-        Regex::new(&format!(r#"(?i)(?:{names})["']?\s*[:=]|-----BE[G]IN [A-Z ]+PRIVATE KEY-----|\b(?:ghp|github_pat|sk)-[A-Za-z0-9_-]{{12,}}\b|\bBearer\s+[A-Za-z0-9._~+/-]{{12,}}={{0,2}}\b|(?-i:\b(?:gh[pousr]_|github_[p]at_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]{{12,}})"#)).unwrap()
-    });
-    if rule.is_match(value) {
-        return Err("input contains secret-like content; redact it before attachment or delivery");
-    }
+    reject_secrets(value)?;
     Ok(())
 }
 fn validate_origin(origin: &str) -> Result<()> {
@@ -469,7 +774,14 @@ fn create(
     content: &str,
     interrupted: &AtomicBool,
 ) -> Result<J> {
-    safe_text(content, MAX_ATTACHMENT)?;
+    safe_text(
+        content,
+        if kind == "artifact-feedback" {
+            MAX_FEEDBACK
+        } else {
+            MAX_ATTACHMENT
+        },
+    )?;
     checkpoint(interrupted)?;
     let tracked = git(
         repo,
@@ -484,7 +796,6 @@ fn create(
     if !tracked.is_empty() {
         return Err("private input state must not be tracked by Git");
     }
-    let now: DateTime<Utc> = std::time::SystemTime::now().into();
     storage::create(
         repo,
         interrupted,
@@ -497,10 +808,7 @@ fn create(
                 ("source", source),
                 ("content_sha256", string(&hash(content.as_bytes()))),
                 ("content_bytes", number(content.len() as i64)),
-                (
-                    "created_at",
-                    string(&now.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-                ),
+                ("created_at", string(&utc_now())),
             ])
         },
         content.as_bytes(),
@@ -509,7 +817,9 @@ fn create(
 fn load(root: &Root, id: &str) -> Result<(J, String)> {
     valid_id(OsStr::new(id))?;
     let path = PathBuf::from(".oms/inputs/attachments").join(id);
-    let record = json::parse(&read(root, &path.join("meta.json"), MAX_ATTACHMENT)?)?;
+    let meta = read_opt(root, &path.join("meta.json"), MAX_ATTACHMENT)?
+        .ok_or("attachment is missing or belongs to another repository")?;
+    let record = json::parse(&meta)?;
     if field(&record, "schema")? != &number(1)
         || text(field(&record, "id")?)? != id
         || field(&record, "repo")? != &os_string(root.physical_root().as_os_str())
@@ -579,7 +889,7 @@ fn listing(root: &Root) -> Result<Vec<J>> {
     });
     Ok(result)
 }
-fn validate(root: &Root, record: &J) -> Result<bool> {
+fn validate(root: &Root, record: &J, interrupted: &AtomicBool) -> Result<bool> {
     let source = field(record, "source")?;
     match text(field(record, "kind")?)? {
         "file" => {
@@ -588,19 +898,24 @@ fn validate(root: &Root, record: &J) -> Result<bool> {
             if path.is_absolute() {
                 return Err(UNSAFE);
             }
-            let path = relative_source(&path)?;
+            let path = relative_source(&path)
+                .map_err(|_| "attachment source escapes its recorded worktree")?;
             if storage::plain(&work)? != work {
                 return Err(UNSAFE);
             }
             let source_root = Root::open(&work).map_err(|_| UNSAFE)?;
             let bytes = read(&source_root, &path, MAX_SOURCE)?;
             if text(field(source, "full_file_sha256")?)? != hash(&bytes) {
-                return Err(UNSAFE);
+                return Err(
+                    "file attachment source drifted; capture a new attachment before delivery",
+                );
             }
         }
+        "terminal" => terminal::matches_record(source, interrupted)?,
         "selection" => {}
         "artifact-feedback" => {
             let view = valid_id(OsStr::new(text(field(source, "view_id")?)?))?;
+            let drifted = "feedback view source changed";
             let registry = json::parse(&read(
                 root,
                 &PathBuf::from(".oms/artifact-views").join(format!("{view}.json")),
@@ -610,16 +925,16 @@ fn validate(root: &Root, record: &J) -> Result<bool> {
                 || field(&registry, "data_sha256")? != field(source, "data_sha256")?
                 || hash(&json::canonical(&registry)?) != text(field(source, "registry_sha256")?)?
             {
-                return Err(UNSAFE);
+                return Err(drifted);
             }
         }
-        _ => return Err(UNSAFE),
+        _ => return Err("unknown attachment source kind"),
     }
     Ok(field(source, "verified").is_ok_and(|v| v == &J::Bool(true)))
 }
-fn retrieve(root: &Root, id: &str, full: bool) -> Result<J> {
+fn retrieve(root: &Root, id: &str, full: bool, interrupted: &AtomicBool) -> Result<J> {
     let (mut record, content) = load(root, id)?;
-    let status = match validate(root, &record) {
+    let status = match validate(root, &record, interrupted) {
         Ok(true) => "current",
         Ok(false) => "declared-unverified",
         Err(_) => "drifted-or-unavailable",
