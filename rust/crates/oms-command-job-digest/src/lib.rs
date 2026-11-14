@@ -6,8 +6,10 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -89,7 +91,9 @@ fn query(
     if deadline.is_some_and(|d| Instant::now() >= d) {
         return (124, vec![], vec![]);
     }
-    let Ok((out_read, out_write)) = nix::unistd::pipe() else {
+    // Socket readers can be made nonblocking through std on Linux and macOS,
+    // without changing the child's blocking write endpoints.
+    let Ok((out_read, out_write)) = UnixStream::pair() else {
         return (1, vec![], vec![]);
     };
     let (err_read, err_write) = if name == "sacct" {
@@ -98,90 +102,111 @@ fn query(
         };
         (None, write)
     } else {
-        let Ok((read, write)) = nix::unistd::pipe() else {
+        let Ok((read, write)) = UnixStream::pair() else {
             return (1, vec![], vec![]);
         };
         (Some(read), write)
     };
+    if out_read.set_nonblocking(true).is_err()
+        || err_read
+            .as_ref()
+            .is_some_and(|read| read.set_nonblocking(true).is_err())
+    {
+        return (1, vec![], vec![]);
+    }
     let mut child = match Command::new(name)
         .args(args)
         .current_dir(repo)
-        .stdout(Stdio::from(out_write))
-        .stderr(Stdio::from(err_write))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(OwnedFd::from(out_write)))
+        .stderr(Stdio::from(OwnedFd::from(err_write)))
         .process_group(0)
         .spawn()
     {
         Ok(c) => c,
         Err(_) => return (127, vec![], vec![]),
     };
-    let mut out = fs::File::from(out_read);
-    let accounting = name == "sacct";
-    let a = std::thread::spawn(move || {
-        let mut v = vec![];
-        if accounting {
-            let mut reader = BufReader::new(out);
-            for _ in 0..20 {
-                if reader.read_until(b'\n', &mut v).unwrap_or(0) == 0 {
-                    break;
-                }
-            }
-        } else {
-            let _ = out.read_to_end(&mut v);
-        }
-        v
-    });
-    let b = std::thread::spawn(move || {
-        let mut v = vec![];
-        if let Some(read) = err_read {
-            let _ = fs::File::from(read).read_to_end(&mut v);
-        }
-        v
-    });
-    let mut status = None;
+    let mut streams = [Some(out_read), err_read];
+    let mut output = [Vec::new(), Vec::new()];
+    let mut lines = 0;
+    let mut read_failed = false;
     let code = loop {
-        if interrupted.load(Ordering::Relaxed) || deadline.is_some_and(|d| Instant::now() >= d) {
+        let cancelled = interrupted.load(Ordering::Relaxed);
+        let expired = deadline.is_some_and(|d| Instant::now() >= d);
+        if cancelled || expired || read_failed {
+            // No wait/try_wait has reaped the leader on this path. Even an
+            // exited leader reserves its PID/PGID until group cleanup finishes.
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(child.id() as i32),
                 nix::sys::signal::Signal::SIGKILL,
             );
             let _ = child.kill();
             let _ = child.wait();
-            break if interrupted.load(Ordering::Relaxed) {
+            break if cancelled {
                 130
-            } else {
+            } else if expired {
                 124
+            } else {
+                1
             };
         }
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(Some(s)) => {
-                    status = Some(s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)))
+
+        let mut progress = false;
+        for (index, stream) in streams.iter_mut().enumerate() {
+            let Some(read) = stream else { continue };
+            // One block per stream keeps output from starving cancellation,
+            // deadlines, or the other stream.
+            let mut block = [0; 8192];
+            match read.read(&mut block) {
+                Ok(0) => *stream = None,
+                Ok(count) => {
+                    progress = true;
+                    let mut take = count;
+                    if name == "sacct" {
+                        for (offset, &byte) in block[..count].iter().enumerate() {
+                            if byte == b'\n' {
+                                lines += 1;
+                                if lines == 20 {
+                                    take = offset + 1;
+                                    *stream = None;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    output[index].extend_from_slice(&block[..take]);
                 }
-                Ok(None) => {}
-                Err(_) => {
-                    let _ = nix::sys::signal::killpg(
-                        nix::unistd::Pid::from_raw(child.id() as i32),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break 1;
-                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => read_failed = true,
             }
         }
-        if let Some(code) = status
-            && a.is_finished()
-            && b.is_finished()
-        {
-            break code;
+        // Retain the unreaped leader while descendants may own output writers.
+        // A successful reap immediately leaves the loop: no later group signal
+        // or blocking reader join can use an identity that is now reusable.
+        if !read_failed && streams.iter().all(Option::is_none) {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    break status
+                        .code()
+                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                }
+                Ok(None) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                // An ownership failure (such as ECHILD) revokes permission to
+                // signal the numeric identity; it may already have been reused.
+                Err(_) => break 1,
+            }
         }
-        std::thread::sleep(Duration::from_millis(10));
+        if !progress {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     };
-    (
-        code,
-        a.join().unwrap_or_default(),
-        b.join().unwrap_or_default(),
-    )
+    let [out, err] = output;
+    (code, out, err)
 }
 fn trimmed(v: &[u8]) -> String {
     String::from_utf8_lossy(v)

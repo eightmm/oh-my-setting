@@ -1,6 +1,7 @@
 use oms_command_job_digest::run;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -153,6 +154,15 @@ fn scheduler_matrix() {
         if let Ok(pid) = fs::read_to_string(root.join("descendant")) {
             assert_not_running(pid.parse().unwrap());
         }
+        if mode == "stdin-null" {
+            for name in ["squeue", "sacct", "git"] {
+                assert_eq!(
+                    fs::read_to_string(root.join(format!("stdin-{name}"))).unwrap(),
+                    "0",
+                    "{name} inherited caller input"
+                );
+            }
+        }
         assert!(!root.join("forbidden").exists());
         return;
     }
@@ -198,11 +208,16 @@ fn scheduler_matrix() {
         "relative-path",
         "remove-log",
         "remove-metrics",
+        "stdin-null",
     ] {
         for name in ["calls", "descendant", "queue-called"] {
             let _ = fs::remove_file(root.join(name));
         }
-        let status = Command::new(std::env::current_exe().unwrap())
+        if mode == "stdin-null" {
+            fs::copy(&actor, root.join("git")).unwrap();
+        }
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", "scheduler_matrix", "--nocapture"])
             .env(
                 "PATH",
@@ -215,9 +230,17 @@ fn scheduler_matrix() {
             .env("OMS_JOB_DIGEST_POLL", "0")
             .env("OMS_POLL_VERBOSE", "1")
             .env("OMS_DIGEST_MATRIX_ROOT", &root)
-            .env("OMS_DIGEST_MATRIX_MODE", mode)
-            .status()
-            .unwrap();
+            .env("OMS_DIGEST_MATRIX_MODE", mode);
+        if mode == "stdin-null" {
+            command.stdin(std::process::Stdio::piped());
+        }
+        let mut child = command.spawn().unwrap();
+        if let Some(mut input) = child.stdin.take() {
+            if let Err(err) = input.write_all(b"caller input\n") {
+                assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+        }
+        let status = child.wait().unwrap();
         if !status.success() {
             failures.push(mode);
         }

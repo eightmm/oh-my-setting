@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::Write,
+    io::{Read, Write},
     path::Path,
     process::{self, Command, Stdio},
     thread,
@@ -18,6 +18,14 @@ fn main() {
     }
     let command = env::args_os().next().unwrap();
     let name = Path::new(&command).file_name().unwrap().to_str().unwrap();
+    if mode == "stdin-null" {
+        let count = std::io::stdin().read(&mut [0; 1]).unwrap();
+        fs::write(root.join(format!("stdin-{name}")), count.to_string()).unwrap();
+        assert_eq!(count, 0, "{name} inherited caller input");
+        if name == "git" {
+            return;
+        }
+    }
     if ["scancel", "sbatch"].contains(&name) {
         fs::write(root.join("forbidden"), b"called").unwrap();
         process::exit(99);
