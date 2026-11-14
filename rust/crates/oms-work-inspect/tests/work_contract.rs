@@ -299,6 +299,140 @@ fn status_snapshot_lossless_dialect_and_bounds() {
         );
         assert_eq!(task_status_snapshot(raw.as_bytes()).is_ok(), valid);
     }
+
+    // Positive controls: valid Unicode and escaped surrogates in required fields,
+    // unknown fields, and object keys, plus Python JSON dialect controls.
+    let task_ctrl = concat!(
+        r#"{"schema":1,"present":true,"status":"한글😀\ud800","#,
+        r#""verification":"fresh","stale":false,"#,
+        r#""ext_\udfff":"val_\ud800_한글","ext_dup":1,"ext_dup":[NaN,Infinity,-Infinity]}"#
+    )
+    .as_bytes();
+    assert_eq!(
+        task_status_snapshot(task_ctrl).unwrap(),
+        oms_context::parse_experiment_json(task_ctrl, task_ctrl.len()).unwrap()
+    );
+    let mut plan_top = String::from_utf8(bytes(&status_fixture(0, 0, 0))).unwrap();
+    plan_top.pop();
+    plan_top.push_str(
+        r#","ext_\udfff":"val_\ud800_한글","ext_dup":1,"ext_dup":[NaN,Infinity,-Infinity]}"#,
+    );
+    let plan_top = plan_top.replace("\"blocker\":\"\"", "\"blocker\":\"한글😀\\ud800\"");
+    assert_eq!(
+        plan_status_snapshot(plan_top.as_bytes(), &[]).unwrap(),
+        oms_context::parse_experiment_json(plan_top.as_bytes(), plan_top.len()).unwrap()
+    );
+
+    // Raw invalid UTF-8 bytes must be rejected across the entire stream for both APIs,
+    // including required strings, unknown string values, and object keys.
+    let plan_valid = bytes(&status_fixture(0, 0, 0));
+    let invalid_utf8_seqs: &[&[u8]] = &[
+        b"\xff",
+        b"\xed\xa0\x80",
+        b"\xed\xbf\xbf",
+        b"\xc3\x28",
+        b"\xe2\x82",
+    ];
+    let replace_bytes = |haystack: &[u8], needle: &[u8], replacement: &[u8]| -> Vec<u8> {
+        let pos = haystack
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .unwrap();
+        let mut out = Vec::with_capacity(haystack.len() + replacement.len());
+        out.extend_from_slice(&haystack[..pos]);
+        out.extend_from_slice(replacement);
+        out.extend_from_slice(&haystack[pos + needle.len()..]);
+        out
+    };
+    for bad in invalid_utf8_seqs {
+        // 1. Required string field (task.status / plan.contract.blocker)
+        let mut task_req = b"{\"schema\":1,\"present\":true,\"status\":\"".to_vec();
+        task_req.extend_from_slice(bad);
+        task_req.extend_from_slice(b"\",\"verification\":\"fresh\",\"stale\":false}");
+        assert_eq!(
+            task_status_snapshot(&task_req).unwrap_err().to_string(),
+            "canonical task status projection is unavailable or invalid"
+        );
+
+        let mut blocker_rep = b"\"blocker\":\"".to_vec();
+        blocker_rep.extend_from_slice(bad);
+        blocker_rep.push(b'"');
+        let plan_req = replace_bytes(&plan_valid, b"\"blocker\":\"\"", &blocker_rep);
+        assert_eq!(
+            plan_status_snapshot(&plan_req, &[])
+                .unwrap_err()
+                .to_string(),
+            "canonical plan status projection is unavailable or invalid"
+        );
+
+        // 2. Unknown string field value
+        let mut task_unknown_val =
+            b"{\"schema\":1,\"present\":true,\"status\":\"active\",\"verification\":\"fresh\",\"stale\":false,\"unknown\":\""
+                .to_vec();
+        task_unknown_val.extend_from_slice(bad);
+        task_unknown_val.extend_from_slice(b"\"}");
+        assert_eq!(
+            task_status_snapshot(&task_unknown_val)
+                .unwrap_err()
+                .to_string(),
+            "canonical task status projection is unavailable or invalid"
+        );
+
+        let mut plan_unknown_val = plan_valid[..plan_valid.len() - 1].to_vec();
+        plan_unknown_val.extend_from_slice(b",\"unknown\":\"");
+        plan_unknown_val.extend_from_slice(bad);
+        plan_unknown_val.extend_from_slice(b"\"}");
+        assert_eq!(
+            plan_status_snapshot(&plan_unknown_val, &[])
+                .unwrap_err()
+                .to_string(),
+            "canonical plan status projection is unavailable or invalid"
+        );
+
+        // 3. Unknown object key
+        let mut task_unknown_key =
+            b"{\"schema\":1,\"present\":true,\"status\":\"active\",\"verification\":\"fresh\",\"stale\":false,\""
+                .to_vec();
+        task_unknown_key.extend_from_slice(bad);
+        task_unknown_key.extend_from_slice(b"\":1}");
+        assert_eq!(
+            task_status_snapshot(&task_unknown_key)
+                .unwrap_err()
+                .to_string(),
+            "canonical task status projection is unavailable or invalid"
+        );
+
+        let mut plan_unknown_key = plan_valid[..plan_valid.len() - 1].to_vec();
+        plan_unknown_key.extend_from_slice(b",\"");
+        plan_unknown_key.extend_from_slice(bad);
+        plan_unknown_key.extend_from_slice(b"\":1}");
+        assert_eq!(
+            plan_status_snapshot(&plan_unknown_key, &[])
+                .unwrap_err()
+                .to_string(),
+            "canonical plan status projection is unavailable or invalid"
+        );
+    }
+
+    // Oversized input with trailing invalid raw UTF-8 fails cleanly at the size bound.
+    let mut oversized_bad = task.to_vec();
+    oversized_bad.resize(limit, b' ');
+    oversized_bad.push(0xff);
+    assert_eq!(
+        task_status_snapshot(&oversized_bad)
+            .unwrap_err()
+            .to_string(),
+        "canonical task status projection is unavailable or invalid"
+    );
+    let mut plan_oversized_bad = plan_valid.clone();
+    plan_oversized_bad.resize(limit, b' ');
+    plan_oversized_bad.push(0xff);
+    assert_eq!(
+        plan_status_snapshot(&plan_oversized_bad, &[])
+            .unwrap_err()
+            .to_string(),
+        "canonical plan status projection is unavailable or invalid"
+    );
 }
 #[test]
 fn criterion_evidence_status_contract() {

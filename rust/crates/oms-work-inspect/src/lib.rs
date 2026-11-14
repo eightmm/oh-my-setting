@@ -34,10 +34,18 @@ fn field<'a>(v: &'a Json, k: &str) -> &'a Json {
     }
 }
 
+const MAX_STATUS_BYTES: usize = 4 * 1024 * 1024;
+
 fn status_payload(raw: &[u8], message: &str) -> Result<Json> {
-    // Status commands use Python's JSON dialect, including last-key-wins and
-    // lossless surrogate strings. Keep unknown fields for the envelope adapter.
-    let payload = parse_experiment_json(raw, 4 * 1024 * 1024).map_err(|_| err(message))?;
+    // Canonical status commands are decoded by `run_output(..., text=True)` (strict
+    // UTF-8) before `json.loads`. Check the 4 MiB bound before scanning `raw`,
+    // then require valid UTF-8 across the whole byte stream while keeping Python's
+    // JSON dialect (escaped surrogates as WTF-8, last-key-wins, non-finite values).
+    if raw.len() > MAX_STATUS_BYTES {
+        return Err(err(message));
+    }
+    std::str::from_utf8(raw).map_err(|_| err(message))?;
+    let payload = parse_experiment_json(raw, MAX_STATUS_BYTES).map_err(|_| err(message))?;
     if !matches!(payload, Json::Object(_))
         || status_number(field(&payload, "schema")).as_deref() != Some("1")
         || !matches!(field(&payload, "present"), Json::Bool(true))
@@ -95,8 +103,9 @@ fn status_sum(left: &str, right: &str) -> String {
 }
 
 /// Validate a present `agent-task status --json` snapshot for a native envelope.
-/// Preserves unknown fields, number spellings and WTF-8 strings. Status and
-/// verification strings are not enums here; the envelope adapter normalizes them.
+/// Preserves unknown fields, number spellings and escaped-surrogate WTF-8 strings.
+/// Raw input bytes must be valid UTF-8 (matching `run_output(..., text=True)`).
+/// Status and verification strings are not enums here; the envelope adapter normalizes them.
 /// Input uses the canonical JSON dialect, bounded to 4 MiB and 1024 nesting levels.
 /// Absence, malformed input and invalid field types are errors, never empty state.
 pub fn task_status_snapshot(raw: &[u8]) -> Result<Json> {
