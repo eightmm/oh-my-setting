@@ -1,0 +1,23 @@
+[package]
+name = "oms-command-runs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[workspace]
+
+[dependencies]
+oms-context = { path = "../oms-context" }
+oms-experiment = { path = "../oms-experiment" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+regex = "=1.13.1"
+nix = { version = "=0.31.3", default-features = false, features = ["signal", "process"] }
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+unicode-general-category = "=0.6.0"
+
+[lints.rust]
+unsafe_code = "forbid"
