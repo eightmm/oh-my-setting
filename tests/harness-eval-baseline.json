@@ -49,6 +49,14 @@
     "memory-fits-budget": {
       "wall_ms": 25981
     },
+    "output-digest-retrieves-middle": {
+      "auto_response_bytes": 875,
+      "legacy_response_bytes": 1723,
+      "model_calls": 0,
+      "restored_bytes": 43228,
+      "retrieval_response_bytes": 1171,
+      "wall_ms": 834
+    },
     "panel-matches-source": {
       "wall_ms": 18554
     },

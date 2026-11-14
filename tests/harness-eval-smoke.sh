@@ -38,6 +38,7 @@ SCENARIOS=(
   unrelated-verification-no-resolve
   panel-matches-source
   memory-fits-budget
+  output-digest-retrieves-middle
   hook-refusal-contract-command-guard
   hook-refusal-contract-move-guard
   hook-command-guard-python-absent
@@ -366,6 +367,63 @@ print(json.loads(sys.stdin.readline())["event_id"])')"
     [ "$section" -le 1200 ] || violated "memory section is $section bytes, over its 1200-byte bound"
     [ "$size" -le 4096 ] || violated "block is $size bytes, over the 4096-byte cap"
     echo "memory: relevant note $relevant_id shown; memory section ${section}B of 1200, block ${size}B of 4096"
+  }
+
+  scenario_output_digest_retrieves_middle() {
+    local repo="$TMP/output-retrieval"
+    new_repo "$repo"
+    python3 - "$ROOT" "$repo" "${OMS_EVAL_METRICS:-}" "$NAME" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:3])
+sys.path.insert(0, str(root / "scripts/lib"))
+from output_digest import build_bytes, render
+from output_capture import capture_metadata
+marker = "COMPOUND_7319 affinity=-7.25 unit=kcal/mol"
+source = repo / "input.log"
+source.write_text("".join("measurement %d unchanged\n" % n for n in range(1200))
+                  + marker + "\n" + "tail observation\n" * 1200)
+run = subprocess.run([str(root / "scripts/oms"), "output-digest", "--json", "--", "cat", str(source)],
+                     cwd=repo, check=True, capture_output=True, text=True)
+doc = json.loads(run.stdout)
+assert doc["shown"]["omitted_lines"] > 0 and marker not in doc["text"], doc
+args = dict(doc["raw"]["read_arguments"], query="COMPOUND_7319")
+request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "oms_output_read", "arguments": args}}
+before = {p: p.read_bytes() for p in (repo / ".oms").rglob("*") if p.is_file()}
+response = subprocess.run([sys.executable, str(root / "scripts/oms-mcp-server.py")],
+                          input=json.dumps(request) + "\n", text=True, capture_output=True, check=True)
+reply = json.loads(response.stdout)["result"]
+assert not reply["isError"], reply
+answer_text = reply["content"][0]["text"]
+answer = json.loads(answer_text)
+assert len(answer["matches"]) == 1 and marker in answer["matches"][0]["context"], answer
+assert answer["capture_sha256"] == doc["raw"]["sha256"]
+replay = subprocess.run([str(root / "scripts/oms"), "artifact-index", "--repo", str(repo),
+                         "telemetry", "--outputs", "--json"], check=True, capture_output=True, text=True)
+report = json.loads(replay.stdout)
+assert report["totals"]["captures"] == 1 and report["provider_tokens"] is None
+assert report["retrieval_response_bytes"] is None and report["task_success"] is None
+assert before == {p: p.read_bytes() for p in (repo / ".oms").rglob("*") if p.is_file()}
+# A complete repeated-log representation must roundtrip the rare middle record.
+raw = ("INFO stable state\n" * 1200 + "ERROR rare middle condition\n" + "INFO stable state\n" * 1200).encode()
+compressed = build_bytes(raw)
+legacy = build_bytes(raw, strategy="legacy")
+table = json.loads(compressed["text"])
+restored = "\n".join(line for count, line in table["runs"] for _ in range(count)) + "\n"
+assert restored.encode() == raw and compressed["representation"]["lossless"]
+meta = capture_metadata(repo, pathlib.Path(doc["raw"]["ref"]).name, hashlib.sha256(raw).hexdigest())
+for value in (compressed, legacy):
+    value["raw"].update(meta)
+auto_bytes, legacy_bytes = len(render(compressed).encode()), len(render(legacy).encode())
+assert auto_bytes < legacy_bytes, (auto_bytes, legacy_bytes)
+if sys.argv[3]:
+    with open(sys.argv[3], "a") as metrics:
+        for key, value in (("retrieval_response_bytes", len(answer_text.encode())),
+                           ("auto_response_bytes", auto_bytes), ("legacy_response_bytes", legacy_bytes),
+                           ("restored_bytes", len(raw)), ("model_calls", 0)):
+            metrics.write("%s\t%s\t%d\n" % (sys.argv[4], key, value))
+print("output retrieval: omitted middle record recovered; repeated logs roundtrip; no model calls")
+PY
   }
 
   # ======================================================================

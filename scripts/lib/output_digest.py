@@ -7,11 +7,15 @@ digest. A log no recogniser understands falls back to a bounded head and tail.
 """
 
 import argparse
+import bisect
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import sys
+
+from output_reducers import reduce_output
 
 SCHEMA = 1
 LINE_CHARS = 300
@@ -39,12 +43,23 @@ RECOGNISERS = (
 )
 
 
+def _clean_details(line):
+    normal = CONTROL.sub("", ANSI.sub("", line)).rstrip()
+    prefix = normal[:LINE_CHARS]
+    clipped = max(0, len(normal) - LINE_CHARS)
+    byte_size = lambda value: len(value.encode("utf-8", "surrogateescape"))
+    invalid = sum(0xDC80 <= ord(char) <= 0xDCFF for char in prefix)
+    shown = "".join("\ufffd" if 0xDC80 <= ord(char) <= 0xDCFF else char for char in prefix)
+    if clipped:
+        shown += "…[+%d chars]" % clipped
+    return shown, {"normalized_bytes": byte_size(line) - byte_size(normal),
+                   "clipped_bytes": byte_size(normal[LINE_CHARS:]), "clipped_chars": clipped,
+                   "invalid_utf8_bytes": invalid}
+
+
 def clean(line):
     """One raw line as it is shown: escape sequences and control bytes removed, bounded in length."""
-    line = CONTROL.sub("", ANSI.sub("", line)).rstrip()
-    if len(line) > LINE_CHARS:
-        line = "%s…[+%d chars]" % (line[:LINE_CHARS], len(line) - LINE_CHARS)
-    return line
+    return _clean_details(line)[0]
 
 
 def read(path):
@@ -62,13 +77,19 @@ def read(path):
             handle.readline()
             skipped = handle.tell()
         data = handle.read()
-    text = data.decode("utf-8", "replace")
+    return _record(data, size, sha.hexdigest(), skipped)
+
+
+def _record(data, size, sha256, skipped):
+    text = data.decode("utf-8", "surrogateescape")
     partial = bool(text) and not text.endswith("\n")
-    lines = text.split("\n")
+    lines = text.split("\n") if text else []
     if lines and lines[-1] == "":
         lines.pop()
-    return {"bytes": size, "sha256": sha.hexdigest(), "lines": lines, "partial_last_line": partial,
-            "unread_leading_bytes": skipped}
+    line_bytes = [len(line.encode("utf-8", "surrogateescape")) + int(index < len(lines) - 1 or not partial)
+                  for index, line in enumerate(lines)]
+    return {"bytes": size, "sha256": sha256, "lines": lines, "partial_last_line": partial,
+            "unread_leading_bytes": skipped, "line_bytes": line_bytes, "text": text}
 
 
 def failures(lines):
@@ -84,8 +105,30 @@ def failures(lines):
 
 
 def build(path, exit_code=None, max_bytes=DEFAULT_MAX_BYTES, head=DEFAULT_HEAD, tail=DEFAULT_TAIL,
-          ref=None, duration=None, withhold=None):
-    raw = read(path)
+          ref=None, duration=None, withhold=None, strategy="auto"):
+    return _build(read(path), exit_code, max_bytes, head, tail, ref, duration, withhold, strategy)
+
+
+def build_bytes(data, exit_code=None, max_bytes=DEFAULT_MAX_BYTES, head=DEFAULT_HEAD, tail=DEFAULT_TAIL,
+                ref=None, duration=None, withhold=None, strategy="auto"):
+    """Build from already verified capture bytes, with the file reader's same cap and hash."""
+    if not isinstance(data, bytes):
+        raise TypeError("capture data must be bytes")
+    size, sha256, skipped = len(data), hashlib.sha256(data).hexdigest(), 0
+    if size > READ_CAP:
+        skipped = size - READ_CAP
+        ending = data.find(b"\n", skipped)
+        skipped = size if ending == -1 else ending + 1
+        data = data[skipped:]
+    return _build(_record(data, size, sha256, skipped), exit_code, max_bytes, head, tail,
+                  ref, duration, withhold, strategy)
+
+
+def _build(raw, exit_code, max_bytes, head, tail, ref, duration, withhold, strategy):
+    if strategy not in ("auto", "legacy"):
+        raise ValueError("strategy must be auto or legacy")
+    if not 256 <= max_bytes <= 1048576 or not 0 <= head <= 10000 or not 0 <= tail <= 10000:
+        raise ValueError("max_bytes is 256..1048576 and head/tail are 0..10000")
     lines = raw["lines"]
     total = len(lines)
     found, by = failures(lines)
@@ -98,41 +141,85 @@ def build(path, exit_code=None, max_bytes=DEFAULT_MAX_BYTES, head=DEFAULT_HEAD, 
         "parser": sorted(by) if by else ["none"],
         "failures": {"matched": len(found), "by_recogniser": by},
         "withheld": withhold,
+        "representation": {"algorithm": "none", "version": 1, "lossless": False,
+                           "source_bytes_lossless": False},
+        "transformations": {"normalized_bytes": 0, "clipped_bytes": 0, "clipped_chars": 0,
+                            "clipped_lines": 0, "invalid_utf8_bytes": 0,
+                            "json_formatting": False},
     }
-    whole = sum(len(line.encode("utf-8")) + 1 for line in (clean(l) for l in lines))
     out = []
     if withhold:
         doc["shown"] = {"mode": "withheld", "lines": 0, "omitted_lines": total, "omitted_bytes": raw["bytes"]}
         doc["failures"]["shown"] = 0
         doc["text"] = ""
         return doc
-    if whole <= max_bytes and not raw["unread_leading_bytes"]:
-        out = [clean(line) for line in lines]
-        doc["shown"] = {"mode": "whole", "lines": total, "omitted_lines": 0, "omitted_bytes": 0}
-        doc["failures"]["shown"] = len(found)
-        doc["text"] = "\n".join(out)
+
+    def finish(selected, text, mode):
+        changes = doc["transformations"]
+        for number in selected:
+            _line, detail = _clean_details(lines[number - 1])
+            for key, count in detail.items():
+                changes[key] += count
+            changes["clipped_lines"] += int(detail["clipped_chars"] > 0)
+        removed = sum(changes[key] for key in ("normalized_bytes", "clipped_bytes", "invalid_utf8_bytes"))
+        omitted = raw["bytes"] - sum(raw["line_bytes"][number - 1] for number in selected) + removed
+        if mode == "whole" and removed:
+            mode = "all-lines-transformed"
+        doc["shown"] = {"mode": mode, "lines": len(selected), "omitted_lines": total - len(selected),
+                        "omitted_bytes": omitted}
+        doc["failures"]["shown"] = sum(number in selected for number, _name in found)
+        doc["representation"]["lossless"] = not omitted
+        doc["representation"]["source_bytes_lossless"] = not omitted
+        doc["text"] = text
         return doc
+
+    # Small ordinary output keeps its existing readable view. Reducers see original
+    # valid UTF-8 only, before clipping or normalization can change scientific values.
+    whole = "\n".join(clean(line) for line in lines)
+    if (len(raw["text"].encode("utf-8", "surrogateescape")) <= max_bytes
+            and len(whole.encode("utf-8")) <= max_bytes and not raw["unread_leading_bytes"]):
+        return finish(set(range(1, total + 1)), whole, "whole")
+    if strategy == "auto" and not raw["unread_leading_bytes"] and not any(
+            0xDC80 <= ord(char) <= 0xDCFF for char in raw["text"]):
+        reduced = reduce_output(raw["text"], lines, {number for number, _name in found}, max_bytes)
+        if reduced is not None:
+            text, metadata = reduced
+            doc["representation"] = metadata
+            doc["transformations"]["json_formatting"] = metadata["algorithm"] == "json-table"
+            doc["shown"] = {"mode": metadata["algorithm"], "lines": total, "omitted_lines": 0, "omitted_bytes": 0}
+            doc["failures"]["shown"] = len(found)
+            doc["text"] = text
+            return doc
     # Budget order: the failure lines first, then the tail, then the head; each is cut, never the exit code.
-    budget = max_bytes
     shown = {}
+    order = []
+
+    def gap_cost(first, last):
+        return len(("   … %d line(s) omitted …\n" % (last - first + 1)).encode("utf-8")) if first <= last else 0
+
+    used = gap_cost(1, total)
 
     def take(number):
-        nonlocal budget
+        nonlocal used
         if number in shown or not 1 <= number <= total:
             return number in shown
         line = clean(lines[number - 1])
-        cost = len(line.encode("utf-8")) + len(str(number)) + 3
-        if cost > budget:
+        position = bisect.bisect_left(order, number)
+        before = order[position - 1] if position else 0
+        after = order[position] if position < len(order) else total + 1
+        cost = (len(("%d| %s\n" % (number, line)).encode("utf-8"))
+                - gap_cost(before + 1, after - 1)
+                + gap_cost(before + 1, number - 1) + gap_cost(number + 1, after - 1))
+        if used + cost - 1 > max_bytes:
             return False
-        budget -= cost
+        used += cost
+        order.insert(position, number)
         shown[number] = line
         return True
 
-    kept_failures = 0
     for number, _name in found[:FAILURE_LINES]:
         if not take(number):
             break
-        kept_failures += 1
         take(number + 1)  # the line under a failure header usually carries the reason
     tail_start = max(1, total - tail + 1)
     for number in range(total, tail_start - 1, -1):
@@ -151,12 +238,7 @@ def build(path, exit_code=None, max_bytes=DEFAULT_MAX_BYTES, head=DEFAULT_HEAD, 
     if previous < total:
         out.append("   … %d line(s) omitted …" % (total - previous))
     text = "\n".join(out)
-    doc["shown"] = {"mode": "failures+tail+head" if by else "raw head+tail",
-                    "lines": len(shown), "omitted_lines": total - len(shown),
-                    "omitted_bytes": max(0, raw["bytes"] - sum(len(lines[n - 1].encode("utf-8")) + 1 for n in shown))}
-    doc["failures"]["shown"] = kept_failures
-    doc["text"] = text
-    return doc
+    return finish(shown, text, "failures+tail+head" if by else "raw head+tail")
 
 
 def render(doc):
@@ -167,6 +249,11 @@ def render(doc):
         head += "  duration=%ss" % doc["duration_s"]
     out = [head]
     out.append("raw: %s  sha256=%s" % (raw["ref"] or "not kept", raw["sha256"]))
+    if raw.get("read_tool"):
+        out.append("read: %s %s" % (raw["read_tool"], json.dumps(raw["read_arguments"], ensure_ascii=False, separators=(",", ":"))))
+    elif raw.get("read_unavailable_reason"):
+        out.append("read: unavailable (%s); MCP capture limit=%d bytes; stored file and SHA are retained"
+                   % (raw["read_unavailable_reason"], raw["read_max_bytes"]))
     if raw["unread_leading_bytes"]:
         out.append("read: the last %d bytes; the first %d bytes were not read"
                    % (raw["bytes"] - raw["unread_leading_bytes"], raw["unread_leading_bytes"]))
@@ -177,11 +264,25 @@ def render(doc):
         out.append("failures: %d matching line(s)%s" % (
             fails["matched"], " (%s)" % _by(fails) if fails["matched"] else ""))
     else:
-        if shown["mode"] == "whole":
+        representation = doc.get("representation", {})
+        if representation.get("algorithm", "none") != "none":
+            out.append("shown: all %d source line(s) as %s v%d; lossless for %s; no data omitted"
+                       % (shown["lines"], representation["algorithm"], representation["version"],
+                          representation["lossless_scope"]))
+            out.append("decode: %s" % representation["decode"])
+            if not representation["source_bytes_lossless"]:
+                out.append("note: JSON formatting is changed; the raw file retains the source spelling and whitespace")
+        elif shown["mode"] == "whole":
             out.append("shown: all %d line(s); nothing omitted" % shown["lines"])
         else:
             out.append("shown: %d of %d line(s) (%s); omitted %d line(s), %d bytes — open the raw file for them"
                        % (shown["lines"], raw["lines"], shown["mode"], shown["omitted_lines"], shown["omitted_bytes"]))
+        changes = doc.get("transformations", {})
+        if any(changes.get(key, 0) for key in ("normalized_bytes", "clipped_bytes", "invalid_utf8_bytes")):
+            out.append("transformed: normalized %d source bytes; clipped %d bytes (%d chars across %d lines); "
+                       "replaced %d invalid UTF-8 bytes"
+                       % tuple(changes.get(key, 0) for key in ("normalized_bytes", "clipped_bytes", "clipped_chars",
+                                                               "clipped_lines", "invalid_utf8_bytes")))
         if fails["matched"]:
             out.append("failures: %d matching line(s) (%s); %d shown" % (fails["matched"], _by(fails), fails["shown"]))
         elif code not in (None, 0):
@@ -212,6 +313,9 @@ def main(argv=None):
     parser.add_argument("--ref")
     parser.add_argument("--duration", type=int)
     parser.add_argument("--withhold")
+    parser.add_argument("--strategy", choices=("auto", "legacy"), default="auto")
+    # Internal wrapper argument: only actually retained run captures are advertised.
+    parser.add_argument("--capture-repo", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     if not 256 <= args.max_bytes <= 1048576 or not 0 <= args.head <= 10000 or not 0 <= args.tail <= 10000:
@@ -219,9 +323,22 @@ def main(argv=None):
         return 2
     try:
         doc = build(args.path, args.exit_code, args.max_bytes, args.head, args.tail,
-                    args.ref, args.duration, args.withhold)
+                    args.ref, args.duration, args.withhold, args.strategy)
+        if args.capture_repo and not args.withhold:
+            from output_capture import CAPTURE_ROOT, READ_CAP as CAPTURE_READ_CAP, capture_metadata
+            repo = Path(args.capture_repo).resolve()
+            source = Path(args.path)
+            if source.resolve() != repo / CAPTURE_ROOT / source.name:
+                raise ValueError("capture is outside the retained output store")
+            if doc["raw"]["bytes"] <= CAPTURE_READ_CAP:
+                doc["raw"].update(capture_metadata(repo, source.name, doc["raw"]["sha256"]))
+            else:
+                doc["raw"].update(read_unavailable_reason="capture_too_large", read_max_bytes=CAPTURE_READ_CAP)
     except OSError as error:
         print("output-digest: cannot read the capture: %s" % error.strerror, file=sys.stderr)
+        return 2
+    except ValueError as error:
+        print("output-digest: %s" % error, file=sys.stderr)
         return 2
     if args.json:
         doc["size"] = {"raw_bytes": doc["raw"]["bytes"], "digest_text_bytes": len(doc["text"].encode("utf-8")),

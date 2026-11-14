@@ -42,6 +42,7 @@ if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
 from oms_graph import render as graph_render
+from output_capture import CaptureError, PAGE_BYTES, READ_CAP, read_capture
 from peer_artifacts import artifact_sections, artifact_sections_stream, bounded_answer, tail_lines
 from peer_cancellation import valid_receipt
 
@@ -85,7 +86,7 @@ def child_env() -> dict:
 
 CORE_TOOLS = frozenset({
     "oms_inbox", "oms_repo_state", "oms_handoffs", "oms_handoff_show",
-    "oms_journal", "oms_peer_start", "oms_peer_result",
+    "oms_journal", "oms_peer_start", "oms_peer_result", "oms_output_read",
     "oms_peer_operations", "oms_project_graph_render", "oms_project_graph_query",
     "oms_project_graph_trace", "oms_project_graph_affected",
 })
@@ -510,6 +511,29 @@ TOOLS = [
             "answer_limit": {"type": "integer", "minimum": 4, "maximum": ANSWER_PAGE_BYTES, "description": "answer_ref only: maximum returned answer bytes, excluding JSON. Default 16384; pages never split a UTF-8 character."},
             "answer_query": {"type": "string", "description": "answer_ref only: case-sensitive literal search (1-256 UTF-8 bytes), starting at answer_offset. Returns up to 8 matches with context and read arguments. Incompatible with answer_limit; no regex."},
         },
+        "annotations": READ_ONLY,
+    },
+    {
+        "name": "oms_output_read",
+        "description": (
+            "Read a retained output-digest capture using its returned capture_ref."
+            " Returns bounded UTF-8 text pages or case-sensitive literal matches"
+            " with continuation/read arguments and the full stored-file SHA-256."
+            " Offsets count UTF-8 bytes after replacing invalid input bytes."
+            " Only the repository's output-digest store is accessible; missing or"
+            " evicted captures return an error and never rerun a command."
+            " Content is the stored redacted capture, not verification evidence."
+        ),
+        "properties": {
+            **REPO_PROPERTY,
+            "capture_ref": {"type": "string", "description": "Reference returned by output-digest; no arbitrary paths."},
+            "offset": {"type": "integer", "minimum": 0, "maximum": READ_CAP * 3,
+                       "description": "UTF-8 byte offset; default 0. Reuse continuation arguments."},
+            "limit": {"type": "integer", "minimum": 4, "maximum": PAGE_BYTES,
+                      "description": "Maximum content bytes, default 16384; never splits a character."},
+            "query": {"type": "string", "description": "Case-sensitive literal, 1-256 UTF-8 bytes; up to 8 matches from offset. No regex; incompatible with limit."},
+        },
+        "required": ["capture_ref"],
         "annotations": READ_ONLY,
     },
     {
@@ -1929,7 +1953,23 @@ def thread_exchange(arguments: dict, action: str) -> tuple[str, bool]:
     return json.dumps({"thread": thread, "status": "recorded", "kind": action}), False
 
 
+def output_read(arguments: dict) -> tuple[str, bool]:
+    if set(arguments) - {"repo", "capture_ref", "offset", "limit", "query"}:
+        return "error: unsupported output read argument", True
+    repo, err = resolve_repo(arguments)
+    if err:
+        return "error: invalid repository directory", True
+    try:
+        payload = read_capture(repo.resolve(), arguments)
+    except CaptureError as exc:
+        return json.dumps({"error": exc.code, "message": str(exc)}), True
+    except (OSError, ValueError, RuntimeError):
+        return "error: capture store is unavailable", True
+    return json.dumps(payload, ensure_ascii=False, indent=2), False
+
+
 ACTIONS = {
+    "oms_output_read": output_read,
     "oms_peer_start": start_peer,
     "oms_peer_result": peer_result,
     "oms_peer_operations": peer_operations,

@@ -194,7 +194,7 @@ cli = subprocess.run([sys.executable, str(root / "scripts/lib/room.py"), "send",
                      capture_output=True, text=True)
 assert cli.returncode == 0 and json.loads(cli.stdout)["recipient"] == "all", cli.stderr or cli.stdout
 assert not (repo / ".oms/artifacts/mcp").exists(), "room messages never start another model"
-assert len(m.tool_definitions()) == 12, "do not grow core tool discovery"
+assert len(m.tool_definitions()) == 13, "live threads reuse the existing core tool catalog"
 # Inbox mail follows the room reader's repository, participant and rollover;
 # a query (including --fix-safe) never acknowledges mail or copies its body.
 from inbox_projection import pending_room_mail
@@ -557,12 +557,12 @@ rows = {row["id"]: row for row in map(json.loads, out.stdout.splitlines())}
 core = rows[1]["result"]["tools"]
 assert [tool["name"] for tool in core] == [
     "oms_inbox", "oms_repo_state", "oms_handoffs", "oms_handoff_show",
-    "oms_journal", "oms_peer_start", "oms_peer_result", "oms_peer_operations",
+    "oms_journal", "oms_peer_start", "oms_peer_result", "oms_output_read", "oms_peer_operations",
     "oms_project_graph_render", "oms_project_graph_query", "oms_project_graph_trace",
     "oms_project_graph_affected"], core
 with open(os.environ["OMS_T_FULL"], encoding="utf-8") as fh:
     full = {row["id"]: row for row in map(json.loads, fh)}[2]["result"]["tools"]
-assert len(full) == 27, len(full)
+assert len(full) == 28, len(full)
 assert all(tool in full for tool in core), "profile changed schemas or annotations"
 assert not rows[2]["result"]["isError"], rows[2]
 assert rows[3]["result"]["resources"][0]["uri"] == "ui://oms/project-graph/v1.html", rows[3]
@@ -573,6 +573,140 @@ invalid = subprocess.run(command, input=payload, text=True, capture_output=True,
                          env={**env, "OMS_MCP_TOOL_PROFILE": "typo"})
 assert invalid.returncode == 2 and not invalid.stdout, invalid
 assert "must be core or full" in invalid.stderr, invalid.stderr
+PY
+}
+
+test_mcp_output_capture_read_is_scoped_and_bounded() {
+  local repo="$TMP/mcp-output-capture"
+  make_repo "$repo"
+  python3 - "$ROOT" "$repo" <<'PY'
+import hashlib, importlib.util, json, os, pathlib, subprocess, sys
+from unittest.mock import patch
+root, repo = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("mcp_output_test", root / "scripts/oms-mcp-server.py")
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+import output_capture as capture
+store = repo / capture.CAPTURE_ROOT
+store.mkdir(parents=True)
+path = store / "20261112T123456Z-12345.log"
+content = "HEAD 근거🙂\n" + "ordinary line\n" * 2000 + "MIDDLE EVIDENCE\n" + "근거🙂\n" * 12 + "tail\n" * 2000
+raw = content.encode()
+path.write_bytes(raw)
+sha = hashlib.sha256(raw).hexdigest()
+meta = capture.capture_metadata(repo, path.name, sha)
+args = meta["read_arguments"]
+assert meta["capture_sha256"] == sha and meta["read_tool"] == "oms_output_read"
+requests = [
+    {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "oms_output_read", "arguments": args}},
+]
+run = subprocess.run([sys.executable, str(root / "scripts/oms-mcp-server.py")],
+                     input="".join(json.dumps(x) + "\n" for x in requests),
+                     text=True, capture_output=True, check=True)
+listed, called = map(json.loads, run.stdout.splitlines())
+tool = next(t for t in listed["result"]["tools"] if t["name"] == "oms_output_read")
+assert tool["annotations"] == m.READ_ONLY and tool["inputSchema"]["required"] == ["capture_ref"]
+assert not called["result"]["isError"], called
+
+def call(arguments, error=None):
+    reply = m.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "oms_output_read", "arguments": arguments}})["result"]
+    text = reply["content"][0]["text"]
+    assert reply["isError"] == bool(error), text
+    if error:
+        assert error in text and str(repo) not in text, text
+        return
+    return json.loads(text)
+
+before = {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+pages, current, prior = [], args, 0
+while True:
+    data = call(current)
+    assert data["capture_sha256"] == sha and data["capture_bytes"] == len(raw)
+    assert data["offset"] == prior and len(data["content"].encode()) <= 16384
+    pages.append(data["content"])
+    prior = data["end"]
+    if not data["has_more"]:
+        break
+    current = data["next_read_arguments"]
+assert "".join(pages) == content
+middle = raw.index(b"MIDDLE EVIDENCE")
+assert call(dict(args, offset=middle, limit=16))["content"] == "MIDDLE EVIDENCE\n"
+assert call(dict(args, offset=5, limit=4))["content"] == "근"
+assert call(dict(args, offset=len(raw)))["content"] == ""
+found = call(dict(args, query="MIDDLE EVIDENCE"))
+assert found["matches"][0]["offset"] == middle and not found["has_more"]
+assert "MIDDLE EVIDENCE" in call(found["matches"][0]["read_arguments"])["content"]
+found = call(dict(args, query="근거🙂"))
+assert len(found["matches"]) == 8 and found["has_more"]
+more = call(found["next_search_arguments"])
+assert len(more["matches"]) == 5 and not more["has_more"]
+assert not call(dict(args, query="middle evidence"))["matches"]
+assert not call(dict(args, query=".*"))["matches"], "queries must be literal"
+for extra in ({"offset": -1}, {"offset": True}, {"offset": "1"}, {"offset": 6},
+              {"offset": len(raw) + 1}, {"limit": 16385}, {"limit": 3}, {"limit": True}):
+    call(dict(args, **extra), "invalid_range")
+for query in ("", "a" * 257, "근" * 86, True, None, "\ud800"):
+    call(dict(args, query=query), "invalid_query")
+call(dict(args, query="a", limit=10), "invalid_query")
+for ref in (None, "", "../outside", args["capture_ref"].replace(path.name, "../outside.log"),
+            args["capture_ref"].replace(path.name, "20261112T123456Z-1.log/extra")):
+    call(dict(args, capture_ref=ref), "invalid_reference")
+call({"repo": str(repo)}, "invalid_reference")
+call(dict(args, path="outside"), "unsupported")
+other = repo / "other"
+other.mkdir()
+call(dict(args, repo=str(other)), "capture_scope_mismatch")
+other.rmdir()
+after = {p.relative_to(repo): p.read_bytes() for p in repo.rglob("*") if p.is_file()}
+assert before == after, "reads must not modify state or stored captures"
+path.write_bytes(raw.replace(b"MIDDLE", b"ALTER!"))
+call(args, "capture_hash_changed")
+path.unlink()
+call(args, "capture_missing")
+path.write_bytes(raw)
+for link in (os.symlink, os.link):
+    target = repo / "foreign.log"
+    path.rename(target)
+    link(target, path)
+    call(args, "unsafe_capture")
+    path.unlink()
+    target.rename(path)
+for directory in (store, store.parent, store.parent.parent):
+    moved = directory.with_name(directory.name + "-moved")
+    directory.rename(moved)
+    directory.symlink_to(moved, target_is_directory=True)
+    call(args, "unsafe_capture")
+    directory.unlink()
+    moved.rename(directory)
+try:
+    capture.read_stored_capture(repo, path.name, max_bytes=len(raw) - 1)
+    raise AssertionError("smaller caller read cap must be enforced")
+except capture.CaptureError as exc:
+    assert exc.code == "capture_too_large"
+# Replacement after the lstat must not redirect the opened descriptor.
+real_open = capture.os.open
+foreign = repo / "foreign.log"
+foreign.write_bytes(b"foreign content")
+def replace_leaf(name, flags, **kwargs):
+    if name == path.name:
+        path.unlink()
+        path.symlink_to(foreign)
+    return real_open(name, flags, **kwargs)
+with patch.object(capture.os, "open", side_effect=replace_leaf):
+    call(args, "unsafe_capture")
+path.unlink()
+foreign.unlink()
+# Byte hash remains the stored hash when display text replaces invalid UTF-8.
+path.write_bytes(b"first\xfflast")
+invalid_args = capture.capture_metadata(repo, path.name, hashlib.sha256(path.read_bytes()).hexdigest())["read_arguments"]
+result = call(invalid_args)
+assert result["content"] == "first\ufffdlast" and result["capture_bytes"] == 10
+assert result["content_bytes"] == len(result["content"].encode())
+path.write_bytes(b"")
+empty_args = capture.capture_metadata(repo, path.name, hashlib.sha256(b"").hexdigest())["read_arguments"]
+assert call(empty_args)["content"] == "" and not call(empty_args)["has_more"]
 PY
 }
 
@@ -3373,7 +3507,7 @@ assert names == [
     "oms_task_state", "oms_fail_ledger", "oms_handoffs", "oms_handoff_show",
     "oms_journal", "oms_runtime_release", "oms_runtime_profile",
     "oms_runtime_failures", "oms_peer_start", "oms_peer_result",
-    "oms_peer_operations", "oms_project_graph_map", "oms_project_graph_render",
+    "oms_output_read", "oms_peer_operations", "oms_project_graph_map", "oms_project_graph_render",
     "oms_project_graph_query",
     "oms_project_graph_api", "oms_project_graph_search", "oms_project_graph_symbol",
     "oms_project_graph_trace",
@@ -3423,6 +3557,7 @@ test_mcp_live_thread_reuses_peer_tools
 test_mcp_server_serves_modern_clients_without_a_handshake
 test_mcp_tasks_extension_is_opt_in_and_reuses_peer_operations
 test_mcp_server_bounds_requests_before_effects
+test_mcp_output_capture_read_is_scoped_and_bounded
 test_mcp_peer_actions_start_detached_and_poll
 test_mcp_peer_result_reads_the_answer_not_the_quoted_prompt
 test_mcp_peer_operations_report_dead_and_legacy_runs

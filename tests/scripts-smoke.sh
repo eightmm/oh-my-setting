@@ -1672,6 +1672,15 @@ test_output_digest_keeps_failures_and_exit_code() {
   contains "$out" 'shown: all 2 line(s); nothing omitted' || fail "short output should be shown whole"
   contains "$out" '한글 줄' || fail "stderr and non-ASCII text belong in the capture"
   contains "$out" 'not verification evidence' || fail "the digest must say it is a derived view"
+  contains "$out" 'read: oms_output_read ' || fail "a retained capture should advertise bounded retrieval"
+  printf '%s\n' "$out" | python3 -c '
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from output_capture import read_capture
+args = json.loads(next(line for line in sys.stdin if line.startswith("read: oms_output_read ")).split(" ", 2)[2])
+assert read_capture(Path(args["repo"]), args)["content"] == "hello\n한글 줄\n"
+' "$ROOT/scripts/lib" || fail "advertised arguments should retrieve the stored command output"
   raw="$(printf '%s\n' "$out" | sed -n 's/^raw: \([^ ]*\)  sha256=.*/\1/p')"
   [ -f "$raw" ] || fail "the raw capture should be kept at the path the digest names: $raw"
   [ "$(cat "$raw")" = "$(printf 'hello\n한글 줄')" ] || fail "the raw capture must be the command's output, unchanged"
@@ -1746,9 +1755,11 @@ test_output_digest_keeps_failures_and_exit_code() {
   rm -rf .oms
   out="$("$ROOT/scripts/output-digest.sh" --no-store -- echo once)" || fail "--no-store digest should succeed"
   contains "$out" 'raw: not kept' || fail "--no-store should name no file"
+  ! contains "$out" 'oms_output_read' || fail "--no-store must advertise no reader"
   [ ! -e .oms ] || fail "--no-store must write nothing under .oms"
   out="$(OMS_HARNESS_CHILD=1 "$ROOT/scripts/output-digest.sh" -- echo child)" || fail "a child digest should succeed"
   contains "$out" 'raw: not kept' || fail "a harness child keeps no capture"
+  ! contains "$out" 'oms_output_read' || fail "a child must advertise no reader"
   [ ! -e .oms ] || fail "a harness child must write nothing under .oms"
   printf 'ok 1\nFAIL: the thing broke\n' > "$dir/existing.log"
   out="$("$ROOT/scripts/output-digest.sh" --file "$dir/existing.log" --exit-code 2 --json)" ||
@@ -1757,7 +1768,132 @@ test_output_digest_keeps_failures_and_exit_code() {
   contains "$out" '"exit_code": 2' || fail "--file --exit-code should be reported"
   contains "$out" '"smoke": 1' || fail "--file should recognise the failure line"
   contains "$out" 'not a tokenizer' || fail "the size estimate must name its method"
+  ! contains "$out" 'capture_ref' || fail "--file must advertise no retained reader"
   [ ! -e .oms ] || fail "--file must store nothing"
+
+  # Complete-data representations are independently reconstructible; loss marking
+  # also covers cuts within a retained line, UTF-8 and the source's real newline sizes.
+  python3 - "$ROOT" "$dir" <<'PY' || fail "output digest representation/loss contracts failed"
+from contextlib import redirect_stdout
+from io import StringIO
+import json
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(sys.argv[1]) / "scripts/lib"))
+import output_digest as digest
+import output_capture as stored_capture
+
+root, directory = Path(sys.argv[1]), Path(sys.argv[2])
+
+def capture(name, text, **kwargs):
+    path = directory / name
+    path.write_text(text, encoding="utf-8")
+    doc = digest.build(path, **kwargs)
+    assert len(doc["text"].encode("utf-8")) <= kwargs.get("max_bytes", 4000), doc
+    assert doc == digest.build(path, **kwargs), "representation must be deterministic"
+    assert doc == digest.build_bytes(path.read_bytes(), **kwargs), "byte replay must equal file reads"
+    return path, doc
+
+for ending in ("", "\n"):
+    path, doc = capture("unicode.log", "가" * 400 + ending)
+    assert doc["shown"]["mode"] != "whole", "a clipped line must never claim completeness"
+    assert doc["shown"]["omitted_bytes"] == 300, doc
+    assert doc["transformations"]["clipped_chars"] == 100
+    assert doc["transformations"]["clipped_lines"] == 1
+    assert "nothing omitted" not in digest.render(doc)
+path, doc = capture("normalized.log", "\x1b[31m값\x1b[0m  \n")
+assert doc["transformations"]["normalized_bytes"] == 11
+assert doc["shown"]["omitted_bytes"] == 11
+path, doc = capture("empty.log", "")
+assert doc["raw"]["lines"] == 0 and doc["shown"]["omitted_bytes"] == 0
+
+records = [{"measurement_identifier": index, "nullable_observation": None,
+            "boolean_observation": bool(index % 2), "integer_observation": 1,
+            "float_observation": 1.0, "string_observation": "1",
+            "scientific_string": "C1=CC=CC=C1/ΔG=-7.0100e-05"} for index in range(64)]
+records[31]["scientific_string"] = "rare middle observation " + "Δ" * 400
+del records[32]["nullable_observation"]
+source = json.dumps(records, ensure_ascii=False, indent=2)
+path, doc = capture("records.json", source, max_bytes=9000)
+assert doc["representation"]["algorithm"] == "json-table", doc["representation"]
+assert doc["representation"]["lossless"] and not doc["representation"]["source_bytes_lossless"]
+table = json.loads(doc["text"])
+restored = [{key: cell for key, cell in zip(table["keys"], row) if cell != []} for row in table["rows"]]
+assert json.dumps(restored, sort_keys=True, ensure_ascii=False) == json.dumps(records, sort_keys=True, ensure_ascii=False)
+assert doc["shown"]["omitted_lines"] == 0 and doc["shown"]["omitted_bytes"] == 0
+assert doc["transformations"]["json_formatting"]
+assert digest.build(path, max_bytes=9000, strategy="legacy")["representation"]["algorithm"] == "none"
+assert digest.build(path, max_bytes=256)["representation"]["algorithm"] == "none"
+
+for value in ('{"repeated_field":1,"repeated_field":2}', '{"repeated_field":NaN}',
+              '{"repeated_field":Infinity}', '{"repeated_field":[1]}',
+              '{"repeated_field":1e-400}', '{"repeated_field":1.234567890123456789}',
+              '{"repeated_field":1e-999999999999999999999}',
+              '{"repeated_field":"\\ud800"}', '{"\\ud800":1}'):
+    _path, declined = capture("unsupported.json", "[" + ",".join([value] * 40) + "]", max_bytes=400)
+    assert declined["representation"]["algorithm"] == "none", value
+
+for ending in ("", "\n"):
+    log = "\n".join(["INFO step 1: x=1.0000e-05"] * 120 + ["FAIL: rare middle failure Δ"]
+                    + ["INFO step 2: x=2.0000e-05"] * 120) + ending
+    path, doc = capture("repeated.log", log, exit_code=3, max_bytes=1000)
+    assert doc["representation"]["algorithm"] == "repeated-lines"
+    packed = json.loads(doc["text"])
+    restored = "\n".join(line for count, line in packed["runs"] for _ in range(count))
+    restored += "\n" if packed["final_newline"] else ""
+    assert restored == log and doc["exit_code"] == 3
+    assert doc["failures"]["matched"] == doc["failures"]["shown"] == 1
+
+code = 'def f(x):\n    return "1e-400"  # a scientific literal\n'
+path, doc = capture("ordinary.py", code)
+assert doc["text"] == code.rstrip("\n") and doc["shown"]["mode"] == "whole"
+_path, doc = capture("repeated-code.py", code * 100, max_bytes=800)
+assert doc["representation"]["algorithm"] == "none"
+
+old_cap = digest.READ_CAP
+digest.READ_CAP = 128
+try:
+    _path, doc = capture("capped.log", "INFO repeated step\n" * 100, max_bytes=1000)
+    assert doc["raw"]["unread_leading_bytes"] > 0
+    assert doc["representation"]["algorithm"] == "none"
+    assert doc["shown"]["omitted_bytes"] >= doc["raw"]["unread_leading_bytes"]
+finally:
+    digest.READ_CAP = old_cap
+
+retained_repo = directory / "retained"
+retained = retained_repo / stored_capture.CAPTURE_ROOT / "20261112T123456Z-1.log"
+retained.parent.mkdir(parents=True)
+with patch.object(stored_capture, "READ_CAP", 128):
+    for size in (128, 129):
+        retained.write_bytes(b"x" * size)
+        output = StringIO()
+        with redirect_stdout(output):
+            assert digest.main([str(retained), "--capture-repo", str(retained_repo), "--json"]) == 0
+        issued = json.loads(output.getvalue())
+        if size == 128:
+            assert issued["raw"]["read_tool"] == "oms_output_read"
+            assert "read_unavailable_reason" not in issued["raw"]
+        else:
+            assert "read_tool" not in issued["raw"] and "read_arguments" not in issued["raw"]
+            assert issued["raw"]["read_unavailable_reason"] == "capture_too_large"
+            assert issued["raw"]["read_max_bytes"] == 128
+            assert "read: unavailable (capture_too_large)" in digest.render(issued)
+        assert retained.read_bytes() == b"x" * size
+
+for kwargs in ({"strategy": "unknown"}, {"max_bytes": 255}, {"head": -1}, {"tail": 10001}):
+    try:
+        digest.build(path, **kwargs)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bad build request accepted: %r" % kwargs)
+result = subprocess.run([sys.executable, str(root / "scripts/lib/output_digest.py"), str(path),
+                         "--strategy", "unknown"], capture_output=True)
+assert result.returncode == 2
+PY
 
   # Bad requests are refused before anything runs, and retention keeps the newest captures only.
   if "$ROOT/scripts/output-digest.sh" --file "$dir/existing.log" -- echo no >/dev/null 2>&1; then
@@ -1766,6 +1902,10 @@ test_output_digest_keeps_failures_and_exit_code() {
   if "$ROOT/scripts/output-digest.sh" --max-bytes 10 -- echo no >/dev/null 2>&1; then
     fail "an out-of-range budget should be refused"
   fi
+  if "$ROOT/scripts/output-digest.sh" --strategy unknown -- touch "$dir/should-not-run" >/dev/null 2>&1; then
+    fail "an invalid strategy should be refused"
+  fi
+  [ ! -e "$dir/should-not-run" ] || fail "strategy validation must precede command execution"
   mkdir -p .oms/artifacts/output-digest
   local n=0
   while [ "$n" -lt 55 ]; do
@@ -2207,6 +2347,17 @@ test_state_root_follows_a_parent_scratch_to_the_main_checkout() {
   grep -q '"summary": "child"' "$scratch/.oms/failures.jsonl" &&
     ! grep -q '"summary": "child"' "$main/.oms/failures.jsonl" ||
     fail "a harness child's failure must stay in the scratch's ledger"
+  # Capture replay must find the same shared store as the parent writer.
+  ( cd "$scratch/src" && $parent "$ROOT/scripts/output-digest.sh" --json -- printf 'INFO shared capture\n' ) > "$TMP/state-root-digest.json"
+  $parent "$ROOT/scripts/artifact-index.sh" --repo "$scratch/src" telemetry --outputs --json > "$TMP/state-root-replay.json"
+  $parent OMS_HARNESS_CHILD=1 "$ROOT/scripts/artifact-index.sh" --repo "$scratch" telemetry --outputs --json > "$TMP/state-root-child-replay.json"
+  python3 - "$main" "$TMP/state-root-digest.json" "$TMP/state-root-replay.json" "$TMP/state-root-child-replay.json" <<'PYOUTPUT' || fail "output replay must follow capture state ownership"
+import json, pathlib, sys
+digest, parent, child = (json.loads(pathlib.Path(p).read_text()) for p in sys.argv[2:])
+assert digest["raw"]["read_arguments"]["repo"] == sys.argv[1]
+assert parent["totals"]["captures"] == 1 and child["totals"]["captures"] == 0
+assert parent["items"][0]["sha256"] == digest["raw"]["sha256"]
+PYOUTPUT
   # The parent's plan commands read and write the main checkout's plan; the scratch gets none.
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$project" init --goal shared >/dev/null || fail "plan init failed"
   $parent "$ROOT/scripts/agent-plan.sh" --repo "$scratch/src" add --id from-scratch --title t >/dev/null ||
@@ -17301,6 +17452,33 @@ assert c["model_switches"]["switches"] == 1 and c["stored_output_bytes"]["files"
     fail "--top needs --waste"
   ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" telemetry --waste --top 0 >/dev/null 2>&1 ||
     fail "--top must be positive"
+  # Replay compares full response bytes, keeps completeness separate, and
+  # does not turn synthetic bytes into provider-token or task-quality claims.
+  python3 - "$ROOT" "$waste" <<'PY' || fail "output replay should be bounded and read-only"
+import json, pathlib, subprocess, sys
+root, repo = map(pathlib.Path, sys.argv[1:])
+store = repo / ".oms/artifacts/output-digest"
+(store / "20261112T000001Z-1.log").write_text("INFO repeat this observation\n" * 500)
+with (store / "20261112T000002Z-1.log").open("wb") as handle:
+    handle.truncate(4 * 1024 * 1024 + 1)
+before = {p: p.read_bytes() for p in (repo / ".oms").rglob("*") if p.is_file()}
+cmd = [str(root / "scripts/artifact-index.sh"), "--repo", str(repo), "telemetry", "--outputs"]
+result = json.loads(subprocess.check_output(cmd + ["--json"], text=True))
+assert result["kind"] == "oms-output-replay" and result["totals"]["captures"] == 3, result
+assert result["skipped"][0]["reason"] == "capture_too_large", result
+assert result["provider_tokens"] is result["retrieval_response_bytes"] is result["task_success"] is None
+assert result["items"][0]["auto"]["algorithm"] == "repeated-lines" and result["items"][0]["auto"]["complete"]
+assert result["totals"]["response_bytes_saved"] == sum(i["response_bytes_saved"] for i in result["items"])
+assert result["items"][0]["response_bytes_saved"] > 0
+assert json.loads(subprocess.check_output(cmd + ["1", "--json"], text=True))["window"]["capped"]
+for extra in (["51"], ["--by", "day"], ["--waste"], ["--since", "2026-01-01"],
+              ["--file", str(repo / ".oms/artifacts/index.jsonl")]):
+    assert subprocess.run(cmd + extra, capture_output=True).returncode != 0, extra
+assert "Provider tokens" in subprocess.check_output(cmd, text=True)
+assert before == {p: p.read_bytes() for p in (repo / ".oms").rglob("*") if p.is_file()}
+PY
+  ! "$ROOT/scripts/artifact-index.sh" --repo "$usage" list --outputs >/dev/null 2>&1 ||
+    fail "--outputs is valid only with telemetry"
   # The writer records the role on delegate rows only.
   local wrote="$project/roles-write"
   mkdir -p "$wrote"

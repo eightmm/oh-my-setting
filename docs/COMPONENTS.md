@@ -858,13 +858,47 @@ bounded digest instead of the log: the exit code, line and byte counts, the raw
 file's path and sha256, the failure lines a recogniser matched (pytest,
 unittest, smoke `FAIL:`, tracebacks, compiler and lint errors, common runtime
 failures), a head and a tail, and how many lines and bytes it left out. Its
-exit code is the command's. Output that fits `--max-bytes` (default 4000) is
-shown whole. When cutting, failure lines are spent first, then the tail, then
+exit code is the command's. All lines that fit `--max-bytes` (default 4000) are
+shown, with any line transformation marked. When cutting, failure lines are spent first, then the tail, then
 the head; escape codes are stripped from the view, a line past 300 characters
 is cut with the cut counted, and a capture that ends mid-line says so. A
 failing log no recogniser matches is shown as a raw head and tail and labelled
 as such, not as a diagnosis. `--file PATH [--exit-code N]` digests an existing
 capture without running or storing anything; `--json` prints schema 1.
+
+`--strategy auto` (default) also tries two stdlib-only complete representations
+when the source exceeds the text budget: a JSON table (`keys` and scalar `rows`,
+with `[]` denoting a missing field) and exact consecutive log runs. A reducer is
+used only when its entire result fits and saves at least 20% and 64 bytes against
+the source text. JSON tables preserve every row, field, scalar type and numeric
+value; formatting and key order may change. Nested values, duplicate keys,
+non-finite or precision-changing numbers and invalid UTF-8 decline the table.
+Log runs preserve every line, repeat count, order and final-newline flag; only
+recognized log prefixes or failure lines qualify. Scientific records are never
+sampled, ranked or summarized. Unsupported output keeps the failure/head/tail
+view. `--strategy legacy` selects that view directly and retains truthful loss
+metadata. Long-line clipping, ANSI/control/whitespace normalization and invalid
+UTF-8 replacement are reported separately; transformed output never claims
+that nothing was omitted. The text budget covers the displayed payload, not
+the metadata frame. A complete table can be larger than a lossy legacy view;
+use the replay report below to compare them.
+
+Retained run captures include `raw.capture_ref`, `raw.capture_sha256`, and exact
+`raw.read_arguments` for the read-only core MCP tool `oms_output_read`. The tool
+accepts those arguments plus a UTF-8 byte `offset` and `limit` (4..16384, default
+16384), or a case-sensitive literal `query` (1..256 UTF-8 bytes, up to eight
+matches, incompatible with an explicit `limit`). Results include continuation
+arguments, offsets, stored-byte SHA and content sizes. Invalid UTF-8 is replaced
+for display, so offsets refer to normalized text while the hash describes the
+exact stored bytes. Each request revalidates the complete capture, up to 64 MiB.
+Larger retained captures keep their file and SHA, but advertise no MCP reader:
+`raw.read_unavailable_reason=capture_too_large` and `raw.read_max_bytes` explain
+the read limit in JSON, and the text view also reports it.
+References bind canonical repository, generated filename and stored hash;
+they are integrity references, not authorization credentials. Arbitrary paths,
+symlinked stores/files, hardlinks and stale hashes are refused. Missing or
+evicted captures fail explicitly and never rerun the command. `--file`,
+`--no-store`, harness-child and withheld views advertise no capture reader.
 
 No model is called. Before the capture is kept, every line the shared secret
 scan flags (the outbound scrubber's pattern and env-value check, no second
@@ -1163,6 +1197,18 @@ totals per session (injection ledger); and the largest `output-digest` captures
 share of its total. Values are reported, never approval evidence, and a category
 that is absent or `not recorded` means the data was not recorded, not that
 nothing was wasted. The last three ignore `--since`/`--until`.
+`oms artifact-index telemetry --outputs [N] [--json]` replays retained
+`output-digest` captures against the current `legacy` and `auto` strategies at
+the default 4000-byte text budget. It reports complete rendered response bytes,
+including the metadata frame and retrieval reference, and whether every source
+byte or JSON value/type is represented. Negative savings mean a larger
+response. This is a read-only replay, not measured provider-token savings:
+original command settings, exit code and duration are unavailable; later
+retrieval cost, cache effects and task success are unobserved. Nothing is
+written or sent to a model. The default is 20 captures (maximum 50), with a
+4 MiB per-capture and 16 MiB total input cap; skipped captures and capped windows
+are explicit. This view needs no artifact-index rows and cannot combine with
+`--by`, `--waste`, `--since`, `--until` or `--file`.
 No extra run, timer, model, test omission or automatic delegation is introduced.
 Explicit repeated-failure advice bypasses replay: a different agent contributes
 to that trajectory and its cost, so single-worker evidence is not comparable.
@@ -1599,7 +1645,7 @@ records explicit consumption (not approval). Each hook session retains a small
 delivery cursor, never a second transcript. Worktrees can address the canonical
 log explicitly with `--repo`; no cross-machine sync or forced live-model
 interruption is implied. MCP reuses `oms_peer_start` message/ack modes and
-`oms_peer_result(thread, after)` without increasing its 12-tool core catalog.
+`oms_peer_result(thread, after)` without adding separate live-thread tools.
 
 
 #### Bounded operation waits
@@ -3164,10 +3210,10 @@ oversized input is rejected before provider argv or prompt files are built.
 
 #### Tool discovery profiles
 
-By default `tools/list` exposes 12 core tools: inbox, repo state, journal,
-handoff list/read, peer start/result/operations, and graph render/query/trace/
+By default `tools/list` exposes 13 core tools: inbox, repo state, journal,
+handoff list/read, peer start/result/operations, output capture read, and graph render/query/trace/
 affected. Set `OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment
-and restart its connection to discover all 27 tools; `core` is the default.
+and restart its connection to discover all 28 tools; `core` is the default.
 The profile is fixed at process startup, so cached discovery is stable.
 Unlisted registered tools remain callable for existing clients: this setting
 reduces discovery overhead, not permissions. Schemas, annotations, UI resources,
