@@ -202,7 +202,7 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             "work-journal",
         ),
     ] {
-        if let Some(raw) = rt.bytes(path, MAX_STATE)? {
+        if let Ok(Some(raw)) = rt.bytes(path, MAX_STATE) {
             let path = PathBuf::from(path);
             bytes.insert(path.clone(), raw.to_vec());
             candidates.push(Candidate {
@@ -306,7 +306,11 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
     for raw in needed {
         match acquire(rt, &raw, request.allow_external) {
             Ok((path, name, data)) => {
-                required.insert(name.clone());
+                required.insert(if path.is_absolute() {
+                    label(&path)?
+                } else {
+                    name.clone()
+                });
                 bytes.entry(path.clone()).or_insert(data);
                 candidates.push(Candidate {
                     path,
@@ -321,7 +325,7 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
             }
         }
     }
-    if rt.bytes("PROJECT.md", MAX_STATE)?.is_some() {
+    if std::fs::symlink_metadata(rt.repo.join("PROJECT.md")).is_ok() {
         required.insert("PROJECT.md".into());
     }
     let mut best = BTreeMap::<PathBuf, Candidate>::new();
@@ -441,10 +445,18 @@ pub fn plan(rt: &Runtime<'_>, request: &ContextRequest) -> Result<Value> {
         .manifest
         .clone()
         .unwrap_or_else(|| format!(".oms/runtime/context/{digest}.json").into());
-    rt.write(&bundle_path, &bundle, MAX_STATE)?;
-    manifest.set("bundle_path", os(bundle_path.as_os_str()))?;
-    rt.write_json(&manifest_path, &manifest)?;
-    manifest.set("manifest_path", os(manifest_path.as_os_str()))?;
+    if request.bundle.is_some() {
+        rt.write_output(&bundle_path, &bundle, MAX_STATE)?;
+    } else {
+        rt.write(&bundle_path, &bundle, MAX_STATE)?;
+    }
+    manifest.set("bundle_path", rt.output_label(&bundle_path))?;
+    if request.manifest.is_some() {
+        rt.write_json_output(&manifest_path, &manifest)?;
+    } else {
+        rt.write_json(&manifest_path, &manifest)?;
+    }
+    manifest.set("manifest_path", rt.output_label(&manifest_path))?;
     Ok(manifest)
 }
 pub fn inspect(rt: &Runtime<'_>, request: &Request) -> Result<Value> {
@@ -488,11 +500,16 @@ pub fn inspect(rt: &Runtime<'_>, request: &Request) -> Result<Value> {
     }
     if let Some(session) = session {
         let path = rt.user_path(session)?;
-        let path = if path.is_absolute() {
-            path
-        } else {
-            rt.repo.join(path)
-        };
+        let path =
+            if Path::new(session).is_absolute() || session.as_encoded_bytes().starts_with(b"~") {
+                if path.is_absolute() {
+                    path
+                } else {
+                    rt.repo.join(path)
+                }
+            } else {
+                rt.cwd.join(session)
+            };
         return from_serde(
             &if request.has("timeline") {
                 oms_context_source::inspect_timeline(&path, 200, cancel)
@@ -502,14 +519,17 @@ pub fn inspect(rt: &Runtime<'_>, request: &Request) -> Result<Value> {
             .map_err(error)?,
         );
     }
-    let root = Root::open(&rt.repo).map_err(|e| error(format!("context manifest: {e:?}")))?;
-    let left_path = rt.user_path(manifest.unwrap())?;
+    let left_path = PathBuf::from(manifest.unwrap());
+    let root = Root::open(rt.source_root(&left_path))
+        .map_err(|e| error(format!("context manifest: {e:?}")))?;
     let left = root
         .read_manifest(&left_path, 4 * 1024 * 1024)
         .map_err(|e| error(format!("context manifest: {e:?}")))?;
     let mut result = if let Some(right) = request.os("compare") {
-        let path = rt.user_path(right)?;
-        let right = root
+        let path = PathBuf::from(right);
+        let right_root = Root::open(rt.source_root(&path))
+            .map_err(|e| error(format!("context manifest: {e:?}")))?;
+        let right = right_root
             .read_manifest(&path, 4 * 1024 * 1024)
             .map_err(|e| error(format!("context manifest: {e:?}")))?;
         oms_context::compare_manifests(&left, &right, limit)
@@ -527,7 +547,9 @@ pub fn inspect(rt: &Runtime<'_>, request: &Request) -> Result<Value> {
         for source in sources {
             rt.check()?;
             let path = crate::value::path(source.get("path"))?;
-            let state = match root.read_os(&path, 2 * 1024 * 1024, Policy::source()) {
+            let sources = Root::open(rt.source_root(Path::new(&path)))
+                .map_err(|e| error(format!("context sources: {e:?}")))?;
+            let state = match sources.read_os(&path, 2 * 1024 * 1024, Policy::source()) {
                 Ok(raw) => {
                     if sha(raw) == source.text("sha256") {
                         0

@@ -35,6 +35,12 @@ fn statement(s: &str) -> String {
     md::strip_criterion_marker(&md::bounded_line(s, usize::MAX))
 }
 pub fn project(rt: &Runtime<'_>) -> Result<Value> {
+    match std::fs::symlink_metadata(rt.repo.join("PROJECT.md")) {
+        Ok(m) if !m.is_file() || m.file_type().is_symlink() => return Ok(absent()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(absent()),
+        Err(e) => return Err(error(e)),
+        _ => {}
+    }
     let Some(text) = rt.text("PROJECT.md")? else {
         return Ok(absent());
     };
@@ -543,7 +549,7 @@ pub fn criteria(project: &Value, task: &Value, plan: &Value) -> Result<Value> {
     Ok(a(out))
 }
 pub fn failures(rt: &Runtime<'_>) -> Result<Value> {
-    let mut result = Vec::new();
+    let mut canonical = Vec::new();
     if let Some(raw) = rt.bytes(".oms/failures.jsonl", crate::storage::MAX_STREAM)? {
         let payload = parse(
             &rt.services
@@ -573,7 +579,7 @@ pub fn failures(rt: &Runtime<'_>) -> Result<Value> {
                 },
                 300,
             );
-            result.push(failure_item(
+            canonical.push(failure_item(
                 row,
                 &summary,
                 ".oms/failures.jsonl",
@@ -614,7 +620,18 @@ pub fn failures(rt: &Runtime<'_>) -> Result<Value> {
             }
         }
     }
+    if rt
+        .bytes(".oms/failures.jsonl", crate::storage::MAX_STREAM)?
+        .is_some()
+    {
+        paths.insert(std::path::PathBuf::from(".oms/failures.jsonl"));
+    }
+    let mut result = Vec::new();
     for path in paths {
+        if path == std::path::Path::new(".oms/failures.jsonl") {
+            result.extend(std::mem::take(&mut canonical));
+            continue;
+        }
         let path = path
             .to_str()
             .ok_or_else(|| error("failure source path is not UTF-8"))?;
@@ -792,8 +809,8 @@ pub fn base(rt: &Runtime<'_>) -> Result<Value> {
     ]))
 }
 pub fn finalize(mut base: Value, evidence: Value) -> Result<Value> {
-    let raw = oms_context::parse_json(&canonical(&base)?).map_err(error)?;
-    let ev = oms_context::parse_json(&canonical(&evidence)?).map_err(error)?;
+    let raw = to_native(&base);
+    let ev = to_native(&evidence);
     let completion = oms_work_inspect::envelope_completion(&raw, &ev).map_err(error)?;
     base.set("criteria", evidence.get("criteria").clone())?;
     base.set("evidence", without(&evidence, &["criteria"]))?;

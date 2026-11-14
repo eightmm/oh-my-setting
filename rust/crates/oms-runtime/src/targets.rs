@@ -95,7 +95,7 @@ pub fn update(
     value.set("targets", entries)?;
     let mut bytes = sorted_pretty(&value)?;
     bytes.push(b'\n');
-    rt.write_locked(Path::new(FILE), &bytes, crate::storage::MAX_STATE)?;
+    rt.write_locked(Path::new(FILE), &bytes, crate::storage::MAX_STATE, &_guard)?;
     Ok(value)
 }
 pub fn check(rt: &Runtime<'_>, target: &str) -> Result<Value> {

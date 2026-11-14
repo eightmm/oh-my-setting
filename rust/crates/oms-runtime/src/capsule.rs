@@ -271,12 +271,16 @@ pub fn export(rt: &Runtime<'_>, output: Option<&Path>) -> Result<Value> {
     let destination = output.map(Path::to_path_buf).unwrap_or_else(|| {
         format!(".oms/portable/capsules/{}.json", raw.text("capsule_id")).into()
     });
-    rt.write_json(&destination, &raw)?;
+    if output.is_some() {
+        rt.write_json_output(&destination, &raw)?;
+    } else {
+        rt.write_json(&destination, &raw)?;
+    }
     Ok(object([
         ("schema", number(1)),
         ("capsule_id", raw.get("capsule_id").clone()),
         ("digest", raw.get("digest").clone()),
-        ("path", os(destination.as_os_str())),
+        ("path", rt.output_label(&destination)),
         ("authority_transfer", b(false)),
     ]))
 }
@@ -313,12 +317,13 @@ pub fn import(rt: &Runtime<'_>, path: &std::ffi::OsStr) -> Result<Value> {
             ("advisory", b(true)),
             ("capsule", raw.clone()),
         ]);
-        rt.write_locked(p, &encoded(&wrapper)?, MAX + 4096)?;
+        rt.write_locked(p, &encoded(&wrapper)?, MAX + 4096, &_guard)?;
     }
     rt.write_locked(
         Path::new(".oms/portable/imports/LATEST"),
         format!("{id}\n").as_bytes(),
         128,
+        &_guard,
     )?;
     Ok(object([
         ("schema", number(1)),

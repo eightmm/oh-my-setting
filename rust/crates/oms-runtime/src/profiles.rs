@@ -19,7 +19,16 @@ pub fn catalog(rt: &Runtime<'_>) -> Result<Value> {
     let store = oms_command_plan::storage::Store::open(&rt.install_root)?
         .with_group_resolver(rt.services.group_resolver());
     let raw = match store.optional("config/capability-profiles.json", crate::storage::MAX_STATE)? {
-        Some(raw) => parse(&raw)?,
+        Some(raw) => {
+            let value = parse(&raw)?;
+            if matches!(value, Value::Null) {
+                parse(include_bytes!(
+                    "../../../../config/capability-profiles.json"
+                ))?
+            } else {
+                value
+            }
+        }
         None => parse(include_bytes!(
             "../../../../config/capability-profiles.json"
         ))?,

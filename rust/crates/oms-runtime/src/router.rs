@@ -17,7 +17,11 @@ impl Response {
         Self {
             code: error.code,
             stdout: vec![],
-            stderr: format!("runtime-core: {error}\n").into_bytes(),
+            stderr: if error.message.starts_with("usage: oms runtime") {
+                error.message.into_bytes()
+            } else {
+                format!("runtime-core: {error}\n").into_bytes()
+            },
         }
     }
     pub fn text(value: impl AsRef<str>) -> Self {
@@ -70,13 +74,14 @@ pub fn run(
         }
         authorize(&request)?;
         let roots = services.resolve_roots(cwd, &request.repo)?;
-        let runtime = Runtime::open(
+        let mut runtime = Runtime::open(
             &roots.execution_repo,
             &roots.state_repo,
             install_root,
             services,
             interrupted,
         )?;
+        runtime.cwd = cwd.to_path_buf();
         dispatch(&runtime, &request)
     })();
     result.unwrap_or_else(Response::failure)
@@ -128,9 +133,9 @@ fn report(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
         let before = r
             .os("before")
             .map(|p| {
-                let root = oms_safe_fs::Root::open(&rt.repo)
+                let path = std::path::PathBuf::from(p);
+                let root = oms_safe_fs::Root::open(rt.source_root(&path))
                     .map_err(|_| error("cannot safely read the selected prior envelope"))?;
-                let path = rt.user_path(p)?;
                 let raw = root
                     .read_manifest(&path, 4 * 1024 * 1024)
                     .map_err(|_| error("cannot safely read the selected prior envelope"))?;
@@ -181,8 +186,12 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                     .os("output")
                     .unwrap_or(OsStr::new(".oms/runtime/effective-contract.json"));
                 let output = rt.user_path(output)?;
-                rt.write_json(&output, &value)?;
-                object([("written", os(output.as_os_str())), ("envelope", value)])
+                if r.has("output") {
+                    rt.write_json_output(&output, &value)?;
+                } else {
+                    rt.write_json(&output, &value)?;
+                }
+                object([("written", rt.output_label(&output)), ("envelope", value)])
             } else {
                 value
             }
@@ -256,7 +265,11 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                 .map(|s| {
                     use std::os::unix::ffi::{OsStrExt, OsStringExt};
                     let raw = s.as_bytes();
-                    if let Some(i) = raw.iter().position(|b| *b == b':').filter(|i| *i != 1) {
+                    if let Some(i) = raw
+                        .iter()
+                        .position(|b| *b == b':')
+                        .filter(|i| !(*i == 1 && raw.len() > 2))
+                    {
                         Ok((
                             OsString::from_vec(raw[..i].to_vec()),
                             String::from_utf8(raw[i + 1..].to_vec()).map_err(error)?,
@@ -552,7 +565,7 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
             "template" => {
                 let value = from_native(&oms_experiment::template());
                 if let Some(p) = path_option(rt, r, "output")? {
-                    rt.write_json(&p, &value)?;
+                    rt.write_json_output(&p, &value)?;
                 }
                 value
             }

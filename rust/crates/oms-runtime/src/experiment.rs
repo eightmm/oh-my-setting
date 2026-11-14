@@ -1,6 +1,7 @@
 //! Experiment contracts reuse native normalization; runtime owns linkage and budgets.
 use crate::parser::Request;
 use crate::services::LedgerRequest;
+use crate::statistics::{mean, stdev};
 use crate::storage::{Runtime, random_id};
 use crate::value::*;
 use crate::{Result, error, require};
@@ -9,7 +10,7 @@ use std::path::Path;
 const RUNS: &str = ".oms/experiments/runs.jsonl";
 const RESERVATIONS: &str = ".oms/experiments/budget-reservations.jsonl";
 pub fn validate(raw: &Value) -> Result<Value> {
-    let native = oms_context::parse_json(&canonical(raw)?).map_err(error)?;
+    let native = to_native(raw);
     let report = oms_experiment::validate(&native).map_err(error)?;
     Ok(from_native(&report.normalized))
 }
@@ -51,11 +52,9 @@ pub fn register(rt: &Runtime<'_>, raw: &Value, name: &str) -> Result<Value> {
     )?;
     contract.set("experiment_id", string(name))?;
     contract.set("registered_at", string(&rt.now))?;
-    rt.write_locked(
-        Path::new(&path),
-        &encoded(&contract)?,
-        crate::storage::MAX_STATE,
-    )?;
+    let mut body = sorted_pretty(&contract)?;
+    body.push(b'\n');
+    rt.write_locked(Path::new(&path), &body, body.len(), &_guard)?;
     Ok(object([
         ("schema", number(1)),
         ("experiment_id", string(name)),
@@ -63,27 +62,16 @@ pub fn register(rt: &Runtime<'_>, raw: &Value, name: &str) -> Result<Value> {
         ("path", string(path)),
     ]))
 }
-fn mean(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.iter().map(|v| *v / values.len() as f64).sum())
-    }
-}
-fn stdev(values: &[f64]) -> Option<f64> {
-    let m = mean(values)?;
-    Some(if values.len() == 1 {
-        0.0
-    } else {
-        (values
-            .iter()
-            .map(|v| (v - m).powi(2) / (values.len() - 1) as f64)
-            .sum::<f64>())
-        .sqrt()
-    })
-}
 fn numeric(n: Option<f64>) -> Value {
     n.map(number).unwrap_or(Value::Null)
+}
+fn integer_zero(value: &Value) -> Option<bool> {
+    let Value::Number(raw) = value else {
+        return None;
+    };
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.bytes().all(|b| b == b'0'))
 }
 fn result_values(results: &Value, arm: &str, metric: &str, primary: &str) -> Vec<f64> {
     let arm = results.get(arm);
@@ -181,7 +169,10 @@ pub fn evaluate(raw: &Value, results: &Value) -> Result<Value> {
             Value::Bool(v) => Some(*v),
             _ => match raw.get("passed") {
                 Value::Bool(v) => Some(*v),
-                _ => raw.get("exit").int().ok().map(|n| n == 0),
+                _ => match raw.get("exit") {
+                    Value::Bool(v) => Some(!*v),
+                    v => integer_zero(v),
+                },
             },
         };
         invariant_complete &= ok.is_some();
@@ -284,8 +275,10 @@ pub fn budget_status(rt: &Runtime<'_>, contract: &Value, experiment_id: &str) ->
             let gone = if age.is_some_and(|v| v > 3600) {
                 if let Ok(pid) = row.get("pid").int() {
                     if let Ok(pid) = u32::try_from(pid) {
-                        rt.services
-                            .reservation_process_gone(row.text("host"), pid)?
+                        pid > 0
+                            && rt
+                                .services
+                                .reservation_process_gone(row.text("host"), pid)?
                     } else {
                         false
                     }
@@ -308,11 +301,11 @@ pub fn budget_status(rt: &Runtime<'_>, contract: &Value, experiment_id: &str) ->
             ("limit", limit.clone()),
             ("used", number(used)),
             ("reserved", number(count)),
+            ("remaining", subtract_count(limit, used + count)?),
             (
-                "remaining",
-                number((limit.int()? - (used + count) as i128).max(0)),
+                "exceeded",
+                b(subtract_count(limit, used + count)?.is_int(0)),
             ),
-            ("exceeded", b((used + count) as i128 >= limit.int()?)),
             ("stale", a(stale)),
         ]);
         if count > 0 {
@@ -380,7 +373,7 @@ fn reserve(
     if !override_reason.is_empty() {
         row.set("budget_override_reason", string(&override_reason))?;
     }
-    rt.append_locked(Path::new(RESERVATIONS), &row)?;
+    rt.append_locked(Path::new(RESERVATIONS), &row, &_guard)?;
     Ok((true, override_reason))
 }
 fn settle(
@@ -407,13 +400,19 @@ pub fn record_run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
     let name = r.text("id", "")?;
     let contract = load(rt, name)?;
     let arm = r.text("arm", "")?;
-    let seed = r.integer("seed", 0)?;
+    let seed_value = r.integer_value("seed", 0)?;
+    let seed = String::from_utf8(canonical(&seed_value)?).map_err(error)?;
     require(
         ["baseline", "treatment"].contains(&arm),
         "experiment arm must be baseline or treatment",
     )?;
     require(
-        rows(contract.get("seeds")).iter().any(|v| v.is_int(seed)),
+        rows(contract.get("seeds"))
+            .iter()
+            .map(canonical)
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .any(|v| v.as_slice() == seed.as_bytes()),
         format!("seed {seed} was not pre-registered"),
     )?;
     let metrics = rt.user_path(
@@ -542,7 +541,7 @@ pub fn record_run(rt: &Runtime<'_>, r: &Request) -> Result<(Value, i32)> {
         ("experiment_id", string(name)),
         ("contract_digest", contract.get("contract_digest").clone()),
         ("arm", string(arm)),
-        ("seed", number(seed)),
+        ("seed", seed_value.clone()),
         ("execution_receipt", receipt.get("receipt").clone()),
         (
             "execution_operation_id",
@@ -595,15 +594,20 @@ fn arm_summary(
     seeds: &[Value],
     metric: &str,
     digest: &str,
-) -> Value {
+) -> Result<Value> {
     let mut values = vec![];
     let mut missing = vec![];
     for seed in seeds {
-        let key = String::from_utf8(canonical(seed).unwrap_or_default()).unwrap_or_default();
-        let found = latest
+        let key = String::from_utf8(canonical(seed)?).map_err(error)?;
+        let candidate = latest
             .get(&key)
-            .filter(|r| r.get("exit").is_int(0))
-            .and_then(|r| finite(r.get("metrics").get(metric)));
+            .filter(|r| r.get("exit") == &b(false) || finite(r.get("exit")) == Some(0.0))
+            .map(|r| r.get("metrics").get(metric));
+        let found = candidate.and_then(finite);
+        require(
+            found.is_some() || !matches!(candidate, Some(Value::Number(_))),
+            "experiment metric cannot be represented as a finite float",
+        )?;
         if let Some(v) = found {
             values.push(v)
         } else {
@@ -611,7 +615,7 @@ fn arm_summary(
         }
     }
     let ci = oms_command_runs::metrics::bootstrap(&values, &format!("{digest}{metric}"));
-    object([
+    Ok(object([
         ("values", a(values.iter().copied().map(number))),
         ("n", number(values.len())),
         ("mean", numeric(mean(&values))),
@@ -621,7 +625,7 @@ fn arm_summary(
             ci.map(|v| a(v.map(number))).unwrap_or(Value::Null),
         ),
         ("missing_seeds", a(missing)),
-    ])
+    ]))
 }
 pub fn summarize(rt: &Runtime<'_>, name: &str) -> Result<Value> {
     let c = load(rt, name)?;
@@ -637,17 +641,21 @@ pub fn summarize(rt: &Runtime<'_>, name: &str) -> Result<Value> {
             "treatment" => 1,
             _ => continue,
         };
-        if row.get("seed").int().is_ok() {
-            latest[index].insert(
-                String::from_utf8(canonical(row.get("seed"))?).map_err(error)?,
-                row,
-            );
+        let key = match row.get("seed") {
+            Value::Bool(v) => Some(u8::from(*v).to_string()),
+            Value::Number(s) if !s.contains(['.', 'e', 'E']) => {
+                Some(String::from_utf8(canonical(row.get("seed"))?).map_err(error)?)
+            }
+            _ => None,
+        };
+        if let Some(key) = key {
+            latest[index].insert(key, row);
         }
     }
     let seeds = rows(c.get("seeds"));
     let primary = c.text("primary_metric");
-    let baseline = arm_summary(&latest[0], seeds, primary, &format!("{digest}baseline"));
-    let treatment = arm_summary(&latest[1], seeds, primary, &format!("{digest}treatment"));
+    let baseline = arm_summary(&latest[0], seeds, primary, &format!("{digest}baseline"))?;
+    let treatment = arm_summary(&latest[1], seeds, primary, &format!("{digest}treatment"))?;
     let data_complete =
         !baseline.get("missing_seeds").truth() && !treatment.get("missing_seeds").truth();
     let direction = c.get("metrics").get("primary").text("direction");
@@ -676,8 +684,8 @@ pub fn summarize(rt: &Runtime<'_>, name: &str) -> Result<Value> {
     let mut regression_pass = true;
     for (k, rule) in c.get("success").get("no_regression").object()? {
         let metric = std::str::from_utf8(k).map_err(error)?;
-        let l = arm_summary(&latest[0], seeds, metric, &format!("{digest}baseline"));
-        let r = arm_summary(&latest[1], seeds, metric, &format!("{digest}treatment"));
+        let l = arm_summary(&latest[0], seeds, metric, &format!("{digest}baseline"))?;
+        let r = arm_summary(&latest[1], seeds, metric, &format!("{digest}treatment"))?;
         let ready = !l.get("missing_seeds").truth() && !r.get("missing_seeds").truth();
         let delta = if ready {
             finite(l.get("mean"))

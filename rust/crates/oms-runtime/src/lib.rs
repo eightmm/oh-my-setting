@@ -33,6 +33,10 @@
 //! proof, backend readiness/supervision, profile installation, release Git and
 //! publication, SSH checkout transport, native run ledger, host/process identity,
 //! and reconciled GPU usage. `Unavailable` refuses each required producer.
+//! Named-user home expansion additionally needs read-only `account_home` metadata.
+//! Direct API consumers set `Runtime::cwd` to the invocation directory; `run`
+//! supplies it automatically. Guarded writes/appends require the held canonical
+//! lock, including the capsule pointer lock spanning its wrapper publication.
 //! Services must preserve real lifecycle/room/approval/lease authority and use
 //! the existing native task/plan/operations/runs/journal/memory producers. They
 //! must never infer execution, verification, isolation or publication success.
@@ -54,15 +58,33 @@
 //! | benchmark outcome/effectiveness streams | serialized native append; uncertain writes require reconciliation before retry |
 //! | backend logs/receipts; installer receipts; release manifest/refs; SSH checkout; run ledger/journal/memory | independent native producer owns locks, exact output, fsync, crash and process recovery |
 //!
+//! Runtime JSON uses the existing explicit-bound Python-string parser at 8 MiB;
+//! native value conversions impose no aggregate reparse. Strict context manifests
+//! retain their 4 MiB bound and duplicate/non-finite refusal. Runtime append checks
+//! an existing stream of at most 32 MiB, accepts a row of at most 1 MiB including
+//! LF, reads at most one prior EOF byte, and makes one O_APPEND write. It retains
+//! file/parent descriptors, generation and namespace proofs, and refuses torn
+//! tails. This is a static I/O budget, without a measured performance claim.
+//!
+//! Explicit envelope/template `--output`, capsule export `--output`, and context
+//! `--bundle`/`--manifest` alone authorize the separate external atomic writer.
+//! Defaults and every internal state path remain confined. Backend log/receipt
+//! and profile installer receipt flags carry explicit paths to their independent
+//! producers, which must enforce the same protected-publication requirements.
+//! Existing ancestor permissions are never relaxed. Replacement failures can
+//! leave only a private temporary or an explicitly uncertain published result;
+//! append failures retain prior rows and may leave a torn row or empty new file.
+//!
 //! Remaining integration and compatibility work is explicit. No concrete
-//! producer is wired here. Strict native JSON parsing currently accepts at most
-//! 4 MiB while runtime inputs permit 8 MiB. The reused native append writer has
-//! a 16 MiB stream bound versus runtime's 32 MiB, and rereads the stream. Its
-//! write preserves the inode, but total append acquisition is not O(newrow).
-//! External output destinations still meet the native Store's repository
-//! confinement. General argparse abbreviation/help/error byte parity is pending;
-//! numeric statistics/repr and the full frozen context corpus need independent
-//! comparison. These are compatibility gaps, with no speedup or completion claim.
+//! producer is wired here. Reused work-inspect byte APIs still strictly reparse
+//! decoded current views at 4 MiB; parent-owned decoded-value entrypoints are
+//! needed to retain larger valid runtime views. Reused Runs bootstrap computes
+//! approximate sample means; its private RNG needs a parent-owned numerical
+//! correction. Local experiment means and sample spread use exact dyadic sums
+//! and final nearest-even rounding. General argparse/help/error byte parity,
+//! Unicode version details, numerical/repr corpora and the full frozen context
+//! corpus still need independent comparison. Settlement I/O errors propagate
+//! rather than hiding uncertain budget state. No acceptance follows from compile.
 //! No source cache, persisted envelope or portable import supplies mutation
 //! authority. Real process ownership, NFS crash behavior, private-group accounts,
 //! Ubuntu/WSL2/macOS behavior and installed CLI/panel/MCP wiring remain parent
@@ -71,15 +93,19 @@
 pub mod backend;
 pub mod benchmark;
 pub mod capsule;
+mod cli_schema;
 pub mod context;
 pub mod evidence;
 pub mod experiment;
+mod help;
+mod io;
 pub mod parser;
 pub mod profiles;
 pub mod projection;
 pub mod release;
 pub mod router;
 pub mod services;
+mod statistics;
 pub mod storage;
 pub mod targets;
 pub mod value;

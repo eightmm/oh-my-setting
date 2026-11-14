@@ -527,7 +527,7 @@ pub fn coverage(rt: &Runtime<'_>, base: &Value) -> Result<Value> {
         }
         let mut support = "explicit-artifact";
         if matched.is_empty()
-            && row.text("kind") == "acceptance"
+            && row.text("kind").eq_ignore_ascii_case("acceptance")
             && !row.text("accept_sha256").is_empty()
         {
             matched = criteria
@@ -544,7 +544,7 @@ pub fn coverage(rt: &Runtime<'_>, base: &Value) -> Result<Value> {
             }
         }
         if matched.is_empty()
-            && row.text("kind") == "patch-admit"
+            && row.text("kind").eq_ignore_ascii_case("patch-admit")
             && !row.text("task_id").is_empty()
         {
             matched = criteria
@@ -645,10 +645,7 @@ pub fn coverage(rt: &Runtime<'_>, base: &Value) -> Result<Value> {
         if items.len() > 20 {
             items.drain(..items.len() - 20);
         }
-        let native = items
-            .iter()
-            .map(|v| oms_context::parse_json(&canonical(v)?).map_err(error))
-            .collect::<Result<Vec<_>>>()?;
+        let native = items.iter().map(to_native).collect::<Vec<_>>();
         let state = oms_work_inspect::criterion_evidence_status(&native).map_err(error)?;
         *counts.entry(state.into()).or_default() += 1;
         let weight = finite(criterion.get("weight")).unwrap_or(1.0);
@@ -858,6 +855,6 @@ pub fn revoke(rt: &Runtime<'_>, id: &str, reason: &str) -> Result<Value> {
             )),
         ),
     ]);
-    rt.append_locked(Path::new(BINDINGS), &row)?;
+    rt.append_locked(Path::new(BINDINGS), &row, &_guard)?;
     Ok(row)
 }

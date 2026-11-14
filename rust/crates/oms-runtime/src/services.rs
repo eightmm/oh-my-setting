@@ -104,6 +104,11 @@ pub struct RelatedSource {
 }
 
 pub trait Services {
+    /// Read-only native account-database lookup for an explicitly named ~user.
+    /// This supplies metadata, with no file access or execution authority.
+    fn account_home(&self, _username: &std::ffi::OsStr) -> Result<Option<PathBuf>> {
+        Err(unavailable("account home directory"))
+    }
     /// Resolve the raw user path with native tilde/Git-root/shared-state semantics.
     fn resolve_roots(&self, _cwd: &Path, _requested: &std::ffi::OsStr) -> Result<RuntimeRoots> {
         Err(unavailable("repository root resolution"))

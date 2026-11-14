@@ -51,36 +51,60 @@ impl Request {
     pub fn all(&self, key: &str) -> Vec<OsString> {
         self.options.get(key).cloned().unwrap_or_default()
     }
+    pub fn integer_value(&self, key: &str, default: i128) -> Result<crate::value::Value> {
+        let Some(raw) = self.os(key) else {
+            return Ok(crate::value::number(default));
+        };
+        let normalized = decimal_spelling(
+            raw.to_str()
+                .ok_or_else(|| error(format!("invalid int value: {}", crate::help::quote(raw))))?,
+        );
+        let text = normalized.trim();
+        static INTEGER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        require(
+            INTEGER
+                .get_or_init(|| regex::Regex::new(r"^[+-]?[0-9]+(?:_[0-9]+)*$").unwrap())
+                .is_match(text),
+            format!("invalid int value: {}", crate::help::quote(raw)),
+        )?;
+        let plain = text.replace('_', "");
+        let negative = plain.starts_with('-');
+        let digits = plain.trim_start_matches(['+', '-']).trim_start_matches('0');
+        Ok(crate::value::Value::Number(if digits.is_empty() {
+            "0".into()
+        } else if negative {
+            format!("-{digits}")
+        } else {
+            digits.into()
+        }))
+    }
     pub fn integer(&self, key: &str, default: i128) -> Result<i128> {
-        match self.os(key) {
-            None => Ok(default),
-            Some(v) => {
-                let raw = v.to_str().ok_or_else(|| error("invalid integer value"))?;
-                let s = raw.trim();
-                require(
-                    !s.is_empty() && !s.starts_with('_') && !s.ends_with('_') && !s.contains("__"),
-                    format!("invalid int value: {raw}"),
-                )?;
-                require(
-                    regex::Regex::new(r"^[+-]?[0-9]+(?:_[0-9]+)*$")
-                        .map_err(error)?
-                        .is_match(s),
-                    format!("invalid int value: {raw}"),
-                )?;
-                s.replace('_', "")
-                    .parse()
-                    .map_err(|_| error(format!("invalid int value: {raw}")))
-            }
-        }
+        self.integer_value(key, default)?.int()
     }
     pub fn float(&self, key: &str, default: f64) -> Result<f64> {
-        match self.os(key) {
-            None => Ok(default),
-            Some(v) => v
-                .to_str()
-                .and_then(|s| s.trim().replace('_', "").parse().ok())
-                .ok_or_else(|| error("invalid float value")),
-        }
+        let Some(raw) = self.os(key) else {
+            return Ok(default);
+        };
+        let source = raw
+            .to_str()
+            .ok_or_else(|| error(format!("invalid float value: {}", crate::help::quote(raw))))?;
+        let normalized = decimal_spelling(source);
+        let text = normalized.trim();
+        let bytes = text.as_bytes();
+        let valid = bytes.iter().enumerate().all(|(i, b)| {
+            *b != b'_'
+                || i > 0
+                    && i + 1 < bytes.len()
+                    && bytes[i - 1].is_ascii_digit()
+                    && bytes[i + 1].is_ascii_digit()
+        });
+        require(
+            valid,
+            format!("invalid float value: {}", crate::help::quote(raw)),
+        )?;
+        text.replace('_', "")
+            .parse()
+            .map_err(|_| error(format!("invalid float value: {}", crate::help::quote(raw))))
     }
     pub fn positional(&self, index: usize) -> Result<&OsStr> {
         self.positionals
@@ -125,13 +149,11 @@ struct Spec {
     flags: &'static str,
     values: &'static str,
     repeat: &'static str,
-    required: &'static str,
-    min: usize,
     max: usize,
     tail: bool,
 }
 fn spec(r: &Request) -> Spec {
-    let (flags, values, repeat, required, min, max, tail) = match (
+    let (flags, values, repeat, _required, _min, max, tail) = match (
         r.mode,
         r.action.as_str(),
         r.subaction.as_str(),
@@ -264,8 +286,6 @@ fn spec(r: &Request) -> Spec {
         flags,
         values,
         repeat,
-        required,
-        min,
         max,
         tail,
     }
@@ -274,10 +294,18 @@ fn includes(list: &str, key: &str) -> bool {
     list.split_whitespace().any(|s| s == key)
 }
 fn choose<'a>(value: &'a OsStr, choices: &[&str]) -> Result<&'a str> {
-    let v = value.to_str().ok_or_else(|| error("invalid choice"))?;
+    let v = value.to_str().unwrap_or("");
     require(
         choices.contains(&v),
-        format!("invalid choice: {v} (choose from {})", choices.join(", ")),
+        format!(
+            "invalid choice: {} (choose from {})",
+            crate::help::quote(value),
+            choices
+                .iter()
+                .map(|v| crate::help::quote(OsStr::new(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     )?;
     Ok(v)
 }
@@ -293,10 +321,19 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
         tail: vec![],
         options: BTreeMap::new(),
     };
+    match parse_into(argv, &mut r) {
+        Ok(()) => Ok(r),
+        Err(e) => Err(crate::help::parser_error(&r, &e.message)),
+    }
+}
+fn parse_into(argv: &[OsString], r: &mut Request) -> Result<()> {
     let mut selected = false;
     let mut action_needed = false;
     let mut sub_needed = false;
     let mut ended = false;
+    let mut variadic_closed = false;
+    let mut tail_closed = false;
+    let mut extras = Vec::<OsString>::new();
     let mut i = 0;
     while i < argv.len() {
         let arg = &argv[i];
@@ -304,7 +341,7 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
         if !ended && raw == b"--" {
             ended = true;
             i += 1;
-            if selected && spec(&r).tail {
+            if selected && spec(&r).tail && r.positionals.len() >= spec(&r).max && !tail_closed {
                 r.tail.extend_from_slice(&argv[i..]);
                 break;
             }
@@ -312,16 +349,39 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
         }
         if !ended && (raw == b"--help" || raw == b"-h") {
             r.options.insert("help".into(), vec![]);
-            return Ok(r);
+            return Ok(());
+        }
+        if !ended && raw.starts_with(b"-h") && !raw.starts_with(b"--") {
+            let explicit = &raw[2..];
+            require(
+                explicit.iter().all(|b| *b == b'h'),
+                format!(
+                    "argument -h/--help: ignored explicit argument {}",
+                    crate::help::quote(OsStr::from_bytes(
+                        explicit.strip_prefix(b"=").unwrap_or(explicit)
+                    ))
+                ),
+            )?;
+            r.options.insert("help".into(), vec![]);
+            return Ok(());
         }
         if !ended && raw == b"--version" && !selected {
             r.mode = Mode::Version;
-            return Ok(r);
+            return Ok(());
         }
         if !ended && raw.starts_with(b"--") {
+            if !r.positionals.is_empty() && spec(r).max == usize::MAX {
+                variadic_closed = true;
+            }
+            if !r.tail.is_empty() {
+                tail_closed = true;
+            }
             let split = raw.iter().position(|b| *b == b'=');
-            let requested =
-                std::str::from_utf8(&raw[2..split.unwrap_or(raw.len())]).map_err(error)?;
+            let Ok(requested) = std::str::from_utf8(&raw[2..split.unwrap_or(raw.len())]) else {
+                extras.push(arg.clone());
+                i += 1;
+                continue;
+            };
             let explicit = split.map(|j| OsString::from_vec(raw[j + 1..].to_vec()));
             let s = spec(&r);
             let mut available = vec!["help", "repo", "pretty"];
@@ -343,7 +403,8 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
                 require(
                     matches.len() <= 1,
                     format!(
-                        "ambiguous option: --{requested} could match {}",
+                        "ambiguous option: {} could match {}",
+                        crate::help::display(arg),
                         matches
                             .iter()
                             .map(|s| format!("--{s}"))
@@ -356,28 +417,46 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
             if matches!(name, "help" | "version") {
                 require(
                     explicit.is_none(),
-                    format!("argument --{name}: ignored explicit argument"),
+                    format!(
+                        "argument {}: ignored explicit argument {}",
+                        if name == "help" {
+                            "-h/--help"
+                        } else {
+                            "--version"
+                        },
+                        explicit
+                            .as_deref()
+                            .map(crate::help::quote)
+                            .unwrap_or_default()
+                    ),
                 )?;
                 if name == "help" {
                     r.options.insert("help".into(), vec![]);
                 } else {
                     r.mode = Mode::Version;
                 }
-                return Ok(r);
+                return Ok(());
             }
             let shared = matches!(name, "repo" | "pretty");
             let flag = name == "pretty"
                 || selected && !action_needed && !sub_needed && includes(s.flags, name);
             let takes = name == "repo"
                 || selected && !action_needed && !sub_needed && includes(s.values, name);
-            require(
-                shared || flag || takes,
-                format!("unrecognized arguments: {}", arg.to_string_lossy()),
-            )?;
+            if !(shared || flag || takes) {
+                extras.push(arg.clone());
+                i += 1;
+                continue;
+            }
             if flag {
                 require(
                     explicit.is_none(),
-                    format!("argument --{name}: ignored explicit argument"),
+                    format!(
+                        "argument --{name}: ignored explicit argument {}",
+                        explicit
+                            .as_deref()
+                            .map(crate::help::quote)
+                            .unwrap_or_default()
+                    ),
                 )?;
                 if name == "pretty" {
                     r.pretty = true
@@ -393,12 +472,30 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
                             error(format!("argument --{name}: expected one argument"))
                         })?;
                         require(
-                            !v.as_bytes().starts_with(b"--"),
+                            !option_word(v),
                             format!("argument --{name}: expected one argument"),
                         )?;
                         v.clone()
                     }
                 };
+                if matches!(name, "adapter" | "target")
+                    && r.mode == Mode::Backend
+                    && r.action != "target"
+                    && r.has(if name == "adapter" {
+                        "target"
+                    } else {
+                        "adapter"
+                    })
+                {
+                    return Err(error(format!(
+                        "argument --{name}: not allowed with argument --{}",
+                        if name == "adapter" {
+                            "target"
+                        } else {
+                            "adapter"
+                        }
+                    )));
+                }
                 if name == "repo" {
                     r.repo = value
                 } else if includes(s.repeat, name) {
@@ -406,12 +503,25 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
                 } else {
                     r.options.insert(name.into(), vec![value]);
                 }
+                crate::help::validate_option(r, name)?;
             }
             i += 1;
             continue;
         }
+        if !ended && option_word(arg) {
+            if !r.positionals.is_empty() && spec(r).max == usize::MAX {
+                variadic_closed = true;
+            }
+            if !r.tail.is_empty() {
+                tail_closed = true;
+            }
+            extras.push(arg.clone());
+            i += 1;
+            continue;
+        }
         if !selected {
-            let name = choose(arg, &COMMANDS.split_whitespace().collect::<Vec<_>>())?;
+            let name = choose(arg, &COMMANDS.split_whitespace().collect::<Vec<_>>())
+                .map_err(|e| error(format!("argument command: {e}")))?;
             r.mode = match name {
                 "envelope" => Mode::Envelope,
                 "evidence" => Mode::Evidence,
@@ -457,7 +567,9 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
                 Mode::Benchmark => "show snapshot record compare",
                 _ => "",
             };
-            r.action = choose(arg, &choices.split_whitespace().collect::<Vec<_>>())?.into();
+            r.action = choose(arg, &choices.split_whitespace().collect::<Vec<_>>())
+                .map_err(|e| error(format!("argument {}: {e}", action_destination(r.mode))))?
+                .into();
             action_needed = false;
             sub_needed = r.mode == Mode::Backend && r.action == "target"
                 || r.mode == Mode::Experiment && r.action == "sweep";
@@ -467,65 +579,116 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
             } else {
                 vec!["plan"]
             };
-            r.subaction = choose(arg, &choices)?.into();
+            r.subaction = choose(arg, &choices)
+                .map_err(|e| {
+                    error(format!(
+                        "argument {}: {e}",
+                        if r.mode == Mode::Backend {
+                            "target_action"
+                        } else {
+                            "sweep_action"
+                        }
+                    ))
+                })?
+                .into();
             sub_needed = false;
-        } else if r.mode == Mode::Envelope
-            && r.positionals.is_empty()
-            && matches!(arg.to_str(), Some("show" | "write"))
-        {
-            r.action = arg.to_str().unwrap().into();
+        } else if r.mode == Mode::Envelope && r.positionals.is_empty() {
+            r.action = choose(arg, &["show", "write"])
+                .map_err(|e| error(format!("argument action: {e}")))?
+                .into();
             r.positionals.push(arg.clone());
         } else {
             let s = spec(&r);
             if s.tail && r.positionals.len() >= s.max {
-                r.tail.extend_from_slice(&argv[i..]);
-                break;
+                if tail_closed {
+                    extras.push(arg.clone());
+                    i += 1;
+                    continue;
+                }
+                if r.mode == Mode::Experiment && r.action == "launch" || ended {
+                    r.tail.extend_from_slice(&argv[i..]);
+                    break;
+                }
+                r.tail.push(arg.clone());
+                i += 1;
+                continue;
             }
-            require(
-                ended
-                    || !raw.starts_with(b"-")
-                    || raw == b"-"
-                    || arg.to_str().is_some_and(|s| s.parse::<f64>().is_ok()),
-                format!("unrecognized arguments: {}", arg.to_string_lossy()),
-            )?;
+            if variadic_closed || r.positionals.len() >= s.max {
+                extras.push(arg.clone());
+                i += 1;
+                continue;
+            }
             r.positionals.push(arg.clone());
+            crate::help::validate_positionals(r)?;
         }
         i += 1;
     }
     require(selected, "the following arguments are required: command")?;
     require(
         !action_needed,
-        "the following arguments are required: action",
+        format!(
+            "the following arguments are required: {}",
+            action_destination(r.mode)
+        ),
     )?;
-    require(!sub_needed, "the following arguments are required: action")?;
+    require(
+        !sub_needed,
+        format!(
+            "the following arguments are required: {}",
+            if r.mode == Mode::Backend {
+                "target_action"
+            } else {
+                "sweep_action"
+            }
+        ),
+    )?;
     if r.mode == Mode::Envelope {
         require(
-            r.positionals.len() <= 1
-                && r.positionals
-                    .first()
-                    .is_none_or(|v| matches!(v.to_str(), Some("show" | "write"))),
-            "invalid envelope action",
+            r.positionals.len() <= 1,
+            format!(
+                "unrecognized arguments: {}",
+                r.positionals
+                    .iter()
+                    .skip(1)
+                    .map(|v| crate::help::display(v))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
         )?;
         r.positionals.clear();
     }
     let s = spec(&r);
+    let missing = crate::help::missing(r);
     require(
-        r.positionals.len() >= s.min,
-        "the following arguments are required: positional arguments",
+        missing.is_empty(),
+        format!(
+            "the following arguments are required: {}",
+            missing.join(", ")
+        ),
+    )?;
+    require(
+        extras.is_empty(),
+        format!(
+            "unrecognized arguments: {}",
+            extras
+                .iter()
+                .map(|v| crate::help::display(v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
     )?;
     require(
         r.positionals.len() <= s.max,
-        "unrecognized positional arguments",
+        format!(
+            "unrecognized arguments: {}",
+            r.positionals
+                .iter()
+                .skip(s.max)
+                .map(|v| crate::help::display(v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
     )?;
-    for key in s.required.split_whitespace() {
-        require(
-            r.has(key),
-            format!("the following arguments are required: --{key}"),
-        )?;
-    }
-    if s.tail && !(r.mode == Mode::Experiment && r.action == "launch") {
-        require(!r.tail.is_empty(), "command after -- is required")?;
-    }
     require(
         !(r.has("adapter") && r.has("target")),
         "argument --target: not allowed with argument --adapter",
@@ -568,7 +731,7 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
         "duplicate-work",
     ] {
         if r.has(key) {
-            r.integer(key, 0)?;
+            r.integer_value(key, 0)?;
         }
     }
     if r.has("cpus") {
@@ -623,25 +786,57 @@ pub fn parse(argv: &[OsString]) -> Result<Request> {
             }
         }
     }
-    Ok(r)
+    Ok(())
 }
 pub fn help(request: &Request) -> String {
-    format!(
-        "usage: oms runtime [--repo REPO] [--pretty] [--version] COMMAND ...\n\nTyped semantic core over the existing hardened OMS execution plane.\n\ncommands: {COMMANDS}\n\nselected: {:?} {} {}\noptions: --help --repo REPO --pretty {} {}\n",
-        request.mode,
-        request.action,
-        request.subaction,
-        spec(request)
-            .flags
-            .split_whitespace()
-            .map(|s| format!("--{s}"))
-            .collect::<Vec<_>>()
-            .join(" "),
-        spec(request)
-            .values
-            .split_whitespace()
-            .map(|s| format!("--{s} VALUE"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    )
+    crate::help::render(request)
+}
+fn option_word(value: &OsStr) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() > 1
+        && bytes[0] == b'-'
+        && !value.to_str().is_some_and(|s| {
+            regex::Regex::new(r"^-\d+$|^-\d*\.\d+$")
+                .expect("negative option spelling")
+                .is_match(s)
+        })
+}
+fn action_destination(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Evidence => "evidence_action",
+        Mode::Failure => "failure_action",
+        Mode::Profile => "profile_action",
+        Mode::Release => "release_action",
+        Mode::Capsule => "capsule_action",
+        Mode::Backend => "backend_action",
+        Mode::Experiment => "experiment_action",
+        Mode::Benchmark => "benchmark_action",
+        _ => "action",
+    }
+}
+
+fn decimal_spelling(raw: &str) -> String {
+    static DECIMAL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let category =
+        DECIMAL.get_or_init(|| regex::Regex::new(r"^\p{Nd}$").expect("decimal category"));
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_digit() || !category.is_match(c.encode_utf8(&mut [0; 4])) {
+                return c;
+            }
+            let mut cursor = c as u32;
+            let mut preceding = 0;
+            while cursor > 0 {
+                let Some(previous) = char::from_u32(cursor - 1) else {
+                    break;
+                };
+                if !category.is_match(previous.encode_utf8(&mut [0; 4])) {
+                    break;
+                }
+                preceding += 1;
+                cursor -= 1;
+            }
+            char::from(b'0' + (preceding % 10) as u8)
+        })
+        .collect()
 }
