@@ -1,9 +1,10 @@
 //! Retention decisions use durable references and canonical writer locks.
 use crate::json::{number, object, string};
 use crate::{
-    Context, Options, Output, Result, Value, epoch, error, failures, helpers, json, json_output,
-    parse_timestamp, require, storage, success, timestamp,
+    Context, GcHookResult, HostServices, Options, Output, Result, Value, epoch, error, failures,
+    helpers, json, json_output, parse_timestamp, require, storage, success, timestamp,
 };
+use oms_command_telemetry::store as telemetry_store;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
@@ -97,7 +98,24 @@ fn plan(ctx: &Context<'_>, req: &oms_command_plan::Request) -> Result<oms_comman
     let services = oms_command_plan::UnavailableServices;
     oms_command_plan::Plan::open(context, &services, ctx.interrupted)?.execute(req)
 }
-pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
+fn has_panel_call_artifacts(repo: &Path) -> Result<bool> {
+    let entries = match std::fs::read_dir(repo.join(".oms/artifacts")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(error(2, e)),
+    };
+    for entry in entries {
+        let name = entry.map_err(|e| error(2, e))?.file_name();
+        if let Some(s) = name.to_str()
+            && s.starts_with("panel-call-")
+            && s.ends_with(".json")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices) -> Result<Output> {
     let opts = Options::parse(
         args,
         &["repo", "days"],
@@ -129,6 +147,50 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
     let mut deferred = Vec::new();
     if !ctx.repo.join(".oms").exists() {
         return Ok(success("gc: nothing to reclaim\n"));
+    }
+
+    let completion_dirs = [
+        ".oms/plan/completion-captures",
+        ".oms/plan/completion-prefixes",
+        ".oms/plan/completion-segments",
+        ".oms/plan/completion-pins",
+        ".oms/plan/completions",
+        ".oms/plan/completion-pin-leases",
+    ];
+    if completion_dirs.iter().any(|d| ctx.repo.join(d).is_dir()) {
+        if let (Some(_g1), Some(_g2), Some(_g3)) = (
+            storage::try_lock(&ctx.repo.join(".oms/landings.jsonl"))?,
+            storage::try_lock(&ctx.repo.join(".oms/delegations/.marker-set-lock-target"))?,
+            storage::try_lock(&ctx.repo.join(".oms/plan/tasks.json"))?,
+        ) {
+            let entries = oms_command_plan::completion::gc_completion_captures(
+                &ctx.repo,
+                cutoff,
+                apply,
+                host.group_resolver(),
+            )
+            .map_err(|e| error(e.code, e.message))?;
+            for (kind, path) in entries {
+                items.push(object([("kind", string(kind)), ("path", string(path))]));
+            }
+        } else {
+            deferred.push(string(
+                "completion-provenance: skipped while a writer holds the file",
+            ));
+        }
+    }
+
+    if ctx.repo.join(".oms/landings.jsonl").exists()
+        || ctx.repo.join(".oms/landing-patches").is_dir()
+    {
+        match host.gc_landing_captures(&ctx.repo, days as u64, apply)? {
+            GcHookResult::Reclaimed(pairs) => {
+                for (kind, path) in pairs {
+                    items.push(object([("kind", string(kind)), ("path", string(path))]));
+                }
+            }
+            GcHookResult::Deferred(reason) => deferred.push(string(reason)),
+        }
     }
 
     let mut quiescent = true;
@@ -259,6 +321,18 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         deferred.push(string(
             "hook and dispatch retention deferred while delegation liveness is unknown or live",
         ));
+    }
+    if ctx.repo.join(".oms/panel-state/dispatch-logs").is_dir()
+        || has_panel_call_artifacts(&ctx.repo)?
+    {
+        match host.gc_dispatch_logs(&ctx.repo, days as u64, apply)? {
+            GcHookResult::Reclaimed(pairs) => {
+                for (kind, path) in pairs {
+                    items.push(object([("kind", string(kind)), ("path", string(path))]));
+                }
+            }
+            GcHookResult::Deferred(reason) => deferred.push(string(reason)),
+        }
     }
     let spine = crate::spine::index(&ctx);
     let _spine_guard = storage::lock(&spine)?;
@@ -546,61 +620,79 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             )?;
         }
     }
-    let (pruned, retained) = crate::gc_artifacts::prune(&ctx, apply)?;
-    if pruned > 0 {
-        items.push(object([
-            ("kind", string("artifact-index")),
-            ("rows", number(pruned)),
-        ]));
-    }
-    if let Some(reason) = retained {
-        deferred.push(string(reason));
-    }
-    if opts.flag("delete-orphan-files") && !crate::gc_artifacts::receipts_available(&ctx) {
+    let (keep, _high) =
+        telemetry_store::retention_limits(None, None).map_err(|e| error(e.exit_code(), e))?;
+    let body =
+        telemetry_store::read_index(&ctx.repo, None, true).map_err(|e| error(e.exit_code(), e))?;
+    let source: Vec<&[u8]> = body
+        .split_inclusive(|b| *b == b'\n')
+        .filter(|l| !l.trim_ascii().is_empty())
+        .collect();
+    let pinned = telemetry_store::completion_pins(&ctx.repo);
+    if !source.is_empty() && pinned.is_none() {
         deferred.push(string(
-            "orphan files retained: completion receipts unavailable",
+            "artifact rows retained: completion receipts unavailable",
         ));
-    } else if opts.flag("delete-orphan-files") {
-        let index = ctx.repo.join(".oms/artifacts/index.jsonl");
-        let _guard = storage::lock(&index)?;
-        let (rows, bad) = storage::rows(&ctx.repo, &index)?;
-        require(bad == 0, "invalid artifact index; orphan deletion refused")?;
-        let references =
-            String::from_utf8(json::canonical(&Value::Array(rows))?).map_err(|e| error(2, e))?;
-        let mut references = references;
-        for suffix in [".json", ".jsonl", ".md"] {
-            for source in helpers::files(&ctx, &ctx.repo.join(".oms"), suffix, 50000)? {
-                if source == index {
-                    continue;
-                }
-                let raw = storage::read(&ctx.repo, &source, storage::MAX_STREAM, false)?;
-                require(
-                    references.len().saturating_add(raw.len()) <= 64 * 1024 * 1024,
-                    "reference scan bound exceeded; orphan deletion refused",
-                )?;
-                references.push_str(&String::from_utf8_lossy(&raw));
+    }
+    let mut kept_bytes = body.clone();
+    let mut pruned = 0usize;
+    if !source.is_empty() {
+        let options = telemetry_store::RetentionOptions {
+            keep,
+            pinned_event_ids: pinned,
+            ..Default::default()
+        };
+        let retained = telemetry_store::retained_lines(&source, &options)
+            .map_err(|e| error(e.exit_code(), e))?;
+        pruned = source.len().saturating_sub(retained.len());
+        if pruned > 0 {
+            kept_bytes = retained.concat();
+            items.push(object([
+                ("kind", string("artifact-index")),
+                ("rows", number(pruned)),
+            ]));
+            if apply {
+                telemetry_store::replace_bytes(
+                    &ctx.repo,
+                    None,
+                    &kept_bytes,
+                    &telemetry_store::AppendOptions {
+                        keep: Some(keep as i64),
+                        high_water: None,
+                        expected: Some(body.clone()),
+                    },
+                    &[],
+                    ctx.interrupted,
+                )
+                .map_err(|e| error(e.exit_code(), e))?;
             }
         }
-        let paths = helpers::files(&ctx, &ctx.repo.join(".oms/artifacts"), "", 50000)?;
-        for path in paths {
-            let relative = path
-                .strip_prefix(&ctx.repo)
-                .map_err(|_| error(2, "artifact escaped repository"))?
-                .to_string_lossy();
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == "index.jsonl"
-                || name.ends_with(".lock")
-                || !age(&path, cutoff)
-                || references.contains(relative.as_ref())
-                || references.contains(name.as_ref())
-            {
-                continue;
-            }
-            // Only loose legacy patch files have no independent store ownership.
-            if path.parent() == Some(ctx.repo.join(".oms/artifacts").as_path())
-                && name.ends_with(".patch")
-            {
-                candidate(&ctx, &mut items, "orphan-artifact", &path, apply)?;
+    }
+    if opts.flag("delete-orphan-files") {
+        if telemetry_store::completion_references(&ctx.repo).is_none() {
+            deferred.push(string(
+                "orphan files retained: completion receipts unavailable",
+            ));
+        } else if ctx.repo.join(".oms/artifacts").is_dir() {
+            let snapshot_body = if apply && pruned > 0 {
+                kept_bytes.as_slice()
+            } else {
+                body.as_slice()
+            };
+            let report = telemetry_store::delete_orphans(
+                &ctx.repo,
+                None,
+                snapshot_body,
+                !apply,
+                seconds,
+                ctx.interrupted,
+            )
+            .map_err(|e| error(e.exit_code(), e))?;
+            for rel in report.paths {
+                items.push(object([
+                    ("kind", string("orphan-artifact")),
+                    ("path", string(rel)),
+                ]));
             }
         }
     }

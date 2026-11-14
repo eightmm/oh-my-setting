@@ -7,7 +7,6 @@ mod claims;
 pub mod deps;
 mod failures;
 mod gc;
-mod gc_artifacts;
 pub mod helpers;
 pub mod inventory;
 pub mod job_metrics;
@@ -65,6 +64,32 @@ pub fn run_with_source(
     run_with_services(tool, args, cwd, interrupted, &mut services)
 }
 
+/// Host-provided callbacks for retention hooks whose state formats live in sibling crates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GcHookResult {
+    Reclaimed(Vec<(String, String)>),
+    Deferred(String),
+}
+
+pub trait HostServices {
+    fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        None
+    }
+    fn gc_landing_captures(&self, _repo: &Path, _days: u64, _apply: bool) -> Result<GcHookResult> {
+        Ok(GcHookResult::Deferred(
+            "landing capture retention deferred: host service unavailable".into(),
+        ))
+    }
+    fn gc_dispatch_logs(&self, _repo: &Path, _days: u64, _apply: bool) -> Result<GcHookResult> {
+        Ok(GcHookResult::Deferred(
+            "dispatch log retention deferred: host service unavailable".into(),
+        ))
+    }
+}
+
+pub struct NoHostServices;
+impl HostServices for NoHostServices {}
+
 /// The parent can inject the same native services used by run-ledger.
 pub fn run_with_services(
     tool: &str,
@@ -72,6 +97,18 @@ pub fn run_with_services(
     cwd: &Path,
     interrupted: &AtomicBool,
     services: &mut dyn oms_command_runs::Services,
+) -> Output {
+    run_with_host(tool, args, cwd, interrupted, services, &NoHostServices)
+}
+
+/// Entrypoint injecting both `oms-command-runs` services and host retention hooks.
+pub fn run_with_host(
+    tool: &str,
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    services: &mut dyn oms_command_runs::Services,
+    host: &dyn HostServices,
 ) -> Output {
     let result = (|| {
         if !owns(tool, args) {
@@ -85,7 +122,7 @@ pub fn run_with_services(
             "fail-ledger" => failures::run(args, &context),
             "deps" => deps::run(args, &context),
             "state" | "state-verify" | "inbox" | "dashboard" => state::run(tool, args, &context),
-            "gc" => gc::run(args, &context),
+            "gc" => gc::run(args, &context, host),
             "run-capsule" => capsule::run(args, &context, services),
             "run-claims" => claims::run(args, &context),
             "tsp-queue" => queue::run(args, &context, services),

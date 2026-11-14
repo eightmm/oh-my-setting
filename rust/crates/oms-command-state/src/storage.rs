@@ -26,6 +26,15 @@ pub fn lock(path: &Path) -> Result<oms_lock::Guard> {
         .map_err(|e| error(e.exit_code(), e))
 }
 
+pub fn try_lock(path: &Path) -> Result<Option<oms_lock::Guard>> {
+    let settings = oms_lock::Settings::from_env().map_err(|e| error(e.exit_code(), e))?;
+    match oms_lock::Lock::for_file(path, settings).and_then(|l| l.try_acquire()) {
+        Ok(guard) => Ok(Some(guard)),
+        Err(oms_lock::Error::Busy) => Ok(None),
+        Err(e) => Err(error(e.exit_code(), e)),
+    }
+}
+
 pub fn replace_locked(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     let root = anchor(root, path);
     Root::open(root)

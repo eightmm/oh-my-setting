@@ -2,7 +2,7 @@
 use super::*;
 use crate::{epoch, timestamp};
 
-fn save(ctx: &Context<'_>, path: &Path, row: &Value) -> Result<()> {
+pub(super) fn save(ctx: &Context<'_>, path: &Path, row: &Value) -> Result<()> {
     let ignore = ctx.repo.join(".oms/.gitignore");
     let _guard = storage::lock(&ignore)?;
     if storage::read(&ctx.repo, &ignore, storage::MAX_FILE, true)?.is_empty() {
@@ -10,19 +10,27 @@ fn save(ctx: &Context<'_>, path: &Path, row: &Value) -> Result<()> {
     }
     storage::replace_locked(&ctx.repo, path, &json::encoded(row)?)
 }
-fn history(ctx: &Context<'_>, kind: &str, id: &str) -> Result<()> {
-    storage::append(
-        &ctx.repo,
-        &Path::new(BASE).join("history.jsonl"),
-        &object([
-            ("schema", number(1)),
-            ("at", string(timestamp(epoch())?)),
-            ("kind", string(kind)),
-            ("id", string(id)),
-        ]),
-    )
+pub(super) fn history_with(
+    ctx: &Context<'_>,
+    kind: &str,
+    id: &str,
+    extra: &[(&str, Value)],
+) -> Result<()> {
+    let mut row = object([
+        ("schema", number(1)),
+        ("at", string(timestamp(epoch())?)),
+        ("kind", string(kind)),
+        ("id", string(id)),
+    ]);
+    for (k, v) in extra {
+        row.set(k, v.clone())?;
+    }
+    storage::append(&ctx.repo, &Path::new(BASE).join("history.jsonl"), &row)
 }
-fn existing(ctx: &Context<'_>, path: &Path) -> Result<Option<Value>> {
+fn history(ctx: &Context<'_>, kind: &str, id: &str) -> Result<()> {
+    history_with(ctx, kind, id, &[])
+}
+pub(super) fn existing(ctx: &Context<'_>, path: &Path) -> Result<Option<Value>> {
     let raw = storage::read(&ctx.repo, path, storage::MAX_FILE, true)?;
     if raw.is_empty() {
         Ok(None)
@@ -273,7 +281,7 @@ fn pack(ctx: &Context<'_>, opts: &Options) -> Result<Output> {
             ]),
         );
     }
-    crate::parent_only()?;
+    recipe_parent_only()?;
     require(
         opts.get("digest") == digest,
         "pack digest does not match --digest",
@@ -612,7 +620,7 @@ fn triggers(
             &object([("schema", number(1)), (group, Value::Array(rows))]),
         );
     }
-    if action == "plan" || action == "run" {
+    if action == "plan" {
         require(opts.pos.len() == 3, "action requires request id")?;
         let row = load(ctx, &record_path("requests", &opts.pos[2])?)?;
         require(
@@ -620,17 +628,57 @@ fn triggers(
             "request definition digest mismatch",
         )?;
         let plan = trigger_plan(ctx, row.get("definition"), Some(row.get("pins")))?;
-        return if action == "plan" {
-            json_output(0, &public_plan(&plan)?)
-        } else {
-            execute(ctx, &plan, opts, None, services)
-        };
+        return json_output(0, &public_plan(&plan)?);
     }
-    crate::parent_only()?;
+    recipe_parent_only()?;
+    if action == "run" {
+        require(opts.pos.len() == 3, "action requires request id")?;
+        require(
+            opts.flag("execute"),
+            "execution requires explicit --execute; use plan to inspect the invocation",
+        )?;
+        let key = opts.pos[2].as_str();
+        let req_path = record_path("requests", key)?;
+        let _lock = storage::lock(&ctx.repo.join(&req_path))?;
+        let mut row = load(ctx, &req_path)?;
+        require(row.text("status") != "cancelled", "request was cancelled")?;
+        require(
+            json::hash(row.get("definition"))? == row.text("trigger_digest"),
+            "request definition digest mismatch",
+        )?;
+        let plan = trigger_plan(ctx, row.get("definition"), Some(row.get("pins")))?;
+        let (run_id, resume) = if row.text("run_id").is_empty() {
+            (crate::random_id("run-")?, false)
+        } else {
+            let id = row.text("run_id").to_owned();
+            let has_receipt = existing(ctx, &record_path("runs", &id)?)?.is_some();
+            require(
+                has_receipt || opts.flag("retry-uncertain"),
+                "request has no run receipt after dispatch; --retry-uncertain is required",
+            )?;
+            (id, has_receipt)
+        };
+        row.set("status", string("running"))?;
+        row.set("run_id", string(&run_id))?;
+        row.set("updated_at", string(timestamp(epoch())?))?;
+        save(ctx, &req_path, &row)?;
+        history_with(
+            ctx,
+            "request-dispatched",
+            key,
+            &[("run_id", string(&run_id))],
+        )?;
+        let (run_value, exit_code) =
+            execute_plan(ctx, &plan, opts, &run_id, resume, Some(key), services)?;
+        row.set("status", run_value.get("status").clone())?;
+        row.set("updated_at", string(timestamp(epoch())?))?;
+        save(ctx, &req_path, &row)?;
+        return json_output(exit_code, &object([("request", row), ("run", run_value)]));
+    }
     let _coordinator = storage::lock(&ctx.repo.join(BASE).join("trigger-coordinator"))?;
     if action == "add" {
         require(opts.pos.len() == 3, "add requires FILE")?;
-        let value = load(ctx, helpers::relative(&opts.pos[2])?)?;
+        let value = definition(ctx, helpers::relative(&opts.pos[2])?)?;
         let plan = trigger_plan(ctx, &value, None)?;
         let path = record_path("triggers", value.text("id"))?;
         if let Some(row) = existing(ctx, &path)? {
@@ -859,8 +907,12 @@ pub(super) fn run(
             }
             require(opts.pos.len() == 3, "workset action requires FILE or ID")?;
             if action == "put" {
-                crate::parent_only()?;
-                let definition = workset(ctx, load(ctx, helpers::relative(&opts.pos[2])?)?, true)?;
+                recipe_parent_only()?;
+                let definition = workset(
+                    ctx,
+                    definition(ctx, helpers::relative(&opts.pos[2])?)?,
+                    true,
+                )?;
                 let id = definition.text("id");
                 let path = record_path("worksets", id)?;
                 let _guard = storage::lock(&ctx.repo.join(&path))?;

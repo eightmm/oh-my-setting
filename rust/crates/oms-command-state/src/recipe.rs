@@ -3,14 +3,31 @@ use crate::json::{number, object, string};
 use crate::{
     Context, Options, Output, Result, Value, error, helpers, json, json_output, require, storage,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub(crate) const HELP: &str = "Usage: oms recipe [--repo PATH] validate|plan|run FILE [--input NAME=VALUE]... [--overlay FILE] [--execute]\n       oms recipe resume ID --file FILE [--execute] [--retry-failed] [--retry-uncertain]\n       oms recipe show ID\n       oms recipe history [--id ID] [--limit N]\n       oms recipe workspace plan|run FILE ACTION [--input NAME=VALUE]... [--port NAME=N]... [--execute]\n       oms recipe pack inspect|import DIRECTORY [--digest SHA] [--resource NAME]...\n       oms recipe pack list\n       oms recipe workset put FILE [--replace]\n       oms recipe workset show ID\n       oms recipe workset list\n       oms recipe trigger add FILE\n       oms recipe trigger list|requests|tick|event|enable|disable|plan|cancel|run ...\nHost execution requires --execute. Membership and stored requests grant no authority.\n";
 const BASE: &str = ".oms/recipes";
+const MAX_ATTEMPTS: usize = 256;
+const MAX_RECORDS: usize = 1024;
 #[path = "recipe_catalog.rs"]
 mod catalog;
+fn recipe_parent_only() -> Result<()> {
+    crate::parent_only()?;
+    require(
+        std::env::var("OMS_RECIPE_PROCESS").as_deref() != Ok("1"),
+        "a harness child or recipe process may only use read-only recipe actions",
+    )
+}
 struct Loaded {
     definition: Value,
     resources: Value,
@@ -37,13 +54,14 @@ fn load(ctx: &Context<'_>, path: &Path) -> Result<Value> {
     load_bounded(ctx, path, storage::MAX_FILE)
 }
 fn definition(ctx: &Context<'_>, path: &Path) -> Result<Value> {
-    load_bounded(ctx, path, 256 * 1024)
+    let value = load_bounded(ctx, path, 256 * 1024)?;
+    helpers::scrub(&value)?;
+    Ok(value)
 }
 fn load_bounded(ctx: &Context<'_>, path: &Path, limit: usize) -> Result<Value> {
     let raw = storage::read(&ctx.repo, path, limit, false)?;
     let value = json::parse(&raw)?;
     value.object()?;
-    helpers::scrub(&value)?;
     Ok(value)
 }
 
@@ -342,7 +360,9 @@ fn inputs(specs: &Value, supplied: &Value) -> Result<Value> {
             .cloned()
             .or_else(|| spec.opt("default").cloned())
             .ok_or_else(|| error(2, format!("missing recipe input {key}")))?;
-        if supplied_value.is_some() && ["integer", "number", "boolean"].contains(&spec.text("type"))
+        if matches!(&value, Value::String(_))
+            && supplied_value.is_some()
+            && ["integer", "number", "boolean"].contains(&spec.text("type"))
         {
             value = json::parse(value.str()?.as_bytes())?;
         }
@@ -544,17 +564,21 @@ fn file_hash(path: &Path, limit: usize) -> Result<String> {
     Ok(json::sha(storage::read(parent, path, limit, false)?))
 }
 
-fn bundle(ctx: &Context<'_>, loaded: &Loaded, opts: &Options) -> Result<(Value, String, Value)> {
+fn bundle_with(
+    ctx: &Context<'_>,
+    loaded: &Loaded,
+    overlay_arg: &str,
+) -> Result<(Value, String, Value)> {
     let mut definition = loaded.definition.clone();
     validate(&definition)?;
     let original = json::hash(&definition)?;
     let mut overlay_digest = Value::Null;
-    if !opts.get("overlay").is_empty() {
+    if !overlay_arg.is_empty() {
         require(
             definition.text("kind") == "recipe",
             "project overlays currently apply to recipes",
         )?;
-        let overlay = catalog::source(ctx, opts.get("overlay"))?.definition;
+        let overlay = catalog::source(ctx, overlay_arg)?.definition;
         fields(
             &overlay,
             &["schema", "kind", "base_digest", "steps"],
@@ -599,22 +623,50 @@ fn bundle(ctx: &Context<'_>, loaded: &Loaded, opts: &Options) -> Result<(Value, 
     Ok((definition, original, overlay_digest))
 }
 
+fn bundle(ctx: &Context<'_>, loaded: &Loaded, opts: &Options) -> Result<(Value, String, Value)> {
+    bundle_with(ctx, loaded, opts.get("overlay"))
+}
+
 fn compile(ctx: &Context<'_>, loaded: Loaded, opts: &Options, action: &str) -> Result<Value> {
-    let (definition, original, overlay_digest) = bundle(ctx, &loaded, opts)?;
-    let input = inputs(definition.get("inputs"), &pairs(opts.all("input"))?)?;
+    let supplied_inputs = pairs(opts.all("input"))?;
+    let supplied_ports = pairs(opts.all("port"))?;
+    compile_with(
+        ctx,
+        loaded,
+        opts.get("overlay"),
+        &supplied_inputs,
+        &supplied_ports,
+        opts.all("with"),
+        action,
+    )
+}
+
+fn compile_with(
+    ctx: &Context<'_>,
+    loaded: Loaded,
+    overlay_arg: &str,
+    supplied_inputs: &Value,
+    supplied_ports: &Value,
+    with_companions: &[String],
+    action: &str,
+) -> Result<Value> {
+    let (definition, original, overlay_digest) = bundle_with(ctx, &loaded, overlay_arg)?;
+    let input = inputs(definition.get("inputs"), supplied_inputs)?;
     let mut ports = definition.opt("ports").cloned().unwrap_or_else(json::empty);
-    for (name, value) in pairs(opts.all("port"))?.object()? {
+    for (name, value) in supplied_ports.object()? {
         let name = std::str::from_utf8(name).map_err(|_| error(2, "invalid port name"))?;
         require(ports.opt(name).is_some(), "unknown workspace port")?;
-        ports.set(
-            name,
-            number(
-                value
-                    .str()?
-                    .parse::<u16>()
-                    .map_err(|_| error(2, "invalid port number"))?,
-            ),
-        )?;
+        let port = match value {
+            Value::String(_) => value
+                .str()?
+                .parse::<u16>()
+                .map_err(|_| error(2, "invalid port number"))?,
+            Value::Number(_) => {
+                u16::try_from(value.int()?).map_err(|_| error(2, "invalid port number"))?
+            }
+            _ => return Err(error(2, "invalid port number")),
+        };
+        ports.set(name, number(port))?;
     }
     let mut used = BTreeSet::new();
     for (_, value) in ports.object()? {
@@ -673,8 +725,8 @@ fn compile(ctx: &Context<'_>, loaded: Loaded, opts: &Options, action: &str) -> R
     let mut work = selected.array()?.to_vec();
     let mut sidecars = Vec::new();
     let mut unique = BTreeSet::new();
-    require(opts.all("with").len() <= 8, "too many workspace companions")?;
-    for name in opts.all("with") {
+    require(with_companions.len() <= 8, "too many workspace companions")?;
+    for name in with_companions {
         require(unique.insert(name), "duplicate workspace companion")?;
         let row = definition
             .get("companions")
@@ -780,11 +832,14 @@ fn compile(ctx: &Context<'_>, loaded: Loaded, opts: &Options, action: &str) -> R
             ),
             (
                 "cwd",
-                string(
-                    cwd.strip_prefix(&ctx.repo)
-                        .unwrap_or(&cwd)
-                        .to_string_lossy(),
-                ),
+                string({
+                    let rel = cwd.strip_prefix(&ctx.repo).unwrap_or(&cwd);
+                    if rel.as_os_str().is_empty() {
+                        std::borrow::Cow::Borrowed(".")
+                    } else {
+                        rel.to_string_lossy()
+                    }
+                }),
             ),
             ("environment_digest", string(json::hash(&environment)?)),
             ("environment", environment),
@@ -866,19 +921,957 @@ fn public_plan(value: &Value) -> Result<Value> {
     Ok(value)
 }
 
-fn execute(
-    _ctx: &Context<'_>,
-    _plan: &Value,
+fn output_entry(repo: &Path, requirement: &Value) -> Result<Option<Value>> {
+    let rel = requirement.text("path");
+    let path = confined(repo, rel)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let limit = bounded(
+        requirement.get("max_bytes"),
+        16 * 1024 * 1024,
+        1,
+        64 * 1024 * 1024,
+    )? as usize;
+    let data = storage::read(repo, &path, limit, false)?;
+    let meta = std::fs::symlink_metadata(&path).map_err(|e| error(2, e))?;
+    let mtime_ns = i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec());
+    Ok(Some(object([
+        ("path", string(rel)),
+        ("bytes", number(data.len())),
+        ("sha256", string(json::sha(&data))),
+        ("mtime_ns", number(mtime_ns)),
+    ])))
+}
+
+fn snapshot_outputs(repo: &Path, outputs: &Value) -> Result<Value> {
+    let mut result = json::empty();
+    for req in outputs.array().unwrap_or(&[]) {
+        let entry = output_entry(repo, req)?.unwrap_or(Value::Null);
+        result.set(req.text("path"), entry)?;
+    }
+    Ok(result)
+}
+
+fn verify_outputs(repo: &Path, outputs: &Value, before: &Value) -> Result<Value> {
+    let mut result = Vec::new();
+    for req in outputs.array().unwrap_or(&[]) {
+        let rel = req.text("path");
+        let entry = output_entry(repo, req)?
+            .ok_or_else(|| error(2, format!("required output is missing: {rel}")))?;
+        let bytes = entry.get("bytes").int()?;
+        let min_bytes = bounded(req.get("min_bytes"), 0, 0, 64 * 1024 * 1024)?;
+        require(
+            bytes >= min_bytes,
+            format!("required output is too small: {rel}"),
+        )?;
+        if let Some(expected) = req.opt("sha256")
+            && !matches!(expected, Value::Null)
+        {
+            require(
+                entry.text("sha256") == expected.str()?,
+                format!("required output digest does not match: {rel}"),
+            )?;
+        }
+        let fresh = match req.opt("fresh") {
+            None | Some(Value::Null) => true,
+            Some(v) => v.truth(),
+        };
+        if fresh && before.opt(rel) == Some(&entry) {
+            return Err(error(
+                2,
+                format!("required output was not refreshed: {rel}"),
+            ));
+        }
+        result.push(object([
+            ("path", entry.get("path").clone()),
+            ("bytes", entry.get("bytes").clone()),
+            ("sha256", entry.get("sha256").clone()),
+        ]));
+    }
+    Ok(Value::Array(result))
+}
+
+fn verify_completed(repo: &Path, run: &Value, plan: &Value) -> Result<()> {
+    let run_steps = run.get("steps").object()?;
+    let plan_steps = plan.get("steps").array()?;
+    let run_keys: BTreeSet<&[u8]> = run_steps.iter().map(|(k, _)| k.as_slice()).collect();
+    let plan_keys: BTreeSet<&[u8]> = plan_steps.iter().map(|s| s.text("id").as_bytes()).collect();
+    require(
+        run_keys == plan_keys,
+        "run steps do not match the current definition",
+    )?;
+    for step in plan_steps {
+        let rec = run.get("steps").get(step.text("id"));
+        require(
+            ["pending", "running", "succeeded", "failed", "interrupted"]
+                .contains(&rec.text("status")),
+            "invalid stored step status",
+        )?;
+        let attempts = rec.get("attempts").array()?;
+        require(
+            attempts.len() <= MAX_ATTEMPTS,
+            "invalid or exhausted stored attempts",
+        )?;
+        if rec.text("status") != "succeeded" {
+            continue;
+        }
+        let last = attempts
+            .last()
+            .filter(|a| a.text("status") == "succeeded")
+            .ok_or_else(|| error(2, "completed step is missing a successful receipt"))?;
+        let evidence = last.get("outputs").array()?;
+        let ev_paths: BTreeSet<&str> = evidence.iter().map(|i| i.text("path")).collect();
+        let reqs = step.get("outputs").array()?;
+        let req_paths: BTreeSet<&str> = reqs.iter().map(|i| i.text("path")).collect();
+        require(
+            ev_paths == req_paths,
+            "completed step output evidence is incomplete",
+        )?;
+        for req in reqs {
+            let rel = req.text("path");
+            let actual = output_entry(repo, req)?;
+            let old = evidence
+                .iter()
+                .find(|i| i.text("path") == rel)
+                .ok_or_else(|| error(2, "completed step output evidence is incomplete"))?;
+            let unchanged = actual.as_ref().is_some_and(|a| {
+                a.text("sha256") == old.text("sha256") && a.get("bytes") == old.get("bytes")
+            });
+            require(
+                unchanged,
+                format!("completed output changed; start a new run: {rel}"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn verify_command_inputs(repo: &Path, command: &Value) -> Result<()> {
+    let exe_real = Path::new(command.text("executable"))
+        .canonicalize()
+        .map_err(|_| error(2, "declared executable missing after planning"))?;
+    let exe_digest = file_hash(&exe_real, 64 * 1024 * 1024)?;
+    require(
+        exe_digest == command.text("executable_digest"),
+        "declared executable changed after planning",
+    )?;
+    for dep in command.get("dependencies").array()? {
+        let path = confined(repo, dep.text("path"))?;
+        let digest = file_hash(&path, 16 * 1024 * 1024)?;
+        require(
+            digest == dep.text("sha256"),
+            "declared command dependency changed after planning",
+        )?;
+    }
+    Ok(())
+}
+
+fn command_env(command: &Value) -> Result<BTreeMap<OsString, OsString>> {
+    let mut env = BTreeMap::new();
+    for (k, v) in command.get("environment").object()? {
+        let key = std::str::from_utf8(k).map_err(|_| error(2, "invalid environment name"))?;
+        env.insert(OsString::from(key), OsString::from(v.str()?));
+    }
+    Ok(env)
+}
+
+fn command_argv(command: &Value) -> Result<Vec<OsString>> {
+    let raw = command.get("argv").strings()?;
+    require(!raw.is_empty(), "command argv is empty")?;
+    let mut argv = Vec::with_capacity(raw.len());
+    argv.push(OsString::from(command.text("executable")));
+    for arg in &raw[1..] {
+        argv.push(OsString::from(*arg));
+    }
+    Ok(argv)
+}
+
+fn pid_alive(pid: &Value) -> bool {
+    let Ok(raw) = pid.int() else {
+        return false;
+    };
+    let Ok(raw) = i32::try_from(raw) else {
+        return false;
+    };
+    if raw <= 1 {
+        return false;
+    }
+    rustix::process::Pid::from_raw(raw).is_some_and(|p| {
+        matches!(
+            rustix::process::test_kill_process(p),
+            Ok(()) | Err(rustix::io::Errno::PERM)
+        )
+    })
+}
+
+fn obj_get_mut<'a>(val: &'a mut Value, key: &str) -> Option<&'a mut Value> {
+    match val {
+        Value::Object(items) => items
+            .iter_mut()
+            .find(|(k, _)| k == key.as_bytes())
+            .map(|(_, v)| v),
+        _ => None,
+    }
+}
+
+fn obj_items_mut(val: &mut Value) -> Option<&mut Vec<(Vec<u8>, Value)>> {
+    match val {
+        Value::Object(items) => Some(items),
+        _ => None,
+    }
+}
+
+fn stop_child(child: &mut Child) {
+    if let Ok(raw) = i32::try_from(child.id())
+        && let Some(pgid) = rustix::process::Pid::from_raw(raw)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::TERM);
+    } else {
+        let _ = child.kill();
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if let Ok(raw) = i32::try_from(child.id())
+        && let Some(pgid) = rustix::process::Pid::from_raw(raw)
+    {
+        let _ = rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL);
+    } else {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+struct CompanionGuard {
+    processes: Mutex<Vec<Child>>,
+}
+impl CompanionGuard {
+    fn new() -> Self {
+        Self {
+            processes: Mutex::new(Vec::new()),
+        }
+    }
+    fn stop_all(&self) {
+        let mut list = self.processes.lock().expect("companion lock");
+        for child in list.iter_mut().rev() {
+            stop_child(child);
+        }
+        list.clear();
+    }
+}
+impl Drop for CompanionGuard {
+    fn drop(&mut self) {
+        if let Ok(list) = self.processes.get_mut() {
+            for child in list.iter_mut().rev() {
+                stop_child(child);
+            }
+        }
+    }
+}
+
+struct ConsoleCollector {
+    bytes: usize,
+    hasher: Sha256,
+    tail: Vec<u8>,
+    sensitive: bool,
+}
+impl ConsoleCollector {
+    fn new() -> Self {
+        Self {
+            bytes: 0,
+            hasher: Sha256::new(),
+            tail: Vec::new(),
+            sensitive: false,
+        }
+    }
+    fn digest_hex(&self) -> String {
+        format!("{:x}", self.hasher.clone().finalize())
+    }
+}
+impl std::io::Write for ConsoleCollector {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buf.len());
+        self.hasher.update(buf);
+        if !self.sensitive && !buf.is_empty() {
+            let mut window = Vec::with_capacity(self.tail.len().saturating_add(buf.len()));
+            window.extend_from_slice(&self.tail);
+            window.extend_from_slice(buf);
+            if oms_scrub::scan(&window, &[]).is_ok_and(|hits| !hits.is_empty()) {
+                self.sensitive = true;
+            }
+            let keep = window.len().saturating_sub(512);
+            self.tail.clear();
+            self.tail.extend_from_slice(&window[keep..]);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn sanitize_failure_reason(raw: &str) -> String {
+    let line = raw
+        .split(['\n', '\r'])
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(500)
+        .collect::<String>();
+    let re = regex::Regex::new(r"(?:/[A-Za-z0-9._-]+){2,}").expect("static path pattern");
+    let redacted = re.replace_all(&line, "[path omitted]").into_owned();
+    if oms_scrub::scan(redacted.as_bytes(), &[]).is_ok_and(|h| h.is_empty()) {
+        redacted
+    } else {
+        "local process or filesystem operation failed".into()
+    }
+}
+
+struct StepOutcome {
+    code: i32,
+    reason: &'static str,
+    duration_seconds: f64,
+    console_bytes: usize,
+    console_sha256: String,
+    sensitive: bool,
+    interrupted: bool,
+}
+
+fn run_step_command(
+    ctx: &Context<'_>,
+    command: &Value,
+    companions: &CompanionGuard,
+    has_companions: bool,
+    run_path: &Path,
+    run: &mut Value,
+    step_id: &str,
+) -> Result<StepOutcome> {
+    verify_command_inputs(&ctx.repo, command)?;
+    let cwd = confined(&ctx.repo, command.text("cwd"))?;
+    let argv = command_argv(command)?;
+    let env = command_env(command)?;
+    let timeout_secs = u64::try_from(command.get("timeout_seconds").int()?)
+        .map_err(|_| error(2, "invalid step timeout"))?;
+    let max_output = usize::try_from(command.get("max_output_bytes").int()?)
+        .map_err(|_| error(2, "invalid step max_output_bytes"))?;
+    let policy = oms_command_runs::process::ProcessPolicy {
+        env_clear: true,
+        env,
+        null_stdin: true,
+        merged: true,
+        ..Default::default()
+    };
+
+    let companion_exited = AtomicBool::new(false);
+    let stop_watch = AtomicBool::new(false);
+    let step_interrupted = AtomicBool::new(false);
+    let mut collector = ConsoleCollector::new();
+    let mut spawned_pid: Option<u32> = None;
+    let mut pid_persist_err: Option<crate::Error> = None;
+
+    let started = Instant::now();
+    let exec_result = std::thread::scope(|scope| {
+        if has_companions {
+            scope.spawn(|| {
+                while !stop_watch.load(Ordering::Relaxed) {
+                    if ctx.interrupted.load(Ordering::Relaxed) {
+                        step_interrupted.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let dead = {
+                        let mut list = companions.processes.lock().expect("companion lock");
+                        list.iter_mut()
+                            .any(|child| matches!(child.try_wait(), Ok(Some(_))))
+                    };
+                    if dead {
+                        companion_exited.store(true, Ordering::Relaxed);
+                        step_interrupted.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            });
+        }
+        let rctx = oms_command_runs::Context::new(
+            &cwd,
+            if has_companions {
+                &step_interrupted
+            } else {
+                ctx.interrupted
+            },
+        );
+        let res = match rctx {
+            Ok(ref rctx) => {
+                let mut sink = std::io::sink();
+                let mut on_spawn = |pid: u32| {
+                    spawned_pid = Some(pid);
+                    if let Some(attempts) = obj_get_mut(run, "steps")
+                        .and_then(|steps| obj_get_mut(steps, step_id))
+                        .and_then(|rec| obj_get_mut(rec, "attempts"))
+                        .and_then(|arr| arr.array_mut().ok())
+                        && let Some(last) = attempts.last_mut()
+                    {
+                        let _ = last.set("pid", number(pid));
+                        if let Err(err) = catalog::save(ctx, run_path, run) {
+                            pid_persist_err = Some(err);
+                        }
+                    }
+                };
+                oms_command_runs::process::execute_with_hooks(
+                    rctx,
+                    &argv,
+                    &policy,
+                    false,
+                    max_output,
+                    Some(Duration::from_secs(timeout_secs)),
+                    &mut collector,
+                    &mut sink,
+                    Some(&mut on_spawn),
+                )
+            }
+            Err(e) => Err(e),
+        };
+        stop_watch.store(true, Ordering::Relaxed);
+        res
+    });
+    if let Some(err) = pid_persist_err {
+        return Err(err);
+    }
+
+    let elapsed = started.elapsed().as_secs_f64();
+    let companion_died = companion_exited.load(Ordering::Relaxed);
+    let was_interrupted = ctx.interrupted.load(Ordering::Relaxed) && !companion_died;
+
+    let (code, reason) = if was_interrupted {
+        (130, "interrupted")
+    } else if companion_died {
+        (125, "companion-exited")
+    } else {
+        match exec_result {
+            Ok(out) => {
+                if spawned_pid.is_none() {
+                    (127, "launch-failed")
+                } else if out.code == 124 {
+                    (124, "timeout")
+                } else if out.code == 130 && !ctx.interrupted.load(Ordering::Relaxed) {
+                    (out.code, "exit")
+                } else {
+                    (out.code, "exit")
+                }
+            }
+            Err(err) => {
+                if err.message.contains("exceeds its byte limit") {
+                    (125, "output-limit")
+                } else if err.code == 130 {
+                    return Ok(StepOutcome {
+                        code: 130,
+                        reason: "interrupted",
+                        duration_seconds: elapsed,
+                        console_bytes: collector.bytes,
+                        console_sha256: collector.digest_hex(),
+                        sensitive: collector.sensitive,
+                        interrupted: true,
+                    });
+                } else {
+                    (127, "launch-failed")
+                }
+            }
+        }
+    };
+
+    Ok(StepOutcome {
+        code,
+        reason,
+        duration_seconds: elapsed,
+        console_bytes: collector.bytes,
+        console_sha256: collector.digest_hex(),
+        sensitive: collector.sensitive,
+        interrupted: was_interrupted,
+    })
+}
+
+fn mark_interrupted(run: &mut Value) -> Result<()> {
+    run.set("status", string("interrupted"))?;
+    let now = string(crate::timestamp(crate::epoch())?);
+    if let Some(steps) = obj_get_mut(run, "steps")
+        && let Some(items) = obj_items_mut(steps)
+    {
+        for (_, rec) in items {
+            if rec.text("status") == "running" {
+                rec.set("status", string("interrupted"))?;
+                if let Some(attempts) = obj_get_mut(rec, "attempts")
+                    && let Ok(arr) = attempts.array_mut()
+                    && let Some(last) = arr.last_mut()
+                    && last.text("status") == "running"
+                {
+                    last.set("status", string("interrupted"))?;
+                    last.set("finished_at", now.clone())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mark_failed(run: &mut Value, message: &str) -> Result<()> {
+    run.set("status", string("failed"))?;
+    run.set(
+        "failure",
+        object([("reason", string(sanitize_failure_reason(message)))]),
+    )?;
+    let now = string(crate::timestamp(crate::epoch())?);
+    if let Some(steps) = obj_get_mut(run, "steps")
+        && let Some(items) = obj_items_mut(steps)
+    {
+        for (_, rec) in items {
+            if rec.text("status") == "running" {
+                rec.set("status", string("failed"))?;
+                if let Some(attempts) = obj_get_mut(rec, "attempts")
+                    && let Ok(arr) = attempts.array_mut()
+                    && let Some(last) = arr.last_mut()
+                    && last.text("status") == "running"
+                {
+                    last.set("status", string("failed"))?;
+                    last.set("finished_at", now.clone())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn execute_plan(
+    ctx: &Context<'_>,
+    plan: &Value,
     opts: &Options,
-    _resume: Option<&str>,
+    run_id: &str,
+    resume: bool,
+    request_id: Option<&str>,
     _services: &dyn oms_command_runs::Services,
+) -> Result<(Value, i32)> {
+    recipe_parent_only()?;
+    require(
+        opts.flag("execute"),
+        "execution requires explicit --execute; use plan to inspect the invocation",
+    )?;
+    let run_path = record_path("runs", run_id)?;
+    let _guard = storage::lock(&ctx.repo.join(&run_path))?;
+    let mut run = if resume {
+        let row = load(ctx, &run_path)?;
+        require(
+            row.get("schema").is_int(1) && row.text("id") == run_id,
+            "run is missing or invalid",
+        )?;
+        require(
+            row.get("plan_digest") == plan.get("plan_digest"),
+            "definition, inputs, environment or declared dependencies changed; start a new run",
+        )?;
+        verify_completed(&ctx.repo, &row, plan)?;
+        if row.text("status") == "succeeded" {
+            for old in row.get("outputs").array().unwrap_or(&[]) {
+                let req = object([
+                    ("path", old.get("path").clone()),
+                    ("max_bytes", number(64 * 1024 * 1024)),
+                ]);
+                let actual = output_entry(&ctx.repo, &req)?;
+                let same = actual.as_ref().is_some_and(|a| {
+                    a.text("sha256") == old.text("sha256") && a.get("bytes") == old.get("bytes")
+                });
+                require(
+                    same,
+                    format!(
+                        "completed final output changed; start a new run: {}",
+                        old.text("path")
+                    ),
+                )?;
+            }
+            return Ok((row, 0));
+        }
+        let mut uncertain = matches!(row.text("status"), "running" | "interrupted");
+        for (_, rec) in row.get("steps").object()? {
+            if matches!(rec.text("status"), "running" | "interrupted") {
+                uncertain = true;
+                if let Some(last) = rec.get("attempts").array()?.last() {
+                    require(
+                        !pid_alive(last.get("pid")),
+                        "a prior step process still appears live; resume cannot replay it",
+                    )?;
+                }
+            }
+        }
+        for comp in row.get("companion_attempts").array().unwrap_or(&[]) {
+            if comp.text("status") == "running" {
+                require(
+                    !pid_alive(comp.get("pid")),
+                    "a prior companion still appears live; resume cannot duplicate it",
+                )?;
+            }
+        }
+        require(
+            !uncertain || opts.flag("retry-uncertain"),
+            "interrupted execution has uncertain side effects; --retry-uncertain is required",
+        )?;
+        require(
+            row.text("status") != "failed" || opts.flag("retry-failed"),
+            "failed execution requires explicit --retry-failed",
+        )?;
+        row
+    } else {
+        require(!ctx.repo.join(&run_path).exists(), "run id already exists")?;
+        require(
+            records(ctx, "runs")?.len() < MAX_RECORDS,
+            "recipe run capacity reached",
+        )?;
+        let mut steps_map = json::empty();
+        for step in plan.get("steps").array()? {
+            steps_map.set(
+                step.text("id"),
+                object([
+                    ("status", string("pending")),
+                    ("attempts", Value::Array(vec![])),
+                ]),
+            )?;
+        }
+        let companion_ids =
+            json::list(plan.get("companions").array()?.iter().map(|c| c.text("id")));
+        object([
+            ("schema", number(1)),
+            ("id", string(run_id)),
+            ("recipe_id", plan.get("id").clone()),
+            ("kind", plan.get("kind").clone()),
+            ("action", plan.get("action").clone()),
+            ("source", plan.get("source").clone()),
+            ("definition_digest", plan.get("definition_digest").clone()),
+            ("overlay_digest", plan.get("overlay_digest").clone()),
+            ("plan_digest", plan.get("plan_digest").clone()),
+            ("inputs", plan.get("inputs").clone()),
+            ("ports", plan.get("ports").clone()),
+            ("companions", companion_ids),
+            ("created_at", string(crate::timestamp(crate::epoch())?)),
+            ("request_id", request_id.map(string).unwrap_or(Value::Null)),
+            (
+                "outputs_before",
+                snapshot_outputs(&ctx.repo, plan.get("outputs"))?,
+            ),
+            ("steps", steps_map),
+            ("companion_attempts", Value::Array(vec![])),
+            (
+                "execution",
+                object([
+                    ("profile", string("trusted-local")),
+                    ("sandbox", Value::Bool(false)),
+                    ("network", string("host")),
+                    (
+                        concat!("credential", "s"),
+                        string("ambient host files remain readable"),
+                    ),
+                    ("process_groups", Value::Bool(true)),
+                ]),
+            ),
+        ])
+    };
+
+    run.set("status", string("running"))?;
+    run.set("updated_at", string(crate::timestamp(crate::epoch())?))?;
+    catalog::save(ctx, &run_path, &run)?;
+    catalog::history_with(
+        ctx,
+        if resume { "run-resumed" } else { "run-started" },
+        run_id,
+        &[
+            ("recipe_id", plan.get("id").clone()),
+            ("plan_digest", plan.get("plan_digest").clone()),
+        ],
+    )?;
+
+    let companions = CompanionGuard::new();
+    let pending_steps: Vec<Value> = plan
+        .get("steps")
+        .array()?
+        .iter()
+        .filter(|s| run.get("steps").get(s.text("id")).text("status") != "succeeded")
+        .cloned()
+        .collect();
+
+    let mut exit_code: i32 = 0;
+    let body: Result<()> = (|| {
+        if !pending_steps.is_empty() {
+            for comp in plan.get("companions").array()? {
+                let comp_count = run.get("companion_attempts").array()?.len();
+                require(comp_count < MAX_ATTEMPTS, "companion attempt limit reached")?;
+                let comp_cmd = comp.get("command");
+                if let Ok(port_num) = comp.get("ready_port").int() {
+                    let port =
+                        u16::try_from(port_num).map_err(|_| error(2, "invalid companion port"))?;
+                    TcpListener::bind(("127.0.0.1", port))
+                        .map_err(|_| error(2, "companion port is already in use"))?;
+                }
+                let comp_row = object([
+                    ("id", comp.get("id").clone()),
+                    ("status", string("running")),
+                    ("started_at", string(crate::timestamp(crate::epoch())?)),
+                    ("command_digest", comp_cmd.get("command_digest").clone()),
+                ]);
+                obj_get_mut(&mut run, "companion_attempts")
+                    .and_then(|v| v.array_mut().ok())
+                    .ok_or_else(|| error(2, "invalid companion attempts"))?
+                    .push(comp_row);
+                catalog::save(ctx, &run_path, &run)?;
+
+                verify_command_inputs(&ctx.repo, comp_cmd)?;
+                let cwd = confined(&ctx.repo, comp_cmd.text("cwd"))?;
+                let argv = command_argv(comp_cmd)?;
+                let env = command_env(comp_cmd)?;
+                let child = Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .current_dir(&cwd)
+                    .env_clear()
+                    .envs(env)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0)
+                    .spawn()
+                    .map_err(|_| error(2, "local process or filesystem operation failed"))?;
+                let child_pid = child.id();
+                if let Some(arr) =
+                    obj_get_mut(&mut run, "companion_attempts").and_then(|v| v.array_mut().ok())
+                    && let Some(last) = arr.last_mut()
+                {
+                    last.set("pid", number(child_pid))?;
+                }
+                catalog::save(ctx, &run_path, &run)?;
+                {
+                    let mut list = companions.processes.lock().expect("companion lock");
+                    list.push(child);
+                }
+
+                if let Ok(port_num) = comp.get("ready_port").int() {
+                    let port =
+                        u16::try_from(port_num).map_err(|_| error(2, "invalid companion port"))?;
+                    let startup_secs = u64::try_from(comp.get("startup_seconds").int()?)
+                        .map_err(|_| error(2, "invalid companion startup timeout"))?;
+                    let deadline = Instant::now() + Duration::from_secs(startup_secs);
+                    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+                    loop {
+                        if ctx.interrupted.load(Ordering::Relaxed) {
+                            return Err(error(130, "interrupted"));
+                        }
+                        {
+                            let mut list = companions.processes.lock().expect("companion lock");
+                            if let Some(last) = list.last_mut()
+                                && matches!(last.try_wait(), Ok(Some(_)))
+                            {
+                                return Err(error(2, "companion exited before readiness"));
+                            }
+                        }
+                        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+                            break;
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(error(2, "companion readiness timed out"));
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+
+        let has_companions =
+            !plan.get("companions").array()?.is_empty() && !pending_steps.is_empty();
+        for step in &pending_steps {
+            let step_id = step.text("id");
+            let attempt_num = {
+                let rec = run.get("steps").get(step_id);
+                let attempts = rec.get("attempts").array()?;
+                require(attempts.len() < MAX_ATTEMPTS, "step attempt limit reached")?;
+                attempts.len() + 1
+            };
+            let before = snapshot_outputs(&ctx.repo, step.get("outputs"))?;
+            let step_cmd = step.get("command");
+            let current = object([
+                ("attempt", number(attempt_num)),
+                ("status", string("running")),
+                ("started_at", string(crate::timestamp(crate::epoch())?)),
+                ("command_digest", step_cmd.get("command_digest").clone()),
+                (
+                    "environment_digest",
+                    step_cmd.get("environment_digest").clone(),
+                ),
+                (
+                    "executable_digest",
+                    step_cmd.get("executable_digest").clone(),
+                ),
+                (
+                    "executable_path_digest",
+                    step_cmd.get("executable_path_digest").clone(),
+                ),
+                ("dependencies", step_cmd.get("dependencies").clone()),
+            ]);
+            let planned_bytes = json::pretty(&run)?.len() + json::pretty(&current)?.len();
+            require(
+                planned_bytes <= storage::MAX_FILE - 1024 * 1024,
+                "run receipt capacity reached; start a new run",
+            )?;
+            {
+                let rec = obj_get_mut(&mut run, "steps")
+                    .and_then(|s| obj_get_mut(s, step_id))
+                    .ok_or_else(|| error(2, "missing step state"))?;
+                rec.set("status", string("running"))?;
+                obj_get_mut(rec, "attempts")
+                    .and_then(|a| a.array_mut().ok())
+                    .ok_or_else(|| error(2, "invalid step attempts"))?
+                    .push(current);
+            }
+            catalog::save(ctx, &run_path, &run)?;
+
+            let outcome = run_step_command(
+                ctx,
+                step_cmd,
+                &companions,
+                has_companions,
+                &run_path,
+                &mut run,
+                step_id,
+            )?;
+            if outcome.interrupted {
+                mark_interrupted(&mut run)?;
+                exit_code = 130;
+                return Ok(());
+            }
+            let finished_at = string(crate::timestamp(crate::epoch())?);
+            let dur_str = format!("{:.3}", outcome.duration_seconds);
+            {
+                let rec = obj_get_mut(&mut run, "steps")
+                    .and_then(|s| obj_get_mut(s, step_id))
+                    .ok_or_else(|| error(2, "missing step state"))?;
+                if let Some(last) = obj_get_mut(rec, "attempts")
+                    .and_then(|a| a.array_mut().ok())
+                    .and_then(|arr| arr.last_mut())
+                {
+                    last.set("exit", number(outcome.code))?;
+                    last.set("reason", string(outcome.reason))?;
+                    last.set("duration_seconds", Value::Number(dur_str))?;
+                    last.set("console_bytes", number(outcome.console_bytes))?;
+                    last.set("console_sha256", string(outcome.console_sha256))?;
+                    last.set("sensitive_console_detected", Value::Bool(outcome.sensitive))?;
+                    last.set("console_retained", Value::Bool(false))?;
+                    last.set("finished_at", finished_at)?;
+                }
+                if outcome.code != 0 {
+                    rec.set("status", string("failed"))?;
+                    if let Some(last) = obj_get_mut(rec, "attempts")
+                        .and_then(|a| a.array_mut().ok())
+                        .and_then(|arr| arr.last_mut())
+                    {
+                        last.set("status", string("failed"))?;
+                    }
+                    exit_code = outcome.code;
+                }
+            }
+            if outcome.code != 0 {
+                run.set(
+                    "failure",
+                    object([
+                        ("step", string(step_id)),
+                        ("reason", string(outcome.reason)),
+                    ]),
+                )?;
+                run.set("status", string("failed"))?;
+                return Ok(());
+            }
+            let outputs = verify_outputs(&ctx.repo, step.get("outputs"), &before)?;
+            {
+                let rec = obj_get_mut(&mut run, "steps")
+                    .and_then(|s| obj_get_mut(s, step_id))
+                    .ok_or_else(|| error(2, "missing step state"))?;
+                rec.set("status", string("succeeded"))?;
+                if let Some(last) = obj_get_mut(rec, "attempts")
+                    .and_then(|a| a.array_mut().ok())
+                    .and_then(|arr| arr.last_mut())
+                {
+                    last.set("outputs", outputs)?;
+                    last.set("status", string("succeeded"))?;
+                }
+            }
+            catalog::save(ctx, &run_path, &run)?;
+            catalog::history_with(
+                ctx,
+                "step-succeeded",
+                run_id,
+                &[("step", string(step_id)), ("attempt", number(attempt_num))],
+            )?;
+        }
+
+        verify_completed(&ctx.repo, &run, plan)?;
+        let final_outputs =
+            verify_outputs(&ctx.repo, plan.get("outputs"), run.get("outputs_before"))?;
+        run.set("outputs", final_outputs)?;
+        run.remove("failure");
+        run.set("status", string("succeeded"))?;
+        Ok(())
+    })();
+
+    companions.stop_all();
+    let stopped_at = string(crate::timestamp(crate::epoch())?);
+    if let Some(arr) = obj_get_mut(&mut run, "companion_attempts").and_then(|v| v.array_mut().ok())
+    {
+        for row in arr.iter_mut() {
+            row.set("status", string("stopped"))?;
+            row.set("finished_at", stopped_at.clone())?;
+        }
+    }
+    if let Err(err) = body {
+        if err.code == 130 || ctx.interrupted.load(Ordering::Relaxed) {
+            mark_interrupted(&mut run)?;
+            exit_code = 130;
+        } else {
+            mark_failed(&mut run, &err.message)?;
+            exit_code = 2;
+        }
+    } else if exit_code != 0 && run.text("status") == "running" {
+        run.set("status", string("failed"))?;
+    }
+    run.set("updated_at", string(crate::timestamp(crate::epoch())?))?;
+    catalog::save(ctx, &run_path, &run)?;
+    catalog::history_with(
+        ctx,
+        "run-finished",
+        run_id,
+        &[
+            ("status", run.get("status").clone()),
+            ("exit", number(exit_code)),
+        ],
+    )?;
+    Ok((run, exit_code))
+}
+
+fn execute(
+    ctx: &Context<'_>,
+    plan: &Value,
+    opts: &Options,
+    resume_id: Option<&str>,
+    services: &dyn oms_command_runs::Services,
 ) -> Result<Output> {
-    crate::parent_only()?;
-    require(opts.flag("execute"), "host execution requires --execute")?;
-    Err(error(
-        2,
-        "native recipe execution requires a child-start PID receipt API; no process or state write was started",
-    ))
+    let run_id = match resume_id {
+        Some(id) => id.to_owned(),
+        None => crate::random_id("run-")?,
+    };
+    let (run, exit_code) = execute_plan(
+        ctx,
+        plan,
+        opts,
+        &run_id,
+        resume_id.is_some(),
+        None,
+        services,
+    )?;
+    json_output(exit_code, &run)
 }
 
 pub(crate) fn run(
@@ -941,6 +1934,13 @@ pub(crate) fn run(
                 (action, opts.pos[1].as_str(), "")
             };
             require(["validate", "plan", "run"].contains(&operation), HELP)?;
+            if operation == "run" {
+                recipe_parent_only()?;
+                require(
+                    opts.flag("execute"),
+                    "execution requires explicit --execute; use plan to inspect the invocation",
+                )?;
+            }
             let loaded = catalog::source(&ctx, file)?;
             if operation == "validate" {
                 let (definition, digest, _) = bundle(&ctx, &loaded, &opts)?;
@@ -955,7 +1955,34 @@ pub(crate) fn run(
                     ]),
                 );
             }
-            let plan = compile(&ctx, loaded, &opts, selection)?;
+            let plan = if resume {
+                let previous = load(&ctx, &record_path("runs", &opts.pos[1])?)?;
+                require(
+                    previous.get("schema").is_int(1) && previous.text("id") == opts.pos[1],
+                    "run is missing or invalid",
+                )?;
+                let companions = previous
+                    .get("companions")
+                    .strings()?
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                compile_with(
+                    &ctx,
+                    loaded,
+                    opts.get("overlay"),
+                    previous.get("inputs"),
+                    previous.get("ports"),
+                    &companions,
+                    previous.text("action"),
+                )?
+            } else {
+                require(
+                    (loaded.definition.text("kind") == "workspace") == workspace,
+                    "workspace definitions use workspace plan/run; recipes use plan/run",
+                )?;
+                compile(&ctx, loaded, &opts, selection)?
+            };
             if operation == "run" {
                 execute(
                     &ctx,
