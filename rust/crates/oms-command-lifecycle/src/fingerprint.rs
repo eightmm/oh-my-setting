@@ -4,7 +4,12 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, os::unix::ffi::OsStrExt, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::Path,
+};
 
 pub(crate) fn tree(root: &Path, fingerprint: bool) -> Result<String> {
     if !root.is_dir() {
@@ -48,7 +53,11 @@ pub(crate) fn tree(root: &Path, fingerprint: bool) -> Result<String> {
                 } else {
                     path
                 };
-                h.update(r::read(&source, 1024 * 1024 * 1024)?);
+                h.update(if m.is_file() && m.nlink() > 1 {
+                    crate::transaction::external_read(&source)?
+                } else {
+                    r::read(&source, 1024 * 1024 * 1024)?
+                });
             }
             h.update(b"\0");
         }

@@ -231,3 +231,158 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     tx.commit()?;
     Ok(r::text(format!("wrote {}", out.display())))
 }
+
+pub(crate) fn slurm(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> Result<()> {
+    let output = env::var_os("OH_MY_SETTING_SLURM_REF")
+        .map(PathBuf::from)
+        .unwrap_or(paths.source.join("local/slurm.md"));
+    let mut body = format!(
+        "# Local Slurm Cluster\n\nSchema: 1\nGenerated: {}\n\nUse this as local reference only. Do not commit generated cluster details.\n\n",
+        r::now()
+    );
+    let user = env::var("USER").unwrap_or_default();
+    let assoc = format!("user={user}");
+    let sections = [
+        (
+            "Partitions",
+            "sinfo",
+            vec!["-h", "-o", "%P|%a|%l|%D|%G|%m|%c|%N"],
+        ),
+        (
+            "Partition Configuration",
+            "scontrol",
+            vec!["-o", "show", "partition"],
+        ),
+        ("Node Configuration", "scontrol", vec!["-o", "show", "node"]),
+        (
+            "Associations (current user)",
+            "sacctmgr",
+            vec![
+                "-nP",
+                "show",
+                "assoc",
+                assoc.as_str(),
+                "format=Cluster,Account,User,Partition,DefaultQOS,QOS,GrpTRES,MaxTRES,MaxTRESPJ,MaxJobs,MaxSubmit,MaxWall",
+            ],
+        ),
+        (
+            "QOS",
+            "sacctmgr",
+            vec![
+                "-nP",
+                "show",
+                "qos",
+                "format=Name,Priority,Preempt,PreemptMode,Flags,UsageFactor,GrpTRES,MaxTRESPU,MaxTRESPJ,MaxWall,MaxJobsPU,MaxSubmitPU",
+            ],
+        ),
+        (
+            "Current Queue",
+            "squeue",
+            vec![
+                "-u",
+                user.as_str(),
+                "-o",
+                "%.18i %.9P %.32j %.2t %.10M %.6D %R",
+            ],
+        ),
+    ];
+    let mut collected = std::collections::BTreeMap::<String, String>::new();
+    for (heading, command, args) in sections {
+        body.push_str(&format!("## {heading}\n\n"));
+        match probe(paths, command, &args, flag) {
+            Some(raw) => {
+                collected.insert(heading.to_owned(), raw.clone());
+                body.push_str("```text\n");
+                body.push_str(&raw.replace("```", "'''"));
+                body.push_str("\n```\n\n");
+            }
+            None => body.push_str(
+                "Unavailable (command missing, accounting disabled, or access denied).\n\n",
+            ),
+        }
+    }
+    let partitions = collected
+        .get("Partition Configuration")
+        .map(String::as_str)
+        .unwrap_or("");
+    let default = partitions
+        .lines()
+        .find(|line| line.split_whitespace().any(|p| p == "Default=YES"))
+        .unwrap_or("");
+    let value = |name: &str| {
+        default
+            .split_whitespace()
+            .find_map(|w| {
+                w.split_once('=')
+                    .filter(|(n, _)| *n == name)
+                    .map(|(_, v)| v)
+            })
+            .unwrap_or("(not configured)")
+            .to_owned()
+    };
+    let preferred = value("PartitionName");
+    let associations = collected
+        .get("Associations (current user)")
+        .map(String::as_str)
+        .unwrap_or("");
+    let association = |column: usize| {
+        let mut values = std::collections::BTreeSet::new();
+        for line in associations.lines() {
+            let fields = line.split('|').collect::<Vec<_>>();
+            if fields
+                .get(3)
+                .is_some_and(|p| *p == preferred || p.is_empty())
+            {
+                if let Some(v) = fields.get(column).filter(|s| !s.is_empty()) {
+                    values.insert((*v).to_owned());
+                }
+            }
+        }
+        if values.is_empty() {
+            "(not configured)".to_owned()
+        } else {
+            values.into_iter().collect::<Vec<_>>().join(", ")
+        }
+    };
+    let defaults = value("JobDefaults");
+    let cpu = defaults
+        .split(',')
+        .filter(|p| p.starts_with("DefCpu"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut memory = default
+        .split_whitespace()
+        .filter(|p| {
+            p.starts_with("DefMemPerCPU=")
+                || p.starts_with("DefMemPerNode=")
+                || p.starts_with("DefMemPerGPU=")
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    memory.extend(
+        defaults
+            .split(',')
+            .filter(|p| p.starts_with("DefMem"))
+            .map(str::to_owned),
+    );
+    body.push_str(&format!("## Effective Submission Defaults\n\nValues are copied from configuration and associations; missing values are not inferred.\n\n- Preferred partition: {preferred}\n- Account: {}\n- QOS default: {}\n- CPU default: {}\n- GPU default: (not configured)\n- Memory default: {}\n- Time default: {}\n- Log path:\n- Checkpoint path:\n",association(1),association(4),if cpu.is_empty(){"(not configured)"}else{&cpu},if memory.is_empty(){"(not configured)".into()}else{memory.join(", ")},value("DefaultTime")));
+    if env::var_os("OH_MY_SETTING_SLURM_WRITE_RAW").is_some_and(|s| s == "1") {
+        let root = env::var_os("OH_MY_SETTING_SLURM_RAW_DIR")
+            .map(PathBuf::from)
+            .unwrap_or(paths.source.join("local/slurm"));
+        for (heading, name) in [
+            ("Partition Configuration", "partitions.txt"),
+            ("Node Configuration", "nodes.txt"),
+            (
+                "Associations (current user)",
+                "associations-current-user.psv",
+            ),
+            ("QOS", "qos.psv"),
+        ] {
+            if let Some(raw) = collected.get(heading) {
+                tx.write(&root.join(name), format!("{raw}\n").as_bytes(), 0o600)?;
+            }
+        }
+    }
+    tx.write(&output, body.as_bytes(), 0o600)
+}

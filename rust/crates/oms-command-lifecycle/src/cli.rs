@@ -18,6 +18,8 @@ pub(crate) struct Options {
     values: BTreeMap<String, Vec<String>>,
     paths: BTreeMap<String, Vec<OsString>>,
     pub raw: Vec<OsString>,
+    pub claude_capabilities: Option<(bool, bool)>,
+    pub hook_protected: bool,
 }
 impl Options {
     pub fn has(&self, k: &str) -> bool {
@@ -117,6 +119,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
                 "--reapply",
                 "--add",
                 "--upgrade",
+                "--providers",
                 "--allow-missing",
                 "--full",
                 "--dry-run",
@@ -147,6 +150,7 @@ fn spec(tool: &str) -> (&'static [&'static str], &'static [&'static str]) {
             ],
             &["--ref"],
         ),
+        "agy-hook" => (&[], &[]),
         "auto-update" => (
             &["--dry-run", "--apply", "--check-only", "--json"],
             &["--method"],
@@ -252,7 +256,10 @@ fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
         let s = raw
             .to_str()
             .ok_or_else(|| r::Error(2, "unknown non-UTF8 lifecycle argument".into()))?;
-        if !s.starts_with('-') && out.action.is_empty() && matches!(tool, "tick" | "auto-update") {
+        if !s.starts_with('-')
+            && out.action.is_empty()
+            && matches!(tool, "tick" | "auto-update" | "agy-hook")
+        {
             out.action = s.into();
             continue;
         }
@@ -329,17 +336,39 @@ pub(crate) fn execute(
     }
     r::check(flag)?;
     r::native_host()?;
+    if tool == "agy-hook" {
+        return crate::agy_hook::run(cwd, source, &options, flag, services);
+    }
     let mut paths = Paths::new(cwd, source)?;
     if tool != "tick" {
         if let Some(repo) = options.path("--repo", &paths.cwd)? {
             paths.cwd = r::physical(&repo)?;
         }
     }
+    let mutation = !options.preview()
+        && (matches!(
+            tool,
+            "install"
+                | "link"
+                | "unlink"
+                | "uninstall"
+                | "install-hooks"
+                | "install-claude-hooks"
+                | "install-mcp"
+                | "install-codex-plugin"
+                | "install-agy-plugin"
+                | "install-autoupdate"
+                | "uninstall-autoupdate"
+        ) || matches!(tool, "install-tools" | "install-profile") && !options.has("--check")
+            || tool == "doctor" && options.has("--repair"));
+    if mutation {
+        crate::update::borrowed(&paths)?;
+    }
     match tool {
-        "doctor" => crate::doctor::run(&paths, &options, flag),
+        "doctor" => crate::doctor::run(&paths, &options, flag, services),
         "status" => crate::doctor::status(&paths, &options, flag),
         "snapshot" | "write-machine-snapshot" => crate::snapshot::run(&paths, &options, flag),
-        "update" | "auto-update" => crate::update::run(&paths, &options, flag),
+        "update" | "auto-update" => crate::update::run(&paths, &options, flag, services),
         "tick" => crate::tick::run(&paths, &options, flag, services),
         "install-profile" | "install-tools" => crate::tools::run(&paths, &options, flag),
         "install-autoupdate" | "uninstall-autoupdate" => {
@@ -349,7 +378,7 @@ pub(crate) fn execute(
         | "install-claude-hooks"
         | "install-mcp"
         | "install-codex-plugin"
-        | "install-agy-plugin" => crate::integrations::run(&paths, &options, flag),
-        _ => crate::install::run(&paths, &options, flag),
+        | "install-agy-plugin" => crate::integrations::run(&paths, &options, flag, services),
+        _ => crate::install::run(&paths, &options, flag, services),
     }
 }

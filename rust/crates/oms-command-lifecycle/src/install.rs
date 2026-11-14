@@ -163,7 +163,7 @@ pub(crate) fn skill_sources(paths: &Paths) -> Result<Vec<PathBuf>> {
     }
     Ok(sources)
 }
-fn targets(paths: &Paths, executable: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+pub(crate) fn targets(paths: &Paths, executable: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut pairs = vec![
         (
             paths.source.join("rules/global-AGENTS.md"),
@@ -208,7 +208,7 @@ pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Resul
         ));
     }
     r::child_guard()?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let _guard = r::receipt_lock(paths, flag)?;
     let old = paths.load()?;
     let mut tx = Transaction::begin(paths)?;
     let row = apply(paths, old.as_ref(), &payload, &mut tx, flag)?;
@@ -417,7 +417,7 @@ pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Res
         ));
     }
     r::child_guard()?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let _guard = r::receipt_lock(paths, flag)?;
     paths.require_owner()?;
     let mut tx = Transaction::begin(paths)?;
     let result = apply_unlink(paths, options, flag, &mut tx)?;
@@ -425,12 +425,12 @@ pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Res
     tx.commit()?;
     Ok(result)
 }
-pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
-    if options.has("--purge") || options.has("--purge-dirty") {
-        return r::fail(
-            "checkout purge is outside the reversible native installer; unlink first and remove the checkout explicitly",
-        );
-    }
+pub(crate) fn run(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
     if options.tool == "install-skills" {
         return Ok(r::text(format!(
             "skills: {} enabled sources validated",
@@ -444,7 +444,7 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
         return unlink(paths, options, flag);
     }
     if options.tool == "install" {
-        return install(paths, options, flag);
+        return install(paths, options, flag, services);
     }
     if options.tool == "uninstall" {
         return uninstall(paths, options, flag);
@@ -463,7 +463,12 @@ fn component_options(options: &Options, tool: &str, remove: bool) -> Options {
     }
     options
 }
-fn install(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+fn install(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
     if !options.preview() {
         r::child_guard()?;
     }
@@ -482,24 +487,25 @@ fn install(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate:
     if options.has("--no-auto-update") {
         row["components"]["auto_update"] = json!(false);
     }
-    // These options require independent ownership services. Refuse before build,
-    // target staging, or receipt publication, rather than silently ignoring them.
-    for option in [
+    let extras = [
         "--connect-services",
         "--peer-permissions",
         "--star",
         "--notion-data-source",
-    ] {
-        if options.has(option) {
-            return r::fail(format!(
-                "native install {option} requires an owner-supplied service"
-            ));
-        }
-    }
-    for key in ["slurm_snapshot"] {
-        if row["components"][key] == true {
-            return r::fail(format!(
-                "native {key} component requires a producer adapter before installation"
+    ]
+    .iter()
+    .any(|s| options.has(s));
+    if extras && !options.preview() {
+        let out = services.install_extras(
+            crate::IncomingPhase::Preflight,
+            &paths.source,
+            &options.raw,
+            flag,
+        );
+        if out.0 != 0 {
+            return Err(r::Error(
+                out.0,
+                "native install extra preflight failed; installation unchanged".into(),
             ));
         }
     }
@@ -537,16 +543,14 @@ fn install(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate:
             &json!({"schema":1,"install":row,"capabilities":plan,"actions":["stage native payload","converge owned targets and components","publish install receipt"]}),
         );
     }
-    if plan
-        .as_ref()
-        .is_some_and(|p| p["missing"].as_array().is_some_and(|a| !a.is_empty()))
-    {
-        return r::fail(
-            "selected tools are missing; verified tool installation is required before install",
-        );
-    }
     r::child_guard()?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let prepared = if row["components"]["claude_hooks"] == true {
+        crate::integrations::prepare_hooks(paths, options, flag)?
+    } else {
+        options.clone()
+    };
+    let options = &prepared;
+    let _guard = r::receipt_lock(paths, flag)?;
     let fresh = paths.load()?;
     if fresh != old {
         return Err(r::Error(
@@ -599,9 +603,11 @@ fn install(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate:
             0o600,
         )?;
     }
-    if let Some(mut plan) = plan {
-        plan["status"] = json!("available");
-        plan["installed_at"] = json!(r::now());
+    if row["components"]["slurm_snapshot"] == true {
+        crate::snapshot::slurm(paths, &mut tx, flag)?;
+    }
+    if plan.is_some() {
+        let plan = crate::tools::apply(paths, options, &mut tx, flag)?;
         tx.write(
             &paths.config.join("capabilities.json"),
             &r::bytes(&plan)?,
@@ -611,12 +617,26 @@ fn install(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate:
     payload.recheck()?;
     r::check(flag)?;
     tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
+    let diagnostics = tx.diagnostics();
     tx.commit()?;
-    Ok(r::text(format!(
+    if extras {
+        let out = services.install_extras(
+            crate::IncomingPhase::Reconcile,
+            &paths.source,
+            &options.raw,
+            flag,
+        );
+        if out.0 != 0 {
+            return Err(r::Error(out.0,"core install succeeded; native extra producer failed and retains its recovery state".into()));
+        }
+    }
+    let mut output = r::text(format!(
         "installed native OMS {}; receipt: {}",
         payload.revision,
         paths.receipt.display()
-    )))
+    ));
+    output.2 = diagnostics;
+    Ok(output)
 }
 fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
     if !options.preview() {
@@ -633,22 +653,42 @@ fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crat
             "uninstall requires --yes in a noninteractive lifecycle invocation".into(),
         ));
     }
-    // Account effects must be withdrawn by their canonical registry transaction.
-    // An unrecognized registry is never permission to remove global integration.
-    for file in [
-        "provider-accounts.claude.json",
-        "provider-account-effects.json",
-        "codex-account-links.json",
-    ] {
-        let file = paths.config.join(file);
-        if r::exists(&file) {
+    let purge =
+        options.has("--purge") || std::env::var_os("OH_MY_SETTING_PURGE").is_some_and(|s| s == "1");
+    let dirty = options.has("--purge-dirty")
+        || std::env::var_os("OH_MY_SETTING_PURGE_DIRTY").is_some_and(|s| s == "1");
+    if dirty && !purge {
+        return r::fail("purge-dirty requires purge");
+    }
+    if purge {
+        if paths.source == Path::new("/")
+            || paths.home.starts_with(&paths.source)
+            || [&paths.config, &paths.state, &paths.data]
+                .iter()
+                .any(|p| p.starts_with(&paths.source))
+        {
+            return r::fail("refusing unsafe checkout purge root");
+        }
+        if !dirty
+            && !r::git(
+                &paths.source,
+                &["status", "--porcelain", "--untracked-files=all"],
+                flag,
+            )?
+            .is_empty()
+        {
             return r::fail(
-                "registered account effects require the native account cleanup adapter; installation retained",
+                "refusing to purge a dirty checkout; preserve changes or explicitly use purge-dirty",
             );
         }
     }
     if options.preview() {
-        return unlink(paths, options, flag);
+        crate::account_cleanup::plan(paths)?;
+        return Ok(r::text(if purge {
+            "would withdraw owned integrations and purge the checkout"
+        } else {
+            "would withdraw owned integrations and keep the checkout"
+        }));
     }
     let old = paths.require_owner()?;
     for (key, tool) in [
@@ -661,9 +701,14 @@ fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crat
     }
     {
         r::child_guard()?;
-        let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+        let _operation = crate::lifecycle_lock::acquire(paths, flag)?;
+        let _accounts = r::lock(&paths.config.join("provider-accounts.json"), &paths.cwd)?;
+        let _guard = r::receipt_only(paths)?;
         let old = paths.require_owner()?;
         let mut tx = Transaction::begin(paths)?;
+        let accounts = crate::account_cleanup::plan(paths)?;
+        crate::account_cleanup::apply(accounts, &mut tx)?;
+
         for (key, tool) in [
             ("claude_hooks", "install-claude-hooks"),
             ("mcp", "install-mcp"),
@@ -690,7 +735,42 @@ fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crat
                 flag,
             )?;
         }
+        crate::scheduler::apply(
+            paths,
+            &component_options(options, "tick", true),
+            &mut tx,
+            flag,
+        )?;
+        crate::account_cleanup::permissions(paths, &mut tx)?;
+        if purge {
+            crate::account_cleanup::journal(paths, &mut tx)?;
+        }
         let result = apply_unlink(paths, options, flag, &mut tx)?;
+        let runtime = std::env::var_os("OMS_PYTHON_RUNTIME_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or(paths.data.join("python-runtime"));
+        if r::exists(&runtime) {
+            let proof = runtime.join(".oh-my-setting-python-runtime");
+            let expected = ["schema", "1", "owner", "oh-my-setting"];
+            let lines = String::from_utf8(r::read(&proof, 4096)?)
+                .map_err(|_| r::Error(2, "invalid interpreter ownership".into()))?;
+            if !runtime.is_symlink()
+                && !paths.home.starts_with(&runtime)
+                && lines.lines().take(2).eq([
+                    format!("{}{}{}", expected[0], '=', expected[1]),
+                    format!("{}{}{}", expected[2], '=', expected[3]),
+                ]
+                .iter()
+                .map(String::as_str))
+            {
+                tx.remove_external(&runtime)?;
+            } else {
+                return r::fail("interpreter ownership is ambiguous; directory retained");
+            }
+        }
+        if purge {
+            tx.remove_external(&paths.source)?;
+        }
         r::check(flag)?;
         tx.commit()?;
         Ok(result)

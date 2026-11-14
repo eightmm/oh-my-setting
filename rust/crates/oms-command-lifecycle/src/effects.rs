@@ -9,6 +9,18 @@ use std::{
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Effect {
+    GitRef {
+        source: PathBuf,
+        name: String,
+        before: Option<String>,
+        after: String,
+    },
+    GitCheckout {
+        source: PathBuf,
+        before: String,
+        after: String,
+        branch: Option<String>,
+    },
     Crontab {
         cwd: PathBuf,
         before: Option<Vec<u8>>,
@@ -83,6 +95,74 @@ impl Effect {
     }
     pub fn restore(&self) -> Result<()> {
         match self {
+            Self::GitRef {
+                source,
+                name,
+                before,
+                after,
+            } => {
+                if !name.starts_with("refs/heads/")
+                    || after.len() != 40
+                    || !after.bytes().all(|b| b.is_ascii_hexdigit())
+                {
+                    return r::fail("unsafe Git ref recovery");
+                }
+                let flag = AtomicBool::new(false);
+                let current = r::git(source, &["rev-parse", "--verify", name], &flag).ok();
+                if &current == before {
+                    return Ok(());
+                }
+                if current.as_ref() != Some(after) {
+                    return r::fail("Git ref changed concurrently; journal retained");
+                }
+                if let Some(previous) = before {
+                    r::git(source, &["update-ref", name, previous, after], &flag)?;
+                } else {
+                    r::git(source, &["update-ref", "-d", name, after], &flag)?;
+                }
+            }
+
+            Self::GitCheckout {
+                source,
+                before,
+                after,
+                branch,
+            } => {
+                let flag = AtomicBool::new(false);
+                let valid = |s: &str| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit());
+                if !valid(before) || !valid(after) {
+                    return r::fail("invalid Git rollback identity");
+                }
+                let current = r::git(source, &["rev-parse", "HEAD"], &flag)?;
+                if current != *before && current != *after {
+                    return r::fail("Git changed concurrently; update journal retained");
+                }
+                if !r::git(
+                    source,
+                    &["status", "--porcelain", "--untracked-files=normal"],
+                    &flag,
+                )?
+                .is_empty()
+                {
+                    return r::fail("checkout changed during update; rollback journal retained");
+                }
+                r::git(source, &["checkout", "--detach", before], &flag)?;
+                if let Some(branch) = branch {
+                    if !branch.starts_with("refs/heads/") {
+                        return r::fail("unsafe rollback branch");
+                    }
+                    let actual = r::git(source, &["rev-parse", "--verify", branch], &flag)?;
+                    if actual != *before && actual != *after {
+                        return r::fail("branch changed concurrently; rollback journal retained");
+                    }
+                    r::git(source, &["update-ref", branch, before, &actual], &flag)?;
+                    r::git(
+                        source,
+                        &["checkout", branch.trim_start_matches("refs/heads/")],
+                        &flag,
+                    )?;
+                }
+            }
             Self::Crontab { cwd, before, after } => {
                 let current = cron(cwd)?;
                 if &current == before {

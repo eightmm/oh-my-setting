@@ -1,96 +1,100 @@
-# Native lifecycle implementation draft
+# Native lifecycle implementation
 
-This standalone crate is a partial migration. It is not ready for lifecycle
-cutover. Compilation establishes neither behavioral parity nor host deployment
-readiness. The embedding dispatcher and admission remain the owner's work.
+This crate owns native lifecycle planning, validation, transactions, and provider
+configuration. It preserves `run`, `run_with_source`, and `run_with_services`;
+the first two use `UnavailableServices`. It never dispatches a Bash or Python
+lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enabled.
 
-Public entrypoints are `owns`, `run_with_source`, and `run_with_services`.
-The latter takes the same command, argument, cwd, source, and cancellation
-inputs plus `&dyn Services`. `owns` is an IO-free family selector, including
-malformed invocations. Execution returns `(exit, stdout, stderr)` without
-changing process-global cwd, environment, or signal handlers.
+## Implemented surfaces
 
-Path-valued options retain `OsString` bytes, including attached option values.
-Option names, actions, configuration command strings, and textual registries
-still require UTF-8. JSON serialization can also refuse a non-UTF8 path; this
-crate does not silently replace those bytes.
+- `update` check/apply, `--fallback-to-edge`, `--rollback`, auto-update status,
+  and `--probe-agy-surfaces`: validate refs, clean checkout, live worker/panel
+  fences, and canonical ownership before mutation. Apply uses a separate update
+  journal, backs up managed payloads and the receipt, invokes the incoming native
+  gate, verifies its receipt/doctor, and publishes the final receipt last. Gate
+  failure restores payloads and Git state if their recorded identities still
+  match; concurrent changes retain recovery evidence. Preview precedes probing.
+- `install`, `link`, `unlink`, and `uninstall --purge`: converge recorded
+  components, manage native launchers/skills, remove only recorded provider
+  account effects, retire owned interpreter trees, and optionally remove the
+  checkout. Dirty purge needs `--purge-dirty`; unsafe root/ancestor paths and
+  ambiguous ownership fail closed. Permission cleanup preserves unrelated grants.
+- `install-codex-plugin`: inventory through the bounded Codex CLI, initial
+  marketplace/plugin registration, moved-marketplace/version refresh, and full
+  removal. Deleted previous checkouts do not prevent removal. Unmanaged TOML
+  tables, foreign caches, modified managed caches, and unrelated config changes
+  remain refusals. External snapshots cover the OMS marketplace/cache namespaces
+  and actual Codex config, never the entire provider plugins directory.
+- `install-claude-hooks`: isolated, bounded capability negotiation before global
+  receipt/transaction locking; conditional `onFailure` and compact-window
+  convergence; adoption/removal of legacy OMS wrapper commands even when their
+  checkout was deleted. Account mode requires a matching effects reservation
+  (`--ownership-receipt`) and removes only exact recorded leaves/hooks.
+- `install-agy-plugin --probe-surfaces`: disposable home/workspace certification
+  checks hook delivery, payload, blocking, and timeout behavior. Cache identity
+  uses Bash-compatible binary spelling and stat identity, including macOS path
+  aliases. A binary removed during the probe produces `binary_changed`.
+  `agy-surfaces.env` is evidence only for that binary; changed identity retracts
+  hooks. Certified plugins ship native `agy-hook` PreInvocation/Stop adapters;
+  uncertified plugins remain MCP-only. The adapter translates provider payloads,
+  bounds stdin, honors kill switches, and keeps advisory Stop calls nonblocking.
+- `install-tools` / `install-profile`: catalog/profile inheritance, `--only`,
+  `--full`, `--upgrade`, installed-provider-only `--providers`, capability
+  checks, and Slurm snapshots. Managed Node, uv/uvx, gh, Antigravity, Claude,
+  Codex, and Notion payloads use verified lock metadata, HTTPS-only downloads,
+  digest/SRI verification, constrained archive extraction, and managed provenance.
+  Provider stable release refresh retains a verified lock snapshot; an explicit
+  tool lock stays pinned. Optional npm refresh selects installed global packages
+  and stable releases at least fourteen days old; native Pi uses its updater.
+  Existing foreign tools are preserved or refused, not silently replaced.
+- `doctor --contract`, `--live-models`, `--strict-diversity`, and `--repair`:
+  isolated native template/hook contract fixtures, bounded provider/model
+  discovery, declared/detected effort controls, configured-default routability,
+  capability `.env`/model/effort caches, model-family diversity, recorded-component convergence,
+  project/security-policy baselines, managed copy/digest inventories, and MCP
+  probe memoization. MCP cache keys include command, execution context, timeout,
+  and binary identity; a memo contains validated tool hashes, not arbitrary
+  provider output. Unknown model families cannot certify diversity.
+- Existing status, sandbox, residue, pins, scheduler, and tick behavior remains
+  native. Optional external adapters must actually satisfy profile requirements;
+  their absence is accepted only by explicit allow-missing policy.
 
-## Implemented paths
+Downloads, metadata, archive members, provider output, and stdin are bounded.
+Invalid paths, links escaping staged payloads, malformed manifests, checksum
+mismatches, downgrade attempts, and ambiguous ownership fail before publication.
+Provider commands are cancellable, time-bounded process groups with closed stdin
+unless a protocol explicitly supplies input. Probe output is not authority.
 
-- `link`, `unlink`, and skill-source validation retain schema-1/2 receipt
-  reading, schema-2 receipt production, physical ownership comparisons,
-  enabled skills, copy markers, and displaced-user backups. The native payload
-  proof now stays alive and is rechecked during target publication. `unlink`
-  uses the receipt's recorded native frontdoor for ownership comparisons.
-- `install` can consume a validated staged payload or build a missing payload
-  with locked, offline Cargo 1.99.1. It stages the complete cache directory
-  atomically, installs native artifacts and a hash-checking POSIX frontdoor,
-  converges supported recorded components, and publishes the receipt last.
-  The frontdoor invokes native private dispatch with explicit source/revision
-  arguments. It requires `sha256sum` or `shasum`, with no Python activation,
-  interpreter-tree installation, or legacy-launcher fallback. Invalid existing
-  caches are refused. Component disable transitions withdraw owned effects.
-- `uninstall --yes` withdraws supported integration effects and managed targets
-  in one target transaction. Account-effect registries and unsupported provider
-  removal transactions refuse before global cleanup. Checkout purge and managed
-  interpreter-directory retirement remain unavailable.
-- `install-claude-hooks` converges declared hooks, HUDs, attribution, and the
-  evidenced model effort default. Exact managed entries from another genuine
-  checkout can be adopted; user siblings survive. Unset guard configuration
-  preserves existing owned `onFailure` blocks, and explicit disabling removes
-  them. Enabling fail-closed guards refuses without capability negotiation.
-  Account reservation, auto-compact negotiation, and native HUD execution are
-  still incomplete; existing hook/HUD declarations retain their shell forms.
-- `install-mcp` registers the managed native frontdoor for Claude and Codex.
-  TOML is parsed with `oms-toml`; a candidate must preserve all unrelated data,
-  including when marker-like text occurs inside strings. Unmanaged registration
-  tables are refused. Both provider configurations validate before publication.
-- `install-agy-plugin` materializes a complete, owned MCP-only plugin directory
-  atomically. Foreign or modified plugin directories are refused. No lifecycle
-  hook certification is inferred from a cache assertion.
-- `install-codex-plugin` can converge an already registered plugin's proven
-  cache and managed HUD/usage blocks. Customized values survive. The settings
-  editor validates syntax and the entire semantic delta, handles displaced HUD
-  markers, preserves the file mode, and creates a first-touch backup. Initial
-  marketplace/plugin registration and provider-owned removal remain unavailable.
-- `install-profile` / `install-tools` retain capability inheritance, availability
-  checks, planning, checking, reapply/add, explicit degraded receipts, and native
-  runtime requirements. Tool download/selection/upgrade remains incomplete.
-- `install-autoupdate`, `uninstall-autoupdate`, and tick trigger installation
-  retain journaled native scheduler files and external activation recovery.
-  Removal inspects existing units as well as cron. Exact legacy tick cron
-  entries can migrate under the same journal; ambiguous prefixes/markers refuse.
-- `update --check` resolves pinned refs, edge, and explicit fallback-to-edge.
-  Fetch and target resolution serialize through an `oms-lock` derived from the
-  common Git directory. `auto-update check|status|attention|install|remove`
-  preserves the legacy status-file format and can read the earlier JSON draft.
-  Attention distinguishes disabled, unwired, no-run, failed, blocked,
-  session-only, overdue, unknown, and ok. Failed checks record a complete failure
-  outcome. Apply and rollback still refuse before checkout mutation.
-- `doctor` retains core receipt/target/payload/skill/operations/memory checks,
-  link repair, surfaces, tool-lock, security, residue, sandbox, and provider
-  reports. TOML security/MCP inspection now uses `oms-toml`. Extension inventory
-  includes Claude plugin declarations and Antigravity plugin/extension names.
-  Provider `--check --table --root` validates profiles, references, implementation
-  definitions, and test words without executing configuration content.
-- `doctor --mcp` hashes launch metadata and sorted environment names, reports
-  unpinned package launchers and non-loopback HTTP, and merges the latest pin
-  baseline under its canonical lock. Unknown providers keep their pins.
-  `--probe-tools NAME` selects exactly one enabled local stdio server and speaks
-  initialize/initialized/tools-list without a shell. Bounds are 4 MiB, 20 pages,
-  500 tools, and one 1–120 second deadline. The process group is always stopped.
-  Only tool hashes/counts and cleaned names are reported; configuration values,
-  schemas, descriptions, headers, and server stderr are not printed.
-- Security finding fingerprints use a locked, atomic `doctor-security.json`;
-  harness children observe without publishing it. Snapshot home storage uses
-  native `statvfs`, with an explicit unknown result on failure.
-- `tick` retains physical-path registration, native attempt reconciliation,
-  memory health, and telemetry. It deduplicates repositories, defers for live or
-  unproven verification markers, and preserves validated wake ledgers. Complete
-  maintenance, schedules, catalog refresh, optional GC, and idle-main wake use
-  injected native `Services`. Missing/invalid phase receipts produce failure,
-  never a successful partial sweep. Failure classification uses the declared
-  `oms-command-failure` adapter.
+## Host dispatcher contracts
+
+The following are native domain boundaries, rather than shell fallbacks. The
+embedding binary must use `run_with_services` and route the crate's owned command
+names, including the private `agy-hook` adapter. Default methods return nonzero
+when their producer is unavailable.
+
+- `incoming_lifecycle`: `Preflight` proves incoming payload/build/dispatch
+  availability before checkout mutation; `Reconcile` invokes that checkout's
+  native `--oms-dispatch` frontdoor to converge recorded components and returns a
+  schema-2 receipt; `Verify` invokes its native doctor; `RefreshTools` runs after
+  core commit. Child processes must finish before returning. The child receives
+  `OMS_NATIVE_UPDATE_PARENT` only in its own environment. Borrowing the receipt
+  mutex requires the durable `native-update/lease.json`, matching receipt,
+  live parent generation, process ancestry, and held mutex. It uses its own
+  component journal. Recursive updates are refused.
+- `apply_project_template` and `provider_hook`: call the existing native
+  template/hook domains for doctor fixtures and certified Antigravity routing.
+  Fixture destinations are disposable. Advisory hooks cannot block a turn.
+- `install_extras`: preflight/reconcile explicit service, permission, or
+  publication options through their existing native authority checks. Reconcile
+  occurs after the core install commits and retains independent recovery state.
+- `hook_protection`: supply read-only CI protection proof for
+  `install-hooks --quick --check-protection` before mutation.
+- Tick maintenance, approved schedules, catalog refresh, optional GC, and wake
+  remain the existing host callbacks specified below.
+
+This crate does not implement those other native domains or change their public
+contracts. Host wiring is required for their dependent modes; it is not needed
+for self-contained configuration, cleanup, supply, probe, and diagnostic paths.
 
 ## Native tick service contract
 
@@ -119,55 +123,51 @@ linked, multiply linked, or oversized existing receipts are retained. Receipt
 publication is capped at 1 MiB. `run_with_source` supplies unavailable services;
 the embedding host must use `run_with_services` for a complete native sweep.
 
-## Remaining migration work and integration boundaries
+## State, concurrency, and interruption
 
-The earlier `ProducerUnavailable` explanation was incorrect. On this base,
-`oms-bootstrap::ReferenceProducer` composes the checked Reference service from
-an authenticated `ValidatedPayload`. It does not implement staging, receipt
-publication, or frontdoor lifecycle operations; those are native transactions
-in this crate. It also cannot authenticate an incoming revision using the
-running binary's old embedded source inventory.
+The install lifecycle uses the canonical `install-lifecycle.lock.d` protocol,
+including PID generation, stale-owner claims, and validated owner adoption, then
+the receipt mutex. Account changes additionally lock the provider-account
+registry before the receipt mutex. Claude capability probes run before these
+locks. Provider/CLI mutations are serialized with lifecycle receipt publication.
 
-The remaining blockers are explicit:
+The durable transaction journal records intended writes and prior payloads
+before publication. Managed files use exclusive staging and atomic rename;
+CLI-owned OMS trees preserve symlink targets and regular hardlinked content.
+Snapshots copy the old payload without changing its live inode. Account writes
+and removals bind the parent directory identity and expected prior contents or
+link identity. A second call observes either a completed state or recovery work;
+ambiguous concurrent changes keep the journal and backups instead of deleting
+unrelated files. Update Git restoration uses expected refs/HEAD and clean-tree
+checks, and its journal is separate from the incoming component journal.
 
-- Incoming-revision native dispatch/build handoff, update apply/rollback,
-  worker/panel admission fences, doctor-gated recovery, and provider refresh.
-  The parent must also wire lifecycle routing and bootstrap frontdoor support
-  in the native main; this crate does not change that excluded consumer.
-- Legacy lifecycle-lock adoption; checkout purge; managed interpreter-tree
-  retirement; account reservation, refresh, and cleanup; Slurm snapshot/service
-  connection/permission/publication components; full install profiles.
-- Verified tool downloads, full/only/upgrade selection, vendor refresh, Codex
-  marketplace registration/removal, Antigravity isolated surface certification,
-  guard capability negotiation, and complete provider settings convergence.
-- Doctor MCP probe memoization, complete security/project-policy coverage,
-  model capability/live probes and strict diversity, complete copy/digest
-  inventories, contract fixtures, full component repair, and exact legacy
-  help/text/JSON compatibility. Existing partial schemas are not cutover proof.
-- Host implementations of native tick services. No Python or shell producer is
-  selected when those services are absent. `oms-context-report` is not invoked
-  with unrelated lifecycle findings; its context-report schema remains distinct.
+A kill before sealing external CLI changes can leave an unsealed transaction;
+automatic recovery refuses to overwrite an unproven result. A kill during purge
+or interpreter retirement leaves the renamed tree in the transaction undo area
+until commit/recovery. Receipt publication is last. Optional vendor updater/npm
+internal state retains the vendor's own recovery semantics; tool refresh after
+an update does not roll back an already committed core update. Failures state
+that distinction explicitly.
 
-## State, concurrent calls, and interruption
+Private probe/download directories use random names, exclusive creation, and
+mode 0700. Ordinary unwind removes them; SIGKILL may leave a private directory.
+Probe caches, model catalogs, security baselines, snapshots, and status records
+use their own validated locks/atomic publication. They cannot certify an
+unavailable native host producer. Durable native journals are intentionally
+retained when recovery cannot prove ownership.
 
-| Written object | Concurrent call / interruption behavior |
-| --- | --- |
-| Native cache directory and its executable/checksum/manifest | Complete directory staging and one journaled rename under the receipt and journal locks. Validation precedes host publication. A second call validates the existing revision; an incomplete journal rolls back the first staging. A kill during unjournaled preparation can retain an unclaimed stage. |
-| Cargo build output under `rust/target/lifecycle-build` | Cargo owns its build locks. Failed/stopped output is not an install proof and is not published as a payload. |
-| Native libexec artifacts, frontdoor, managed targets/copies/markers, user backups, capability/snapshot files, install receipt | One receipt lock plus the shared journal lock. Target changes have durable undo entries; the receipt publishes last. Conflicting identities retain recovery material. A second call recovers before mutation. |
-| `native-lifecycle/transaction.json`, `.oms-stage-*`, `.oms-undo-*` | Journal locking also serializes distinct receipt overrides sharing one config root. Uncommitted state rolls back; committed state finishes cleanup. Unclaimed preparations are preserved. |
-| Claude hook/HUD/default settings and one-time backup; Claude MCP JSON; Codex MCP/HUD/usage configuration and first-touch backup | Same target journal and locks. User siblings and semantic values are retained. Independent provider writers do not honor these locks; complete cross-process compare-and-swap coverage remains unverified. |
-| Codex cache/provenance markers; Antigravity plugin directory/ownership marker | Same journal. Complete plugin directories replace atomically; provenance writes roll back with their cache. A stopped operation restores recorded targets or retains a conflict. Codex provider registration/removal is not attempted. |
-| Service/timer files and crontab (including legacy tick migration) | File changes use the target journal. External before/after state is durable before mutation. Changed crontabs refuse rollback; unavailable host tools can retain the recovery journal. |
-| MCP pins and optional tool hashes | Latest baseline is read after canonical lock acquisition. Merge and publication are atomic; unknown-provider pins and unrelated tool hashes survive. Failure before publication retains the old store. |
-| Security baseline | Canonical file lock and atomic replacement; only section hashes/timestamps persist. Concurrent callers compare against the latest completed baseline. |
-| Tick registry | Canonical file lock, physical-path deduplication, atomic publication. A stopped writer leaves the previous complete registry. |
-| Tick sweep receipt and wake ledger | Canonical receipt mutex, verification-marker admission, ledger validation, bounded atomic publication. A stopped sweep retains the previous receipt; native domain changes and notifications retain their producers' own journals/locks. |
-| Git fetch refs / auto-update outcome | Common-Git-directory fetch lock spans fetch, resolution, and state publication. Git owns ref atomicity; state replacement has a separate canonical lock. A kill can leave fetched refs with the prior complete outcome, never a torn outcome. |
-| Probe pipes/captures | Captures are exclusive unlinked TMPDIR files; MCP uses nonblocking pipes. Deadline, cancellation, and errors stop the owned process group. Nothing is memoized persistently. |
+## Verification status
 
-All source changes are confined to this crate. No existing tests were changed.
-Behavior, boundary, concurrency, kill-injection, provider/network, macOS/WSL,
-and Ubuntu-floor execution were not run in the implementation-first phase.
-Only offline all-target compilation and formatting were checked. Admission,
-behavioral verification, and the remaining implementation are still required.
+This implementation round permits offline compilation and formatting only.
+The following passing checks do not establish runtime parity:
+
+```sh
+cargo +1.99.1 check --manifest-path rust/crates/oms-command-lifecycle/Cargo.toml --all-targets --offline
+cargo +1.99.1 fmt --manifest-path rust/crates/oms-command-lifecycle/Cargo.toml -- --check
+```
+
+ Provider CLI compatibility, real
+Linux/macOS installation, live surface/model probes, signal/crash recovery, and
+cross-process contention still require behavioral verification by the owner.
+No tests or live provider turns were run in this phase; no dependency, lockfile,
+external dispatcher, or canonical Bash/Python producer was changed.

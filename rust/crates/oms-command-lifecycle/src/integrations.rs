@@ -58,7 +58,7 @@ pub(crate) fn expected(paths: &Paths) -> Result<Value> {
     }
     Ok(json!({"schema":1,"hooks_schema":schema,"root":paths.source,"surfaces":rows}))
 }
-fn command_words(command: &str) -> Option<Vec<String>> {
+pub(crate) fn command_words(command: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;
@@ -139,41 +139,93 @@ fn owned_entry(command: &str, executable: &str, script: &str, paths: &Paths) -> 
         return Ok(false);
     }
     if let Some(wrapper) = wrapper {
-        if r::physical(Path::new(wrapper))?
-            != r::physical(&root.join("scripts/lib/python-entry.sh"))?
-        {
+        if Path::new(wrapper) != root.join("scripts/lib/python-entry.sh") {
             return Ok(false);
         }
     }
-    Ok(r::physical(root)? == paths.source
+    Ok(root == paths.source
+        || r::physical(root).is_ok_and(|r| r == paths.source)
+        || wrapper.is_some() && !root.join("scripts/lib/python-entry.sh").exists()
         || root.join(".agents/plugins/marketplace.json").is_file()
             && root.join("scripts/install-claude-hooks.sh").is_file())
 }
-fn owned_hook(command: &str, paths: &Paths, expected: &Value) -> Result<bool> {
+pub(crate) fn owned_hook(command: &str, paths: &Paths, expected: &Value) -> Result<bool> {
     for row in expected["surfaces"].as_array().unwrap() {
         if owned_entry(command, "bash", row["script"].as_str().unwrap(), paths)? {
             return Ok(true);
         }
     }
+    for retired in ["tier-guard-hook.sh", "panel-direct-work-hook.sh"] {
+        if owned_entry(command, "bash", retired, paths)? {
+            return Ok(true);
+        }
+    }
     Ok(false)
 }
-fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
+fn claude_capability(paths: &Paths, guard: bool, flag: &AtomicBool) -> Result<bool> {
+    let Some(binary) = r::find("claude", &paths.cwd) else {
+        return Ok(false);
+    };
+    let scratch = r::Scratch::new()?;
+    let home = scratch.0.join("home");
+    let workspace = scratch.0.join("workspace");
+    std::fs::create_dir_all(workspace.join(".claude"))?;
+    std::fs::create_dir(&home)?;
+    if guard {
+        let fixture = json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"true","onFailure":"oms-probe"}]}]}});
+        let compact = serde_json::to_vec(&fixture)
+            .map_err(|_| r::Error(2, "cannot encode capability fixture".into()))?;
+        r::new_file(&workspace.join(".claude/settings.json"), &compact, 0o600)?;
+    }
+    let isolated = [
+        ("HOME", home.as_os_str()),
+        ("CLAUDE_CONFIG_DIR", home.as_os_str()),
+        ("XDG_CONFIG_HOME", home.as_os_str()),
+    ];
+    let result = r::command_env(
+        binary,
+        &[if guard { "doctor" } else { "--help" }.into()],
+        &workspace,
+        None,
+        flag,
+        std::time::Duration::from_secs(if guard { 10 } else { 3 }),
+        &isolated,
+    );
+    r::check(flag)?;
+    let Ok(out) = result else {
+        return Ok(false);
+    };
+    if out.0 == 124 {
+        return Ok(false);
+    }
+    let body = [out.1, out.2].concat();
+    let text = String::from_utf8_lossy(&body);
+    Ok(if guard {
+        text.contains("onFailure") && text.contains("\"block\"")
+    } else {
+        out.0 == 0 && text.contains("--autocompact <auto|tokens>")
+    })
+}
+fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction, _flag: &AtomicBool) -> Result<()> {
     if options.has("--ownership-receipt") {
-        return r::fail(
-            "account hook installation requires the provider-account reservation adapter",
-        );
+        return crate::account_cleanup::hooks(paths, options, tx);
     }
     let mode = std::env::var("OMS_GUARD_FAIL_CLOSED").unwrap_or_default();
-    if !options.has("--remove") {
-        match mode.as_str() {
-            "" | "0" => (),
-            "1" => {
-                return r::fail(
-                    "guard capability negotiation service unavailable; settings unchanged",
-                );
-            }
-            _ => return r::fail("OMS_GUARD_FAIL_CLOSED must be 0 or 1"),
-        }
+    if !options.has("--remove") && !matches!(mode.as_str(), "" | "0" | "1") {
+        return r::fail("OMS_GUARD_FAIL_CLOSED must be 0 or 1");
+    }
+    let (enable_block, auto_compact) = if options.has("--remove") {
+        (false, false)
+    } else {
+        options.claude_capabilities.ok_or_else(|| {
+            r::Error(
+                2,
+                "Claude capabilities must be prepared before the install lock".into(),
+            )
+        })?
+    };
+    if !options.has("--remove") && mode == "1" && !enable_block {
+        tx.warn("guard opt-in was not applied: this Claude does not validate onFailure; guards remain fail-open");
     }
     let expected = expected(paths)?;
     let mut blocked = std::collections::BTreeSet::new();
@@ -237,7 +289,7 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
         for surface in expected["surfaces"].as_array().unwrap() {
             let mut hook = json!({"type":"command","command":surface["command"]});
             if surface["fail_closed"] == true
-                && blocked.contains(surface["event"].as_str().unwrap())
+                && (enable_block || blocked.contains(surface["event"].as_str().unwrap()))
             {
                 hook["onFailure"] = json!("block");
             }
@@ -263,7 +315,7 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
     if !value["hooks"].as_object().is_none_or(|o| !o.is_empty()) {
         value.as_object_mut().unwrap().remove("hooks");
     }
-    defaults(paths, &mut value, options.has("--remove"))?;
+    defaults(paths, &mut value, options.has("--remove"), auto_compact)?;
     let body = r::bytes(&value)?;
     if r::exists(&file) && r::read(&file, r::LIMIT)? == body {
         return Ok(());
@@ -277,7 +329,7 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
     }
     tx.write(&file, &body, 0o600)
 }
-fn defaults(paths: &Paths, value: &mut Value, remove: bool) -> Result<()> {
+fn defaults(paths: &Paths, value: &mut Value, remove: bool, auto_compact: bool) -> Result<()> {
     for (key, script) in [
         ("statusLine", "claude-statusline.py"),
         ("subagentStatusLine", "claude-subagent-statusline.py"),
@@ -305,16 +357,23 @@ fn defaults(paths: &Paths, value: &mut Value, remove: bool) -> Result<()> {
         if value["attribution"] == attribution {
             value.as_object_mut().unwrap().remove("attribution");
         }
-        if value["modelSettings"]["claude-opus-5-5"]["effortLevel"] == "high" {
-            let models = value["modelSettings"].as_object_mut().unwrap();
-            let row = models
+        if let Some(models) = value
+            .get_mut("modelSettings")
+            .and_then(Value::as_object_mut)
+        {
+            if let Some(row) = models
                 .get_mut("claude-opus-5-5")
-                .unwrap()
-                .as_object_mut()
-                .unwrap();
-            row.remove("effortLevel");
-            if row.is_empty() {
-                models.remove("claude-opus-5-5");
+                .and_then(Value::as_object_mut)
+            {
+                if row.get("effortLevel") == Some(&json!("high")) {
+                    row.remove("effortLevel");
+                }
+                if row.get("autoCompactWindow") == Some(&json!(300000)) {
+                    row.remove("autoCompactWindow");
+                }
+                if row.is_empty() {
+                    models.remove("claude-opus-5-5");
+                }
             }
             if models.is_empty() {
                 value.as_object_mut().unwrap().remove("modelSettings");
@@ -335,6 +394,9 @@ fn defaults(paths: &Paths, value: &mut Value, remove: bool) -> Result<()> {
             let model = models.entry("claude-opus-5-5").or_insert(json!({}));
             if let Some(model) = model.as_object_mut() {
                 model.entry("effortLevel").or_insert(json!("high"));
+                if auto_compact {
+                    model.entry("autoCompactWindow").or_insert(json!(300000));
+                }
             }
         }
     }
@@ -488,8 +550,8 @@ fn git_hook(
     tx: &mut Transaction,
     flag: &AtomicBool,
 ) -> Result<()> {
-    if options.has("--check-protection") {
-        return r::fail("quick hook protection requires the CI-status protection adapter");
+    if options.has("--check-protection") && !options.hook_protected {
+        return r::fail("CI gate requirement was not proven; quick hook unchanged");
     }
     let raw = r::git(&paths.source, &["rev-parse", "--git-path", "hooks"], flag)?;
     let dir = PathBuf::from(raw);
@@ -512,6 +574,28 @@ fn git_hook(
     };
     tx.write(&target,format!("#!/usr/bin/env bash\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/pre-push-check.sh\"{mode} \"$@\"\n").as_bytes(),0o755)
 }
+pub(crate) fn prepare_hooks(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+) -> Result<Options> {
+    let mut prepared = options.clone();
+    if options.has("--ownership-receipt") {
+        prepared.claude_capabilities = Some((false, false));
+        return Ok(prepared);
+    }
+    if !options.preview() && !options.has("--remove") {
+        let mode = std::env::var("OMS_GUARD_FAIL_CLOSED").unwrap_or_default();
+        if !matches!(mode.as_str(), "" | "0" | "1") {
+            return r::fail("guard mode must be 0 or 1");
+        }
+        prepared.claude_capabilities = Some((
+            mode == "1" && claude_capability(paths, true, flag)?,
+            claude_capability(paths, false, flag)?,
+        ));
+    }
+    Ok(prepared)
+}
 pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<()> {
     if matches!(
         options.tool.as_str(),
@@ -521,9 +605,7 @@ pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> 
     }
     if options.tool == "install-claude-hooks" {
         if options.has("--ownership-receipt") {
-            return r::fail(
-                "account hook installation requires the provider-account reservation adapter",
-            );
+            crate::account_cleanup::reservation(paths, options)?;
         }
         if !options.has("--remove") {
             match std::env::var("OMS_GUARD_FAIL_CLOSED")
@@ -531,11 +613,7 @@ pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> 
                 .as_str()
             {
                 "" | "0" => (),
-                "1" => {
-                    return r::fail(
-                        "guard capability negotiation service unavailable; settings unchanged",
-                    );
-                }
+                "1" => (),
                 _ => return r::fail("OMS_GUARD_FAIL_CLOSED must be 0 or 1"),
             }
         }
@@ -549,7 +627,7 @@ pub(crate) fn apply(
     flag: &AtomicBool,
 ) -> Result<()> {
     match options.tool.as_str() {
-        "install-claude-hooks" => hooks(paths, options, tx),
+        "install-claude-hooks" => hooks(paths, options, tx, flag),
         "install-mcp" => mcp(paths, options, tx, flag),
         "install-hooks" => git_hook(paths, options, tx, flag),
         "install-codex-plugin" | "install-agy-plugin" => {
@@ -558,9 +636,25 @@ pub(crate) fn apply(
         _ => r::fail("provider integration adapter unavailable"),
     }
 }
-pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+pub(crate) fn run(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
     if options.tool == "install-claude-hooks" && options.has("--print-expected") {
         return r::json(&expected(paths)?);
+    }
+    if options.tool == "install-agy-plugin" && options.has("--probe-surfaces") {
+        if options.has("--remove") {
+            return r::fail("--remove and --probe-surfaces are exclusive");
+        }
+        if !options.preview() {
+            return crate::agy_surface::probe(paths, flag);
+        }
+    }
+    if options.has("--check-protection") && !options.has("--quick") {
+        return r::fail("check-protection requires quick");
     }
     if options.preview() {
         return Ok(r::text(format!(
@@ -575,13 +669,54 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     r::child_guard()?;
     paths.require_owner()?;
     preflight(paths, options, flag)?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let prepared = if options.tool == "install-claude-hooks" {
+        prepare_hooks(paths, options, flag)?
+    } else {
+        options.clone()
+    };
+    let mut prepared = prepared;
+    if options.has("--check-protection") {
+        let out = services.hook_protection(&paths.source, flag);
+        if out.0 != 0 {
+            return Err(r::Error(
+                1,
+                "CI gate requirement is absent or unknown; quick hook unchanged".into(),
+            ));
+        }
+        prepared.hook_protected = true;
+    }
+    let options = &prepared;
+    let account = options.has("--ownership-receipt");
+    let _operation = if account {
+        Some(crate::lifecycle_lock::acquire(paths, flag)?)
+    } else {
+        None
+    };
+    let _account = if account {
+        Some(r::lock(
+            &paths.config.join("provider-accounts.json"),
+            &paths.cwd,
+        )?)
+    } else {
+        None
+    };
+    let _guard = if account {
+        None
+    } else {
+        Some(r::receipt_lock(paths, flag)?)
+    };
+    let _receipt = if account {
+        r::receipt_only(paths)?
+    } else {
+        None
+    };
+
     paths.require_owner()?;
     let mut tx = Transaction::begin(paths)?;
     apply(paths, options, &mut tx, flag)?;
     if let Some(mut row) = paths.load()? {
         let key = match options.tool.as_str() {
-            "install-claude-hooks" => Some("claude_hooks"),
+            "install-claude-hooks" if !account => Some("claude_hooks"),
             "install-mcp" => Some("mcp"),
             "install-codex-plugin" => Some("codex_plugin"),
             "install-agy-plugin" => Some("agy_plugin"),
@@ -596,9 +731,9 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
         }
     }
     r::check(flag)?;
+    let diagnostics = tx.diagnostics();
     tx.commit()?;
-    Ok(r::text(format!(
-        "{}: configuration converged",
-        options.tool
-    )))
+    let mut output = r::text(format!("{}: configuration converged", options.tool));
+    output.2 = diagnostics;
+    Ok(output)
 }

@@ -22,6 +22,19 @@ struct Change {
     undo: PathBuf,
     old: Option<String>,
     new: Option<String>,
+    #[serde(default)]
+    external: bool,
+    #[serde(default)]
+    parent_identity: Option<(u64, u64)>,
+}
+impl Change {
+    fn identity(&self, path: &Path) -> Result<Option<String>> {
+        if self.external {
+            external_identity(path)
+        } else {
+            identity(path)
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 struct Journal {
@@ -37,11 +50,18 @@ pub(crate) struct Transaction {
     path: PathBuf,
     journal: Journal,
     complete: bool,
+    notices: Vec<String>,
     _journal_lock: oms_lock::Guard,
 }
 impl Transaction {
     pub fn begin(paths: &Paths) -> Result<Self> {
-        let dir = paths.config.join("native-lifecycle");
+        Self::begin_named(paths, "native-lifecycle")
+    }
+    pub fn begin_update(paths: &Paths) -> Result<Self> {
+        Self::begin_named(paths, "native-update")
+    }
+    fn begin_named(paths: &Paths, name: &str) -> Result<Self> {
+        let dir = paths.config.join(name);
         let path = dir.join("transaction.json");
         // Receipt overrides may differ while sharing this recovery journal.
         let journal_lock = r::lock(&path, &paths.cwd)?;
@@ -58,6 +78,7 @@ impl Transaction {
                 effects: Vec::new(),
             },
             complete: false,
+            notices: Vec::new(),
             _journal_lock: journal_lock,
         };
         tx.save()?;
@@ -94,6 +115,21 @@ impl Transaction {
         })
     }
     fn replace(&mut self, target: &Path, prepare: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+        self.replace_mode(target, false, prepare)
+    }
+    fn replace_mode(
+        &mut self,
+        target: &Path,
+        external: bool,
+        prepare: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
+        let identify = |p: &Path| {
+            if external {
+                external_identity(p)
+            } else {
+                identity(p)
+            }
+        };
         let target = r::leaf(target)?;
         let parent = target.parent().unwrap();
         fs::create_dir_all(parent)?;
@@ -105,19 +141,21 @@ impl Transaction {
         if r::exists(&staged) || r::exists(&undo) {
             return r::fail("transaction staging name already exists");
         }
-        let old = identity(&target)?;
+        let old = identify(&target)?;
         prepare(&staged)?;
-        let new = identity(&staged)?;
+        let new = identify(&staged)?;
         self.journal.changes.push(Change {
             target,
             staged,
             undo,
             old,
             new,
+            external,
+            parent_identity: None,
         });
         self.save()?;
         let change = self.journal.changes.last().unwrap();
-        if identity(&change.target)? != change.old {
+        if change.identity(&change.target)? != change.old {
             return r::fail("target changed while staging lifecycle mutation");
         }
         if change.old.is_some() {
@@ -129,8 +167,18 @@ impl Transaction {
         Ok(())
     }
     pub fn remove(&mut self, target: &Path) -> Result<()> {
+        self.remove_mode(target, false)
+    }
+    pub fn remove_external(&mut self, target: &Path) -> Result<()> {
+        self.remove_mode(target, true)
+    }
+    fn remove_mode(&mut self, target: &Path, external: bool) -> Result<()> {
         let target = r::leaf(target)?;
-        let old = identity(&target)?;
+        let old = if external {
+            external_identity(&target)?
+        } else {
+            identity(&target)?
+        };
         if old.is_none() {
             return Ok(());
         }
@@ -145,18 +193,256 @@ impl Transaction {
             target,
             old,
             new: None,
+            external,
+            parent_identity: None,
         });
         self.save()?;
         let change = self.journal.changes.last().unwrap();
-        if identity(&change.target)? != change.old {
+        if change.identity(&change.target)? != change.old {
             return r::fail("target changed before removal");
         }
         fs::rename(&change.target, &change.undo)?;
         r::sync_dir(change.target.parent().unwrap())?;
         Ok(())
     }
+    pub fn write_bound(
+        &mut self,
+        target: &Path,
+        raw: &[u8],
+        mode: u32,
+        parent: &serde_json::Value,
+        expected: Option<&[u8]>,
+        expected_identity: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = target
+            .parent()
+            .ok_or_else(|| r::Error(2, "invalid account target".into()))?;
+        let directory = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+            )
+            .open(root)?;
+        let m = directory.metadata()?;
+        let check = || -> Result<()> {
+            let now = fs::symlink_metadata(root)?;
+            if now.file_type().is_symlink()
+                || parent["st_dev"] != m.dev()
+                || parent["st_ino"] != m.ino()
+                || now.dev() != m.dev()
+                || now.ino() != m.ino()
+            {
+                return r::fail("account settings home changed; retained");
+            }
+            Ok(())
+        };
+        check()?;
+        let name = target
+            .file_name()
+            .ok_or_else(|| r::Error(2, "invalid account settings name".into()))?;
+        let old = match rustix::fs::openat(
+            &directory,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(fd) => {
+                let file = fs::File::from(fd);
+                let info = file.metadata()?;
+                if !info.is_file()
+                    || info.nlink() != 1
+                    || info.len() > r::LIMIT as u64
+                    || expected_identity
+                        .is_some_and(|id| id["st_dev"] != info.dev() || id["st_ino"] != info.ino())
+                {
+                    return r::fail("account settings identity changed; retained");
+                }
+                let mut before = Vec::new();
+                (&file).take(r::LIMIT as u64 + 1).read_to_end(&mut before)?;
+                if expected != Some(before.as_slice()) {
+                    return r::fail("account settings changed concurrently; retained");
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"file\0");
+                hash.update(before);
+                Some(format!("{:x}", hash.finalize()))
+            }
+            Err(rustix::io::Errno::NOENT) if expected.is_none() => None,
+            _ => return r::fail("account settings target changed; retained"),
+        };
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let staged = target.with_file_name(format!(".oms-stage-{}.{}", std::process::id(), n));
+        let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
+        if r::exists(&undo) {
+            return r::fail("account settings undo name exists");
+        }
+        let fd = rustix::fs::openat(
+            &directory,
+            staged.file_name().unwrap(),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::from_raw_mode(mode),
+        )
+        .map_err(|_| r::Error(2, "cannot stage bound account settings".into()))?;
+        let mut output = fs::File::from(fd);
+        output.write_all(raw)?;
+        output.sync_all()?;
+        let mut hash = Sha256::new();
+        hash.update(b"file\0");
+        hash.update(raw);
+        let new = Some(format!("{:x}", hash.finalize()));
+        self.journal.changes.push(Change {
+            target: target.to_owned(),
+            staged: staged.clone(),
+            undo: undo.clone(),
+            old: old.clone(),
+            new,
+            external: false,
+            parent_identity: Some((m.dev(), m.ino())),
+        });
+        self.save()?;
+        check()?;
+        if identity(target)? != old {
+            return r::fail("account settings changed before publication");
+        }
+        if old.is_some() {
+            rustix::fs::renameat(&directory, name, &directory, undo.file_name().unwrap())
+                .map_err(|_| r::Error(2, "account settings backup failed".into()))?;
+        }
+        rustix::fs::renameat(&directory, staged.file_name().unwrap(), &directory, name)
+            .map_err(|_| r::Error(2, "account settings publication failed".into()))?;
+        directory.sync_all()?;
+        check()
+    }
+    pub fn remove_link_bound(
+        &mut self,
+        target: &Path,
+        parent: &serde_json::Value,
+        entry: &serde_json::Value,
+        destination: &Path,
+    ) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let directory = target
+            .parent()
+            .ok_or_else(|| r::Error(2, "invalid account target".into()))?;
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+            )
+            .open(directory)?;
+        let m = handle.metadata()?;
+        if parent["st_dev"] != m.dev() || parent["st_ino"] != m.ino() {
+            return r::fail("account home changed before removal");
+        }
+        let name = target
+            .file_name()
+            .ok_or_else(|| r::Error(2, "invalid account link name".into()))?;
+        let inspect = || -> Result<()> {
+            let st = rustix::fs::statat(&handle, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|_| r::Error(2, "account link disappeared".into()))?;
+            let to = rustix::fs::readlinkat(&handle, name, Vec::new())
+                .map_err(|_| r::Error(2, "account entry is no longer a link".into()))?;
+            if entry["st_dev"] != st.st_dev
+                || entry["st_ino"] != st.st_ino
+                || to.as_bytes() != destination.as_os_str().as_bytes()
+            {
+                return r::fail("account link identity changed; retained");
+            }
+            let current = fs::symlink_metadata(directory)?;
+            if current.file_type().is_symlink()
+                || current.dev() != m.dev()
+                || current.ino() != m.ino()
+            {
+                return r::fail("account home changed before removal");
+            }
+            Ok(())
+        };
+        inspect()?;
+        let mut hash = Sha256::new();
+        hash.update(b"link\0");
+        hash.update(destination.as_os_str().as_bytes());
+        let old = Some(format!("{:x}", hash.finalize()));
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
+        if r::exists(&undo) {
+            return r::fail("account undo destination exists");
+        }
+        self.journal.changes.push(Change {
+            target: target.to_owned(),
+            staged: undo.with_extension("stage"),
+            undo: undo.clone(),
+            old,
+            new: None,
+            external: false,
+            parent_identity: Some((m.dev(), m.ino())),
+        });
+        self.save()?;
+        inspect()?;
+        rustix::fs::renameat(&handle, name, &handle, undo.file_name().unwrap())
+            .map_err(|_| r::Error(2, "account unlink transaction failed".into()))?;
+        handle.sync_all()?;
+        Ok(())
+    }
     pub fn effect(&mut self, effect: crate::effects::Effect) -> Result<()> {
         self.journal.effects.push(effect);
+        self.save()
+    }
+    pub fn warn(&mut self, message: &str) {
+        self.notices.push(format!("warning: {message}\n"));
+    }
+    pub fn diagnostics(&self) -> Vec<u8> {
+        self.notices.concat().into_bytes()
+    }
+    /// Snapshot provider-owned files before letting its CLI rewrite them. A kill
+    /// before sealing retains the undo copy and refuses uncertain recovery.
+    pub fn publish_external(&mut self, target: &Path, source: &Path) -> Result<()> {
+        self.replace_mode(target, true, |p| external_copy(source, p))
+    }
+    pub fn prepare_external(&mut self, targets: &[PathBuf]) -> Result<usize> {
+        let start = self.journal.changes.len();
+        for target in targets {
+            let target = r::leaf(target)?;
+            fs::create_dir_all(target.parent().unwrap())?;
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
+            let staged = target.with_file_name(format!(".oms-stage-{}.{}", std::process::id(), n));
+            if r::exists(&undo) || r::exists(&staged) {
+                return r::fail("external snapshot name already exists");
+            }
+            let old = external_identity(&target)?;
+            self.journal.changes.push(Change {
+                target: target.clone(),
+                staged,
+                undo: undo.clone(),
+                old: old.clone(),
+                new: old.clone(),
+                external: true,
+                parent_identity: None,
+            });
+            self.save()?;
+            if old.is_some() {
+                external_copy(&target, &undo)?;
+                if external_identity(&undo)? != old || external_identity(&target)? != old {
+                    return r::fail("provider state changed during snapshot");
+                }
+                r::sync_dir(target.parent().unwrap())?;
+            }
+        }
+        Ok(start)
+    }
+    pub fn finish_external(&mut self, start: usize) -> Result<()> {
+        for change in &mut self.journal.changes[start..] {
+            change.new = change.identity(&change.target)?;
+        }
         self.save()
     }
     pub fn commit(mut self) -> Result<()> {
@@ -195,6 +481,16 @@ impl Drop for Transaction {
 }
 fn validate(j: &Journal) -> Result<()> {
     for c in &j.changes {
+        if let Some((dev, ino)) = c.parent_identity {
+            let m = fs::symlink_metadata(
+                c.target
+                    .parent()
+                    .ok_or_else(|| r::Error(2, "invalid bound target".into()))?,
+            )?;
+            if !m.is_dir() || m.file_type().is_symlink() || m.dev() != dev || m.ino() != ino {
+                return r::fail("account parent moved; recovery journal retained");
+            }
+        }
         let parent = c
             .target
             .parent()
@@ -224,8 +520,16 @@ fn validate(j: &Journal) -> Result<()> {
 fn rollback(j: &Journal) -> Result<()> {
     validate(j)?;
     for c in j.changes.iter().rev() {
-        let current = identity(&c.target)?;
-        let undo = identity(&c.undo)?;
+        let current = c.identity(&c.target)?;
+        let undo = c.identity(&c.undo)?;
+        if c.external && current == c.old && undo == c.old && undo.is_some() {
+            remove(&c.undo)?;
+            if r::exists(&c.staged) {
+                return r::fail("unexpected external staging during rollback");
+            }
+            r::sync_dir(c.target.parent().unwrap())?;
+            continue;
+        }
         if undo.is_some() {
             if undo != c.old || (current.is_some() && current != c.new) {
                 return r::fail("rollback conflict; lifecycle recovery journal retained");
@@ -241,7 +545,7 @@ fn rollback(j: &Journal) -> Result<()> {
             return r::fail("previous lifecycle target missing; recovery journal retained");
         }
         if r::exists(&c.staged) {
-            if identity(&c.staged)? != c.new {
+            if c.identity(&c.staged)? != c.new {
                 return r::fail("staging content changed; recovery journal retained");
             }
             remove(&c.staged)?;
@@ -256,7 +560,7 @@ fn rollback(j: &Journal) -> Result<()> {
 fn cleanup(j: &Journal) -> Result<()> {
     for c in &j.changes {
         if r::exists(&c.undo) {
-            if identity(&c.undo)? != c.old {
+            if c.identity(&c.undo)? != c.old {
                 return r::fail("undo content changed; recovery journal retained");
             }
             remove(&c.undo)?;
@@ -357,6 +661,84 @@ fn copy(source: &Path, target: &Path) -> Result<()> {
         r::sync_dir(target)?;
     } else {
         return r::fail("managed copy source is not a file or directory");
+    }
+    Ok(())
+}
+
+pub(crate) fn external_read(path: &Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() > 1024 * 1024 * 1024 {
+        return r::fail("external snapshot requires a bounded regular file");
+    }
+    let mut raw = Vec::new();
+    (&file).take(1024 * 1024 * 1024 + 1).read_to_end(&mut raw)?;
+    let after = file.metadata()?;
+    if raw.len() as u64 != before.len()
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return r::fail("provider file changed during snapshot");
+    }
+    Ok(raw)
+}
+fn external_identity(path: &Path) -> Result<Option<String>> {
+    fn visit(path: &Path, h: &mut Sha256, depth: usize) -> Result<()> {
+        if depth > 128 {
+            return r::fail("external snapshot nesting exceeds limit");
+        }
+        let m = fs::symlink_metadata(path)?;
+        h.update(m.mode().to_le_bytes());
+        if m.file_type().is_symlink() {
+            h.update(b"link");
+            h.update(fs::read_link(path)?.as_os_str().as_bytes());
+        } else if m.is_file() {
+            h.update(b"file");
+            h.update(external_read(path)?);
+        } else if m.is_dir() {
+            h.update(b"dir");
+            let mut rows = fs::read_dir(path)?.collect::<std::io::Result<Vec<_>>>()?;
+            rows.sort_by_key(|e| e.file_name());
+            for row in rows {
+                h.update(row.file_name().as_bytes());
+                h.update(b"\0");
+                visit(&row.path(), h, depth + 1)?;
+            }
+        } else {
+            return r::fail("provider snapshot refuses special files");
+        }
+        Ok(())
+    }
+    if !r::exists(path) {
+        return Ok(None);
+    }
+    let mut h = Sha256::new();
+    visit(path, &mut h, 0)?;
+    Ok(Some(format!("{:x}", h.finalize())))
+}
+fn external_copy(source: &Path, target: &Path) -> Result<()> {
+    let m = fs::symlink_metadata(source)?;
+    if m.file_type().is_symlink() {
+        symlink(fs::read_link(source)?, target)?;
+    } else if m.is_file() {
+        r::new_file(target, &external_read(source)?, m.mode() & 0o777)?;
+    } else if m.is_dir() {
+        fs::create_dir(target)?;
+        fs::set_permissions(target, fs::Permissions::from_mode(m.mode() & 0o777))?;
+        for row in fs::read_dir(source)? {
+            let row = row?;
+            external_copy(&row.path(), &target.join(row.file_name()))?;
+        }
+        r::sync_dir(target)?;
+    } else {
+        return r::fail("provider snapshot refuses special files");
     }
     Ok(())
 }

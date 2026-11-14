@@ -1,6 +1,9 @@
 //! Native installation, host inspection, and reversible lifecycle transactions.
 #![forbid(unsafe_code)]
 
+mod account_cleanup;
+mod agy_hook;
+mod agy_surface;
 mod cli;
 mod config;
 mod doctor;
@@ -8,6 +11,7 @@ mod effects;
 mod fingerprint;
 mod install;
 mod integrations;
+mod lifecycle_lock;
 mod mcp_probe;
 mod payload;
 mod plugins;
@@ -18,12 +22,13 @@ mod scheduler;
 mod services;
 mod settings;
 mod snapshot;
+mod supply;
 mod tick;
 mod tools;
 mod transaction;
 mod update;
 
-pub use services::{Services, UnavailableServices};
+pub use services::{IncomingPhase, Services, UnavailableServices};
 use std::{ffi::OsString, path::Path, sync::atomic::AtomicBool};
 pub type Output = (i32, Vec<u8>, Vec<u8>);
 
@@ -32,6 +37,7 @@ pub fn owns(tool: &str, _args: &[OsString]) -> bool {
     matches!(
         tool,
         "doctor"
+            | "agy-hook"
             | "install"
             | "link"
             | "install-profile"

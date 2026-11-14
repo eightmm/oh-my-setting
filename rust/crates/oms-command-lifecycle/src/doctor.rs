@@ -229,6 +229,7 @@ fn security(paths: &Paths) -> Result<Vec<Value>> {
             ),
         ));
     }
+    rows.extend(policy_baselines(paths)?);
     Ok(rows)
 }
 fn sandbox(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Vec<Value>> {
@@ -605,7 +606,10 @@ fn extensions(
             return r::fail("--probe-tools must name exactly one configured server");
         }
         let (key, spec) = selected[0];
-        Some((key.clone(), crate::mcp_probe::run(spec, &paths.cwd, flag)?))
+        Some((
+            key.clone(),
+            crate::mcp_probe::cached(spec, &paths.cwd, flag)?,
+        ))
     } else {
         None
     };
@@ -961,6 +965,33 @@ fn health(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
             rows.push(finding("plan", "ok", "plan state JSON readable"));
         }
     }
+    if let Some(row) = paths.load()? {
+        let mut owner_paths = paths.clone();
+        owner_paths.source = receipt::owner(&row)?;
+        let frontdoor = row["native"]["frontdoor"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or(owner_paths.source.join("scripts/oms"));
+        for (source, target) in crate::install::targets(&owner_paths, &frontdoor)? {
+            let owned = crate::install::owned(&source, &target)?;
+            rows.push(finding(
+                "managed inventory",
+                if owned { "ok" } else { "error" },
+                format!(
+                    "{}: {}",
+                    target
+                        .strip_prefix(&paths.home)
+                        .unwrap_or(&target)
+                        .display(),
+                    if owned {
+                        "source/digest identity matches"
+                    } else {
+                        "missing, modified or foreign"
+                    }
+                ),
+            ));
+        }
+    }
     Ok(rows)
 }
 fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
@@ -996,11 +1027,14 @@ fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
     }
     Ok(rows)
 }
-pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
-    for key in ["--contract", "--live-models", "--strict-diversity"] {
-        if options.has(key) {
-            return r::fail(format!("native doctor {key} adapter is not yet available"));
-        }
+pub(crate) fn run(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
+    if options.has("--contract") {
+        return contract(paths, options, flag, services);
     }
 
     if options.has("--extensions") || options.has("--mcp") {
@@ -1022,11 +1056,11 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
             }
         }
         let mut repair = options.clone();
-        repair.tool = "link".into();
+        repair.tool = "install".into();
         repair.flags.remove("--repair");
-        crate::install::link(&repair_paths, &repair, flag)?;
+        crate::install::run(&repair_paths, &repair, flag, services)?;
     }
-    let rows = if options.has("--security") {
+    let mut rows = if options.has("--security") {
         if options.has("--residue") {
             residue(paths, flag)?
         } else {
@@ -1041,6 +1075,54 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     } else {
         health(paths, flag)?
     };
+    let model_mode = if options.has("--no-model-doctor") {
+        "0".to_owned()
+    } else if options.has("--live-models") || options.has("--strict-diversity") {
+        "1".to_owned()
+    } else {
+        std::env::var("OH_MY_SETTING_MODEL_DOCTOR").unwrap_or_else(|_| "auto".into())
+    };
+    if !matches!(model_mode.as_str(), "auto" | "0" | "1") {
+        return r::fail("OH_MY_SETTING_MODEL_DOCTOR must be auto, 0, or 1");
+    }
+    let model_applicable = model_mode == "1"
+        || model_mode == "auto"
+            && ["codex", "claude", "agy"]
+                .iter()
+                .any(|s| r::find(s, &paths.cwd).is_some());
+    if model_applicable
+        && !["--security", "--sandbox", "--surfaces", "--tool-lock"]
+            .iter()
+            .any(|s| options.has(s))
+    {
+        let models = crate::provider_check::models(
+            paths,
+            options.has("--live-models"),
+            options.has("--strict-diversity"),
+            flag,
+        )?;
+        for message in models["errors"].as_array().unwrap() {
+            rows.push(finding(
+                "model doctor",
+                if model_mode == "1" { "error" } else { "warn" },
+                message.as_str().unwrap_or("provider failure"),
+            ));
+        }
+        for message in models["warnings"].as_array().unwrap() {
+            rows.push(finding(
+                "model doctor",
+                "warn",
+                message.as_str().unwrap_or("provider warning"),
+            ));
+        }
+        if models["ok"] == true {
+            rows.push(finding(
+                "model doctor",
+                "ok",
+                "bounded provider invocation checks passed",
+            ));
+        }
+    }
     let mut result = report(paths, rows);
     if options.has("--security") {
         result["kind"] = json!("oms-doctor-security");
@@ -1118,4 +1200,287 @@ pub(crate) fn status(paths: &Paths, options: &Options, flag: &AtomicBool) -> Res
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "not installed".into())
     )))
+}
+
+fn contract(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    services: &dyn crate::Services,
+) -> Result<crate::Output> {
+    let scratch = r::Scratch::new()?;
+    let fixture = scratch.0.join("fixture");
+    fs::create_dir(&fixture)?;
+    let mut rows = Vec::new();
+    let blocks = |path: &Path| -> Result<String> {
+        let raw = String::from_utf8(r::read(path, r::LIMIT)?)
+            .map_err(|_| r::Error(2, "invalid loader fixture".into()))?;
+        let mut inside = false;
+        let mut result = String::new();
+        for line in raw.lines() {
+            if line.starts_with("<!-- oh-my-setting:") && line.ends_with(":begin -->") {
+                inside = true;
+            }
+            if inside {
+                result.push_str(line);
+                result.push('\n');
+            }
+            if line.starts_with("<!-- oh-my-setting:") && line.ends_with(":end -->") {
+                inside = false;
+            }
+        }
+        if inside {
+            return r::fail("unterminated loader block");
+        }
+        Ok(result)
+    };
+    for style in ["general", "ml"] {
+        if style == "ml" {
+            r::new_file(&fixture.join("GEMINI.md"),b"<!-- oh-my-setting:general:begin -->\nstale\n<!-- oh-my-setting:general:end -->\n",0o600)?;
+        }
+        let out = services.apply_project_template(style, &fixture, &paths.source, flag);
+        if out.0 != 0 {
+            return Err(r::Error(
+                out.0,
+                "native project-template contract producer unavailable or failed".into(),
+            ));
+        }
+        let agents = blocks(&fixture.join("AGENTS.md"))?;
+        let mut equal = !agents.is_empty() && agents == blocks(&fixture.join("CLAUDE.md"))?;
+        if style == "general" {
+            equal &= !fixture.join("GEMINI.md").exists();
+        } else {
+            equal &= agents == blocks(&fixture.join("GEMINI.md"))?
+                && !agents.contains(":general:")
+                && agents.contains(":ml:");
+        }
+        rows.push(finding(
+            "provider contract",
+            if equal { "ok" } else { "error" },
+            format!("loader parity ({style})"),
+        ));
+    }
+    let plain = scratch.0.join("unadopted");
+    fs::create_dir(&plain)?;
+    for name in [
+        "skill-router",
+        "turn-guard",
+        "fail-ledger-hook",
+        "precompact-handoff",
+    ] {
+        let out = services.provider_hook(name, b"", &plain, &paths.source, false, flag);
+        rows.push(finding(
+            "provider contract",
+            if out.0 == 0 && !plain.join(".oms").exists() {
+                "ok"
+            } else {
+                "error"
+            },
+            format!("unadopted hook no-op: {name}"),
+        ));
+    }
+    let (servers, unknown) = specs(paths)?;
+    let mut registrations = std::collections::BTreeSet::new();
+    for (provider, binary) in [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("antigravity", "agy"),
+    ] {
+        let matching = servers
+            .iter()
+            .filter(|(name, _)| {
+                name.starts_with(&format!("{provider}:")) && name.ends_with(":oh-my-setting")
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() && r::find(binary, &paths.cwd).is_some() {
+            rows.push(finding(
+                "provider contract",
+                "error",
+                format!("{provider}: managed MCP registration missing"),
+            ));
+        }
+        for (_, spec) in matching {
+            registrations.insert(r::canonical_ascii(
+                &json!({"command":spec["command"],"args":spec["args"]}),
+            )?);
+        }
+    }
+    rows.push(finding(
+        "provider contract",
+        if registrations.len() > 1 || !unknown.is_empty() {
+            "error"
+        } else {
+            "ok"
+        },
+        "MCP registrations resolve to one shared launch contract",
+    ));
+    emit(report(paths, rows), options)
+}
+
+fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    let mut files = vec![
+        ("project claude", paths.cwd.join(".claude/settings.json")),
+        (
+            "project claude local",
+            paths.cwd.join(".claude/settings.local.json"),
+        ),
+        ("project MCP", paths.cwd.join(".mcp.json")),
+        ("project codex", paths.cwd.join(".codex/config.toml")),
+        (
+            "managed claude",
+            paths.home.join(".claude/managed-settings.json"),
+        ),
+        (
+            "system claude",
+            PathBuf::from("/etc/claude-code/managed-settings.json"),
+        ),
+    ];
+    if let Some(root) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        files.push((
+            "claude config directory",
+            PathBuf::from(root).join("settings.json"),
+        ));
+    }
+    for (label, file) in files {
+        if !r::exists(&file) {
+            continue;
+        }
+        let raw = match r::read(&file, r::LIMIT) {
+            Ok(raw) => raw,
+            Err(_) => {
+                rows.push(finding(
+                    label,
+                    "unknown",
+                    "policy file is unsafe or unreadable; nothing executed",
+                ));
+                continue;
+            }
+        };
+        let value = if file.extension().is_some_and(|s| s == "toml") {
+            crate::config::toml(&raw)
+        } else {
+            r::parse(&raw)
+        };
+        let value = match value {
+            Ok(value) if value.is_object() => value,
+            _ => {
+                rows.push(finding(
+                    label,
+                    "unknown",
+                    "policy file is malformed; posture unproven",
+                ));
+                continue;
+            }
+        };
+        let mut digest = finding(label, "info", "policy inventory recorded without values");
+        digest["sha256"] = json!(r::hash(&raw));
+        rows.push(digest);
+        for (wide, description) in [
+            (
+                value["permissions"]["defaultMode"] == "bypassPermissions",
+                "permission bypass",
+            ),
+            (value["approval_policy"] == "never", "approval policy never"),
+            (
+                value["sandbox_mode"] == "danger-full-access",
+                "full host access",
+            ),
+            (
+                value["sandbox"]["allowUnsandboxedCommands"] == true,
+                "unsandboxed fallback",
+            ),
+            (
+                value["enableAllProjectMcpServers"] == true,
+                "all project MCP servers preapproved",
+            ),
+            (
+                value.get("notify").is_some(),
+                "configured notification command",
+            ),
+            (
+                value["permissions"]["allow"].as_array().is_some_and(|a| {
+                    a.iter()
+                        .any(|v| matches!(v.as_str(), Some("*" | "Bash" | "Bash(*)" | "Bash(:*)")))
+                }),
+                "blanket shell allow",
+            ),
+        ] {
+            if wide {
+                rows.push(finding(label, "warn", description));
+            }
+        }
+        for (group, kind) in [
+            ("hooks", "hook declarations"),
+            ("mcpServers", "MCP declarations"),
+            ("mcp_servers", "MCP declarations"),
+            ("env", "environment declarations"),
+            ("model_providers", "model provider declarations"),
+        ] {
+            if let Some(table) = value[group].as_object() {
+                if !table.is_empty() {
+                    rows.push(finding(
+                        label,
+                        "info",
+                        format!("{} {kind}; values withheld", table.len()),
+                    ));
+                }
+            }
+        }
+        for name in [
+            ["api", "KeyHelper"].concat(),
+            ["aws", "AuthRefresh"].concat(),
+            ["aws", "CredentialExport"].concat(),
+            "gcpAuthRefresh".into(),
+            "otelHeadersHelper".into(),
+            "statusLine".into(),
+            "fileSuggestion".into(),
+        ] {
+            if value.get(&name).is_some() {
+                rows.push(finding(
+                    label,
+                    "warn",
+                    format!(
+                        "{} names an executable helper; command withheld",
+                        clean(&name)
+                    ),
+                ));
+            }
+        }
+        if let Some(domains) = value["sandbox"]["network"]["allowedDomains"].as_array() {
+            if domains.iter().any(|v| {
+                v.as_str().is_some_and(|s| {
+                    s.contains('*')
+                        && s.split('.')
+                            .filter(|p| !p.is_empty() && !p.contains('*'))
+                            .count()
+                            < 2
+                })
+            }) {
+                rows.push(finding(
+                    label,
+                    "warn",
+                    "network policy has a catch-all domain",
+                ));
+            }
+        }
+        if value["sandbox"]["excludedCommands"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        {
+            rows.push(finding(
+                label,
+                "info",
+                "sandbox command exclusions configured; command values withheld",
+            ));
+        }
+        if let Some(deny) = value["permissions"]["deny"].as_array() {
+            rows.push(finding(
+                label,
+                "info",
+                format!("{} explicit deny rules", deny.len()),
+            ));
+        }
+    }
+    Ok(rows)
 }

@@ -233,3 +233,119 @@ pub(crate) fn run(spec: &Value, cwd: &Path, flag: &AtomicBool) -> Result<Value> 
     }
     r::fail("MCP tools/list exceeds 20 pages")
 }
+
+pub(crate) fn codex_models(binary: &Path, cwd: &Path, flag: &AtomicBool) -> Result<Value> {
+    let mut command = Command::new(binary);
+    command
+        .arg("app-server")
+        .current_dir(cwd)
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let input = child.stdin.take().unwrap();
+    let output = child.stdout.take().unwrap();
+    let mut io = Session {
+        child,
+        input,
+        output,
+        buffer: Vec::new(),
+        total: 0,
+        deadline: Instant::now() + Duration::from_secs(40),
+        flag,
+    };
+    for fd in [
+        &io.input as &dyn std::os::fd::AsFd,
+        &io.output as &dyn std::os::fd::AsFd,
+    ] {
+        let flags = rustix::fs::fcntl_getfl(fd)
+            .map_err(|_| r::Error(2, "cannot bound catalog pipe".into()))?;
+        rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)
+            .map_err(|_| r::Error(2, "cannot bound catalog pipe".into()))?;
+    }
+    io.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"oh-my-setting","title":"oh-my-setting","version":"1"}}}))?;
+    io.reply(1)?;
+    io.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))?;
+    let mut rows = Vec::new();
+    let mut cursor = None;
+    for page in 0..20 {
+        let id = page + 2;
+        let params = cursor
+            .as_ref()
+            .map(|c| json!({"cursor":c}))
+            .unwrap_or(json!({}));
+        io.send(json!({"jsonrpc":"2.0","id":id,"method":"model/list","params":params}))?;
+        let result = io.reply(id)?;
+        for row in result["data"]
+            .as_array()
+            .ok_or_else(|| r::Error(2, "invalid model catalog".into()))?
+        {
+            if row["hidden"] == true {
+                continue;
+            }
+            let name = row["id"]
+                .as_str()
+                .or_else(|| row["model"].as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| r::Error(2, "model catalog has no identity".into()))?;
+            rows.push(
+                json!({"id":name,"supportedReasoningEfforts":row["supportedReasoningEfforts"]}),
+            );
+            if rows.len() > 500 {
+                return r::fail("model catalog exceeds 500 entries");
+            }
+        }
+        cursor = result["nextCursor"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if cursor.is_none() {
+            return Ok(json!(rows));
+        }
+    }
+    r::fail("model catalog exceeds 20 pages")
+}
+
+pub(crate) fn cached(spec: &Value, cwd: &Path, flag: &AtomicBool) -> Result<Value> {
+    let Some(dir) = std::env::var_os("OMS_DOCTOR_PROBE_DIR") else {
+        return run(spec, cwd, flag);
+    };
+    let dir = std::path::PathBuf::from(dir);
+    if dir.is_symlink() || !dir.is_absolute() {
+        return r::fail("doctor probe cache must be a physical absolute directory");
+    }
+    r::private_dir(&dir)?;
+    let executable = spec["command"]
+        .as_str()
+        .and_then(|s| r::find(s, cwd))
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            json!([m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec()])
+        });
+    let material = r::bytes(
+        &json!({"spec":spec,"cwd":cwd,"executable":executable,"bound":std::env::var("OMS_MCP_PROBE_TIMEOUT").ok()}),
+    )?;
+    let file = dir.join(format!("doctor-mcp-probe-{}.json", r::hash(&material)));
+    let _guard = r::lock(&file, cwd)?;
+    if r::exists(&file) {
+        let row = r::value(&file)?;
+        if row["schema"] != 1
+            || row["tools"].as_object().is_none_or(|m| {
+                m.len() > 500
+                    || m.values().any(|v| {
+                        v.as_str().is_none_or(|s| {
+                            s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())
+                        })
+                    })
+            })
+        {
+            return r::fail("invalid MCP probe cache");
+        }
+        return Ok(row["tools"].clone());
+    }
+    let tools = run(spec, cwd, flag)?;
+    r::atomic(&file, &r::bytes(&json!({"schema":1,"tools":tools}))?)?;
+    Ok(tools)
+}

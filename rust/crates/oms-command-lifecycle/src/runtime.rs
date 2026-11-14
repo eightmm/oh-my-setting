@@ -256,15 +256,8 @@ pub(crate) fn find(name: &str, cwd: &Path) -> Option<PathBuf> {
         .find(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0))
 }
 fn capture_file() -> Result<fs::File> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let base = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let name = base.join(format!(
-        ".oms-lifecycle-{}.{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let directory = Scratch::new()?;
+    let name = directory.0.join("capture");
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -281,6 +274,29 @@ pub(crate) fn command(
     input: Option<&[u8]>,
     flag: &AtomicBool,
     timeout: Duration,
+) -> Result<Output> {
+    command_env(program, args, cwd, input, flag, timeout, &[])
+}
+pub(crate) fn command_env(
+    program: impl AsRef<OsStr>,
+    args: &[OsString],
+    cwd: &Path,
+    input: Option<&[u8]>,
+    flag: &AtomicBool,
+    timeout: Duration,
+    environment: &[(&str, &OsStr)],
+) -> Result<Output> {
+    command_env_limit(program, args, cwd, input, flag, timeout, environment, LIMIT)
+}
+pub(crate) fn command_env_limit(
+    program: impl AsRef<OsStr>,
+    args: &[OsString],
+    cwd: &Path,
+    input: Option<&[u8]>,
+    flag: &AtomicBool,
+    timeout: Duration,
+    environment: &[(&str, &OsStr)],
+    limit: usize,
 ) -> Result<Output> {
     check(flag)?;
     let mut out = capture_file()?;
@@ -315,13 +331,16 @@ pub(crate) fn command(
     ] {
         command.env_remove(key);
     }
+    for (name, value) in environment {
+        command.env(name, value);
+    }
     let mut child = command
         .spawn()
         .map_err(|e| Error(2, format!("cannot start command: {e}")))?;
     let started = Instant::now();
     let mut code = None;
     let status = loop {
-        let over = out.metadata()?.len() > LIMIT as u64 || err.metadata()?.len() > LIMIT as u64;
+        let over = out.metadata()?.len() > limit as u64 || err.metadata()?.len() > limit as u64;
         if flag.load(Ordering::Acquire) || started.elapsed() >= timeout || over {
             code = Some(if flag.load(Ordering::Acquire) {
                 130
@@ -348,12 +367,41 @@ pub(crate) fn command(
     err.seek(SeekFrom::Start(0))?;
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    out.take(LIMIT as u64 + 1).read_to_end(&mut stdout)?;
-    err.take(LIMIT as u64 + 1).read_to_end(&mut stderr)?;
-    if stdout.len() > LIMIT || stderr.len() > LIMIT {
-        return fail("command output exceeds 16 MiB");
+    out.take(limit as u64 + 1).read_to_end(&mut stdout)?;
+    err.take(limit as u64 + 1).read_to_end(&mut stderr)?;
+    if stdout.len() > limit || stderr.len() > limit {
+        return fail("command output exceeds its byte limit");
     }
     Ok((code.unwrap_or(status.code().unwrap_or(1)), stdout, stderr))
+}
+
+/// Exclusive, private scratch storage; probe configuration never uses a live home.
+pub(crate) struct Scratch(pub PathBuf);
+impl Scratch {
+    pub fn new() -> Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        let base = physical(&std::env::temp_dir())?;
+        for _ in 0..128 {
+            let mut entropy = [0u8; 16];
+            fs::File::open("/dev/urandom")?.read_exact(&mut entropy)?;
+            let suffix = entropy
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            let path = base.join(format!("oms-lifecycle-{suffix}"));
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        fail("cannot allocate private lifecycle scratch directory")
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 pub(crate) fn git(root: &Path, args: &[&str], flag: &AtomicBool) -> Result<String> {
     let program = find("git", root).ok_or_else(|| Error(2, "git is required".into()))?;
@@ -442,4 +490,28 @@ pub(crate) fn new_file(path: &Path, raw: &[u8], mode: u32) -> Result<()> {
     f.write_all(raw)?;
     f.sync_all()?;
     Ok(())
+}
+
+pub(crate) struct ReceiptGuard {
+    _operation: crate::lifecycle_lock::Guard,
+    _receipt: Option<oms_lock::Guard>,
+}
+pub(crate) fn receipt_lock(
+    paths: &crate::receipt::Paths,
+    flag: &AtomicBool,
+) -> Result<ReceiptGuard> {
+    let operation = crate::lifecycle_lock::acquire(paths, flag)?;
+    let receipt = receipt_only(paths)?;
+    Ok(ReceiptGuard {
+        _operation: operation,
+        _receipt: receipt,
+    })
+}
+
+pub(crate) fn receipt_only(paths: &crate::receipt::Paths) -> Result<Option<oms_lock::Guard>> {
+    if crate::update::borrowed(paths)? {
+        Ok(None)
+    } else {
+        lock(&paths.receipt, &paths.cwd).map(Some)
+    }
 }

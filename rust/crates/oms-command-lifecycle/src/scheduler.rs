@@ -250,7 +250,7 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
         return Ok(r::text("would converge the owned scheduler trigger"));
     }
     r::child_guard()?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let _guard = r::receipt_lock(paths, flag)?;
     paths.require_owner()?;
     let mut tx = Transaction::begin(paths)?;
     let result = apply(paths, options, &mut tx, flag)?;
