@@ -513,7 +513,7 @@ pub fn dispatch(
             check_wip(running, awaiting, request.continue_task.is_some())?;
         }
         let launch = serde_json::json!({"schema":2,"member":member,"task_id":request.task_id,"main":request.main,"main_attempt":request.main_attempt,
-            "room":request.room,"route":request.route,"scopes":scopes,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
+            "room":request.room,"route":request.route,"scopes":scopes,"verify":request.verify,"state":"reserved","execution_repo":execution.repo(),"created_at":crate::now()});
         tx.write_json(Path::new(&relative), &launch, true, 65536)?;
         registry["calls"][&member] = launch;
         tx.write_json(
@@ -864,4 +864,198 @@ pub fn continuation(
         "native resume requires independently verified session/account provenance",
     )?;
     Ok(note)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContinuationDefaults {
+    pub attempt_id: String,
+    pub member: String,
+    pub role: String,
+    pub scopes: Vec<String>,
+    pub workload: Option<String>,
+    pub verify: Option<String>,
+    pub purpose: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// Inherit role, recorded scopes, workload, verifier and purpose from the newest
+/// owned write dispatch for this owner lineage and task. Preserves empty recorded
+/// scope lists rather than silently widening them to repository-wide `"."`.
+pub fn continuation_defaults(
+    repo: &Path,
+    owner: &str,
+    main: Option<&str>,
+    main_attempt: Option<&str>,
+    task_id: &str,
+    room_id: Option<&str>,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Option<ContinuationDefaults>> {
+    crate::identifier(owner)?;
+    crate::identifier(task_id)?;
+    let store = Store::open(repo)?;
+    let attempts = query(
+        service,
+        NativeCommand::Events,
+        repo,
+        &["list", "--json"],
+        stop,
+    )?;
+    let attempt_rows = array(&attempts);
+    let main_id = main_attempt.map(str::to_owned).or_else(|| {
+        attempt_rows
+            .iter()
+            .filter(|v| {
+                (v["tool"] == "panel-main" || v["refs"]["panel_role"] == "main")
+                    && !crate::state::TERMINAL_STATES.contains(&text(v, "state").as_str())
+                    && v["refs"]["panel_owner"]
+                        .as_str()
+                        .or_else(|| v["provider"].as_str())
+                        == Some(owner)
+                    && main.is_none_or(|m| v["refs"]["panel_room_participant"] == m)
+                    && room_id.is_none_or(|r| v["refs"]["panel_room_id"] == r)
+            })
+            .max_by_key(|v| (text(v, "created_at"), text(v, "attempt_id")))
+            .and_then(|v| v["attempt_id"].as_str().map(str::to_owned))
+    });
+    let parents: std::collections::BTreeSet<String> = if let Some(att) = main_id.as_deref() {
+        crate::control::lineage(repo, attempt_rows, att, service, stop, false)?
+    } else {
+        attempt_rows
+            .iter()
+            .filter(|v| {
+                (v["tool"] == "panel-main" || v["refs"]["panel_role"] == "main")
+                    && v["refs"]["panel_owner"]
+                        .as_str()
+                        .or_else(|| v["provider"].as_str())
+                        == Some(owner)
+            })
+            .filter_map(|v| v["attempt_id"].as_str().map(str::to_owned))
+            .collect()
+    };
+
+    let mut owned = attempt_rows
+        .iter()
+        .filter(|v| {
+            let role = text(&v["refs"], "panel_role");
+            let write_like = v["refs"]["panel_access"] == "write"
+                || (!role.is_empty() && WRITERS.contains(&role.as_str()));
+            v["task_id"] == task_id && write_like && parents.contains(&text(v, "parent_attempt_id"))
+        })
+        .collect::<Vec<_>>();
+    owned.sort_by_key(|v| (text(v, "created_at"), text(v, "attempt_id")));
+
+    let room_participants = if let Some(room) = room_id {
+        let state = query(
+            service,
+            NativeCommand::Room,
+            repo,
+            &["show", "--id", room, "--json"],
+            stop,
+        )?;
+        array(&state["participants"])
+            .iter()
+            .filter(|v| !text(v, "participant").is_empty())
+            .map(|v| (text(v, "participant"), v.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
+    for row in owned.into_iter().rev() {
+        let refs = &row["refs"];
+        let member = text(refs, "panel_room_participant");
+        let role = text(refs, "panel_role");
+        let role = if role.is_empty() {
+            "worker".to_owned()
+        } else {
+            role
+        };
+
+        let public_launch = if !member.is_empty() {
+            store
+                .json(
+                    Path::new(&format!(
+                        ".oms/artifacts/panel-dispatch/{member}-launch.json"
+                    )),
+                    65536,
+                    true,
+                )
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let private_launch = if !member.is_empty() {
+            crate::control::private_record(repo, &member, "launch").ok()
+        } else {
+            None
+        };
+
+        let extract_scopes = |v: &Value| -> Option<Vec<String>> {
+            v.get("scopes").and_then(|s| s.as_array()).map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+        };
+
+        let scopes = private_launch
+            .as_ref()
+            .and_then(|v| extract_scopes(v).or_else(|| extract_scopes(&v["rework"])))
+            .or_else(|| public_launch.as_ref().and_then(extract_scopes))
+            .or_else(|| {
+                room_participants
+                    .get(&member)
+                    .and_then(|p| extract_scopes(p))
+            })
+            .unwrap_or_default();
+
+        let pick = |key: &str, ref_key: &str| -> Option<String> {
+            private_launch
+                .as_ref()
+                .and_then(|v| {
+                    v["route"][key]
+                        .as_str()
+                        .or_else(|| v[key].as_str())
+                        .or_else(|| v["route"]["candidate"][key].as_str())
+                })
+                .or_else(|| {
+                    public_launch.as_ref().and_then(|v| {
+                        v["route"][key]
+                            .as_str()
+                            .or_else(|| v[key].as_str())
+                            .or_else(|| v["route"]["candidate"][key].as_str())
+                    })
+                })
+                .or_else(|| refs[ref_key].as_str())
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        };
+
+        let verify = private_launch
+            .as_ref()
+            .and_then(|v| v["verify"].as_str())
+            .or_else(|| public_launch.as_ref().and_then(|v| v["verify"].as_str()))
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+
+        return Ok(Some(ContinuationDefaults {
+            attempt_id: text(row, "attempt_id"),
+            member,
+            role,
+            scopes,
+            workload: pick("workload", "panel_workload"),
+            verify,
+            purpose: pick("purpose", "panel_purpose"),
+            provider: pick("provider", "panel_provider")
+                .or_else(|| row["provider"].as_str().map(str::to_owned)),
+            model: pick("model", "panel_model"),
+            effort: pick("effort", "panel_effort"),
+        }));
+    }
+    Ok(None)
 }

@@ -3,8 +3,52 @@ use crate::terminals::{PrivateStore, SessionProof, session_proof, tmux};
 use crate::{Error, Result, Services, Value, require};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-pub fn list_workspaces(repo: &Path, archived: bool) -> Result<Vec<Value>> {
-    PrivateStore::open(repo, "workspaces", archived, false)?.list()
+pub fn public_workspace(
+    repo: &Path,
+    row: &Value,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Value {
+    let state = if workspace_proof(repo, row, service, stop).is_ok() {
+        "running"
+    } else if workspace_gone(repo, row, service, stop).unwrap_or(false) {
+        "gone"
+    } else {
+        "unknown"
+    };
+    let archived = row["archived"] == true;
+    serde_json::json!({
+        "id": row["id"],
+        "label": crate::eventlog::clean(row["label"].as_str().unwrap_or("Workspace"), 120),
+        "kind": "workspace",
+        "state": state,
+        "archived": archived,
+        "capabilities": {
+            "focus": state == "running",
+            "forget": state == "gone",
+            "archive": state == "gone" && !archived,
+            "restore": state == "gone" && archived,
+        },
+    })
+}
+
+pub fn list_workspaces(
+    repo: &Path,
+    archived: bool,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Vec<Value>> {
+    crate::parent_only()?;
+    let Some(store) = PrivateStore::open_optional(repo, "workspaces", archived)? else {
+        return Ok(vec![]);
+    };
+    let mut rows = Vec::new();
+    for id in store.identifiers()? {
+        let row = store.record(&id)?;
+        require(row["kind"] == "workspace", "invalid workspace record kind")?;
+        rows.push(public_workspace(repo, &row, service, stop));
+    }
+    Ok(rows)
 }
 pub fn workspace_gone(
     repo: &Path,
@@ -143,15 +187,43 @@ pub fn open_workspace(
     store.update(ident, &row, &changed)?;
     Ok(changed)
 }
-pub fn focus(repo: &Path, ident: &str, service: &dyn Services, stop: &AtomicBool) -> Result<()> {
+pub fn focus(repo: &Path, ident: &str, service: &dyn Services, stop: &AtomicBool) -> Result<Value> {
     crate::parent_only()?;
     let row = PrivateStore::open(repo, "workspaces", false, false)?.record(ident)?;
     let proof = workspace_proof(repo, &row, service, stop)?;
-    tmux(
-        service,
-        repo,
-        &crate::services::args(&["switch-client", "-t", &proof.session]),
-        stop,
-    )?;
-    Ok(())
+    let window = row["window"]
+        .as_str()
+        .ok_or_else(|| Error::new("workspace window unavailable"))?;
+    let pane = row["pane"]
+        .as_str()
+        .ok_or_else(|| Error::new("workspace pane unavailable"))?;
+    let commands =
+        crate::terminals::switch_commands(service, repo, &proof.session, window, pane, stop)?;
+    for cmd in &commands {
+        workspace_proof(repo, &row, service, stop)?;
+        tmux(service, repo, cmd, stop)?;
+    }
+    Ok(public_workspace(repo, &row, service, stop))
+}
+
+pub fn archive_workspace(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::history::archive(repo, "workspaces", ident, |row| {
+        workspace_gone(repo, row, service, stop)
+    })
+}
+
+pub fn restore_workspace(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::history::restore(repo, "workspaces", ident, |row| {
+        workspace_gone(repo, row, service, stop)
+    })
 }

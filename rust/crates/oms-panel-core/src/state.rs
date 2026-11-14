@@ -22,9 +22,43 @@ pub struct Snapshot {
     pub report: Value,
     pub status: i32,
 }
+/// Resolve the canonical shared state repository for a working directory or scratch checkout.
 pub fn repository(path: &Path) -> Result<std::path::PathBuf> {
-    oms_reference::repository::work_repository(path, &AtomicBool::new(false))
-        .map(|v| v.0)
+    repository_for(path, false)
+}
+
+/// Resolve the canonical shared state repository, optionally allowing foreign room overrides.
+pub fn repository_for(path: &Path, allow_foreign: bool) -> Result<std::path::PathBuf> {
+    let resolver = oms_reference::repository::Resolver::from_env().map_err(Error::new)?;
+    resolve_state_with(&resolver, path, allow_foreign)
+}
+
+/// Resolve the physical Git working repository root (or normalized non-Git path) and Git flag.
+pub fn work_repository(path: &Path) -> Result<(std::path::PathBuf, bool)> {
+    oms_reference::repository::work_repository(path, &AtomicBool::new(false)).map_err(Error::new)
+}
+
+/// Resolve the native execution root for a shared state repository, honoring an optional checkout.
+pub fn native_repository(
+    shared: &Path,
+    execution_root: Option<&Path>,
+) -> Result<std::path::PathBuf> {
+    let mut resolver = oms_reference::repository::Resolver::from_env().map_err(Error::new)?;
+    if let Some(root) = execution_root {
+        resolver.execution_root = Some(root.to_owned());
+    }
+    resolver
+        .native_repository(shared, &AtomicBool::new(false))
+        .map_err(Error::new)
+}
+
+fn resolve_state_with(
+    resolver: &oms_reference::repository::Resolver,
+    path: &Path,
+    allow_foreign: bool,
+) -> Result<std::path::PathBuf> {
+    resolver
+        .state_repository(path, allow_foreign, &AtomicBool::new(false))
         .map_err(Error::new)
 }
 pub fn snapshot(
@@ -160,4 +194,120 @@ pub fn heartbeat(
             stop,
         )?
         .success()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let id = SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "oms-panel-state-{label}-{}-{id}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
+            Self(canonical)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git execution");
+        assert!(
+            status.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        git_ok(dir, &["init", "-b", "main"]);
+        git_ok(dir, &["config", "user.name", "Test"]);
+        git_ok(dir, &["config", "user.email", "test@example.invalid"]);
+        std::fs::write(dir.join("README.md"), "ok\n").unwrap();
+        git_ok(dir, &["add", "README.md"]);
+        git_ok(dir, &["commit", "-m", "init"]);
+    }
+
+    #[test]
+    fn scratch_worktree_resolves_to_shared_state_and_rejects_foreign_room() {
+        let base = TempDir::new("scratch");
+        let main_repo = base.0.join("repo");
+        let other_repo = base.0.join("other");
+        let managed = base.0.join("worktrees");
+        std::fs::create_dir_all(&main_repo).unwrap();
+        std::fs::create_dir_all(&other_repo).unwrap();
+        init_repo(&main_repo);
+        init_repo(&other_repo);
+
+        let parent = managed.join("oh-my-setting-scratch.demo1");
+        let scratch = parent.join("wt-demo1");
+        std::fs::create_dir_all(&parent).unwrap();
+        git_ok(
+            &main_repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "oms/demo",
+                scratch.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(
+            parent.join(".oh-my-setting-tmp"),
+            format!(
+                "kind=oh-my-setting-temp\ntemporary=1\nrepo={}\nworktree={}\n",
+                main_repo.display(),
+                scratch.display()
+            ),
+        )
+        .unwrap();
+
+        let resolver = oms_reference::repository::Resolver {
+            managed_root: managed.clone(),
+            child: false,
+            inherited_room: Some(main_repo.clone()),
+            execution_root: None,
+        };
+        let resolved = resolve_state_with(&resolver, &scratch, false).unwrap();
+        assert_eq!(resolved, main_repo);
+
+        let foreign = oms_reference::repository::Resolver {
+            managed_root: managed,
+            child: false,
+            inherited_room: Some(other_repo),
+            execution_root: None,
+        };
+        let err = resolve_state_with(&foreign, &scratch, false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("conflicts with the inherited room repository"),
+            "unexpected error: {err}"
+        );
+        let allowed = resolve_state_with(&foreign, &scratch, true).unwrap();
+        assert_eq!(allowed, main_repo);
+    }
 }

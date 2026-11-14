@@ -1,0 +1,31 @@
+[package]
+name = "oms-command-panel"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+oms-panel-core = { path = "../oms-panel-core" }
+oms-work-inspect = { path = "../oms-work-inspect" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-command-task = { path = "../oms-command-task" }
+oms-command-operations = { path = "../oms-command-operations" }
+oms-command-room = { path = "../oms-command-room" }
+oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+oms-safe-fs = { path = "../oms-safe-fs" }
+oms-scrub = { path = "../oms-scrub" }
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+regex = "=1.13.1"
+sha2 = "=0.10.9"
+rustix = { version = "=1.1.6", features = ["termios", "event", "process", "fs"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+unicode-general-category = "=0.6.0"
+
+[[test]]
+name = "panel_parity"
+harness = false

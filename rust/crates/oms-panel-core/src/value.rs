@@ -123,7 +123,7 @@ pub fn outbound(bytes: &[u8]) -> Result<()> {
         "panel outbound content refused by scrubber",
     )
 }
-pub(crate) fn redact(bytes: &[u8]) -> Result<String> {
+pub fn redact(bytes: &[u8]) -> Result<String> {
     let values: Vec<_> = std::env::vars_os().collect();
     require(
         values.len() <= oms_scrub::MAX_ENV_ENTRIES

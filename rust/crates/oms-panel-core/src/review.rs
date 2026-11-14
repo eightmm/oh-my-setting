@@ -753,3 +753,407 @@ pub fn council_execute(
     plan["exit"] = output.code.into();
     Ok(plan)
 }
+
+pub fn stopped_worker_proof(repo: &Path, worker: &Value, attempts: &[Value]) -> Result<Value> {
+    crate::control::stopped(repo, worker, attempts)
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SettleReviewRequest {
+    pub owner: Option<String>,
+    pub owner_attempt: Option<String>,
+    pub explicit: Vec<String>,
+    pub reason: Option<String>,
+    pub apply: bool,
+    pub legacy: bool,
+    pub legacy_older_than: Option<f64>,
+    pub standalone: bool,
+    pub older_than: Option<f64>,
+    pub aged_days: Option<f64>,
+}
+
+pub fn settle_review(
+    repo: &Path,
+    request: &SettleReviewRequest,
+    service: &dyn crate::Services,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Value> {
+    use crate::services::{NativeCommand, query};
+    use crate::value::{array, text};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    crate::parent_only()?;
+    if let Some(owner) = &request.owner {
+        crate::identifier(owner)?;
+    }
+    if let Some(att) = &request.owner_attempt {
+        crate::identifier(att)?;
+    }
+    for ident in &request.explicit {
+        crate::identifier(ident)?;
+    }
+    require(
+        !request.legacy || request.owner_attempt.is_some(),
+        "--legacy requires --owner-attempt",
+    )?;
+    require(
+        request.legacy_older_than.is_none() || request.legacy,
+        "--legacy-older-than requires --legacy",
+    )?;
+    require(
+        !request.standalone
+            || (request.owner.is_none()
+                && request.owner_attempt.is_none()
+                && request.explicit.is_empty()
+                && request.reason.is_none()
+                && !request.legacy),
+        "--standalone cannot be combined with owner or attempt selection",
+    )?;
+    if let Some(days) = request.aged_days {
+        require(
+            days.is_finite() && days >= 7.0,
+            "--aged-days must be finite and at least 7",
+        )?;
+        require(
+            request.older_than.is_none() && request.explicit.is_empty() && request.reason.is_none(),
+            "--aged-days cannot be combined with --older-than, --attempt or --reason",
+        )?;
+    }
+    require(
+        request.older_than.is_none() || request.standalone,
+        "--older-than requires --standalone",
+    )?;
+    require(
+        !request.standalone || request.older_than.is_some() || request.aged_days.is_some(),
+        "--standalone requires --older-than DAYS or --aged-days DAYS",
+    )?;
+    for (flag, val) in [
+        ("--legacy-older-than", request.legacy_older_than),
+        ("--older-than", request.older_than),
+    ] {
+        if let Some(hours_or_days) = val {
+            require(
+                hours_or_days.is_finite() && hours_or_days > 0.0,
+                &format!("{flag} must be finite and positive"),
+            )?;
+        }
+    }
+    if !request.explicit.is_empty() {
+        let reason = request.reason.as_deref().unwrap_or("");
+        require(
+            !reason.is_empty() && reason.len() <= 200 && !reason.chars().any(|c| (c as u32) < 32),
+            "--attempt requires a one-line --reason of 1..200 characters",
+        )?;
+    } else {
+        require(request.reason.is_none(), "--reason requires --attempt")?;
+    }
+
+    let store = Store::open(repo)?;
+    let _tx = if request.apply {
+        Some(store.transaction("panel-results", Duration::from_secs(10))?)
+    } else {
+        None
+    };
+
+    let attempts_val = query(
+        service,
+        NativeCommand::Events,
+        repo,
+        &["list", "--json"],
+        stop,
+    )?;
+    let attempts = array(&attempts_val);
+    let artifacts = crate::results::index_rows(repo)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(Error::new)?
+        .as_secs_f64();
+
+    let plan_path = store.repo().join(".oms/plan/tasks.json");
+    let plan_exists = std::fs::symlink_metadata(&plan_path).is_ok();
+    let plan = if plan_exists {
+        store.json(Path::new(".oms/plan/tasks.json"), 4 * 1024 * 1024, true)
+    } else {
+        Ok(None)
+    };
+    let (plan_unreadable, plan_id) = match plan {
+        Ok(Some(v)) => match v["plan_id"].as_str() {
+            Some(id) if !id.is_empty() => (false, Some(id.to_owned())),
+            _ => (true, None),
+        },
+        Ok(None) => (plan_exists, None),
+        Err(_) => (true, None),
+    };
+
+    let mut parents = BTreeSet::new();
+    let mut legacy_parents = BTreeSet::new();
+    let legacy_hours = request
+        .legacy
+        .then(|| request.legacy_older_than.unwrap_or(24.0));
+    if !request.standalone {
+        for row in attempts
+            .iter()
+            .filter(|v| v["tool"] == "panel-main" || v["refs"]["panel_role"] == "main")
+        {
+            let aid = text(row, "attempt_id");
+            if aid.is_empty() {
+                continue;
+            }
+            if let Some(req_att) = &request.owner_attempt {
+                if &aid != req_att {
+                    continue;
+                }
+            }
+            let row_owner = row["refs"]["panel_owner"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .or_else(|| row["provider"].as_str())
+                .unwrap_or_default();
+            if let Some(req_owner) = &request.owner {
+                if row_owner != req_owner {
+                    continue;
+                }
+            }
+            let dead = crate::state::TERMINAL_STATES.contains(&text(row, "state").as_str());
+            if !dead {
+                parents.insert(aid);
+            } else if let Some(hours) = legacy_hours {
+                let age_hours = crate::metrics::stamp(&row["created_at"])
+                    .map(|t| (now - t) / 3600.0)
+                    .unwrap_or(0.0);
+                if age_hours >= hours {
+                    parents.insert(aid.clone());
+                    legacy_parents.insert(aid);
+                }
+            }
+        }
+    }
+
+    let mut decisions: BTreeMap<String, (Value, Value)> = BTreeMap::new();
+    if request.aged_days.is_none() && !request.standalone {
+        for row in &artifacts {
+            if row["kind"] != "panel-result" {
+                continue;
+            }
+            let task = text(row, "task_id");
+            if task.is_empty() {
+                continue;
+            }
+            if let Ok(bytes) = crate::results::indexed_artifact(&store, row)
+                && let Ok(payload) = crate::decode(&bytes, 1024 * 1024)
+            {
+                let main_att = text(&payload, "main_attempt_id");
+                if !main_att.is_empty() && parents.contains(&main_att) {
+                    decisions.insert(task, (payload, row.clone()));
+                }
+            }
+        }
+    }
+
+    let explicit_set: BTreeSet<&str> = request.explicit.iter().map(String::as_str).collect();
+    let eligible_states: &[&str] = if request.aged_days.is_some() {
+        &["working", "verifying", "blocked", "review"]
+    } else {
+        &["review"]
+    };
+
+    let mut report = serde_json::json!({
+        "candidates": [],
+        "pending": [],
+        "errors": [],
+        "applied": [],
+        "superseded": [],
+        "terminal": 0u64,
+        "executes": request.apply,
+    });
+    let mut terminal_count = 0u64;
+
+    for row in attempts {
+        if row["refs"]["panel_role"] != "worker" || row["refs"]["panel_access"] != "write" {
+            continue;
+        }
+        let ident = text(row, "attempt_id");
+        let parent = text(row, "parent_attempt_id");
+        let state = text(row, "state");
+        if crate::state::TERMINAL_STATES.contains(&state.as_str()) {
+            terminal_count += 1;
+        }
+        let explicit_chosen = explicit_set.contains(ident.as_str());
+        if !request.standalone && !parents.contains(&parent) && !explicit_chosen {
+            continue;
+        }
+        if !eligible_states.contains(&state.as_str()) && !explicit_chosen {
+            continue;
+        }
+        let task = text(row, "task_id");
+        let landed = artifacts.iter().any(|art| {
+            art["kind"] == "land-patch"
+                && (art["attempt_id"] == ident || (!task.is_empty() && art["task_id"] == task))
+        });
+
+        let mut target: Option<(&str, &str)> = None;
+        let mut selection_reason: Option<String> = None;
+
+        if landed {
+            target = Some(("done", "landed_patch"));
+            selection_reason = Some("landed_patch".into());
+        } else if let Some(days) = request.aged_days {
+            let stamp = crate::metrics::stamp(&row["updated_at"])
+                .or_else(|| crate::metrics::stamp(&row["created_at"]));
+            let age_days = stamp.map(|t| (now - t) / 86400.0).unwrap_or(0.0);
+            if age_days >= days {
+                target = Some(("cancelled", "aged_unsettled"));
+                selection_reason =
+                    Some(format!("aged {state} without owner decision ({days} days)"));
+            }
+        } else if request.standalone {
+            if let Some(days) = request.older_than {
+                let stamp = crate::metrics::stamp(&row["updated_at"])
+                    .or_else(|| crate::metrics::stamp(&row["created_at"]));
+                let age_days = stamp.map(|t| (now - t) / 86400.0).unwrap_or(0.0);
+                if age_days >= days {
+                    target = Some(("cancelled", "standalone_older"));
+                    selection_reason = Some(format!("standalone review older than {days} days"));
+                }
+            }
+        } else if explicit_chosen {
+            target = Some(("cancelled", "owner_explicit_settle"));
+            selection_reason = request.reason.clone();
+        } else if let Some((payload, _)) = decisions.get(&task) {
+            let same_plan = plan_id
+                .as_ref()
+                .is_none_or(|id| payload["plan_id"].as_str().is_none_or(|p| p == id));
+            if same_plan {
+                let superseded = crate::value::array(&payload["superseded_attempts"])
+                    .iter()
+                    .any(|v| v["attempt_id"] == ident);
+                if superseded {
+                    target = Some(("cancelled", "owner_superseded"));
+                    selection_reason = Some("owner_superseded".into());
+                    report["superseded"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(ident.clone().into());
+                } else {
+                    match payload["outcome"].as_str() {
+                        Some("accepted") => {
+                            target = Some(("done", "owner_accepted"));
+                            selection_reason = Some("owner_accepted".into());
+                        }
+                        Some("completed") => {
+                            target = Some(("done", "owner_completed"));
+                            selection_reason = Some("owner_completed".into());
+                        }
+                        Some("rejected") => {
+                            target = Some(("cancelled", "owner_rejected"));
+                            selection_reason = Some("owner_rejected".into());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if plan_unreadable && target.is_some() && !landed {
+            target = None;
+        }
+        let stopped_ok = crate::control::stopped(repo, row, &attempts).is_ok();
+        let exit_proven = artifacts
+            .iter()
+            .any(|art| art["attempt_id"] == ident && art["exit"].is_i64())
+            || row["exit"].is_i64();
+
+        if let Some((dest_state, reason_code)) = target
+            && eligible_states.contains(&state.as_str())
+            && (stopped_ok
+                || exit_proven
+                || landed
+                || legacy_parents.contains(&parent)
+                || request.standalone)
+        {
+            report["candidates"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "attempt_id": ident,
+                    "task_id": task,
+                    "from_state": state,
+                    "to_state": dest_state,
+                    "reason_code": reason_code,
+                    "reason": selection_reason,
+                }));
+            if request.apply {
+                let apply_res = (|| -> Result<()> {
+                    let seq = row["sequence"]
+                        .as_u64()
+                        .ok_or_else(|| Error::new("worker sequence unavailable"))?;
+                    let key = format!(
+                        "settle-review-{}",
+                        crate::digest(
+                            format!("{ident}:{state}:{dest_state}:{reason_code}").as_bytes()
+                        )
+                    );
+                    let mut args = crate::services::args(&[
+                        "transition",
+                        "--attempt",
+                        &ident,
+                        "--state",
+                        dest_state,
+                        "--expected-state",
+                        &state,
+                        "--expected-seq",
+                        &seq.to_string(),
+                        "--actor",
+                        "panel-review-settlement",
+                        "--reason-code",
+                        reason_code,
+                        "--idempotency-key",
+                        &key,
+                    ]);
+                    if let Some(reason_text) = &selection_reason {
+                        args.extend(["--reason".into(), reason_text.into()]);
+                    }
+                    service
+                        .command(NativeCommand::Events, repo, &args, stop)?
+                        .success()
+                })();
+                match apply_res {
+                    Ok(()) => report["applied"].as_array_mut().unwrap().push(ident.into()),
+                    Err(e) => report["errors"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "attempt_id": ident,
+                            "error": crate::eventlog::clean(&e.message, 240),
+                        })),
+                }
+            }
+        } else {
+            let pending_reason = if target.is_none() {
+                if plan_unreadable {
+                    "plan_unreadable"
+                } else {
+                    "rework"
+                }
+            } else if state == "blocked" {
+                "aged_days_required"
+            } else {
+                "not_in_review"
+            };
+            let mut item = serde_json::json!({
+                "attempt_id": ident,
+                "task_id": task,
+                "state": state,
+                "reason": pending_reason,
+            });
+            if let Some(days) = request.aged_days {
+                item["aged_days"] = days.into();
+            } else if let Some(days) = request.older_than {
+                item["older_than_days"] = days.into();
+            }
+            report["pending"].as_array_mut().unwrap().push(item);
+        }
+    }
+    report["terminal"] = terminal_count.into();
+    Ok(report)
+}

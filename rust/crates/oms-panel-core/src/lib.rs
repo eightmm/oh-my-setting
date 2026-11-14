@@ -33,7 +33,7 @@ pub mod workspaces;
 pub use serde_json::Value;
 pub use services::{CommandOutput, NativeCommand, PeerExecutor, Services, SubcommandServices};
 pub use storage::{Store, Transaction};
-pub use value::{decode, digest, now, outbound, timestamp};
+pub use value::{decode, digest, now, outbound, redact, timestamp};
 
 /// Native producer types remain available to an in-process command adapter.
 pub mod native {

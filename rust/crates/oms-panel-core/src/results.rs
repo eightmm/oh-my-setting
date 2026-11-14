@@ -931,6 +931,7 @@ pub fn results_page(
                 "guard",
                 "provider_error_exit",
                 "artifact",
+                "artifact_sha256",
                 "patch",
                 "patch_sha256",
                 "event_id",
@@ -1554,7 +1555,7 @@ fn round_delta(store: &Store, attempts: &[Value], rows: &[&Value]) -> Option<Val
     })().unwrap_or_else(|_| serde_json::json!({"issue":"unavailable"})))
 }
 
-pub(crate) fn indexed_artifact(store: &Store, row: &Value) -> Result<Vec<u8>> {
+pub fn indexed_artifact(store: &Store, row: &Value) -> Result<Vec<u8>> {
     let path = text(row, "artifact");
     require(
         path.starts_with(".oms/artifacts/"),

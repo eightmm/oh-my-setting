@@ -692,7 +692,7 @@ fn empty_identity(task: &str, attempt: &str) -> Result<String> {
     ))
 }
 
-fn recorded_kept(repo: &Path, worker: &Value, indexed: Option<&Value>) -> Result<PathBuf> {
+pub fn recorded_kept(repo: &Path, worker: &Value, indexed: Option<&Value>) -> Result<PathBuf> {
     let mut paths = std::collections::BTreeSet::new();
     let location = crate::value::text(&worker["refs"], "panel_location");
     if let Some(relative) = location.strip_prefix("worktree:") {

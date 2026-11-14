@@ -123,6 +123,20 @@ impl PrivateStore {
     pub fn open(repo: &Path, kind: &str, archived: bool, create: bool) -> Result<Self> {
         Self::at(repo, kind, archived, create, &state_home()?)
     }
+    pub fn open_optional(repo: &Path, kind: &str, archived: bool) -> Result<Option<Self>> {
+        let base = state_home()?;
+        let canon = std::fs::canonicalize(repo).map_err(Error::new)?;
+        let namespace = crate::digest(canon.as_os_str().as_encoded_bytes());
+        let root = base
+            .join("oh-my-setting/panel-control")
+            .join(namespace)
+            .join(format!("{kind}{}", if archived { "-archive" } else { "" }));
+        match std::fs::symlink_metadata(&root) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::new(e)),
+            Ok(_) => Self::at(&canon, kind, archived, false, &base).map(Some),
+        }
+    }
     pub fn at(repo: &Path, kind: &str, archived: bool, create: bool, base: &Path) -> Result<Self> {
         require(
             ["terminals", "workspaces", "jobs"].contains(&kind),
@@ -493,6 +507,213 @@ pub fn open_terminal(
     store.update(ident, &row, &changed)?;
     Ok(changed)
 }
+pub fn switch_commands(
+    service: &dyn Services,
+    repo: &Path,
+    target_session: &str,
+    target_window: &str,
+    target_pane: &str,
+    stop: &AtomicBool,
+) -> Result<Vec<Vec<OsString>>> {
+    require(
+        target_id(&Value::String(target_session.to_owned()), '$')
+            && target_id(&Value::String(target_window.to_owned()), '@')
+            && target_id(&Value::String(target_pane.to_owned()), '%'),
+        "invalid tmux target identifiers",
+    )?;
+    let caller = std::env::var("TMUX_PANE").unwrap_or_default();
+    require(
+        target_id(&Value::String(caller.clone()), '%'),
+        "current tmux pane is unavailable; select the original terminal",
+    )?;
+    let current = tmux(
+        service,
+        repo,
+        &crate::services::args(&["display-message", "-p", "-t", &caller, "#{session_id}"]),
+        stop,
+    )?;
+    let current_session = current.trim();
+    require(
+        target_id(&Value::String(current_session.to_owned()), '$'),
+        "current tmux session is unavailable; native session was preserved",
+    )?;
+    let mut commands = vec![
+        crate::services::args(&["select-window", "-t", target_window]),
+        crate::services::args(&["select-pane", "-t", target_pane]),
+    ];
+    if current_session != target_session {
+        let out = tmux(
+            service,
+            repo,
+            &crate::services::args(&["list-clients", "-F", "#{client_name}\t#{session_id}"]),
+            stop,
+        )?;
+        let clients: Vec<String> = out
+            .lines()
+            .filter_map(|line| {
+                let (client, sess) = line.split_once('\t')?;
+                if sess == current_session
+                    && !client.is_empty()
+                    && client.len() <= 256
+                    && !client.starts_with('-')
+                    && crate::eventlog::clean(client, 256) == client
+                {
+                    Some(client.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        require(
+            clients.len() == 1,
+            "unique attached client required to switch tmux sessions",
+        )?;
+        commands.push(crate::services::args(&[
+            "switch-client",
+            "-c",
+            &clients[0],
+            "-t",
+            target_session,
+        ]));
+    }
+    Ok(commands)
+}
+
+pub fn terminal_proof(
+    repo: &Path,
+    row: &Value,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<(String, String, String)> {
+    let canon = std::fs::canonicalize(repo).map_err(Error::new)?;
+    require(
+        row["archived"].as_bool() != Some(true)
+            && row["kind"] == "shell"
+            && row["repo"] == canon.to_string_lossy().as_ref()
+            && target_id(&row["pane"], '%'),
+        "invalid or archived terminal binding",
+    )?;
+    let proof: SessionProof =
+        serde_json::from_value(row["session_proof"].clone()).map_err(Error::new)?;
+    require(
+        session_proof(service, repo, &proof.session, stop)? == proof,
+        "terminal host ownership changed",
+    )?;
+    let pane = row["pane"].as_str().unwrap();
+    let info = tmux(
+        service,
+        repo,
+        &crate::services::args(&[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{session_id}\t#{window_id}\t#{pane_id}\t#{pane_dead}",
+        ]),
+        stop,
+    )?;
+    let fields: Vec<&str> = info.trim_end_matches(['\r', '\n']).split('\t').collect();
+    require(
+        fields.len() == 4
+            && fields[0] == proof.session
+            && fields[2] == pane
+            && fields[3] == "0"
+            && target_id(&Value::String(fields[1].to_owned()), '@'),
+        "terminal pane changed or exited",
+    )?;
+    Ok((proof.session, fields[1].to_owned(), pane.to_owned()))
+}
+
+pub fn public_terminal(
+    repo: &Path,
+    row: &Value,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Value {
+    let state = if terminal_proof(repo, row, service, stop).is_ok() {
+        "running"
+    } else if terminal_gone(repo, row, service, stop).unwrap_or(false) {
+        "gone"
+    } else {
+        "unknown"
+    };
+    let archived = row["archived"] == true;
+    serde_json::json!({
+        "id": row["id"],
+        "label": crate::eventlog::clean(row["label"].as_str().unwrap_or("Terminal"), 120),
+        "kind": "shell",
+        "state": state,
+        "archived": archived,
+        "capabilities": {
+            "focus": state == "running",
+            "read": state == "running",
+            "restart": false,
+            "forget": state == "gone",
+            "archive": state == "gone" && !archived,
+            "restore": state == "gone" && archived,
+        },
+    })
+}
+
+pub fn list_terminals(
+    repo: &Path,
+    archived: bool,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Vec<Value>> {
+    crate::parent_only()?;
+    let Some(store) = PrivateStore::open_optional(repo, "terminals", archived)? else {
+        return Ok(vec![]);
+    };
+    let mut rows = Vec::new();
+    for id in store.identifiers()? {
+        let row = store.record(&id)?;
+        require(row["kind"] == "shell", "invalid terminal record kind")?;
+        rows.push(public_terminal(repo, &row, service, stop));
+    }
+    Ok(rows)
+}
+
+pub fn focus_terminal(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::parent_only()?;
+    let store = PrivateStore::open(repo, "terminals", false, false)?;
+    let row = store.record(ident)?;
+    let (session, window, pane) = terminal_proof(repo, &row, service, stop)?;
+    let commands = switch_commands(service, repo, &session, &window, &pane, stop)?;
+    for cmd in &commands {
+        terminal_proof(repo, &row, service, stop)?;
+        tmux(service, repo, cmd, stop)?;
+    }
+    Ok(public_terminal(repo, &row, service, stop))
+}
+
+pub fn archive_terminal(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::history::archive(repo, "terminals", ident, |row| {
+        terminal_gone(repo, row, service, stop)
+    })
+}
+
+pub fn restore_terminal(
+    repo: &Path,
+    ident: &str,
+    service: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    crate::history::restore(repo, "terminals", ident, |row| {
+        terminal_gone(repo, row, service, stop)
+    })
+}
+
 pub fn read_terminal(
     repo: &Path,
     ident: &str,
@@ -500,21 +721,14 @@ pub fn read_terminal(
     service: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Value> {
+    crate::parent_only()?;
     let store = PrivateStore::open(repo, "terminals", false, false)?;
     let row = store.record(ident)?;
-    let proof: SessionProof =
-        serde_json::from_value(row["session_proof"].clone()).map_err(Error::new)?;
-    require(
-        session_proof(service, repo, &proof.session, stop)? == proof,
-        "terminal host changed",
-    )?;
-    let pane = row["pane"]
-        .as_str()
-        .ok_or_else(|| Error::new("terminal launch unconfirmed"))?;
+    let (_, _, pane) = terminal_proof(repo, &row, service, stop)?;
     let raw = tmux(
         service,
         repo,
-        &crate::services::args(&["capture-pane", "-p", "-t", pane, "-S", "-200"]),
+        &crate::services::args(&["capture-pane", "-p", "-t", &pane, "-S", "-200"]),
         stop,
     )?;
     preview(raw.as_bytes(), maximum)
