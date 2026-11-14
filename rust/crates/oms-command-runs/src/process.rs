@@ -242,7 +242,26 @@ pub fn execute_with_policy(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<Output> {
-    execute_mode(ctx, argv, policy, query, capture, timeout, out, err, false)
+    execute_mode(
+        ctx, argv, policy, query, capture, timeout, out, err, false, None,
+    )
+}
+/// Executes with child-local policy and invokes `on_spawn` with the OS PID
+/// as soon as the child process is spawned and armed under `Lifetime`.
+pub fn execute_with_hooks(
+    ctx: &Context<'_>,
+    argv: &[OsString],
+    policy: &ProcessPolicy,
+    query: bool,
+    capture: usize,
+    timeout: Option<Duration>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    on_spawn: Option<&mut dyn FnMut(u32)>,
+) -> Result<Output> {
+    execute_mode(
+        ctx, argv, policy, query, capture, timeout, out, err, false, on_spawn,
+    )
 }
 pub fn merged(
     ctx: &Context<'_>,
@@ -260,6 +279,7 @@ pub fn merged(
         out,
         &mut std::io::sink(),
         true,
+        None,
     )
 }
 fn execute_mode(
@@ -272,6 +292,7 @@ fn execute_mode(
     out: &mut dyn Write,
     err: &mut dyn Write,
     merged: bool,
+    on_spawn: Option<&mut dyn FnMut(u32)>,
 ) -> Result<Output> {
     if argv.is_empty() {
         return Err(Error::usage("empty command"));
@@ -348,6 +369,9 @@ fn execute_mode(
     };
     drop(command);
     let child = Lifetime(child);
+    if let Some(callback) = on_spawn {
+        callback(child.0.id());
+    }
     for f in streams.iter().flatten() {
         nonblock(f)?;
     }

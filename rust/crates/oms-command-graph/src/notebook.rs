@@ -111,18 +111,7 @@ fn valid<P: Parser + ?Sized>(
     digest: &str,
     python: &mut P,
 ) -> Result<bool, oms_graph_python::Error> {
-    let parsed = python.parse(path, text, digest)?;
-    if parsed.nodes.len() > 1 || !parsed.refs.is_empty() {
-        return Ok(true);
-    }
-    // Prefixing cannot complete an unfinished suffix. Valid future imports
-    // already produce refs above, so their module-placement rule is preserved.
-    let probe = format!("def __oms_nb_probe():\n pass\n{text}");
-    let parsed = python.parse(path, &probe, digest)?;
-    Ok(parsed
-        .nodes
-        .iter()
-        .any(|n| n.kind == "function" && n.name == "__oms_nb_probe" && n.metadata.line == Some(1)))
+    Ok(python.parse(path, text, digest)?.syntax_valid)
 }
 #[derive(Default)]
 struct Continuation {
@@ -324,10 +313,12 @@ pub fn parse<P: Parser + ?Sized>(
             owners.push(index + 1);
         }
     }
-    if !valid(path, &lines.join("\n"), digest, python)? {
+    let joined = lines.join("\n");
+    let parsed_source = python.parse(path, &joined, digest)?;
+    if !parsed_source.syntax_valid {
         return Ok(empty);
     }
-    let mut result = convert(python.parse(path, &lines.join("\n"), digest)?);
+    let mut result = convert(parsed_source);
     let remap = |value: &Value| -> Value {
         json!(
             value

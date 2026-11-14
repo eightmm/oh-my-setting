@@ -9,6 +9,10 @@ pub struct ParseResult {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub refs: Vec<Reference>,
+    /// True only when Ruff parses the source cleanly into a Python module
+    /// without pre-parse refusals (BOM, NUL, or CPython parser limits).
+    #[serde(default)]
+    pub syntax_valid: bool,
 }
 
 impl ParseResult {

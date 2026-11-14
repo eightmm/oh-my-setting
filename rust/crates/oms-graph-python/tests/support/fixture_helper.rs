@@ -39,8 +39,8 @@ fn reply_empty(delay: Duration) {
     let len = u32::from_le_bytes(header[16..20].try_into().unwrap_or_default()) as u64;
     let _ = std::io::copy(&mut stdin.by_ref().take(len), &mut std::io::sink());
     std::thread::sleep(delay);
-    let json = br#"{"nodes":[],"edges":[],"refs":[]}"#;
-    emit(&frame(1, 2, id, json.len() as u32, json));
+    let json = br#"{"nodes":[],"edges":[],"refs":[],"syntax_valid":true}"#;
+    emit(&frame(2, 2, id, json.len() as u32, json));
 }
 
 /// Stay alive, ignoring input, until the session kills this process.
@@ -54,18 +54,18 @@ fn main() {
     let name = std::env::args().next().unwrap_or_default();
     let scenario = name.rsplit('/').next().unwrap_or_default().to_owned();
     match scenario.strip_prefix("fixture-").unwrap_or_default() {
-        "bad-version" => emit(&frame(2, 2, 1, 0, b"")),
-        "oversize" => emit(&frame(1, 2, 1, u32::MAX, b"")),
-        "wrong-id" => emit(&frame(1, 2, 9, 2, b"{}")),
-        "malformed-result" => emit(&frame(1, 2, 1, 2, b"{}")),
-        "unexpected-kind" => emit(&frame(1, 7, 1, 2, b"{}")),
+        "bad-version" => emit(&frame(3, 2, 1, 0, b"")),
+        "oversize" => emit(&frame(2, 2, 1, u32::MAX, b"")),
+        "wrong-id" => emit(&frame(2, 2, 9, 2, b"{}")),
+        "malformed-result" => emit(&frame(2, 2, 1, 2, b"{}")),
+        "unexpected-kind" => emit(&frame(2, 7, 1, 2, b"{}")),
         "garbage" => emit(b"not a frame at all, just text"),
         "truncated-header" => {
-            emit(b"OGPY\x01\x02");
+            emit(b"OGPY\x02\x02");
             exit(0);
         }
         "truncated-payload" => {
-            emit(&frame(1, 2, 1, 2, b"{"));
+            emit(&frame(2, 2, 1, 2, b"{"));
             exit(0);
         }
         "exit-0" => exit(0),

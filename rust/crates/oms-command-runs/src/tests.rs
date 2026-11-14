@@ -1196,3 +1196,45 @@ fn reconcile_digest_cannot_replace_the_receipt_file() {
     assert!(!f.0.join("out/7.md").exists());
     assert_eq!(svc.digests, 0);
 }
+
+#[test]
+fn execute_with_hooks_delivers_live_child_pid_immediately_after_spawn() {
+    let f = Fixture::new();
+    let flag = AtomicBool::new(false);
+    let c = f.context(&flag);
+    let gate = f.0.join("spawned.gate");
+    f.executable(
+        "pid_wait.sh",
+        "#!/bin/sh\necho \"$$\"\nwhile [ ! -e \"$1\" ]; do sleep 0.01; done\n",
+    );
+    let argv = [
+        f.0.join("pid_wait.sh").into_os_string(),
+        gate.clone().into_os_string(),
+    ];
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut observed_pid = None;
+    let mut hook = |pid: u32| {
+        observed_pid = Some(pid);
+        assert!(pid > 0);
+        fs::write(&gate, b"ok").unwrap();
+    };
+    let output = crate::process::execute_with_hooks(
+        &c,
+        &argv,
+        &crate::process::ProcessPolicy::default(),
+        false,
+        1024,
+        Some(Duration::from_secs(5)),
+        &mut out,
+        &mut err,
+        Some(&mut hook),
+    )
+    .unwrap();
+    assert_eq!(output.code, 0);
+    let stdout_pid: u32 = String::from_utf8_lossy(&output.bytes)
+        .trim()
+        .parse()
+        .expect("child prints numeric pid");
+    assert_eq!(observed_pid, Some(stdout_pid));
+}

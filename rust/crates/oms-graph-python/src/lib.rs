@@ -45,7 +45,7 @@
 //!   [`MAX_SOURCE_BYTES`]), [`MAX_RESPONSE_BYTES`] for the serialized graph, and
 //!   [`Options::timeout`] (default 60 s) for one request, after which the child
 //!   is killed and reaped. [`CancelFlag`] ends a request early the same way.
-//! - Protocol: version 1 frames (see `protocol.rs`); a version mismatch is a
+//! - Protocol: version 2 frames (see `protocol.rs`); a version mismatch is a
 //!   [`Error::Protocol`], so helper and library must be built together.
 //!
 //! # Output
@@ -88,7 +88,7 @@ pub use session::{CancelFlag, Options, Parser, Session};
 pub use text::{compact_summary, sensitive_text};
 
 /// Parser version recorded by the graph builder; bump with any output change.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const LANGUAGE: &str = "python";
 pub const EXTENSIONS: &[&str] = &[".py"];
 /// The graph builder's default source cap.

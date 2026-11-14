@@ -3,7 +3,7 @@
 //! One frame is a 20 byte header followed by `len` payload bytes:
 //!
 //! ```text
-//! 0..4   magic "OGPY"          4      version (1)
+//! 0..4   magic "OGPY"          4      version (2)
 //! 5      kind                  6..8   reserved, zero
 //! 8..16  request id, u64 LE    16..20 payload length, u32 LE
 //! ```
@@ -18,7 +18,9 @@
 use std::io::{self, Read, Write};
 
 pub(crate) const MAGIC: [u8; 4] = *b"OGPY";
-pub(crate) const VERSION: u8 = 1;
+/// Frame bodies are UTF-8 JSON `ParseResult` values (including `syntax_valid`
+/// on version 2) for kind 2 results, or ASCII refusal reasons for kind 3.
+pub(crate) const VERSION: u8 = 2;
 pub(crate) const HEADER_LEN: usize = 20;
 pub(crate) const KIND_REQUEST: u8 = 1;
 pub(crate) const KIND_RESULT: u8 = 2;
@@ -211,7 +213,7 @@ mod tests {
             ("magic", [b"XXXX".as_slice(), &good[4..]].concat()),
             ("version", {
                 let mut bad = good.clone();
-                bad[4] = 2;
+                bad[4] = VERSION.wrapping_add(1);
                 bad
             }),
             ("reserved", {

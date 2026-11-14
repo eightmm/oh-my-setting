@@ -62,6 +62,14 @@ fn as_value(result: &ParseResult) -> Value {
     serde_json::to_value(result).expect("serializable")
 }
 
+fn as_legacy_value(result: &ParseResult) -> Value {
+    let mut value = as_value(result);
+    if let Some(map) = value.as_object_mut() {
+        map.remove("syntax_valid");
+    }
+    value
+}
+
 fn text_of(case: &Value, key: &str) -> String {
     case[key].as_str().expect("string field").to_owned()
 }
@@ -77,7 +85,7 @@ fn matches_every_legacy_case_exactly() {
             text_of(case, "path"),
             text_of(case, "source"),
         );
-        let actual = as_value(&parse(&path, &source, "digest"));
+        let actual = as_legacy_value(&parse(&path, &source, "digest"));
         if actual != case["expected"] {
             mismatches.push(name);
         }
@@ -384,7 +392,12 @@ fn one_persistent_helper_replays_every_legacy_case() {
     for case in &cases {
         let (path, source) = (text_of(case, "path"), text_of(case, "source"));
         let actual = session.parse(&path, &source, "digest").expect("answers");
-        assert_eq!(as_value(&actual), case["expected"], "{}", case["name"]);
+        assert_eq!(
+            as_legacy_value(&actual),
+            case["expected"],
+            "{}",
+            case["name"]
+        );
         assert_eq!(session.pid(), pid, "the helper process is reused");
     }
     assert!(!session.is_poisoned());
@@ -1055,7 +1068,7 @@ fn assert_gone(pid: u32) {
 
 #[cfg(unix)]
 fn raw_frame(kind: u8, id: u8, payload: &[u8]) -> Vec<u8> {
-    let mut frame = b"OGPY\x01".to_vec();
+    let mut frame = b"OGPY\x02".to_vec();
     frame.push(kind);
     frame.extend([0, 0, id, 0, 0, 0, 0, 0, 0, 0]);
     frame.extend((payload.len() as u32).to_le_bytes());
@@ -1103,13 +1116,13 @@ fn the_helper_enforces_the_protocol_itself() {
     // A request over the client's max_bytes is refused in-protocol, same id.
     let (out, status) = talk_to_helper(&raw_request(1, "m.py", "d", "x = 1\n"));
     assert!(status.success());
-    assert_eq!(&out[..6], b"OGPY\x01\x03");
+    assert_eq!(&out[..6], b"OGPY\x02\x03");
     assert_eq!(out[8], 5);
     assert_eq!(&out[20..], b"source_too_large");
     // A valid request is answered with a result frame and a clean EOF exits 0.
     let (out, status) = talk_to_helper(&raw_request(100, "m.py", "d", "def f():\n    g()\n"));
     assert!(status.success());
-    assert_eq!(&out[..6], b"OGPY\x01\x02");
+    assert_eq!(&out[..6], b"OGPY\x02\x02");
     let graph: ParseResult = serde_json::from_slice(&out[20..]).expect("graph");
     assert_eq!(graph.refs.len(), 1);
     // Garbage, truncation, bad version, a result frame sent as a request,
@@ -1215,4 +1228,31 @@ fn the_helper_runs_with_an_address_space_limit_and_bounded_memory() {
         .parse("m.py", &dense, "d")
         .expect("dense source fits the limit");
     assert!(graph.refs.len() > 100_000);
+}
+
+#[test]
+fn syntax_valid_tracks_module_parse_and_refusals_across_wire() {
+    let mut session = start(Options::default());
+    for (name, source, expected) in [
+        ("empty", "", true),
+        ("statement", "x = 1\n", true),
+        ("syntax_error", "def f(:\n", false),
+        ("incomplete_assign", "x = \n", false),
+        ("bom", "\u{feff}x = 1\n", false),
+        ("nul", "x = 1\0\n", false),
+        (
+            "paren_limit",
+            &format!("f{}{}\n", "(".repeat(201), ")".repeat(201)),
+            false,
+        ),
+    ] {
+        let direct = parse("m.py", source, "d");
+        let wired = session.parse("m.py", source, "d").expect("answers");
+        assert_eq!(direct.syntax_valid, expected, "{name} direct");
+        assert_eq!(wired.syntax_valid, expected, "{name} wired");
+        assert_eq!(wired, direct, "{name} equality");
+    }
+    let legacy: ParseResult =
+        serde_json::from_str(r#"{"nodes":[],"edges":[],"refs":[]}"#).expect("legacy defaults");
+    assert!(!legacy.syntax_valid);
 }

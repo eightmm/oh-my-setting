@@ -749,6 +749,7 @@ pub(crate) fn project(path: &str, text: &str, digest: &str) -> ParseResult {
     let Some(parsed) = parsed.try_into_module() else {
         return result;
     };
+    result.syntax_valid = true;
     let module = parsed.syntax();
     result.nodes[0].summary = summary_of(&module.body, text);
 
