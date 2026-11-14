@@ -7,6 +7,7 @@ members = [
     "crates/oms-command-failure",
     "crates/oms-command-input",
     "crates/oms-command-job-digest",
+    "crates/oms-command-journal",
     "crates/oms-command-memory",
     "crates/oms-command-operations",
     "crates/oms-command-slurm-lint",

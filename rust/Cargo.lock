@@ -560,6 +560,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-journal"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "oms-context",
+ "oms-json",
+ "oms-lock",
+ "oms-safe-fs",
+ "oms-scrub",
+ "regex",
+ "rusqlite",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "users",
+]
+
+[[package]]
 name = "oms-command-memory"
 version = "0.1.0"
 dependencies = [
