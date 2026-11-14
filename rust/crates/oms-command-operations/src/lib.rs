@@ -16,9 +16,9 @@ pub use approvals::{
     parse_scalar_map, public_approval,
 };
 pub use events::{
-    StartRequest, append_lifecycle, attempt_spec_from_created, attempt_spec_path, create_attempt,
-    effective_run_id, existing_idempotent, lifecycle_semantics, load_projection, new_event,
-    project_attempts, validate_event_row,
+    StartRequest, append_lifecycle, append_lifecycle_checked, attempt_spec_from_created,
+    attempt_spec_path, create_attempt, effective_run_id, existing_idempotent, lifecycle_semantics,
+    load_projection, new_event, project_attempts, validate_event_row,
 };
 use std::io::Read;
 use std::path::Path;
