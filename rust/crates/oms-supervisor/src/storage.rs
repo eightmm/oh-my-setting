@@ -574,9 +574,14 @@ pub(crate) fn expand(path: &Path) -> Result<PathBuf> {
     }
 }
 fn home() -> Result<PathBuf> {
-    // On Unix std falls back to the account database for absent or empty HOME.
-    #[allow(deprecated)]
-    let home = std::env::home_dir();
+    use users::os::unix::UserExt;
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            users::get_user_by_uid(users::get_current_uid())
+                .map(|user| user.home_dir().to_path_buf())
+        });
     home.filter(|path| path.is_absolute())
         .ok_or_else(|| "absolute home directory unavailable".into())
 }

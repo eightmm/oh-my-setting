@@ -66,8 +66,10 @@ timeout, or inference of EOF from missing `POLLIN`. After leader exit, live pipe
 get a 250 ms drain window before group shutdown begins. Surviving descendants
 receive TERM then KILL after the requested grace. Drainage ends after that grace
 plus two 250 ms windows even if an escaped descendant still holds a pipe; closing
-that reader does not claim EOF. Cancellation and deadlines remain active until
-group teardown completes, including cleanup started without an explicit stop.
+that reader does not claim EOF. Closing a capture at its limit also removes its
+pipe from polling, without claiming EOF. An observed child exit with actual EOF
+takes precedence over an expired execution deadline. Cancellation stays active
+during group teardown; deadlines still apply while output remains incomplete.
 
 `Scope::Leader` waits/signals only the exact unreaped child. `ProcessGroup`
 additionally observes group quiescence while the leader is pinned; escaped
@@ -78,9 +80,12 @@ subsequent child creation and SIGCHLD disposition. Reactors are not Send/Sync.
 Only this dedicated mode uses wait(All); it individually reserves/reaps adopted
 children and requires actual ECHILD before `all_reaped`. A library embedded with
 other child-spawning code must not claim this exclusive capability.
-On macOS the runner uses `ProcessGroup` and bounded native `ps` observations to
-exclude zombies from group liveness. It makes no whole-tree claim. Linux proc
-disappearance (including ESRCH) is distinct from permission denial, which is
+On macOS the runner uses `ProcessGroup` and fixed `/bin/ps` observations to
+exclude zombies from group liveness. ESRCH from killpg returns quiescence without
+starting a helper. Otherwise the reactor retains one asynchronous helper with a
+100 ms deadline and waits at least 100 ms between probes. Payload poll turns
+advance that helper without waiting for it. It makes no whole-tree claim.
+Linux proc disappearance (including ESRCH) is distinct from permission denial, which is
 conservatively treated as a live observation.
 
 A queued kill never proves exit. Kernel D-state can retain a job indefinitely.
@@ -160,7 +165,7 @@ Only canonical runtime directories, `jobs/ID.json`, `logs/ID.log`, queue lock
 namespace, lifecycle events/specs and atomic temporary files are written.
 Runtime root hashing uses the canonical physical repository's raw path bytes
 under XDG state or the default state home. Empty or absent HOME uses the Unix
-account database through the standard library; an unavailable absolute home is
+account database through explicit `users` lookup; an unavailable absolute home is
 an error. Dispatch passes the resolved state home to detached runners.
 State-home ownership and ancestor
 permissions are checked; OMS directories require private ownership/modes.
@@ -210,7 +215,7 @@ These checks detect observed races, not hostile same-UID atomic transactions.
 
 ## Verification boundary
 
-Rust 1.99.1 offline `cargo check` and rustfmt are the implementation-phase
+Rust 1.99.1 offline `cargo check --all-targets` and rustfmt are the implementation-phase
 checks; exact session results are in the worker report.
 All resolved dependency versions already occur in the root lockfile.
 

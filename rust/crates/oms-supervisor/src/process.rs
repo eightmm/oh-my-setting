@@ -202,9 +202,18 @@ struct Job {
     ownership_lost: bool,
     adopted_signals: BTreeMap<i32, bool>,
     group_quiescent: Option<bool>,
+    #[cfg(target_os = "macos")]
+    group_probe: Option<GroupProbe>,
+    #[cfg(target_os = "macos")]
+    group_probe_after: Instant,
     signals: Vec<SignalRecord>,
     error: Option<String>,
     finished: bool,
+}
+#[cfg(target_os = "macos")]
+struct GroupProbe {
+    reactor: Reactor,
+    id: JobId,
 }
 
 /// Ordinary reactors wait only their exact child PIDs; they never use wait(-1).
@@ -380,6 +389,10 @@ impl Reactor {
             ownership_lost: false,
             adopted_signals: BTreeMap::new(),
             group_quiescent: None,
+            #[cfg(target_os = "macos")]
+            group_probe: None,
+            #[cfg(target_os = "macos")]
+            group_probe_after: started,
             signals: vec![],
             error: None,
             finished: false,
@@ -417,12 +430,14 @@ impl Reactor {
             let now = Instant::now();
             let mut wait = budget.min(Duration::from_millis(50));
             if job.stop.is_none()
+                && !job.exited_with_eof()
                 && let Some(deadline) = job.request.deadline
             {
                 wait = wait.min(deadline.saturating_duration_since(now));
             }
             if let Some(stopping) = job.stopping
                 && !job.kill_sent
+                && job.group_quiescent != Some(true)
             {
                 wait = wait
                     .min((stopping + job.request.terminate_grace).saturating_duration_since(now));
@@ -508,6 +523,45 @@ fn nonblocking(fd: &OwnedFd) -> crate::Result<()> {
     fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(|e| e.to_string())
 }
 impl Job {
+    fn exited_with_eof(&self) -> bool {
+        self.exit.is_some() && self.stdout.eof && self.stderr.as_ref().is_none_or(|s| s.eof)
+    }
+    fn observe_group(&mut self) -> Option<bool> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            group_quiescent(self.pid)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // The helper stays owned across turns; never wait for ps from a
+            // payload poll turn or drop a still-running helper on a timeout.
+            if let Some(probe) = &mut self.group_probe {
+                return match probe.reactor.poll(probe.id, Duration::ZERO) {
+                    Ok(Progress::Complete(result)) => {
+                        self.group_probe = None;
+                        self.group_probe_after = Instant::now() + Duration::from_millis(100);
+                        mac_group_result(self.pid, &result)
+                    }
+                    Ok(Progress::Pending(_)) => Some(false),
+                    Err(_) => None,
+                };
+            }
+            match os::test_kill_process_group(self.pid) {
+                Err(Errno::SRCH) => return Some(true),
+                Err(Errno::PERM | Errno::ACCESS) => return Some(false),
+                Err(_) => return None,
+                Ok(()) => {}
+            }
+            if self.group_quiescent == Some(true) || Instant::now() < self.group_probe_after {
+                return self.group_quiescent;
+            }
+            self.group_probe_after = Instant::now() + Duration::from_millis(100);
+            let mut reactor = Reactor::new();
+            let id = reactor.start(mac_group_request()).ok()?;
+            self.group_probe = Some(GroupProbe { reactor, id });
+            Some(false)
+        }
+    }
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             pid: self.pid.as_raw_nonzero().get() as u32,
@@ -640,10 +694,14 @@ impl Job {
             self.fail(e);
         }
         self.write_input();
-        let eof = self.out.is_none() && self.err.is_none();
-        // Cancellation and deadlines stay active throughout group teardown.
+        // Preserve an already-observed child outcome and actual EOF even when
+        // the caller resumes polling after the execution deadline has passed.
         if self.stop.is_none() {
-            if self.stdout.should_stop() || self.stderr.as_ref().is_some_and(Capture::should_stop) {
+            if self.exited_with_eof() {
+                self.begin_cleanup();
+            } else if self.stdout.should_stop()
+                || self.stderr.as_ref().is_some_and(Capture::should_stop)
+            {
                 let cutoff = self.stdout.snapshot().cutoff
                     || self.stderr.as_ref().is_some_and(|s| s.snapshot().cutoff);
                 self.begin_stop(if cutoff {
@@ -654,10 +712,9 @@ impl Job {
             } else if self.request.deadline.is_some_and(|d| Instant::now() >= d) {
                 self.begin_stop(StopReason::Deadline);
             } else if self.exit.is_some()
-                && (eof
-                    || self
-                        .exited_at
-                        .is_some_and(|t| t.elapsed() >= POST_EXIT_DRAIN))
+                && self
+                    .exited_at
+                    .is_some_and(|t| t.elapsed() >= POST_EXIT_DRAIN)
             {
                 self.begin_cleanup();
             }
@@ -668,7 +725,7 @@ impl Job {
         self.group_quiescent = if self.request.scope == Scope::Leader {
             Some(self.exit.is_some())
         } else {
-            group_quiescent(self.pid)
+            self.observe_group()
         };
         if !self.kill_sent
             && self.group_quiescent != Some(true)
@@ -719,7 +776,7 @@ impl Job {
                 return;
             }
             if self.request.scope == Scope::ProcessGroup {
-                self.group_quiescent = group_quiescent(self.pid);
+                self.group_quiescent = self.observe_group();
                 if self.group_quiescent == Some(false) {
                     return;
                 }
@@ -874,6 +931,7 @@ impl Job {
 }
 fn drain(fd: &mut Option<OwnedFd>, capture: &mut Capture) -> crate::Result<()> {
     if capture.should_stop() {
+        fd.take();
         return Ok(());
     }
     let Some(opened) = fd.as_ref() else {
@@ -891,6 +949,7 @@ fn drain(fd: &mut Option<OwnedFd>, capture: &mut Capture) -> crate::Result<()> {
             Ok(n) => {
                 capture.push(&buf[..n]);
                 if capture.should_stop() {
+                    fd.take();
                     return Ok(());
                 }
             }
@@ -961,16 +1020,11 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
     }
     #[cfg(target_os = "macos")]
     {
-        // killpg(0) includes the pinned zombie leader. A bounded native ps
-        // producer distinguishes runnable members without relying on /proc.
-        let mut request = Request::new(vec!["ps".into(), "-axo".into(), "pgid=,stat=".into()]);
-        request.scope = Scope::Leader;
-        request.deadline = Some(Instant::now() + Duration::from_secs(1));
-        request.capture.max_bytes = 8 * 1024 * 1024;
-        request.capture.on_limit = crate::capture::LimitAction::Terminate;
+        // Synchronous command-side observations share the bounded producer.
+        // Job::observe_group instead retains it and advances without waiting.
         let mut reactor = Reactor::new();
-        let id = reactor.start(request).ok()?;
-        let until = Instant::now() + Duration::from_secs(3);
+        let id = reactor.start(mac_group_request()).ok()?;
+        let until = Instant::now() + Duration::from_millis(250);
         let result = loop {
             match reactor.poll(id, Duration::from_millis(10)).ok()? {
                 Progress::Complete(result) => break result,
@@ -978,29 +1032,43 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
                 Progress::Pending(_) => {}
             }
         };
-        if !result.cleanup_complete()
-            || !result.output_complete()
-            || result.stop.is_some()
-            || result.exit.is_none_or(|exit| exit.shell_code() != 0)
-        {
-            return None;
-        }
-        for row in std::str::from_utf8(&result.stdout.bytes).ok()?.lines() {
-            let mut fields = row.split_whitespace();
-            let group = fields.next()?.parse::<i32>().ok()?;
-            let state = fields.next()?;
-            if fields.next().is_some() {
-                return None;
-            }
-            if group == pid.as_raw_nonzero().get() && !state.starts_with(['Z', 'X']) {
-                return Some(false);
-            }
-        }
-        Some(true)
+        mac_group_result(pid, &result)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
     }
+}
+#[cfg(target_os = "macos")]
+fn mac_group_request() -> Request {
+    let mut request = Request::new(vec!["/bin/ps".into(), "-axo".into(), "pgid=,stat=".into()]);
+    request.scope = Scope::Leader;
+    request.deadline = Some(Instant::now() + Duration::from_millis(100));
+    request.terminate_grace = Duration::ZERO;
+    request.capture.max_bytes = 8 * 1024 * 1024;
+    request.capture.on_limit = crate::capture::LimitAction::Terminate;
+    request
+}
+#[cfg(target_os = "macos")]
+fn mac_group_result(pid: Pid, result: &Completion) -> Option<bool> {
+    if !result.cleanup_complete()
+        || !result.output_complete()
+        || result.stop.is_some()
+        || result.exit.is_none_or(|exit| exit.shell_code() != 0)
+    {
+        return None;
+    }
+    for row in std::str::from_utf8(&result.stdout.bytes).ok()?.lines() {
+        let mut fields = row.split_whitespace();
+        let group = fields.next()?.parse::<i32>().ok()?;
+        let state = fields.next()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        if group == pid.as_raw_nonzero().get() && !state.starts_with(['Z', 'X']) {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
