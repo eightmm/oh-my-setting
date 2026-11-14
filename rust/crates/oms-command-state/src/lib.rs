@@ -3,8 +3,19 @@
 
 mod capsule;
 mod checkpoints;
+mod claims;
+pub mod deps;
 mod failures;
+mod gc;
+mod gc_artifacts;
+pub mod helpers;
+pub mod inventory;
+pub mod job_metrics;
 pub mod lease;
+mod queue;
+mod recipe;
+mod spine;
+mod state;
 mod storage;
 
 use std::ffi::OsString;
@@ -44,8 +55,23 @@ pub fn run_with_source(
     tool: &str,
     args: &[OsString],
     cwd: &Path,
-    _source: &Path,
+    source: &Path,
     interrupted: &AtomicBool,
+) -> Output {
+    let mut services = NativeServices {
+        source,
+        interrupted,
+    };
+    run_with_services(tool, args, cwd, interrupted, &mut services)
+}
+
+/// The parent can inject the same native services used by run-ledger.
+pub fn run_with_services(
+    tool: &str,
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    services: &mut dyn oms_command_runs::Services,
 ) -> Output {
     let result = (|| {
         if !owns(tool, args) {
@@ -57,7 +83,20 @@ pub fn run_with_source(
             "lease" => lease::run(args, &context),
             "run-checkpoints" => checkpoints::run(args, &context),
             "fail-ledger" => failures::run(args, &context),
-            _ => Err(error(2, format!("native {tool} integration is incomplete"))),
+            "deps" => deps::run(args, &context),
+            "state" | "state-verify" | "inbox" | "dashboard" => state::run(tool, args, &context),
+            "gc" => gc::run(args, &context),
+            "run-capsule" => capsule::run(args, &context, services),
+            "run-claims" => claims::run(args, &context),
+            "tsp-queue" => queue::run(args, &context, services),
+            "recipe" => recipe::run(args, &context, services),
+            "run" => match args.first().and_then(|s| s.to_str()) {
+                Some("capsule") => capsule::run(&args[1..], &context, services),
+                Some("checkpoints") => checkpoints::run(&args[1..], &context),
+                Some("claims" | "figure") => claims::run(args, &context),
+                _ => spine::run(args, &context, services),
+            },
+            _ => Err(error(2, "unknown state command")),
         }
     })();
     match result {
@@ -67,6 +106,128 @@ pub fn run_with_source(
             Vec::new(),
             format!("error: {}\n", e.message).into_bytes(),
         ),
+    }
+}
+
+/// Supply the canonical parent-owned runtime envelope without launching another CLI.
+pub fn run_with_runtime(
+    tool: &str,
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    runtime: &Value,
+) -> Output {
+    let result = (|| {
+        require(
+            ["state", "state-verify", "inbox", "dashboard"].contains(&tool),
+            "runtime projection applies to state views",
+        )?;
+        let mut ctx = Context::new(cwd, interrupted)?;
+        ctx.runtime = Some(runtime);
+        state::run(tool, args, &ctx)
+    })();
+    result.unwrap_or_else(|e| (e.code, vec![], format!("error: {e}\n").into_bytes()))
+}
+
+/// Command help is available without opening a repository or acquiring a lock.
+pub fn usage(tool: &str) -> Option<&'static str> {
+    match tool {
+        "run" => Some(spine::HELP),
+        "run-capsule" => Some(capsule::HELP),
+        "run-claims" => Some(claims::HELP),
+        "deps" => Some(deps::HELP),
+        "state" | "state-verify" | "inbox" | "dashboard" => Some(state::HELP),
+        "gc" => Some(gc::HELP),
+        "recipe" => Some(recipe::HELP),
+        "tsp-queue" => Some(queue::HELP),
+        "lease" => Some(lease::HELP),
+        "run-checkpoints" => Some(checkpoints::HELP),
+        "fail-ledger" => Some(failures::HELP),
+        _ => None,
+    }
+}
+
+fn parent_only() -> Result<()> {
+    require(
+        !["OMS_HARNESS_CHILD", "OMS_HARNESS_DELEGATE_DEPTH"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty() && v != "0")),
+        "a harness child cannot mutate parent-owned host or global state; return the request to the parent agent",
+    )
+}
+
+struct NativeServices<'a> {
+    source: &'a Path,
+    interrupted: &'a AtomicBool,
+}
+impl oms_command_runs::Services for NativeServices<'_> {
+    fn available(&self, service: oms_command_runs::Service) -> bool {
+        matches!(
+            service,
+            oms_command_runs::Service::Journal
+                | oms_command_runs::Service::Memory
+                | oms_command_runs::Service::RunLink
+        )
+    }
+    fn observe(
+        &mut self,
+        event: oms_command_runs::Observation<'_>,
+    ) -> oms_command_runs::Result<()> {
+        let mut args = vec![
+            "observe".into(),
+            "--repo".into(),
+            event.repo.as_os_str().to_owned(),
+            "--source-type".into(),
+            event.source_type.into(),
+            "--source-file".into(),
+            event.record_path.as_os_str().to_owned(),
+        ];
+        if let Some(kind) = event.event_type {
+            args.extend(["--event-type".into(), kind.into()]);
+        }
+        service_result(oms_command_journal::run_with_source(
+            &args,
+            event.repo,
+            self.source,
+            self.interrupted,
+        ))
+    }
+    fn memory(&mut self, note: oms_command_runs::MemoryNote<'_>) -> oms_command_runs::Result<()> {
+        service_result(oms_command_memory::run_with_source(
+            &[
+                "append".into(),
+                "--agent".into(),
+                note.agent.to_owned(),
+                note.text.into(),
+            ],
+            note.repo,
+            self.source,
+            self.interrupted,
+        ))
+    }
+    fn link(&mut self, link: oms_command_runs::RunLink<'_>) -> oms_command_runs::Result<()> {
+        let ctx = Context::new(link.repo, self.interrupted)
+            .map_err(|e| oms_command_runs::Error::usage(e.to_string()))?;
+        spine::link(
+            &ctx,
+            link.run_id,
+            "run-ledger",
+            "record",
+            &link.record_path.to_string_lossy(),
+            &format!("exit {}", link.code),
+            &helpers::agent(),
+        )
+        .map_err(|e| oms_command_runs::Error::usage(e.to_string()))
+    }
+}
+fn service_result(output: Output) -> oms_command_runs::Result<()> {
+    if output.0 == 0 {
+        Ok(())
+    } else {
+        Err(oms_command_runs::Error {
+            code: output.0,
+            message: String::from_utf8_lossy(&output.2).into_owned(),
+        })
     }
 }
 
@@ -94,6 +255,7 @@ fn checkpoint(interrupted: &AtomicBool) -> Result<()> {
 }
 
 struct Context<'a> {
+    runtime: Option<&'a Value>,
     cwd: PathBuf,
     repo: PathBuf,
     state_repo: PathBuf,
@@ -111,6 +273,7 @@ impl<'a> Context<'a> {
             None => repo.clone(),
         };
         Ok(Self {
+            runtime: None,
             cwd,
             repo,
             state_repo,
@@ -143,9 +306,14 @@ fn epoch() -> i64 {
 }
 
 fn parse_timestamp(value: &str) -> Option<i64> {
-    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ")
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|t| t.timestamp())
         .ok()
-        .map(|t| t.and_utc().timestamp())
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+                .ok()
+                .map(|t| t.and_utc().timestamp())
+        })
 }
 
 fn strings(args: &[OsString]) -> Result<Vec<String>> {
@@ -245,5 +413,16 @@ impl Options {
         }
         oms_command_operations::storage::repo_root(Path::new(self.get("repo")), &ctx.cwd)
             .map_err(|e| error(2, e))
+    }
+}
+
+/// Internal detached queue worker protocol; never a recipe or provider launcher.
+pub fn run_queue_worker(request: &Path) -> i32 {
+    match queue::worker(request) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e}");
+            e.code
+        }
     }
 }

@@ -17,7 +17,7 @@ const EXTENSIONS: &[&str] = &[
     ".keras",
     ".msgpack",
 ];
-const HELP: &str = "Usage: oms run checkpoints [DIR...] [--max N] [--strict] [--json]\n\nRead-only checkpoint audit. Default: checkpoints/ and PROJECT.md - Checkpoints:.\nOnly regular files are counted; symlinks are never followed. No file contents\nare opened. Default --max 2; allowed stems latest and best. Stops at 2000\ndirectories or 50000 checkpoint files. --strict exits 1 for warnings.\n";
+pub(crate) const HELP: &str = "Usage: oms run checkpoints [DIR...] [--max N] [--strict] [--json]\n\nRead-only checkpoint audit. Default: checkpoints/ and PROJECT.md - Checkpoints:.\nOnly regular files are counted; symlinks are never followed. No file contents\nare opened. Default --max 2; allowed stems latest and best. Stops at 2000\ndirectories or 50000 checkpoint files. --strict exits 1 for warnings.\n";
 
 fn show(path: &Path, repo: &Path) -> String {
     path.strip_prefix(repo)

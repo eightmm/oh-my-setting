@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 
 const STORE: &str = ".oms/failures.jsonl";
-const HELP: &str = "Usage: oms fail-ledger [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]\n       oms fail-ledger [--repo PATH] check --cmd CMD [--ignore-state]\n       oms fail-ledger [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]\n       oms fail-ledger [--repo PATH] list [--unresolved] [--json] [--limit N]\n       oms fail-ledger [--repo PATH] list --stalls [--json]\n       oms fail-ledger [--repo PATH] show --fingerprint FP [--json]\n\nAppend-only failure memory; unchanged retries exit 3. Hook failures expire on\nread after OMS_HOOK_FAIL_TTL (default 86400s). Reads count invalid rows.\n";
+pub(crate) const HELP: &str = "Usage: oms fail-ledger [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]\n       oms fail-ledger [--repo PATH] check --cmd CMD [--ignore-state]\n       oms fail-ledger [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]\n       oms fail-ledger [--repo PATH] list [--unresolved] [--json] [--limit N]\n       oms fail-ledger [--repo PATH] list --stalls [--json]\n       oms fail-ledger [--repo PATH] show --fingerprint FP [--json]\n\nAppend-only failure memory; unchanged retries exit 3. Hook failures expire on\nread after OMS_HOOK_FAIL_TTL (default 86400s). Reads count invalid rows.\n";
 
 pub fn fingerprint(command: &str) -> String {
     let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -260,7 +260,8 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
         &repo
     };
     let path = std::env::var_os("OMS_FAIL_LEDGER")
-        .map(std::path::PathBuf::from)
+        .filter(|p| !p.is_empty())
+        .map(|p| crate::helpers::absolute(&ctx.cwd, p))
         .unwrap_or_else(|| state.join(STORE));
     let cmd = normalize(opts.get("cmd"));
     let fp = if opts.get("fingerprint").is_empty() {

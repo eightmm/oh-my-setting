@@ -24,6 +24,7 @@ oms-contract-markdown = { path = "../oms-contract-markdown" }
 oms-experiment = { path = "../oms-experiment" }
 oms-failure = { path = "../oms-failure" }
 oms-json = { path = "../oms-json" }
+oms-toml = { path = "../oms-toml" }
 oms-lock = { path = "../oms-lock" }
 oms-safe-fs = { path = "../oms-safe-fs" }
 oms-scrub = { path = "../oms-scrub" }

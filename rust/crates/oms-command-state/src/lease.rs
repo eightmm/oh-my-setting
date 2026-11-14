@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 const STORE: &str = ".oms/leases.jsonl";
-const HELP: &str = "Usage: oms lease add PATH_OR_GLOB... [--ttl 30m] [--reason TEXT] [--shared]\n       oms lease list [--json]\n       oms lease release ID | --mine\n       oms lease check PATH... | --staged\n\nAdvisory append-only intent in .oms/leases.jsonl; expiry is computed on read.\n--ttl is 1m to 8h (default 30m). Shared leases overlap each other.\nHolder: OMS_ATTEMPT_ID, OMS_ROOM_PARTICIPANT, or unknown-session.\ncheck exits 1 for another holder's exclusive lease, 2 on usage errors.\n";
+pub(crate) const HELP: &str = "Usage: oms lease add PATH_OR_GLOB... [--ttl 30m] [--reason TEXT] [--shared]\n       oms lease list [--json]\n       oms lease release ID | --mine\n       oms lease check PATH... | --staged\n\nAdvisory append-only intent in .oms/leases.jsonl; expiry is computed on read.\n--ttl is 1m to 8h (default 30m). Shared leases overlap each other.\nHolder: OMS_ATTEMPT_ID, OMS_ROOM_PARTICIPANT, or unknown-session.\ncheck exits 1 for another holder's exclusive lease, 2 on usage errors.\n";
 
 pub fn parse_ttl(raw: &str) -> Result<i64> {
     let text = raw.trim();
