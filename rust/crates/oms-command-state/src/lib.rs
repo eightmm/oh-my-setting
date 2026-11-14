@@ -72,7 +72,16 @@ pub enum GcHookResult {
 }
 
 pub trait HostServices {
+    /// Account-proof resolver for group-writable plan files; defaults to the plan services'.
     fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        self.plan_services().group_membership_resolver()
+    }
+    /// Services for opening the plan store; the default fails closed on group-writable plans.
+    fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+        &oms_command_plan::UnavailableServices
+    }
+    /// Native task status; `None` falls back to the crate's own `oms_command_task::run`.
+    fn task_status(&self, _repo: &Path, _interrupted: &AtomicBool) -> Option<Output> {
         None
     }
     fn gc_landing_captures(&self, _repo: &Path, _days: u64, _apply: bool) -> Result<GcHookResult> {
@@ -121,7 +130,9 @@ pub fn run_with_host(
             "run-checkpoints" => checkpoints::run(args, &context),
             "fail-ledger" => failures::run(args, &context),
             "deps" => deps::run(args, &context),
-            "state" | "state-verify" | "inbox" | "dashboard" => state::run(tool, args, &context),
+            "state" | "state-verify" | "inbox" | "dashboard" => {
+                state::run(tool, args, &context, host)
+            }
             "gc" => gc::run(args, &context, host),
             "run-capsule" => capsule::run(args, &context, services),
             "run-claims" => claims::run(args, &context),
@@ -154,6 +165,18 @@ pub fn run_with_runtime(
     interrupted: &AtomicBool,
     runtime: &Value,
 ) -> Output {
+    run_with_runtime_host(tool, args, cwd, interrupted, runtime, &NoHostServices)
+}
+
+/// Like `run_with_runtime`, with host hooks for plan services and task status.
+pub fn run_with_runtime_host(
+    tool: &str,
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    runtime: &Value,
+    host: &dyn HostServices,
+) -> Output {
     let result = (|| {
         require(
             ["state", "state-verify", "inbox", "dashboard"].contains(&tool),
@@ -161,7 +184,7 @@ pub fn run_with_runtime(
         )?;
         let mut ctx = Context::new(cwd, interrupted)?;
         ctx.runtime = Some(runtime);
-        state::run(tool, args, &ctx)
+        state::run(tool, args, &ctx, host)
     })();
     result.unwrap_or_else(|e| (e.code, vec![], format!("error: {e}\n").into_bytes()))
 }

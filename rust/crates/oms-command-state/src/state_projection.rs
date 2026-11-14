@@ -664,8 +664,8 @@ pub(super) fn refresh_ci(ctx: &Context<'_>) -> Result<bool> {
     storage::append(&ctx.repo, Path::new(".oms/ci.jsonl"), &row)?;
     Ok(true)
 }
-pub(super) fn repairs(ctx: &Context<'_>) -> Result<Vec<Value>> {
-    let state = snapshot(ctx)?;
+pub(super) fn repairs(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Vec<Value>> {
+    let state = snapshot(ctx, host)?;
     let mut actions = Vec::new();
     if !state
         .get("plan")
@@ -675,7 +675,7 @@ pub(super) fn repairs(ctx: &Context<'_>) -> Result<Vec<Value>> {
         .is_empty()
     {
         actions.push(string(
-            if plan(ctx, oms_command_plan::Action::Reclaim).is_ok() {
+            if plan(ctx, oms_command_plan::Action::Reclaim, host).is_ok() {
                 "reclaimed-stale-plan"
             } else {
                 "reclaim-stale-plan-failed"
@@ -740,7 +740,12 @@ pub(super) fn repairs(ctx: &Context<'_>) -> Result<Vec<Value>> {
     }
     Ok(actions)
 }
-pub(super) fn verify(ctx: &Context<'_>, state: &Value, findings: &mut Vec<Value>) -> Result<()> {
+pub(super) fn verify(
+    ctx: &Context<'_>,
+    host: &dyn HostServices,
+    state: &Value,
+    findings: &mut Vec<Value>,
+) -> Result<()> {
     for row in findings.iter_mut() {
         row.set("level", string("fail"))?;
         row.default("family", string("jsonl"))?;
@@ -850,8 +855,7 @@ pub(super) fn verify(ctx: &Context<'_>, state: &Value, findings: &mut Vec<Value>
         let mut context = oms_command_plan::Context::from_environment(&request, &ctx.repo)?;
         context.state_repo = ctx.repo.clone();
         context.plan_file = ctx.repo.join(".oms/plan/tasks.json");
-        let services = oms_command_plan::UnavailableServices;
-        match oms_command_plan::Plan::open(context, &services, ctx.interrupted)
+        match oms_command_plan::Plan::open(context, host.plan_services(), ctx.interrupted)
             .and_then(|plan| oms_command_plan::retirement::validate_ledger(&plan))
         {
             Ok(_) => {}

@@ -1,8 +1,8 @@
 //! Read-only source collection. Failed collectors remain explicit degraded sources.
 use crate::json::{number, object, string};
 use crate::{
-    Context, Options, Output, Result, Value, epoch, error, failures, helpers, json, json_output,
-    require, spine, storage, success, timestamp,
+    Context, HostServices, Options, Output, Result, Value, epoch, error, failures, helpers, json,
+    json_output, require, spine, storage, success, timestamp,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -34,13 +34,16 @@ fn collector(result: Result<Value>, present: bool) -> Value {
     }
 }
 
-fn plan(ctx: &Context<'_>, action: oms_command_plan::Action) -> Result<Value> {
+fn plan(
+    ctx: &Context<'_>,
+    action: oms_command_plan::Action,
+    host: &dyn HostServices,
+) -> Result<Value> {
     let req = oms_command_plan::Request::new(action).flag("json");
     let mut context = oms_command_plan::Context::from_environment(&req, &ctx.repo)?;
     context.state_repo = ctx.repo.clone();
     context.plan_file = ctx.repo.join(".oms/plan/tasks.json");
-    let services = oms_command_plan::UnavailableServices;
-    let plan = oms_command_plan::Plan::open(context, &services, ctx.interrupted)?;
+    let plan = oms_command_plan::Plan::open(context, host.plan_services(), ctx.interrupted)?;
     let response = plan.execute(&req)?;
     require(
         response.code == 0,
@@ -49,16 +52,21 @@ fn plan(ctx: &Context<'_>, action: oms_command_plan::Action) -> Result<Value> {
     json::parse(&response.stdout)
 }
 
-pub(crate) fn snapshot(ctx: &Context<'_>) -> Result<Value> {
+pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Value> {
     let mut state = object([
         ("schema", number(1)),
         ("project", helpers::project(&ctx.repo)),
     ]);
-    let task = decoded(oms_command_task::run(
-        &["status".into(), "--json".into()],
-        &ctx.repo,
-        ctx.interrupted,
-    ));
+    let task = decoded(
+        host.task_status(&ctx.repo, ctx.interrupted)
+            .unwrap_or_else(|| {
+                oms_command_task::run(
+                    &["status".into(), "--json".into()],
+                    &ctx.repo,
+                    ctx.interrupted,
+                )
+            }),
+    );
     state.set(
         "task",
         collector(task, ctx.repo.join(".oms/task/current.md").exists()),
@@ -66,7 +74,7 @@ pub(crate) fn snapshot(ctx: &Context<'_>) -> Result<Value> {
     state.set(
         "plan",
         collector(
-            plan(ctx, oms_command_plan::Action::Status),
+            plan(ctx, oms_command_plan::Action::Status, host),
             ctx.repo.join(".oms/plan/tasks.json").exists(),
         ),
     )?;
@@ -364,7 +372,12 @@ fn render(report: &Value, tool: &str) -> Result<String> {
         .collect())
 }
 
-pub(crate) fn run(tool: &str, args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
+pub(crate) fn run(
+    tool: &str,
+    args: &[OsString],
+    ctx: &Context<'_>,
+    host: &dyn HostServices,
+) -> Result<Output> {
     let (values, flags): (&[&str], &[&str]) = match tool {
         "state" => (&["repo"], &["json", "refresh-ci"]),
         "inbox" => (&["repo"], &["json", "fix-safe"]),
@@ -435,7 +448,7 @@ pub(crate) fn run(tool: &str, args: &[OsString], ctx: &Context<'_>) -> Result<Ou
         let _ = projection::refresh_ci(&ctx);
     }
     let safe_actions = if opts.flag("fix-safe") {
-        projection::repairs(&ctx)?
+        projection::repairs(&ctx, host)?
     } else {
         vec![]
     };
@@ -443,7 +456,7 @@ pub(crate) fn run(tool: &str, args: &[OsString], ctx: &Context<'_>) -> Result<Ou
     let mut code = 0;
     for i in 0..count {
         crate::checkpoint(ctx.interrupted)?;
-        let state = snapshot(&ctx)?;
+        let state = snapshot(&ctx, host)?;
         let report = match tool {
             "state" => state,
             "inbox" => {
@@ -468,7 +481,7 @@ pub(crate) fn run(tool: &str, args: &[OsString], ctx: &Context<'_>) -> Result<Ou
                         ]));
                     }
                 }
-                projection::verify(&ctx, &state, &mut findings)?;
+                projection::verify(&ctx, host, &state, &mut findings)?;
                 let fails = findings
                     .iter()
                     .filter(|r| r.text("level") == "fail")

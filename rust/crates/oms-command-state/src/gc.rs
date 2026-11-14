@@ -91,12 +91,15 @@ fn candidate(
     ]));
     Ok(())
 }
-fn plan(ctx: &Context<'_>, req: &oms_command_plan::Request) -> Result<oms_command_plan::Response> {
+fn plan(
+    ctx: &Context<'_>,
+    req: &oms_command_plan::Request,
+    host: &dyn HostServices,
+) -> Result<oms_command_plan::Response> {
     let mut context = oms_command_plan::Context::from_environment(req, &ctx.repo)?;
     context.state_repo = ctx.repo.clone();
     context.plan_file = ctx.repo.join(".oms/plan/tasks.json");
-    let services = oms_command_plan::UnavailableServices;
-    oms_command_plan::Plan::open(context, &services, ctx.interrupted)?.execute(req)
+    oms_command_plan::Plan::open(context, host.plan_services(), ctx.interrupted)?.execute(req)
 }
 fn has_panel_call_artifacts(repo: &Path) -> Result<bool> {
     let entries = match std::fs::read_dir(repo.join(".oms/artifacts")) {
@@ -167,7 +170,8 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
                 &ctx.repo,
                 cutoff,
                 apply,
-                host.group_resolver(),
+                host.group_resolver()
+                    .or_else(|| host.plan_services().group_membership_resolver()),
             )
             .map_err(|e| error(e.code, e.message))?;
             for (kind, path) in entries {
@@ -244,7 +248,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
                     if !apply {
                         request = request.flag("check");
                     }
-                    match plan(&ctx, &request) {
+                    match plan(&ctx, &request, host) {
                         Ok(response) if response.code == 0 => {}
                         _ => {
                             deferred.push(string("orphan task recovery unproven; marker retained"));
