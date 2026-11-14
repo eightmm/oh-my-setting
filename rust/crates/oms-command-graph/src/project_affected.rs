@@ -1,11 +1,22 @@
 use super::{history, index::Graph};
 use crate::{Error, Result, util::*};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 pub fn changed_paths(repo: &Path, base: &str, cancel: &AtomicBool) -> Result<Vec<String>> {
+    let changes = workspace_changes(repo, base, cancel)?;
+    Ok(array(&changes, "changed")
+        .iter()
+        .chain(array(&changes, "untracked"))
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+pub fn workspace_changes(repo: &Path, base: &str, cancel: &AtomicBool) -> Result<Value> {
     if base.starts_with('-') || base.contains('\0') {
         return Err(Error::new(format!("invalid base ref: {base}")));
     }
@@ -35,7 +46,7 @@ pub fn changed_paths(repo: &Path, base: &str, cancel: &AtomicBool) -> Result<Vec
             git(repo, &["diff", "--name-only", "--"], cancel)
         )
     };
-    let mut paths: BTreeSet<String> = changed
+    let paths: BTreeSet<String> = changed
         .lines()
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
@@ -45,13 +56,8 @@ pub fn changed_paths(repo: &Path, base: &str, cancel: &AtomicBool) -> Result<Vec
         &["ls-files", "--others", "--exclude-standard", "-z"],
         cancel,
     );
-    paths.extend(
-        untracked
-            .split('\0')
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-    );
-    Ok(paths.into_iter().collect())
+    let untracked: BTreeSet<_> = untracked.split('\0').filter(|s| !s.is_empty()).collect();
+    Ok(json!({"changed":paths,"untracked":untracked}))
 }
 pub fn entries(repo: &Path, base: &str, head: &str, cancel: &AtomicBool) -> Result<Vec<Value>> {
     for (label, value) in [("base", base), ("head", head)] {
@@ -114,7 +120,6 @@ pub fn entries(repo: &Path, base: &str, head: &str, cancel: &AtomicBool) -> Resu
     Ok(rows)
 }
 fn boundary(path: &str, guards: &[String]) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
     [
         ".github/*",
         ".gitlab/*",
@@ -157,7 +162,7 @@ fn boundary(path: &str, guards: &[String]) -> bool {
         "**/run-smoke-shard.sh",
     ]
     .iter()
-    .any(|p| glob(p, path) || glob(p, name))
+    .any(|p| glob(p, path))
         || guards.iter().any(|p| glob(p, path))
 }
 fn runnable(path: &str, extra: &[String]) -> bool {
@@ -165,7 +170,19 @@ fn runnable(path: &str, extra: &[String]) -> bool {
         || path.ends_with(".sh")
         || (path.rsplit('/').next().unwrap_or(path).starts_with("test_") && path.ends_with(".py"))
 }
-pub fn report(
+fn runner_edge(edge: &Value, graph: &Graph, extra: &[String]) -> bool {
+    let (Some(source), Some(target)) = (
+        graph.nodes.get(s(edge, "source")),
+        graph.nodes.get(s(edge, "target")),
+    ) else {
+        return false;
+    };
+    ["calls", "tests"].contains(&s(edge, "relation"))
+        && ["scripts/check.sh", "tests/run-smoke-shard.sh"].contains(&s(source, "path"))
+        && s(target, "kind") == "test"
+        && runnable(s(target, "path"), extra)
+}
+pub fn report_with_helper(
     repo: &Path,
     graph: &Graph,
     base: &str,
@@ -174,12 +191,50 @@ pub fn report(
     guards: &[String],
     extra: &[String],
     cancel: &AtomicBool,
+    helper: Option<&Path>,
 ) -> Result<Value> {
     if depth < 0 {
         return Err(Error::new("affected depth must be zero or greater"));
     }
     let changes = entries(repo, base, head, cancel)?;
-    let paths: Vec<String> = changes.iter().map(|r| s(r, "path").to_owned()).collect();
+    let mut paths: Vec<String> = changes.iter().map(|r| s(r, "path").to_owned()).collect();
+    let mut suites = BTreeMap::<String, Option<Vec<String>>>::new();
+    let mut narrow = BTreeMap::<String, Vec<Value>>::new();
+    let mut containment = BTreeSet::<String>::new();
+    for change in &changes {
+        if s(change, "status") != "M" {
+            continue;
+        }
+        let path = s(change, "path");
+        if !runnable(path, extra) {
+            continue;
+        }
+        let hunks = super::cases::hunks(repo, base, head, path, cancel);
+        let indexed = graph.nodes.values().any(|node| s(node, "path") == path);
+        let before = super::cases::revision(repo, base, path, cancel);
+        let after = super::cases::revision(repo, head, path, cancel);
+        if !indexed {
+            let names = if super::cases::SELECTABLE.contains(&path) {
+                before
+                    .as_deref()
+                    .zip(after.as_deref())
+                    .and_then(|(old, new)| super::cases::suite(old, new, &hunks))
+            } else {
+                None
+            };
+            suites.insert(path.to_owned(), names);
+        } else if let Some((before, after)) = before.as_deref().zip(after.as_deref()) {
+            if let Some(cases) =
+                super::cases::changed(graph, path, &hunks, before, after, helper, cancel)
+            {
+                if let Some(seeds) = super::cases::seeds(graph, path, &cases) {
+                    containment.extend(seeds);
+                    narrow.insert(path.to_owned(), cases);
+                }
+            }
+        }
+    }
+    paths.retain(|path| !suites.contains_key(path));
     let documents: Vec<String> = paths
         .iter()
         .filter(|p| {
@@ -203,42 +258,107 @@ pub fn report(
         .collect();
     let seed_paths: Vec<String> = paths
         .iter()
-        .filter(|p| !documents.contains(*p))
+        .filter(|path| !documents.contains(path) && !narrow.contains_key(*path))
         .cloned()
         .collect();
-    let radius = graph.blast(
+    let runner_paths: BTreeSet<_> = array(&graph.graph, "edges")
+        .iter()
+        .filter(|edge| runner_edge(edge, graph, extra))
+        .filter_map(|edge| graph.nodes.get(s(edge, "target")))
+        .map(|node| s(node, "path"))
+        .collect();
+    let code_paths: Vec<_> = paths
+        .iter()
+        .filter(|path| !documents.contains(path))
+        .collect();
+    let cut = !code_paths.is_empty()
+        && code_paths
+            .iter()
+            .all(|path| runner_paths.contains(path.as_str()));
+    let filtered;
+    let index = if cut {
+        let mut value = graph.graph.clone();
+        value["edges"] = json!(
+            array(&graph.graph, "edges")
+                .iter()
+                .filter(|edge| !runner_edge(edge, graph, extra))
+                .collect::<Vec<_>>()
+        );
+        filtered = Graph::new(value)?;
+        &filtered
+    } else {
+        graph
+    };
+    let relations = [
+        "imports",
+        "calls",
+        "references",
+        "tests",
+        "uses",
+        "depends_on",
+        "reads_env",
+    ];
+    let mut seeds = containment.clone();
+    for id in &containment {
+        for edge in index.ins.get(id).into_iter().flatten() {
+            if relations.contains(&s(edge, "relation"))
+                && s(edge, "confidence") == "INFERRED"
+                && graph
+                    .nodes
+                    .get(s(edge, "source"))
+                    .is_some_and(|node| !narrow.contains_key(s(node, "path")))
+            {
+                seeds.insert(s(edge, "source").to_owned());
+            }
+        }
+    }
+    for (id, node) in &index.nodes {
+        if s(node, "kind") == "module" && narrow.contains_key(s(node, "path")) {
+            for edge in index.ins.get(id).into_iter().flatten() {
+                if relations.contains(&s(edge, "relation"))
+                    && ["EXTRACTED", "INFERRED"].contains(&s(edge, "confidence"))
+                    && graph
+                        .nodes
+                        .get(s(edge, "source"))
+                        .is_some_and(|node| !narrow.contains_key(s(node, "path")))
+                {
+                    seeds.insert(s(edge, "source").to_owned());
+                }
+            }
+        }
+    }
+    let radius = index.blast(
         &seed_paths,
         if depth == 0 { None } else { Some(depth) },
         &["EXTRACTED"],
-        &[],
+        &seeds.into_iter().collect::<Vec<_>>(),
     )?;
-    let tests: Vec<&str> = array(&radius, "tests")
+    let mut tests: Vec<String> = array(&radius, "tests")
         .iter()
         .filter_map(Value::as_str)
         .filter(|p| runnable(p, extra))
+        .map(str::to_owned)
         .collect();
-    let cases: Vec<Value> = array(&radius, "test_cases")
+    let mut cases: Vec<Value> = array(&radius, "test_cases")
         .iter()
-        .filter(|r| tests.contains(&s(r, "path")))
+        .filter(|row| tests.iter().any(|p| p == s(row, "path")))
         .cloned()
         .collect();
     let mut reasons = BTreeSet::new();
-    let exact_head = git(repo, &["rev-parse", "--verify", "HEAD^{tree}"], cancel);
-    let requested = git(
+    let (diff, _, _) = command(repo, "git", &["diff", "--quiet", head, "--"], cancel)?;
+    let (untracked, raw, _) = command(
         repo,
-        &["rev-parse", "--verify", &format!("{head}^{{tree}}")],
+        "git",
+        &["ls-files", "--others", "--exclude-standard"],
         cancel,
-    );
-    let dirty = git(
-        repo,
-        &["status", "--porcelain", "--untracked-files=all"],
-        cancel,
-    );
-    if exact_head != requested || !dirty.is_empty() {
+    )?;
+    if diff != 0 || untracked != 0 || !raw.iter().all(u8::is_ascii_whitespace) {
         reasons.insert("workspace-differs-from-head".to_owned());
     }
     for path in array(&radius, "unmatched").iter().filter_map(Value::as_str) {
-        reasons.insert(format!("unmatched:{path}"));
+        if !documents.iter().any(|p| p == path) {
+            reasons.insert(format!("unmatched:{path}"));
+        }
     }
     for path in &paths {
         if boundary(path, guards) {
@@ -248,42 +368,63 @@ pub fn report(
     if radius["truncated"] == true {
         reasons.insert("depth-truncated".into());
     }
-    for row in &changes {
-        match s(row, "status") {
+    for change in &changes {
+        match s(change, "status") {
             "D" => {
-                reasons.insert(format!("deleted:{}", s(row, "path")));
+                reasons.insert(format!("deleted:{}", s(change, "path")));
             }
             "R" | "C" => {
-                reasons.insert(format!("renamed:{}", s(row, "path")));
+                reasons.insert(format!("renamed:{}", s(change, "path")));
             }
             _ => {}
         }
     }
-    if !seed_paths.is_empty() && tests.is_empty() {
+    if !code_paths.is_empty() && tests.is_empty() {
         reasons.insert("no-tests".into());
-    }
-    // A successful test link for one changed file cannot certify another.
-    for path in &seed_paths {
-        let individual = graph.blast(std::slice::from_ref(path), None, &["EXTRACTED"], &[])?;
-        if !array(&individual, "tests")
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|p| runnable(p, extra))
-            && !tests.is_empty()
-        {
-            reasons.insert(format!("no-tests:{path}"));
-        }
-    }
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
-    for row in array(&radius, "dependents") {
-        *counts.entry(s(row, "confidence").into()).or_default() += 1;
     }
     let reached: BTreeSet<&str> = array(&radius, "seeds")
         .iter()
         .filter_map(Value::as_str)
-        .chain(array(&radius, "dependents").iter().map(|r| s(r, "id")))
+        .chain(array(&radius, "dependents").iter().map(|row| s(row, "id")))
         .collect();
-    let mut ignored = std::collections::BTreeMap::<String, usize>::new();
+    if !tests.is_empty() && reasons.is_empty() {
+        let mut covered: BTreeSet<&str> = reached
+            .iter()
+            .copied()
+            .filter(|id| {
+                tests
+                    .iter()
+                    .any(|path| path == s(&graph.nodes[*id], "path"))
+            })
+            .collect();
+        let mut pending: Vec<_> = covered.iter().copied().collect();
+        while let Some(id) = pending.pop() {
+            for edge in graph.out.get(id).into_iter().flatten() {
+                let target = s(edge, "target");
+                if relations.contains(&s(edge, "relation"))
+                    && s(edge, "confidence") == "EXTRACTED"
+                    && reached.contains(target)
+                    && covered.insert(target)
+                {
+                    pending.push(target);
+                }
+            }
+        }
+        let covered_paths: BTreeSet<_> = covered
+            .iter()
+            .map(|id| s(&graph.nodes[*id], "path"))
+            .collect();
+        for path in &code_paths {
+            if !covered_paths.contains(path.as_str()) && !narrow.contains_key(path.as_str()) {
+                reasons.insert(format!("no-tests:{path}"));
+            }
+        }
+    }
+    let mut counts = BTreeMap::<String, usize>::new();
+    for row in array(&radius, "dependents") {
+        *counts.entry(s(row, "confidence").into()).or_default() += 1;
+    }
+    let mut ignored = BTreeMap::<String, usize>::new();
     let mut seen = BTreeSet::new();
     for id in &reached {
         for edge in graph.ins.get(*id).into_iter().flatten() {
@@ -300,31 +441,63 @@ pub fn report(
             }
         }
     }
+    for (path, names) in &suites {
+        if names.as_ref().is_none_or(|names| !names.is_empty()) {
+            tests.push(path.clone());
+        }
+        cases.extend(super::cases::suite_rows(
+            path,
+            names.as_deref().unwrap_or(&[]),
+        ));
+    }
+    tests.sort();
+    tests.dedup();
     Ok(
-        json!({"schema":1,"mode":if reasons.is_empty(){"affected"}else{"full"},"depth":depth,"paths":paths,"documentation_paths":documents,"tests":tests,"test_cases":cases,"suite_paths":[],"unsupported_test_count":array(&radius,"tests").len()-tests.len(),"confidence_counts":counts,"ignored_confidence_counts":ignored,"path_coverage":radius["path_coverage"],"unmatched":radius["unmatched"],"reasons":reasons}),
+        json!({"schema":1,"base":base,"head":head,"changes":changes,"mode":if reasons.is_empty(){"affected"}else{"full"},"depth":depth,"paths":paths,"documentation_paths":documents,"tests":tests,"test_cases":cases,"suite_paths":suites.keys().collect::<Vec<_>>(),"unsupported_test_count":array(&radius,"tests").len() as i64-tests.len() as i64,"confidence_counts":counts,"ignored_confidence_counts":ignored,"path_coverage":radius["path_coverage"],"unmatched":radius["unmatched"],"reasons":reasons}),
     )
 }
 pub fn limit_blast(value: &mut Value, limit: usize) {
-    let mut counts = json!({});
     let mut omitted = json!({});
-    for key in ["dependents", "files", "tests", "test_cases"] {
-        let rows = value[key].as_array_mut().unwrap();
-        counts[key] = json!(rows.len());
-        if rows.len() > limit {
-            omitted[key] = json!(rows.len() - limit);
-            rows.truncate(limit);
+    for key in ["dependents", "files", "tests", "test_cases", "seeds"] {
+        if let Some(rows) = value[key].as_array_mut() {
+            if rows.len() > limit {
+                omitted[key] = json!(rows.len() - limit);
+                rows.truncate(limit);
+            }
         }
     }
-    value["counts"] = counts;
+    value["limits"] = json!({"per_list":limit});
+    value["truncated"] = json!(!omitted.as_object().unwrap().is_empty());
     value["omitted"] = omitted;
 }
 pub fn blast_text(value: &Value) -> String {
     let mut out = String::new();
-    for key in ["seeds", "dependents", "files", "tests", "unmatched"] {
+    for path in array(value, "paths") {
+        out.push_str(&format!("path: {}\n", path.as_str().unwrap_or("")));
+    }
+    out.push_str(&format!(
+        "path_coverage: {}\ntruncated: {}\n",
+        s(value, "path_coverage"),
+        value["truncated"]
+    ));
+    for (key, label) in [("unmatched", "unmatched"), ("seeds", "seed")] {
+        for row in array(value, key) {
+            out.push_str(&format!("{label}: {}\n", row.as_str().unwrap_or("")));
+        }
+    }
+    for row in array(value, "dependents") {
+        out.push_str(&format!(
+            "{}  {}  ({})\n",
+            n(row, "distance"),
+            s(row, "id"),
+            s(row, "via")
+        ));
+    }
+    for key in ["files", "tests", "test_cases"] {
+        out.push_str(&format!("{key}:\n"));
         for row in array(value, key) {
             out.push_str(&format!(
-                "{}: {}\n",
-                key,
+                "  {}\n",
                 row.as_str().unwrap_or_else(|| s(row, "id"))
             ));
         }
@@ -333,36 +506,130 @@ pub fn blast_text(value: &Value) -> String {
 }
 pub fn text(value: &Value) -> String {
     if s(value, "kind") == "impact-brief" {
-        return format!(
-            "impact brief {}..{} ({})\n{}",
-            s(value, "base"),
-            s(value, "head"),
-            s(value, "note"),
-            serde_json::to_string_pretty(value).unwrap_or_default()
-        );
+        return impact_text(value);
     }
     let mut out = format!(
         "mode: {}\npath_coverage: {}\n",
         s(value, "mode"),
         s(value, "path_coverage")
     );
-    for key in [
-        "reasons",
-        "documentation_paths",
-        "tests",
-        "test_cases",
-        "unmatched",
+    if let Some(counts) = value["ignored_confidence_counts"].as_object() {
+        let ordered: BTreeMap<_, _> = counts.iter().collect();
+        for (confidence, count) in ordered {
+            out.push_str(&format!("ignored_confidence: {confidence} {count}\n"));
+        }
+    }
+    for (key, label) in [
+        ("reasons", "reason"),
+        ("documentation_paths", "documentation"),
+        ("tests", "test"),
+        ("test_cases", "test_case"),
     ] {
         for row in array(value, key) {
             out.push_str(&format!(
-                "{key}: {}\n",
+                "{label}: {}\n",
                 row.as_str().unwrap_or_else(|| s(row, "id"))
             ));
         }
     }
     out
 }
-pub fn impact(
+fn impact_text(value: &Value) -> String {
+    let mut out = format!(
+        "impact brief {}..{} ({})\n",
+        s(value, "base"),
+        s(value, "head"),
+        s(value, "note")
+    );
+    for row in array(value, "changes") {
+        out.push_str(&format!(
+            "changed: {} {}\n",
+            s(row, "status"),
+            s(row, "path")
+        ));
+    }
+    let affected = &value["affected"];
+    out.push_str(&format!(
+        "tests: mode={} path_coverage={}\n",
+        s(affected, "mode"),
+        s(affected, "path_coverage")
+    ));
+    for (key, label) in [
+        ("reasons", "reason"),
+        ("tests", "test"),
+        ("test_cases", "test_case"),
+        ("unmatched", "unmatched"),
+    ] {
+        for row in array(affected, key) {
+            out.push_str(&format!("  {label}: {}\n", row.as_str().unwrap_or("")));
+        }
+    }
+    for row in array(value, "documentation_paths") {
+        out.push_str(&format!("documentation: {}\n", row.as_str().unwrap_or("")));
+    }
+    let dependents = &value["dependents"];
+    out.push_str(&format!(
+        "dependents ({}{}):\n",
+        s(dependents, "basis"),
+        if dependents["depth_truncated"] == true {
+            ", deeper ones not followed"
+        } else {
+            ""
+        }
+    ));
+    for row in array(dependents, "files") {
+        out.push_str(&format!("  {}\n", row.as_str().unwrap_or("")));
+    }
+    let cochange = &value["co_change"];
+    out.push_str(&format!(
+        "usually changes with these but is not in this range ({}):\n",
+        s(cochange, "basis")
+    ));
+    for row in array(cochange, "not_in_range") {
+        out.push_str(&format!(
+            "  {}  with {}  {:.1}%  shared {}  structural={}\n",
+            s(row, "path"),
+            s(row, "with"),
+            row["degree"].as_f64().unwrap_or(0.0),
+            n(row, "shared_revs"),
+            if row["structural"] == true {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
+    }
+    if value["owners"].is_object() {
+        out.push_str(&format!(
+            "owners ({}, last matching rule):\n",
+            s(&value["owners"], "file")
+        ));
+        for row in array(&value["owners"], "paths") {
+            let owners = array(row, "owners")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&format!(
+                "  {}  {}\n",
+                s(row, "path"),
+                if owners.is_empty() {
+                    "(no owner)"
+                } else {
+                    &owners
+                }
+            ));
+        }
+    }
+    if let Some(omitted) = value["omitted"].as_object() {
+        let ordered: BTreeMap<_, _> = omitted.iter().collect();
+        for (name, count) in ordered {
+            out.push_str(&format!("omitted: {name} +{count} (raise --limit)\n"));
+        }
+    }
+    out
+}
+pub fn impact_with_helper(
     repo: &Path,
     graph: &Graph,
     base: &str,
@@ -371,6 +638,7 @@ pub fn impact(
     commits: i64,
     limit: i64,
     cancel: &AtomicBool,
+    helper: Option<&Path>,
 ) -> Result<Value> {
     if depth < 0 {
         return Err(Error::new("project impact --depth must be zero or greater"));
@@ -385,7 +653,7 @@ pub fn impact(
             .filter(|p| !p.is_empty())
             .map(str::to_owned),
     );
-    let plan = report(repo, graph, base, head, 0, &[], &[], cancel)?;
+    let plan = report_with_helper(repo, graph, base, head, 0, &[], &[], cancel, helper)?;
     let radius = graph.blast(&paths, Some(depth), &["EXTRACTED"], &[])?;
     let dependents: Vec<Value> = array(&radius, "files")
         .iter()
@@ -531,4 +799,29 @@ fn codeowners(repo: &Path, paths: &[String]) -> Result<(String, Vec<Value>)> {
         return Ok((relative.into(), rows));
     }
     Ok((String::new(), vec![]))
+}
+
+pub fn report(
+    repo: &Path,
+    graph: &Graph,
+    base: &str,
+    head: &str,
+    depth: i64,
+    guards: &[String],
+    extra: &[String],
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    report_with_helper(repo, graph, base, head, depth, guards, extra, cancel, None)
+}
+pub fn impact(
+    repo: &Path,
+    graph: &Graph,
+    base: &str,
+    head: &str,
+    depth: i64,
+    commits: i64,
+    limit: i64,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    impact_with_helper(repo, graph, base, head, depth, commits, limit, cancel, None)
 }

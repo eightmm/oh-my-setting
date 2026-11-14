@@ -156,3 +156,98 @@ pub fn assurance(graph: &Graph, include_tests: bool) -> Value {
     }
     json!({"schema":1,"basis":"structural-evidence","note":"Structural evidence only; no test-pass or completion claim.","nodes":nodes,"counts":counts})
 }
+
+pub fn recall_summary(rows: &[Value]) -> Value {
+    let count = rows.len();
+    let recall: f64 = rows
+        .iter()
+        .map(|row| row["recall_at_8"].as_f64().unwrap_or(0.0))
+        .sum();
+    let hits = rows
+        .iter()
+        .filter(|row| !array(row, "hits").is_empty())
+        .count();
+    let mut sizes: Vec<_> = rows.iter().map(|row| n(row, "pack_bytes")).collect();
+    sizes.sort_unstable();
+    let median = if count == 0 {
+        json!(0)
+    } else if count % 2 == 1 {
+        json!(sizes[count / 2])
+    } else {
+        json!((sizes[count / 2 - 1] as f64 + sizes[count / 2] as f64) / 2.0)
+    };
+    json!({"cases":count,"recall_at_8":if count==0 {0.0}else{recall/count as f64},"hit_at_8":if count==0{0.0}else{hits as f64/count as f64},"median_pack_bytes":median})
+}
+pub fn recall_compare(left: &Value, right: &Value) -> crate::Result<Value> {
+    let cases = |value: &Value| -> crate::Result<BTreeMap<String, Value>> {
+        array(value, "cases")
+            .iter()
+            .map(|row| {
+                let commit = row["commit"]
+                    .as_str()
+                    .ok_or_else(|| crate::Error::new("recall snapshot case lacks commit"))?;
+                if !row["hits"].is_number() {
+                    return Err(crate::Error::new("recall snapshot case lacks numeric hits"));
+                }
+                Ok((commit.to_owned(), row.clone()))
+            })
+            .collect()
+    };
+    let before = cases(left)?;
+    let after = cases(right)?;
+    let shared: Vec<_> = before
+        .keys()
+        .filter(|key| after.contains_key(*key))
+        .collect();
+    let comparable = before.keys().eq(after.keys()) && left["definition"] == right["definition"];
+    let improved: Vec<_> = shared
+        .iter()
+        .filter(|key| {
+            after[key.as_str()]["hits"].as_f64().unwrap_or(0.0)
+                > before[key.as_str()]["hits"].as_f64().unwrap_or(0.0)
+        })
+        .collect();
+    let regressed: Vec<_> = shared
+        .iter()
+        .filter(|key| {
+            after[key.as_str()]["hits"].as_f64().unwrap_or(0.0)
+                < before[key.as_str()]["hits"].as_f64().unwrap_or(0.0)
+        })
+        .collect();
+    let mut metrics = serde_json::Map::new();
+    if let (Some(l), Some(r)) = (left["metrics"].as_object(), right["metrics"].as_object()) {
+        for (key, value) in l {
+            if let Some(other) = r.get(key) {
+                let a = value
+                    .as_f64()
+                    .ok_or_else(|| crate::Error::new("recall snapshot metric is not numeric"))?;
+                let b = other
+                    .as_f64()
+                    .ok_or_else(|| crate::Error::new("recall snapshot metric is not numeric"))?;
+                let integer = |value: &Value| {
+                    value
+                        .as_i64()
+                        .map(i128::from)
+                        .or_else(|| value.as_u64().map(i128::from))
+                };
+                let delta = integer(value)
+                    .zip(integer(other))
+                    .and_then(|(a, b)| {
+                        let delta = b - a;
+                        i64::try_from(delta)
+                            .map(|delta| json!(delta))
+                            .ok()
+                            .or_else(|| u64::try_from(delta).map(|delta| json!(delta)).ok())
+                    })
+                    .unwrap_or_else(|| json!(b - a));
+                metrics.insert(
+                    key.clone(),
+                    json!({"left":value,"right":other,"delta":delta}),
+                );
+            }
+        }
+    }
+    Ok(
+        json!({"schema":1,"kind":"oms-graph-recall-compare","comparable":comparable,"reason":if comparable{""}else{"the snapshots cover different fix commits or use different definitions"},"cases":{"left":before.len(),"right":after.len(),"shared":shared.len()},"metrics":metrics,"improved":improved,"regressed":regressed}),
+    )
+}

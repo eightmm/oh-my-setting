@@ -106,7 +106,7 @@ fn walk(root: &Path, rel: &Path, files: &mut BTreeSet<String>, cancel: &AtomicBo
     Ok(())
 }
 struct Discovery {
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, (String, usize)>,
     skipped: Vec<Value>,
 }
 fn discover(repo: &Path, options: &BuildOptions, cancel: &AtomicBool) -> Result<Discovery> {
@@ -159,7 +159,7 @@ fn discover(repo: &Path, options: &BuildOptions, cancel: &AtomicBool) -> Result<
             } else {
                 match root.read(
                     &path,
-                    options.max_bytes.min(64 * 1024 * 1024) as usize,
+                    usize::try_from(options.max_bytes).unwrap_or(usize::MAX),
                     Policy::source(),
                 ) {
                     Ok(data) => {
@@ -168,7 +168,7 @@ fn discover(repo: &Path, options: &BuildOptions, cancel: &AtomicBool) -> Result<
                         } else if language(&path).is_none() {
                             reason = "unparsed";
                         } else {
-                            files.insert(path.clone(), data);
+                            files.insert(path.clone(), (sha(&data), data.len()));
                         }
                     }
                     Err(oms_safe_fs::Error::Oversize) => reason = "too-large",
@@ -206,6 +206,7 @@ fn coverage(found: &Discovery) -> Value {
 struct Python<'a> {
     session: Option<Session>,
     helper: Option<PathBuf>,
+    max_bytes: usize,
     cancel: &'a AtomicBool,
 }
 impl Parser for Python<'_> {
@@ -215,13 +216,29 @@ impl Parser for Python<'_> {
         text: &str,
         digest: &str,
     ) -> std::result::Result<oms_graph_python::ParseResult, oms_graph_python::Error> {
+        if text.len() > oms_graph_python::MAX_SOURCE_BYTES {
+            return Err(oms_graph_python::Error::SourceTooLarge {
+                bytes: text.len(),
+                max_bytes: oms_graph_python::MAX_SOURCE_BYTES,
+            });
+        }
+        if self.session.is_some() && text.len() > self.max_bytes {
+            self.session = None;
+        }
         if self.session.is_none() {
+            self.max_bytes = text.len().max(oms_graph_python::DEFAULT_MAX_BYTES);
             let helper = self.helper.as_deref().ok_or_else(|| {
                 oms_graph_python::Error::HelperUnavailable(
                     "packaged helper path was not supplied".into(),
                 )
             })?;
-            self.session = Some(Session::start(helper, Default::default())?);
+            self.session = Some(Session::start(
+                helper,
+                oms_graph_python::Options {
+                    max_bytes: self.max_bytes,
+                    ..Default::default()
+                },
+            )?);
         }
         let cancel = oms_graph_python::CancelFlag::new();
         let done = (std::sync::Mutex::new(false), std::sync::Condvar::new());
@@ -355,16 +372,19 @@ fn build_from(
     let mut python = Python {
         session: None,
         helper: helper(explicit_helper)?,
+        max_bytes: 0,
         cancel,
     };
     let mut files = BTreeMap::new();
     let mut extractions = vec![];
     let mut cached = 0;
-    for (path, data) in &found.files {
+    let mut keys = BTreeSet::new();
+    let root = Root::open(repo).map_err(|e| Error::new(format!("source root: {e:?}")))?;
+    for (path, (digest, size)) in &found.files {
         crate::util::check(cancel)?;
-        let digest = sha(data);
         let (lang, version) = language(path).unwrap();
         let key = sha(format!("{path}\n{digest}\n{version}\n{SCHEMA}"));
+        keys.insert(format!("{key}.json"));
         let cache_path = state.join("cache").join(format!("{key}.json"));
         let old = if options.force {
             None
@@ -374,7 +394,7 @@ fn build_from(
                 .flatten()
                 .filter(|v| {
                     v["path"] == *path
-                        && v["sha256"] == digest
+                        && v["sha256"] == *digest
                         && v["nodes"].is_array()
                         && v["edges"].is_array()
                         && v["refs"].is_array()
@@ -387,7 +407,19 @@ fn build_from(
                 v
             }
             None => {
-                let v = extraction(path, data, &mut python)?;
+                let data = root
+                    .read(
+                        path,
+                        usize::try_from(options.max_bytes).unwrap_or(0),
+                        Policy::source(),
+                    )
+                    .map_err(|e| {
+                        Error::new(format!("source changed during build: {path}: {e:?}"))
+                    })?;
+                if data.len() != *size || sha(&data) != *digest {
+                    return Err(Error::new(format!("source changed during build: {path}")));
+                }
+                let v = extraction(path, &data, &mut python)?;
                 let raw = bytes(&v, false)?;
                 if raw.len() <= 8 * 1024 * 1024 {
                     write(&cache_path, &raw)?;
@@ -397,11 +429,11 @@ fn build_from(
         };
         files.insert(
             path.clone(),
-            json!({"sha256":digest,"bytes":data.len(),"parser":lang,"cached":was_cached}),
+            json!({"sha256":digest,"bytes":size,"parser":lang,"cached":was_cached}),
         );
         extractions.push(oms_graph_resolve::Extraction {
             path: path.clone(),
-            sha256: digest,
+            sha256: digest.clone(),
             parser: lang.into(),
             nodes: array(&payload, "nodes").to_vec(),
             edges: array(&payload, "edges").to_vec(),
@@ -440,7 +472,26 @@ fn build_from(
         &state.join("orientation.json"),
         &json!({"schema":1,"revision":revision,"generated_at":now(),"text":brief}),
     )?;
+    prune_cache(state, &keys)?;
     Ok(manifest)
+}
+fn prune_cache(state: &Path, wanted: &BTreeSet<String>) -> Result<()> {
+    let directory = state.join("cache");
+    if !std::fs::symlink_metadata(&directory).is_ok_and(|m| m.is_dir() && !m.is_symlink()) {
+        return Ok(());
+    }
+    let store = oms_command_plan::storage::Store::open(state)?;
+    for name in store.names("cache", usize::MAX, true)? {
+        let label = name.to_string_lossy();
+        if !label.ends_with(".json") || wanted.contains(label.as_ref()) {
+            continue;
+        }
+        let path = Path::new("cache").join(name);
+        if let Ok(Some(snapshot)) = store.snapshot(&path, 8 * 1024 * 1024, true) {
+            store.remove(&path, &snapshot.raw, Some(&snapshot.generation))?;
+        }
+    }
+    Ok(())
 }
 pub fn load(state: &Path) -> Result<Value> {
     read_json(&state.join("graph.json"), GRAPH_LIMIT)?
@@ -473,7 +524,7 @@ fn freshness(
     let stale: Vec<&str> = current
         .intersection(&known)
         .copied()
-        .filter(|p| sha(&found.files[*p]) != s(&manifest["files"][*p], "sha256"))
+        .filter(|p| found.files[*p].0 != s(&manifest["files"][*p], "sha256"))
         .collect();
     let missing: Vec<&str> = known.difference(&current).copied().collect();
     let new: Vec<&str> = current.difference(&known).copied().collect();
@@ -523,4 +574,19 @@ pub fn ensure(
     Ok(
         json!({"action":if present {"refreshed"} else {"built"},"revision":manifest["revision"],"stats":manifest["stats"],"skipped":array(&manifest,"skipped").len()}),
     )
+}
+
+pub(super) fn revision_nodes(
+    path: &str,
+    text: &str,
+    explicit_helper: Option<&Path>,
+    cancel: &AtomicBool,
+) -> Result<Vec<Value>> {
+    let mut python = Python {
+        session: None,
+        helper: helper(explicit_helper)?,
+        max_bytes: 0,
+        cancel,
+    };
+    Ok(array(&extraction(path, text.as_bytes(), &mut python)?, "nodes").to_vec())
 }

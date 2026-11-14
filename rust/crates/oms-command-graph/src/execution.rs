@@ -21,7 +21,7 @@ pub use oms_command_operations::value::{V as Value, obj};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-pub use validate::validate;
+pub use validate::{validate, validate_with_plan_tasks};
 pub const OUTCOMES: &[&str] = &[
     "completed",
     "failed",
@@ -103,22 +103,22 @@ pub fn maximum(left: &Value, right: &Value) -> Value {
 pub fn increment(value: &Value) -> Value {
     Value::Num(oms_command_operations::value::add(&value.py(), "1"))
 }
-fn read(path: &Path) -> Result<Value> {
+fn source_bytes(path: &Path) -> Result<Vec<u8>> {
     util::no_symlinks(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| Error::new("file has no parent"))?;
     let store = oms_command_plan::storage::Store::open(parent)?;
-    Value::parse(
-        &store.read(
-            Path::new(
-                path.file_name()
-                    .ok_or_else(|| Error::new("file has no name"))?,
-            ),
-            256 * 1024 * 1024,
-        )?,
-    )
-    .map_err(Error::new)
+    Ok(store.read(
+        Path::new(
+            path.file_name()
+                .ok_or_else(|| Error::new("file has no name"))?,
+        ),
+        256 * 1024 * 1024,
+    )?)
+}
+fn read(path: &Path) -> Result<Value> {
+    Value::parse(&source_bytes(path)?).map_err(Error::new)
 }
 pub fn write(path: &Path, value: &Value) -> Result<()> {
     let mut raw = value.json(false).map_err(Error::new)?;
@@ -178,12 +178,33 @@ fn strings(value: &Value, label: &str) -> Result<Value> {
     Ok(value.clone())
 }
 pub fn normalize(raw: &Value) -> Result<Value> {
-    normalize_inner(raw, st(raw, "id"), 0)
-}
-fn normalize_inner(raw: &Value, id: &str, depth: usize) -> Result<Value> {
-    if depth > 1 {
-        return Err(Error::new("subgraphs may only be one level deep"));
+    let (root, children) = normalize_shallow(raw, st(raw, "id"), None)?;
+    let mut stack = vec![(String::new(), root, children.into_iter())];
+    loop {
+        let frame = stack.last_mut().unwrap();
+        if let Some((name, child)) = frame.2.next() {
+            if !matches!(child, Value::Obj(_)) {
+                return Err(Error::new(format!("subgraph {name} must be an object")));
+            }
+            let (node, children) = normalize_shallow(child, &name, Some(frame.1.get("schema")))?;
+            stack.push((name, node, children.into_iter()));
+        } else {
+            let (name, node, _) = stack.pop().unwrap();
+            if let Some(parent) = stack.last_mut() {
+                let mut children = parent.1.get("subgraphs").clone();
+                children.set(&name, node);
+                parent.1.set("subgraphs", children);
+            } else {
+                return Ok(node);
+            }
+        }
     }
+}
+fn normalize_shallow<'a>(
+    raw: &'a Value,
+    id: &str,
+    inherited: Option<&Value>,
+) -> Result<(Value, Vec<(String, &'a Value)>)> {
     if !matches!(raw, Value::Obj(_)) {
         return Err(Error::new("graph spec must be an object"));
     }
@@ -242,6 +263,11 @@ fn normalize_inner(raw: &Value, id: &str, depth: usize) -> Result<Value> {
         if kind == "tool" {
             node.set("timeout", node.default("timeout", 600_i64));
             node.set("cacheable", node.default("cacheable", false));
+            if matches!(node.get("tool"), Value::Null) {
+                if let Value::Obj(fields) = &mut node {
+                    fields.remove(b"tool".as_slice());
+                }
+            }
             if !raw_nodes.get(&id).has("effect") {
                 if let Some(effect) = validate::capability_effect(st(&node, "tool")) {
                     node.set("effect", effect);
@@ -285,8 +311,20 @@ fn normalize_inner(raw: &Value, id: &str, depth: usize) -> Result<Value> {
     if !matches!(budget, Value::Obj(_)) {
         return Err(Error::new("budget must be an object"));
     }
-    let mut result = raw.clone();
-    result.set("schema", raw.default("schema", 1_i64));
+    let Value::Obj(fields) = raw else {
+        unreachable!()
+    };
+    let mut result = Value::Obj(
+        fields
+            .iter()
+            .filter(|(key, _)| key.as_slice() != b"subgraphs")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    result.set(
+        "schema",
+        raw.default("schema", inherited.cloned().unwrap_or(1_i64.into())),
+    );
     result.set(
         "id",
         raw.default("id", if id.is_empty() { "graph" } else { id })
@@ -303,27 +341,23 @@ fn normalize_inner(raw: &Value, id: &str, depth: usize) -> Result<Value> {
     result.set("stop_facts", strings(raw.get("stop_facts"), "stop_facts")?);
     result.set("nodes", object(nodes));
     result.set("edges", list(edges));
-    let subgraphs = raw.default("subgraphs", empty());
-    if !matches!(subgraphs, Value::Obj(_)) {
+    if raw.has("subgraphs") && !matches!(raw.get("subgraphs"), Value::Obj(_)) {
         return Err(Error::new("subgraphs must be an object"));
     }
-    let mut children = BTreeMap::new();
-    for (name, mut child) in map(&subgraphs) {
-        if !matches!(child, Value::Obj(_)) {
-            return Err(Error::new(format!("subgraph {name} must be an object")));
-        }
-        child.set(
-            "schema",
-            child.default("schema", result.get("schema").clone()),
-        );
-        child.set("id", child.default("id", name.as_str()));
-        children.insert(name.clone(), normalize_inner(&child, &name, depth + 1)?);
+    let children = if let Value::Obj(fields) = raw.get("subgraphs") {
+        fields
+            .iter()
+            .map(|(name, child)| (String::from_utf8_lossy(name).into_owned(), child))
+            .collect()
+    } else {
+        vec![]
+    };
+    if raw.has("subgraphs") {
+        result.set("subgraphs", empty());
     }
-    if !children.is_empty() || raw.has("subgraphs") {
-        result.set("subgraphs", object(children));
-    }
-    Ok(result)
+    Ok((result, children))
 }
+
 pub fn digest(spec: &Value) -> Result<String> {
     Ok(util::sha(normalize(spec)?.json(false).map_err(Error::new)?))
 }
@@ -427,6 +461,7 @@ pub(crate) fn dispatch(
     cwd: &Path,
     cancel: &AtomicBool,
     helper: Option<&Path>,
+    services: &(dyn oms_command_plan::Services + Sync),
 ) -> Result<CommandResult> {
     let mut text = String::new();
     let mut code = 0;
@@ -464,13 +499,13 @@ pub(crate) fn dispatch(
         }
         "route" => {
             let (spec, state, facts) = if !args.text("run").is_empty() {
-                runner::view(repo, args.text("run"), cancel)?
+                runner::view(repo, args.text("run"), cancel, services)?
             } else if !args.text("spec").is_empty() {
                 let spec = load(&args.text("spec").into(), cwd)?;
                 let outcomes = option(args.text("outcomes"), cwd)?;
                 let state = route::state(&spec, &outcomes, &empty(), &empty(), &empty())?;
                 let facts = if args.text("facts").is_empty() {
-                    runner::facts(repo, cancel)?
+                    runner::facts(repo, cancel, services)?
                 } else {
                     read(&util::at(cwd, args.text("facts")))?
                 };
@@ -529,7 +564,7 @@ pub(crate) fn dispatch(
                     "exec status cannot combine --json with --mermaid",
                 ));
             }
-            let (spec, state, facts) = runner::view(repo, &run, cancel)?;
+            let (spec, state, facts) = runner::view(repo, &run, cancel, services)?;
             let route = route::evaluate(&spec, &state, &facts);
             text = if args.flag("mermaid") {
                 render::exec(&spec, Some(&state), None, true)
@@ -568,11 +603,42 @@ pub(crate) fn dispatch(
             }
             let mut rows = vec![];
             for path in files {
-                let fixture = read(&path)?;
-                let row = route::fixture(&fixture, cwd)?;
-                let name = fixture
-                    .get("name")
-                    .or(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
+                let raw = source_bytes(&path)?;
+                let fixture = Value::parse(&raw).map_err(Error::new)?;
+                let source = oms_context::parse_experiment_json(&raw, 256 * 1024 * 1024)
+                    .map_err(Error::new)?;
+                let keys = if let oms_context::Json::Object(fields) = &source {
+                    fields
+                        .iter()
+                        .find(|(key, _)| key.as_slice() == b"expect")
+                        .and_then(|(_, value)| {
+                            if let oms_context::Json::Object(fields) = value {
+                                Some(
+                                    fields
+                                        .iter()
+                                        .map(|(key, _)| key.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+                if !matches!(fixture, Value::Obj(_)) {
+                    return Err(Error::new(format!(
+                        "route fixture must be a JSON object: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )));
+                }
+                let row = route::fixture_with_order(&fixture, cwd, keys.as_deref())?;
+                let name = Value::from(
+                    fixture
+                        .get("name")
+                        .or(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+                        .py(),
+                );
                 let ok = row.get("diff").array().is_empty();
                 if !ok {
                     code = 3;
@@ -605,7 +671,7 @@ pub(crate) fn dispatch(
             ])
         }
         "run" | "resume" => {
-            let result = runner::run(args, repo, cwd, cancel, helper)?;
+            let result = runner::run(args, repo, cwd, cancel, helper, services)?;
             if result.get("dry_run").truth() {
                 text = format!(
                     "run: dry-run status={} primary={}\n",
@@ -649,6 +715,7 @@ pub(crate) fn dispatch(
                 args.text("outcome"),
                 args.text("note"),
                 cancel,
+                services,
             )?;
             text = format!(
                 "decide: {} {}={}\n{}",
@@ -666,6 +733,7 @@ pub(crate) fn dispatch(
                 args.text("run"),
                 args.text("message"),
                 cancel,
+                services,
             )?;
             text = format!(
                 "commit: {} task={} status={} paths={}\n",
@@ -686,7 +754,21 @@ pub(crate) fn dispatch(
                 "--html-fragment requires an absolute output path",
             ));
         }
-        let fragment = render::html(&value);
+        let fragment = if args.action == "render" {
+            render::html(&value, None, None)
+        } else {
+            let run = if args.text("run").is_empty() {
+                events::latest(repo)?
+            } else {
+                args.text("run").to_owned()
+            };
+            let spec = events::load(repo, &run)?;
+            render::html(
+                &spec,
+                Some(value.get("projection")),
+                Some(value.get("route")),
+            )
+        };
         if fragment.len() > 1024 * 1024 {
             return Err(Error::new(
                 "HTML fragment exceeds the 1 MiB agent-view limit",

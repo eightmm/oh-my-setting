@@ -134,7 +134,7 @@ fn append_unlocked(repo: &Path, run: &str, event: &str, fields: Value) -> Result
         .last()
         .map(|r| r.get("seq").clone())
         .unwrap_or(0_i64.into());
-    if !last.integer(false) {
+    if !last.integer(false) || number_cmp(&last, &0_i64.into()).is_lt() {
         return Err(Error::new("graph event log has an invalid final sequence"));
     }
     let seq = oms_command_operations::value::add(&last.py(), "1");

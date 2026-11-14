@@ -154,7 +154,7 @@ pub fn select(
     ];
     let terms: Vec<String> = task
         .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|w| !stop.contains(&w.to_lowercase().as_str()))
+        .filter(|w| !stop.contains(&super::unicode::casefold(w).as_str()))
         .flat_map(words)
         .filter(|w| w.chars().count() > 1 || !w.is_ascii())
         .collect();
@@ -202,11 +202,19 @@ pub fn select(
             }
         }
     }
-    let change_paths = if base.is_empty() {
-        vec![]
+    let change = if base.is_empty() {
+        json!({"changed":[],"untracked":[]})
     } else {
-        super::affected::changed_paths(repo, base, cancel)?
+        super::affected::workspace_changes(repo, base, cancel)?
     };
+    let change_paths: Vec<String> = array(&change, "changed")
+        .iter()
+        .chain(array(&change, "untracked"))
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     for path in &change_paths {
         if index.nodes.values().any(|n| s(n, "path") == path) {
             *scores.entry(path.clone()).or_default() += 800;
@@ -360,7 +368,7 @@ pub fn select(
         *count += 1;
         *count <= 4
     });
-    cases.truncate((max_files.max(0) * 4).min(40) as usize);
+    cases.truncate(max_files.max(0).saturating_mul(4).min(40) as usize);
     let degrees = analytics::degrees(index, &index.nodes.keys().map(String::as_str).collect());
     let mut hubs: Vec<Value> = selected
         .iter()
@@ -445,7 +453,7 @@ pub fn select(
     } else {
         "partial"
     };
-    let mut pack = json!({"task":task,"project_graph_revision":index.graph["revision"],"entries":entries.iter().map(|r|s(r,"id")).collect::<Vec<_>>(),"files":files,"tests":tests,"test_cases":cases,"blast":{"seeds":array(&blast,"seeds").iter().take(40).collect::<Vec<_>>(),"dependents":array(&blast,"dependents").iter().take(40).collect::<Vec<_>>(),"files":array(&blast,"files").iter().take(max_files.max(0)as usize).collect::<Vec<_>>(),"tests":tests,"test_cases":cases,"unmatched":blast["unmatched"],"path_coverage":blast["path_coverage"],"truncated":blast["truncated"],"counts":{"seeds":array(&blast,"seeds").len(),"dependents":array(&blast,"dependents").len(),"files":array(&blast,"files").len(),"tests":array(&blast,"tests").len(),"test_cases":array(&blast,"test_cases").len()}},"hubs":hubs,"evidence":evidence,"assurance":{"schema":1,"basis":all["basis"],"note":all["note"],"counts":assurance_counts,"nodes":assurance_rows},"change":{"schema":1,"enabled":!base.is_empty(),"base":base,"impact_basis":"EXTRACTED reverse dependencies","changed":change_paths,"untracked":[],"impacted":impacted,"unmatched":change_blast["unmatched"],"truncated":change_blast["truncated"]},"coverage":coverage,"pack_bytes":0,"retrieval":{"method":if entry_paths.is_empty(){"lexical"}else{"entry-path"},"status":status,"unmatched_entry_paths":unmatched,"hint":if status=="matched"{""}else{"No complete match. Search source identifiers/paths directly, then use --entry-path. Lexical search does not translate the task; missing matches do not prove missing code."}}});
+    let mut pack = json!({"task":task,"project_graph_revision":index.graph["revision"],"entries":entries.iter().map(|r|s(r,"id")).collect::<Vec<_>>(),"files":files,"tests":tests,"test_cases":cases,"blast":{"seeds":array(&blast,"seeds").iter().take(40).collect::<Vec<_>>(),"dependents":array(&blast,"dependents").iter().take(40).collect::<Vec<_>>(),"files":array(&blast,"files").iter().take(max_files.max(0)as usize).collect::<Vec<_>>(),"tests":tests,"test_cases":cases,"unmatched":blast["unmatched"],"path_coverage":blast["path_coverage"],"truncated":blast["truncated"],"counts":{"seeds":array(&blast,"seeds").len(),"dependents":array(&blast,"dependents").len(),"files":array(&blast,"files").len(),"tests":array(&blast,"tests").len(),"test_cases":array(&blast,"test_cases").len()}},"hubs":hubs,"evidence":evidence,"assurance":{"schema":1,"basis":all["basis"],"note":all["note"],"counts":assurance_counts,"nodes":assurance_rows},"change":{"schema":1,"enabled":!base.is_empty(),"base":base,"impact_basis":"EXTRACTED reverse dependencies","changed":change["changed"],"untracked":change["untracked"],"impacted":impacted,"unmatched":change_blast["unmatched"],"truncated":change_blast["truncated"]},"coverage":coverage,"pack_bytes":0,"retrieval":{"method":if entry_paths.is_empty(){"lexical"}else{"entry-path"},"status":status,"unmatched_entry_paths":unmatched,"hint":if status=="matched"{""}else{"No complete match. Search source identifiers/paths directly, then use --entry-path. Lexical search does not translate the task; missing matches do not prove missing code."}}});
     measure(&mut pack)?;
     Ok(pack)
 }
@@ -573,4 +581,86 @@ pub fn text(pack: &Value) -> String {
         s(pack, "pack_path")
     ));
     out
+}
+
+/// The canonical runtime compiler owns phase selection, source slicing and the
+/// evidence-envelope digest. Its producer services remain supplied by the host.
+pub fn compile_bundle_with_services(
+    repo: &Path,
+    state_repo: &Path,
+    pack: &Value,
+    max_bytes: usize,
+    services: &dyn oms_runtime::Services,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let install = crate::execution::install_root()
+        .ok_or_else(|| Error::new("packaged OMS installation root was not supplied"))?;
+    let runtime =
+        oms_runtime::storage::Runtime::open(repo, state_repo, &install, services, cancel)?;
+    let request = oms_runtime::context::ContextRequest {
+        targets: vec![],
+        explicit: array(pack, "evidence")
+            .iter()
+            .filter_map(|item| {
+                let path = s(item, "path");
+                (!path.is_empty()).then(|| {
+                    (
+                        path.into(),
+                        format!(
+                            "project-graph: {}",
+                            item.get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("selected")
+                        ),
+                    )
+                })
+            })
+            .collect(),
+        required: vec![],
+        max_bytes,
+        bundle: None,
+        manifest: None,
+        allow_external: false,
+        phase: "implementation".into(),
+    };
+    let manifest = oms_runtime::context::plan(&runtime, &request)?;
+    Ok(serde_json::from_slice(&oms_runtime::value::canonical(
+        &manifest,
+    )?)?)
+}
+pub(crate) struct LocalRuntime<'a>(pub &'a AtomicBool);
+impl oms_runtime::Services for LocalRuntime<'_> {
+    fn repository_view(
+        &self,
+        repo: &Path,
+    ) -> oms_runtime::Result<oms_runtime::services::RepositoryView> {
+        Ok(oms_runtime::services::RepositoryView {
+            head: git(repo, &["rev-parse", "HEAD"], self.0),
+            branch: git(repo, &["symbolic-ref", "--short", "HEAD"], self.0),
+            worktree_state: oms_command_task::state_fingerprint(repo, self.0).map_err(|e| {
+                oms_command_plan::Error {
+                    code: e.code,
+                    message: String::from_utf8_lossy(&e.message).into_owned(),
+                }
+            })?,
+        })
+    }
+}
+pub fn compile_bundle(
+    repo: &Path,
+    pack: &Value,
+    max_bytes: usize,
+    cancel: &AtomicBool,
+) -> Result<Value> {
+    let mut request = oms_command_plan::Request::new(oms_command_plan::Action::Status);
+    request.repo = Some(repo.into());
+    let context = oms_command_plan::Context::from_environment(&request, repo)?;
+    compile_bundle_with_services(
+        repo,
+        &context.state_repo,
+        pack,
+        max_bytes,
+        &LocalRuntime(cancel),
+        cancel,
+    )
 }

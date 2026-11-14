@@ -60,13 +60,15 @@ fn reach(start: &str, adj: &BTreeMap<String, Vec<String>>) -> BTreeSet<String> {
     }
     seen
 }
-fn graph(
-    raw: &Value,
+fn graph<'a>(
+    raw: &'a Value,
     prefix: &str,
     inherited: &Value,
     nested: bool,
     errors: &mut Vec<Value>,
     warnings: &mut Vec<Value>,
+    children: &mut Vec<(&'a Value, String, Value)>,
+    plan_tasks: Option<&[String]>,
 ) {
     if !matches!(raw, Value::Obj(_)) {
         add(errors, "invalid_schema", prefix, "graph must be an object");
@@ -233,6 +235,19 @@ fn graph(
                     "invalid_plan_task_reference",
                     &format!("{where_}.plan_task"),
                     "agent node must name a plan task or a plan_task_from binding",
+                );
+            }
+            if task
+                && !source
+                && st(node, "plan_task") != "next"
+                && plan_tasks
+                    .is_some_and(|tasks| !tasks.iter().any(|task| task == st(node, "plan_task")))
+            {
+                add(
+                    errors,
+                    "invalid_plan_task_reference",
+                    &format!("{where_}.plan_task"),
+                    format!("unknown plan task {}", st(node, "plan_task")),
                 );
             }
             for field in ["plan_task_from", "bind_task"] {
@@ -523,7 +538,7 @@ fn graph(
                 "edge kind must be normal or repeat",
             );
         }
-        let priority = edge.default("priority", 0_i64);
+        let mut priority = edge.default("priority", 0_i64);
         if !matches!(&priority,Value::Num(n)if !n.contains(['.','e','E'])) {
             add(
                 errors,
@@ -531,6 +546,7 @@ fn graph(
                 &format!("{where_}.priority"),
                 "edge priority must be an integer",
             );
+            priority = 0_i64.into();
         }
         if !matches!(edge.default("fanout", false), Value::Bool(_)) {
             add(
@@ -712,44 +728,43 @@ fn graph(
             }
         }
     }
-    for (name, child) in &subgraphs {
-        if !matches!(child, Value::Obj(_)) {
-            add(
-                errors,
-                "unknown_subgraph",
-                &format!("{prefix}.subgraphs.{name}"),
-                "subgraph must be an object",
-            );
-        } else if !nested {
-            graph(
-                child,
-                &format!("{prefix}.subgraphs.{name}"),
-                &schema,
-                true,
-                errors,
-                warnings,
-            );
-        } else {
-            add(
-                errors,
-                "recursive_subgraph",
-                &format!("{prefix}.subgraphs.{name}"),
-                "subgraphs may only be one level deep",
-            );
+    if let Value::Obj(subgraphs) = raw.get("subgraphs") {
+        for (name, child) in subgraphs {
+            let name = String::from_utf8_lossy(name);
+            let child_prefix = format!("{prefix}.subgraphs.{name}");
+            if !matches!(child, Value::Obj(_)) {
+                add(
+                    errors,
+                    "unknown_subgraph",
+                    &child_prefix,
+                    "subgraph must be an object",
+                );
+            } else {
+                children.push((child, child_prefix, schema.clone()));
+            }
         }
     }
 }
+
 pub fn validate(spec: &Value) -> Value {
+    validate_with_plan_tasks(spec, None)
+}
+pub fn validate_with_plan_tasks(spec: &Value, plan_tasks: Option<&[String]>) -> Value {
     let mut errors = vec![];
     let mut warnings = vec![];
-    graph(
-        spec,
-        "spec",
-        &1_i64.into(),
-        false,
-        &mut errors,
-        &mut warnings,
-    );
+    let mut pending = vec![(spec, "spec".to_owned(), 1_i64.into())];
+    while let Some((raw, prefix, schema)) = pending.pop() {
+        graph(
+            raw,
+            &prefix,
+            &schema,
+            prefix != "spec",
+            &mut errors,
+            &mut warnings,
+            &mut pending,
+            plan_tasks,
+        );
+    }
     for rows in [&mut errors, &mut warnings] {
         rows.sort_by(|a, b| {
             (st(a, "where"), st(a, "code"), st(a, "message")).cmp(&(

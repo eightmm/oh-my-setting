@@ -30,8 +30,7 @@ pub fn words(text: &str) -> Vec<String> {
         expanded.push(ch);
         previous = ch;
     }
-    expanded
-        .to_lowercase()
+    super::unicode::casefold(&expanded)
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
@@ -111,7 +110,7 @@ impl Graph {
             .ok_or_else(|| Error::new(format!("unknown graph node: {id}")))
     }
     pub fn find(&self, query: &str, kind: &str, limit: i64, include_tests: bool) -> Vec<Value> {
-        let needle = query.trim().to_lowercase();
+        let needle = super::unicode::casefold(query.trim());
         let normalized = words(query).join(" ");
         let terms = words(query);
         let candidates: Vec<&Value> = self
@@ -149,10 +148,10 @@ impl Graph {
             .collect();
         let mut rows = vec![];
         for node in candidates {
-            let name = s(node, "name").to_lowercase();
-            let path = s(node, "path").to_lowercase();
-            let qual = s(&node["metadata"], "qualname").to_lowercase();
-            let summary = s(node, "summary").to_lowercase();
+            let name = super::unicode::casefold(s(node, "name"));
+            let path = super::unicode::casefold(s(node, "path"));
+            let qual = super::unicode::casefold(s(&node["metadata"], "qualname"));
+            let summary = super::unicode::casefold(s(node, "summary"));
             let mut score = if name == needle
                 || (!normalized.is_empty() && words(&name).join(" ") == normalized)
             {
@@ -693,7 +692,8 @@ impl Graph {
                         block.4 = number;
                         block.5 = text.into();
                     }
-                } else if text.to_lowercase().contains(&query.to_lowercase()) {
+                } else if super::unicode::casefold(text).contains(&super::unicode::casefold(query))
+                {
                     total += 1;
                     if captured >= cap {
                         continue;
@@ -815,7 +815,8 @@ impl Graph {
                                 .iter()
                                 .any(|s| {
                                     if fold {
-                                        s.to_lowercase() == name.to_lowercase()
+                                        super::unicode::casefold(s)
+                                            == super::unicode::casefold(name)
                                     } else {
                                         *s == name
                                     }

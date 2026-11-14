@@ -28,6 +28,53 @@ pub fn route_text(route: &Value) -> String {
 fn label(text: &str) -> String {
     text.replace('\\', "/").replace('"', "'").replace('\n', " ")
 }
+fn spec_edges(spec: &Value, nodes: &BTreeMap<String, Value>) -> Vec<Value> {
+    let mut edges: Vec<_> = ar(spec, "edges")
+        .iter()
+        .filter(|edge| nodes.contains_key(st(edge, "from")) && nodes.contains_key(st(edge, "to")))
+        .cloned()
+        .map(|mut edge| {
+            let priority =
+                oms_command_operations::value::integer_value(&edge.get("priority").or(0_i64))
+                    .unwrap_or(0_i64.into());
+            edge.set("priority", priority);
+            if !["normal", "repeat"].contains(&st(&edge, "kind")) {
+                edge.set("kind", "normal");
+            }
+            edge
+        })
+        .collect();
+    edges.sort_by(|a, b| {
+        number_cmp(a.get("priority"), b.get("priority")).then_with(|| {
+            (
+                st(a, "from"),
+                st(a, "to"),
+                ar(a, "outcomes")
+                    .iter()
+                    .map(Value::py)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+                .cmp(&(
+                    st(b, "from"),
+                    st(b, "to"),
+                    ar(b, "outcomes")
+                        .iter()
+                        .map(Value::py)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ))
+        })
+    });
+    edges
+}
+fn kind(node: &Value) -> &str {
+    if st(node, "kind").is_empty() {
+        "node"
+    } else {
+        st(node, "kind")
+    }
+}
 pub fn exec(
     spec: &Value,
     projection: Option<&Value>,
@@ -35,33 +82,7 @@ pub fn exec(
     mermaid: bool,
 ) -> String {
     let nodes = map(spec.get("nodes"));
-    let mut edges: Vec<Value> = ar(spec, "edges")
-        .iter()
-        .filter(|e| nodes.contains_key(st(e, "from")) && nodes.contains_key(st(e, "to")))
-        .cloned()
-        .collect();
-    edges.sort_by(|a, b| {
-        (
-            count(a, "priority"),
-            st(a, "from"),
-            st(a, "to"),
-            ar(a, "outcomes")
-                .iter()
-                .map(Value::py)
-                .collect::<Vec<_>>()
-                .join(","),
-        )
-            .cmp(&(
-                count(b, "priority"),
-                st(b, "from"),
-                st(b, "to"),
-                ar(b, "outcomes")
-                    .iter()
-                    .map(Value::py)
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ))
-    });
+    let edges = spec_edges(spec, &nodes);
     if mermaid {
         let mut ids = BTreeMap::new();
         let mut taken = BTreeSet::new();
@@ -94,7 +115,7 @@ pub fn exec(
                 "    {}[\"{}\\n({})\"]\n",
                 ids[id],
                 label(id),
-                label(st(node, "kind"))
+                label(kind(node))
             ));
         }
         for edge in &edges {
@@ -155,12 +176,96 @@ pub fn exec(
         return out;
     }
     let entry = st(spec, "entry");
+    let order = render_order(&nodes, &edges, entry);
+    let mut out = format!(
+        "graph {} (entry {})\n",
+        spec.get("id").or("-").py(),
+        if entry.is_empty() { "-" } else { entry }
+    );
+    if let Some(route) = route {
+        if !st(route, "status").is_empty() {
+            out.push_str(&format!(
+                "route {}{}\n",
+                st(route, "status"),
+                if st(route, "reason").is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", st(route, "reason"))
+                }
+            ));
+        }
+    }
+    for id in order {
+        let node = &nodes[&id];
+        let state = projection
+            .map(|p| p.get("nodes").get(&id))
+            .unwrap_or(&oms_command_operations::value::NULL);
+        let primary = route.is_some_and(|r| st(r, "primary") == id);
+        let glyph = if st(state, "status") == "finished"
+            && ["completed", "approved"].contains(&st(state, "outcome"))
+        {
+            "✔"
+        } else if st(state, "status") == "finished"
+            && ["failed", "blocked", "unverified"].contains(&st(state, "outcome"))
+        {
+            "✖"
+        } else if st(node, "kind") == "gate"
+            && projection.is_none_or(|p| !p.get("gates").has(&id))
+            && (st(state, "status") == "active" || primary)
+        {
+            "⏸"
+        } else if st(state, "status") == "active" || primary {
+            "◇"
+        } else {
+            "○"
+        };
+        let mut line = format!("{glyph} {id} ({})", kind(node));
+        if !st(state, "outcome").is_empty() {
+            line.push_str(&format!(" [{}]", st(state, "outcome")));
+        }
+        line.push_str(&binding_label(node, state, projection));
+        let title = st(node, "title");
+        if !title.is_empty() && title != id {
+            line.push_str(&format!(" — {title}"));
+        }
+        if primary {
+            line.push_str("  ← next");
+        }
+        out.push_str(&line);
+        out.push('\n');
+        let outgoing: Vec<&Value> = edges.iter().filter(|e| st(e, "from") == id).collect();
+        for (i, edge) in outgoing.iter().enumerate() {
+            let outcomes = ar(edge, "outcomes")
+                .iter()
+                .map(Value::py)
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "  {} {} → {}{}\n",
+                if i + 1 == outgoing.len() {
+                    "└──"
+                } else {
+                    "├──"
+                },
+                if outcomes.is_empty() { "-" } else { &outcomes },
+                st(edge, "to"),
+                if st(edge, "kind") == "repeat" {
+                    " ↻"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    out
+}
+fn render_order(nodes: &BTreeMap<String, Value>, edges: &[Value], entry: &str) -> Vec<String> {
     let mut adjacency: BTreeMap<String, BTreeSet<String>> = nodes
         .keys()
         .map(|id| (id.clone(), BTreeSet::new()))
         .collect();
     let mut indegree: BTreeMap<String, usize> = nodes.keys().map(|id| (id.clone(), 0)).collect();
-    for edge in &edges {
+    for edge in edges {
         if adjacency
             .get_mut(st(edge, "from"))
             .unwrap()
@@ -210,111 +315,60 @@ pub fn exec(
         }
         order.push(chosen);
     }
-    let mut out = format!(
-        "graph {} (entry {})\n",
-        spec.get("id").or("-").py(),
-        if entry.is_empty() { "-" } else { entry }
-    );
-    if let Some(route) = route {
-        if !st(route, "status").is_empty() {
-            out.push_str(&format!(
-                "route {}{}\n",
-                st(route, "status"),
-                if st(route, "reason").is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", st(route, "reason"))
-                }
-            ));
-        }
-    }
-    for id in order {
-        let node = &nodes[&id];
-        let state = projection
-            .map(|p| p.get("nodes").get(&id))
-            .unwrap_or(&oms_command_operations::value::NULL);
-        let primary = route.is_some_and(|r| st(r, "primary") == id);
-        let glyph = if st(state, "status") == "finished"
-            && ["completed", "approved"].contains(&st(state, "outcome"))
-        {
-            "✔"
-        } else if st(state, "status") == "finished"
-            && ["failed", "blocked", "unverified"].contains(&st(state, "outcome"))
-        {
-            "✖"
-        } else if st(node, "kind") == "gate"
-            && projection.is_none_or(|p| !p.get("gates").has(&id))
-            && (st(state, "status") == "active" || primary)
-        {
-            "⏸"
-        } else if st(state, "status") == "active" || primary {
-            "◇"
-        } else {
-            "○"
-        };
-        let mut line = format!("{glyph} {id} ({})", st(node, "kind"));
-        if !st(state, "outcome").is_empty() {
-            line.push_str(&format!(" [{}]", st(state, "outcome")));
-        }
-        if st(node, "kind") == "agent" && projection.is_some() {
-            if !st(node, "bind_task").is_empty() && !st(state, "task_id").is_empty() {
-                line.push_str(&format!(
-                    " [{}={}]",
-                    st(node, "bind_task"),
-                    st(state, "task_id")
-                ));
-            } else if !st(node, "plan_task_from").is_empty() {
-                let held = bound(projection.unwrap(), st(node, "plan_task_from"));
-                line.push_str(&format!(
-                    " [task={}→{}]",
-                    st(node, "plan_task_from"),
-                    if held.is_empty() { "?" } else { &held }
-                ));
-            } else if !st(state, "task_id").is_empty() {
-                line.push_str(&format!(" [task={}]", st(state, "task_id")));
-            }
-        }
-        let title = st(node, "title");
-        if !title.is_empty() && title != id {
-            line.push_str(&format!(" — {title}"));
-        }
-        if primary {
-            line.push_str("  ← next");
-        }
-        out.push_str(&line);
-        out.push('\n');
-        let outgoing: Vec<&Value> = edges.iter().filter(|e| st(e, "from") == id).collect();
-        for (i, edge) in outgoing.iter().enumerate() {
-            let outcomes = ar(edge, "outcomes")
-                .iter()
-                .map(Value::py)
-                .collect::<Vec<_>>()
-                .join(", ");
-            out.push_str(&format!(
-                "  {} {} → {}{}\n",
-                if i + 1 == outgoing.len() {
-                    "└──"
-                } else {
-                    "├──"
-                },
-                if outcomes.is_empty() { "-" } else { &outcomes },
-                st(edge, "to"),
-                if st(edge, "kind") == "repeat" {
-                    " ↻"
-                } else {
-                    ""
-                }
-            ));
-        }
-    }
-    out
+    order
 }
-pub fn html(value: &Value) -> String {
-    let raw = value.json(false).unwrap_or_default();
-    let data = String::from_utf8_lossy(&raw)
-        .replace('<', "\\u003c")
-        .replace('&', "\\u0026");
-    format!(
-        "<section aria-label=\"OMS Execution Graph\"><pre id=\"oms-graph-view\"></pre><script type=\"application/json\" id=\"oms-graph-data\">{data}</script><script>document.getElementById('oms-graph-view').textContent=JSON.stringify(JSON.parse(document.getElementById('oms-graph-data').textContent),null,2)</script></section>"
+fn binding_label(node: &Value, state: &Value, projection: Option<&Value>) -> String {
+    if st(node, "kind") != "agent" || projection.is_none() {
+        return String::new();
+    }
+    if !st(node, "bind_task").is_empty() && !st(state, "task_id").is_empty() {
+        format!(" [{}={}]", st(node, "bind_task"), st(state, "task_id"))
+    } else if !st(node, "plan_task_from").is_empty() {
+        let held = bound(projection.unwrap(), st(node, "plan_task_from"));
+        format!(
+            " [task={}→{}]",
+            st(node, "plan_task_from"),
+            if held.is_empty() { "?" } else { &held }
+        )
+    } else if !st(state, "task_id").is_empty() {
+        format!(" [task={}]", st(state, "task_id"))
+    } else {
+        String::new()
+    }
+}
+
+pub fn visual_model(
+    spec: &Value,
+    projection: Option<&Value>,
+    route: Option<&Value>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let nodes = map(spec.get("nodes"));
+    let edges = spec_edges(spec, &nodes);
+    let mut degree: BTreeMap<String, usize> = nodes.keys().map(|id| (id.clone(), 0)).collect();
+    for edge in &edges {
+        *degree.get_mut(st(edge, "from")).unwrap() += 1;
+        *degree.get_mut(st(edge, "to")).unwrap() += 1;
+    }
+    let rows:Vec<_>=render_order(&nodes,&edges,st(spec,"entry")).into_iter().map(|id| {
+        let node=&nodes[&id];
+        let state=projection.map(|p|p.get("nodes").get(&id)).unwrap_or(&oms_command_operations::value::NULL);
+        let title=st(node,"title");
+        json!({"id":id,"label":if !title.is_empty() && title!=id{title}else{&id},"kind":if st(node,"kind").is_empty(){"node"}else{st(node,"kind")},"language":"","path":"","degree":degree[&id],"focus":route.is_some_and(|r|st(r,"primary")==id),"show_label":true,"status":if st(state,"status").is_empty(){"pending"}else{st(state,"status")},"outcome":st(state,"outcome"),"binding":binding_label(node,state,projection).trim()})
+    }).collect();
+    let edge_rows:Vec<_>=edges.iter().map(|edge| {
+        let outcomes=ar(edge,"outcomes").iter().map(Value::py).collect::<Vec<_>>().join(", ");
+        json!({"source":st(edge,"from"),"target":st(edge,"to"),"relation":if outcomes.is_empty(){"next"}else{&outcomes},"confidence":if st(edge,"kind")=="repeat"{"REPEAT"}else{"NORMAL"}})
+    }).collect();
+    json!({"schema":1,"kind":"execution","revision":st(spec,"id"),"nodes":rows,"edges":edge_rows,"counts":{"shown_nodes":rows.len(),"total_nodes":rows.len(),"shown_edges":edge_rows.len(),"total_edges":edge_rows.len()}})
+}
+pub fn html(spec: &Value, projection: Option<&Value>, route: Option<&Value>) -> String {
+    let id = st(spec, "id");
+    crate::project::visual::html(
+        &visual_model(spec, projection, route),
+        &format!(
+            "OMS Execution Graph · {}",
+            if id.is_empty() { "execution" } else { id }
+        ),
     )
 }

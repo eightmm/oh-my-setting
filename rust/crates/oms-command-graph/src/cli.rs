@@ -19,7 +19,36 @@ impl Args {
             .unwrap_or(false)
     }
     pub fn int(&self, key: &str) -> i64 {
-        self.values.get(key).and_then(Value::as_i64).unwrap_or(0)
+        self.values
+            .get(key)
+            .map(|value| {
+                value.as_i64().unwrap_or_else(|| {
+                    value
+                        .as_str()
+                        .map(|number| {
+                            number.parse().unwrap_or(if number.starts_with('-') {
+                                i64::MIN
+                            } else {
+                                i64::MAX
+                            })
+                        })
+                        .unwrap_or(0)
+                })
+            })
+            .unwrap_or(0)
+    }
+    pub fn integer(&self, key: &str) -> oms_command_operations::value::V {
+        let raw = self
+            .values
+            .get(key)
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string())
+            })
+            .unwrap_or_else(|| "0".into());
+        oms_command_operations::value::parse_integer(&raw).unwrap_or(0_i64.into())
     }
     pub fn float(&self, key: &str) -> f64 {
         self.values.get(key).and_then(Value::as_f64).unwrap_or(0.0)
@@ -116,6 +145,14 @@ pub(crate) fn parse(raw: &[OsString]) -> std::result::Result<Args, CommandResult
             }
             let option = options[0];
             let key = option["dest"].as_str().unwrap();
+            let pair = option["nargs"].as_u64() == Some(2);
+            if pair && inline.is_some() {
+                return Err(failure(
+                    parser,
+                    format!("argument {name}: expected 2 arguments"),
+                ));
+            }
+            let expected = if pair { "2 arguments" } else { "one argument" };
             let action = option["action"].as_str().unwrap();
             if action == "help" {
                 return Err((
@@ -151,7 +188,7 @@ pub(crate) fn parse(raw: &[OsString]) -> std::result::Result<Args, CommandResult
                 } else {
                     position += 1;
                     words.get(position).cloned().ok_or_else(|| {
-                        failure(parser, format!("argument {name}: expected one argument"))
+                        failure(parser, format!("argument {name}: expected {expected}"))
                     })?
                 };
                 if inline.is_none()
@@ -161,7 +198,7 @@ pub(crate) fn parse(raw: &[OsString]) -> std::result::Result<Args, CommandResult
                 {
                     return Err(failure(
                         parser,
-                        format!("argument {name}: expected one argument"),
+                        format!("argument {name}: expected {expected}"),
                     ));
                 }
                 let choices = option["choices"].as_array().unwrap();
@@ -180,14 +217,10 @@ pub(crate) fn parse(raw: &[OsString]) -> std::result::Result<Args, CommandResult
                                     format!("argument {name}: invalid int value: '{value}'"),
                                 )
                             })?;
-                        let number = parsed.py().parse::<i64>().unwrap_or_else(|_| {
-                            if parsed.py().starts_with('-') {
-                                i64::MIN
-                            } else {
-                                i64::MAX
-                            }
-                        });
-                        json!(number)
+                        match parsed.py().parse::<i64>() {
+                            Ok(number) => json!(number),
+                            Err(_) => json!(parsed.py()),
+                        }
                     }
                     "float" => json!(value.parse::<f64>().map_err(|_| failure(
                         parser,
@@ -195,6 +228,18 @@ pub(crate) fn parse(raw: &[OsString]) -> std::result::Result<Args, CommandResult
                     ))?),
                     _ => json!(value),
                 }
+            };
+            let value = if option["nargs"].as_u64() == Some(2) {
+                position += 1;
+                let next = words
+                    .get(position)
+                    .filter(|word| !word.starts_with('-'))
+                    .ok_or_else(|| {
+                        failure(parser, format!("argument {name}: expected 2 arguments"))
+                    })?;
+                json!([value, next])
+            } else {
+                value
             };
             if action == "append" {
                 values

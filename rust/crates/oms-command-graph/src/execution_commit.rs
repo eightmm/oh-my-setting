@@ -36,6 +36,7 @@ pub fn bound(
     run: &str,
     message: &str,
     cancel: &AtomicBool,
+    services: &(dyn oms_command_plan::Services + Sync),
 ) -> Result<Value> {
     if std::env::var_os("OMS_HARNESS_CHILD").as_deref() == Some(std::ffi::OsStr::new("1")) {
         return Err(Error::new(
@@ -52,7 +53,7 @@ pub fn bound(
             "no execution graph run to read the binding from",
         ));
     }
-    let (_, state, facts) = runner::view(repo, &selected, cancel)?;
+    let (_, state, facts) = runner::view(repo, &selected, cancel, services)?;
     let task = super::bound(&state, binding);
     if task.is_empty() {
         return Err(Error::new(format!(
@@ -60,7 +61,7 @@ pub fn bound(
             binding.chars().take(60).collect::<String>()
         )));
     }
-    let task_view = runner::task_view(repo, &task, cancel)?;
+    let task_view = runner::task_view(repo, &task, cancel, services)?;
     if st(&task_view, "state") != "done" {
         return Err(Error::new(format!(
             "task {task} is {}, not done; nothing landed to commit",

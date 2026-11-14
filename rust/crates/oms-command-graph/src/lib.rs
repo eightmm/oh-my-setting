@@ -67,6 +67,38 @@ pub fn run_with_helper(
     interrupted: &AtomicBool,
     python_helper: Option<&Path>,
 ) -> CommandResult {
+    run_with_runtime_services(args, cwd, interrupted, python_helper, None)
+}
+
+/// Supply the host's canonical runtime producers for context bundles. Missing
+/// projections refuse through the runtime service boundary.
+pub fn run_with_runtime_services(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
+) -> CommandResult {
+    run_with_services(
+        args,
+        cwd,
+        interrupted,
+        python_helper,
+        runtime_services,
+        &oms_command_plan::UnavailableServices,
+    )
+}
+
+/// Plan services must support concurrent graph work; the parent retains the
+/// lifecycle, room and approval producers that verify plan projections.
+pub fn run_with_services(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    python_helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
+    plan_services: &(dyn oms_command_plan::Services + Sync),
+) -> CommandResult {
     let args = match cli::parse(args) {
         Ok(v) => v,
         Err(result) => return result,
@@ -77,7 +109,9 @@ pub fn run_with_helper(
     let work = || -> Result<CommandResult> {
         if std::env::var_os("OMS_HARNESS_CHILD").as_deref() == Some(std::ffi::OsStr::new("1"))
             && (!args.text("html_fragment").is_empty()
-                || (args.group == "project" && args.action == "context")
+                || (args.group == "project"
+                    && (args.action == "context"
+                        || (args.action == "benchmark" && args.list("compare").is_empty())))
                 || (args.group == "exec"
                     && matches!(args.action.as_str(), "run" | "resume" | "decide" | "commit")))
         {
@@ -94,8 +128,22 @@ pub fn run_with_helper(
         };
         let repo = util::repo_root(&selected, interrupted)?;
         match args.group.as_str() {
-            "project" => project::dispatch(&args, &repo, &cwd, interrupted, python_helper),
-            "exec" => execution::dispatch(&args, &repo, &cwd, interrupted, python_helper),
+            "project" => project::dispatch(
+                &args,
+                &repo,
+                &cwd,
+                interrupted,
+                python_helper,
+                runtime_services,
+            ),
+            "exec" => execution::dispatch(
+                &args,
+                &repo,
+                &cwd,
+                interrupted,
+                python_helper,
+                plan_services,
+            ),
             _ => Err(Error::new("unknown graph group")),
         }
     };

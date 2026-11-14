@@ -77,19 +77,34 @@ pub fn state(
             );
         }
     }
+    let normalized_gates = object(
+        map(gates)
+            .into_iter()
+            .map(|(name, value)| (name, value.py().into())),
+    );
+    let normalized_repeats = object(
+        map(repeats)
+            .into_iter()
+            .map(|(name, value)| {
+                oms_command_operations::value::integer_value(&value)
+                    .map(|value| (name, value))
+                    .map_err(Error::new)
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
     let mut normalized_bindings = BTreeMap::new();
     for (name, value) in map(bindings) {
         let task = if matches!(value, Value::Obj(_)) {
-            st(&value, "task_id")
+            value.get("task_id").or("").py()
         } else {
-            value.text().unwrap_or("")
+            value.text().unwrap_or("").to_owned()
         };
         if !task.is_empty() {
             normalized_bindings.insert(
                 name,
                 obj([
                     ("task_id", task.into()),
-                    ("node", value.default("node", "")),
+                    ("node", value.get("node").or("").py().into()),
                     ("attempt", value.default("attempt", 1_i64)),
                 ]),
             );
@@ -98,8 +113,8 @@ pub fn state(
     Ok(obj([
         ("nodes", object(nodes)),
         ("steps", steps.into()),
-        ("repeats", repeats.clone()),
-        ("gates", gates.clone()),
+        ("repeats", normalized_repeats),
+        ("gates", normalized_gates),
         ("bindings", object(normalized_bindings)),
         ("subgraphs", object(child_states)),
     ]))
@@ -719,6 +734,13 @@ pub fn evaluate(spec: &Value, state: &Value, facts: &Value) -> Value {
     }
 }
 pub fn fixture(fixture: &Value, cwd: &Path) -> Result<Value> {
+    fixture_with_order(fixture, cwd, None)
+}
+pub fn fixture_with_order(
+    fixture: &Value,
+    cwd: &Path,
+    expected_keys: Option<&[Vec<u8>]>,
+) -> Result<Value> {
     if !matches!(fixture, Value::Obj(_)) {
         return Err(Error::new("route fixture must be an object"));
     }
@@ -747,30 +769,46 @@ pub fn fixture(fixture: &Value, cwd: &Path) -> Result<Value> {
         state.set("steps", fixture.get("steps").clone());
     }
     let actual_route = evaluate(&spec, &state, fixture.get("facts"));
-    let mut actual = empty();
+    let expected = if matches!(fixture.get("expect"), Value::Obj(_)) {
+        fixture.get("expect").clone()
+    } else {
+        empty()
+    };
+    let mut actual = BTreeMap::new();
     let mut diff = vec![];
-    for (key, wanted) in map(fixture.get("expect")) {
-        let got = if key == "downgrades" {
+    let Value::Obj(fields) = &expected else {
+        unreachable!()
+    };
+    let keys: Vec<_> = expected_keys
+        .map(|keys| keys.to_vec())
+        .unwrap_or_else(|| fields.keys().cloned().collect());
+    for key in keys {
+        let Some(wanted) = fields.get(&key) else {
+            continue;
+        };
+        let got = if key == b"downgrades" {
             list(
                 ar(&actual_route, "downgrades")
                     .iter()
-                    .map(|r| r.get("node").clone()),
+                    .map(|row| row.get("node").clone()),
             )
+        } else if let Value::Obj(route) = &actual_route {
+            route.get(&key).cloned().unwrap_or(Value::Null)
         } else {
-            actual_route.get(&key).clone()
+            Value::Null
         };
-        actual.set(&key, got.clone());
-        if got != wanted {
+        actual.insert(key.clone(), got.clone());
+        if got != *wanted {
             diff.push(obj([
-                ("key", key.into()),
-                ("expected", wanted),
+                ("key", Value::Str(key)),
+                ("expected", wanted.clone()),
                 ("actual", got),
             ]));
         }
     }
     Ok(obj([
-        ("expected", fixture.get("expect").clone()),
-        ("actual", actual),
+        ("expected", expected),
+        ("actual", Value::Obj(actual)),
         ("diff", list(diff)),
     ]))
 }

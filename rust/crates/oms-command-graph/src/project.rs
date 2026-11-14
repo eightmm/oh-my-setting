@@ -3,8 +3,12 @@
 pub mod affected;
 #[path = "project_analytics.rs"]
 pub mod analytics;
+#[path = "project_benchmark.rs"]
+pub mod benchmark;
 #[path = "project_build.rs"]
 mod build;
+#[path = "project_cases.rs"]
+mod cases;
 #[path = "project_context.rs"]
 pub mod context;
 #[path = "project_history.rs"]
@@ -13,6 +17,8 @@ pub mod history;
 pub mod index;
 #[path = "project_sqlite.rs"]
 mod sqlite;
+#[path = "project_unicode.rs"]
+mod unicode;
 #[path = "project_visual.rs"]
 pub(crate) mod visual;
 
@@ -147,8 +153,12 @@ pub(crate) fn dispatch(
     _cwd: &Path,
     cancel: &AtomicBool,
     helper: Option<&Path>,
+    runtime_services: Option<&dyn oms_runtime::Services>,
 ) -> Result<CommandResult> {
     bounds(args)?;
+    if args.action == "benchmark" {
+        return benchmark::dispatch(args, repo, _cwd, cancel, helper);
+    }
     let state = state_dir(repo)?;
     let action = args.action.as_str();
     let mut err = String::new();
@@ -447,9 +457,22 @@ pub(crate) fn dispatch(
                     ));
                 }
                 if args.flag("bundle") {
-                    return Err(Error::new(
-                        "context bundle requires the canonical context service",
-                    ));
+                    pack["bundle"] = if let Some(services) = runtime_services {
+                        let mut request =
+                            oms_command_plan::Request::new(oms_command_plan::Action::Status);
+                        request.repo = Some(repo.into());
+                        let roots = oms_command_plan::Context::from_environment(&request, repo)?;
+                        context::compile_bundle_with_services(
+                            repo,
+                            &roots.state_repo,
+                            &pack,
+                            64 * 1024,
+                            services,
+                            cancel,
+                        )?
+                    } else {
+                        context::compile_bundle(repo, &pack, 64 * 1024, cancel)?
+                    };
                 }
                 if args.flag("ui_model") || !args.text("html_fragment").is_empty() {
                     let ids = array(&pack, "entries")
@@ -463,7 +486,7 @@ pub(crate) fn dispatch(
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
                     let result = graph.visual(
-                        (args.int("max_files") * 6).clamp(48, 120),
+                        args.int("max_files").saturating_mul(6).clamp(48, 120),
                         2,
                         false,
                         &coverage,
@@ -495,6 +518,9 @@ pub(crate) fn dispatch(
                     args.list("path")
                 };
                 let mut result = graph.blast(&paths, Some(args.int("depth")), &[], &[])?;
+                result["paths"] = json!(paths);
+                result["changed_paths"] =
+                    affected::workspace_changes(repo, args.text("base"), cancel)?;
                 text = affected::blast_text(&result);
                 if args.flag("json") && args.int("limit") > 0 {
                     affected::limit_blast(&mut result, args.int("limit") as usize);
@@ -517,7 +543,7 @@ pub(crate) fn dispatch(
                 result
             }
             "affected" => {
-                let result = affected::report(
+                let result = affected::report_with_helper(
                     repo,
                     &graph,
                     args.text("base"),
@@ -526,12 +552,13 @@ pub(crate) fn dispatch(
                     &args.list("guard"),
                     &args.list("runnable"),
                     cancel,
+                    helper,
                 )?;
                 text = affected::text(&result);
                 result
             }
             "impact" => {
-                let result = affected::impact(
+                let result = affected::impact_with_helper(
                     repo,
                     &graph,
                     args.text("base"),
@@ -540,6 +567,7 @@ pub(crate) fn dispatch(
                     args.int("commits"),
                     args.int("limit"),
                     cancel,
+                    helper,
                 )?;
                 text = affected::text(&result);
                 result

@@ -52,6 +52,13 @@ pub fn process(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<(i32, Vec<u8>, Vec<u8>)> {
+    process_detail(command, timeout, cancel).map(|(exit, out, err, _)| (exit, out, err))
+}
+pub fn process_detail(
+    command: &mut Command,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<(i32, Vec<u8>, Vec<u8>, bool)> {
     use rustix::{
         fs::{OFlags, fcntl_getfl, fcntl_setfl},
         process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid},
@@ -105,7 +112,10 @@ pub fn process(
         loop {
             check(cancel)?;
             if start.elapsed() > timeout {
-                return Err(Error::new("command timed out"));
+                return Err(Error {
+                    code: 124,
+                    message: "command timed out".into(),
+                });
             }
             drain(&mut out, &mut stdout)?;
             drain(&mut err, &mut stderr)?;
@@ -132,16 +142,23 @@ pub fn process(
                 break;
             }
         }
-        Ok(status.code().unwrap_or(1))
+        use std::os::unix::process::ExitStatusExt;
+        Ok(status
+            .code()
+            .unwrap_or_else(|| -status.signal().unwrap_or(1)))
     })();
     match result {
-        Ok(status) => Ok((status, stdout, stderr)),
+        Ok(status) => Ok((status, stdout, stderr, false)),
         Err(error) => {
             if !reaped {
                 let _ = kill_process_group(pid, Signal::KILL);
                 let _ = child.wait();
             }
-            Err(error)
+            if error.code == 124 {
+                Ok((-1, stdout, stderr, true))
+            } else {
+                Err(error)
+            }
         }
     }
 }
