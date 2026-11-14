@@ -2,10 +2,12 @@ use crate::value::{Text, Value};
 use crate::{OUTPUT_LIMIT, Server, ToolResult, matches, prefix_chars, text};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal, kill_process_group};
+use std::ffi::OsString;
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // Keep enough decoded text for the largest UI model plus one character. Counts
@@ -81,14 +83,138 @@ impl Stream {
         }
     }
 }
-pub(crate) struct Captured {
-    pub code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub stderr_leading: String,
-    pub stdout_chars: usize,
-    pub stdout_bytes: usize,
-    pub combined_chars: usize,
+/// Bounded capture of one finished command. Text fields keep only the bounded
+/// prefix; the counts cover the whole stream so oversize output is refused
+/// rather than silently cut.
+pub struct Captured {
+    pub(crate) code: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) stderr_leading: String,
+    pub(crate) stdout_chars: usize,
+    pub(crate) stdout_bytes: usize,
+    pub(crate) combined_chars: usize,
+}
+impl Captured {
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+    pub fn stdout(&self) -> &str {
+        &self.stdout
+    }
+    pub fn stderr(&self) -> &str {
+        &self.stderr
+    }
+    /// Build a capture from complete in-memory output, with the same UTF-8
+    /// decoding, bounds and counts as the subprocess executor.
+    pub fn from_output(code: i32, stdout: &[u8], stderr: &[u8]) -> Self {
+        let (mut out, mut err) = (Stream::default(), Stream::default());
+        out.feed(stdout, true);
+        err.feed(stderr, true);
+        Self::finish(code, out, err)
+    }
+    fn finish(code: i32, out: Stream, err: Stream) -> Self {
+        let stdout_chars = out.trimmed_chars();
+        // Python strips the combined output, rather than each stream. The
+        // explicit separator exists whenever both raw streams are nonempty.
+        let combined_chars = if out.chars == 0 {
+            err.trimmed_chars()
+        } else if err.chars == 0 {
+            stdout_chars
+        } else if !out.nonwhite && !err.nonwhite {
+            0
+        } else {
+            out.chars + 1 + err.chars
+                - if out.nonwhite {
+                    out.leading
+                } else {
+                    out.chars + 1 + err.leading
+                }
+                - if err.nonwhite {
+                    err.trailing
+                } else {
+                    err.chars + 1 + out.trailing
+                }
+        };
+        Self {
+            code,
+            stdout: out.prefix,
+            stderr: err.prefix,
+            stderr_leading: err.leading_text,
+            stdout_chars,
+            stdout_bytes: out.bytes,
+            combined_chars,
+        }
+    }
+}
+/// One fixed OMS verb invocation. `args` excludes the program name.
+pub struct CommandRequest<'a> {
+    pub args: &'a [OsString],
+    pub cwd: &'a Path,
+    pub timeout: Duration,
+    /// Set by the embedding process; executors must stop promptly when true.
+    pub interrupted: &'a AtomicBool,
+}
+/// Host boundary for every MCP tool that runs an OMS verb. The `oms` front door
+/// can supply an in-process router; the default spawns the native `oms` binary.
+pub trait CommandExecutor: Send + Sync {
+    fn execute(&self, request: &CommandRequest<'_>) -> Result<Captured, String>;
+}
+const ENTRYPOINT: &str = "oms";
+fn trusted(p: &Path) -> bool {
+    p.is_absolute() && p.is_file() && rustix::fs::access(p, rustix::fs::Access::EXEC_OK).is_ok()
+}
+/// Locate the native `oms` for fixed verbs. Only absolute, regular, executable
+/// files qualify. An explicit pin is authoritative: when invalid it is refused,
+/// never skipped. Otherwise: the running executable when named `oms`; an `oms`
+/// beside an absolute private peer owner; then absolute `PATH` entries.
+pub(crate) fn resolve_oms(
+    oms_program: Option<&Path>,
+    peer_owner: &Path,
+) -> Result<PathBuf, String> {
+    if let Some(pin) = oms_program {
+        return if trusted(pin) {
+            Ok(pin.to_owned())
+        } else {
+            Err("error: configured oms program is not an absolute executable file".into())
+        };
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && exe.file_name().is_some_and(|n| n == ENTRYPOINT)
+        && trusted(&exe)
+    {
+        return Ok(exe);
+    }
+    if peer_owner.is_absolute()
+        && peer_owner.is_file()
+        && let Some(sibling) = peer_owner.parent().map(|d| d.join(ENTRYPOINT))
+        && trusted(&sibling)
+    {
+        return Ok(sibling);
+    }
+    std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|d| d.join(ENTRYPOINT))
+                .find(|p| trusted(p))
+        })
+        .ok_or_else(|| "error: native oms executable not found".into())
+}
+/// Default executor: one subprocess of the resolved `oms` per call.
+pub struct SubprocessExecutor {
+    program: PathBuf,
+}
+impl SubprocessExecutor {
+    pub fn resolve(oms_program: Option<&Path>, peer_owner: &Path) -> Result<Self, String> {
+        resolve_oms(oms_program, peer_owner).map(|program| Self { program })
+    }
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+    /// Use an explicit native `oms` executable (absolute, regular, executable).
+    pub fn with_program(program: PathBuf) -> Result<Self, String> {
+        Self::resolve(Some(&program), Path::new(""))
+    }
 }
 fn terminate(child: &mut Child) {
     if let Some(pid) = Pid::from_raw(child.id() as i32) {
@@ -114,19 +240,12 @@ fn drain(reader: &mut impl Read, stream: &mut Stream) -> io::Result<bool> {
     }
     Ok(false)
 }
-impl Server<'_> {
-    pub(crate) fn command(
-        &self,
-        args: &[impl AsRef<std::ffi::OsStr>],
-        cwd: &std::path::Path,
-        timeout: Duration,
-    ) -> Result<Captured, String> {
-        let executable = self.source_root.join("scripts/oms");
-        let mut child = Command::new(executable)
-            .args(args)
+impl CommandExecutor for SubprocessExecutor {
+    fn execute(&self, request: &CommandRequest<'_>) -> Result<Captured, String> {
+        let (cwd, timeout) = (request.cwd, request.timeout);
+        let mut child = Command::new(&self.program)
+            .args(request.args)
             .current_dir(cwd)
-            .env("PYTHONIOENCODING", "utf-8")
-            .env("PYTHONUTF8", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -146,7 +265,7 @@ impl Server<'_> {
             let (mut out_done, mut err_done) = (false, false);
             let deadline = Instant::now() + timeout;
             let code = loop {
-                if self.interrupted.load(Ordering::Relaxed) {
+                if request.interrupted.load(Ordering::Relaxed) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted"));
                 }
                 if Instant::now() >= deadline {
@@ -166,42 +285,28 @@ impl Server<'_> {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             };
-            let stdout_chars = out.trimmed_chars();
-            // Python strips the combined output, rather than each stream. The
-            // explicit separator exists whenever both raw streams are nonempty.
-            let combined_chars = if out.chars == 0 {
-                err.trimmed_chars()
-            } else if err.chars == 0 {
-                stdout_chars
-            } else if !out.nonwhite && !err.nonwhite {
-                0
-            } else {
-                out.chars + 1 + err.chars
-                    - if out.nonwhite {
-                        out.leading
-                    } else {
-                        out.chars + 1 + err.leading
-                    }
-                    - if err.nonwhite {
-                        err.trailing
-                    } else {
-                        err.chars + 1 + out.trailing
-                    }
-            };
-            Ok(Captured {
-                code,
-                stdout: out.prefix,
-                stderr: err.prefix,
-                stderr_leading: err.leading_text,
-                stdout_chars,
-                stdout_bytes: out.bytes,
-                combined_chars,
-            })
+            Ok(Captured::finish(code, out, err))
         })();
         if result.is_err() {
             terminate(&mut child);
         }
         result.map_err(|e| format!("error: {e}"))
+    }
+}
+impl Server<'_> {
+    pub(crate) fn command(
+        &self,
+        args: &[impl AsRef<std::ffi::OsStr>],
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Result<Captured, String> {
+        let args: Vec<OsString> = args.iter().map(|a| a.as_ref().to_owned()).collect();
+        self.executor.execute(&CommandRequest {
+            args: &args,
+            cwd,
+            timeout,
+            interrupted: self.interrupted,
+        })
     }
     pub(crate) fn run_tool(&self, tool: &Value, args: &Value) -> ToolResult {
         let repo = self.repo(args)?;

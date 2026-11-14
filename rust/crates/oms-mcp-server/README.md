@@ -40,7 +40,7 @@ select an executable. It must arrange for blocked input reads to wake when its
 interruption flag is set. Child-operation waits observe that flag directly.
 
 The bundled `oms-mcp-peer-owner` is **private libexec**, never a PATH command.
-Its entire positional ABI is `SOURCE_ROOT REPO OPERATION`. A parent that embeds
+Its entire positional ABI is `SOURCE_ROOT REPO OPERATION [OMS_PROGRAM]`. A parent that embeds
 this entry instead must call `peer_owner(&[OsString])` from a private executable
 entry with that exact argument layout. The owner validates stored typed launch
 fields, rechecks delegated-worker restrictions and provider registration, locks
@@ -78,12 +78,21 @@ newline in the 256 KiB bound; oversized records are drained before recovery.
 
 ## Tool and fixed subprocess matrix
 
-Every command below executes **only** `source_root/scripts/oms` with a fixed argv
-array. This transitional public-CLI bridge may still execute legacy substantive
-Bash and Python downstream. It cannot establish a Python-free server host. The
-bridge is temporary: retire it only after the parent admits native in-process
-implementations for every fixed downstream verb, including peer supervision and
-thread/room writes, and verifies their public and internal contracts. The
+Every command below runs through the `CommandExecutor` host boundary with a
+fixed argv array. `serve`/`Server::new` default to `SubprocessExecutor`, which
+spawns only a native `oms`: an absolute, regular, executable file, never
+`scripts/oms`, and with no `PYTHON*` variable set by this crate. Resolution
+order: `Config::oms_program` when set (authoritative; an invalid pin is an
+error, never skipped); the running executable when named `oms`; an `oms` beside
+an absolute private peer owner; absolute `PATH` entries. Relative locations and
+non-executable files are ignored; nothing found is an error, not a bare `oms`.
+A parent that routes verbs in-process implements `CommandExecutor` and calls
+`serve_with_services` / `Server::with_executor`; no child is then spawned for
+the 24 command-backed tools. `oms_peer_start` still launches the private
+`peer_owner` process; it receives `Config::oms_program` as an optional fourth
+argument (`SOURCE_ROOT REPO OPERATION [OMS_PROGRAM]`) and resolves the same
+way, so the parent must point `Config::peer_owner` at a native bundled helper.
+The
 canonical definitions/descriptions/annotations and input/output schemas are
 embedded in `src/tools.json`; `tests/definitions.json` independently records the
 reference discovery output. Both were generated from the canonical Python
@@ -124,7 +133,7 @@ The table anchors identify canonical definitions. Execution handlers are at
 The golden arrays are the executable argv/schema evidence.
 
 State commands run in the requested physical repository with inherited child
-restrictions and UTF-8 settings. They have a 30-second bound. Thread/room and ask
+restrictions. They have a 30-second bound. Thread/room and ask
 thread preparation have a five-second bound. Output is streamed into a bounded
 prefix while complete decoded character counts continue: oversized JSON is
 refused; raw text retains the first 60000 characters and an omission count.

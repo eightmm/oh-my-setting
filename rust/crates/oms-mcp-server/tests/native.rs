@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
-use oms_mcp_server::{Config, Server, ToolProfile};
+use oms_mcp_server::{
+    Captured, CommandExecutor, CommandRequest, Config, Server, SubprocessExecutor, ToolProfile,
+};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -40,7 +42,13 @@ fn config(full: bool, tasks: bool) -> Config {
         },
         tasks_extension: tasks,
         peer_owner: PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner")),
+        oms_program: None,
     }
+}
+// Pin the fixture `oms` of a source tree so nothing is searched for.
+fn pinned(source: &Path, mut cfg: Config) -> Config {
+    cfg.oms_program = Some(source.join("bin/oms"));
+    cfg
 }
 struct Temp(PathBuf);
 impl Temp {
@@ -56,9 +64,8 @@ impl Temp {
     }
     fn source(&self) -> PathBuf {
         let p = self.0.join("source");
-        std::fs::create_dir_all(p.join("scripts")).unwrap();
-        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), p.join("scripts/oms"))
-            .unwrap();
+        std::fs::create_dir_all(p.join("bin")).unwrap();
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), p.join("bin/oms")).unwrap();
         std::fs::write(p.join("VERSION"), "fixture\n").unwrap();
         p
     }
@@ -107,6 +114,8 @@ impl Client {
         depth: &std::ffi::OsStr,
     ) -> Self {
         let mut p = Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
             .arg("--stdio")
             .arg(source)
             .arg(repo)
@@ -611,7 +620,7 @@ fn transport_bounds() {
         &flag,
         &mut std::io::Cursor::new(b"{\"id\":992,\"method\":\"ping\"}"),
         &mut output,
-        config(false, false),
+        pinned(&source, config(false, false)),
     )
     .unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["id"], 992);
@@ -748,7 +757,7 @@ fn fixed_argv() {
         let r = record(&source);
         assert_eq!(r["argv"], row["argv"], "{name}");
         assert_eq!(r["cwd"], repo.to_string_lossy().as_ref());
-        assert_eq!(r["utf8"], "1");
+        assert_eq!(r["utf8"], "");
     }
     good(&c.tool("oms_journal", json!({"view":"blockers"})));
     assert_eq!(
@@ -1209,7 +1218,9 @@ fn peer_reading() {
                 source.as_os_str(),
                 repo.as_os_str(),
                 std::ffi::OsStr::new(&op),
+                source.join("bin/oms").as_os_str(),
             ])
+            .env("PATH", "")
             .env("OMS_HARNESS_CHILD", "0")
             .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
             .output()
@@ -1911,7 +1922,7 @@ fn owner_validation() {
     let repo = t.repo();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner"));
     assert!(!Command::new(&binary).output().unwrap().status.success());
-    for (i,launch)in[json!({}),json!({"kind":"write"}),json!({"kind":"consult","targets":["--help"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}),json!({"kind":"consult","targets":[],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{"include_task":1}})].into_iter().enumerate(){let op=format!("consult-20200101T000000Z-{i:08x}");let dir=run_dir(&repo,&op,json!({}),None);std::fs::write(dir.join("launch.json"),launch.to_string()).unwrap();let output=Command::new(&binary).args([source.as_os_str(),repo.as_os_str(),std::ffi::OsStr::new(&op)]).env("OMS_HARNESS_CHILD","0").env("OMS_HARNESS_DELEGATE_DEPTH","0").output().unwrap();assert!(!output.status.success());assert_eq!(std::fs::read_to_string(dir.join("status")).unwrap(),"1\n");assert!(!source.join("last-call.json").exists());}
+    for (i,launch)in[json!({}),json!({"kind":"write"}),json!({"kind":"consult","targets":["--help"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}),json!({"kind":"consult","targets":[],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{"include_task":1}})].into_iter().enumerate(){let op=format!("consult-20200101T000000Z-{i:08x}");let dir=run_dir(&repo,&op,json!({}),None);std::fs::write(dir.join("launch.json"),launch.to_string()).unwrap();let output=Command::new(&binary).args([source.as_os_str(),repo.as_os_str(),std::ffi::OsStr::new(&op),source.join("bin/oms").as_os_str()]).env("PATH","").env("OMS_HARNESS_CHILD","0").env("OMS_HARNESS_DELEGATE_DEPTH","0").output().unwrap();assert!(!output.status.success());assert_eq!(std::fs::read_to_string(dir.join("status")).unwrap(),"1\n");assert!(!source.join("last-call.json").exists());}
     fixture_settings(&source, json!({"gate":true}));
     let mut c = Client::new(&source, &repo, false, true, false);
     let started = c.tool("oms_peer_start", json!({"kind":"consult","prompt":"hold"}));
@@ -1925,7 +1936,9 @@ fn owner_validation() {
             source.as_os_str(),
             repo.as_os_str(),
             std::ffi::OsStr::new(op),
+            source.join("bin/oms").as_os_str(),
         ])
+        .env("PATH", "")
         .env("OMS_HARNESS_CHILD", "0")
         .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
         .output()
@@ -1947,6 +1960,275 @@ fn owner_validation() {
     bad(
         &serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         "not configured",
+    );
+}
+struct Recorder(std::sync::Mutex<Vec<(Vec<String>, PathBuf)>>);
+impl CommandExecutor for Recorder {
+    fn execute(&self, r: &CommandRequest<'_>) -> Result<Captured, String> {
+        let argv = r
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        self.0.lock().unwrap().push((argv, r.cwd.to_owned()));
+        Ok(Captured::from_output(0, b"{\"ok\":true}\n", b""))
+    }
+}
+// Every fixed-argv tool must reach the injected executor: the source root has
+// no launcher and no program is spawned, so any subprocess attempt fails.
+fn executor_injection() {
+    let t = Temp::new();
+    let source = t.0.join("bare");
+    std::fs::create_dir(&source).unwrap();
+    let repo = t.repo();
+    let flag = AtomicBool::new(false);
+    let rec = std::sync::Arc::new(Recorder(Default::default()));
+    let mut server =
+        Server::with_executor(&source, &repo, &flag, config(true, false), rec.clone()).unwrap();
+    let rows: Value = serde_json::from_str(include_str!("fixed-argv.json")).unwrap();
+    for (i, row) in rows.as_array().unwrap().iter().enumerate() {
+        let out = server
+            .handle(&json!({"id":i,"method":"tools/call","params":{"name":row["name"],"arguments":row["arguments"]}}))
+            .unwrap();
+        let out: Value = serde_json::from_str(&out.to_string()).unwrap();
+        good(&out);
+        let seen = rec.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(json!(seen.0), row["argv"], "{}", row["name"]);
+        assert_eq!(seen.1, repo.canonicalize().unwrap());
+    }
+    assert_eq!(rec.0.lock().unwrap().len(), rows.as_array().unwrap().len());
+}
+fn clear_python(c: &mut Command) -> &mut Command {
+    c.env_remove("PYTHONUTF8").env_remove("PYTHONIOENCODING")
+}
+fn exec_file(dir: &Path, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    let p = dir.join("oms");
+    std::fs::copy(std::env::current_exe().unwrap(), &p).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+    p
+}
+// Pinned native program: no Python setting reaches it even when inherited, and
+// an invalid pin is refused rather than skipped to another candidate.
+fn native_program_has_no_python_env() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    let exe = std::env::current_exe().unwrap();
+    let out = clear_python(
+        Command::new(&exe)
+            .args(["--resolve-run"])
+            .arg(&source)
+            .arg(&repo),
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let r: Value =
+        serde_json::from_slice(&std::fs::read(source.join("last-call.json")).unwrap()).unwrap();
+    assert_eq!(r["utf8"], "");
+    let flag = AtomicBool::new(false);
+    let mut cfg = config(false, false);
+    for bad in ["relative/oms", "missing/oms"] {
+        cfg.oms_program = Some(PathBuf::from(bad));
+        assert!(
+            Server::new(&source, &repo, &flag, cfg.clone()).is_err(),
+            "{bad}"
+        );
+    }
+    let plain = t.0.join("plain");
+    std::fs::write(&plain, "x").unwrap();
+    cfg.oms_program = Some(plain);
+    assert!(Server::new(&source, &repo, &flag, cfg.clone()).is_err());
+    assert!(SubprocessExecutor::with_program(PathBuf::from("oms")).is_err());
+}
+// Resolution runs in a child with a controlled PATH and cwd (no globals here).
+fn resolve_child(cwd: &Path, path: &str, pin: Option<&Path>, owner: &Path) -> String {
+    let mut c = Command::new(std::env::current_exe().unwrap());
+    c.arg("--resolve")
+        .arg(owner)
+        .current_dir(cwd)
+        .env("PATH", path);
+    if let Some(p) = pin {
+        c.arg(p);
+    }
+    let out = clear_python(&mut c).output().unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+fn resolution_trust() {
+    let t = Temp::new();
+    let work = t.0.join("work");
+    std::fs::create_dir(&work).unwrap();
+    let repo_oms = exec_file(&work, 0o755);
+    let owner_dir = t.0.join("owner");
+    std::fs::create_dir(&owner_dir).unwrap();
+    let owner = owner_dir.join("oms-mcp-peer-owner");
+    std::fs::write(&owner, "x").unwrap();
+    // Workspace shape: an `oms` sits beside the owner, but the pin wins.
+    let sibling = exec_file(&owner_dir, 0o755);
+    let pin = exec_file(&t.0.join("pin"), 0o755);
+    assert_eq!(
+        resolve_child(&work, "", Some(&pin), &owner),
+        format!("{}\n", pin.display())
+    );
+    assert_eq!(
+        resolve_child(&work, "", None, &owner),
+        format!("{}\n", sibling.display())
+    );
+    // Relative owner and relative PATH entries never reach the repo's `oms`.
+    let rel_owner = resolve_child(&work, "", None, Path::new("oms-mcp-peer-owner"));
+    assert!(rel_owner.starts_with("error"), "{rel_owner}");
+    for path in [".", "", "relative"] {
+        let got = resolve_child(&work, path, None, Path::new("rel/owner"));
+        assert!(got.starts_with("error"), "{path:?}: {got}");
+    }
+    assert!(repo_oms.is_file());
+    // A 0644 `oms` earlier on PATH is skipped for a later executable one.
+    let (noexec, good_dir) = (t.0.join("a"), t.0.join("b"));
+    exec_file(&noexec, 0o644);
+    let later = exec_file(&good_dir, 0o755);
+    let path = format!("{}:{}", noexec.display(), good_dir.display());
+    assert_eq!(
+        resolve_child(&work, &path, None, Path::new("rel/owner")),
+        format!("{}\n", later.display())
+    );
+    // Nothing usable: a clear error, never a bare `oms` fallback.
+    let only = format!("{}", noexec.display());
+    let got = resolve_child(&work, &only, None, Path::new("rel/owner"));
+    assert!(got.contains("native oms executable not found"), "{got}");
+    // A pin that is not executable is refused even with a good sibling.
+    let bad = exec_file(&t.0.join("bad"), 0o644);
+    assert!(resolve_child(&work, "", Some(&bad), &owner).starts_with("error"));
+}
+// Server::new with only PATH (no pin, no launcher) resolves and runs a native
+// `oms` with no Python variables.
+fn path_resolution_runs_native() {
+    let t = Temp::new();
+    let source = t.0.join("bare");
+    std::fs::create_dir(&source).unwrap();
+    let repo = t.repo();
+    let bin = t.0.join("pathbin");
+    std::fs::create_dir(&bin).unwrap();
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join("oms")).unwrap();
+    let out = clear_python(
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--path-run")
+            .arg(&source)
+            .arg(&repo)
+            .env("PATH", &bin),
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+}
+// Unresolvable oms: oms_peer_start refuses before any `.oms/` state exists, and
+// a directly launched owner never publishes `pid`.
+fn start_refusal_before_mutation() {
+    let t = Temp::new();
+    let source = t.0.join("bare");
+    std::fs::create_dir(&source).unwrap();
+    let repo = t.repo();
+    let exe = std::env::current_exe().unwrap();
+    let empty = t.0.join("emptybin");
+    std::fs::create_dir(&empty).unwrap();
+    for (mode, path) in [("bad", ""), ("none", empty.to_str().unwrap())] {
+        let out = clear_python(
+            Command::new(&exe)
+                .args(["--start-refused"])
+                .arg(&source)
+                .arg(&repo)
+                .arg(mode),
+        )
+        .env("PATH", path)
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .output()
+        .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && text.contains("\"isError\":true"),
+            "{mode}: {out:?}"
+        );
+        assert!(text.contains("oms"), "{text}");
+        assert!(
+            !repo.join(".oms").exists(),
+            "{mode}: state created before refusal"
+        );
+    }
+    let (source, repo) = (t.source(), t.0.join("repo2"));
+    std::fs::create_dir(&repo).unwrap();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner"));
+    let valid = json!({"kind":"consult","targets":[],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}});
+    // An unpinned owner may legitimately find a sibling `oms` in a workspace build,
+    // so only invalid pins are discriminating here.
+    for (i, pin) in [Some("relative/oms"), Some("/nonexistent/oms")]
+        .into_iter()
+        .enumerate()
+    {
+        let op = format!("consult-20200101T000000Z-{:08x}", 0xa0 + i);
+        let dir = run_dir(&repo, &op, json!({}), None);
+        std::fs::write(dir.join("launch.json"), valid.to_string()).unwrap();
+        let mut c = Command::new(&binary);
+        c.args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            std::ffi::OsStr::new(&op),
+        ]);
+        if let Some(p) = pin {
+            c.arg(p);
+        }
+        let out = c
+            .env("PATH", "")
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            !dir.join("pid").exists(),
+            "pid published before oms resolved"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("status")).unwrap(), "1\n");
+    }
+}
+// With no pin and no sibling, the server forwards its own resolved `oms`.
+fn start_forwards_resolved_oms() {
+    let t = Temp::new();
+    let source = t.0.join("bare");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("fixture-owner"), "x").unwrap();
+    let repo = t.repo();
+    let bin = t.0.join("pathbin");
+    let program = exec_file(&bin, 0o755);
+    let out = clear_python(
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--forward-run")
+            .arg(&source)
+            .arg(&repo),
+    )
+    .env("PATH", &bin)
+    .env("OMS_HARNESS_CHILD", "0")
+    .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let runs = repo.join(".oms/artifacts/mcp");
+    let op = std::fs::read_dir(&runs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let recorded = std::fs::read_to_string(op.join("owner-args")).unwrap();
+    assert_eq!(
+        recorded.lines().nth(3),
+        Some(program.to_str().unwrap()),
+        "{recorded}"
     );
 }
 fn fake_oms() {
@@ -2034,7 +2316,8 @@ fn command_interruption() {
     let flag = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let waiter = scope.spawn(|| {
-            let mut s = Server::new(&source, &repo, &flag, config(false, false)).unwrap();
+            let mut s =
+                Server::new(&source, &repo, &flag, pinned(&source, config(false, false))).unwrap();
             s.handle(&json!({"id":1,"method":"tools/call","params":{"name":"oms_inbox"}}))
                 .unwrap()
         });
@@ -2058,16 +2341,43 @@ fn main() {
         fake_oms();
         return;
     }
-    if args.len() == 4 && Path::new(&args[1]).join("fixture-owner").is_file() {
+    if (4..=5).contains(&args.len()) && Path::new(&args[1]).join("fixture-owner").is_file() {
         let dir = Path::new(&args[2])
             .join(".oms/artifacts/mcp")
             .join(&args[3]);
+        let owner_args: Vec<_> = args[1..].iter().map(|a| a.to_string_lossy()).collect();
+        std::fs::write(dir.join("owner-args"), owner_args.join("\n")).unwrap();
         std::fs::write(dir.join("status"), "0\n").unwrap();
         std::fs::write(dir.join("pid"), format!("{}\n", std::process::id())).unwrap();
         return;
     }
+    if args.get(1).is_some_and(|a| a == "--forward-run") {
+        // ARGS: --forward-run SOURCE REPO; no pin, so the server resolves `oms`.
+        let flag = AtomicBool::new(false);
+        let mut cfg = config(false, true);
+        cfg.peer_owner = std::env::current_exe().unwrap();
+        let mut s = Server::new(Path::new(&args[2]), Path::new(&args[3]), &flag, cfg).unwrap();
+        let v = s.handle(&json!({"id":1,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"kind":"consult","prompt":"q"}}})).unwrap();
+        println!("{v}");
+        return;
+    }
+    if args.get(1).is_some_and(|a| a == "--start-refused") {
+        // ARGS: --start-refused SOURCE REPO MODE; hosts embed their own executor.
+        let flag = AtomicBool::new(false);
+        let mut cfg = config(false, true);
+        // deps/ holds no sibling `oms`, even after a workspace build.
+        cfg.peer_owner = std::env::current_exe().unwrap();
+        cfg.oms_program = (args[4] == "bad").then(|| PathBuf::from("relative/oms"));
+        let rec = std::sync::Arc::new(Recorder(Default::default()));
+        let mut s =
+            Server::with_executor(Path::new(&args[2]), Path::new(&args[3]), &flag, cfg, rec)
+                .unwrap();
+        let v = s.handle(&json!({"id":1,"method":"tools/call","params":{"name":"oms_peer_start","arguments":{"kind":"ask","prompt":"q"}}})).unwrap();
+        println!("{v}");
+        return;
+    }
     if args.get(1).is_some_and(|a| a == "--missing-owner") {
-        let mut cfg = config(false, false);
+        let mut cfg = pinned(Path::new(&args[2]), config(false, false));
         cfg.peer_owner = PathBuf::from("missing");
         let flag = AtomicBool::new(false);
         let mut server = Server::new(Path::new(&args[2]), Path::new(&args[3]), &flag, cfg).unwrap();
@@ -2080,6 +2390,49 @@ fn main() {
         }
         return;
     }
+    if args.get(1).is_some_and(|a| a == "--resolve") {
+        // ARGS: --resolve OWNER [PIN]
+        let pin = args.get(3).map(PathBuf::from);
+        match oms_mcp_server::SubprocessExecutor::resolve(pin.as_deref(), Path::new(&args[2])) {
+            Ok(e) => println!("{}", e.program().display()),
+            Err(e) => print!("{e}"),
+        }
+        return;
+    }
+    if args.get(1).is_some_and(|a| a == "--resolve-run") {
+        let flag = AtomicBool::new(false);
+        let mut s = Server::new(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            &flag,
+            pinned(Path::new(&args[2]), config(false, false)),
+        )
+        .unwrap();
+        let v = s
+            .handle(
+                &json!({"id":1,"method":"tools/call","params":{"name":"oms_inbox","arguments":{}}}),
+            )
+            .unwrap();
+        good(&serde_json::from_str(&v.to_string()).unwrap());
+        return;
+    }
+    if args.get(1).is_some_and(|a| a == "--path-run") {
+        let flag = AtomicBool::new(false);
+        let mut cfg = config(false, false);
+        // No sibling `oms` (a workspace build puts one beside the owner).
+        cfg.peer_owner = PathBuf::from("/nonexistent/owner");
+        let mut s = Server::new(Path::new(&args[2]), Path::new(&args[3]), &flag, cfg).unwrap();
+        let v = s
+            .handle(
+                &json!({"id":1,"method":"tools/call","params":{"name":"oms_inbox","arguments":{}}}),
+            )
+            .unwrap();
+        good(&serde_json::from_str(&v.to_string()).unwrap());
+        let rec = Path::new(&args[2]).parent().unwrap().join("last-call.json");
+        let r: Value = serde_json::from_slice(&std::fs::read(rec).unwrap()).unwrap();
+        assert_eq!(r["utf8"], "");
+        return;
+    }
     if args.get(1).is_some_and(|a| a == "--exit") {
         return;
     }
@@ -2087,7 +2440,7 @@ fn main() {
         let flag = AtomicBool::new(false);
         let full = args[4] == "full";
         let tasks = args[5] == "1";
-        let mut fixture_config = config(full, tasks);
+        let mut fixture_config = pinned(Path::new(&args[2]), config(full, tasks));
         if Path::new(&args[2]).join("fixture-owner").is_file() {
             fixture_config.peer_owner = std::env::current_exe().unwrap();
         }
@@ -2102,7 +2455,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 21] = [
+    let cases: [(&str, fn()); 27] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -2124,6 +2477,18 @@ fn main() {
         ("peer_start_threads", peer_start_threads),
         ("peer_exchange_repo_argv", peer_exchange_repo_argv),
         ("peer_detached_cancel", peer_detached_cancel),
+        ("executor_injection", executor_injection),
+        (
+            "native_program_has_no_python_env",
+            native_program_has_no_python_env,
+        ),
+        ("resolution_trust", resolution_trust),
+        (
+            "start_refusal_before_mutation",
+            start_refusal_before_mutation,
+        ),
+        ("start_forwards_resolved_oms", start_forwards_resolved_oms),
+        ("path_resolution_runs_native", path_resolution_runs_native),
     ];
     let mut failed = 0;
     for (name, test) in cases {
@@ -2144,6 +2509,7 @@ fn main() {
     let source = t.source();
     let repo = t.repo();
     let flag = AtomicBool::new(false);
-    let mut server = Server::new(&source, &repo, &flag, config(false, false)).unwrap();
+    let mut server =
+        Server::new(&source, &repo, &flag, pinned(&source, config(false, false))).unwrap();
     assert!(server.handle(&json!({"method":"ping"})).is_none());
 }

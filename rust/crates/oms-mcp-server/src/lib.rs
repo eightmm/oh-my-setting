@@ -7,14 +7,15 @@
 #[macro_use]
 pub mod value;
 mod command;
+pub use command::{Captured, CommandExecutor, CommandRequest, SubprocessExecutor};
 mod peer;
 mod storage;
 
 use crate::value::{Text, Value};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 pub(crate) const OUTPUT_LIMIT: usize = 60_000;
@@ -58,6 +59,9 @@ pub struct Config {
     /// Trusted private executable invoking [`peer_owner`] with its OS arguments.
     /// This is a bundled native helper, never an arbitrary command from a client.
     pub peer_owner: PathBuf,
+    /// Absolute native `oms` executable pinned by the host. When set it is the
+    /// only program MCP verbs and the peer owner run; no search is attempted.
+    pub oms_program: Option<PathBuf>,
 }
 impl Config {
     pub fn from_env(peer_owner: PathBuf) -> Result<Self, &'static str> {
@@ -70,6 +74,7 @@ impl Config {
             profile,
             tasks_extension: std::env::var("OMS_MCP_TASKS_EXTENSION").as_deref() == Ok("1"),
             peer_owner,
+            oms_program: None,
         })
     }
 }
@@ -227,6 +232,7 @@ pub struct Server<'a> {
     pub(crate) caller_cwd: PathBuf,
     pub(crate) interrupted: &'a AtomicBool,
     pub(crate) config: Config,
+    pub(crate) executor: Arc<dyn CommandExecutor>,
     protocol: &'static str,
     info: Value,
     definitions: Value,
@@ -237,6 +243,20 @@ impl<'a> Server<'a> {
         caller_cwd: &Path,
         interrupted: &'a AtomicBool,
         config: Config,
+    ) -> io::Result<Self> {
+        let executor = Arc::new(
+            SubprocessExecutor::resolve(config.oms_program.as_deref(), &config.peer_owner)
+                .map_err(io::Error::other)?,
+        );
+        Self::with_executor(source_root, caller_cwd, interrupted, config, executor)
+    }
+    /// Like [`Server::new`], with the host supplying how OMS verbs run.
+    pub fn with_executor(
+        source_root: &Path,
+        caller_cwd: &Path,
+        interrupted: &'a AtomicBool,
+        config: Config,
+        executor: Arc<dyn CommandExecutor>,
     ) -> io::Result<Self> {
         let source_root = source_root.canonicalize()?;
         let caller_cwd = caller_cwd.canonicalize()?;
@@ -251,6 +271,7 @@ impl<'a> Server<'a> {
             caller_cwd,
             interrupted,
             config,
+            executor,
             protocol: FALLBACK,
             info: json!({"name":"oh-my-setting","version":version.trim_matches(crate::whitespace)}),
             definitions,
@@ -500,6 +521,28 @@ pub fn serve<R: BufRead, W: Write>(
     config: Config,
 ) -> io::Result<()> {
     let mut server = Server::new(source_root, caller_cwd, interrupted, config)?;
+    serve_server(&mut server, interrupted, reader, writer)
+}
+/// [`serve`] with a host-supplied [`CommandExecutor`] (for example an
+/// in-process router that never spawns a child).
+pub fn serve_with_services<R: BufRead, W: Write>(
+    source_root: &Path,
+    caller_cwd: &Path,
+    interrupted: &AtomicBool,
+    reader: &mut R,
+    writer: &mut W,
+    config: Config,
+    executor: Arc<dyn CommandExecutor>,
+) -> io::Result<()> {
+    let mut server = Server::with_executor(source_root, caller_cwd, interrupted, config, executor)?;
+    serve_server(&mut server, interrupted, reader, writer)
+}
+fn serve_server<R: BufRead, W: Write>(
+    server: &mut Server<'_>,
+    interrupted: &AtomicBool,
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<()> {
     loop {
         if interrupted.load(Ordering::Relaxed) {
             break;
@@ -562,7 +605,9 @@ pub fn serve<R: BufRead, W: Write>(
 }
 
 /// Private native owner entry, for a bundled executable only. Arguments are
-/// exactly SOURCE_ROOT, REPO, OPERATION; no command strings or launch modes.
+/// SOURCE_ROOT, REPO, OPERATION and an optional OMS_PROGRAM (the absolute native
+/// `oms` the server resolved); no command strings or launch modes. Without
+/// OMS_PROGRAM the owner resolves `oms` itself and fails before publishing `pid`.
 pub fn peer_owner(arguments: &[std::ffi::OsString]) -> io::Result<()> {
     peer::owner(arguments)
 }

@@ -533,6 +533,11 @@ impl Server<'_> {
         if !self.config.peer_owner.is_absolute() || !self.config.peer_owner.is_file() {
             return Err("error: native MCP peer owner is not configured; the embedding executable must bundle the private owner entry".into());
         }
+        // Fail closed before any `.oms/` state exists when no native oms resolves.
+        let oms_bin = crate::command::resolve_oms(
+            self.config.oms_program.as_deref(),
+            &self.config.peer_owner,
+        )?;
         let mut random = [0u8; 4];
         File::open("/dev/urandom")
             .and_then(|mut f| f.read_exact(&mut random))
@@ -610,6 +615,7 @@ impl Server<'_> {
                 self.source_root.as_os_str(),
                 repo.as_os_str(),
                 std::ffi::OsStr::new(&op),
+                oms_bin.as_os_str(),
             ])
             .current_dir(&repo)
             .env(
@@ -1114,9 +1120,9 @@ fn answer_page(repo: &Path, op: &str, args: &Value, code: i64) -> ToolResult {
 }
 
 pub(crate) fn owner(arguments: &[OsString]) -> io::Result<()> {
-    if arguments.len() != 3 {
+    if !(3..=4).contains(&arguments.len()) {
         return Err(io::Error::other(
-            "private owner requires source, repository and operation",
+            "private owner requires source, repository, operation and optional oms program",
         ));
     }
     if delegated() {
@@ -1124,7 +1130,7 @@ pub(crate) fn owner(arguments: &[OsString]) -> io::Result<()> {
             "delegated worker cannot own a peer launch",
         ));
     }
-    let source = PathBuf::from(&arguments[0]).canonicalize()?;
+    PathBuf::from(&arguments[0]).canonicalize()?;
     let repo = PathBuf::from(&arguments[1]).canonicalize()?;
     let op = arguments[2]
         .to_str()
@@ -1138,17 +1144,21 @@ pub(crate) fn owner(arguments: &[OsString]) -> io::Result<()> {
         return Err(io::Error::other("operation already has an owner"));
     }
     rustix::process::setsid()?;
-    let result = owner_run(&source, &repo, op, &dir);
+    let pin = arguments.get(3).map(PathBuf::from);
+    let result = owner_run(pin.as_deref(), &repo, op, &dir);
     if let Err(e) = &result {
         eprintln!("error: native peer owner: {e}");
         let _ = dir.atomic("status", b"1\n");
     }
     result
 }
-fn owner_run(source: &Path, repo: &Path, op: &str, dir: &Directory) -> io::Result<()> {
+fn owner_run(pin: Option<&Path>, repo: &Path, op: &str, dir: &Directory) -> io::Result<()> {
     fn fail(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
         io::Error::other(e)
     }
+    // Resolve before any running-state file: `pid` means the launch is viable.
+    let program = crate::command::resolve_oms(pin, &std::env::current_exe().unwrap_or_default())
+        .map_err(fail)?;
     let launch: Value = crate::value::from_slice(
         &storage::read_run(&dir.path, "launch.json", 128 * 1024).map_err(fail)?,
     )
@@ -1283,11 +1293,9 @@ fn owner_run(source: &Path, repo: &Path, op: &str, dir: &Directory) -> io::Resul
     }
     dir.atomic("pid", format!("{}\n", std::process::id()).as_bytes())
         .map_err(fail)?;
-    let mut child = Command::new(source.join("scripts/oms"))
+    let mut child = Command::new(program)
         .args(argv)
         .current_dir(repo)
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUTF8", "1")
         .env("OMS_PEER_CANCEL_DIR", &dir.path)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
