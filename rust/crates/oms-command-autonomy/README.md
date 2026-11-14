@@ -1,0 +1,117 @@
+# oms-command-autonomy
+
+Native command adapter and orchestration domain for `intent`, `plan-from-spec`,
+`plan-run`, `autopilot`, `goal-drive`, and the write-free `install-plan` helper.
+This is a standalone Rust 2024 workspace with a Rust 1.99.1 floor. Integration
+into the root dispatcher is deliberately outside this crate's write scope.
+
+The library does not invoke a shell/Python implementation of an OMS command.
+Acceptance and campaign verifier commands explicitly supplied by a contract
+remain executable shell programs, run through native bounded supervision.
+
+## Entry points and host wiring
+
+`owns(tool: &str, args: &[OsString]) -> bool` classifies all six command families,
+including malformed arguments and help, without filesystem access.
+
+`run(tool, args, cwd, interrupted) -> (i32, Vec<u8>, Vec<u8>)` supplies the local
+read-only projections and native supervisor adapter. Provider-dependent work
+refuses when its required service is unavailable.
+
+`run_with_services(tool, args, cwd, interrupted, services)` is the host adapter.
+Arguments exclude the public verb. File arguments resolve against `cwd`;
+source-file intake resolves against the selected repository. `Services` extends
+[`oms-command-plan::Services`](../oms-command-plan/src/services.rs), retaining
+that producer's approval, lifecycle, room, publication and acceptance interfaces.
+
+| Hook | Required host behavior |
+| --- | --- |
+| `work_repository`, `state_repository` | Resolve physical execution and canonical state roots, including managed scratch checkouts. |
+| `resolve_route` | Return the native registry's exact `ModelRoute` without a provider call. Its class, primary/fallback and effort fields bind unchanged-failure identity. |
+| `invoke` | Dispatch the requested native OMS command and preserve exit/stdout/stderr. Honor the invocation's cwd, environment, wall and output bounds. Never fall back to a script backend. |
+| `validate_context_pack` | Validate the typed graph orientation pack before any task claim. The pack grants no scope. |
+| `provider_names` | Return canonical transport names for campaign manifest validation. Local defaults cover Codex, Claude and Antigravity. |
+| `read_issue` | One bounded GitHub GET, without linked-content traversal. The local implementation uses `gh api` with a 20-second, 512-KiB bound. |
+| `discovery_section` | Supply native metrics, review and CI projections. Missing sections carry explicit incomplete coverage. |
+| `observe_journal` | Forward durable goal/autopilot observations to the existing native Work Journal producer; observation failures do not replace canonical outcomes. |
+| inherited plan services | Supply native approval records, producer locks/projections, acceptance execution, controller identity, and publication products where those plan operations require them. |
+
+`services::invoke_binary` supports a host-supplied native binary prefix, usually
+the current `oms` executable. It passes argv without a shell, propagates
+interruptions, and enforces byte/deadline bounds. Its private whole-tree reactor
+requires exclusive Linux child ownership. A multithreaded host, an existing
+supervisor owner, or a macOS host must inject its supported native execution
+service rather than silently degrading containment. `LocalServices::new` borrows
+the caller's interruption flag.
+
+The invocation producer supplies canonical state, goal run/cycle and autopilot
+owner labels as child environment entries. Role timeouts also reach provider
+commands through their existing timeout environment interface. Services are
+trusted host integrations; no CLI argument selects an alternate backend.
+
+## Modules and authority
+
+| Module | Responsibility |
+| --- | --- |
+| `cli`, `lib` | Strict option parsing, public family routing, buffered output and exit codes. |
+| `value`, `storage` | Duplicate-key refusal, native canonical JSON/digests, descriptor-relative reads, CAS writes, locks and durable JSONL through existing crates. |
+| `contract` | Shared adoption/planning acceptance parser, required verifier inputs, scope defaults, stable criteria, section budgets and Roadmap milestones. |
+| `intent` | Pinned file/issue source intake; draft/show/adopt/amend; candidate snapshots, pre-passing-check refusal, predecessor archives and amendment recovery. |
+| `planning` | Provider/council decomposition, proposal validation, scope/dependency checks, advisory waves/size and native atomic proposal apply. |
+| `discovery` | Bounded evidence packets and candidate filtering. Speculative, duplicate, rejected-hypothesis and unresolved findings cannot become tasks. Current tracked source citations are checked without executing target code. |
+| `selectors`, `verify` | Static suite selectors, verifier-base preconditions, existing native floor lint, acceptance reuse identity and receipt freshness. |
+| `runner` | One task, reviewed assignment, exact lease, failure-ledger preflight, isolated delegation, explicit patch landing and one durable same-lease repair. |
+| `goal` | Fresh acceptance, vacuity/stall checks, lifetime cycle reservations, serial landing and exact-tree Git publication with restartable commit intents. |
+| `receipt` | Schema-1 frozen autopilot receipts, exact proposal approval, parked/exhausted refusal, reentry/shadow evidence, one durable remainder reservation, semantic review and optional Draft PR producer calls. |
+| `campaign` | Digest-bound campaign manifests, locked lifetime reservations/settlements, bounded candidate artifacts, isolated verification, consolidation and double-verified handoff evidence. Execution is serial within the declared concurrency ceilings. |
+| `advisory`, `handoff`, `conflicts` | Lifecycle overlays, stall/repair projections, baseline and allocation arithmetic, mechanical handoffs, pickup markers and read-only pairwise conflict previews. These observations grant no authority. |
+| `install` | Preview calls to the owning native installation producers; unavailable previews print `not-previewed`. No install or provider-registration command is run. |
+
+Completion, approval, cancellation, proposal SHA/CAS enforcement, acceptance
+receipts and retirement remain owned by `oms-command-plan::Plan::execute`.
+The crate reexports native completion/decision/retirement APIs, task packet and
+consumer APIs, task verification observations/fingerprints, and work-inspection
+projections instead of creating alternate authorities for those records.
+
+## Durable effects and interruption
+
+Contract, plan and orchestration mutations require the native parent guard.
+Advisory handoff pickup records confer no authority. Records and source paths are
+read without following symlinks; existing ownership and permission checks remain
+in the shared stores. Proposal apply requires the exact lowercase SHA-256 before
+any apply, followed by the plan producer's locked digest/CAS check.
+
+| Written paths or objects | Concurrent call and interruption behavior |
+| --- | --- |
+| `.oms/intents/*.md`, provenance and amendment bindings | Unique immutable publication prevents clobbering. A stop between paired files can leave an orphan candidate/binding; it grants no adoption or execution authority. |
+| `PROJECT.md`, intent archives, publication intents, `amendments.jsonl` | Receipt/intake locks and exact predecessor bytes fence publication. Archive and publication intent precede replacement. A stop after replacement can be reconciled from the exact publication intent without repeating acceptance or losing the predecessor. A partial ledger append refuses mutation until reconciled. |
+| Proposal, discovery and candidate-report files | Unique immutable artifacts are published only after validation. Generated proposals never apply themselves; missing review authority refuses. |
+| `.oms/plan/tasks.json` and native plan records | The native plan producer owns locks, CAS and replay. A failed worker cleanup releases only this call's exact active lease. Review/repair evidence and another claimant's lease are preserved. |
+| `progress.jsonl`, frozen commit patches, Git objects/ref/index | Attempts are recorded before calls. Frozen patches precede commit intents. A standard exclusive `index.lock` fences immutable-tree publication through expected-old ref CAS and exact index synchronization. A stop after ref publication retains an open intent for parent/tree reconciliation. A hard kill can leave Git's lock: it is never stolen automatically. Unreferenced objects and orphan immutable patches confer no publication authority. |
+| `autopilot-run.json`, archives, abandonment/approval/reentry/shadow/replan records | A foreground controller lock serializes native controllers, with exact receipt-byte CAS. Frozen fields cannot change. Archive/retirement evidence precedes removal. Parked receipts cannot silently resume; cycle and sole-remainder reservations survive restart. Reentry uses native dead-owner lease recovery. |
+| Campaign manifest, `events.jsonl`, artifacts and handoff | Manifest bytes bind the directory digest. A controller lock and ledger lock serialize mutations. Reservations remain spent after a kill; unsettled reservations become abandoned under the next controller, never refunded. Candidate/handoff publication is immutable. Solved/stopped ledgers do not restart. |
+| Temporary indices, merge object directories and candidate checkouts | Private indices/merge objects are removed on ordinary exit. Hard-kill leftovers grant no ref/index authority. Managed candidate checkout creation/removal belongs to the injected native scratch producer and its ownership records. |
+| `.oms/handoffs/consumed.jsonl` | Advisory pickup records use the shared durable writer under a file lock. Distinct sessions are counted by projection. No pickup hides a handoff or grants resume authority. |
+| Work Journal | The existing producer owns its files, deduplication and locks. Observation failure does not undo a completed canonical operation. |
+
+## Verification phase
+
+Implementation verification is intentionally limited to:
+
+```text
+cargo +1.99.1 check --manifest-path rust/crates/oms-command-autonomy/Cargo.toml --all-targets --offline
+cargo +1.99.1 fmt --manifest-path rust/crates/oms-command-autonomy/Cargo.toml -- --check
+```
+
+Runtime tests, cross-provider execution, native macOS execution, fault injection
+and end-to-end compatibility have not been established in this phase. This
+crate is not wired into the root workspace, dispatcher, migration contracts or
+installation. Owning integration must supply and exercise the native services
+before selecting this command family for live orchestration.
+
+The existing compatibility sources remain the shell front doors under
+[`scripts`](../../../scripts), with behavioral coverage in
+[`autonomy-plan-run-smoke.sh`](../../../tests/autonomy-plan-run-smoke.sh),
+[`autopilot-smoke.sh`](../../../tests/autopilot-smoke.sh), and the existing
+operator/context suites. Those sources were inspected; their tests were not
+run under the implementation-only brief.
