@@ -8,6 +8,8 @@ rust-version = "1.99.1"
 oms-context = { path = "../oms-context" }
 oms-safe-fs = { path = "../oms-safe-fs" }
 oms-json = { path = "../oms-json" }
+oms-lock = { path = "../oms-lock" }
+sha2 = "=0.10.9"
 chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 regex = "=1.13.1"
 rustix = { version = "=1.1.6", features = ["fs"] }

@@ -148,6 +148,8 @@ pub(crate) struct Metrics {
     pub model: Option<V>,
     pub cost: Option<f64>,
     pub ambiguous: bool,
+    pub served_model: Option<V>,
+    pub configured_model: Option<V>,
 }
 pub(crate) fn complete(detail: &V) -> bool {
     USAGE.iter().all(|k| detail[k].int().is_some())
@@ -251,6 +253,12 @@ pub(crate) fn metrics(repo: &Path, row: &V) -> Result<Metrics, String> {
         || configured.len() > 1
         || (!models.is_empty() && !configured.is_empty() && models != configured)
         || row["model_attribution"].text() == Some("ambiguous");
+    if !result.ambiguous {
+        result.served_model = models.iter().next().cloned().map(V::Str);
+        if result.served_model.is_none() {
+            result.configured_model = configured.iter().next().cloned().map(V::Str);
+        }
+    }
     if !result.ambiguous {
         result.model = models
             .into_iter()

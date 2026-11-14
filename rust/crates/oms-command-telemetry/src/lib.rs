@@ -4,6 +4,7 @@ mod diagnostic;
 mod emit;
 mod metrics;
 mod report;
+pub mod store;
 mod time;
 mod value;
 
