@@ -275,7 +275,7 @@ fn row_check(encoded: &[u8]) -> Result<(), StoreError> {
     row(encoded).map(|_| ())
 }
 
-fn payload(root: &Root, repo: &Path, path: &Path) -> Result<Vec<u8>, StoreError> {
+pub(super) fn payload(root: &Root, repo: &Path, path: &Path) -> Result<Vec<u8>, StoreError> {
     if let Ok(target) = paths::target(root, repo, path) {
         paths::validate(root, &target, false)?;
         return Ok(root.read_path(

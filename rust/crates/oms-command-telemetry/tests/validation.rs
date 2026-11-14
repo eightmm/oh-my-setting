@@ -18,7 +18,7 @@ fn rejects_invalid_options_and_corrupt_index() {
     assert_eq!(call(&[]).0, 0);
     assert_eq!(call(&["--top", "0"]).0, 2);
     assert_eq!(call(&["--top", "101"]).0, 2);
-    assert_eq!(call(&["--by", "day", "--waste"]).0, 75);
+    assert_eq!(call(&["--by", "day", "--waste"]).0, 2);
     fs::write(
         root.join(".oms/artifacts/index.jsonl"),
         b"{\"kind\":\"call\"}",

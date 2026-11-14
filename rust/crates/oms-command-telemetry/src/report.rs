@@ -14,7 +14,8 @@ const CLASSES: [&str; 6] = [
     "deep",
 ];
 const EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
-const EMPTY_DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+pub(crate) const EMPTY_DIGEST: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const USAGE: [&str; 3] = ["input_tokens", "cache_read_tokens", "output_tokens"];
 fn label(value: &V, fallback: &str) -> Vec<u8> {
     value
@@ -142,7 +143,7 @@ fn admission_digest(v: &V) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
     })
 }
-fn resolved(rows: &[V]) -> BTreeSet<Vec<u8>> {
+pub(crate) fn resolved(rows: &[V]) -> BTreeSet<Vec<u8>> {
     let mut entries = BTreeMap::<Vec<u8>, Vec<(usize, &V)>>::new();
     for (pos, row) in rows.iter().enumerate() {
         if let Some(id) = row["event_id"].bytes() {
@@ -601,6 +602,10 @@ pub(crate) fn report(
         }
         report["repair_replay"] = obj!("recorded":traces.len(),"delegations_seen":delegates.len(),"selected":selected,"policy_counts":counts,"early_stops":early,
             "basis":"historical-prefix replay; not proof of future success","cost_basis":"worker attempts only; not measured token or wall-clock savings");
+    }
+    if options.waste {
+        report["waste"] =
+            crate::waste::report(root, selected, rows, &admitted, options.top, interrupted)?;
     }
     Ok(report)
 }

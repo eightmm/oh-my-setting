@@ -230,6 +230,36 @@ pub fn delete_orphans(
     grace: i64,
     interrupted: &AtomicBool,
 ) -> Result<OrphanReport, StoreError> {
+    sweep_orphans(
+        repo,
+        index,
+        kept_body,
+        kept_body,
+        dry_run,
+        grace,
+        interrupted,
+    )
+}
+pub(super) fn plan_orphans(
+    repo: &Path,
+    index: Option<&Path>,
+    expected: &[u8],
+    kept: &[u8],
+    grace: i64,
+    interrupted: &AtomicBool,
+) -> Result<OrphanReport, StoreError> {
+    sweep_orphans(repo, index, expected, kept, true, grace, interrupted)
+}
+#[allow(clippy::too_many_arguments)]
+fn sweep_orphans(
+    repo: &Path,
+    index: Option<&Path>,
+    expected: &[u8],
+    kept_body: &[u8],
+    dry_run: bool,
+    grace: i64,
+    interrupted: &AtomicBool,
+) -> Result<OrphanReport, StoreError> {
     if grace < 0 {
         return Err(StoreError::Invalid("orphan grace must be non-negative"));
     }
@@ -245,7 +275,7 @@ pub fn delete_orphans(
             max_bytes: MAX_INPUT_BYTES,
         },
     )?;
-    if current != kept_body {
+    if current != expected {
         return Err(StoreError::Changed);
     }
     let Some(completion_refs) = completion_references(root.physical_root()) else {

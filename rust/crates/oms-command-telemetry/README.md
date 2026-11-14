@@ -1,8 +1,8 @@
 # oms-command-telemetry
 
-The CLI continues to own only read-only `telemetry`. The reusable `store`
-module adds artifact-index mutations without a dispatcher cutover or a Python
-subprocess. All code forbids unsafe Rust.
+The native CLI owns artifact-index views and mutations. The reusable `store`
+module provides repository-confined transactions without a Python subprocess.
+All code forbids unsafe Rust.
 
 `store::register_panel_result(repo, owner, task_id, artifact_relative,
 interrupted)` publishes a successful `panel-result` and returns its event id.
@@ -58,7 +58,7 @@ return None. None protects every index row, subject to the byte ceiling.
 `canonical_index` rebases root aliases and validates confined paths;
 `ensure_oms_ignore` initializes `.oms/.gitignore` to `*` plus LF only when
 missing. Existing contents are preserved. Writers use `oms_lock::Lock::for_file`
-with environment settings and explicit mkdir mode. The lock spans index reads,
+with environment settings and Bash-compatible lock mode selection. The lock spans index reads,
 payload hashes, snapshot CAS, retention and atomic replacement. Creation uses
 0700 parents and 0600 files subject to umask; existing index permissions follow
 `oms-safe-fs` replacement semantics. The temporary body is fsynced before
@@ -92,6 +92,60 @@ initialization can remain after an append failure. A publication error requires
 state reconciliation before retrying; an identical subsequent write is not
 proof of durability after the original failure.
 
-The implementation-first verification scope is offline cargo check for all
-targets and rustfmt check on Rust 1.99.1. Runtime parity, concurrent mutation and
-fault-injection suites belong to the owner's subsequent validation phase.
+Verification uses Rust 1.99.1 offline checks and focused CLI parity tests.
+The owning agent retains dispatcher integration and full admission checks.
+
+Native CLI ownership now covers every `artifact-index` argument vector,
+including help and parse errors. `run` retains its existing signature. The
+caller supplies `telemetry` as the action for both standard reports and
+`telemetry --waste [--top N]`; top accepts 1 through 100 and cannot combine
+with `--by`. Waste adds the schema-1 `waste` block with five categories,
+reported shares and deterministic rankings. The selected index window only
+limits delegate categories; model switches, injected bytes and stored outputs
+use the retained hook ledger and capture directory. No report writes files.
+
+The CLI implements list (default 20), latest, latest-run, failures, unresolved,
+resolve, resolve-superseded, resolve-recovered, validate, migrate, salvage,
+prune and import. Unresolved annotations and automatic resolution share one
+join, with provider and complete-lineage checks before mechanical writes.
+Explicit resolution validates every target before publishing one batch; a
+second call reports already resolved. Migration and prune replace a checked
+snapshot atomically. Prune supports --files, --stale and --dry-run; stale
+cleanup preserves completion and recent decision pins plus resolution closure.
+File deletion rechecks the current index after acquiring its lock, including
+when a dry run reports a hypothetical retained body. Interruption can leave
+an already deleted prefix; repeated sweeps skip bodies already removed.
+
+For legacy parity, positional N is rejected for mechanical resolvers, and
+latest-run emits the compact text summary even with --json. Empty read views
+return schema/action/rows in JSON and fail in text; empty mechanical resolvers
+report zero. Validate reports structural corruption without repairing it.
+Normal views and mutations remain strict. Git worktree roots are resolved
+using `git -C ... rev-parse --show-toplevel`; explicit logical aliases are
+rebased before descriptor-relative index validation.
+
+Import accepts --kind, --provider, --file, --prompt-file, --repo,
+--artifact-dir and --exit, with the legacy provider aliases and custom adapter
+discovery. It publishes an exclusive artifact before recording its index row.
+A kill between the two writes leaves an unindexed artifact that can be
+inspected or swept after the grace window; a second same-second import refuses
+a filename collision rather than overwriting an existing answer. Ignore
+initialization can remain after failure. Artifact destinations remain confined
+to the repository, and external input files are read with the existing safe
+producer helper. Sensitive content and unusable pasted answers produce
+warnings. Index-accounting failure preserves the imported artifact and warns.
+
+CLI writers and store producers use `oms-lock` LegacyAuto mode, matching
+Bash's flock selection when flock is available and mkdir otherwise, with
+OMS_LOCK_FORCE_MKDIR honored. Unsafe writable-by-others lock paths refuse;
+interoperability fixtures create legacy locks under umask 077. Atomic index
+publication leaves readers seeing either the old or new complete body. A
+kill before publication can leave temporary bodies or empty directories;
+after publication, retrying resolution is idempotent. Salvage always
+publishes quarantine before the repaired index.
+
+The crate tests compare native views, waste, argument failures, migration,
+retention and mechanical resolution against the public legacy oracle, and
+exercise batch atomicity, concurrent resolution, salvage and native import.
+JSON comparison ignores object ordering; telemetry's existing golden-byte
+fixtures continue to check its exact sorted output.

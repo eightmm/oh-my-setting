@@ -1,12 +1,16 @@
 //! Canonical, repository-confined artifact-index transactions.
 //!
-//! Writers use the Bash-compatible mkdir lock, held across payload hashing,
-//! retention and publication. This module does not extend CLI ownership.
+//! Writers use Bash-compatible lock selection, held across payload hashing,
+//! retention and publication. The CLI reuses these transaction primitives.
 //! A publication-phase storage error requires reconciliation before retrying.
+#[path = "../actions.rs"]
+pub(crate) mod actions;
 mod paths;
 mod producer;
 mod recovery;
 mod retention;
+#[path = "../waste.rs"]
+pub(crate) mod waste;
 
 pub use producer::{AppendArtifactRequest, append_artifact_index, register_panel_result};
 pub use recovery::{OrphanReport, SalvageReport, delete_orphans, salvage_index};
@@ -111,7 +115,7 @@ fn cancelled(interrupted: &AtomicBool) -> Result<(), StoreError> {
 }
 fn acquire(target: &Path, interrupted: &AtomicBool) -> Result<oms_lock::Guard, StoreError> {
     let mut settings = oms_lock::Settings::from_env().map_err(StoreError::Lock)?;
-    settings.mode = oms_lock::Mode::Mkdir;
+    settings.mode = oms_lock::Mode::LegacyAuto;
     let timeout = settings.timeout;
     let lock = oms_lock::Lock::for_file(target, settings).map_err(StoreError::Lock)?;
     let start = Instant::now();
