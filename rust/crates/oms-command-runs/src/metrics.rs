@@ -1,4 +1,5 @@
 //! Canonical ledger metric contracts, captured provenance and seed aggregation.
+use crate::statistics::{mean, stdev};
 use crate::{Error, Result};
 use crate::{store, value::*};
 use oms_context::Json;
@@ -870,7 +871,7 @@ impl Random {
     }
 }
 pub fn bootstrap(values: &[f64], seed_text: &str) -> Option<[f64; 2]> {
-    if values.is_empty() {
+    if values.is_empty() || values.iter().any(|v| !v.is_finite()) {
         return None;
     }
     if values.len() == 1 {
@@ -879,12 +880,12 @@ pub fn bootstrap(values: &[f64], seed_text: &str) -> Option<[f64; 2]> {
     let sha = hash(seed_text.as_bytes());
     let mut random = Random::new(u64::from_str_radix(&sha[..16], 16).unwrap());
     let mut estimates = Vec::with_capacity(2000);
+    let mut sample = vec![0.0; values.len()];
     for _ in 0..2000 {
-        let mut sum = 0.0;
-        for _ in values {
-            sum += values[random.choice(values.len())] / values.len() as f64;
+        for value in &mut sample {
+            *value = values[random.choice(values.len())];
         }
-        estimates.push(sum);
+        estimates.push(mean(&sample)?);
     }
     estimates.sort_by(f64::total_cmp);
     Some([estimates[49], estimates[1949]])
@@ -971,18 +972,8 @@ pub fn groups(rows: &[(f64, Json)], metric: &str) -> Result<(Vec<Group>, usize)>
         let seeds = values.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>();
         let values = values.iter().map(|(_, v)| *v).collect::<Vec<_>>();
         let n = values.len();
-        let mean = values.iter().map(|x| x / n as f64).sum::<f64>();
-        let stdev = if n > 1 {
-            Some(
-                values
-                    .iter()
-                    .map(|v| (v - mean).powi(2) / (n - 1) as f64)
-                    .sum::<f64>()
-                    .sqrt(),
-            )
-        } else {
-            None
-        };
+        let mean = mean(&values).ok_or_else(|| Error::usage("invalid group statistics"))?;
+        let stdev = if n > 1 { stdev(&values) } else { None };
         result.push(Group {
             ci: if n > 1 {
                 bootstrap(&values, &format!("{label}{metric}"))

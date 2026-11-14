@@ -4,6 +4,7 @@ mod ledger;
 pub mod metrics;
 pub mod process;
 mod reconcile;
+pub mod statistics;
 mod store;
 mod store_path;
 pub mod usage;
@@ -113,6 +114,10 @@ pub struct DigestRequest<'a> {
 }
 /// Parent adapters call native journal/memory/run services in process. Missing services fail explicitly.
 pub trait Services {
+    /// Dedicated executable implementing the `LIMIT COMMAND...` helper protocol.
+    fn rlimit_helper(&self) -> Option<PathBuf> {
+        None
+    }
     fn available(&self, _service: Service) -> bool {
         false
     }

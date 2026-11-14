@@ -30,6 +30,57 @@ advisories and md/tsv/tex output. Tables also enforce the documented data filter
 the old table helper omitted that filter despite claiming the same selection
 as top. Numbers use four significant digits; bootstrap uses Python's seeded
 MT19937 choice algorithm and the existing 2,000-sample percentile definition.
+Group means, sample standard deviations and bootstrap sample means use the
+public `statistics::{mean, stdev}` dyadic accumulator, matching oms-runtime.
+It retains exact binary64 sums and sums of squares through final rounding to
+the nearest representable result, with ties to even. Empty or nonfinite inputs
+return `None`; a singleton standard deviation is zero. Group reports retain
+`None` for singleton standard deviations and intervals.
+
+`process::execute_with_policy` accepts a defaultable `ProcessPolicy` with
+`env_clear`, `env`, `null_stdin`, `inherit_stdio`, `rlimit_as`, `cancel_dir`
+and an optional `rlimit_helper` override. Environment clearing precedes context
+overrides and then policy overrides. Queries always use null stdin; other calls
+inherit stdin unless requested otherwise. Inherited stdout/stderr bypass capture,
+submission parsing and hashing (the output hash is the empty-stream hash), while
+leader exit, deadlines, signals and cancellation remain monitored.
+
+Address-space bounds require the dedicated `oms-run-bounded-helper BYTES
+COMMAND...` executable. `Services::rlimit_helper()` defaults to `None`; adapters
+can copy its path into the policy override without changing `Context`. Otherwise
+resolution checks the current executable's sibling, then strictly absolute
+entries in the effective child `PATH`. Empty and relative `PATH` entries are
+skipped, so the target working directory cannot implicitly supply the helper.
+An explicit helper override can name a relative path under `Context::cwd`.
+An explicit unavailable override, missing helper, zero limit or a limit above
+the inherited hard limit refuses execution. The helper validates decimal bytes,
+lowers its own soft and hard `RLIMIT_AS`, and immediately execs the command.
+A missing command argument is usage error 2; an explicitly empty command goes
+through exec and returns 127, as does a missing executable. Other exec failures
+return 126. For piped non-query execution with a memory limit, exits 126/127
+retain up to 64 KiB of stderr in `Output.stderr` as well as streaming it to the
+stderr writer. This includes target programs that themselves exit 126/127;
+other non-query exits retain the existing empty `Output.stderr` behavior.
+Neither the library caller's limits nor its process environment are mutated.
+Packaging the helper and wiring the parent's adapter remain owner responsibilities.
+
+Cancellation monitoring requires an explicit `ProcessPolicy::cancel_dir`.
+`execute`, `merged` and default policies do not read `OMS_PEER_CANCEL_DIR` or
+enable cancellation from child environment overrides. Opt-in adapters populate
+`cancel_dir` from that setting or an explicit argument themselves. Before spawn
+and while the leader is live, a bounded, regular,
+single-link `cancel-request.json` with schema 1, the directory basename as
+`task_id`, and kind `mcp-task-cancel-request` requests cancellation. Malformed,
+oversized, linked and foreign receipts are ignored. A completed leader wins a
+late request. Cancellation stops the owned group, reaps the leader, and returns
+130 after atomic publication of `cancel-observed.json` followed by
+`cancelled.json`, with kinds `mcp-task-cancel-observed` and `mcp-task-cancelled`.
+Receipt publication failure returns an explicit error after child cleanup.
+Concurrent calls publish identical complete receipt bodies or report a detected
+namespace race. A kill between publications can leave only the observation;
+a kill during either atomic replacement can leave its private temporary file.
+A receipt is evidence of handled cancellation, not a process supervision lease.
+No process-global limit, environment or unrelated group is changed.
 
 Reconciliation supports scan/apply/list/usage, ledger/job selection, memory and
 agent options. It handles legacy and full allocation rows, newest array/hetjob
@@ -210,7 +261,14 @@ table/run, reconcile scan/apply/list/usage, metric contract/split reads and
 evaluation-code hashing, and usage aggregation. Public metric/usage APIs keep
 their signatures; entry points without an explicit root use the current caller
 root, while existing explicit-root entry points retain that supplied authority. The
-execution Context, service callbacks, accounting snapshot shape, JSON schemas,
+execution Context, existing service callbacks, accounting snapshot shape, JSON schemas,
 flags and filenames are unchanged. No additional ledger or recovery writer is
 introduced. The combined candidate contains both implementation rounds against
 the original base; the parent owns its exact source-only patch admission.
+
+
+The process-policy/statistics repair phase runs the pinned crate all-targets
+check and formatting only, as required by its implementation-first brief.
+No new tests are added in this phase. Behavioral tests, new-limit edge/failure
+probes and non-test patch-reversal checks remain deferred; compilation does not
+establish cancellation, inherited-stdio or child-limit runtime behavior.

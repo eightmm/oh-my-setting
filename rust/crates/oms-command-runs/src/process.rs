@@ -1,16 +1,196 @@
 use crate::{Context, Error, Result};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use sha2::{Digest, Sha256};
-use std::ffi::OsString;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Child-local execution controls. Defaults preserve `execute` behavior.
+#[derive(Clone, Debug, Default)]
+pub struct ProcessPolicy {
+    pub env_clear: bool,
+    pub env: BTreeMap<OsString, OsString>,
+    pub null_stdin: bool,
+    /// Inherited output is neither captured nor hashed; the empty hash is returned.
+    pub inherit_stdio: bool,
+    pub rlimit_as: Option<u64>,
+    /// Cancellation is enabled only by an explicit directory, never by child env.
+    pub cancel_dir: Option<PathBuf>,
+    /// Optional `Services::rlimit_helper()` result, using `LIMIT COMMAND...` argv.
+    /// Context deliberately carries no service reference or process-global state.
+    pub rlimit_helper: Option<PathBuf>,
+}
+impl ProcessPolicy {
+    fn variable(&self, ctx: &Context<'_>, name: &str) -> Option<OsString> {
+        self.env
+            .get(OsStr::new(name))
+            .or_else(|| ctx.env.get(OsStr::new(name)))
+            .cloned()
+            .or_else(|| (!self.env_clear).then(|| std::env::var_os(name)).flatten())
+    }
+    fn helper(&self, ctx: &Context<'_>) -> Result<PathBuf> {
+        fn executable(path: PathBuf) -> Option<PathBuf> {
+            let path = path.canonicalize().ok()?;
+            if !path.is_file() || rustix::fs::access(&path, rustix::fs::Access::EXEC_OK).is_err() {
+                return None;
+            }
+            Some(path)
+        }
+        if let Some(path) = &self.rlimit_helper {
+            return executable(ctx.cwd.join(path))
+                .ok_or_else(|| Error::io("configured RLIMIT_AS helper is not executable"));
+        }
+        let sibling = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.join("oms-run-bounded-helper")));
+        let paths = self.variable(ctx, "PATH");
+        sibling
+            .into_iter()
+            .chain(
+                paths
+                    .iter()
+                    .flat_map(std::env::split_paths)
+                    .filter(|p| p.is_absolute())
+                    .map(|p| p.join("oms-run-bounded-helper")),
+            )
+            .find_map(executable)
+            .ok_or_else(|| Error::io("RLIMIT_AS requires an executable oms-run-bounded-helper"))
+    }
+}
+
+fn validate_rlimit(limit: u64) -> Result<()> {
+    let hard = rustix::process::getrlimit(rustix::process::Resource::As).maximum;
+    if limit == 0 || hard.is_some_and(|hard| limit > hard) {
+        return Err(Error::usage(
+            "RLIMIT_AS bytes must be positive and not exceed the hard limit",
+        ));
+    }
+    Ok(())
+}
+
+/// Permanently lowers this process's address-space limit and replaces it with
+/// the target. Call only from a dedicated helper, never an embedded CLI thread.
+pub fn run_rlimit_helper_cli() -> ! {
+    fn run() -> Result<()> {
+        let mut args = std::env::args_os().skip(1);
+        let raw = args
+            .next()
+            .ok_or_else(|| Error::usage("usage: oms-run-bounded-helper BYTES COMMAND..."))?;
+        let raw = raw
+            .to_str()
+            .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or_else(|| Error::usage("invalid RLIMIT_AS bytes"))?;
+        let limit = raw
+            .parse::<u64>()
+            .map_err(|_| Error::usage("invalid RLIMIT_AS bytes"))?;
+        validate_rlimit(limit)?;
+        let target = args
+            .next()
+            .ok_or_else(|| Error::usage("usage: oms-run-bounded-helper BYTES COMMAND..."))?;
+        rustix::process::setrlimit(
+            rustix::process::Resource::As,
+            rustix::process::Rlimit {
+                current: Some(limit),
+                maximum: Some(limit),
+            },
+        )
+        .map_err(|_| Error::io("cannot apply child RLIMIT_AS"))?;
+        let error = Command::new(target).args(args).exec();
+        Err(Error {
+            code: if error.kind() == std::io::ErrorKind::NotFound {
+                127
+            } else {
+                126
+            },
+            message: format!("cannot execute bounded command: {error}"),
+        })
+    }
+    let error = run().expect_err("exec never returns on success");
+    eprintln!("error: {error}");
+    std::process::exit(error.code);
+}
+
+fn cancel_requested(directory: Option<&Path>) -> bool {
+    use crate::value::{get, number, parse, text};
+    let Some(directory) = directory else {
+        return false;
+    };
+    let Some(task) = directory.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+    oms_safe_fs::Root::open(directory)
+        .ok()
+        .and_then(|root| {
+            root.read_manifest(Path::new("cancel-request.json"), 4096)
+                .ok()
+        })
+        .and_then(|bytes| parse(&bytes).ok())
+        .is_some_and(|row| {
+            get(&row, "schema").and_then(number) == Some(1.0)
+                && get(&row, "task_id").and_then(text) == Some(task)
+                && get(&row, "kind").and_then(text) == Some("mcp-task-cancel-request")
+        })
+}
+fn acknowledge_cancel(directory: &Path) -> Result<()> {
+    use crate::value::{encode, num, object, string};
+    use oms_safe_fs::{ByteReadOptions, MutationOptions, Root};
+    let task = directory
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| Error::io("invalid cancellation directory"))?;
+    let root = Root::open(directory).map_err(|_| Error::io("opening cancellation directory"))?;
+    // Preserve the shared Python/MCP observation receipt as well as completion.
+    for name in ["cancel-observed", "cancelled"] {
+        let row = object(vec![
+            ("schema", num(1)),
+            ("task_id", string(task)),
+            ("kind", string(format!("mcp-task-{name}"))),
+        ]);
+        let mut body = encode(&row, false, false)?;
+        body.push(b'\n');
+        root.atomic_mutate(
+            Path::new(&format!("{name}.json")),
+            MutationOptions {
+                read: ByteReadOptions {
+                    missing_ok: true,
+                    max_bytes: 4096,
+                },
+                max_output: 4096,
+                ..MutationOptions::default()
+            },
+            |_| -> Result<Vec<u8>> { Ok(body) },
+        )
+        .map_err(|e| {
+            Error::io(format!(
+                "cancellation handled but receipt publication failed: {e:?}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn child_status(child: &Child) -> Result<Option<rustix::process::WaitIdStatus>> {
+    use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+    let pid =
+        Pid::from_raw(child.id() as i32).ok_or_else(|| Error::io("invalid child identity"))?;
+    // Retain the zombie until group cleanup finishes, preventing PID reuse.
+    waitid(
+        WaitId::Pid(pid),
+        WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    )
+    .map_err(|_| Error::io("waiting for child"))
+}
 
 pub struct Output {
     pub code: i32,
     pub bytes: Vec<u8>,
+    /// Query diagnostics or spawn errors. Helper-backed non-query exits 126/127
+    /// also retain up to 64 KiB while streaming to the supplied stderr writer.
     pub stderr: Vec<u8>,
     pub hash: String,
     pub submitted: String,
@@ -39,7 +219,30 @@ pub fn execute(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<Output> {
-    execute_mode(ctx, argv, query, capture, timeout, out, err, false)
+    execute_with_policy(
+        ctx,
+        argv,
+        &ProcessPolicy::default(),
+        query,
+        capture,
+        timeout,
+        out,
+        err,
+    )
+}
+/// Executes with child-local policy using the same group lifetime and bounded
+/// stream handling as `execute`. Cancellation receipts return exit 130.
+pub fn execute_with_policy(
+    ctx: &Context<'_>,
+    argv: &[OsString],
+    policy: &ProcessPolicy,
+    query: bool,
+    capture: usize,
+    timeout: Option<Duration>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<Output> {
+    execute_mode(ctx, argv, policy, query, capture, timeout, out, err, false)
 }
 pub fn merged(
     ctx: &Context<'_>,
@@ -50,6 +253,7 @@ pub fn merged(
     execute_mode(
         ctx,
         argv,
+        &ProcessPolicy::default(),
         false,
         0,
         timeout,
@@ -61,6 +265,7 @@ pub fn merged(
 fn execute_mode(
     ctx: &Context<'_>,
     argv: &[OsString],
+    policy: &ProcessPolicy,
     query: bool,
     capture: usize,
     timeout: Option<Duration>,
@@ -71,27 +276,60 @@ fn execute_mode(
     if argv.is_empty() {
         return Err(Error::usage("empty command"));
     }
+    if policy
+        .cancel_dir
+        .as_ref()
+        .is_some_and(|p| p.as_os_str().is_empty())
+    {
+        return Err(Error::usage("empty cancel directory"));
+    }
     ctx.check()?;
-    let (or, ow) = nix::unistd::pipe().map_err(|_| Error::io("pipe"))?;
-    let (er, ew) = if merged {
-        (None, ow.try_clone().map_err(|_| Error::io("pipe clone"))?)
+    let mut command = if let Some(limit) = policy.rlimit_as {
+        validate_rlimit(limit)?;
+        let mut command = Command::new(policy.helper(ctx)?);
+        command.arg(limit.to_string()).arg(&argv[0]);
+        command
     } else {
-        let (r, w) = nix::unistd::pipe().map_err(|_| Error::io("pipe"))?;
-        (Some(File::from(r)), w)
+        Command::new(&argv[0])
     };
-    let mut command = Command::new(&argv[0]);
+    let cancel_dir = policy.cancel_dir.as_ref().map(|p| ctx.cwd.join(p));
+    if cancel_requested(cancel_dir.as_deref()) {
+        acknowledge_cancel(cancel_dir.as_deref().unwrap())?;
+        return Ok(Output {
+            code: 130,
+            bytes: vec![],
+            stderr: vec![],
+            hash: crate::value::hash(b""),
+            submitted: String::new(),
+        });
+    }
     command
         .args(&argv[1..])
         .current_dir(&ctx.cwd)
-        .envs(ctx.env.iter())
-        .stdout(Stdio::from(ow))
-        .stderr(Stdio::from(ew))
         .process_group(0);
-    if query {
-        command.stdin(Stdio::null());
-    } else {
-        command.stdin(Stdio::inherit());
+    if policy.env_clear {
+        command.env_clear();
     }
+    command.envs(&ctx.env).envs(&policy.env);
+    let mut streams = if policy.inherit_stdio {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        [None, None]
+    } else {
+        let (or, ow) = nix::unistd::pipe().map_err(|_| Error::io("pipe"))?;
+        let (er, ew) = if merged {
+            (None, ow.try_clone().map_err(|_| Error::io("pipe clone"))?)
+        } else {
+            let (r, w) = nix::unistd::pipe().map_err(|_| Error::io("pipe"))?;
+            (Some(File::from(r)), w)
+        };
+        command.stdout(Stdio::from(ow)).stderr(Stdio::from(ew));
+        [Some(File::from(or)), er]
+    };
+    command.stdin(if query || policy.null_stdin {
+        Stdio::null()
+    } else {
+        Stdio::inherit()
+    });
     let child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -110,7 +348,6 @@ fn execute_mode(
     };
     drop(command);
     let child = Lifetime(child);
-    let mut streams = [Some(File::from(or)), er];
     for f in streams.iter().flatten() {
         nonblock(f)?;
     }
@@ -123,14 +360,31 @@ fn execute_mode(
     let mut line_large = false;
     let mut submitted = String::new();
     let mut stop = None;
+    let mut cancelled = false;
     let mut stop_at = None;
     let mut write_error = false;
     loop {
-        if stop.is_none() {
-            if ctx.interrupted() {
-                stop = Some(ctx.signal_code());
-            } else if timeout.is_some_and(|t| started.elapsed() >= t) {
-                stop = Some(124);
+        if status.is_none() {
+            status = child_status(&child.0)?;
+        }
+        if status.is_some() && streams.iter().all(Option::is_none) {
+            break;
+        }
+        if status.is_none() && stop.is_none() {
+            if cancel_requested(cancel_dir.as_deref()) {
+                // A completed leader wins a cancellation that arrived after exit.
+                status = child_status(&child.0)?;
+                if status.is_none() {
+                    stop = Some(130);
+                    cancelled = true;
+                }
+            }
+            if status.is_none() && stop.is_none() {
+                if ctx.interrupted() {
+                    stop = Some(ctx.signal_code());
+                } else if timeout.is_some_and(|t| started.elapsed() >= t) {
+                    stop = Some(124);
+                }
             }
             if stop.is_some() {
                 let _ = nix::sys::signal::killpg(
@@ -160,7 +414,7 @@ fn execute_mode(
                     let data = &block[..n];
                     if index == 0 {
                         sha.update(data);
-                        if bytes.len().saturating_add(n) > capture && capture > 0 {
+                        if bytes.len().saturating_add(n) > capture && capture > 0 && !cancelled {
                             stop = Some(2);
                             stop_at.get_or_insert_with(Instant::now);
                         }
@@ -183,8 +437,8 @@ fn execute_mode(
                                 }
                             }
                         }
-                    } else if query {
-                        if diagnostics.len().saturating_add(n) > 65536 {
+                    } else if query || policy.rlimit_as.is_some() {
+                        if query && diagnostics.len().saturating_add(n) > 65536 && !cancelled {
                             stop = Some(2);
                             stop_at.get_or_insert_with(Instant::now);
                         }
@@ -199,8 +453,10 @@ fn execute_mode(
                         };
                         if write.is_err() {
                             write_error = true;
-                            stop = Some(141);
-                            stop_at.get_or_insert_with(Instant::now);
+                            if !cancelled {
+                                stop = Some(141);
+                                stop_at.get_or_insert_with(Instant::now);
+                            }
                         }
                     }
                 }
@@ -213,16 +469,8 @@ fn execute_mode(
                 Err(_) => return Err(Error::io("reading child output")),
             }
         }
-        if status.is_none() {
-            use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
-            let pid = Pid::from_raw(child.0.id() as i32)
-                .ok_or_else(|| Error::io("invalid child identity"))?;
-            // Retain the zombie until pipe draining and group cleanup finish, preventing PID reuse.
-            status = waitid(
-                WaitId::Pid(pid),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            )
-            .map_err(|_| Error::io("waiting for child"))?;
+        if status.is_none() && streams.iter().all(Option::is_none) {
+            status = child_status(&child.0)?;
         }
         if status.is_some()
             && (streams.iter().all(Option::is_none)
@@ -247,6 +495,15 @@ fn execute_mode(
         s.exit_status()
             .unwrap_or_else(|| 128 + s.terminating_signal().unwrap_or(1))
     });
+    if !query && !matches!(code, 126 | 127) {
+        diagnostics.clear();
+    }
+    // Stop/reap before publishing cancellation completion, including descendants
+    // that closed the pipes or ignored TERM in inherited-stdio mode.
+    drop(child);
+    if cancelled {
+        acknowledge_cancel(cancel_dir.as_deref().unwrap())?;
+    }
     Ok(Output {
         code,
         bytes,
