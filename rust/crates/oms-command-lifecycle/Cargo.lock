@@ -294,6 +294,7 @@ dependencies = [
  "oms-lock",
  "oms-safe-fs",
  "oms-scrub",
+ "oms-toml",
  "regex",
  "rustix",
  "serde",
@@ -376,9 +377,11 @@ dependencies = [
  "chrono",
  "oms-context",
  "oms-json",
+ "oms-lock",
  "oms-safe-fs",
  "regex",
  "rustix",
+ "sha2",
 ]
 
 [[package]]
@@ -482,6 +485,10 @@ dependencies = [
  "aho-corasick",
  "regex",
 ]
+
+[[package]]
+name = "oms-toml"
+version = "0.1.0"
 
 [[package]]
 name = "oms-work-inspect"

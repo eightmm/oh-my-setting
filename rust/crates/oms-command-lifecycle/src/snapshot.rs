@@ -144,8 +144,21 @@ pub(crate) fn render(paths: &Paths, flag: &AtomicBool) -> Result<String> {
             })
         })
         .unwrap_or_else(|| "n/a".into());
+    let storage = rustix::fs::statvfs(&paths.home)
+        .ok()
+        .map(|v| {
+            let unit = v.f_frsize as u128;
+            let total = v.f_blocks as u128 * unit;
+            let available = v.f_bavail as u128 * unit;
+            format!(
+                "{:.1} GiB available / {:.1} GiB total",
+                available as f64 / 1073741824.0,
+                total as f64 / 1073741824.0
+            )
+        })
+        .unwrap_or_else(|| "unknown".into());
     let mut body = format!(
-        "# Machine Snapshot\n\nCompact local compute snapshot. Do not commit if it contains private details.\n\n- Schema: 1\n- Updated: {}\n- Host label: {}\n- OS: {}\n- Kernel: {}\n- CPU: {}\n- CPU cores: {}\n- RAM: {}\n- Home storage: unknown\n- GPU:\n",
+        "# Machine Snapshot\n\nCompact local compute snapshot. Do not commit if it contains private details.\n\n- Schema: 1\n- Updated: {}\n- Host label: {}\n- OS: {}\n- Kernel: {}\n- CPU: {}\n- CPU cores: {}\n- RAM: {}\n- Home storage: {}\n- GPU:\n",
         r::now(),
         clean(&env::var("OH_MY_SETTING_HOST_LABEL").unwrap_or_else(|_| "local".into())),
         clean(&os),
@@ -154,7 +167,8 @@ pub(crate) fn render(paths: &Paths, flag: &AtomicBool) -> Result<String> {
         std::thread::available_parallelism()
             .map(|n| n.get().to_string())
             .unwrap_or_else(|_| "unknown".into()),
-        memory
+        memory,
+        storage
     );
     for line in gpu.lines().take(16) {
         body.push_str(&format!("  - {}\n", clean(line)));

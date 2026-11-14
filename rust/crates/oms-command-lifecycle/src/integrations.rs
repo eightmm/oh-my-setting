@@ -58,24 +58,101 @@ pub(crate) fn expected(paths: &Paths) -> Result<Value> {
     }
     Ok(json!({"schema":1,"hooks_schema":schema,"root":paths.source,"surfaces":rows}))
 }
-fn owned_hook(command: &str, paths: &Paths) -> Result<bool> {
-    let rows = expected(paths)?;
-    for row in rows["surfaces"].as_array().unwrap() {
-        let script = row["script"].as_str().unwrap();
-        for command_form in [
-            format!(
-                "bash {}",
-                r::shell(paths.source.join("scripts").join(script).as_os_str())?
-            ),
-            format!(
-                "bash {} bash {}",
-                r::shell(paths.source.join("scripts/lib/python-entry.sh").as_os_str())?,
-                r::shell(paths.source.join("scripts").join(script).as_os_str())?
-            ),
-        ] {
-            if command == command_form {
-                return Ok(true);
+fn command_words(command: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut started = false;
+    for ch in command.chars() {
+        if matches!(ch, '\n' | '\r' | '\0') {
+            return None;
+        }
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            started = true;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            started = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                if q == '"' && matches!(ch, '$' | '`') {
+                    return None;
+                }
+                word.push(ch);
             }
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            started = true;
+        } else if ch.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else if matches!(ch, '$' | '`' | ';' | '&' | '|' | '<' | '>' | '(' | ')') {
+            return None;
+        } else {
+            word.push(ch);
+            started = true;
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+fn owned_entry(command: &str, executable: &str, script: &str, paths: &Paths) -> Result<bool> {
+    let Some(words) = command_words(command) else {
+        return Ok(false);
+    };
+    let (wrapper, path) = match words.as_slice() {
+        [program, path] if program == executable => (None, path),
+        [bash, wrapper, program, path] if bash == "bash" && program == executable => {
+            (Some(wrapper), path)
+        }
+        _ => return Ok(false),
+    };
+    let entry = Path::new(path);
+    if entry.file_name().and_then(|p| p.to_str()) != Some(script) {
+        return Ok(false);
+    }
+    let Some(root) = entry
+        .parent()
+        .filter(|p| p.file_name().is_some_and(|s| s == "scripts"))
+        .and_then(Path::parent)
+    else {
+        return Ok(false);
+    };
+    if !root.is_absolute() {
+        return Ok(false);
+    }
+    if let Some(wrapper) = wrapper {
+        if r::physical(Path::new(wrapper))?
+            != r::physical(&root.join("scripts/lib/python-entry.sh"))?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(r::physical(root)? == paths.source
+        || root.join(".agents/plugins/marketplace.json").is_file()
+            && root.join("scripts/install-claude-hooks.sh").is_file())
+}
+fn owned_hook(command: &str, paths: &Paths, expected: &Value) -> Result<bool> {
+    for row in expected["surfaces"].as_array().unwrap() {
+        if owned_entry(command, "bash", row["script"].as_str().unwrap(), paths)? {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -86,6 +163,20 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
             "account hook installation requires the provider-account reservation adapter",
         );
     }
+    let mode = std::env::var("OMS_GUARD_FAIL_CLOSED").unwrap_or_default();
+    if !options.has("--remove") {
+        match mode.as_str() {
+            "" | "0" => (),
+            "1" => {
+                return r::fail(
+                    "guard capability negotiation service unavailable; settings unchanged",
+                );
+            }
+            _ => return r::fail("OMS_GUARD_FAIL_CLOSED must be 0 or 1"),
+        }
+    }
+    let expected = expected(paths)?;
+    let mut blocked = std::collections::BTreeSet::new();
     let file = options
         .path("--settings", &paths.cwd)?
         .unwrap_or(paths.claude_settings()?);
@@ -106,7 +197,7 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
     let hooks = value["hooks"]
         .as_object_mut()
         .ok_or_else(|| r::Error(2, "Claude hooks must be an object".into()))?;
-    for groups in hooks.values_mut() {
+    for (event, groups) in hooks.iter_mut() {
         let groups = groups
             .as_array_mut()
             .ok_or_else(|| r::Error(2, "hook event must be an array".into()))?;
@@ -117,12 +208,23 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
                 .ok_or_else(|| r::Error(2, "hook group must contain an array".into()))?;
             let mut kept = Vec::new();
             for row in rows.drain(..) {
-                if !row["command"]
+                let ours = row["command"]
                     .as_str()
-                    .map(|s| owned_hook(s, paths))
+                    .map(|s| owned_hook(s, paths, &expected))
                     .transpose()?
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                if ours
+                    && mode.is_empty()
+                    && row["onFailure"] == "block"
+                    && row["command"]
+                        .as_str()
+                        .map(|c| owned_entry(c, "bash", "command-guard-hook.sh", paths))
+                        .transpose()?
+                        .unwrap_or(false)
                 {
+                    blocked.insert(event.clone());
+                }
+                if !ours {
                     kept.push(row);
                 }
             }
@@ -132,8 +234,13 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
     }
     hooks.retain(|_, g| g.as_array().is_none_or(|a| !a.is_empty()));
     if !options.has("--remove") {
-        for surface in expected(paths)?["surfaces"].as_array().unwrap() {
+        for surface in expected["surfaces"].as_array().unwrap() {
             let mut hook = json!({"type":"command","command":surface["command"]});
+            if surface["fail_closed"] == true
+                && blocked.contains(surface["event"].as_str().unwrap())
+            {
+                hook["onFailure"] = json!("block");
+            }
             if !surface["timeout"].is_null() {
                 hook["timeout"] = surface["timeout"].clone();
             }
@@ -156,6 +263,7 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
     if !value["hooks"].as_object().is_none_or(|o| !o.is_empty()) {
         value.as_object_mut().unwrap().remove("hooks");
     }
+    defaults(paths, &mut value, options.has("--remove"))?;
     let body = r::bytes(&value)?;
     if r::exists(&file) && r::read(&file, r::LIMIT)? == body {
         return Ok(());
@@ -168,6 +276,69 @@ fn hooks(paths: &Paths, options: &Options, tx: &mut Transaction) -> Result<()> {
         tx.copy(&backup, &file)?;
     }
     tx.write(&file, &body, 0o600)
+}
+fn defaults(paths: &Paths, value: &mut Value, remove: bool) -> Result<()> {
+    for (key, script) in [
+        ("statusLine", "claude-statusline.py"),
+        ("subagentStatusLine", "claude-subagent-statusline.py"),
+    ] {
+        let command = format!(
+            "bash {} python3 {}",
+            r::shell(paths.source.join("scripts/lib/python-entry.sh").as_os_str())?,
+            r::shell(paths.source.join("scripts").join(script).as_os_str())?
+        );
+        let ours = value[key]["command"]
+            .as_str()
+            .map(|c| owned_entry(c, "python3", script, paths))
+            .transpose()?
+            .unwrap_or(false);
+        if remove {
+            if ours {
+                value.as_object_mut().unwrap().remove(key);
+            }
+        } else if value.get(key).is_none() || ours {
+            value[key] = json!({"type":"command","command":command});
+        }
+    }
+    let attribution = json!({"commit":"","pr":"","sessionUrl":false});
+    if remove {
+        if value["attribution"] == attribution {
+            value.as_object_mut().unwrap().remove("attribution");
+        }
+        if value["modelSettings"]["claude-opus-5-5"]["effortLevel"] == "high" {
+            let models = value["modelSettings"].as_object_mut().unwrap();
+            let row = models
+                .get_mut("claude-opus-5-5")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            row.remove("effortLevel");
+            if row.is_empty() {
+                models.remove("claude-opus-5-5");
+            }
+            if models.is_empty() {
+                value.as_object_mut().unwrap().remove("modelSettings");
+            }
+        }
+    } else {
+        value
+            .as_object_mut()
+            .unwrap()
+            .entry("attribution")
+            .or_insert(attribution);
+        let models = value
+            .as_object_mut()
+            .unwrap()
+            .entry("modelSettings")
+            .or_insert(json!({}));
+        if let Some(models) = models.as_object_mut() {
+            let model = models.entry("claude-opus-5-5").or_insert(json!({}));
+            if let Some(model) = model.as_object_mut() {
+                model.entry("effortLevel").or_insert(json!("high"));
+            }
+        }
+    }
+    Ok(())
 }
 /// A dedicated managed block leaves all user TOML byte-for-byte intact. If a
 /// same-named user table exists outside that block, installation refuses it.
@@ -184,7 +355,10 @@ fn toml_block(raw: &str, block: &str, table: &str) -> Result<String> {
         }
         _ => return r::fail("malformed native TOML ownership block"),
     };
-    if base.lines().any(|s| s.trim() == table) {
+    let parsed = crate::config::toml(base.as_bytes())?;
+    if base.lines().any(|s| s.trim() == table)
+        || parsed["mcp_servers"].get("oh-my-setting").is_some()
+    {
         return r::fail("an unmanaged TOML table already occupies this registration");
     }
     if block.is_empty() {
@@ -193,7 +367,10 @@ fn toml_block(raw: &str, block: &str, table: &str) -> Result<String> {
     Ok(format!("{}\n{begin}\n{block}\n{end}\n", base.trim_end()))
 }
 fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool) -> Result<()> {
-    let executable = crate::payload::verify(paths, flag)?.executable;
+    if !options.has("--remove") {
+        crate::payload::verify(paths, flag)?.recheck()?;
+    }
+    let executable = paths.home.join(".local/bin/oms");
     let claude = paths.home.join(".claude.json");
     let mut value = if r::exists(&claude) {
         r::value(&claude)?
@@ -211,14 +388,43 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
         .ok_or_else(|| r::Error(2, "invalid MCP server table".into()))?;
     if let Some(current) = servers.get("oh-my-setting") {
         let command = current["command"].as_str().unwrap_or("");
-        if command != executable.to_string_lossy()
-            && current["args"].as_array().is_none_or(|a| {
-                !a.iter().any(|v| {
-                    v.as_str()
-                        .is_some_and(|s| Path::new(s) == paths.source.join("scripts/mcp-server.py"))
+        let args = current["args"]
+            .as_array()
+            .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
+        let native =
+            command == executable.to_string_lossy() && args.as_deref() == Some(&["mcp-server"]);
+        let legacy = command == "python3"
+            && args.as_ref().is_some_and(|a| {
+                a.len() == 1
+                    && ["oms-mcp-server.py", "mcp-server.py"]
+                        .iter()
+                        .any(|name| Path::new(a[0]) == paths.source.join("scripts").join(name))
+            });
+        let cached = if args.as_deref() == Some(&["mcp-server"]) {
+            paths
+                .load()?
+                .and_then(|row| {
+                    let revision = row["native"]["revision"].as_str()?;
+                    if revision.len() != 40
+                        || !revision
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    {
+                        return None;
+                    }
+                    let root = crate::receipt::owner(&row).ok()?;
+                    Some(
+                        root.join("rust/target/oms-native")
+                            .join(revision)
+                            .join("oms")
+                            == Path::new(command),
+                    )
                 })
-            })
-        {
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !native && !legacy && !cached {
             return r::fail("refusing takeover of an unmanaged MCP registration");
         }
     }
@@ -229,9 +435,6 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
             "oh-my-setting".into(),
             json!({"type":"stdio","command":executable,"args":["mcp-server"]}),
         );
-    }
-    if r::exists(&claude) || !options.has("--remove") {
-        tx.write(&claude, &r::bytes(&value)?, 0o600)?;
     }
     let config = paths.codex_config()?;
     let raw = if r::exists(&config) {
@@ -250,7 +453,30 @@ fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool
                 .map_err(|_| r::Error(2, "invalid native command path".into()))?
         )
     };
+    let mut expected = crate::config::toml(raw.as_bytes())?;
     let body = toml_block(&raw, &block, section)?;
+    let candidate = crate::config::toml(body.as_bytes())?;
+    if options.has("--remove") {
+        if let Some(servers) = expected["mcp_servers"].as_object_mut() {
+            servers.remove("oh-my-setting");
+        }
+        if expected["mcp_servers"]
+            .as_object()
+            .is_some_and(|v| v.is_empty())
+            && candidate.get("mcp_servers").is_none()
+        {
+            expected.as_object_mut().unwrap().remove("mcp_servers");
+        }
+    } else {
+        expected["mcp_servers"]["oh-my-setting"] =
+            json!({"command":executable,"args":["mcp-server"]});
+    }
+    if candidate != expected {
+        return r::fail("MCP block edit changed unrelated TOML data; configuration retained");
+    }
+    if r::exists(&claude) || !options.has("--remove") {
+        tx.write(&claude, &r::bytes(&value)?, 0o600)?;
+    }
     if r::exists(&config) || !options.has("--remove") {
         tx.write(&config, body.as_bytes(), 0o600)?;
     }
@@ -286,6 +512,52 @@ fn git_hook(
     };
     tx.write(&target,format!("#!/usr/bin/env bash\nset -euo pipefail\nroot=\"$(git rev-parse --show-toplevel)\"\nexec \"$root/scripts/pre-push-check.sh\"{mode} \"$@\"\n").as_bytes(),0o755)
 }
+pub(crate) fn preflight(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<()> {
+    if matches!(
+        options.tool.as_str(),
+        "install-codex-plugin" | "install-agy-plugin"
+    ) {
+        return crate::plugins::preflight(paths, options, flag);
+    }
+    if options.tool == "install-claude-hooks" {
+        if options.has("--ownership-receipt") {
+            return r::fail(
+                "account hook installation requires the provider-account reservation adapter",
+            );
+        }
+        if !options.has("--remove") {
+            match std::env::var("OMS_GUARD_FAIL_CLOSED")
+                .unwrap_or_default()
+                .as_str()
+            {
+                "" | "0" => (),
+                "1" => {
+                    return r::fail(
+                        "guard capability negotiation service unavailable; settings unchanged",
+                    );
+                }
+                _ => return r::fail("OMS_GUARD_FAIL_CLOSED must be 0 or 1"),
+            }
+        }
+    }
+    Ok(())
+}
+pub(crate) fn apply(
+    paths: &Paths,
+    options: &Options,
+    tx: &mut Transaction,
+    flag: &AtomicBool,
+) -> Result<()> {
+    match options.tool.as_str() {
+        "install-claude-hooks" => hooks(paths, options, tx),
+        "install-mcp" => mcp(paths, options, tx, flag),
+        "install-hooks" => git_hook(paths, options, tx, flag),
+        "install-codex-plugin" | "install-agy-plugin" => {
+            crate::plugins::apply(paths, options, tx, flag)
+        }
+        _ => r::fail("provider integration adapter unavailable"),
+    }
+}
 pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
     if options.tool == "install-claude-hooks" && options.has("--print-expected") {
         return r::json(&expected(paths)?);
@@ -302,30 +574,17 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     }
     r::child_guard()?;
     paths.require_owner()?;
-    // Provider plugin registration has provider-owned external state. Refuse
-    // unsupported adapters before opening a transaction or editing files.
-    if matches!(
-        options.tool.as_str(),
-        "install-codex-plugin" | "install-agy-plugin"
-    ) {
-        return r::fail(format!(
-            "{} requires the native provider plugin adapter; no provider state changed",
-            options.tool
-        ));
-    }
+    preflight(paths, options, flag)?;
     let _guard = r::lock(&paths.receipt, &paths.cwd)?;
     paths.require_owner()?;
     let mut tx = Transaction::begin(paths)?;
-    match options.tool.as_str() {
-        "install-claude-hooks" => hooks(paths, options, &mut tx)?,
-        "install-mcp" => mcp(paths, options, &mut tx, flag)?,
-        "install-hooks" => git_hook(paths, options, &mut tx, flag)?,
-        _ => return r::fail("unknown integration installer"),
-    }
+    apply(paths, options, &mut tx, flag)?;
     if let Some(mut row) = paths.load()? {
         let key = match options.tool.as_str() {
             "install-claude-hooks" => Some("claude_hooks"),
             "install-mcp" => Some("mcp"),
+            "install-codex-plugin" => Some("codex_plugin"),
+            "install-agy-plugin" => Some("agy_plugin"),
             _ => None,
         };
         if let Some(key) = key {

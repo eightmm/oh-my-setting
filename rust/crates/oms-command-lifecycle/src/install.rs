@@ -194,9 +194,9 @@ fn targets(paths: &Paths, executable: &Path) -> Result<Vec<(PathBuf, PathBuf)>> 
     Ok(pairs)
 }
 pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
-    let old = paths.load()?;
+    paths.load()?;
     let payload = payload::verify(paths, flag)?;
-    let pairs = targets(paths, &payload.executable)?;
+    let pairs = targets(paths, &payload.frontdoor(paths))?;
     let mode = receipt::link_mode()?;
     if options.preview() {
         return Ok(r::text(
@@ -209,8 +209,26 @@ pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Resul
     }
     r::child_guard()?;
     let _guard = r::lock(&paths.receipt, &paths.cwd)?;
-    let old = paths.load()?.or(old);
-    let previous = old.as_ref().map(receipt::owner).transpose()?;
+    let old = paths.load()?;
+    let mut tx = Transaction::begin(paths)?;
+    let row = apply(paths, old.as_ref(), &payload, &mut tx, flag)?;
+    tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
+    tx.commit()?;
+    Ok(r::text(format!(
+        "install receipt: {}",
+        paths.receipt.display()
+    )))
+}
+pub(crate) fn apply(
+    paths: &Paths,
+    old: Option<&serde_json::Value>,
+    payload: &payload::Payload,
+    tx: &mut Transaction,
+    flag: &AtomicBool,
+) -> Result<serde_json::Value> {
+    let pairs = targets(paths, &payload.frontdoor(paths))?;
+    let mode = receipt::link_mode()?;
+    let previous = old.map(receipt::owner).transpose()?;
     if previous.as_ref().is_some_and(|p| p != &paths.source)
         && !previous
             .as_ref()
@@ -220,18 +238,23 @@ pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Resul
     {
         return r::fail("previous canonical owner is unavailable; refusing ownership transfer");
     }
-    let mut row = receipt::build(paths, old.as_ref(), flag)?;
-    let mut tx = Transaction::begin(paths)?;
-    payload::install(paths, &payload, &mut tx)?;
+    let mut row = receipt::build(paths, old, flag)?;
+    payload::install(paths, payload, tx)?;
     for (source, target) in &pairs {
         r::check(flag)?;
-        let prior = previous.as_ref().and_then(|p| {
-            source
-                .strip_prefix(&paths.source)
-                .ok()
-                .map(|rel| p.join(rel))
-        });
-        materialize(paths, &mut tx, source, target, prior.as_deref(), &mode)?;
+        let prior = if target == &paths.home.join(".local/bin/oms") {
+            old.and_then(|r| r["native"]["frontdoor"].as_str())
+                .map(PathBuf::from)
+                .or_else(|| previous.as_ref().map(|p| p.join("scripts/oms")))
+        } else {
+            previous.as_ref().and_then(|p| {
+                source
+                    .strip_prefix(&paths.source)
+                    .ok()
+                    .map(|rel| p.join(rel))
+            })
+        };
+        materialize(paths, tx, source, target, prior.as_deref(), &mode)?;
     }
     let enabled = pairs
         .iter()
@@ -254,19 +277,15 @@ pub(crate) fn link(paths: &Paths, options: &Options, flag: &AtomicBool) -> Resul
             }
             if let Some(source) = owned_skill_source(paths, &path)? {
                 if owned(&source, &path)? {
-                    restore(paths, &mut tx, &source, &path)?;
+                    restore(paths, tx, &source, &path)?;
                 }
             }
         }
     }
-    row["native"] = json!({"revision":payload.revision,"libexec":paths.data.join("libexec"),"helper":payload.helper.is_some()});
+    row["native"] = json!({"revision":payload.revision,"libexec":paths.data.join("libexec"),"frontdoor":payload.frontdoor(paths),"helper":payload.helper.is_some()});
     r::check(flag)?;
-    tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
-    tx.commit()?;
-    Ok(r::text(format!(
-        "install receipt: {}",
-        paths.receipt.display()
-    )))
+    payload.recheck()?;
+    Ok(row)
 }
 fn owned_skill_source(paths: &Paths, target: &Path) -> Result<Option<PathBuf>> {
     let source = if fs::symlink_metadata(target)?.file_type().is_symlink() {
@@ -320,11 +339,19 @@ fn restore(_paths: &Paths, tx: &mut Transaction, source: &Path, target: &Path) -
     }
     Ok(())
 }
-pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
-    paths.require_owner()?;
-    let executable = payload::verify(paths, flag)
-        .map(|p| p.executable)
-        .unwrap_or_else(|_| paths.source.join("scripts/oms"));
+fn apply_unlink(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    tx: &mut Transaction,
+) -> Result<crate::Output> {
+    let row = paths.require_owner()?;
+    let executable = row
+        .as_ref()
+        .and_then(|r| r["native"]["frontdoor"].as_str())
+        .map(PathBuf::from)
+        .or_else(|| payload::verify(paths, flag).ok().map(|p| p.executable))
+        .unwrap_or_else(|| paths.source.join("scripts/oms"));
     let mut pairs = targets(paths, &executable)?;
     for target in [".codex/AGENTS.md", ".claude/CLAUDE.md", ".gemini/AGENTS.md"] {
         pairs.push((paths.source.join("AGENTS.md"), paths.home.join(target)));
@@ -364,13 +391,9 @@ pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Res
                 .join("\n"),
         ));
     }
-    r::child_guard()?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
-    paths.require_owner()?;
-    let mut tx = Transaction::begin(paths)?;
     for (source, target) in pairs {
         r::check(flag)?;
-        restore(paths, &mut tx, &source, &target)?;
+        restore(paths, tx, &source, &target)?;
     }
     // Legacy interpreter trees contain symlinks; only remove a proven-owned
     // launcher here. Runtime directory cleanup is a separate explicit action.
@@ -384,8 +407,23 @@ pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Res
     if r::exists(&paths.receipt) {
         tx.remove(&paths.receipt)?;
     }
-    tx.commit()?;
     Ok(r::text("managed links removed; user backups restored"))
+}
+pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    paths.require_owner()?;
+    if options.preview() {
+        return Ok(r::text(
+            "would remove owned targets and restore their user backups",
+        ));
+    }
+    r::child_guard()?;
+    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    paths.require_owner()?;
+    let mut tx = Transaction::begin(paths)?;
+    let result = apply_unlink(paths, options, flag, &mut tx)?;
+    r::check(flag)?;
+    tx.commit()?;
+    Ok(result)
 }
 pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
     if options.has("--purge") || options.has("--purge-dirty") {
@@ -405,10 +443,256 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     if options.tool == "unlink" {
         return unlink(paths, options, flag);
     }
-    if options.tool == "uninstall" || options.tool == "install" {
-        return r::fail(
-            "full native install/uninstall orchestration is not yet available; use the bounded link/unlink operations only after review; no installation state changed",
-        );
+    if options.tool == "install" {
+        return install(paths, options, flag);
+    }
+    if options.tool == "uninstall" {
+        return uninstall(paths, options, flag);
     }
     r::fail("unsupported installer action")
+}
+
+fn component_options(options: &Options, tool: &str, remove: bool) -> Options {
+    let mut options = options.clone();
+    options.tool = tool.into();
+    options.action.clear();
+    if remove {
+        options.flags.insert("--remove".into());
+    } else {
+        options.flags.remove("--remove");
+    }
+    options
+}
+fn install(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    if !options.preview() {
+        r::child_guard()?;
+    }
+    let old = paths.load()?;
+    let mut row = receipt::build(paths, old.as_ref(), flag)?;
+    for (option, key) in [
+        ("--tools", "tools"),
+        ("--auto-update", "auto_update"),
+        ("--machine-snapshot", "machine_snapshot"),
+        ("--slurm-snapshot", "slurm_snapshot"),
+    ] {
+        if options.has(option) || options.has("--full") {
+            row["components"][key] = json!(true);
+        }
+    }
+    if options.has("--no-auto-update") {
+        row["components"]["auto_update"] = json!(false);
+    }
+    // These options require independent ownership services. Refuse before build,
+    // target staging, or receipt publication, rather than silently ignoring them.
+    for option in [
+        "--connect-services",
+        "--peer-permissions",
+        "--star",
+        "--notion-data-source",
+    ] {
+        if options.has(option) {
+            return r::fail(format!(
+                "native install {option} requires an owner-supplied service"
+            ));
+        }
+    }
+    for key in ["slurm_snapshot"] {
+        if row["components"][key] == true {
+            return r::fail(format!(
+                "native {key} component requires a producer adapter before installation"
+            ));
+        }
+    }
+    for (key, tool) in [
+        ("claude_hooks", "install-claude-hooks"),
+        ("mcp", "install-mcp"),
+        ("codex_plugin", "install-codex-plugin"),
+        ("agy_plugin", "install-agy-plugin"),
+    ] {
+        let desired = row["components"][key] == true;
+        if !options.preview()
+            && (desired || old.as_ref().is_some_and(|r| r["components"][key] == true))
+        {
+            crate::integrations::preflight(
+                paths,
+                &component_options(options, tool, !desired),
+                flag,
+            )?;
+        }
+    }
+    if let Some(reference) = options.get("--ref") {
+        row["ref"] = json!(reference);
+    }
+    if let Some(profile) = options.get("--profile") {
+        row["profile"] = json!(profile);
+    }
+    receipt::validate(&row)?;
+    let plan = if row["components"]["tools"] == true {
+        Some(crate::tools::plan(paths, options)?)
+    } else {
+        None
+    };
+    if options.preview() {
+        return r::json(
+            &json!({"schema":1,"install":row,"capabilities":plan,"actions":["stage native payload","converge owned targets and components","publish install receipt"]}),
+        );
+    }
+    if plan
+        .as_ref()
+        .is_some_and(|p| p["missing"].as_array().is_some_and(|a| !a.is_empty()))
+    {
+        return r::fail(
+            "selected tools are missing; verified tool installation is required before install",
+        );
+    }
+    r::child_guard()?;
+    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    let fresh = paths.load()?;
+    if fresh != old {
+        return Err(r::Error(
+            75,
+            "install receipt changed during planning; retry installation".into(),
+        ));
+    }
+    let mut tx = Transaction::begin(paths)?;
+    payload::stage(paths, &mut tx, flag)?;
+    let payload = payload::verify(paths, flag)?;
+    let native = apply(paths, fresh.as_ref(), &payload, &mut tx, flag)?;
+    row["native"] = native["native"].clone();
+    for (key, tool) in [
+        ("claude_hooks", "install-claude-hooks"),
+        ("mcp", "install-mcp"),
+        ("codex_plugin", "install-codex-plugin"),
+        ("agy_plugin", "install-agy-plugin"),
+    ] {
+        let desired = row["components"][key] == true;
+        if desired || old.as_ref().is_some_and(|r| r["components"][key] == true) {
+            crate::integrations::apply(
+                paths,
+                &component_options(options, tool, !desired),
+                &mut tx,
+                flag,
+            )?;
+        }
+    }
+    if row["components"]["auto_update"] == true {
+        let mut scheduler = component_options(options, "install-autoupdate", false);
+        if row["component_modes"]["auto_update"] == "check" {
+            scheduler.flags.insert("--check-only".into());
+        }
+        crate::scheduler::apply(paths, &scheduler, &mut tx, flag)?;
+    } else if old
+        .as_ref()
+        .is_some_and(|r| r["components"]["auto_update"] == true)
+    {
+        crate::scheduler::apply(
+            paths,
+            &component_options(options, "uninstall-autoupdate", true),
+            &mut tx,
+            flag,
+        )?;
+    }
+    if row["components"]["machine_snapshot"] == true {
+        tx.write(
+            &crate::snapshot::output_path(paths)?,
+            crate::snapshot::render(paths, flag)?.as_bytes(),
+            0o600,
+        )?;
+    }
+    if let Some(mut plan) = plan {
+        plan["status"] = json!("available");
+        plan["installed_at"] = json!(r::now());
+        tx.write(
+            &paths.config.join("capabilities.json"),
+            &r::bytes(&plan)?,
+            0o600,
+        )?;
+    }
+    payload.recheck()?;
+    r::check(flag)?;
+    tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
+    tx.commit()?;
+    Ok(r::text(format!(
+        "installed native OMS {}; receipt: {}",
+        payload.revision,
+        paths.receipt.display()
+    )))
+}
+fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    if !options.preview() {
+        r::child_guard()?;
+    }
+    paths.require_owner()?;
+    if !options.preview()
+        && !options.has("--yes")
+        && !options.has("-y")
+        && !std::env::var_os("OH_MY_SETTING_ASSUME_YES").is_some_and(|s| s == "1")
+    {
+        return Err(r::Error(
+            1,
+            "uninstall requires --yes in a noninteractive lifecycle invocation".into(),
+        ));
+    }
+    // Account effects must be withdrawn by their canonical registry transaction.
+    // An unrecognized registry is never permission to remove global integration.
+    for file in [
+        "provider-accounts.claude.json",
+        "provider-account-effects.json",
+        "codex-account-links.json",
+    ] {
+        let file = paths.config.join(file);
+        if r::exists(&file) {
+            return r::fail(
+                "registered account effects require the native account cleanup adapter; installation retained",
+            );
+        }
+    }
+    if options.preview() {
+        return unlink(paths, options, flag);
+    }
+    let old = paths.require_owner()?;
+    for (key, tool) in [
+        ("codex_plugin", "install-codex-plugin"),
+        ("agy_plugin", "install-agy-plugin"),
+    ] {
+        if old.as_ref().is_some_and(|r| r["components"][key] == true) {
+            crate::plugins::preflight(paths, &component_options(options, tool, true), flag)?;
+        }
+    }
+    {
+        r::child_guard()?;
+        let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+        let old = paths.require_owner()?;
+        let mut tx = Transaction::begin(paths)?;
+        for (key, tool) in [
+            ("claude_hooks", "install-claude-hooks"),
+            ("mcp", "install-mcp"),
+            ("codex_plugin", "install-codex-plugin"),
+            ("agy_plugin", "install-agy-plugin"),
+        ] {
+            if old.as_ref().is_some_and(|v| v["components"][key] == true) {
+                crate::integrations::apply(
+                    paths,
+                    &component_options(options, tool, true),
+                    &mut tx,
+                    flag,
+                )?;
+            }
+        }
+        if old
+            .as_ref()
+            .is_some_and(|v| v["components"]["auto_update"] == true)
+        {
+            crate::scheduler::apply(
+                paths,
+                &component_options(options, "uninstall-autoupdate", true),
+                &mut tx,
+                flag,
+            )?;
+        }
+        let result = apply_unlink(paths, options, flag, &mut tx)?;
+        r::check(flag)?;
+        tx.commit()?;
+        Ok(result)
+    }
 }

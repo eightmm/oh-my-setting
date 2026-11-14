@@ -4,7 +4,8 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
+    os::unix::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
@@ -15,10 +16,12 @@ pub(crate) struct Options {
     pub action: String,
     pub flags: BTreeSet<String>,
     values: BTreeMap<String, Vec<String>>,
+    paths: BTreeMap<String, Vec<OsString>>,
+    pub raw: Vec<OsString>,
 }
 impl Options {
     pub fn has(&self, k: &str) -> bool {
-        self.flags.contains(k) || self.values.contains_key(k)
+        self.flags.contains(k) || self.values.contains_key(k) || self.paths.contains_key(k)
     }
     pub fn get(&self, k: &str) -> Option<&str> {
         self.values
@@ -30,7 +33,11 @@ impl Options {
         self.values.get(k).map(Vec::as_slice).unwrap_or(&[])
     }
     pub fn path(&self, k: &str, cwd: &Path) -> Result<Option<PathBuf>> {
-        self.get(k)
+        self.paths
+            .get(k)
+            .and_then(|a| a.last())
+            .map(|s| s.as_os_str())
+            .or_else(|| self.get(k).map(OsStr::new))
             .map(|s| {
                 r::leaf(&if Path::new(s).is_absolute() {
                     PathBuf::from(s)
@@ -39,6 +46,9 @@ impl Options {
                 })
             })
             .transpose()
+    }
+    pub fn all_paths(&self, k: &str) -> &[OsString] {
+        self.paths.get(k).map(Vec::as_slice).unwrap_or(&[])
     }
     pub fn preview(&self) -> bool {
         self.has("--plan")
@@ -168,7 +178,7 @@ fn usage(tool: &str) -> String {
         _ => "",
     };
     format!(
-        "Usage: oms {tool}{actions} [options]\n\n{}\n  -h, --help\n\nNative lifecycle adapter. Operations without a complete native authority adapter fail before mutation.\n",
+        "Usage: oms {tool}{actions} [options]\n\n{}\n  -h, --help\n\nNative lifecycle adapter. Unsupported operations return a nonzero result.\n",
         flags
             .iter()
             .map(|s| format!("  {s}"))
@@ -181,43 +191,67 @@ fn parse(tool: &str, args: &[OsString]) -> Result<Options> {
     let (flags, values) = spec(tool);
     let mut out = Options {
         tool: tool.into(),
+        raw: args.to_vec(),
         ..Default::default()
     };
     let mut args = args.iter();
     while let Some(raw) = args.next() {
-        let s = raw
-            .to_str()
-            .ok_or_else(|| r::Error(2, "lifecycle arguments must be UTF-8".into()))?;
-        if matches!(s, "--help" | "-h") {
+        let bytes = raw.as_bytes();
+        let split = bytes.iter().position(|b| *b == b'=');
+        let (name, attached) = match split {
+            Some(i) => (
+                &bytes[..i],
+                Some(OsString::from_vec(bytes[i + 1..].to_vec())),
+            ),
+            None => (bytes, None),
+        };
+        let s = std::str::from_utf8(name)
+            .map_err(|_| r::Error(2, "option names and actions must be UTF-8".into()))?;
+        if matches!(s, "--help" | "-h") && attached.is_none() {
             out.flags.insert("--help".into());
             continue;
         }
-        if flags.contains(&s) {
+        if flags.contains(&s) && attached.is_none() {
             out.flags.insert(s.into());
             continue;
         }
-        let (name, attached) = s
-            .split_once('=')
-            .map(|(a, b)| (a, Some(b)))
-            .unwrap_or((s, None));
-        if values.contains(&name) {
-            let v = match attached {
-                Some(s) => s,
-                None => args
-                    .next()
-                    .and_then(|v| v.to_str())
-                    .ok_or_else(|| r::Error(2, format!("{name} requires a UTF-8 value")))?,
-            };
-            if v.is_empty() {
-                return r::fail(format!("{name} requires a nonempty value"));
+        if values.contains(&s) {
+            let value = attached
+                .or_else(|| args.next().cloned())
+                .ok_or_else(|| r::Error(2, format!("{s} requires a value")))?;
+            if value.is_empty() || value.as_bytes().contains(&0) {
+                return r::fail(format!("{s} requires a nonempty value"));
             }
-            let entries = out.values.entry(name.into()).or_default();
-            if !entries.is_empty() && !matches!(name, "--profile" | "--repo") {
-                return r::fail(format!("{name} may be specified only once"));
+            if matches!(
+                s,
+                "--repo"
+                    | "--root"
+                    | "--table"
+                    | "--settings"
+                    | "--ownership-receipt"
+                    | "--receipt"
+                    | "--compare"
+            ) {
+                let entries = out.paths.entry(s.into()).or_default();
+                if !entries.is_empty() && s != "--repo" {
+                    return r::fail(format!("{s} may be specified only once"));
+                }
+                entries.push(value);
+            } else {
+                let value = value
+                    .into_string()
+                    .map_err(|_| r::Error(2, format!("{s} requires a UTF-8 value")))?;
+                let entries = out.values.entry(s.into()).or_default();
+                if !entries.is_empty() && s != "--profile" {
+                    return r::fail(format!("{s} may be specified only once"));
+                }
+                entries.push(value);
             }
-            entries.push(v.into());
             continue;
         }
+        let s = raw
+            .to_str()
+            .ok_or_else(|| r::Error(2, "unknown non-UTF8 lifecycle argument".into()))?;
         if !s.starts_with('-') && out.action.is_empty() && matches!(tool, "tick" | "auto-update") {
             out.action = s.into();
             continue;
@@ -284,6 +318,7 @@ pub(crate) fn execute(
     cwd: &Path,
     source: &Path,
     flag: &AtomicBool,
+    services: &dyn crate::Services,
 ) -> Result<crate::Output> {
     if !crate::owns(tool, args) {
         return r::fail("command is not owned by the lifecycle crate");
@@ -305,7 +340,7 @@ pub(crate) fn execute(
         "status" => crate::doctor::status(&paths, &options, flag),
         "snapshot" | "write-machine-snapshot" => crate::snapshot::run(&paths, &options, flag),
         "update" | "auto-update" => crate::update::run(&paths, &options, flag),
-        "tick" => crate::tick::run(&paths, &options, flag),
+        "tick" => crate::tick::run(&paths, &options, flag, services),
         "install-profile" | "install-tools" => crate::tools::run(&paths, &options, flag),
         "install-autoupdate" | "uninstall-autoupdate" => {
             crate::scheduler::run(&paths, &options, flag)

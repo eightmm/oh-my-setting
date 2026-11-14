@@ -81,7 +81,12 @@ fn security(paths: &Paths) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     for (provider, path) in [
         ("claude", paths.claude_settings()?),
-        ("agy", paths.home.join(".gemini/config/settings.json")),
+        (
+            "antigravity",
+            std::env::var_os("OMS_ANTIGRAVITY_SETTINGS")
+                .map(PathBuf::from)
+                .unwrap_or(paths.home.join(".gemini/antigravity-cli/settings.json")),
+        ),
     ] {
         if !r::exists(&path) {
             rows.push(finding(
@@ -127,9 +132,13 @@ fn security(paths: &Paths) -> Result<Vec<Value>> {
             checks.push((
                 value["permissions"]["allow"].as_array().is_some_and(|a| {
                     a.iter()
-                        .any(|x| matches!(x.as_str(), Some("mcp(*)" | "unsandboxed(*)")))
+                        .any(|x| matches!(x.as_str(), Some("mcp(*)" | "unsandboxed(*)" | "*")))
                 }),
                 "blanket MCP or unsandboxed allow rule",
+            ));
+            checks.push((
+                value["enableTerminalSandbox"] == false,
+                "terminal sandbox explicitly disabled",
             ));
         }
         for (wide, description) in checks {
@@ -145,11 +154,60 @@ fn security(paths: &Paths) -> Result<Vec<Value>> {
     }
     let config = paths.codex_config()?;
     if r::exists(&config) {
-        rows.push(finding(
-            "codex",
-            "unknown",
-            "Codex TOML requires a native TOML settings adapter; no executable was started",
-        ));
+        match crate::config::read_toml(&config) {
+            Ok(value) => {
+                for (wide, description) in [
+                    (value["approval_policy"] == "never", "approval policy never"),
+                    (
+                        value["sandbox_mode"] == "danger-full-access",
+                        "full host access",
+                    ),
+                    (
+                        value["sandbox_mode"] == "external-sandbox",
+                        "external sandbox responsibility",
+                    ),
+                    (
+                        value["sandbox_workspace_write"]["network_access"] == true,
+                        "workspace network access",
+                    ),
+                    (
+                        value["shell_environment_policy"]["inherit"] == "all",
+                        "complete shell environment inheritance",
+                    ),
+                    (
+                        value["shell_environment_policy"]["ignore_default_excludes"] == true,
+                        "default environment exclusions disabled",
+                    ),
+                ] {
+                    rows.push(finding(
+                        "codex",
+                        if wide { "warn" } else { "info" },
+                        format!(
+                            "{description}: {}",
+                            if wide { "configured" } else { "not observed" }
+                        ),
+                    ));
+                }
+                if let Some(profiles) = value["profiles"].as_object() {
+                    for (name, profile) in profiles {
+                        if profile["approval_policy"] == "never"
+                            || profile["sandbox_mode"] == "danger-full-access"
+                        {
+                            rows.push(finding(
+                                "codex",
+                                "warn",
+                                format!("profile {} widens execution authority", clean(name)),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(_) => rows.push(finding(
+                "codex",
+                "unknown",
+                "settings could not be parsed; nothing executed",
+            )),
+        }
     } else {
         rows.push(finding(
             "codex",
@@ -299,11 +357,20 @@ fn extension_configs(paths: &Paths) -> Vec<(&'static str, &'static str, PathBuf)
         ("claude", "user", paths.home.join(".claude.json")),
         ("claude", "project", paths.cwd.join(".mcp.json")),
         (
-            "agy",
-            "user",
+            "antigravity",
+            "legacy",
             paths.home.join(".gemini/config/mcp_config.json"),
         ),
-        ("agy", "project", paths.cwd.join(".gemini/mcp_config.json")),
+        (
+            "antigravity",
+            "user",
+            paths.home.join(".gemini/settings.json"),
+        ),
+        (
+            "antigravity",
+            "project",
+            paths.cwd.join(".gemini/mcp_config.json"),
+        ),
     ]
 }
 fn specs(paths: &Paths) -> Result<(Vec<(String, Value)>, Vec<String>)> {
@@ -317,7 +384,7 @@ fn specs(paths: &Paths) -> Result<(Vec<(String, Value)>, Vec<String>)> {
             Ok(v) if v.is_object() => {
                 if let Some(servers) = v["mcpServers"].as_object() {
                     for (name, spec) in servers {
-                        specs.push((format!("{provider}:{scope}:{}", clean(name)), spec.clone()));
+                        specs.push((format!("{provider}:{scope}:{name}"), spec.clone()));
                     }
                 } else if !v["mcpServers"].is_null() {
                     unknown.push(provider.into());
@@ -326,9 +393,59 @@ fn specs(paths: &Paths) -> Result<(Vec<(String, Value)>, Vec<String>)> {
             _ => unknown.push(provider.into()),
         }
     }
-    if r::exists(&paths.codex_config()?) {
-        unknown.push("codex".into());
+    let plugins = paths.home.join(".gemini/config/plugins");
+    if plugins.is_dir() {
+        for entry in fs::read_dir(plugins)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let file = entry.path().join("mcp_config.json");
+            if !r::exists(&file) {
+                continue;
+            }
+            match r::value(&file) {
+                Ok(v) => {
+                    if let Some(servers) = v["mcpServers"].as_object() {
+                        for (name, spec) in servers {
+                            specs.push((
+                                format!(
+                                    "antigravity:plugin-{}:{}",
+                                    clean(&entry.file_name().to_string_lossy()),
+                                    clean(name)
+                                ),
+                                spec.clone(),
+                            ));
+                        }
+                    } else {
+                        unknown.push("antigravity".into());
+                    }
+                }
+                Err(_) => unknown.push("antigravity".into()),
+            }
+        }
     }
+    let codex = paths.codex_config()?;
+    if r::exists(&codex) {
+        match crate::config::read_toml(&codex) {
+            Ok(v) => match v.get("mcp_servers") {
+                Some(Value::Object(servers)) => {
+                    for (name, spec) in servers {
+                        specs.push((format!("codex:user:{name}"), spec.clone()));
+                    }
+                }
+                None => (),
+                _ => unknown.push("codex".into()),
+            },
+            Err(_) => unknown.push("codex".into()),
+        }
+    }
+    for (key, spec) in &specs {
+        if !spec.is_object() {
+            unknown.push(key.split(':').next().unwrap_or("").into());
+        }
+    }
+    specs.retain(|(_, spec)| spec.is_object());
     unknown.sort();
     unknown.dedup();
     Ok((specs, unknown))
@@ -358,37 +475,155 @@ fn safe_target(spec: &Value) -> String {
             .unwrap_or("?"),
     )
 }
-fn extensions(paths: &Paths, pins: bool, options: &Options) -> Result<crate::Output> {
-    if options.has("--probe-tools") {
-        return r::fail(
-            "native MCP tools/list protocol probe adapter is not yet available; no server was started",
-        );
+fn risks(spec: &Value) -> Vec<&'static str> {
+    let mut rows = Vec::new();
+    let command = spec["command"]
+        .as_str()
+        .unwrap_or("")
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let name = Path::new(command)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let args = spec["args"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let package = args.iter().find(|a| !a.starts_with('-')).copied();
+    if matches!(name, "npx" | "bunx" | "pnpx")
+        && package
+            .is_some_and(|s| !s.trim_start_matches('@').contains('@') || s.ends_with("@latest"))
+    {
+        rows.push("package launcher uses an unpinned version");
+    }
+    if name == "uvx"
+        && package.is_some_and(|s| !s.contains("=="))
+        && !args.iter().any(|s| s.contains("=="))
+    {
+        rows.push("uvx uses an unpinned version");
+    }
+    if let Some(url) = spec["url"]
+        .as_str()
+        .or_else(|| spec["httpUrl"].as_str())
+        .or_else(|| spec["serverUrl"].as_str())
+    {
+        if let Some(rest) = url.strip_prefix("http://") {
+            let host = rest
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .rsplit('@')
+                .next()
+                .unwrap_or("");
+            let local = host == "[::1]"
+                || host.starts_with("[::1]:")
+                || matches!(host.split(':').next(), Some("localhost" | "127.0.0.1"));
+            if !local {
+                rows.push("plain HTTP to a non-loopback host");
+            }
+        }
+    }
+    rows
+}
+fn plugin_inventory(paths: &Paths) -> Result<Vec<Value>> {
+    let mut rows = Vec::new();
+    for (scope, file) in [
+        ("user", paths.claude_settings()?),
+        ("project", paths.cwd.join(".claude/settings.json")),
+    ] {
+        if !r::exists(&file) {
+            continue;
+        }
+        match r::value(&file) {
+            Ok(v) => {
+                if let Some(plugins) = v["enabledPlugins"].as_object() {
+                    for (name, enabled) in plugins {
+                        rows.push(json!({"provider":"claude","name":clean(name),"scope":scope,"enabled":enabled!=false,"owned":name.split('@').next()==Some("oh-my-setting")}));
+                    }
+                }
+            }
+            Err(_) => rows.push(json!({"provider":"claude","scope":scope,"status":"unread"})),
+        }
+    }
+    for (scope, base) in [
+        ("plugin", paths.home.join(".gemini/config/plugins")),
+        ("extension", paths.home.join(".gemini/extensions")),
+    ] {
+        if !base.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(base)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !name.starts_with('.') {
+                    rows.push(json!({"provider":"antigravity","name":clean(&name),"scope":scope,"enabled":true,"owned":name=="oh-my-setting"}));
+                }
+            }
+        }
+    }
+    Ok(rows)
+}
+fn extensions(
+    paths: &Paths,
+    pins: bool,
+    options: &Options,
+    flag: &AtomicBool,
+) -> Result<crate::Output> {
+    if options.has("--pin") {
+        r::child_guard()?;
     }
     let (specs, unknown) = specs(paths)?;
     let mut rows = Vec::new();
     let mut current = serde_json::Map::new();
     for (key, spec) in &specs {
-        let env_names = spec["env"]
+        let mut env_names = spec["env"]
             .as_object()
             .map(|m| m.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
+        env_names.sort();
         let material = json!({"type":spec.get("type").or_else(||spec.get("transport")),"command":spec.get("command"),"args":spec.get("args"),"url":spec.get("url").or_else(||spec.get("httpUrl")).or_else(||spec.get("serverUrl")),"env_names":env_names});
-        let compact = serde_json::to_vec(&material)
-            .map_err(|_| r::Error(2, "MCP pin serialization failed".into()))?;
+        let compact = r::canonical_ascii(&material)?;
         current.insert(key.clone(), json!(r::hash(&compact)));
-        rows.push(json!({"server":key,"transport":if spec["command"].is_string(){"stdio"}else{"http"},"target":safe_target(spec),"env_names":env_names.len(),"disabled":spec["disabled"]==true || spec["enabled"]==false}));
+        rows.push(json!({"server":clean(key),"transport":if spec["command"].is_string(){"stdio"}else{"http"},"target":safe_target(spec),"env_names":env_names.len(),"disabled":spec["disabled"]==true || spec["enabled"]==false,"risks":risks(spec)}));
     }
+    let plugins = plugin_inventory(paths)?;
     if !pins {
         return r::json(
-            &json!({"schema":1,"kind":"oms-doctor-extensions","servers":rows,"unknown":unknown}),
+            &json!({"schema":1,"kind":"oms-doctor-extensions","servers":rows,"plugins":plugins,"unknown":unknown}),
         );
     }
+    let probed = if let Some(name) = options.get("--probe-tools") {
+        let selected = specs
+            .iter()
+            .filter(|(key, _)| key == name || key.splitn(3, ':').nth(2) == Some(name))
+            .collect::<Vec<_>>();
+        if selected.len() != 1 {
+            return r::fail("--probe-tools must name exactly one configured server");
+        }
+        let (key, spec) = selected[0];
+        Some((key.clone(), crate::mcp_probe::run(spec, &paths.cwd, flag)?))
+    } else {
+        None
+    };
     let path = std::env::var_os("OMS_MCP_PIN_FILE")
         .map(PathBuf::from)
         .unwrap_or(paths.config.join("mcp-pins.json"));
+    let _guard = if options.has("--pin") {
+        r::child_guard()?;
+        Some(r::lock(&path, &paths.cwd)?)
+    } else {
+        None
+    };
     let previous = if r::exists(&path) {
         let row = r::value(&path)?;
-        if row["schema"] != 1 || !row["pins"].is_object() {
+        if row["schema"] != 1
+            || !row["pins"].is_object()
+            || row.get("tools").is_some_and(|v| !v.is_object())
+        {
             return r::fail("invalid MCP pin store");
         }
         row
@@ -414,19 +649,35 @@ fn extensions(paths: &Paths, pins: bool, options: &Options) -> Result<crate::Out
         .cloned()
         .collect::<Vec<_>>();
     if options.has("--pin") {
-        r::child_guard()?;
-        let _guard = r::lock(&path, &paths.cwd)?;
         // Unknown providers keep their existing baseline, never a false removal.
         for (k, v) in old {
             if unknown.iter().any(|p| k.starts_with(&format!("{p}:"))) {
                 current.insert(k.clone(), v.clone());
             }
         }
-        let row = json!({"schema":1,"pins":current,"tools":previous.get("tools").cloned().unwrap_or(json!({}))});
+        let mut tools = previous
+            .get("tools")
+            .filter(|v| v.is_object())
+            .cloned()
+            .unwrap_or(json!({}));
+        tools
+            .as_object_mut()
+            .unwrap()
+            .retain(|k, _| current.contains_key(k));
+        if let Some((key, hashes)) = &probed {
+            tools[key] = hashes.clone();
+        }
+        let row = json!({"schema":1,"pins":current,"tools":tools});
         r::atomic(&path, &r::bytes(&row)?)?;
     }
+    let probe = probed.map(|(key, hashes)| {
+        let now = hashes.as_object().unwrap();
+        let old = previous["tools"][&key].as_object();
+        let names = |kind: &str| now.iter().filter(|(k,v)| match kind {"new" => old.is_some_and(|o| !o.contains_key(*k)), _ => old.and_then(|o| o.get(*k)).is_some_and(|p| p != *v)}).map(|(k,_)| clean(k)).collect::<Vec<_>>();
+        json!({"server":key,"tools":now.len(),"baseline":if old.is_some(){"recorded"}else{"none"},"added":names("new"),"changed":names("changed"),"removed":old.map(|o| o.keys().filter(|k| !now.contains_key(*k)).map(|k| clean(k)).collect::<Vec<_>>()).unwrap_or_default()})
+    });
     r::json(
-        &json!({"schema":1,"servers":rows,"new":added,"changed":changed,"removed":removed,"unknown":unknown,"pinned":options.has("--pin")}),
+        &json!({"schema":1,"kind":"oms-mcp-pins","servers":rows,"new":added,"changed":changed,"removed":removed,"unknown":unknown,"pinned":options.has("--pin"),"probe":probe}),
     )
 }
 fn residue(paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
@@ -489,6 +740,16 @@ fn providers(paths: &Paths, options: &Options) -> Result<crate::Output> {
     let table = r::value(&path)?;
     if table["schema"] != 1 {
         return r::fail("unsupported provider capability table schema");
+    }
+    if options.has("--check") {
+        let mut rooted = paths.clone();
+        if let Some(root) = options.path("--root", &paths.cwd)? {
+            rooted.source = r::physical(&root)?;
+        }
+        let result = crate::provider_check::check(&table, &rooted)?;
+        let mut out = r::json(&result)?;
+        out.0 = i32::from(result["ok"] != true);
+        return Ok(out);
     }
     r::json(&table)
 }
@@ -736,24 +997,14 @@ fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
     Ok(rows)
 }
 pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
-    for key in [
-        "--contract",
-        "--live-models",
-        "--strict-diversity",
-        "--root",
-    ] {
+    for key in ["--contract", "--live-models", "--strict-diversity"] {
         if options.has(key) {
             return r::fail(format!("native doctor {key} adapter is not yet available"));
         }
     }
-    if options.has("--providers") && options.has("--check") {
-        return r::fail(
-            "native provider definition/test-reference check adapter is not yet available",
-        );
-    }
 
     if options.has("--extensions") || options.has("--mcp") {
-        return extensions(paths, options.has("--mcp"), options);
+        return extensions(paths, options.has("--mcp"), options, flag);
     }
     if options.has("--providers") {
         return providers(paths, options);
@@ -796,6 +1047,47 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
     }
     if options.has("--sandbox") {
         result["kind"] = json!("oms-doctor-sandbox");
+    }
+    if options.has("--security") && !options.has("--residue") {
+        let file = paths.state.join("doctor-security.json");
+        let child = std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1");
+        let _guard = if child {
+            None
+        } else {
+            Some(r::lock(&file, &paths.cwd)?)
+        };
+        let previous = if r::exists(&file) {
+            r::value(&file).ok()
+        } else {
+            None
+        };
+        let mut sections = serde_json::Map::new();
+        let mut groups = BTreeMap::<String, Vec<&Value>>::new();
+        for row in result["findings"].as_array().unwrap() {
+            groups
+                .entry(row["section"].as_str().unwrap_or("unknown").into())
+                .or_default()
+                .push(row);
+        }
+        for (section, rows) in groups {
+            sections.insert(section, json!(r::hash(&r::canonical_ascii(&json!(rows))?)));
+        }
+        let old = previous.as_ref().and_then(|v| v["sections"].as_object());
+        let mut changed = sections
+            .iter()
+            .filter(|(k, v)| old.is_some_and(|o| o.get(*k) != Some(*v)))
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>();
+        if let Some(old) = old {
+            changed.extend(old.keys().filter(|k| !sections.contains_key(*k)).cloned());
+        }
+        result["since"] = json!({"baseline":old.is_none(),"checked_at":previous.as_ref().and_then(|v| v.get("checked_at")),"changed":changed});
+        if !child {
+            r::atomic(
+                &file,
+                &r::bytes(&json!({"schema":1,"checked_at":r::now(),"sections":sections}))?,
+            )?;
+        }
     }
     emit(result, options)
 }

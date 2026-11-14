@@ -37,12 +37,15 @@ pub(crate) struct Transaction {
     path: PathBuf,
     journal: Journal,
     complete: bool,
+    _journal_lock: oms_lock::Guard,
 }
 impl Transaction {
     pub fn begin(paths: &Paths) -> Result<Self> {
         let dir = paths.config.join("native-lifecycle");
-        r::private_dir(&dir)?;
         let path = dir.join("transaction.json");
+        // Receipt overrides may differ while sharing this recovery journal.
+        let journal_lock = r::lock(&path, &paths.cwd)?;
+        r::private_dir(&dir)?;
         if r::exists(&path) {
             Self::recover(&path)?;
         }
@@ -55,6 +58,7 @@ impl Transaction {
                 effects: Vec::new(),
             },
             complete: false,
+            _journal_lock: journal_lock,
         };
         tx.save()?;
         Ok(tx)
@@ -75,6 +79,19 @@ impl Transaction {
     }
     pub fn copy(&mut self, target: &Path, source: &Path) -> Result<()> {
         self.replace(target, |p| copy(source, p))
+    }
+    pub fn files(&mut self, target: &Path, files: &[(&str, &[u8], u32)]) -> Result<()> {
+        self.replace(target, |p| {
+            fs::create_dir(p)?;
+            fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
+            for (name, raw, mode) in files {
+                if !r::safe_name(name) || matches!(*name, "." | "..") {
+                    return r::fail("invalid staged payload member");
+                }
+                r::new_file(&p.join(name), raw, *mode)?;
+            }
+            r::sync_dir(p)
+        })
     }
     fn replace(&mut self, target: &Path, prepare: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
         let target = r::leaf(target)?;

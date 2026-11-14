@@ -5,7 +5,7 @@ use crate::{
 };
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::atomic::AtomicBool,
 };
@@ -14,6 +14,25 @@ pub(crate) struct Payload {
     pub executable: PathBuf,
     pub helper: Option<PathBuf>,
     pub revision: String,
+    discovery: oms_bootstrap::Discovery,
+    proof: oms_bootstrap::ValidatedPayload,
+}
+impl Payload {
+    pub(crate) fn recheck(&self) -> Result<()> {
+        self.proof.recheck(&self.discovery).map_err(|_| {
+            r::Error(
+                2,
+                "native payload changed during lifecycle transaction".into(),
+            )
+        })
+    }
+    pub(crate) fn frontdoor(&self, paths: &Paths) -> PathBuf {
+        paths
+            .data
+            .join("libexec")
+            .join(&self.revision)
+            .join("oms-frontdoor")
+    }
 }
 fn protected(path: &Path, executable: bool) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
@@ -118,9 +137,12 @@ pub(crate) fn verify(paths: &Paths, flag: &AtomicBool) -> Result<Payload> {
         executable: proof.executable(),
         helper: proof.helper(),
         revision,
+        discovery,
+        proof,
     })
 }
 pub(crate) fn install(paths: &Paths, payload: &Payload, tx: &mut Transaction) -> Result<()> {
+    payload.recheck()?;
     let dir = paths.data.join("libexec").join(&payload.revision);
     for (name, source) in std::iter::once(("oms", &payload.executable)).chain(
         payload
@@ -137,9 +159,82 @@ pub(crate) fn install(paths: &Paths, payload: &Payload, tx: &mut Transaction) ->
             );
         }
         if !r::exists(&target) {
-            tx.copy(&target, source)?;
+            tx.write(&target, &r::read(source, 1024 * 1024 * 1024)?, 0o755)?;
         }
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))?;
     }
-    Ok(())
+    let digest = r::hash(&r::read(&payload.executable, 1024 * 1024 * 1024)?);
+    let executable = r::shell(payload.executable.as_os_str())?;
+    let wrapper = format!(
+        "#!/bin/sh\n# oh-my-setting native lifecycle\nif command -v sha256sum >/dev/null 2>&1; then\n  observed=$(sha256sum < {executable}) || exit 2\n  observed=${{observed%% *}}\nelif command -v shasum >/dev/null 2>&1; then\n  observed=$(shasum -a 256 < {executable}) || exit 2\n  observed=${{observed%% *}}\nelse\n  echo 'error: native payload hash tool unavailable' >&2\n  exit 2\nfi\n[ \"$observed\" = '{digest}' ] || {{ echo 'error: native payload changed; run oms doctor --repair' >&2; exit 2; }}\nexec {executable} --oms-dispatch {} {} -- \"$@\"\n",
+        r::shell(paths.source.as_os_str())?,
+        payload.revision
+    );
+    tx.write(&payload.frontdoor(paths), wrapper.as_bytes(), 0o755)?;
+    payload.recheck()
+}
+
+/// Stage a complete build through the same target journal as installed files.
+/// A present invalid cache is terminal; a build never repairs it implicitly.
+pub(crate) fn stage(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> Result<()> {
+    let revision = r::git(&paths.source, &["rev-parse", "HEAD"], flag)?;
+    if revision.len() != 40
+        || !revision
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return r::fail("invalid source revision for native build");
+    }
+    let dir = paths.source.join("rust/target/oms-native").join(&revision);
+    if r::exists(&dir) {
+        verify(paths, flag)?;
+        return Ok(());
+    }
+    let cargo = r::find("cargo", &paths.cwd)
+        .ok_or_else(|| r::Error(2, "native payload missing and cargo unavailable".into()))?;
+    let result = r::command(
+        cargo,
+        &[
+            "+1.99.1".into(),
+            "build".into(),
+            "--manifest-path".into(),
+            paths.source.join("rust/Cargo.toml").into_os_string(),
+            "--locked".into(),
+            "--offline".into(),
+            "--release".into(),
+            "--bin".into(),
+            "oms".into(),
+            "--target-dir".into(),
+            paths
+                .source
+                .join("rust/target/lifecycle-build")
+                .into_os_string(),
+        ],
+        &paths.source,
+        None,
+        flag,
+        std::time::Duration::from_secs(1800),
+    )?;
+    if result.0 != 0 {
+        return Err(r::Error(
+            result.0,
+            "native source build failed; installation was not published".into(),
+        ));
+    }
+    if r::git(&paths.source, &["rev-parse", "HEAD"], flag)? != revision {
+        return r::fail("source revision changed during build");
+    }
+    let executable = paths.source.join("rust/target/lifecycle-build/release/oms");
+    protected(&executable, true)?;
+    let raw = r::read(&executable, 1024 * 1024 * 1024)?;
+    let digest = r::hash(&raw);
+    let row = serde_json::json!({"schema":1,"source_commit":revision,"artifacts":{"oms":digest}});
+    tx.files(
+        &dir,
+        &[
+            ("oms", &raw, 0o755),
+            ("oms.sha256", format!("{digest}\n").as_bytes(), 0o600),
+            ("manifest.json", &r::bytes(&row)?, 0o600),
+        ],
+    )?;
+    verify(paths, flag)?.recheck()
 }

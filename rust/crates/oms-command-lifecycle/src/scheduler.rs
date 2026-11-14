@@ -56,7 +56,12 @@ fn block(raw: &str, name: &str, replacement: &str) -> Result<String> {
     }
     Ok(result)
 }
-pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+pub(crate) fn apply(
+    paths: &Paths,
+    options: &Options,
+    tx: &mut Transaction,
+    flag: &AtomicBool,
+) -> Result<crate::Output> {
     let tick = options.tool == "tick";
     let name = if tick { "tick" } else { "autoupdate" };
     let remove = options.tool == "uninstall-autoupdate"
@@ -72,7 +77,11 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
         "apply"
     };
     let cron_file = std::env::var_os("OH_MY_SETTING_AUTO_UPDATE_CRON_FILE").map(PathBuf::from);
-    let systemd = method == "systemd"
+    let units = paths.config.parent().unwrap().join("systemd/user");
+    let existing_units = r::exists(&units.join(format!("oh-my-setting-{name}.service")))
+        || r::exists(&units.join(format!("oh-my-setting-{name}.timer")));
+    let systemd = remove && existing_units
+        || method == "systemd"
         || method == "auto"
             && cron_file.is_none()
             && r::find("systemctl", &paths.cwd).is_some()
@@ -92,11 +101,6 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
             if systemd { "systemd" } else { "cron" }
         )));
     }
-    r::child_guard()?;
-    paths.require_owner()?;
-    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
-    paths.require_owner()?;
-    let mut tx = Transaction::begin(paths)?;
     let executable = paths.home.join(".local/bin/oms");
     let command = if tick {
         format!("{} tick run", r::shell(executable.as_os_str())?)
@@ -171,7 +175,8 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
         {
             return r::fail("user timer activation failed; unit file transaction rolls back");
         }
-    } else {
+    }
+    if !systemd || remove {
         let old = if let Some(file) = &cron_file {
             if r::exists(file) {
                 String::from_utf8(r::read(file, r::LIMIT)?)
@@ -202,7 +207,12 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
                 command
             )
         };
-        let new = block(&old, name, &replacement)?;
+        let legacy = if tick {
+            retire_legacy_tick(&old, paths)?
+        } else {
+            old.clone()
+        };
+        let new = block(&legacy, name, &replacement)?;
         if let Some(file) = cron_file {
             tx.write(&file, new.as_bytes(), 0o600)?;
         } else {
@@ -229,9 +239,80 @@ pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result
         }
         tx.write(&paths.receipt, &r::bytes(&row)?, 0o600)?;
     }
-    tx.commit()?;
     Ok(r::text(format!(
         "{name} trigger: {}",
         if remove { "removed" } else { "installed" }
     )))
+}
+
+pub(crate) fn run(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    if options.preview() {
+        return Ok(r::text("would converge the owned scheduler trigger"));
+    }
+    r::child_guard()?;
+    let _guard = r::lock(&paths.receipt, &paths.cwd)?;
+    paths.require_owner()?;
+    let mut tx = Transaction::begin(paths)?;
+    let result = apply(paths, options, &mut tx, flag)?;
+    r::check(flag)?;
+    tx.commit()?;
+    Ok(result)
+}
+
+fn retire_legacy_tick(raw: &str, paths: &Paths) -> Result<String> {
+    let script = paths.source.join("scripts/tick.sh");
+    let quoted = format!(
+        "\"{}\" run >/dev/null 2>&1 # oh-my-setting tick",
+        script.to_str().ok_or_else(|| r::Error(
+            2,
+            "legacy cron migration requires a UTF-8 source path".into()
+        ))?
+    );
+    let mut out = String::new();
+    for line in raw.lines() {
+        if line.ends_with("# oh-my-setting tick") && !line.trim_start().starts_with('#') {
+            if !line.starts_with("23 * * * * ")
+                || !line.ends_with(&quoted)
+                || line.contains(['\n', '\r'])
+            {
+                return r::fail("ambiguous legacy tick cron entry; crontab retained");
+            }
+            let prefix = line
+                .strip_suffix(&quoted)
+                .unwrap()
+                .strip_prefix("23 * * * * ")
+                .unwrap();
+            // Do not withdraw a line whose prefix can run another command.
+            if !prefix.is_empty() {
+                let rest = prefix
+                    .strip_prefix("PATH=")
+                    .and_then(|s| s.split_once(' '))
+                    .filter(|(path, _)| {
+                        !path.is_empty()
+                            && path
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_./:+-".contains(&b))
+                    })
+                    .map(|(_, rest)| rest)
+                    .ok_or_else(|| {
+                        r::Error(
+                            2,
+                            "ambiguous legacy tick PATH prefix; crontab retained".into(),
+                        )
+                    })?;
+                if !rest.is_empty() {
+                    let recorded =
+                        String::from_utf8(r::read(&paths.config.join("bash-interpreter"), 4096)?)
+                            .map_err(|_| r::Error(2, "invalid recorded Bash path".into()))?;
+                    if rest != format!("\"{}\" ", recorded.trim()) {
+                        return r::fail("unrecognized legacy tick interpreter; crontab retained");
+                    }
+                }
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    Ok(out)
 }

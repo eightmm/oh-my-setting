@@ -11,7 +11,7 @@ use std::{
         fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         process::CommandExt,
     },
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -95,6 +95,34 @@ pub(crate) fn bytes(v: &Value) -> Result<Vec<u8>> {
     b.push(b'\n');
     Ok(b)
 }
+pub(crate) fn canonical_ascii(v: &Value) -> Result<Vec<u8>> {
+    fn ordered(v: &Value) -> Value {
+        match v {
+            Value::Object(o) => Value::Object(
+                o.iter()
+                    .map(|(k, v)| (k.clone(), ordered(v)))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            Value::Array(a) => Value::Array(a.iter().map(ordered).collect()),
+            _ => v.clone(),
+        }
+    }
+    let raw = serde_json::to_string(&ordered(v))
+        .map_err(|_| Error(2, "canonical JSON serialization failed".into()))?;
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii() {
+            out.push(ch)
+        } else {
+            for unit in ch.encode_utf16(&mut [0; 2]) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    Ok(out.into_bytes())
+}
 pub(crate) fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
@@ -102,17 +130,7 @@ pub(crate) fn physical(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         return fail("expected an absolute path");
     }
-    let mut normalized = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::CurDir => (),
-            _ => normalized.push(part),
-        }
-    }
-    let mut ancestor = normalized.as_path();
+    let mut ancestor = path;
     let mut names = Vec::new();
     loop {
         match fs::symlink_metadata(ancestor) {
@@ -213,12 +231,15 @@ pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     fs::File::open(path)?.sync_all()?;
     Ok(())
 }
-pub(crate) fn lock(path: &Path, cwd: &Path) -> Result<oms_lock::Guard> {
+pub(crate) fn file_lock(path: &Path, cwd: &Path) -> Result<oms_lock::Lock> {
     let mut settings =
         oms_lock::Settings::from_env().map_err(|e| Error(2, format!("lock settings: {e:?}")))?;
     settings.cwd = cwd.to_path_buf();
     oms_lock::Lock::for_file(&leaf(path)?, settings)
-        .map_err(|e| Error(2, format!("lock derivation: {e:?}")))?
+        .map_err(|e| Error(2, format!("lock derivation: {e:?}")))
+}
+pub(crate) fn lock(path: &Path, cwd: &Path) -> Result<oms_lock::Guard> {
+    file_lock(path, cwd)?
         .acquire(None)
         .map_err(|e| Error(75, format!("lifecycle lock unavailable: {e:?}")))
 }
@@ -344,6 +365,12 @@ pub(crate) fn git(root: &Path, args: &[&str], flag: &AtomicBool) -> Result<Strin
     ];
     argv.extend(args.iter().map(OsString::from));
     let output = command(program, &argv, root, None, flag, Duration::from_secs(120))?;
+    if matches!(output.0, 130 | 124) {
+        return Err(Error(
+            output.0,
+            "git command interrupted or timed out".into(),
+        ));
+    }
     if output.0 != 0 {
         return fail(format!(
             "git {} failed (exit {})",
