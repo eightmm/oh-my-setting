@@ -2,8 +2,8 @@
 
 Native command adapter and orchestration domain for `intent`, `plan-from-spec`,
 `plan-run`, `autopilot`, `goal-drive`, and the write-free `install-plan` helper.
-This is a standalone Rust 2024 workspace with a Rust 1.99.1 floor. Integration
-into the root dispatcher is deliberately outside this crate's write scope.
+This Rust 2024 crate has a Rust 1.99.1 floor. Root dispatcher integration
+is outside this crate's write scope.
 
 The library does not invoke a shell/Python implementation of an OMS command.
 Acceptance and campaign verifier commands explicitly supplied by a contract
@@ -94,24 +94,40 @@ any apply, followed by the plan producer's locked digest/CAS check.
 | `.oms/handoffs/consumed.jsonl` | Advisory pickup records use the shared durable writer under a file lock. Distinct sessions are counted by projection. No pickup hides a handoff or grants resume authority. |
 | Work Journal | The existing producer owns its files, deduplication and locks. Observation failure does not undo a completed canonical operation. |
 
-## Verification phase
+## Static selectors and installation previews
 
-Implementation verification is intentionally limited to:
+Selector validation reads suite definitions as data. When
+`tests/operator/runner.py` is present, its static `SECTIONS` manifest retains
+its existing section and case behavior, including refusal of shell cases.
+Only an absent registry enables the shell fallback: inline
+`# OPERATOR_SECTION_BEGIN` sections and `tests/operator/*.sh` section files
+supply names, with underscores normalized to hyphens. Shell case names come
+from `# BEGIN ` markers, removing sentence and parenthetical annotations.
+Unknown sections and cases refuse; unsafe or non-UTF-8 registry/case files
+remain errors. No target suite or Python interpreter is executed.
+
+`install-plan --install` and `--update` retain the `STEP: STATUS: detail`
+format. The `native-runtime` step reports readiness as `not-previewed`;
+artifact availability belongs to the native installation producer. The preview
+neither downloads an interpreter nor writes installation state.
+
+## Verification
+
+The integration suite covers ownership/help and parse errors for all six
+families, interruption, selectors with and without the legacy registry,
+continuation digest binding, install/update previews and native callback argv,
+contract parsing, proposal JSON/digests, frozen receipt validation and budgets,
+and unavailable service refusal. Run it with:
 
 ```text
-cargo +1.99.1 check --manifest-path rust/crates/oms-command-autonomy/Cargo.toml --all-targets --offline
-cargo +1.99.1 fmt --manifest-path rust/crates/oms-command-autonomy/Cargo.toml -- --check
+cargo +1.99.1 test --manifest-path rust/Cargo.toml -p oms-command-autonomy --test autonomy_contract --locked --offline
+cargo +1.99.1 fmt --manifest-path rust/Cargo.toml -p oms-command-autonomy -- --check
+cargo +1.99.1 clippy --manifest-path rust/Cargo.toml -p oms-command-autonomy --test autonomy_contract --locked --offline -- -D warnings
 ```
 
-Runtime tests, cross-provider execution, native macOS execution, fault injection
-and end-to-end compatibility have not been established in this phase. This
-crate is not wired into the root workspace, dispatcher, migration contracts or
-installation. Owning integration must supply and exercise the native services
-before selecting this command family for live orchestration.
-
-The existing compatibility sources remain the shell front doors under
-[`scripts`](../../../scripts), with behavioral coverage in
-[`autonomy-plan-run-smoke.sh`](../../../tests/autonomy-plan-run-smoke.sh),
-[`autopilot-smoke.sh`](../../../tests/autopilot-smoke.sh), and the existing
-operator/context suites. Those sources were inspected; their tests were not
-run under the implementation-only brief.
+These commands run from the repository root. Cross-provider execution, native
+macOS supervision and end-to-end host integration are not established by these
+fixture tests. The owning host must inject native services before selecting
+this family for live orchestration. In particular, `Services` extends the
+plan producer's interfaces; the default unavailable callbacks grant no provider,
+approval, publication, routing, context-validation or controller authority.

@@ -37,6 +37,54 @@ fn operator_sections(source: &str) -> BTreeMap<String, Option<String>> {
     }
     rows
 }
+fn operator_manifest(
+    store: &Store,
+    source: &str,
+) -> Result<(BTreeMap<String, Option<String>>, bool)> {
+    if let Some(raw) = store.optional("tests/operator/runner.py", 4 * 1024 * 1024)? {
+        let body =
+            String::from_utf8(raw).map_err(|_| Error::new(2, "verify suite is not UTF-8"))?;
+        return Ok((operator_sections(&body), false));
+    }
+    let mut rows = BTreeMap::new();
+    for name in store.names("tests/operator", usize::MAX, true)? {
+        let Some(file) = name.to_str() else { continue };
+        let Some(stem) = file.strip_suffix(".sh") else {
+            continue;
+        };
+        if !stem.is_empty()
+            && stem
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b"_-".contains(&b))
+        {
+            rows.insert(stem.replace('_', "-"), Some(file.to_owned()));
+        }
+    }
+    for name in Regex::new(r"(?m)^# OPERATOR_SECTION_BEGIN ([a-z_-]+)$")
+        .unwrap()
+        .captures_iter(source)
+    {
+        let name = name[1].replace('_', "-");
+        if !["core", "shared-cache"].contains(&name.as_str()) {
+            rows.entry(name).or_insert(None);
+        }
+    }
+    Ok((rows, true))
+}
+fn inline_section(source: &str, section: &str) -> String {
+    let mut lines = source.lines();
+    let Some(marker) = lines.find_map(|line| {
+        line.strip_prefix("# OPERATOR_SECTION_BEGIN ")
+            .filter(|name| name.replace('_', "-") == section)
+    }) else {
+        return String::new();
+    };
+    let end = format!("# OPERATOR_SECTION_END {marker}");
+    lines
+        .take_while(|line| *line != end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 fn case_names(source: &str) -> Vec<String> {
     source
         .lines()
@@ -129,35 +177,36 @@ pub fn validate_with_continuation(
                     .map(|c| c[1].replace('_', "-"))
                     .filter(|s| !["core", "shared-cache"].contains(&s.as_str()))
                     .collect::<Vec<_>>();
-                for name in operator_sections(&read(&store, "tests/operator/runner.py")?).keys() {
+                for name in operator_manifest(&store, &source)?.0.keys() {
                     if !names.contains(name) {
                         names.push(name.clone());
                     }
                 }
                 Some(names)
             } else if option == "--case" && suite == "tests/operator-tools-smoke.sh" {
-                let manifest = operator_sections(&read(&store, "tests/operator/runner.py")?);
+                let (manifest, shell_cases) = operator_manifest(&store, &source)?;
                 if sections.len() != 1 {
                     None
                 } else if let Some(file) = manifest.get(&sections[0]) {
                     let body = if let Some(file) = file {
-                        if file.ends_with(".sh") {
+                        if file.ends_with(".sh") && !shell_cases {
                             String::new()
                         } else {
                             read(&store, &format!("tests/operator/{file}"))?
                         }
                     } else {
-                        source
-                            .split_once("# OPERATOR_SECTION_BEGIN dispatch_exit\n")
-                            .map(|(_, body)| {
-                                body.split("# OPERATOR_SECTION_END dispatch_exit\n")
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_owned()
-                            })
-                            .unwrap_or_default()
+                        inline_section(
+                            &source,
+                            if shell_cases {
+                                &sections[0]
+                            } else {
+                                "dispatch-exit"
+                            },
+                        )
                     };
                     Some(case_names(&body))
+                } else if shell_cases {
+                    Some(Vec::new())
                 } else {
                     None
                 }

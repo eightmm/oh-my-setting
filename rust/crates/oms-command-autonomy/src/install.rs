@@ -79,9 +79,9 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     ));
     plan.emit("checkout", "not-previewed", "fetching the configured ref needs the network and writes the checkout; steps below describe the current checkout");
     plan.emit(
-        "python-runtime",
+        "native-runtime",
         "not-previewed",
-        "runtime ensure may download the locked interpreter and precompile the checkout",
+        "native runtime readiness belongs to the installation producer; artifact availability is not previewed",
     );
     if update {
         plan.emit(
