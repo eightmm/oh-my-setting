@@ -49,6 +49,7 @@ struct Anchor {
     parent: OwnedFd,
     name: OsString,
     stat: Stat,
+    system_link: Option<Stat>,
 }
 pub(crate) struct Directory {
     pub path: PathBuf,
@@ -75,20 +76,41 @@ impl Directory {
             let Component::Normal(name) = component else {
                 return Err("invalid supervisor state ancestor".into());
             };
+            let mut created = false;
             if create {
                 match fs::mkdirat(&fd, name, Mode::from_raw_mode(0o700)) {
-                    Ok(()) => fs::fsync(&fd).map_err(err)?,
+                    Ok(()) => created = true,
                     Err(rustix::io::Errno::EXIST) => {}
                     Err(e) => return Err(err(e)),
                 }
             }
+            // macOS system aliases such as /tmp and /var are root-owned.
+            // Never follow a user-controlled link or a link inside state home.
+            let named = fs::statat(&fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(err)?;
+            let parent = fs::fstat(&fd).map_err(err)?;
+            let system_link = (FileType::from_raw_mode(named.st_mode) == FileType::Symlink
+                && index + 1 < private_from
+                && named.st_uid == 0
+                && parent.st_uid == 0
+                && parent.st_mode & 0o022 == 0)
+                .then_some(named);
+            let nofollow = if system_link.is_some() {
+                OFlags::empty()
+            } else {
+                OFlags::NOFOLLOW
+            };
             let child = fs::openat(
                 &fd,
                 name,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                OFlags::RDONLY | OFlags::DIRECTORY | nofollow | OFlags::CLOEXEC,
                 Mode::empty(),
             )
             .map_err(err)?;
+            if created {
+                fs::fchmod(&child, Mode::from_raw_mode(0o700)).map_err(err)?;
+                fs::fsync(&child).map_err(err)?;
+                fs::fsync(&fd).map_err(err)?;
+            }
             let stat = fs::fstat(&child).map_err(err)?;
             let private = index >= private_from;
             if index + 1 == private_from
@@ -110,6 +132,7 @@ impl Directory {
                 parent: fd,
                 name: name.to_os_string(),
                 stat,
+                system_link,
             });
             fd = child;
         }
@@ -123,8 +146,19 @@ impl Directory {
     }
     pub fn check(&self) -> Result<()> {
         for anchor in &self.chain {
-            let current =
+            let named =
                 fs::statat(&anchor.parent, &anchor.name, AtFlags::SYMLINK_NOFOLLOW).map_err(err)?;
+            let current = if let Some(link) = &anchor.system_link {
+                if !generation(&named, link)
+                    || named.st_uid != 0
+                    || FileType::from_raw_mode(named.st_mode) != FileType::Symlink
+                {
+                    return Err("supervisor system ancestor changed".into());
+                }
+                fs::statat(&anchor.parent, &anchor.name, AtFlags::empty()).map_err(err)?
+            } else {
+                named
+            };
             if !same(&current, &anchor.stat)
                 || FileType::from_raw_mode(current.st_mode) != FileType::Directory
                 || current.st_mode != anchor.stat.st_mode
@@ -165,6 +199,9 @@ impl Directory {
         }
     }
     fn read(&self, name: &OsStr, limit: usize) -> Result<Option<Vec<u8>>> {
+        self.read_snapshot(name, limit, false)
+    }
+    fn read_snapshot(&self, name: &OsStr, limit: usize, growing: bool) -> Result<Option<Vec<u8>>> {
         let Some(before) = self.observed(name)? else {
             return Ok(None);
         };
@@ -180,15 +217,40 @@ impl Directory {
         .map_err(err)?;
         let opened = fs::fstat(&fd).map_err(err)?;
         regular(&opened)?;
-        if !generation(&before, &opened) {
+        if !(if growing {
+            same(&before, &opened) && opened.st_size >= before.st_size
+        } else {
+            generation(&before, &opened)
+        }) {
             return Err("supervisor record changed before read".into());
+        }
+        if opened.st_size < 0 || opened.st_size as u64 > limit as u64 {
+            return Err("supervisor record exceeds safe read bound".into());
         }
         let mut file = File::from(fd);
         let mut data = Vec::new();
         (&mut file)
-            .take(limit as u64 + 1)
+            .take(if growing {
+                opened.st_size as u64
+            } else {
+                limit as u64 + 1
+            })
             .read_to_end(&mut data)
             .map_err(err)?;
+        if growing {
+            let after = fs::fstat(&file).map_err(err)?;
+            regular(&after)?;
+            let named = self.observed(name)?.ok_or("supervisor log disappeared")?;
+            if data.len() as u64 != opened.st_size as u64
+                || !same(&opened, &after)
+                || !same(&opened, &named)
+                || after.st_size < opened.st_size
+                || named.st_size < opened.st_size
+            {
+                return Err("supervisor log replaced or shortened while reading".into());
+            }
+            return Ok(Some(data));
+        }
         if data.len() > limit
             || data.len() as i64 != before.st_size as i64
             || !generation(&before, &fs::fstat(&file).map_err(err)?)
@@ -262,20 +324,20 @@ impl Directory {
 }
 pub(crate) struct Store {
     pub root: Directory,
+    pub state_home: PathBuf,
     jobs: Directory,
     logs: Directory,
 }
 impl Store {
-    pub fn open(repo: &Path) -> Result<Self> {
+    pub fn open(repo: &Path, default_repo: &Path) -> Result<Self> {
         let base = match std::env::var_os("XDG_STATE_HOME").filter(|s| !s.is_empty()) {
             Some(s) => expand(Path::new(&s))?,
-            None => PathBuf::from(std::env::var_os("HOME").ok_or("home directory unavailable")?)
-                .join(".local/state"),
+            None => home()?.join(".local/state"),
         };
         let base = if base.is_absolute() {
             base
         } else {
-            std::env::current_dir().map_err(err)?.join(base)
+            default_repo.join(base)
         };
         let mut base_normal = PathBuf::from("/");
         for component in base.components() {
@@ -299,7 +361,19 @@ impl Store {
         let root = Directory::open(&path, true, private_from)?;
         let jobs = Directory::open(&path.join("jobs"), true, private_from)?;
         let logs = Directory::open(&path.join("logs"), true, private_from)?;
-        Ok(Self { root, jobs, logs })
+        Ok(Self {
+            root,
+            jobs,
+            logs,
+            state_home: base_normal,
+        })
+    }
+    pub fn sync_jobs(&self) -> Result<()> {
+        self.root.check()?;
+        self.jobs.check()?;
+        fs::fsync(&self.jobs.fd)
+            .map_err(|e| format!("supervisor job visible but durability uncertain: {e}"))?;
+        self.jobs.check()
     }
     pub fn queue_path(&self) -> PathBuf {
         self.root.path.join("queue.state")
@@ -400,7 +474,7 @@ impl Store {
         valid_id(id)?;
         Ok(self
             .logs
-            .read(OsStr::new(&format!("{id}.log")), 100 * 1024 * 1024)?
+            .read_snapshot(OsStr::new(&format!("{id}.log")), 100 * 1024 * 1024, true)?
             .unwrap_or_default())
     }
     pub fn remove(&self, id: &str) -> Result<()> {
@@ -487,7 +561,7 @@ pub(crate) fn valid_id(raw: &str) -> Result<()> {
 pub(crate) fn expand(path: &Path) -> Result<PathBuf> {
     let raw = path.as_os_str().as_bytes();
     if raw == b"~" || raw.starts_with(b"~/") {
-        let home = std::env::var_os("HOME").ok_or("home directory unavailable")?;
+        let home = home()?;
         Ok(
             PathBuf::from(home).join(OsStr::from_bytes(if raw.len() > 2 {
                 &raw[2..]
@@ -498,6 +572,13 @@ pub(crate) fn expand(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(path.to_owned())
     }
+}
+fn home() -> Result<PathBuf> {
+    // On Unix std falls back to the account database for absent or empty HOME.
+    #[allow(deprecated)]
+    let home = std::env::home_dir();
+    home.filter(|path| path.is_absolute())
+        .ok_or_else(|| "absolute home directory unavailable".into())
 }
 pub(crate) fn digest(raw: &[u8]) -> String {
     format!("{:x}", Sha256::digest(raw))

@@ -39,7 +39,9 @@ failures, and actual payload launch errors.
 `CaptureOptions` carries a byte limit, `Drain`/`Terminate` overflow policy and
 optional line cutoff. A byte limit is exceeded only after the limit; equal is
 allowed. Zero retains no bytes. A zero line cutoff requests immediate consumer
-cutoff. Separate stderr inherits the byte policy but no stdout line cutoff,
+cutoff. For a positive line limit, cutoff is reported only when bytes arrive
+after the selected newline; EOF immediately after that newline is complete.
+Separate stderr inherits the byte policy but no stdout line cutoff,
 unless explicitly configured. The two separate captures have independent byte
 bounds. Merged mode uses one kernel pipe, preserving that pipe's byte order;
 separate mode makes no global stdout/stderr ordering claim. `Captured` reports
@@ -60,13 +62,15 @@ reason -> TERM/grace/KILL as needed -> observe quiescence -> nonblocking reap ->
 optional adopted-child cleanup -> result. Every leader observation uses portable
 rustix `waitid(EXITED | NOWAIT | NOHANG)` until its group signaling decisions are
 finished. There is no reader thread, blocking wait, reader join, default execution
-timeout, post-leader drain timer, or inference of EOF from missing `POLLIN`.
-Leader exit with a live pipe keeps draining until actual read-zero, an explicit
-consumer cutoff, or the requested deadline/cancel. Once ordinary completion is
-frozen, cleanup cannot change it into a timeout.
+timeout, or inference of EOF from missing `POLLIN`. After leader exit, live pipes
+get a 250 ms drain window before group shutdown begins. Surviving descendants
+receive TERM then KILL after the requested grace. Drainage ends after that grace
+plus two 250 ms windows even if an escaped descendant still holds a pipe; closing
+that reader does not claim EOF. Cancellation and deadlines remain active until
+group teardown completes, including cleanup started without an explicit stop.
 
 `Scope::Leader` waits/signals only the exact unreaped child. `ProcessGroup`
-additionally observes Linux group quiescence while the leader is pinned; escaped
+additionally observes group quiescence while the leader is pinned; escaped
 sessions are outside that scope. `WholeTree` requires an explicit dedicated
 Linux reactor, initialized before spawning, with one thread, no existing
 children, and no existing subreaper owner. The caller must exclusively own all
@@ -74,11 +78,17 @@ subsequent child creation and SIGCHLD disposition. Reactors are not Send/Sync.
 Only this dedicated mode uses wait(All); it individually reserves/reaps adopted
 children and requires actual ECHILD before `all_reaped`. A library embedded with
 other child-spawning code must not claim this exclusive capability.
+On macOS the runner uses `ProcessGroup` and bounded native `ps` observations to
+exclude zombies from group liveness. It makes no whole-tree claim. Linux proc
+disappearance (including ESRCH) is distinct from permission denial, which is
+conservatively treated as a live observation.
 
 A queued kill never proves exit. Kernel D-state can retain a job indefinitely.
 Bounded callers keep the reactor and drive it again; there is no detached reaper.
-Dropping a reactor drives cleanup without a time bound. Thus dropping a pending
-reactor is explicitly not a bounded-return operation. CLI shutdown with failed
+Dropping a reactor attempts cleanup for at most five seconds, yields between
+turns, and sends a final KILL before releasing pending handles. Drop cannot prove
+reaping of a kernel-blocked process; callers needing that evidence must retain
+and drive the reactor. CLI shutdown with failed
 identity persistence drives cleanup in the foreground; persisted pending cleanup
 retains canonical `cleanup_failed` identity for recovery rather than terminal
 success. A durable detached runner is handed to the OS reaper at CLI exit.
@@ -90,12 +100,16 @@ frontdoor prefix. The adapter appends `--repo REPO _run-one --attempt ID`.
 `run(argv, default_repo, interrupted, &mut host)` returns status/stdout/stderr.
 `run_streaming` writes and flushes live dispatch IDs to supplied writers. Library
 callers retain `CommandHost`, call `drive()`, and inspect `pending()`; a dropped
-host waits for runner protocol completion without killing the runner owner;
-that destructor also has no time bound. The optional
+host drives pending cleanup for five seconds and releases persisted detached
+runner handles without killing their protocol owner. In a long-lived process,
+retain and drive the host to reap those runners. The optional
 `received_signal` callback supplies actual numeric signal provenance from the
 parent's signal owner. A Boolean interruption invents no received signal number.
-The standalone entry point creates its runner session using safe `setsid` inside
-the new native runner; it installs no process-global signal handlers.
+The library runner creates its session using safe `setsid`; EPERM is accepted
+when the process is already a group leader. This also covers the standalone
+entry point. Neither installs process-global signal handlers. Dispatch launches
+detached runners with stdin, stdout and stderr connected to `/dev/null`, and
+closed warning stderr pipes cannot turn a completed job into a supervisor error.
 
 Canonical anchors below refer to
 [`attempt-runner.py`](../../../scripts/lib/attempt-runner.py), read through EOF.
@@ -103,17 +117,17 @@ The implementation exists for every row; behavioral verification is deferred.
 
 | Mode | Source lines | Implemented behavior / limitation |
 | --- | --- | --- |
-| submit | 452–531 | Git-common-dir cwd authority, immutable argv digest in lifecycle/spec/job, trusted-local-only claim, log bounds, budgets, queued publication under queue -> event lock order; failure blocks incomplete submission. |
+| submit | 452–531 | Git-common-dir cwd authority, immutable argv digest in lifecycle/spec/job, trusted-local-only claim, log bounds, budgets, queued publication under queue -> event lock order; failure blocks incomplete submission. Empty provider becomes local consistently. Relative cwd and XDG state paths use the supplied default repository. |
 | dispatch | 1038–1160 | Strict job snapshot, queue ordering, global/provider/running/job/reservation limits, launching reservation/nonce, cancellation recheck, native runner launch identity, failed-launch convergence and streamed accepted IDs. |
 | status | 1163–1173 | Canonical public JSON keys, lifecycle/runtime/provider/profile/exit text, usage/budget/lineage and honest scope fields. |
 | wait | 1176–1197 | Terminal settlement; review settles only a review contract, never a done contract; interval/interruption and timeout state diagnostic. |
-| attach | 1200–1214 | Bounded log read, UTF-8 replacement, universal newlines and requested tail. Concurrent modification may refuse a snapshot rather than return unstable bytes. |
+| attach | 1200–1214 | Bounded log snapshot through the size observed at open, UTF-8 replacement, universal newlines and requested tail. Concurrent appends are accepted; replacement, unsafe modes and shortening are refused. Job JSON retains strict generation checks. |
 | cancel | 1217–1302 | Queue-locked monotonic request, pre-launch cancellation, stale identity failure. The owning runner forwards; an external caller does not race numeric group reuse. |
 | resume | 1305–1358 | Terminal/blocked parent, base-HEAD fence, new child attempt/spec, preserved command/budget/cwd intent, reset runtime ownership and reservations. |
-| reconcile | 1361–1490 | Ten-second orphan/launch grace, queued-only orphan block, live/zombie runner checks, identity mismatch handling, dry-run selection, lost-runner convergence; live external groups retain cleanup_failed because safe group signaling authority is unavailable. |
+| reconcile | 1361–1490 | Ten-second orphan/launch grace, queued-only orphan block, live/zombie runner checks, identity mismatch handling, dry-run selection, lost-runner convergence; apply uses identity-checked TERM/two-second/KILL/three-second cleanup for orphan groups and reaps an adopted leader when wait-owned. Unverifiable or surviving groups retain cleanup_failed and block the lifecycle. |
 | gc | 1493–1546 | Dry-run default, terminal lifecycle AND terminal runtime only, retention bounds, liveness checks, malformed-time retention, managed log then job deletion; lifecycle evidence is retained. |
 | serve | 1549–1572 | Wall/job/running bounds, counts IDs returned by dispatch, provider/budget routing, until-idle behavior, one job snapshot per iteration and native runner reaping. |
-| _run-one | 769–1035 | State claim, unsupported hard-spending refusal before payload, argv/profile/completion/cwd revalidation, numeric identity publication, merged bounded log, heartbeat/duration usage, cancellation/timeout, verifying/review/done transitions and explicit cleanup failure ownership. Whole-tree runner action currently requires Linux. |
+| _run-one | 769–1035 | State claim, unsupported hard-spending refusal before payload, argv/profile/completion/cwd revalidation, numeric identity publication, merged bounded log, heartbeat/duration usage, cancellation/timeout, verifying/review/done transitions and explicit cleanup failure ownership. Linux uses whole-tree ownership; macOS uses process groups. |
 
 The parser implements every option in canonical lines 1575–1652, including
 repeated provider limits, submit remainder arguments, choices, help, and unique
@@ -145,10 +159,15 @@ There is no fallback to the legacy implementation.
 Only canonical runtime directories, `jobs/ID.json`, `logs/ID.log`, queue lock
 namespace, lifecycle events/specs and atomic temporary files are written.
 Runtime root hashing uses the canonical physical repository's raw path bytes
-under XDG state or the default state home. State-home ownership and ancestor
+under XDG state or the default state home. Empty or absent HOME uses the Unix
+account database through the standard library; an unavailable absolute home is
+an error. Dispatch passes the resolved state home to detached runners.
+State-home ownership and ancestor
 permissions are checked; OMS directories require private ownership/modes.
-Directory components are opened without following links, retained, and checked
-against their named identities. Files must be regular, single-link, privately
+Created directories are explicitly chmodded to 0700 and synced. Directory
+components are opened without following links, except root-owned system aliases
+under non-writable root-owned parents before the state home. Both link and target
+identities are retained and rechecked. Files must be regular, single-link, privately
 owned, and bounded; reads/writes/deletes use their retained directory descriptor.
 These checks detect observed races, not hostile same-UID atomic transactions.
 
@@ -157,7 +176,7 @@ These checks detect observed races, not hostile same-UID atomic transactions.
 | Runtime directories | Validates the same anchored private namespace. | May leave canonical empty directories after mkdir; no arbitrary cleanup. |
 | Canonical queue lock owner record | Existing Operations owner/start/nonce protocol serializes writers; order is queue then events. | Owner death/stale-generation recovery remains Operations-owned. |
 | Lifecycle event stream and attempt spec | Canonical writer allocates sequences and checks idempotence/CAS; independent submissions get distinct IDs. | Creation can precede enriched spec/job publication; orphan reconcile waits ten seconds before blocking. |
-| Job JSON and job-name temporary | Queue lock serializes state claims/reservations; new-job publication also holds the event lock. | Before rename leaves prior record and possibly the operation's exclusive temporary; after rename/fsync error reports publication uncertainty. No blind durability-success retry. |
+| Job JSON and job-name temporary | Queue lock serializes state claims/reservations; new-job publication also holds the event lock. | Before rename leaves prior record and possibly the operation's exclusive temporary; after rename/fsync error reports publication uncertainty. Equal-intent save_new recovery syncs the jobs directory and rereads the published record before success. |
 | Log | Only the claimed runner opens its managed log; descriptor/name checks detect replacement. | Running log appends only new captured prefix bytes up to its cap. Final head/tail rewrite happens once; a kill during that rewrite can leave a partial bounded log, never authority for success. |
 | GC log then job deletion | Queue serialization and terminal selection prevent legitimate concurrent writers. | A kill after log deletion leaves the terminal job; a repeated GC can finish the same deletion. No lifecycle deletion. |
 | Live process ownership | A second _run-one cannot claim starting/running; cancel only publishes a request. | In-memory pending reactor survives library return. Process death between spawn and child-identity publication remains a canonical crash window; no launch gate protocol is implemented. |
@@ -165,24 +184,23 @@ These checks detect observed races, not hostile same-UID atomic transactions.
 
 ## Unimplemented seams and admission blockers
 
-- Reconcile cannot safely signal a dead runner's recorded process group. The
-  pinned rustix `pidfd_send_signal` interface addresses one process and exposes
-  no descriptor-bound group flags; a separate identity check plus killpg does
-  not reserve PID/PGID ownership. Such groups retain `cleanup_failed`, identity
-  and capacity reservation. No false terminal cleanup is published.
+- Reconcile uses the canonical start-identity/group-leadership check before
+  each external group signal. This does not make check-and-signal atomic against
+  a concurrent external reaper. A vanished/unverifiable leader cannot authorize
+  signaling surviving numeric groups; those retain `cleanup_failed`, identity
+  and capacity reservation, and their lifecycle is blocked.
 - Linux dedicated subreaper mode provides the lifetime mechanism, subject to its
-  explicit exclusive-process contract and proc observation. macOS can compile
-  ordinary/direct-child operation, but whole-tree mode refuses before payload;
-  group-quiescence observation is also unavailable there. WSL2 depends on its
+  explicit exclusive-process contract and proc observation. macOS runners use
+  process-group ownership with bounded native `ps` observation; explicit
+  `WholeTree` requests still refuse there. WSL2 depends on its
   Linux proc/subreaper capability. No sandbox/access-control claim is made.
 - Exact argparse help/error bytes and Python's extreme arbitrary-integer/
   nonfinite-float behavior are not fully ported. The adapter refuses integers
   outside native ranges, nonfinite/negative polling values, and runtime records
   over 16 MiB. Existing unsafe modes/links are refused rather than healed.
-- Late inherited pipe bytes drain after leader exit, as required by the worker
-  brief. This intentionally differs from the old smoke case that expects a
-  background child to be killed at successful leader exit before its delayed
-  output. The brief takes priority; the parent must reconcile that test contract.
+- Post-leader inherited pipe drainage and descendant shutdown are bounded.
+  An escaped session can outlive process-group scope; closing its held pipe is
+  recorded as incomplete output, never synthesized EOF.
 - The inherited spawn/publication and final-job/lifecycle crash windows above
   remain. A native launch-gate/recovery transaction would require further work.
 - Operations' public append API currently reads/projects the prior ledger on
@@ -192,17 +210,14 @@ These checks detect observed races, not hostile same-UID atomic transactions.
 
 ## Verification boundary
 
-Rust 1.99.1 offline `cargo check --all-targets` and rustfmt have been run during
-implementation. The first compiler run caught a Drop-type constructor move;
-that source error was repaired. Final check details are in the worker report.
+Rust 1.99.1 offline `cargo check` and rustfmt are the implementation-phase
+checks; exact session results are in the worker report.
 All resolved dependency versions already occur in the root lockfile.
 
-No tests were added, edited, deleted or executed. Canonical reference reading
-covered all 1673 supervisor lines, all 514 dispatch-supervisor lines, all 289
-runtime execution lines, capture_verifier 2105–2161, all 997 supervisor smoke
-lines, and the nearest provider lifecycle case (244–275). Repository searches
-also located GC, dashboard, inventory and CLI consumers. Existing tests remain
-unchanged. Tests, integration scenarios, behavioral probes, cross-platform
+No tests were added, edited, deleted or executed in the R179 repair pass.
+Reference inspection was scoped to the repaired paths and canonical process
+shutdown helpers. Existing tests remain unchanged. Tests, integration scenarios,
+behavioral probes, cross-platform
 execution, baseline-reversal tests, CI/install/publication and paid/provider/
 scheduler/container/remote launches were explicitly deferred by the brief.
 Consequently empty/zero/equal/malformed boundaries and failure exits are source

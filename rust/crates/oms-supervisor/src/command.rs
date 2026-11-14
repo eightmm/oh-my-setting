@@ -32,6 +32,7 @@ pub struct CommandHost {
     pub runner_argv: Vec<OsString>,
     reactor: Reactor,
     retained: Vec<JobId>,
+    detached: Vec<JobId>,
     helpers: BTreeSet<JobId>,
     trees: Vec<(Reactor, JobId)>,
     pub received_signal: Option<fn() -> Option<i32>>,
@@ -43,6 +44,7 @@ impl CommandHost {
             runner_argv,
             reactor: Reactor::new(),
             retained: vec![],
+            detached: vec![],
             helpers: BTreeSet::new(),
             trees: vec![],
             received_signal: None,
@@ -64,6 +66,7 @@ impl CommandHost {
             match self.reactor.poll(id, Duration::ZERO) {
                 Ok(Progress::Complete(result)) => {
                     self.helpers.remove(&id);
+                    self.detached.retain(|existing| *existing != id);
                     done.push(result);
                 }
                 Ok(Progress::Pending(_)) => pending.push(id),
@@ -184,13 +187,16 @@ impl CommandHost {
 }
 impl Drop for CommandHost {
     fn drop(&mut self) {
-        // A native runner owns another process tree. Killing only its leader
-        // would destroy that owner. Wait for runner protocol completion while
-        // keeping every handle; bounded callers retain and drive this host.
-        while self.pending() != 0 {
+        let until = Instant::now() + crate::process::MAX_DROP_WAIT;
+        while self.pending() != 0 && Instant::now() < until {
             let _ = self.drive();
             std::thread::sleep(Duration::from_millis(50));
         }
+        // Persisted runners own their trees independently. Do not kill their
+        // protocol owner when the dispatch host is dropped. They are handed
+        // to the OS reaper when this process exits; retain this host to reap
+        // them within a long-lived library caller.
+        self.reactor.release_detached(&self.detached);
     }
 }
 
@@ -237,11 +243,12 @@ pub fn run_streaming(
     let result = (|| {
         child_guard(&parsed.command, parsed.flag("apply"))?;
         check(interrupted)?;
-        let repo = host.repo(&parsed.repo, default_repo, interrupted)?;
-        let store = Store::open(&repo)?;
+        let default_repo = std::fs::canonicalize(default_repo).map_err(|e| e.to_string())?;
+        let repo = host.repo(&parsed.repo, &default_repo, interrupted)?;
+        let store = Store::open(&repo, &default_repo)?;
         match parsed.command.as_str() {
             "submit" => {
-                let id = submit(&repo, &store, &parsed, host, interrupted)?;
+                let id = submit(&repo, &default_repo, &store, &parsed, host, interrupted)?;
                 line(out, id)?;
                 Ok(0)
             }
@@ -450,15 +457,23 @@ fn save_new(repo: &Path, store: &Store, job: &mut V, interrupted: &AtomicBool) -
         row
     };
     if store.exists(&id)? {
-        if semantics(store.load(&id)?) == semantics(job.clone()) {
-            return Ok(());
+        if semantics(store.load(&id)?) != semantics(job.clone()) {
+            return Err("runtime job already exists with different supervisor intent".into());
         }
-        return Err("runtime job already exists with different supervisor intent".into());
+    } else {
+        store.save(job)?;
     }
-    store.save(job)
+    // Reconfirm both durability and contents on idempotent recovery after an
+    // earlier rename whose directory sync may have failed.
+    store.sync_jobs()?;
+    if semantics(store.load(&id)?) != semantics(job.clone()) {
+        return Err("runtime job changed after publication".into());
+    }
+    Ok(())
 }
 fn submit(
     repo: &Path,
+    default_repo: &Path,
     store: &Store,
     args: &Args,
     host: &mut CommandHost,
@@ -467,7 +482,13 @@ fn submit(
     let (_, argv, digest) = command(&args.argv)?;
     let cwd = match args.raw("cwd").filter(|s| !s.is_empty()) {
         Some(raw) => {
-            std::fs::canonicalize(storage::expand(Path::new(raw))?).map_err(|e| e.to_string())?
+            let path = storage::expand(Path::new(raw))?;
+            std::fs::canonicalize(if path.is_absolute() {
+                path
+            } else {
+                default_repo.join(path)
+            })
+            .map_err(|e| e.to_string())?
         }
         None => repo.to_owned(),
     };
@@ -491,10 +512,16 @@ fn submit(
             budget.set(key, V::from(args.int(option)?));
         }
     }
+    let provider = args.text("provider")?;
+    let provider = if provider.is_empty() {
+        "local".to_owned()
+    } else {
+        provider
+    };
     let id = ops::create_attempt(
         repo,
         &ops::StartRequest {
-            provider: args.text("provider")?,
+            provider: provider.clone(),
             tool: "agent-supervisor".into(),
             task_id: args.text("task-id")?,
             run_id: args.text("run-id")?,
@@ -514,7 +541,7 @@ fn submit(
         let mut job = obj([
             ("schema", 1usize.into()),
             ("attempt_id", id.clone().into()),
-            ("provider", args.text("provider")?.into()),
+            ("provider", provider.into()),
             ("profile", args.text("profile")?.into()),
             ("completion_state", args.text("completion-state")?.into()),
             ("task_id", args.text("task-id")?.into()),
@@ -967,7 +994,11 @@ fn dispatch(
         let mut request = Request::new(argv);
         request.scope = Scope::Leader;
         request.capture.max_bytes = 0;
-        let handle = match host.reactor.start(request) {
+        request.environment.push((
+            "XDG_STATE_HOME".into(),
+            store.state_home.as_os_str().to_owned(),
+        ));
+        let handle = match host.reactor.start_detached(request) {
             Ok(handle) => handle,
             Err(_) => {
                 let _queue = FileLock::acquire(&store.queue_path(), interrupted)?;
@@ -1000,6 +1031,7 @@ fn dispatch(
                 store.save(&mut job)?;
             }
         }
+        host.detached.push(handle);
         launched.push(id.clone());
         line(out, id)?;
         out.flush().map_err(|e| e.to_string())?;
@@ -1126,6 +1158,55 @@ fn age(stamp: &str) -> Option<i64> {
     let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
     Some(seconds - ops::parse_ts(stamp).ok()?.timestamp())
 }
+fn stop_orphan_group(
+    raw: i64,
+    expected: &str,
+    host: &mut CommandHost,
+    interrupted: &AtomicBool,
+) -> Result<bool> {
+    let Some(pid) = pid(raw) else {
+        return Ok(true);
+    };
+    for (signal, grace) in [
+        (rustix::process::Signal::TERM, Duration::from_secs(2)),
+        (rustix::process::Signal::KILL, Duration::from_secs(3)),
+    ] {
+        if !group_alive(raw) {
+            break;
+        }
+        check(interrupted)?;
+        // Match the canonical reconcile policy: validate start identity and
+        // group leadership immediately before each bounded signal attempt.
+        if !recorded(raw, expected, host, interrupted)? {
+            return Ok(false);
+        }
+        match rustix::process::kill_process_group(pid, signal) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(format!("cannot signal orphaned supervised group: {error}")),
+        }
+        let until = Instant::now() + grace;
+        while group_alive(raw) && Instant::now() < until {
+            pause(0.05, interrupted)?;
+        }
+    }
+    if group_alive(raw) {
+        return Ok(false);
+    }
+    // A separate CLI cannot reap another parent's child. If this library host
+    // did adopt the recorded leader, consume only its exact wait status, after
+    // all group signaling decisions are finished.
+    if process_matches(raw, expected, host, interrupted)? {
+        use rustix::process::{WaitId, WaitIdOptions};
+        match rustix::process::waitid(
+            WaitId::Pid(pid),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        ) {
+            Ok(_) | Err(rustix::io::Errno::CHILD | rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(format!("orphaned leader reap failed: {error}")),
+        }
+    }
+    Ok(true)
+}
 fn reconcile(
     repo: &Path,
     store: &Store,
@@ -1193,15 +1274,14 @@ fn reconcile(
         }
         let child = integer(&job, "pid");
         let alive = group_alive(child);
-        let mismatch = child != 0
-            && (ops::lock::pid_alive(child) || alive)
-            && !recorded(child, text(&job, "pid_identity"), host, interrupted)?;
+        let matches = recorded(child, text(&job, "pid_identity"), host, interrupted)?;
+        let mismatch = child != 0 && (ops::lock::pid_alive(child) || alive) && !matches;
         let id = text(&job, "attempt_id").to_owned();
         selected.push(id.clone().into());
         if !args.flag("apply") {
             continue;
         }
-        if mismatch {
+        if mismatch && !alive {
             finish(&mut job, "interrupted", V::Null);
             store.save(&mut job)?;
             attempts = life::projection(repo)?;
@@ -1221,15 +1301,31 @@ fn reconcile(
             continue;
         }
         if alive {
-            // A dead runner's child is no longer wait-owned here. The pinned
-            // rustix API cannot atomically address a recorded group by an
-            // identity-bearing descriptor. Keep recovery evidence, never race
-            // numeric PID reuse with killpg. The owner must supply containment.
             job.set("runtime_state", "cleanup_failed");
             job.set("runner_pid", 0usize);
             job.set("runner_pid_identity", "");
             store.save(&mut job)?;
-            continue;
+            let stopped = if matches {
+                stop_orphan_group(child, text(&job, "pid_identity"), host, interrupted)
+            } else {
+                Ok(false)
+            };
+            if !matches!(stopped, Ok(true)) {
+                if attempts.get(&id).is_some_and(|a| {
+                    life::nonterminal(text(a, "state")) && text(a, "state") != "blocked"
+                }) {
+                    life::transition(
+                        repo,
+                        &id,
+                        "blocked",
+                        "orphan_cleanup_pending",
+                        "reconcile-cleanup-pending",
+                        &AtomicBool::new(false),
+                    )?;
+                }
+                stopped?;
+                continue;
+            }
         }
         let cancelled = state == "cancel_requested";
         finish(
@@ -1411,6 +1507,16 @@ fn runner(
     interrupted: &AtomicBool,
     err: &mut dyn Write,
 ) -> Result<i32> {
+    match rustix::process::setsid() {
+        Ok(_) => {}
+        Err(rustix::io::Errno::PERM)
+            if rustix::process::getpgid(None).ok() == Some(rustix::process::getpid()) => {}
+        Err(error) => {
+            return Err(format!(
+                "native runner could not establish its session: {error}"
+            ));
+        }
+    }
     storage::valid_id(id)?;
     let cleanup = AtomicBool::new(false);
     let mut job;
@@ -1549,11 +1655,18 @@ fn runner_start(
         ("OMS_ATTEMPT_SUPERVISED".into(), "1".into()),
         ("OMS_EXECUTION_PROFILE".into(), "trusted-local".into()),
     ]);
-    // This process must be a dedicated runner. It owns subreaper initialization
-    // before Popen-equivalent spawn, and no other library waits on its children.
-    // Unsupported platforms refuse this action before executing the payload.
+    #[cfg(target_os = "linux")]
     let mut reactor = Reactor::dedicated()?;
-    request.scope = Scope::WholeTree;
+    #[cfg(target_os = "linux")]
+    {
+        request.scope = Scope::WholeTree;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let mut reactor = Reactor::new();
+    #[cfg(not(target_os = "linux"))]
+    {
+        request.scope = Scope::ProcessGroup;
+    }
     let handle = match reactor.start(request) {
         Ok(handle) => handle,
         Err(crate::process::StartError::DeadlineExpired) => {
@@ -1605,7 +1718,7 @@ fn runner_start(
     let mut child_identity = String::new();
     let result: Result<i32> = (|| {
         let child = reactor.snapshot(handle)?.pid;
-        child_identity = proc_identity(child).unwrap_or_default();
+        child_identity = process_identity(child as i64, host, &cleanup)?;
         if child_identity.is_empty() {
             return Err("could not establish supervised process identity".into());
         }
@@ -1671,7 +1784,7 @@ fn runner_start(
             match reactor.poll(handle, Duration::from_millis(50))? {
                 Progress::Pending(snapshot) => {
                     store.append_log(&mut log, reactor.stdout_prefix(handle)?)?;
-                    if snapshot.stop.is_some() {
+                    if snapshot.stop.is_some() || snapshot.exit.is_some() {
                         stop_started.get_or_insert_with(Instant::now);
                     }
                     if stop_started.is_some_and(|t| t.elapsed() >= Duration::from_secs(8)) {
@@ -1778,13 +1891,15 @@ fn runner_start(
             return Err("supervised command interrupted before completion".into());
         }
         if execution.stdout.limited {
-            line(
-                err,
-                format!(
-                    "attempt {id}: log hit the {max_log}-byte cap ({} bytes produced); head and tail are kept, the middle was dropped — the in-log marker carries the dropped byte count",
-                    execution.stdout.observed_bytes
-                ),
-            )?;
+            let warning = format!(
+                "attempt {id}: log hit the {max_log}-byte cap ({} bytes produced); head and tail are kept, the middle was dropped — the in-log marker carries the dropped byte count",
+                execution.stdout.observed_bytes
+            );
+            if let Err(error) = writeln!(err, "{warning}")
+                && error.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(error.to_string());
+            }
         }
         if code != 0 {
             life::transition(

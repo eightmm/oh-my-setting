@@ -64,13 +64,13 @@ impl Capture {
         let mut end = data.len();
         if let Some(limit) = self.options.lines {
             for (i, byte) in data.iter().enumerate() {
+                if self.lines == limit {
+                    end = i;
+                    self.cutoff = true;
+                    break;
+                }
                 if *byte == b'\n' {
                     self.lines += 1;
-                    if self.lines == limit {
-                        end = i + 1;
-                        self.cutoff = true;
-                        break;
-                    }
                 }
             }
         }

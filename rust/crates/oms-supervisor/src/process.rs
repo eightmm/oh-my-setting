@@ -2,8 +2,8 @@
 //!
 //! `poll` never waits for process exit. A deadline stops execution, not kernel
 //! teardown. Pending jobs remain in this reactor; callers must keep driving it.
-//! Dropping a reactor with children deliberately drains cleanup without a time
-//! bound. Bounded-return services must retain the reactor instead of dropping it.
+//! Drop makes a bounded cleanup attempt. Retain and drive pending jobs when
+//! cleanup evidence is required, especially for uninterruptible kernel waits.
 use crate::capture::{Capture, CaptureOptions, Captured};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -18,6 +18,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+pub(crate) const MAX_DROP_WAIT: Duration = Duration::from_secs(5);
+const POST_EXIT_DRAIN: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -189,6 +192,7 @@ struct Job {
     stderr: Option<Capture>,
     started: Instant,
     exit: Option<Exit>,
+    exited_at: Option<Instant>,
     stop: Option<StopReason>,
     stopping: Option<Instant>,
     kill_sent: bool,
@@ -252,6 +256,19 @@ impl Reactor {
         }
     }
     pub fn start(&mut self, request: Request) -> std::result::Result<JobId, StartError> {
+        self.start_with_stdio(request, false)
+    }
+    pub(crate) fn start_detached(
+        &mut self,
+        request: Request,
+    ) -> std::result::Result<JobId, StartError> {
+        self.start_with_stdio(request, true)
+    }
+    fn start_with_stdio(
+        &mut self,
+        request: Request,
+        detached: bool,
+    ) -> std::result::Result<JobId, StartError> {
         if request.argv.first().is_none_or(|s| s.is_empty()) {
             return Err("execution requires a command".into());
         }
@@ -304,9 +321,17 @@ impl Reactor {
         let mut command = Command::new(&request.argv[0]);
         command
             .args(&request.argv[1..])
-            .stdin(child_input)
-            .stdout(Stdio::from(out_write))
-            .stderr(Stdio::from(err_write));
+            .stdin(if detached { Stdio::null() } else { child_input })
+            .stdout(if detached {
+                Stdio::null()
+            } else {
+                Stdio::from(out_write)
+            })
+            .stderr(if detached {
+                Stdio::null()
+            } else {
+                Stdio::from(err_write)
+            });
         if request.scope != Scope::Leader {
             command.process_group(0);
         }
@@ -323,7 +348,7 @@ impl Reactor {
         let child = command.spawn().map_err(StartError::Launch)?;
         // Child IDs returned by std::process are positive platform pid_t values.
         let pid = Pid::from_raw(child.id() as i32).expect("spawn returned invalid PID");
-        let stderr = err_read.as_ref().map(|_| {
+        let stderr = err_read.as_ref().filter(|_| !detached).map(|_| {
             let policy = request.stderr_capture.clone().unwrap_or_else(|| {
                 let mut policy = request.capture.clone();
                 policy.lines = None;
@@ -331,18 +356,21 @@ impl Reactor {
             });
             Capture::new(policy)
         });
+        let mut stdout = Capture::new(request.capture.clone());
+        stdout.eof = detached;
         let job = Job {
             _child: child,
             pid,
-            stdout: Capture::new(request.capture.clone()),
+            stdout,
             stderr,
-            out: Some(out_read),
-            err: err_read,
-            input,
+            out: if detached { None } else { Some(out_read) },
+            err: if detached { None } else { err_read },
+            input: if detached { None } else { input },
             input_offset: 0,
             request,
             started,
             exit: None,
+            exited_at: None,
             stop: None,
             stopping: None,
             kill_sent: false,
@@ -388,7 +416,7 @@ impl Reactor {
         if !job.finished && !budget.is_zero() {
             let now = Instant::now();
             let mut wait = budget.min(Duration::from_millis(50));
-            if job.stopping.is_none()
+            if job.stop.is_none()
                 && let Some(deadline) = job.request.deadline
             {
                 wait = wait.min(deadline.saturating_duration_since(now));
@@ -439,19 +467,34 @@ impl Reactor {
     pub fn pending(&self) -> usize {
         self.jobs.len()
     }
+    pub(crate) fn release_detached(&mut self, ids: &[JobId]) {
+        for id in ids {
+            self.jobs.remove(id);
+        }
+    }
 }
 impl Drop for Reactor {
     fn drop(&mut self) {
         for job in self.jobs.values_mut() {
             job.begin_stop(StopReason::SupervisorError);
         }
-        // No background reaper or blocking wait syscall. This can still take
-        // forever for kernel D-state: only retaining the reactor permits a
-        // bounded caller return with honest ownership.
-        while !self.jobs.is_empty() {
+        let until = Instant::now() + MAX_DROP_WAIT;
+        while !self.jobs.is_empty() && Instant::now() < until {
             let ids: Vec<_> = self.jobs.keys().copied().collect();
             for id in ids {
-                let _ = self.poll(id, Duration::from_millis(50));
+                let _ = self.poll(id, Duration::ZERO);
+            }
+            if !self.jobs.is_empty() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        // A pending uninterruptible child cannot be synchronously reaped with
+        // a bounded destructor. Deliver the final signal while still owning it;
+        // std::process::Child drop performs no blocking wait.
+        for job in self.jobs.values_mut() {
+            if !job.kill_sent {
+                job.signal(Signal::KILL);
+                job.kill_sent = true;
             }
         }
         #[cfg(target_os = "linux")]
@@ -499,10 +542,19 @@ impl Job {
         self.begin_stop(StopReason::SupervisorError);
     }
     fn begin_stop(&mut self, reason: StopReason) {
-        if self.finished || self.stop.is_some() || self.stopping.is_some() {
+        if self.finished || self.stop.is_some() {
             return;
         }
         self.stop = Some(reason);
+        if self.stopping.is_some() {
+            let signal = match reason {
+                StopReason::Signal(number) => {
+                    Signal::from_named_raw(number).unwrap_or(Signal::TERM)
+                }
+                _ => Signal::TERM,
+            };
+            self.signal(signal);
+        }
         self.begin_cleanup();
     }
     fn begin_cleanup(&mut self) {
@@ -557,7 +609,8 @@ impl Job {
                 self.exit = Some(Exit {
                     code: status.exit_status(),
                     signal: status.terminating_signal(),
-                })
+                });
+                self.exited_at = Some(Instant::now());
             }
             Ok(None) => {}
             Err(Errno::INTR) => {}
@@ -588,9 +641,8 @@ impl Job {
         }
         self.write_input();
         let eof = self.out.is_none() && self.err.is_none();
-        // Freeze a valid completion decision before considering the deadline.
-        // Cleanup latency must not turn a completed command into a timeout.
-        if self.stopping.is_none() {
+        // Cancellation and deadlines stay active throughout group teardown.
+        if self.stop.is_none() {
             if self.stdout.should_stop() || self.stderr.as_ref().is_some_and(Capture::should_stop) {
                 let cutoff = self.stdout.snapshot().cutoff
                     || self.stderr.as_ref().is_some_and(|s| s.snapshot().cutoff);
@@ -599,10 +651,15 @@ impl Job {
                 } else {
                     StopReason::OutputLimit
                 });
-            } else if self.exit.is_some() && eof {
-                self.begin_cleanup();
             } else if self.request.deadline.is_some_and(|d| Instant::now() >= d) {
                 self.begin_stop(StopReason::Deadline);
+            } else if self.exit.is_some()
+                && (eof
+                    || self
+                        .exited_at
+                        .is_some_and(|t| t.elapsed() >= POST_EXIT_DRAIN))
+            {
+                self.begin_cleanup();
             }
         }
         if self.stopping.is_none() {
@@ -646,9 +703,14 @@ impl Job {
         if dedicated && self.reaped {
             self.reap_adopted();
         }
-        // Requested cancellation/cutoff is the consumer's authority to stop
-        // drainage. Ordinary leader exit alone never closes a live pipe.
-        if self.stop.is_some() && (self.kill_sent || self.group_quiescent == Some(true)) {
+        // Escaped descendants can keep a pipe open beyond group teardown.
+        // Bound drainage without claiming read-zero or complete output.
+        let drain_expired = self.exited_at.is_some_and(|t| {
+            t.elapsed() >= POST_EXIT_DRAIN + self.request.terminate_grace + POST_EXIT_DRAIN
+        });
+        if (self.stop.is_some() || drain_expired)
+            && (self.kill_sent || self.group_quiescent == Some(true))
+        {
             self.out.take();
             self.err.take();
         }
@@ -811,6 +873,9 @@ impl Job {
     }
 }
 fn drain(fd: &mut Option<OwnedFd>, capture: &mut Capture) -> crate::Result<()> {
+    if capture.should_stop() {
+        return Ok(());
+    }
     let Some(opened) = fd.as_ref() else {
         return Ok(());
     };
@@ -823,7 +888,12 @@ fn drain(fd: &mut Option<OwnedFd>, capture: &mut Capture) -> crate::Result<()> {
                 fd.take();
                 return Ok(());
             }
-            Ok(n) => capture.push(&buf[..n]),
+            Ok(n) => {
+                capture.push(&buf[..n]);
+                if capture.should_stop() {
+                    return Ok(());
+                }
+            }
             Err(Errno::AGAIN) => return Ok(()),
             Err(Errno::INTR) => continue,
             Err(e) => return Err(format!("owned output read failed: {e}")),
@@ -846,9 +916,14 @@ fn direct_children() -> crate::Result<Vec<Pid>> {
         })
         .collect()
 }
-/// A proc snapshot can prove group quiescence while the leader is pinned.
-/// Platforms without that observation return unknown, never kill(0) as proof.
+/// Exclude zombies while the owned leader remains pinned for group signaling.
 pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
+    match os::test_kill_process_group(pid) {
+        Err(Errno::SRCH) => return Some(true),
+        Err(Errno::PERM | Errno::ACCESS) => return Some(false),
+        Err(_) => return None,
+        Ok(()) => {}
+    }
     #[cfg(target_os = "linux")]
     {
         let group = pid.as_raw_nonzero().get().to_string();
@@ -865,7 +940,13 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
             }
             let raw = match std::fs::read_to_string(entry.path().join("stat")) {
                 Ok(raw) => raw,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        || e.raw_os_error() == Some(Errno::SRCH.raw_os_error()) =>
+                {
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Some(false),
                 Err(_) => return None,
             };
             let fields: Vec<_> = raw.get(raw.rfind(')')? + 2..)?.split_whitespace().collect();
@@ -878,7 +959,46 @@ pub(crate) fn group_quiescent(pid: Pid) -> Option<bool> {
         }
         Some(true)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // killpg(0) includes the pinned zombie leader. A bounded native ps
+        // producer distinguishes runnable members without relying on /proc.
+        let mut request = Request::new(vec!["ps".into(), "-axo".into(), "pgid=,stat=".into()]);
+        request.scope = Scope::Leader;
+        request.deadline = Some(Instant::now() + Duration::from_secs(1));
+        request.capture.max_bytes = 8 * 1024 * 1024;
+        request.capture.on_limit = crate::capture::LimitAction::Terminate;
+        let mut reactor = Reactor::new();
+        let id = reactor.start(request).ok()?;
+        let until = Instant::now() + Duration::from_secs(3);
+        let result = loop {
+            match reactor.poll(id, Duration::from_millis(10)).ok()? {
+                Progress::Complete(result) => break result,
+                Progress::Pending(_) if Instant::now() >= until => return None,
+                Progress::Pending(_) => {}
+            }
+        };
+        if !result.cleanup_complete()
+            || !result.output_complete()
+            || result.stop.is_some()
+            || result.exit.is_none_or(|exit| exit.shell_code() != 0)
+        {
+            return None;
+        }
+        for row in std::str::from_utf8(&result.stdout.bytes).ok()?.lines() {
+            let mut fields = row.split_whitespace();
+            let group = fields.next()?.parse::<i32>().ok()?;
+            let state = fields.next()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            if group == pid.as_raw_nonzero().get() && !state.starts_with(['Z', 'X']) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = pid;
         None
