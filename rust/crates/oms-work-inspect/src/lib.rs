@@ -340,6 +340,368 @@ pub fn criterion_evidence_status(items: &[Json]) -> Result<&'static str> {
     }
     Ok(evidence_precedence(&latest_items).unwrap_or("inconclusive"))
 }
+/// Read-only completion fields for the pending native `build_envelope` producer.
+/// The assembler applies these to task/evidence and then recomputes the canonical
+/// digest and continuity. `completion_blocker` overrides only an empty plan;
+/// otherwise existing evidence fields remain untouched. No receipt is written.
+#[derive(Debug)]
+pub struct EnvelopeCompletion {
+    pub task_completion: Option<&'static str>,
+    pub evidence_complete: bool,
+    pub completion_blocker: Option<&'static str>,
+    pub next_actions: Json,
+}
+
+fn projection_field<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
+    if let Json::Object(fields) = value {
+        fields
+            .iter()
+            .find(|(k, _)| k == key.as_bytes())
+            .map(|(_, v)| v)
+    } else {
+        None
+    }
+}
+
+fn projection_bool(value: &Json, key: &str) -> Result<bool> {
+    projection_field(value, key).map_or(Ok(false), |v| boolean(v, key))
+}
+
+fn projection_text<'a>(value: &'a Json, key: &str) -> Result<&'a [u8]> {
+    match projection_field(value, key) {
+        None => Ok(b""),
+        Some(Json::String(bytes)) => Ok(bytes),
+        _ => Err(invalid(key)),
+    }
+}
+
+fn projection_rows<'a>(value: &'a Json, key: &str) -> Result<&'a [Json]> {
+    match projection_field(value, key) {
+        None => Ok(&[]),
+        Some(Json::Array(items)) => Ok(items),
+        _ => Err(invalid(key)),
+    }
+}
+
+fn projection_line(bytes: &[u8], limit: usize) -> Result<Vec<u8>> {
+    // Python split() treats U+001C..U+001F as whitespace and preserves lone
+    // surrogates. Bound by code points, not UTF-8 bytes or grapheme clusters.
+    let mut points = Vec::new();
+    let mut pending_space = false;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let width = match bytes[offset] {
+            0..=0x7f => 1,
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => return Err(invalid("projection string")),
+        };
+        let point = bytes
+            .get(offset..offset + width)
+            .ok_or_else(|| invalid("projection string"))?;
+        let surrogate = width == 3
+            && point[0] == 0xed
+            && (0xa0..=0xbf).contains(&point[1])
+            && (0x80..=0xbf).contains(&point[2]);
+        let space = if surrogate {
+            false
+        } else {
+            let c = std::str::from_utf8(point)
+                .map_err(|_| invalid("projection string"))?
+                .chars()
+                .next()
+                .unwrap();
+            c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
+        };
+        if space {
+            pending_space = !points.is_empty();
+        } else {
+            if pending_space && points.len() <= limit {
+                points.push(b" ".as_slice());
+            }
+            if points.len() <= limit {
+                points.push(point);
+            }
+            pending_space = false;
+        }
+        offset += width;
+    }
+    if points.len() > limit {
+        points.truncate(limit.saturating_sub(1));
+        points.push("…".as_bytes());
+    }
+    Ok(points.concat())
+}
+
+fn completion_action(
+    id: &str,
+    priority: u16,
+    authority: &str,
+    reason: &[u8],
+    command: &[u8],
+) -> Result<Json> {
+    Ok(Json::Object(vec![
+        (b"id".to_vec(), Json::String(id.as_bytes().to_vec())),
+        (b"priority".to_vec(), Json::Number(priority.to_string())),
+        (
+            b"authority".to_vec(),
+            Json::String(authority.as_bytes().to_vec()),
+        ),
+        (
+            b"reason".to_vec(),
+            Json::String(projection_line(reason, 300)?),
+        ),
+        (b"command".to_vec(), Json::String(command.to_vec())),
+    ]))
+}
+
+/// Project evidence-gated completion and deterministic next actions from a
+/// canonical base envelope and its classified coverage snapshot. Matches
+/// `oms_runtime.projection` completion/actions, including empty-plan gating.
+/// Callers must first validate canonical task/plan status and evidence freshness;
+/// a supplied `complete` verdict is not independently attested here. Missing
+/// optional fields use canonical defaults; malformed consumed fields are errors.
+/// Unknown fields are ignored and dynamic output retains WTF-8. This pure
+/// projection grants no execution, landing or publication authority.
+pub fn envelope_completion(base: &Json, evidence: &Json) -> Result<EnvelopeCompletion> {
+    object(base, "base envelope")?;
+    object(evidence, "evidence")?;
+    let empty = Json::Object(vec![]);
+    let task = projection_field(base, "task").unwrap_or(&empty);
+    let plan = projection_field(base, "plan").unwrap_or(&empty);
+    object(task, "task")?;
+    object(plan, "plan")?;
+    let task_present = projection_bool(task, "present")?;
+    let plan_present = projection_bool(plan, "present")?;
+    let empty_plan = plan_present && !projection_bool(plan, "nonempty")?;
+    let complete = projection_bool(evidence, "complete")? && !empty_plan;
+    let counts = field(evidence, "counts");
+    let failed = match projection_field(counts, "failed") {
+        None => false,
+        Some(value) => status_count(value).ok_or_else(|| invalid("failed count"))? != "0",
+    };
+    let status = projection_text(task, "status")?;
+    let completion = if status.eq_ignore_ascii_case(b"blocked") {
+        "blocked"
+    } else if status.eq_ignore_ascii_case(b"failed") {
+        "failed"
+    } else if status.eq_ignore_ascii_case(b"cancelled") {
+        "cancelled"
+    } else if [b"closed".as_slice(), b"done", b"verified", b"completed"]
+        .iter()
+        .any(|s| status.eq_ignore_ascii_case(s))
+    {
+        if failed {
+            "failed"
+        } else if complete {
+            "completed_verified"
+        } else {
+            "completed_with_unverified_items"
+        }
+    } else if task_present {
+        "active"
+    } else {
+        "none"
+    };
+    let mut actions = Vec::new();
+    {
+        let mut add = |id, priority, authority, reason: &[u8], command: &[u8]| -> Result<()> {
+            actions.push((
+                priority,
+                id,
+                completion_action(id, priority, authority, reason, command)?,
+            ));
+            Ok(())
+        };
+        let mut project_present = false;
+        for source in projection_rows(base, "sources")? {
+            object(source, "source")?;
+            project_present |= projection_text(source, "path")? == b"PROJECT.md";
+        }
+        if !project_present {
+            add(
+                "initialize_project",
+                100,
+                "repo_write",
+                b"PROJECT.md is absent.",
+                b"oms init",
+            )?;
+        }
+        let failures = projection_rows(base, "failures")?;
+        for failure in failures {
+            object(failure, "failure")?;
+        }
+        if let Some(top) = failures.last() {
+            let code = projection_field(field(top, "classification"), "code").map_or(
+                Ok(b"unknown".as_slice()),
+                |v| {
+                    if let Json::String(s) = v {
+                        Ok(s.as_slice())
+                    } else {
+                        Err(invalid("failure code"))
+                    }
+                },
+            )?;
+            add(
+                "resolve_blocker",
+                95,
+                "read",
+                &[b"An unresolved ", code, b" failure is recorded."].concat(),
+                b"oms fail-ledger list",
+            )?;
+        }
+        if empty_plan {
+            add(
+                "repair_empty_plan",
+                88,
+                "append",
+                b"The active plan has no tasks, so completion cannot be proven.",
+                b"oms plan-from-spec --repo .",
+            )?;
+        }
+        let mut landing = false;
+        let mut review = None;
+        let mut ready = false;
+        let mut running = false;
+        let mut claimable = 0;
+        let mut actionable = BTreeSet::new();
+        for item in projection_rows(plan, "actionable")? {
+            let Json::String(id) = item else {
+                return Err(invalid("actionable task"));
+            };
+            actionable.insert(id.as_slice());
+        }
+        for row in projection_rows(plan, "tasks")? {
+            object(row, "plan task")?;
+            let state = projection_text(row, "state")?;
+            let id = projection_text(row, "id")?;
+            landing |= state == b"landing";
+            if state == b"review" && review.is_none() {
+                review = Some(id);
+            }
+            ready |= state == b"ready";
+            running |= state == b"claimed" || state == b"running";
+            claimable += usize::from(actionable.contains(id));
+        }
+        if landing {
+            add(
+                "finish_landing",
+                90,
+                "repo_write",
+                b"A task is inside the landing transaction.",
+                b"oms patch-land --recover",
+            )?;
+        } else if let Some(id) = review {
+            let id = projection_line(id, 160)?;
+            let command = if id.is_empty() {
+                b"oms plan-run --next --land".to_vec()
+            } else {
+                [b"oms plan-run --id ", id.as_slice(), b" --land"].concat()
+            };
+            add(
+                "review_or_land_patch",
+                85,
+                "repo_write",
+                b"A reviewed task has a frozen patch awaiting the parent decision.",
+                &command,
+            )?;
+        } else if claimable > 0 {
+            add(
+                "execute_ready_task",
+                80,
+                "worktree_write",
+                format!("{claimable} plan task(s) are ready.").as_bytes(),
+                b"oms plan-run --next",
+            )?;
+        } else if running {
+            add(
+                "inspect_active_attempt",
+                75,
+                "read",
+                b"A plan task is claimed or running.",
+                b"oms state",
+            )?;
+        }
+        let contract = field(plan, "contract");
+        if field(contract, "bound") == &Json::Bool(true)
+            && field(contract, "satisfied") == &Json::Bool(false)
+            && ready
+        {
+            let blocker = projection_field(contract, "blocker")
+                .map_or(Ok(b"unknown".as_slice()), |_| {
+                    projection_text(contract, "blocker")
+                })?;
+            let blocker = projection_line(blocker, 80)?;
+            let blocker = if blocker.is_empty() {
+                b"unknown"
+            } else {
+                blocker.as_slice()
+            };
+            add(
+                "inspect_plan_contract",
+                89,
+                "read",
+                &[
+                    b"The reviewed plan is blocked by PROJECT.md contract state: ",
+                    blocker,
+                    b".",
+                ]
+                .concat(),
+                b"oms agent-plan --repo . status --json",
+            )?;
+        }
+        if task_present && !complete {
+            if projection_text(task, "verification")? != b"fresh" {
+                add(
+                    "verify_active_task",
+                    70,
+                    "read",
+                    b"Acceptance evidence is incomplete and the active task gate is not fresh.",
+                    b"oms agent-task verify",
+                )?;
+            } else {
+                add("resolve_evidence_gaps", 68, "read", b"The task gate is fresh but one or more declared criteria still lack current evidence.", b"oms runtime evidence show")?;
+            }
+        }
+        if complete && !(landing || review.is_some() || ready || running || empty_plan) {
+            if task_present {
+                add(
+                "record_verified_completion",
+                50,
+                "append",
+                b"Every declared criterion has current evidence and no plan task remains active.",
+                b"oms agent-task close",
+            )?;
+            } else if plan_present && projection_bool(plan, "all_done")? {
+                add("inspect_completed_plan_retirement", 50, "read", b"Every declared criterion has current evidence and the completed plan is still active.", b"oms agent-plan --repo . retire --check")?;
+            } else if plan_present && projection_bool(plan, "all_closed")? {
+                add("inspect_closed_plan_retirement", 50, "read", b"The plan has no unfinished tasks; explicitly cancelled tasks are not verified completion.", b"oms agent-plan --repo . retire --check")?;
+            }
+        }
+    }
+    if actions.is_empty() {
+        actions.push((
+            10,
+            "orient",
+            completion_action(
+                "orient",
+                10,
+                "read",
+                b"No stronger deterministic transition is available.",
+                b"oms inbox",
+            )?,
+        ));
+    }
+    actions.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    Ok(EnvelopeCompletion {
+        task_completion: projection_field(base, "task").map(|_| completion),
+        evidence_complete: complete,
+        completion_blocker: empty_plan.then_some("empty-plan"),
+        next_actions: Json::Array(actions.into_iter().map(|(_, _, row)| row).collect()),
+    })
+}
+
 fn object<'a>(v: &'a Json, name: &str) -> Result<&'a Json> {
     if matches!(v, Json::Object(_)) {
         Ok(v)

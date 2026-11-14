@@ -541,6 +541,523 @@ fn criterion_evidence_status_contract() {
     }
 }
 
+fn completion_projection(base: Value, evidence: Value) -> oms_work_inspect::EnvelopeCompletion {
+    oms_work_inspect::envelope_completion(
+        &oms_context::parse_json(&bytes(&base)).unwrap(),
+        &oms_context::parse_json(&bytes(&evidence)).unwrap(),
+    )
+    .unwrap()
+}
+
+fn completion_actions(projection: &oms_work_inspect::EnvelopeCompletion) -> Vec<String> {
+    let oms_context::Json::Array(rows) = &projection.next_actions else {
+        panic!("actions array")
+    };
+    rows.iter()
+        .map(|row| {
+            let oms_context::Json::Object(fields) = row else {
+                panic!("action object")
+            };
+            let (_, oms_context::Json::String(id)) =
+                fields.iter().find(|(key, _)| key == b"id").unwrap()
+            else {
+                panic!("action id")
+            };
+            String::from_utf8(id.clone()).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn envelope_completion_states() {
+    for (status, expected) in [
+        ("", "active"),
+        ("future", "active"),
+        ("active", "active"),
+        ("blocked", "blocked"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+        ("closed", "completed_verified"),
+        ("done", "completed_verified"),
+        ("verified", "completed_verified"),
+        ("completed", "completed_verified"),
+        ("CLOSED", "completed_verified"),
+        (" closed ", "active"),
+    ] {
+        for complete in [false, true] {
+            for failed in [0, 1] {
+                let closed = expected == "completed_verified";
+                let expected = if closed && failed > 0 {
+                    "failed"
+                } else if closed && !complete {
+                    "completed_with_unverified_items"
+                } else {
+                    expected
+                };
+                let base = json!({"task": {"present": true, "status": status}});
+                let evidence = json!({"complete": complete, "counts": {"failed": failed}});
+                let projection = completion_projection(base, evidence);
+                assert_eq!(
+                    projection.task_completion,
+                    Some(expected),
+                    "{status}, {complete}, {failed}"
+                );
+                assert_eq!(projection.evidence_complete, complete);
+                assert_eq!(projection.completion_blocker, None);
+            }
+        }
+    }
+    let absent = completion_projection(json!({}), json!({}));
+    assert_eq!(absent.task_completion, None);
+    assert!(!absent.evidence_complete);
+    let absent = completion_projection(json!({"task": {"present": false}}), json!({}));
+    assert_eq!(absent.task_completion, Some("none"));
+    // Status, rather than the packet's presence or verification flag, closes it.
+    let base = json!({"task": {"present": false, "status": "done", "verification": "fresh"}});
+    assert_eq!(
+        completion_projection(base, json!({})).task_completion,
+        Some("completed_with_unverified_items")
+    );
+    for present in [false, true] {
+        for nonempty in [false, true] {
+            let base = json!({"sources": [{"path": "PROJECT.md"}], "task": {"present": true, "status": "done"},
+                "plan": {"present": present, "nonempty": nonempty}});
+            let result = completion_projection(base, json!({"complete": true}));
+            let blocked = present && !nonempty;
+            assert_eq!(result.evidence_complete, !blocked);
+            assert_eq!(result.completion_blocker, blocked.then_some("empty-plan"));
+            assert_eq!(
+                result.task_completion,
+                Some(if blocked {
+                    "completed_with_unverified_items"
+                } else {
+                    "completed_verified"
+                })
+            );
+            assert_eq!(
+                completion_actions(&result),
+                if blocked {
+                    vec!["repair_empty_plan", "verify_active_task"]
+                } else {
+                    vec!["record_verified_completion"]
+                }
+            );
+        }
+    }
+    let base = oms_context::parse_json(br#"{"task":{"status":"done"}}"#).unwrap();
+    for count in [
+        "0",
+        "-0",
+        "1",
+        "9999999999999999999999999999999999999999999999999999",
+    ] {
+        let evidence = format!(r#"{{"complete":true,"counts":{{"failed":{count}}}}}"#);
+        let result = oms_work_inspect::envelope_completion(
+            &base,
+            &oms_context::parse_json(evidence.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.task_completion,
+            Some(if count == "0" || count == "-0" {
+                "completed_verified"
+            } else {
+                "failed"
+            })
+        );
+    }
+}
+
+#[test]
+fn envelope_completion_actions() {
+    // Golden action records preserve reason, authority, command and priority.
+    let cases = [
+        (
+            json!({}),
+            json!({}),
+            "initialize_project",
+            100,
+            "repo_write",
+            "PROJECT.md is absent.",
+            "oms init",
+        ),
+        (
+            json!({"failures": [{"classification": {"code": "old"}}, {"classification": {"code": "scope"}}]}),
+            json!({}),
+            "resolve_blocker",
+            95,
+            "read",
+            "An unresolved scope failure is recorded.",
+            "oms fail-ledger list",
+        ),
+        (
+            json!({"plan": {"present": true}}),
+            json!({}),
+            "repair_empty_plan",
+            88,
+            "append",
+            "The active plan has no tasks, so completion cannot be proven.",
+            "oms plan-from-spec --repo .",
+        ),
+        (
+            json!({"plan": {"tasks": [{"id": "a", "state": "landing"}]}}),
+            json!({}),
+            "finish_landing",
+            90,
+            "repo_write",
+            "A task is inside the landing transaction.",
+            "oms patch-land --recover",
+        ),
+        (
+            json!({"plan": {"tasks": [{"id": "a", "state": "review"}, {"id": "b", "state": "review"}]}}),
+            json!({}),
+            "review_or_land_patch",
+            85,
+            "repo_write",
+            "A reviewed task has a frozen patch awaiting the parent decision.",
+            "oms plan-run --id a --land",
+        ),
+        (
+            json!({"plan": {"tasks": [{"state": "review"}]}}),
+            json!({}),
+            "review_or_land_patch",
+            85,
+            "repo_write",
+            "A reviewed task has a frozen patch awaiting the parent decision.",
+            "oms plan-run --next --land",
+        ),
+        (
+            json!({"plan": {"tasks": [{"id": "expired", "state": "claimed"}], "actionable": ["expired"]}}),
+            json!({}),
+            "execute_ready_task",
+            80,
+            "worktree_write",
+            "1 plan task(s) are ready.",
+            "oms plan-run --next",
+        ),
+        (
+            json!({"plan": {"tasks": [{"id": "a", "state": "ready"}, {"id": "b", "state": "ready"}], "actionable": ["a", "b"]}}),
+            json!({}),
+            "execute_ready_task",
+            80,
+            "worktree_write",
+            "2 plan task(s) are ready.",
+            "oms plan-run --next",
+        ),
+        (
+            json!({"plan": {"tasks": [{"id": "a", "state": "running"}]}}),
+            json!({}),
+            "inspect_active_attempt",
+            75,
+            "read",
+            "A plan task is claimed or running.",
+            "oms state",
+        ),
+        (
+            json!({"plan": {"tasks": [{"id": "a", "state": "ready"}], "contract": {"bound": true, "satisfied": false, "blocker": "project-drift"}}}),
+            json!({}),
+            "inspect_plan_contract",
+            89,
+            "read",
+            "The reviewed plan is blocked by PROJECT.md contract state: project-drift.",
+            "oms agent-plan --repo . status --json",
+        ),
+        (
+            json!({"task": {"present": true}}),
+            json!({}),
+            "verify_active_task",
+            70,
+            "read",
+            "Acceptance evidence is incomplete and the active task gate is not fresh.",
+            "oms agent-task verify",
+        ),
+        (
+            json!({"task": {"present": true, "verification": "fresh"}}),
+            json!({}),
+            "resolve_evidence_gaps",
+            68,
+            "read",
+            "The task gate is fresh but one or more declared criteria still lack current evidence.",
+            "oms runtime evidence show",
+        ),
+        (
+            json!({"task": {"present": true}}),
+            json!({"complete": true}),
+            "record_verified_completion",
+            50,
+            "append",
+            "Every declared criterion has current evidence and no plan task remains active.",
+            "oms agent-task close",
+        ),
+        (
+            json!({"plan": {"present": true, "nonempty": true, "all_done": true, "all_closed": true, "tasks": [{"state": "done"}]}}),
+            json!({"complete": true}),
+            "inspect_completed_plan_retirement",
+            50,
+            "read",
+            "Every declared criterion has current evidence and the completed plan is still active.",
+            "oms agent-plan --repo . retire --check",
+        ),
+        (
+            json!({"plan": {"present": true, "nonempty": true, "all_closed": true, "tasks": [{"state": "cancelled"}]}}),
+            json!({"complete": true}),
+            "inspect_closed_plan_retirement",
+            50,
+            "read",
+            "The plan has no unfinished tasks; explicitly cancelled tasks are not verified completion.",
+            "oms agent-plan --repo . retire --check",
+        ),
+        (
+            json!({}),
+            json!({}),
+            "orient",
+            10,
+            "read",
+            "No stronger deterministic transition is available.",
+            "oms inbox",
+        ),
+    ];
+    for (mut base, evidence, id, priority, authority, reason, command) in cases {
+        if id != "initialize_project" {
+            base["sources"] = json!([{"path": "PROJECT.md"}]);
+        }
+        let result = completion_projection(base, evidence);
+        assert_eq!(result.next_actions, oms_context::parse_json(&bytes(&json!([{
+            "id": id, "priority": priority, "authority": authority, "reason": reason, "command": command,
+        }]))).unwrap(), "{id}");
+    }
+    for state in ["landing", "review", "claimed", "running", "ready"] {
+        let result = completion_projection(
+            json!({"sources": [{"path": "PROJECT.md"}], "task": {"present": true},
+            "plan": {"tasks": [{"id": "a", "state": state}]}}),
+            json!({"complete": true}),
+        );
+        assert!(
+            !completion_actions(&result)
+                .iter()
+                .any(|id| id == "record_verified_completion"),
+            "{state}"
+        );
+    }
+    // Stored-ready rows cannot override canonical dependency/expiry decisions.
+    let result = completion_projection(
+        json!({"sources": [{"path": "PROJECT.md"}], "plan": {
+        "tasks": [{"id": "a", "state": "ready"}], "actionable": []}}),
+        json!({}),
+    );
+    assert_eq!(completion_actions(&result), ["orient"]);
+    let result = completion_projection(
+        json!({"task": {"present": true}, "failures": [{}], "plan": {"present": true,
+        "tasks": [{"state": "review"}, {"state": "landing"}, {"state": "running"}, {"id": "a", "state": "ready"}],
+        "actionable": ["a"], "contract": {"bound": true, "satisfied": false}}}),
+        json!({}),
+    );
+    assert_eq!(
+        completion_actions(&result),
+        [
+            "initialize_project",
+            "resolve_blocker",
+            "finish_landing",
+            "inspect_plan_contract",
+            "repair_empty_plan",
+            "verify_active_task"
+        ]
+    );
+    // Contract inspection is additive; the canonical actionable snapshot owns admission.
+    let result = completion_projection(
+        json!({"sources": [{"path": "PROJECT.md"}], "plan": {
+        "tasks": [{"id": "a", "state": "ready"}], "actionable": ["a"],
+        "contract": {"bound": true, "satisfied": false}}}),
+        json!({}),
+    );
+    assert_eq!(
+        completion_actions(&result),
+        ["inspect_plan_contract", "execute_ready_task"]
+    );
+}
+
+#[test]
+fn envelope_completion_boundaries() {
+    use oms_context::{Json, parse_json};
+    use oms_work_inspect::envelope_completion;
+    let field = |row: &Json, name: &str| {
+        let Json::Object(fields) = row else {
+            panic!("object")
+        };
+        let (_, Json::String(value)) = fields
+            .iter()
+            .find(|(key, _)| key == name.as_bytes())
+            .unwrap()
+        else {
+            panic!("string")
+        };
+        value.clone()
+    };
+    for size in [
+        0, 1, 79, 80, 81, 159, 160, 161, 264, 265, 266, 299, 300, 301,
+    ] {
+        for (kind, limit) in [("review", 160), ("blocker", 80), ("failure", 300)] {
+            let value = "가".repeat(size);
+            let mut base = json!({"sources": [{"path": "PROJECT.md"}]});
+            match kind {
+                "review" => base["plan"] = json!({"tasks": [{"state": "review", "id": value}]}),
+                "blocker" => {
+                    base["plan"] = json!({"tasks": [{"state": "ready"}], "contract": {"bound": true, "satisfied": false, "blocker": value}})
+                }
+                _ => base["failures"] = json!([{"classification": {"code": value}}]),
+            }
+            let result = completion_projection(base, json!({}));
+            let Json::Array(rows) = &result.next_actions else {
+                panic!("actions")
+            };
+            let bounded = if kind == "failure" {
+                let reason = if size == 0 {
+                    "An unresolved failure is recorded.".into()
+                } else {
+                    format!("An unresolved {value} failure is recorded.")
+                };
+                if reason.chars().count() > limit {
+                    reason.chars().take(limit - 1).collect::<String>() + "…"
+                } else {
+                    reason
+                }
+            } else if size > limit {
+                "가".repeat(limit - 1) + "…"
+            } else {
+                value
+            };
+            let (key, expected) = match kind {
+                "review" => (
+                    "command",
+                    if size == 0 {
+                        "oms plan-run --next --land".into()
+                    } else {
+                        format!("oms plan-run --id {bounded} --land")
+                    },
+                ),
+                "blocker" => (
+                    "reason",
+                    format!(
+                        "The reviewed plan is blocked by PROJECT.md contract state: {}.",
+                        if size == 0 { "unknown" } else { &bounded }
+                    ),
+                ),
+                _ => ("reason", bounded),
+            };
+            assert_eq!(field(&rows[0], key), expected.as_bytes(), "{kind}, {size}");
+        }
+    }
+    let base = parse_json(br#"{"sources":[{"path":"PROJECT.md"}],"plan":{"tasks":[{"state":"review","id":" \t\u001c\ud800 \u00a0 x\n"}]}}"#).unwrap();
+    let result = envelope_completion(&base, &parse_json(b"{}").unwrap()).unwrap();
+    let Json::Array(rows) = &result.next_actions else {
+        panic!("actions")
+    };
+    assert_eq!(
+        field(&rows[0], "command"),
+        [
+            b"oms plan-run --id ".as_slice(),
+            &[0xed, 0xa0, 0x80],
+            b" x --land"
+        ]
+        .concat()
+    );
+    for id in [" \t\r\n\u{1f}\u{a0} ", "é\t😀\u{1d}가"] {
+        let result = completion_projection(
+            json!({"sources": [{"path": "PROJECT.md"}], "plan": {
+            "tasks": [{"state": "review", "id": id}]}}),
+            json!({}),
+        );
+        let Json::Array(rows) = &result.next_actions else {
+            panic!("actions")
+        };
+        let expected = if id.starts_with(' ') {
+            "oms plan-run --next --land"
+        } else {
+            "oms plan-run --id é 😀 가 --land"
+        };
+        assert_eq!(field(&rows[0], "command"), expected.as_bytes());
+    }
+    for bad in [
+        vec![0xff],
+        vec![0xed],
+        vec![0xc0, 0x80],
+        vec![0xe2, 0x28, 0xa1],
+        vec![0xf4, 0x90, 0x80, 0x80],
+    ] {
+        let base = Json::Object(vec![(
+            b"plan".to_vec(),
+            Json::Object(vec![(
+                b"tasks".to_vec(),
+                Json::Array(vec![Json::Object(vec![
+                    (b"state".to_vec(), Json::String(b"review".to_vec())),
+                    (b"id".to_vec(), Json::String(bad)),
+                ])]),
+            )]),
+        )]);
+        assert!(envelope_completion(&base, &parse_json(b"{}").unwrap()).is_err());
+    }
+    for base in [
+        json!(null),
+        json!([]),
+        json!({"task": null}),
+        json!({"plan": []}),
+        json!({"task": {"present": 0}}),
+        json!({"task": {"status": []}}),
+        json!({"task": {"present": true, "verification": null}}),
+        json!({"plan": {"present": "yes"}}),
+        json!({"plan": {"present": true, "nonempty": 1}}),
+        json!({"sources": null}),
+        json!({"sources": [null]}),
+        json!({"sources": [{"path": 1}]}),
+        json!({"failures": {}}),
+        json!({"failures": [null]}),
+        json!({"failures": [{"classification": {"code": []}}]}),
+        json!({"plan": {"tasks": null}}),
+        json!({"plan": {"tasks": [null]}}),
+        json!({"plan": {"tasks": [{"id": 1}]}}),
+        json!({"plan": {"tasks": [{"state": 1}]}}),
+        json!({"plan": {"actionable": {}}}),
+        json!({"plan": {"actionable": [1]}}),
+        json!({"plan": {"tasks": [{"state": "ready"}], "contract": {"bound": true, "satisfied": false, "blocker": null}}}),
+    ] {
+        assert!(
+            envelope_completion(
+                &parse_json(&bytes(&base)).unwrap(),
+                &parse_json(b"{}").unwrap()
+            )
+            .is_err(),
+            "{base}"
+        );
+    }
+    let base = parse_json(br#"{"plan":{"present":true,"nonempty":true}}"#).unwrap();
+    for key in ["all_done", "all_closed"] {
+        let malformed = json!({"plan": {"present": true, "nonempty": true, key: 1}});
+        assert!(
+            envelope_completion(
+                &parse_json(&bytes(&malformed)).unwrap(),
+                &parse_json(br#"{"complete":true}"#).unwrap()
+            )
+            .is_err()
+        );
+    }
+    for evidence in [
+        json!(null),
+        json!([]),
+        json!({"complete": 1}),
+        json!({"complete": null}),
+        json!({"counts": {"failed": -1}}),
+        json!({"counts": {"failed": 1.0}}),
+        json!({"counts": {"failed": true}}),
+        json!({"counts": {"failed": "1"}}),
+        json!({"counts": {"failed": null}}),
+    ] {
+        assert!(
+            envelope_completion(&base, &parse_json(&bytes(&evidence)).unwrap()).is_err(),
+            "{evidence}"
+        );
+    }
+}
+
 #[test]
 fn views_and_render() {
     let v = fixture();
