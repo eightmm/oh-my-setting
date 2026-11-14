@@ -125,17 +125,20 @@ pub fn write(path: &Path, value: &Value) -> Result<()> {
     raw.push(b'\n');
     util::write(path, &raw)
 }
+fn is_root(p: &Path) -> bool {
+    p.join("config/graphs").is_dir()
+        || p.join("scripts/oms").is_file()
+        || p.join("rust/Cargo.toml").is_file()
+}
 pub fn install_root() -> Option<PathBuf> {
     std::env::var_os("OMS_INSTALL_ROOT")
         .map(PathBuf::from)
-        .filter(|p| {
-            p.is_absolute() && (p.join("config/graphs").is_dir() || p.join("scripts/oms").is_file())
-        })
+        .filter(|p| p.is_absolute() && is_root(p))
         .or_else(|| {
             std::env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().and_then(Path::parent).map(Path::to_path_buf))
-                .filter(|p| p.join("config/graphs").is_dir() || p.join("scripts/oms").is_file())
+                .filter(|p| is_root(p))
         })
 }
 pub fn load(source: &Value, cwd: &Path) -> Result<Value> {
@@ -815,4 +818,58 @@ fn option(raw: &str, cwd: &Path) -> Result<Value> {
         return Err(Error::new("option must be a JSON object"));
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::is_root;
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "oms-graph-root-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&p).unwrap();
+            Self(p.canonicalize().unwrap())
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn native_checkout_anchor_is_a_root_without_scripts_oms() {
+        let d = Dir::new();
+        assert!(!is_root(&d.0), "empty dir is not a root");
+        fs::create_dir_all(d.0.join("rust")).unwrap();
+        assert!(!is_root(&d.0), "rust dir alone is not a root");
+        fs::create_dir_all(d.0.join("rust/Cargo.toml")).unwrap();
+        assert!(!is_root(&d.0), "a directory named Cargo.toml is not a file");
+        fs::remove_dir(d.0.join("rust/Cargo.toml")).unwrap();
+        fs::write(d.0.join("rust/Cargo.toml"), "").unwrap();
+        assert!(!d.0.join("scripts/oms").exists());
+        assert!(is_root(&d.0));
+    }
+
+    #[test]
+    fn packaged_and_script_anchors_still_accepted() {
+        let a = Dir::new();
+        fs::create_dir_all(a.0.join("config/graphs")).unwrap();
+        assert!(is_root(&a.0));
+        let b = Dir::new();
+        fs::create_dir_all(b.0.join("scripts")).unwrap();
+        fs::write(b.0.join("scripts/oms"), "").unwrap();
+        assert!(is_root(&b.0));
+    }
 }

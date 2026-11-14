@@ -27,9 +27,11 @@ hosts can use `run_with_runtime_services`; direct bundle consumers can call
 `project::context::compile_bundle_with_services` with explicit execution and
 state roots. The host still owns lifecycle, room, approval and evidence services.
 
-`OMS_INSTALL_ROOT` identifies the trusted packaged installation containing
-`scripts/oms` and `config/graphs`. An executable installed directly beneath
-that root can also discover it from its own location. This installation is
+`OMS_INSTALL_ROOT` identifies the trusted packaged installation. A directory
+is accepted as a root when it contains `config/graphs`, `scripts/oms` or the
+native checkout anchor `rust/Cargo.toml` (`execution::is_root`). An
+executable installed directly beneath that root can also discover it from its
+own location. This installation is
 used for bundled specs and the canonical plan-run, acceptance and exact-commit
 front doors. The graph command does not implement their authority transitions.
 

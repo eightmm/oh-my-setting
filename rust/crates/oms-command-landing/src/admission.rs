@@ -74,6 +74,17 @@ impl Policy {
         }
     }
 }
+/// Indexed private captures live outside the repository, where `read_patch`
+/// refuses them; read those through the index and keep the same size bound.
+fn capture_bytes(index: &CaptureIndex, path: &Path) -> Result<Vec<u8>> {
+    match index.indexed_bytes(path)? {
+        Some(raw) => {
+            require(raw.len() <= storage::MAX, "patch exceeds the size bound")?;
+            Ok(raw)
+        }
+        None => Ok(index.read_patch(path, storage::MAX)?),
+    }
+}
 pub(crate) fn task(c: &Context<'_>, repo: &Path, id: &str) -> Result<V> {
     require(
         !id.is_empty()
@@ -250,7 +261,7 @@ pub(crate) fn admit(
     storage::ensure_ignore(&state, c.interrupted)?;
     let index = CaptureIndex::load(&state)?;
     let mut path = input.to_owned();
-    let mut bytes = index.read_patch(&path, storage::MAX)?;
+    let mut bytes = capture_bytes(&index, &path)?;
     require(!bytes.is_empty(), "patch is empty")?;
     let known = index.admit(
         &path,
@@ -265,7 +276,7 @@ pub(crate) fn admit(
         path = oms_reference::producer::Producer::open(&state, c.interrupted)?
             .allocate(&path, &landing, &digest(&bytes), repo, c.interrupted)
             .map_err(|e| Error::new(e.exit_code(), format!("{e:?}")))?;
-        bytes = CaptureIndex::load(&state)?.read_patch(&path, storage::MAX)?;
+        bytes = capture_bytes(&CaptureIndex::load(&state)?, &path)?;
     }
     let mut policy = policy.clone();
     let unavailable_context = oms_reference::binding::Unavailable;

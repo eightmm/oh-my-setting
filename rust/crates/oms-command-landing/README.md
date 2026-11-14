@@ -34,6 +34,19 @@ publication requires explicit `--yes`; interactive confirmation belongs to
 the embedding UI. A missing Python executable is reported as unavailable
 metadata rather than becoming a native report runtime dependency.
 
+With `Unavailable`, `checkpoint`, `scratch-worktree`, `change-guard`,
+`candidate`, `land status|conflicts|notes|blame-session` and plain
+`report --dry-run` run locally. `patch-admit` also runs locally (`ADMIT`)
+when no `--plan-task`, `--covers`, `--verify` or `scripts/check.sh` applies;
+under `Unavailable`, `--plan-task` refuses at `Services::plan`, `--covers` at
+`Services::coverage`, and `--verify` records the missing
+`Services::supervise` as `REJECT` (exit 1). `report --from-failure` needs
+`Services::failure_report`. `land` itself never calls `admission_context`: after
+Git/remote validation (a missing `origin` fails first) it reaches `supervise`
+for the gate, `wait_siblings`, `publication_guard` and `after_land`.
+`cleanup`, `patch-land`, `sync-shared` and `draft-pr` refuse at their service
+boundary. Group-writable Git state needs the private-group account proof.
+
 `Services`, `PublicationGuard`, `VerifyRequest`, `LandingRequest`, `Execution`,
 `PublicationScan` and `Snapshot` are the integration interfaces. `Unavailable` refuses missing
 authority; it does not infer authority from room membership, environment
