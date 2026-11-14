@@ -10,6 +10,56 @@ use std::{
     ffi::OsString, io::Write, os::unix::ffi::OsStrExt, path::Path, sync::atomic::AtomicBool,
 };
 
+/// Native CLI composition. Only scope actions require controller construction;
+/// independent validation/lifecycle actions retain their existing availability.
+pub fn run(
+    action: &str,
+    repo: &Path,
+    args: &[OsString],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    interrupted: &AtomicBool,
+) -> i32 {
+    run_with_services(action, repo, args, None, stdout, stderr, interrupted)
+}
+
+/// A supplied protocol retains the explicit service-injection route. With no
+/// injection, scope actions use the actual native checked lifecycle producer.
+pub fn run_with_services(
+    action: &str,
+    repo: &Path,
+    args: &[OsString],
+    protocol: Option<&Protocol>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    interrupted: &AtomicBool,
+) -> i32 {
+    let needs_scope = matches!(
+        action,
+        "begin-owned" | "monitor" | "await-monitor" | "stop-monitor" | "close-scope"
+    );
+    let native = if needs_scope && protocol.is_none() {
+        match Protocol::production() {
+            Ok(protocol) => Some(protocol),
+            Err(error) => {
+                let _ = writeln!(stderr, "landing-reference: {error}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    reference_action(
+        action,
+        repo,
+        args,
+        protocol.or(native.as_ref()),
+        stdout,
+        stderr,
+        interrupted,
+    )
+}
+
 /// `task-append` and `admission` are transaction legs: their callers retain
 /// respectively the packet and artifact-index locks, as in the shell helper.
 /// No missing monitor/identity producer is replaced with a successful result.

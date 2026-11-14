@@ -6,8 +6,9 @@ uses the existing operations lifecycle producer and task packet renderer;
 it never invokes the Python/Bash implementation or executes stored commands.
 The parent owns workspace/CLI registration, integration, review and release.
 
-The migration is not complete: the checked lifecycle producer connection is
-an outstanding prerequisite, and macOS execution remains unverified.
+The checked lifecycle producer is connected to the actual operations API.
+macOS execution remains unverified, and its default executing-artifact proof
+requires the parent's authenticated native bootstrap composition.
 Capture collection is a separate gap described below; optional reuse awaits
 the parent's authenticated plan/panel producer composition.
 Successful compilation does not establish behavioral or security acceptance.
@@ -16,7 +17,7 @@ Successful compilation does not establish behavioral or security acceptance.
 
 | Consumer | Native entrypoint and contract |
 | --- | --- |
-| Task `Services::begin_reference` | `scope::task_operation` constructs an actual `OwnedReference` and returns the existing task `ReferenceOperation` trait object. The task crate remains independent of this crate. |
+| Task `Services::begin_reference` | `scope::native_task_operation` uses the production native factory; `task_operation_with_controller` shares a command controller snapshot. Existing `task_operation` accepts an explicitly supplied protocol. All return the existing task `ReferenceOperation` trait object. The task crate remains independent of this crate. |
 | Task `ReferenceOperation::validate` | Validates old and proposed packet bytes, arguments, source session, live capture ownership and the actual evidence namespace under the caller's packet lock. The first proven no-write refusal is terminal; a refusal after possible publication remains unresolved. |
 | Task `ReferenceOperation::finish` | Preserves an existing terminal refusal, records actual completion or nonterminal failure through operations, then cancels and joins the monitor before closing its owned scope. Drop performs owned cleanup without inventing completion. |
 | Task, plan and room state routing | `repository::Resolver::{state_repository,native_repository}` separates the physical working checkout from its validated shared state checkout. `reference_repository` handles FILE-only packets and explicit nested OMS namespaces. |
@@ -24,20 +25,48 @@ Successful compilation does not establish behavioral or security acceptance.
 | Managed capture management | `producer::Producer::open` holds the canonical landings lock. `allocate`, `publish`, `seal` and `usage` reuse its fresh snapshot. Creation refuses child calls; quota counts uncertain generations conservatively. |
 | Admission binding/reuse | `binding::Domain::{admission_binding,batch_prefix,bind_admission,current_admission,require_current_admission}` and `binding_digest` implement binding and freshness checks. `Producer::{intake,refresh_admission}` retain the canonical fresh path when optional context is unavailable. `AllocationError::exit_code` preserves quota status 3 versus input status 2. |
 | Internal task append | `publication::append_deduplicated_unlocked` requires the actual local task operation and the caller's packet lock. It reuses task packet normalization, byte caps, pruning and receipt validation; note and receipt publish together. |
-| Helper routing | `actions::reference_action` implements all reference helper actions, with flushed registration/readiness output, the `landing-reference:` error prefix, error status 2 and stop status 0/3. Invalid native argument counts have explicit native diagnostics rather than Python exception formatting. |
+| Helper routing | `actions::{run,run_with_services}` construct the actual native protocol only for scope actions when no protocol is supplied. `reference_action` retains the explicitly injected route. All actions keep flushed registration/readiness output, the `landing-reference:` error prefix, error status 2 and stop status 0/3. Invalid native argument counts have explicit native diagnostics rather than Python exception formatting. |
 
-`scope::Protocol` requires a concrete checked lifecycle append function and a
-native `IdentitySource`. `CheckedAppend` receives repository, event,
-interruption flag and a validator over fresh rows/current attempt. The parent
-must adapt `oms-command-operations::append_lifecycle_checked`, executing the
-validator under that producer's own canonical lock before any idempotent
-return or append. Ordinary lifecycle writes use `create_attempt` and
-`append_lifecycle` directly. There is no second lifecycle writer.
+`scope::native_checked_append` calls the actual
+`oms-command-operations::append_lifecycle_checked`. `Protocol::production()`
+captures native controller identity and selects that adapter plus
+`NativeIdentity`; `production_with_controller` shares a previously captured
+command snapshot. The operations producer takes its own canonical lock, loads
+rows/projection once, calls the validator before idempotent reuse or append,
+then preserves its normal sequence/transition/write behavior. Scope callbacks
+do not reacquire this lock. Ordinary lifecycle writes still use
+`create_attempt`/`append_lifecycle`; there is no second writer.
+
+The existing `CheckedAppend`, `Protocol::{new,for_executable,native}` and
+`task_operation` injection signatures remain available. `Protocol::new` is a
+trusted service-injection boundary: a hex string is not native authentication.
+Production bootstrap should use `with_controller`/`production_with_controller`
+with an actual authenticated retained descriptor, never a constant digest.
+
+The additive production signatures are:
+
+```rust,ignore
+native_checked_append(&Path, V, &AtomicBool, &mut Validator<'_>) -> Result<V>
+Protocol::production() -> Result<Protocol>
+Protocol::production_with_controller(Controller) -> Result<Protocol>
+native_task_operation(&Path, &Path, Arc<AtomicBool>) -> TaskResult<Box<dyn ReferenceOperation>>
+task_operation_with_controller(Controller, &Path, &Path, Arc<AtomicBool>) -> TaskResult<Box<dyn ReferenceOperation>>
+actions::run(&str, &Path, &[OsString], &mut dyn Write, &mut dyn Write, &AtomicBool) -> i32
+actions::run_with_services(&str, &Path, &[OsString], Option<&Protocol>, &mut dyn Write, &mut dyn Write, &AtomicBool) -> i32
+```
+
+Here `TaskResult` denotes `oms_command_task::Result`. Task construction checks
+controller identity before private scope/lifecycle publication, registers the
+actual local attempt, starts the owned monitor and requires real readiness
+before returning the trait object. Validation still runs under the caller's
+packet lock before publication; finish and Drop retain their existing cleanup
+and nonterminal uncertainty rules.
 
 ## Reference action/source checklist
 
-Every action below is callable through `actions::reference_action`; scope
-actions require the checked producer and native identity prerequisites.
+Every action below is callable through `actions::{run,run_with_services}` or
+the explicit `reference_action` route. Scope actions require positive native
+controller and owner proofs; other actions do not invent that prerequisite.
 
 | Legacy action | Native implementation | Canonical source |
 | --- | --- | --- |
@@ -85,6 +114,7 @@ explicitly confirmed retaining that contract in room message
 | Private generation, payload and retained anchors | Exclusive mode-0700 directories and mode-0600 files are recorded by device/inode. A kill before inventory publication leaves an incomplete charged generation. Matching bytes or filenames never retroactively grant ownership. Unknown link counts and changed owners/namespaces refuse. |
 | `owner.json` and admission witness | Exact old bytes and generation are compared before safe-fs atomic replacement and directory fsync. Concurrent stale saves fail; a kill leaves the old or new complete certificate and possibly a private staging file. A durable terminal row can precede its certificate seal; that gap grants no collection right. |
 | Shared publication | The private publication anchor and its certificate record precede a no-clobber hardlink into the checked repository namespace. A collision leaves the existing occupant intact. A kill can leave a recorded single-link anchor or a complete two-link publication; both remain charged until independently proven collectible. |
+| Controller snapshot | Read-only retained descriptors and one digest live only in command memory. Clones share the snapshot, and positional reads avoid duplicated-descriptor cursor races. A second command obtains its own fresh snapshot; there is no persistent/TTL cache or file to clean up. A changed generation or kernel identity refuses scope construction/use and disables optional reuse. A kill closes descriptors and cannot publish a successful receipt. |
 
 Reads and writes check named namespaces before/after access and on absence.
 Leaf reads use no-follow descriptors, owner/link/type/size checks and full
@@ -98,29 +128,50 @@ and capture roots must keep their exact physical spelling.
 Linux ownership uses native procfs state, owner UID, boot identity and start
 ticks. macOS uses the safe `proc_pidinfo` 0.1.4 binding, explicitly authorized
 by the parent in room message `msg-c4033d8d5b694bab9f40c3deb5e2742e` as the
-sole new dependency exception, only for macOS. Its sealed BSD-info flavor
+initial new dependency exception, only for macOS. Its sealed BSD-info flavor
 rejects a returned-size mismatch before initializing the result. Native code
 checks PID, own UID, zombie status, positive start seconds and microseconds
 below one million, retaining canonical `darwin:seconds:microseconds` birth.
-On zero return, thread errno is captured immediately: only ESRCH means exited;
+The additionally authorized macOS-only existing pin `nix` 0.31.3 uses no
+default features and provides safe errno access. Thread errno is cleared
+immediately before the BSD-info call and captured immediately after it, before
+any result processing. On zero return, only fresh ESRCH means exited;
 unknown, permission, malformed and partial-record outcomes remain unproven.
 No short-BSD/ps/PID-only fallback is used. Other hosts explicitly refuse native
 ownership. This crate still forbids unsafe code; the approved dependency
-provides the platform ABI. Its only transitive dependency is the already
-pinned libc 0.2.191. macOS compilation, native linking, errno behavior and
-runtime partial-record checks remain independent parent verification work.
+provides the platform ABI; the standalone lock retains the existing libc
+0.2.191 and the existing pins needed by nix. macOS compilation, native linking,
+errno behavior and runtime partial-record checks remain independent parent
+verification work.
 
-This execution snapshot lacks `append_lifecycle_checked`. The parent supplied
-and reviewed its exact two-file producer patch in commit
-`896178854a668058a03b6f0f94defe73b1ebb7b4`; its source was inspected. Concrete
-linkage requires the parent's combined source continuation. Until connected,
-`Protocol` cannot be constructed with that native producer. An absent protocol
-explicitly refuses owned helper actions. Ordinary lifecycle actions and
-capture validation remain concrete producers.
+The actual operations producer is now linked through the adapter above
+(`oms-command-operations/src/events.rs:119`). Its callback runs after the
+canonical lock and fresh projection, before idempotent reuse or mutation.
+
+`controller::Controller::capture_current` opens a real procfs directory on
+Linux, verifies its filesystem type and kernel `self` PID-namespace binding,
+then opens the process's fixed kernel executable link relative to retained
+directory descriptors. It hashes that retained image once and checks its
+generation and relationship to a fresh kernel executable descriptor before
+use. A named executable replacement is never opened; an already unlinked
+executing image can be proven by its kernel descriptor without adopting a
+filename. Metadata changes during the command conservatively invalidate the
+snapshot. The snapshot rejects reuse in another process after a fork.
+
+On macOS, native process birth proof is implemented separately from executing
+artifact proof. No available safe API here proves that an ordinary named file
+is the loaded controller image, so default controller capture refuses.
+`Controller::from_authenticated_descriptor(File, Arc<dyn ExecutingImage>)`
+is the typed native bootstrap seam: its provider must establish the actual
+descriptor-to-executing-image relationship using kernel facts on every check.
+It is not a path/hash assertion or peer authority. Without such a genuine
+provider, optional intake allocates fresh, while mandatory scope construction
+explicitly refuses before registration. macOS bootstrap proof, native linking
+and runtime behavior remain parent composition/verification gaps.
 
 Binding depends on authenticated panel dispatch grants and goal-batch lineage
-(`panel_results.py:1279,1546`, `autopilot-receipt.py:1710`), whose native
-producers are absent from the snapshot. The read-only typed `binding::Context`
+(`panel_results.py:1279,1546`, `autopilot-receipt.py:1710`), whose authenticated
+production composition remains parent-owned. The typed `binding::Context`
 methods expose exactly effective allowed paths, accepted prefix and goal-batch
 prefix. Missing producers refuse a binding for real tasks; only an actually
 empty task has the canonical empty prefix. Intake then allocates fresh and
@@ -128,9 +179,17 @@ still requires the full native admission witness. This integration boundary
 was confirmed by the parent in `msg-eac66359fe6a42cab4652824ba0df303`.
 Binding inventory retains the original source roots, environment exclusions,
 seed files, Git base/tree/config/exclude and byte/count limits. It also binds
-the actual executable digest into the opaque harness hash so native code
+the verified executing-artifact digest into the opaque harness hash so native code
 updates cannot reuse an old result merely because legacy files are unchanged.
-That native hash-domain choice awaits the owner's explicit confirmation.
+The owner-approved recipe is exactly
+`SHA256(encoded([canonical_inventory, verified_native_digest]))`; all JSON
+keys/version and canonical inventory/proofs remain intact. Old bindings miss.
+Compound native commands can capture one `Controller`, clone it into
+`Protocol::production_with_controller`, and pass the same snapshot to
+`Domain::{admission_binding_with_controller,bind_admission_with_controller,require_current_admission_with_controller}`
+and `Producer::intake_with_controller`. Digest access rechecks kernel identity
+and generation without hashing the image again. Default convenience methods
+capture one snapshot for their command; no controller failure is a reuse pass.
 
 This crate does not implement verified Git application, collection/quarantine
 or retirement/delegation projections. No existing object is quarantined or
@@ -149,3 +208,14 @@ The worker phase permits compile/fmt, source/reference checks and outbound
 hygiene only: no test additions, suites, behavior probes/reversal rounds,
 cross-host execution, CI or installation have run. Parent integration and
 independent security review remain required.
+
+Deferred checks specific to this continuation: real checked-append refusal
+before idempotent reuse, callback sequence/lock ordering, interruption and
+contended cleanup; production/injected action and task factories; stale ESRCH
+versus freshly cleared zero/ESRCH/permission/partial macOS results; executing
+image rename/unlink/replacement, absent or wrong procfs/PID namespace,
+inherited/forked snapshots, descriptor cursor races, empty/truncated/growing
+image reads and exact generation-size boundaries; one digest shared across
+compound consumers; controller/context failure taking fresh intake while
+mandatory scope construction refuses. Existing source tests are unchanged;
+none of these runtime cases was executed in this implementation-only phase.

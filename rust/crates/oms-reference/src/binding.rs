@@ -3,7 +3,9 @@
 use crate::{
     Result, V,
     capture::{self, CaptureIndex},
-    checkpoint, digest, encoded, hex, obj, path_value,
+    checkpoint,
+    controller::Controller,
+    digest, encoded, hex, obj, path_value,
     producer::{AllocationError, Producer},
     repository, storage, text,
 };
@@ -186,12 +188,29 @@ impl Domain<'_> {
         parameters: &Parameters,
         interrupted: &AtomicBool,
     ) -> Result<V> {
+        let controller = Controller::capture_current()?;
+        self.admission_binding_with_controller(
+            index,
+            execution,
+            parameters,
+            &controller,
+            interrupted,
+        )
+    }
+    pub fn admission_binding_with_controller(
+        &self,
+        index: &CaptureIndex,
+        execution: &Path,
+        parameters: &Parameters,
+        controller: &Controller,
+        interrupted: &AtomicBool,
+    ) -> Result<V> {
         checkpoint(interrupted)?;
         let execution = fs::canonicalize(execution).map_err(|e| e.to_string())?;
         let harness_root = fs::canonicalize(self.harness_root).map_err(|e| e.to_string())?;
         let mut stamps = Vec::new();
         let harness = harness_inventory(&harness_root, &mut stamps, interrupted)?;
-        let native = storage::executable_digest()?;
+        let native = controller.digest()?.to_owned();
         let mut environment = BTreeMap::new();
         for (name, value) in std::env::vars_os() {
             if ["_", "SHLVL", "PWD", "OLDPWD", "CODEX_TOOL_CALL_ID"]
@@ -274,6 +293,7 @@ impl Domain<'_> {
         for stamp in stamps {
             stamp.check()?;
         }
+        controller.check()?;
         if git_text(&execution, &["rev-parse", "HEAD"], interrupted)? != base {
             return Err("admission inputs changed during binding".into());
         }
@@ -346,11 +366,37 @@ impl Domain<'_> {
         parameters: &Parameters,
         interrupted: &AtomicBool,
     ) -> Result<()> {
-        let binding = self.admission_binding(index, execution, parameters, interrupted)?;
+        let controller = Controller::capture_current()?;
+        self.require_current_admission_with_controller(
+            index,
+            capture,
+            execution,
+            parameters,
+            &controller,
+            interrupted,
+        )
+    }
+    pub fn require_current_admission_with_controller(
+        &self,
+        index: &CaptureIndex,
+        capture: &Path,
+        execution: &Path,
+        parameters: &Parameters,
+        controller: &Controller,
+        interrupted: &AtomicBool,
+    ) -> Result<()> {
+        let binding = self.admission_binding_with_controller(
+            index,
+            execution,
+            parameters,
+            controller,
+            interrupted,
+        )?;
         let item = index.find(Some(capture), None)?;
         if !self.current_admission(index, item, &binding)? {
             return Err("admission inputs changed; verification required".into());
         }
+        controller.check()?;
         Ok(())
     }
     pub fn bind_admission(
@@ -365,7 +411,42 @@ impl Domain<'_> {
         parameters: &Parameters,
         interrupted: &AtomicBool,
     ) -> Result<()> {
-        if before != &self.admission_binding(index, execution, parameters, interrupted)? {
+        let controller = Controller::capture_current()?;
+        self.bind_admission_with_controller(
+            index,
+            capture,
+            execution,
+            before,
+            verify,
+            floor,
+            surface,
+            parameters,
+            &controller,
+            interrupted,
+        )
+    }
+    pub fn bind_admission_with_controller(
+        &self,
+        index: &CaptureIndex,
+        capture: &Path,
+        execution: &Path,
+        before: &V,
+        verify: &str,
+        floor: &str,
+        surface: &str,
+        parameters: &Parameters,
+        controller: &Controller,
+        interrupted: &AtomicBool,
+    ) -> Result<()> {
+        if before
+            != &self.admission_binding_with_controller(
+                index,
+                execution,
+                parameters,
+                controller,
+                interrupted,
+            )?
+        {
             return Err("admission inputs changed during verification".into());
         }
         let item = index.find(Some(capture), None)?;
@@ -378,6 +459,7 @@ impl Domain<'_> {
         let mut value = certificate.value().clone();
         value.set("admission", proof);
         checkpoint(interrupted)?;
+        controller.check()?;
         index.check()?;
         certificate.save(&value)
     }
@@ -395,8 +477,39 @@ impl Producer {
         parameters: &Parameters,
         interrupted: &AtomicBool,
     ) -> std::result::Result<PathBuf, AllocationError> {
+        match Controller::capture_current() {
+            Ok(controller) => self.intake_with_controller(
+                domain,
+                source,
+                landing,
+                expected,
+                execution,
+                parameters,
+                &controller,
+                interrupted,
+            ),
+            Err(_) => self.allocate(source, landing, expected, execution, interrupted),
+        }
+    }
+    pub fn intake_with_controller(
+        &mut self,
+        domain: &Domain<'_>,
+        source: &Path,
+        landing: &str,
+        expected: &str,
+        execution: &Path,
+        parameters: &Parameters,
+        controller: &Controller,
+        interrupted: &AtomicBool,
+    ) -> std::result::Result<PathBuf, AllocationError> {
         let binding = domain
-            .admission_binding(&self.index, execution, parameters, interrupted)
+            .admission_binding_with_controller(
+                &self.index,
+                execution,
+                parameters,
+                controller,
+                interrupted,
+            )
             .ok();
         if let Some(binding) = binding {
             for item in self.index.reservations.iter().rev() {
@@ -405,6 +518,7 @@ impl Producer {
                     && domain
                         .current_admission(&self.index, item, &binding)
                         .unwrap_or(false)
+                    && controller.check().is_ok()
                 {
                     return capture::capture_path(item).map_err(AllocationError::from);
                 }

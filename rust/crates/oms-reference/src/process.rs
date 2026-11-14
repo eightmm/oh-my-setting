@@ -126,13 +126,15 @@ impl IdentitySource for NativeIdentity {
         #[cfg(target_os = "macos")]
         {
             use proc_pidinfo::{Pid, ProcBSDInfo, proc_pidinfo};
-            let info = match proc_pidinfo::<ProcBSDInfo>(Pid(pid)) {
+            nix::errno::Errno::clear();
+            let observed = proc_pidinfo::<ProcBSDInfo>(Pid(pid));
+            let observed_errno = nix::errno::Errno::last_raw();
+            let info = match observed {
                 Ok(Some(info)) => info,
                 Ok(None) => {
-                    // This wrapper preserves no error object on zero. Capture
-                    // thread errno before any formatting or secondary query.
-                    let error = std::io::Error::last_os_error();
-                    return if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) {
+                    // A zero result carries no error object. Only the fresh
+                    // thread errno captured above may establish disappearance.
+                    return if observed_errno == rustix::io::Errno::SRCH.raw_os_error() {
                         Err(OwnerError::Exited)
                     } else {
                         Err(OwnerError::Unproven("reference owner unavailable".into()))

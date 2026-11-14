@@ -1,7 +1,9 @@
 //! Immutable private return channels and fenced heartbeat publication.
 //! Shell helper actions and the in-process owner use the same disk protocol.
 use crate::{
-    Result, V, checkpoint, digest, encoded, hex, obj,
+    Result, V, checkpoint,
+    controller::Controller,
+    digest, encoded, hex, obj,
     process::{IdentitySource, Owner, OwnerError},
     publication, storage, text,
 };
@@ -21,15 +23,28 @@ use std::{
 pub type Validator<'a> = dyn FnMut(&[V], Option<&V>) -> Result<()> + 'a;
 pub type CheckedAppend = fn(&Path, V, &AtomicBool, &mut Validator<'_>) -> Result<V>;
 
-/// The parent adapts operations::append_lifecycle_checked to this function
-/// pointer. Missing producer wiring refuses before registering an owned scope.
+/// Uses the operations producer's own lock and fresh projection. The callback
+/// executes before idempotent reuse or append and must not reacquire that lock.
+pub fn native_checked_append(
+    repo: &Path,
+    candidate: V,
+    interrupted: &AtomicBool,
+    check: &mut Validator<'_>,
+) -> Result<V> {
+    events::append_lifecycle_checked(repo, candidate, interrupted, check)
+}
+
 #[derive(Clone)]
 pub struct Protocol {
     helper: String,
     identity: Arc<dyn IdentitySource>,
     checked: CheckedAppend,
+    controller: Option<Controller>,
 }
 impl Protocol {
+    /// Explicit service injection: the trusted caller owns authentication and
+    /// freshness of this helper identity. A hex string alone is not a native
+    /// proof. Production callers use `production` or `production_with_controller`.
     pub fn new(
         helper_sha256: String,
         identity: Arc<dyn IdentitySource>,
@@ -42,20 +57,54 @@ impl Protocol {
             helper: helper_sha256,
             identity,
             checked,
+            controller: None,
         })
     }
-    /// Hash the actual host executable once per command. No stored command is
-    /// executed, and registrar/monitor must use that exact implementation.
+    /// Retains one native executing-image snapshot with injected process and
+    /// lifecycle services. This never hashes a named current_exe replacement.
     pub fn for_executable(
         identity: Arc<dyn IdentitySource>,
         checked: CheckedAppend,
     ) -> Result<Self> {
-        Self::new(storage::executable_digest()?, identity, checked)
+        Self::with_controller(Controller::capture_current()?, identity, checked)
     }
     pub fn native(checked: CheckedAppend) -> Result<Self> {
         Self::for_executable(Arc::new(crate::process::NativeIdentity), checked)
     }
+    pub fn with_controller(
+        controller: Controller,
+        identity: Arc<dyn IdentitySource>,
+        checked: CheckedAppend,
+    ) -> Result<Self> {
+        let helper = controller.digest()?.to_owned();
+        Ok(Self {
+            helper,
+            identity,
+            checked,
+            controller: Some(controller),
+        })
+    }
+    pub fn production() -> Result<Self> {
+        Self::production_with_controller(Controller::capture_current()?)
+    }
+    pub fn production_with_controller(controller: Controller) -> Result<Self> {
+        Self::with_controller(
+            controller,
+            Arc::new(crate::process::NativeIdentity),
+            native_checked_append,
+        )
+    }
+    pub fn controller(&self) -> Option<&Controller> {
+        self.controller.as_ref()
+    }
+    fn check_controller(&self) -> Result<()> {
+        if let Some(controller) = &self.controller {
+            controller.check()?;
+        }
+        Ok(())
+    }
     pub fn read(&self, repo: &Path, channel: &Path, expected: &str) -> Result<(V, fs::Metadata)> {
+        self.check_controller()?;
         let (raw, info) = storage::regular(channel, 4096, 1)?;
         if digest(&raw) != expected {
             return Err("reference scope changed".into());
@@ -79,6 +128,7 @@ impl Protocol {
         }
         Owner::parse(binding.get("owner"))?;
         text(&scope, "attempt")?;
+        self.check_controller()?;
         Ok((scope, info))
     }
     pub fn begin_owned(
@@ -117,6 +167,7 @@ impl Protocol {
         interrupted: &AtomicBool,
     ) -> Result<(String, String)> {
         checkpoint(interrupted)?;
+        self.check_controller()?;
         let (raw, info) = storage::regular(channel, 0, 1)?;
         let root = channel.parent().ok_or("scope has no parent")?;
         let directory = storage::private_directory(root)?;
@@ -159,6 +210,7 @@ impl Protocol {
         publication::transition(&physical, &attempt, "starting", interrupted)?;
         publication::transition(&physical, &attempt, "working", interrupted)?;
         self.require_owner(&owner)?;
+        self.check_controller()?;
         let payload = encoded(&obj([
             ("binding", binding),
             ("attempt", attempt.clone().into()),
@@ -913,4 +965,25 @@ pub fn task_operation(
             Box::new(operation) as Box<dyn oms_command_task::services::ReferenceOperation>
         })
         .map_err(|error| oms_command_task::Error::new(1, error))
+}
+
+pub fn native_task_operation(
+    repo: &Path,
+    target: &Path,
+    interrupted: Arc<AtomicBool>,
+) -> oms_command_task::Result<Box<dyn oms_command_task::services::ReferenceOperation>> {
+    let protocol =
+        Protocol::production().map_err(|error| oms_command_task::Error::new(1, error))?;
+    task_operation(protocol, repo, target, interrupted)
+}
+
+pub fn task_operation_with_controller(
+    controller: Controller,
+    repo: &Path,
+    target: &Path,
+    interrupted: Arc<AtomicBool>,
+) -> oms_command_task::Result<Box<dyn oms_command_task::services::ReferenceOperation>> {
+    let protocol = Protocol::production_with_controller(controller)
+        .map_err(|error| oms_command_task::Error::new(1, error))?;
+    task_operation(protocol, repo, target, interrupted)
 }

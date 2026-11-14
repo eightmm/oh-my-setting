@@ -467,31 +467,6 @@ pub(crate) fn random_hex(bytes: usize) -> Result<String> {
     Ok(value.iter().map(|v| format!("{v:02x}")).collect())
 }
 
-pub(crate) fn executable_digest() -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let path = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut file = File::open(&path).map_err(|e| e.to_string())?;
-    let before = file.metadata().map_err(|e| e.to_string())?;
-    if !before.is_file() || before.nlink() != 1 {
-        return Err("native reference executable identity unavailable".into());
-    }
-    let mut state = Sha256::new();
-    let mut buffer = [0; 128 * 1024];
-    loop {
-        let size = file.read(&mut buffer).map_err(|e| e.to_string())?;
-        if size == 0 {
-            break;
-        }
-        state.update(&buffer[..size]);
-    }
-    if !generation(&before, &file.metadata().map_err(|e| e.to_string())?)
-        || !generation(&before, &fs::metadata(path).map_err(|e| e.to_string())?)
-    {
-        return Err("native reference executable changed".into());
-    }
-    Ok(format!("{:x}", state.finalize()))
-}
-
 pub(crate) fn create_private(root: &Path, name: &Path, raw: &[u8]) -> Result<Metadata> {
     private_directory(root)?;
     let snapshot = Namespace::snapshot(root, &root.join(name))?;

@@ -5,6 +5,7 @@
 pub mod actions;
 pub mod binding;
 pub mod capture;
+pub mod controller;
 pub mod process;
 pub mod producer;
 pub mod publication;
