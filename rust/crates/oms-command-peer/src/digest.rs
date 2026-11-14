@@ -23,8 +23,8 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         tail: args.limit("tail", 30, 0, usize::MAX)?,
         ..Default::default()
     };
-    let mut code = 0;
-    let mut complete = true;
+    let code;
+    let complete;
     let repo = storage::repository(context, context.cwd)?;
     let raw = if args.has("file") {
         if !args.command.is_empty() {
@@ -42,7 +42,8 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
                 .to_string_lossy()
                 .into_owned(),
         );
-        storage::file(&args.path("file", context.cwd))?
+        let digest = file_digest(&args.path("file", context.cwd), &options, context)?;
+        return render(digest, args.has("json"), 0);
     } else {
         if args.command.is_empty() {
             return fail("give --file PATH or -- COMMAND [ARG...]");
@@ -70,11 +71,12 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         let redacted =
             safety::redact(&raw).unwrap_or_else(|_| b"[oms-redacted:scan-failed]\n".to_vec());
         let name = format!(
-            "{}-{}.log",
+            "{}-{}{:020}.log",
             chrono::DateTime::from_timestamp(crate::seconds() as i64, 0)
                 .ok_or_else(|| Error::new(125, "invalid clock"))?
                 .format("%Y%m%dT%H%M%SZ"),
-            std::process::id()
+            std::process::id(),
+            CAPTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let path = Path::new(".oms/artifacts/output-digest").join(&name);
         // A process can make two captures in one second. Never overwrite one.
@@ -101,10 +103,107 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             .retained_capture(&storage::root(&repo)?, &name)
             .map_err(|e| Error::new(125, e))?;
     }
-    let output = if args.has("json") {
+    render(digest, args.has("json"), code)
+}
+static CAPTURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn render(mut digest: oms_output::OutputDigest, json: bool, code: i32) -> Result<Output> {
+    if safety::outbound(digest.semantic_scan_text().as_bytes()).is_err() {
+        digest.withhold("outbound content scan".into());
+    }
+    let output = if json {
         crate::json(&crate::V::parse(digest.json().to_string().as_bytes())?)?
     } else {
         digest.render().into_bytes()
     };
     Ok((code, output, Vec::new()))
+}
+fn file_digest(
+    path: &Path,
+    options: &oms_output::Options,
+    context: &Context<'_>,
+) -> Result<oms_output::OutputDigest> {
+    use rustix::fs::{self, Mode, OFlags};
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let anchor = storage::root(parent)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::new(2, "file name required"))?;
+    let directory = fs::open(
+        anchor.physical_root(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Error::new(2, "digest directory unavailable"))?;
+    let parent_before =
+        fs::fstat(&directory).map_err(|_| Error::new(2, "digest directory unavailable"))?;
+    let mut file: std::fs::File = fs::openat(
+        &directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Error::new(2, "digest file unavailable"))?
+    .into();
+    let before = file.metadata()?;
+    if !before.is_file() || before.nlink() != 1 {
+        return fail("digest input must be a regular non-link file");
+    }
+    struct Observed<'a, R> {
+        reader: R,
+        interrupted: &'a std::sync::atomic::AtomicBool,
+    }
+    impl<R: Read> Read for Observed<'_, R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupted.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(std::io::Error::other("digest interrupted"));
+            }
+            self.reader.read(bytes)
+        }
+    }
+    let digest = oms_output::build_reader(
+        Observed {
+            reader: (&mut file).take(before.len().saturating_add(1)),
+            interrupted: context.interrupted,
+        },
+        options,
+    )
+    .map_err(|_| {
+        Error::new(
+            if context
+                .interrupted
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                130
+            } else {
+                2
+            },
+            "digest stream failed",
+        )
+    })?;
+    let after = file.metadata()?;
+    let named = fs::statat(&directory, name, fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| Error::new(2, "digest source changed"))?;
+    let parent_after = std::fs::metadata(anchor.physical_root())?;
+    if before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+        || named.st_dev != before.dev()
+        || named.st_ino != before.ino()
+        || named.st_nlink != 1
+        || parent_after.dev() != parent_before.st_dev
+        || parent_after.ino() != parent_before.st_ino
+        || parent.canonicalize()? != anchor.physical_root()
+        || digest.raw.bytes as u64 != before.len()
+    {
+        return fail("digest source changed while streaming; output withheld");
+    }
+    Ok(digest)
 }

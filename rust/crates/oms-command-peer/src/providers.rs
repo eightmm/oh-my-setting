@@ -306,6 +306,7 @@ fn quota(home: &Path) -> Option<f64> {
 fn account_environment(
     route: &Route,
     excluded: &BTreeSet<String>,
+    repo: &Path,
 ) -> Result<(Vec<(OsString, OsString)>, Option<String>)> {
     if route.provider != "codex" || std::env::var_os("OMS_RESUME_SESSION").is_some() {
         return Ok((Vec::new(), None));
@@ -357,6 +358,11 @@ fn account_environment(
     if entries.is_empty() {
         return fail("provider accounts must be a non-empty list");
     }
+    let running = if policy == "spread" && !route.explicit {
+        running_accounts(repo)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let mut accounts = Vec::new();
     let mut ids = BTreeSet::new();
     let mut homes = BTreeSet::new();
@@ -401,7 +407,7 @@ fn account_environment(
         accounts.push(Account {
             id: ident.into(),
             used: quota(&location),
-            running: 0,
+            running: running.get(ident).copied().unwrap_or(0),
             home: location,
             usable,
             models,
@@ -417,44 +423,72 @@ fn account_environment(
     }
 }
 pub fn answer_quality(raw: &str) -> &'static str {
-    let scan = raw.rsplit_once("\n## Output\n").map_or(raw, |(_, s)| s);
-    if scan
-        .lines()
-        .any(|l| l.starts_with("[agy] print timeout after ") && l.contains("turn in progress"))
+    let lines = raw.lines().collect::<Vec<_>>();
+    let from = lines
+        .iter()
+        .rposition(|line| *line == "## Output")
+        .map_or(0, |at| at + 1);
+    let timeout = regex::Regex::new(
+        r"^\[agy\] print timeout after .+ with turn in progress; returning partial output$",
+    )
+    .unwrap();
+    if lines[from..]
+        .iter()
+        .any(|line| timeout.is_match(line.trim()))
     {
         return "truncated";
     }
-    for line in scan
-        .lines()
-        .filter(|l| l.starts_with("stop-reason: provider="))
-    {
-        if line.contains("is_error=1") || line.contains("reason=refusal ") {
-            return "blocked";
-        }
-        if line.contains(concat!("reason=", "max_", "tok", "ens "))
-            || line.contains("reason=stream_truncated ")
-        {
-            return "truncated";
+    let stop = regex::Regex::new(
+        r"^stop-reason: provider=\S+ reason=(\S+) subtype=\S+ is_error=([01])(?: category=\S+)?$",
+    )
+    .unwrap();
+    for line in &lines[from..] {
+        if let Some(capture) = stop.captures(line.trim()) {
+            if &capture[2] == "1" || &capture[1] == "refusal" {
+                return "blocked";
+            }
+            if [concat!("max_", "tok", "ens"), "stream_truncated"].contains(&&capture[1]) {
+                return "truncated";
+            }
+            break;
         }
     }
     let noise = regex::Regex::new(concat!(
-        r"(?i)^\s*(model-route:|model-result:|usage detail:|",
-        r"tokens used|\[REDACTED|OpenAI Codex|\[untrusted |\[end untrusted |",
+        r"^\s*(model-route:|model-result:|usage detail:|",
+        r"tok",
+        r"ens used|\[REDACTED|OpenAI Codex|\[untrusted |\[end untrusted |",
         r"workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|",
-        r"reasoning summaries:|session id:|-{3,}$|DRY RUN)"
+        r"reasoning summaries:|session id:|-{3,}$|user$|DRY RUN)"
     ))
     .unwrap();
-    let headings=regex::Regex::new(r"(?i)^(?:#{1,6}\s*)?(?:Answer|Alternatives|Tradeoffs|Evidence|Counterargument|Risks|Recommendation|Verification|Changed from previous round|Remaining disagreements):\s*$").unwrap();
-    let lines: Vec<_> = scan
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !noise.is_match(l) && !l.starts_with("stop-reason:"))
-        .collect();
-    if lines.is_empty() || lines.iter().all(|l| headings.is_match(l)) {
-        return "empty";
+    let headings = regex::Regex::new(r"(?i)^(?:#{1,6}\s*)?(?:Answer|Alternatives|Tradeoffs|Evidence|Counterargument|Risks|Recommendation|Verification|Changed from previous round|Remaining disagreements):\s*$").unwrap();
+    let refusal = regex::Regex::new(r"(?i)^(jetski: no output produced\b|add an allow-rule\b|alternatively, re-run with\b|.*\bcommand not found\b|(error|fatal)[: ].*\b(permission|not authenticated|not logged in|unauthorized|invalid api key|quota|rate limit)\b)").unwrap();
+    let mut skip_next = false;
+    let mut content = Vec::new();
+    for line in lines {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let trimmed = line.trim();
+        if [
+            "served model",
+            "configured model",
+            concat!("tok", "ens used"),
+            "cost usd",
+        ]
+        .contains(&trimmed)
+        {
+            skip_next = true;
+            continue;
+        }
+        if !trimmed.is_empty() && !noise.is_match(line) && !stop.is_match(trimmed) {
+            content.push(trimmed);
+        }
     }
-    let refusal=regex::Regex::new(r"(?i)^(jetski: no output produced|add an allow-rule|alternatively, re-run with|.*\bcommand not found\b|(error|fatal)[: ].*\b(permission|not authenticated|not logged in|unauthorized|quota|rate limit)\b)").unwrap();
-    if lines.iter().all(|l| refusal.is_match(l)) {
+    if content.is_empty() || content.iter().all(|line| headings.is_match(line)) {
+        "empty"
+    } else if content.iter().all(|line| refusal.is_match(line)) {
         "blocked"
     } else {
         "ok"
@@ -595,6 +629,7 @@ pub(crate) fn execute(
     cwd: &Path,
     write: bool,
     timeout: u64,
+    account_repo: &Path,
     context: &Context<'_>,
 ) -> Result<Completed> {
     crate::safety::outbound(prompt)?;
@@ -748,7 +783,7 @@ pub(crate) fn execute(
         .collect();
     let mut excluded = BTreeSet::new();
     for overflow in 0..2 {
-        let (mut environment, account) = account_environment(route, &excluded)?;
+        let (mut environment, account) = account_environment(route, &excluded, account_repo)?;
         environment.extend([
             ("OMS_HARNESS_CHILD".into(), "1".into()),
             ("OMS_HARNESS_DELEGATE_DEPTH".into(), "1".into()),
@@ -762,6 +797,13 @@ pub(crate) fn execute(
                 String::from_utf8_lossy(&base).trim().into(),
             ));
         }
+        let configured = configured_model(
+            route,
+            environment
+                .iter()
+                .find(|(key, _)| key == "CODEX_HOME")
+                .map(|(_, value)| value.as_os_str()),
+        );
         let mut result = context.executor.execute(
             Invocation {
                 argv: argv.clone(),
@@ -777,6 +819,13 @@ pub(crate) fn execute(
         )?;
         let (decoded, terminal) = decode_output(&route.provider, &result.stdout);
         result.stdout = decoded.into_bytes();
+        if !result.stdout.is_empty()
+            && let Some(model) = configured
+        {
+            result
+                .stdout
+                .extend_from_slice(format!("\nconfigured model\n{model}\n").as_bytes());
+        }
         result.complete &= terminal;
         if overflow == 0 && capacity(&result) {
             if let Some(account) = account.filter(|s| s != "default") {
@@ -796,14 +845,15 @@ pub(crate) fn execute_with_fallback(
     cwd: &Path,
     write: bool,
     timeout: u64,
+    account_repo: &Path,
     context: &Context<'_>,
 ) -> Result<Completed> {
-    let result = execute(route, prompt, cwd, write, timeout, context)?;
+    let result = execute(route, prompt, cwd, write, timeout, account_repo, context)?;
     if !fallback.is_empty() && fallback != route.model && capacity(&result) {
         model_name(fallback)?;
         route.model = fallback.into();
         route.explicit = true;
-        execute(route, prompt, cwd, write, timeout, context)
+        execute(route, prompt, cwd, write, timeout, account_repo, context)
     } else {
         Ok(result)
     }
@@ -826,4 +876,79 @@ pub(crate) fn capacity(result: &Completed) -> bool {
         ]
         .iter()
         .any(|word| body.contains(word))
+}
+
+fn configured_model(route: &Route, profile: Option<&std::ffi::OsStr>) -> Option<String> {
+    if route.provider != "codex" || route.model != "provider-default" {
+        return None;
+    }
+    let location = std::env::var_os("OMS_CODEX_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            profile
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".codex")
+                })
+                .join("config.toml")
+        });
+    let parent = location
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let raw = storage::root(parent)
+        .ok()?
+        .read_no_follow(
+            Path::new(location.file_name()?),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: false,
+                max_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .ok()?;
+    let config = oms_toml::parse_bounded(&raw, 4 * 1024 * 1024).ok()?;
+    let model = config.get("model")?.as_str()?;
+    if !regex::Regex::new(r"\A[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}\z")
+        .ok()?
+        .is_match(model)
+    {
+        return None;
+    }
+    Some(model.to_owned())
+}
+fn running_accounts(repo: &Path) -> Result<std::collections::BTreeMap<String, usize>> {
+    let state =
+        oms_command_room::Services::state_repository(&oms_command_room::LocalServices, repo)
+            .map_err(|e| Error::new(2, e.to_string()))?;
+    let (_, rows) = oms_command_operations::load_projection(&state)?;
+    let mut counts = std::collections::BTreeMap::new();
+    for row in rows {
+        let refs = row.get("refs");
+        let provider = if text(refs, "panel_provider").is_empty() {
+            text(&row, "provider")
+        } else {
+            text(refs, "panel_provider")
+        };
+        if provider != "codex"
+            || !["worker", "researcher", "advisor", "reviewer"].contains(&text(refs, "panel_role"))
+            || ![
+                "queued",
+                "starting",
+                "working",
+                "running",
+                "waiting_input",
+                "waiting_approval",
+                "verifying",
+            ]
+            .contains(&text(&row, "state"))
+        {
+            continue;
+        }
+        let account = text(refs, "panel_account").to_owned();
+        if !account.is_empty() {
+            *counts.entry(account).or_insert(0) += 1;
+        }
+    }
+    Ok(counts)
 }

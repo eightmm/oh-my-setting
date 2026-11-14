@@ -173,11 +173,17 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         return fail("native session relocation must be bound before resuming a delegation");
     }
     if args.has("context-manifest")
-        || args.has("context-pack")
-        || args.has("graph-context") && !args.has("no-graph-context")
+        || args.has("graph-context") && !args.has("no-graph-context") && !args.has("context-pack")
     {
         return fail("typed context compilation is not integrated; no worktree created");
     }
+    let orientation = if args.has("context-pack") {
+        Some(crate::context_pack::orientation(
+            &args.path("context-pack", context.cwd),
+        )?)
+    } else {
+        None
+    };
     let target = Target::parse(args.required("to")?)?;
     let question = peer::question(args, context)?;
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;
@@ -234,6 +240,37 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut prompt = format!(
         "You are a delegated worker in an isolated repository worktree. Follow repository contracts. Do not run git commit or git push. Do not recursively delegate. The owner retains review, admission and publication.\nGoal:\n{question}\n\nOutput: return patch artifacts and concise changed files, checks, uncertainty and blockers.\nDone when: the authorized task and its required verification are complete, or no work can advance without the owner.\nBase revision: {base}\n"
     );
+    if args.has("task") && !args.has("no-task") || !read && !args.has("no-task") {
+        let packet = storage::read(&repo, Path::new(".oms/task/current.md"), true)?;
+        if !packet.is_empty() {
+            prompt.push_str(&safety::untrusted("task", "recorded context", &packet)?);
+        }
+    }
+    if args.has("memory") && !args.has("no-memory") {
+        let (code, bytes, _) =
+            oms_command_memory::provider_context(&repo, &question, context.interrupted);
+        if code != 0 {
+            return fail("shared memory context failed");
+        }
+        prompt.push_str(&safety::untrusted("memory", "recorded context", &bytes)?);
+    }
+    if args.has("ml-context") && !args.has("no-ml-context") {
+        let digest = crate::ml_context::build(&repo, context)?;
+        if !digest.is_empty() {
+            prompt.push_str(&safety::untrusted(
+                "ML project",
+                "context digest",
+                digest.as_bytes(),
+            )?);
+        }
+    }
+    if let Some(orientation) = orientation {
+        prompt.push_str(&safety::untrusted(
+            "parent graph",
+            "orientation metadata",
+            orientation.as_bytes(),
+        )?);
+    }
     if read {
         prompt.push_str(
             "Read-only investigation: do not modify files. Return evidence and findings.\n",
@@ -354,6 +391,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             &worktree.path,
             !read,
             peer::timeout(args, "peer-delegate")?,
+            &repo,
             context,
         );
         let result = match result {

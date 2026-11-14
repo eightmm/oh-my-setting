@@ -154,24 +154,7 @@ pub(crate) fn append(
                 return Ok((Vec::new(), ()));
             }
         }
-        let maximum = std::env::var("OMS_THREAD_TURN_BYTES")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4000)
-            .clamp(1, 32768);
-        let trimmed = body.trim_end_matches(['\r', '\n']);
-        let body = if trimmed.len() > maximum {
-            let mut start = trimmed.len() - maximum;
-            while !trimmed.is_char_boundary(start) {
-                start += 1;
-            }
-            format!(
-                "[earlier output truncated: see artifact]\n{}",
-                &trimmed[start..]
-            )
-        } else {
-            trimmed.into()
-        };
+        let body = turn_body(body);
         let seq = rows
             .iter()
             .filter_map(|r| crate::number(r.get("seq")))
@@ -435,6 +418,21 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         return Ok(out(include_bytes!("help/thread.txt").to_vec()));
     }
     args.exact_operands(1)?;
+    if args.has("room-event") && args.action() != "append" {
+        return fail("--room-event applies to append");
+    }
+    if args.has("stale") && !matches!(args.action(), "list" | "close") {
+        return fail("--stale applies to list or close");
+    }
+    if args.has("apply") && !(args.action() == "close" && args.has("stale")) {
+        return fail("--apply requires close --stale");
+    }
+    if args.action() == "close"
+        && args.has("stale")
+        && ["id", "all", "json"].iter().any(|key| args.has(key))
+    {
+        return fail("close --stale cannot combine with --id, --all or --json");
+    }
     let repo = storage::repository(context, &args.path("repo", context.cwd))?;
     let ident = if args.has("id") {
         Some(args.get("id").to_owned())
@@ -476,77 +474,8 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             }
             return Ok(out(format!("{ident}\n").into_bytes()));
         }
-        "list" | "stats" => {
-            let mut values = Vec::new();
-            let mut lines = String::new();
-            let mut answers = 0usize;
-            let mut questions = 0usize;
-            let mut multi = 0usize;
-            for name in storage::names(&repo, Path::new(".oms/threads"), ".jsonl")?
-                .iter()
-                .rev()
-            {
-                let ident = name.trim_end_matches(".jsonl");
-                let rows = load(&repo, ident)?;
-                let closed = rows.iter().any(|r| text(r, "role") == "closed");
-                let providers: std::collections::BTreeSet<_> = rows
-                    .iter()
-                    .map(|r| text(r, "provider"))
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if providers.len() > 1 {
-                    multi += 1;
-                }
-                answers += rows.iter().filter(|r| text(r, "role") == "answer").count();
-                questions += rows
-                    .iter()
-                    .filter(|r| text(r, "role") == "question")
-                    .count();
-                let stale = ident != current(&repo).unwrap_or_default()
-                    && rows
-                        .last()
-                        .and_then(|r| chrono::DateTime::parse_from_rfc3339(text(r, "ts")).ok())
-                        .is_some_and(|s| {
-                            crate::seconds() as i64 - s.timestamp()
-                                >= std::env::var("OMS_THREAD_STALE_TTL")
-                                    .ok()
-                                    .and_then(|s| s.parse().ok())
-                                    .unwrap_or(259200)
-                        });
-                if args.action() == "list"
-                    && (!args.has("all") && closed || args.has("stale") && (!stale || closed))
-                {
-                    continue;
-                }
-                lines.push_str(&format!(
-                    "{ident} {}{}\n",
-                    if closed { "closed" } else { "open" },
-                    if stale { " STALE" } else { "" }
-                ));
-                values.push(obj([
-                    ("id", ident.into()),
-                    ("closed", closed.into()),
-                    ("stale", stale.into()),
-                    ("turns", V::Num(rows.len().to_string())),
-                ]));
-            }
-            let value = if args.action() == "stats" {
-                obj([
-                    ("schema", 1usize.into()),
-                    ("threads", V::Num(values.len().to_string())),
-                    ("questions", V::Num(questions.to_string())),
-                    ("answers", V::Num(answers.to_string())),
-                    ("multi_provider", V::Num(multi.to_string())),
-                ])
-            } else {
-                V::Arr(values)
-            };
-            return Ok(out(if args.has("json") || args.action() == "stats" {
-                json(&value)?
-            } else {
-                lines.into_bytes()
-            }));
-        }
+        "list" | "stats" => return listing(&repo, &args),
+        "close" if args.has("stale") => return close_stale(&repo, &args, context),
         _ => {}
     }
     let ident =
@@ -581,17 +510,29 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             }))
         }
         "append" => {
-            if args.has("room-event") {
-                return fail(
-                    "typed room events must use oms-command-room's validated Room adapter",
-                );
-            }
             let body = if args.has("text-file") {
                 String::from_utf8_lossy(&storage::file(&args.path("text-file", context.cwd))?)
                     .into_owned()
             } else {
                 args.required("text")?.into()
             };
+            if args.has("room-event") {
+                let event =
+                    oms_command_room::value::parse(args.get("room-event").as_bytes(), 65536)
+                        .map_err(|e| Error::new(2, e.to_string()))?;
+                let room = oms_command_room::Room::open(
+                    &repo,
+                    oms_command_room::Session::from_env(),
+                    &oms_command_room::LocalServices,
+                    context.interrupted,
+                    false,
+                    false,
+                )
+                .map_err(|e| Error::new(2, e.to_string()))?;
+                room.append(&ident, &event, &body)
+                    .map_err(|e| Error::new(2, e.to_string()))?;
+                return Ok(out(Vec::new()));
+            }
             let mut fields = Vec::new();
             for key in ["provider", "model", "artifact", "quality"] {
                 if args.has(key) {
@@ -618,9 +559,6 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             ))
         }
         "close" => {
-            if args.has("stale") {
-                return fail("close --stale requires explicit per-thread inspection");
-            }
             append(&repo, &ident, "closed", args.get("summary"), &[], context)?;
             Ok(out(format!("thread: closed {ident}\n").into_bytes()))
         }
@@ -695,4 +633,361 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         }
         _ => fail("unknown thread subcommand"),
     }
+}
+
+fn stale_ttl() -> Result<i64> {
+    let raw = std::env::var("OMS_THREAD_STALE_TTL").unwrap_or_else(|_| "259200".into());
+    raw.parse::<i64>()
+        .ok()
+        .filter(|n| *n >= 0)
+        .ok_or_else(|| Error::new(2, "OMS_THREAD_STALE_TTL must be a nonnegative integer"))
+}
+fn last_epoch(rows: &[V]) -> Option<i64> {
+    rows.iter().rev().find_map(|row| {
+        chrono::NaiveDateTime::parse_from_str(text(row, "ts"), "%Y-%m-%dT%H:%M:%SZ")
+            .ok()
+            .map(|stamp| stamp.and_utc().timestamp())
+    })
+}
+fn closed(rows: &[V]) -> bool {
+    rows.iter().any(|row| {
+        text(row, "role") == "closed"
+            || text(row.get("room_event"), "kind") == "successor"
+                && storage::identifier(text(row.get("room_event"), "target"))
+    })
+}
+fn classification(ident: &str, rows: &[V], current: &str, now: i64, ttl: i64) -> &'static str {
+    if closed(rows) {
+        "closed"
+    } else if ident == current {
+        "current"
+    } else {
+        match last_epoch(rows) {
+            None => "unknown",
+            Some(stamp) if now.saturating_sub(stamp) > ttl => "stale",
+            _ => "fresh",
+        }
+    }
+}
+fn human(age: Option<i64>) -> String {
+    match age {
+        None => "?".into(),
+        Some(n) if n >= 86400 => format!("{}d", n / 86400),
+        Some(n) if n >= 3600 => format!("{}h", n / 3600),
+        Some(n) => format!("{}m", n.div_euclid(60)),
+    }
+}
+fn views(repo: &Path, args: &Args) -> Result<(Vec<V>, V, i64)> {
+    let ttl = stale_ttl()?;
+    let current = current(repo).unwrap_or_default();
+    let now = crate::seconds() as i64;
+    let keys = [
+        "threads",
+        "open",
+        "closed",
+        "stale_open",
+        "undatable_open",
+        "second_question",
+        "multi_provider",
+        "answers_rated",
+        "answers_ok",
+    ];
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    let mut entries = Vec::new();
+    for name in storage::names(repo, Path::new(".oms/threads"), ".jsonl")? {
+        let ident = name.trim_end_matches(".jsonl");
+        let rows = load(repo, ident)?;
+        let state = classification(ident, &rows, &current, now, ttl);
+        if state == "closed" && !args.has("all") && args.action() != "stats" {
+            continue;
+        }
+        let mut providers = Vec::new();
+        let mut questions = 0;
+        for row in &rows {
+            let provider = text(row, "provider");
+            if !provider.is_empty() && !providers.contains(&provider) {
+                providers.push(provider);
+            }
+            if text(row, "role") == "question" {
+                questions += 1;
+            }
+            if text(row, "role") == "answer" && row.get("quality").truth() {
+                *counts.entry("answers_rated").or_default() += 1;
+                if text(row, "quality") == "ok" {
+                    *counts.entry("answers_ok").or_default() += 1;
+                }
+            }
+        }
+        for key in [
+            Some("threads"),
+            Some(if state == "closed" { "closed" } else { "open" }),
+            (state == "stale").then_some("stale_open"),
+            (state == "unknown").then_some("undatable_open"),
+            (questions >= 2).then_some("second_question"),
+            (providers.len() >= 2).then_some("multi_provider"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *counts.entry(key).or_default() += 1;
+        }
+        let topic = rows
+            .iter()
+            .find(|r| text(r, "role") == "topic")
+            .or_else(|| rows.iter().find(|r| text(r, "role") == "question"))
+            .map(|r| {
+                text(r, "text")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let age = last_epoch(&rows).map(|stamp| now.saturating_sub(stamp));
+        let mut entry = obj([
+            ("id", ident.into()),
+            ("turns", rows.len().into()),
+            ("closed", (state == "closed").into()),
+            ("current", (ident == current).into()),
+            ("topic", topic.into()),
+            (
+                "providers",
+                V::Arr(providers.into_iter().map(V::from).collect()),
+            ),
+            (
+                "last_ts",
+                rows.last().map_or(V::Null, |r| r.get("ts").clone()),
+            ),
+            ("staleness", state.into()),
+            (
+                "age_seconds",
+                age.map_or(V::Null, |n| V::Num(n.to_string())),
+            ),
+        ]);
+        if state == "stale" {
+            entry.set(
+                "close_command",
+                format!("oms thread close --id {ident} --summary \"stale\""),
+            );
+        }
+        if !args.has("stale") || state == "stale" {
+            entries.push(entry);
+        }
+    }
+    entries.sort_by(|a, b| {
+        text(b, "last_ts")
+            .cmp(text(a, "last_ts"))
+            .then_with(|| text(a, "id").cmp(text(b, "id")))
+    });
+    let stats = V::Obj(
+        keys.into_iter()
+            .map(|key| {
+                (
+                    key.as_bytes().to_vec(),
+                    counts.get(key).copied().unwrap_or(0).into(),
+                )
+            })
+            .collect(),
+    );
+    Ok((entries, stats, ttl))
+}
+fn listing(repo: &Path, args: &Args) -> Result<Output> {
+    let (entries, stats, ttl) = views(repo, args)?;
+    if args.action() == "stats" {
+        if args.has("json") {
+            return Ok(out(json(&obj([
+                ("schema", 1usize.into()),
+                ("stale_ttl_seconds", V::Num(ttl.to_string())),
+                ("stats", stats),
+            ]))?));
+        }
+        let count = |key| crate::number(stats.get(key)).unwrap_or(0.0) as usize;
+        return Ok(out(format!("# thread stats\n  threads: {} (open {}, closed {})\n  stale open: {} (idle over {}; oms thread list --stale)\n  undatable open: {}\n  with a follow-up question: {}\n  with multiple providers: {}\n  rated answers: {} (quality=ok {})\n",
+            count("threads"), count("open"), count("closed"), count("stale_open"), human(Some(ttl)),
+            count("undatable_open"), count("second_question"), count("multi_provider"),
+            count("answers_rated"), count("answers_ok")).into_bytes()));
+    }
+    if args.has("json") {
+        return Ok(out(json(&obj([
+            ("schema", 1usize.into()),
+            ("threads", V::Arr(entries)),
+        ]))?));
+    }
+    let mut output = String::new();
+    if entries.is_empty() {
+        output.push_str(&if args.has("stale") {
+            format!(
+                "no stale open threads (none idle longer than {})\n",
+                human(Some(ttl))
+            )
+        } else {
+            "no threads\n".into()
+        });
+    } else if args.has("stale") {
+        output.push_str(&format!(
+            "{} stale open thread(s), idle over {}. Nothing is closed automatically:\n",
+            entries.len(),
+            human(Some(ttl))
+        ));
+    }
+    for entry in entries {
+        if args.has("stale") {
+            output.push_str(&stale_line(&entry));
+            output.push_str(&format!("  close: {}\n", text(&entry, "close_command")));
+            continue;
+        }
+        let providers = entry
+            .get("providers")
+            .array()
+            .iter()
+            .filter_map(V::text)
+            .collect::<Vec<_>>()
+            .join(",");
+        output.push_str(&format!(
+            "{:<28} {} turns={:<3} {}{}{}\n",
+            text(&entry, "id"),
+            if entry.get("closed").truth() {
+                "closed"
+            } else {
+                "open  "
+            },
+            crate::number(entry.get("turns")).unwrap_or(0.0) as usize,
+            if providers.is_empty() {
+                "-"
+            } else {
+                &providers
+            },
+            if entry.get("current").truth() {
+                "  *current"
+            } else {
+                ""
+            },
+            if text(&entry, "topic").is_empty() {
+                String::new()
+            } else {
+                format!("  {}", text(&entry, "topic"))
+            }
+        ));
+        if args.has("stale") {
+            output.push_str(&format!("  close: {}\n", text(&entry, "close_command")));
+        }
+    }
+    Ok(out(output.into_bytes()))
+}
+fn close_stale(repo: &Path, args: &Args, context: &Context<'_>) -> Result<Output> {
+    safety::parent()?;
+    let (entries, _, ttl) = views(repo, args)?;
+    if !args.has("apply") {
+        let mut output = format!(
+            "Dry run: {} stale open thread(s); re-run with --apply to close eligible non-room threads.\n",
+            entries.len()
+        );
+        for row in entries {
+            output.push_str(&stale_line(&row));
+        }
+        return Ok(out(output.into_bytes()));
+    }
+    let summary = args.value("summary", "stale");
+    safety::outbound(summary.as_bytes())?;
+    let mut output = String::new();
+    for entry in entries {
+        let ident = text(&entry, "id");
+        if ident.starts_with("room-") {
+            continue;
+        }
+        let did_close = storage::log(repo, &path(ident)?, context.interrupted, |old, _| {
+            let rows = storage::rows(old)?;
+            let now = crate::seconds() as i64;
+            if rows.iter().any(|r| r.has("room_event"))
+                || classification(ident, &rows, &current(repo).unwrap_or_default(), now, ttl)
+                    != "stale"
+                || rows.iter().any(|r| {
+                    last_epoch(std::slice::from_ref(r))
+                        .is_some_and(|stamp| now.saturating_sub(stamp) <= ttl)
+                })
+            {
+                return Ok((Vec::new(), false));
+            }
+            if rows.iter().any(|r| text(r, "thread") != ident) {
+                return fail("thread id does not match its log");
+            }
+            let seq = rows
+                .iter()
+                .filter_map(|r| crate::number(r.get("seq")))
+                .fold(0.0, f64::max) as u64
+                + 1;
+            let row = obj([
+                ("schema", 1usize.into()),
+                ("ts", crate::now().into()),
+                ("thread", ident.into()),
+                ("seq", V::Num(seq.to_string())),
+                ("role", "closed".into()),
+                ("agent", agent().into()),
+                ("text", turn_body(summary).into()),
+            ]);
+            let mut bytes = row.json(false)?;
+            bytes.push(b'\n');
+            if bytes.len() > 65536 || old.len() + bytes.len() > MAX_LOG {
+                return fail("thread storage budget exceeded");
+            }
+            Ok((bytes, true))
+        })?;
+        if did_close {
+            output.push_str(&format!("thread: closed {ident}\n"));
+        }
+    }
+    Ok((0, Vec::new(), output.into_bytes()))
+}
+
+fn turn_body(body: &str) -> String {
+    let maximum = std::env::var("OMS_THREAD_TURN_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4000)
+        .clamp(1, 32768);
+    let trimmed = body.trim_end_matches(['\r', '\n']);
+    if trimmed.len() > maximum {
+        let mut start = trimmed.len() - maximum;
+        while !trimmed.is_char_boundary(start) {
+            start += 1;
+        }
+        format!(
+            "[earlier output truncated: see artifact]\n{}",
+            &trimmed[start..]
+        )
+    } else {
+        trimmed.into()
+    }
+}
+fn stale_line(row: &V) -> String {
+    let providers = row
+        .get("providers")
+        .array()
+        .iter()
+        .filter_map(V::text)
+        .collect::<Vec<_>>()
+        .join(",");
+    let age = if let V::Num(value) = row.get("age_seconds") {
+        value.parse::<i64>().ok()
+    } else {
+        None
+    };
+    format!(
+        "{:<28} idle={:<5} turns={:<3} {}{}\n",
+        text(row, "id"),
+        human(age),
+        row.get("turns").py(),
+        if providers.is_empty() {
+            "-"
+        } else {
+            &providers
+        },
+        if text(row, "topic").is_empty() {
+            String::new()
+        } else {
+            format!("  {}", text(row, "topic"))
+        }
+    )
 }

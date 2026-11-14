@@ -89,7 +89,12 @@ fn roots(args: &Args) -> Result<Vec<(String, PathBuf, usize)>> {
         .unwrap_or_else(|| home.join(".claude"));
     let pi = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".pi/agent/sessions"));
+        .unwrap_or_else(|| {
+            std::env::var_os("PI_CODING_AGENT_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".pi/agent"))
+                .join("sessions")
+        });
     Ok(vec![
         ("claude".into(), claude.join("projects"), 1),
         ("codex".into(), codex.join("sessions"), 3),
@@ -377,7 +382,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     if tool == "session-handoff" {
         return handoff(argv, context);
     }
-    let args = Args::parse(
+    let mut args = Args::parse(
         argv,
         &[
             "repo",
@@ -488,9 +493,76 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             "native checkpoint/fork ownership integration is required; state was preserved",
         );
     }
-    let source = select(&repo, &args, context)?;
+    let (source, bookmark) =
+        if args.action() == "bookmark" && matches!(args.operand(1), "open" | "resume") {
+            let ident = args.operand(2);
+            if !storage::identifier(ident) {
+                return fail("invalid bookmark id");
+            }
+            let record = V::parse(&storage::read(
+                &repo,
+                &Path::new(".oms/sessions/bookmarks").join(format!("{ident}.json")),
+                false,
+            )?)?;
+            if record.get("schema") != &1usize.into()
+                || text(&record, "id") != ident
+                || Path::new(text(&record, "repo")) != repo
+            {
+                return fail("bookmark record is missing or belongs to a different repository");
+            }
+            let value = record.get("source");
+            if Path::new(text(value, "repo")) != repo
+                || !["claude", "codex", "pi"].contains(&text(value, "provider"))
+                || !storage::identifier(text(value, "session_id"))
+            {
+                return fail("bookmark source has no valid repository binding");
+            }
+            let source = Source {
+                provider: text(value, "provider").into(),
+                ident: text(value, "session_id").into(),
+                path: PathBuf::from(text(value, "path")),
+                root: PathBuf::from(text(value, "root")),
+                repo: repo.clone(),
+                modified: 0,
+            };
+            if !source.path.is_absolute() || !source.root.is_absolute() {
+                return fail("bookmark source paths must be absolute");
+            }
+            (source, Some(record))
+        } else {
+            (select(&repo, &args, context)?, None)
+        };
     let raw = read(&source)?;
     let items = messages(&source, &raw);
+    if let Some(bookmark) = bookmark {
+        let position = |key| {
+            bookmark
+                .get(key)
+                .integer(false)
+                .then(|| bookmark.get(key).py().parse::<usize>().ok())
+                .flatten()
+        };
+        let message = items
+            .iter()
+            .find(|message| {
+                Some(message.line) == position("line") && Some(message.part) == position("part")
+            })
+            .filter(|message| text(&bookmark, "line_sha256") == message.hash)
+            .ok_or_else(|| {
+                Error::new(
+                    2,
+                    "bookmark is stale: its original line changed; select a new origin",
+                )
+            })?;
+        if args.operand(1) == "open" {
+            return Ok(out(json(&obj([
+                ("schema", 1usize.into()),
+                ("kind", "oms-session-bookmark-open".into()),
+                ("origin", origin(&source, message, 0, None)),
+            ]))?));
+        }
+        args.positional = vec!["resume".into()];
+    }
     if args.action() == "open" {
         let selected = items.iter().filter(|m| m.line >= line).collect::<Vec<_>>();
         return Ok(out(json(&obj([
@@ -521,11 +593,37 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
             .find(|m| m.line == line && m.part == part)
             .ok_or_else(|| Error::new(2, "no native text at the exact line/part"))?;
         let ident = crate::id("bookmark-")?;
-        let mut row = origin(&source, message, 0, None);
-        row.set("id", ident.clone());
-        row.set("source_sha256", storage::hash(&raw));
-        row.set("label", args.get("label"));
-        row.set("created_at", now());
+        let label = args.get("label");
+        safety::outbound(label.as_bytes())?;
+        let absolute =
+            regex::Regex::new(r"(?:^|[^A-Za-z0-9_.:/-])(?:/[^/\s]+/[^\s]+|[A-Za-z]:[\\/][^\s]+)")
+                .unwrap();
+        if label.len() > 120 || label.chars().any(char::is_control) || absolute.is_match(label) {
+            return fail(
+                "label must be a short title without sensitive content or control characters",
+            );
+        }
+        let source_record = obj([
+            ("provider", source.provider.clone().into()),
+            ("session_id", source.ident.clone().into()),
+            ("path", source.path.to_string_lossy().into_owned().into()),
+            ("root", source.root.to_string_lossy().into_owned().into()),
+            ("repo", repo.to_string_lossy().into_owned().into()),
+            ("bytes", raw.len().into()),
+            ("mtime_ns", V::Num(source.modified.to_string())),
+            ("sha256", storage::hash(&raw).into()),
+        ]);
+        let row = obj([
+            ("schema", 1usize.into()),
+            ("id", ident.clone().into()),
+            ("repo", repo.to_string_lossy().into_owned().into()),
+            ("created_at", now().into()),
+            ("label", label.into()),
+            ("source", source_record),
+            ("line", message.line.into()),
+            ("part", message.part.into()),
+            ("line_sha256", message.hash.clone().into()),
+        ]);
         storage::write(
             &repo,
             &Path::new(".oms/sessions/bookmarks").join(format!("{ident}.json")),
@@ -540,6 +638,21 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     if args.action() != "resume" && !fork {
         return fail("unknown session action");
     }
+    let configured = Args::parse(
+        &["--provider".into(), source.provider.clone().into()],
+        &["provider"],
+        &[],
+    )?;
+    if source.provider != "pi"
+        && !roots(&configured)?
+            .iter()
+            .any(|(_, root, _)| source.path.starts_with(root))
+    {
+        return fail(
+            "selected transcript is outside the configured native store; custom roots are read-only for native launches",
+        );
+    }
+    refuse_managed_resume(&repo, &source, fork, context)?;
     let binary = providers::binary(&source.provider);
     let help = process::invoke(
         context,
@@ -776,7 +889,7 @@ fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         "prompt" => {
             let budget = args.limit("max-bytes", 4096, 512, 65536)?;
             let task = storage::read(&repo, Path::new(".oms/task/current.md"), true)?;
-            let plan = storage::read(&repo, Path::new(".oms/plan/current.json"), true)?;
+            let plan = storage::read(&repo, Path::new(".oms/plan/tasks.json"), true)?;
             let mut body = format!(
                 "# Next-session prompt\n\nContinue the recorded project goal. Inspect the repository contracts and current state before editing.\n\n{}\n{}\n\nVerification: only recorded mechanical receipts prove completion.\n",
                 String::from_utf8_lossy(&task),
@@ -799,8 +912,11 @@ fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         }
         "capture" => {
             let provider = args.value("agent", "claude");
+            if matches!(provider, "antigravity" | "agy") {
+                return antigravity_handoff(&repo, &args, context);
+            }
             if !["claude", "codex"].contains(&provider) {
-                return fail("native Antigravity prompt-only handoff is not integrated");
+                return fail("unknown handoff agent; use claude, codex or antigravity");
             }
             let roots_args = Args::parse(
                 &[OsString::from("--provider"), provider.into()],
@@ -868,4 +984,151 @@ fn handoff(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         }
         _ => fail("session-handoff expects capture, list, show or prompt"),
     }
+}
+
+fn refuse_managed_resume(
+    repo: &Path,
+    source: &Source,
+    fork: bool,
+    context: &Context<'_>,
+) -> Result<()> {
+    if fork {
+        return Ok(());
+    }
+    let digest = storage::hash(source.ident.as_bytes());
+    let room = oms_command_room::Room::open(
+        repo,
+        oms_command_room::Session::from_env(),
+        &oms_command_room::LocalServices,
+        context.interrupted,
+        false,
+        false,
+    )
+    .map_err(|_| {
+        Error::new(
+            2,
+            "native owner discovery is incomplete; resume through the existing panel",
+        )
+    })?;
+    for name in storage::names(repo, Path::new(".oms/threads"), ".jsonl")? {
+        let rows = room.records(name.trim_end_matches(".jsonl")).map_err(|_| {
+            Error::new(
+                2,
+                "native owner discovery is incomplete; resume through the existing panel",
+            )
+        })?;
+        if !rows
+            .iter()
+            .any(|row| row["room_event"].text("kind") == "created")
+        {
+            continue;
+        }
+        let state = oms_command_room::project(&rows).map_err(|_| {
+            Error::new(
+                2,
+                "native owner discovery is incomplete; resume through the existing panel",
+            )
+        })?;
+        if state.list("participants").iter().any(|member| {
+            (member.text("provider") == source.provider
+                || source.provider == "pi" && member.text("provider") == "codex")
+                && [member.text("consumer"), member.text("initial_consumer")]
+                    .contains(&&digest[..32])
+        }) {
+            return fail(
+                "managed native sessions must resume through the existing panel to retain owner and lease checks",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn antigravity_handoff(repo: &Path, args: &Args, context: &Context<'_>) -> Result<Output> {
+    let home = std::env::var_os("OMS_GEMINI_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".gemini")))
+        .ok_or_else(|| Error::new(2, "native history home unavailable"))?;
+    let path = home.join("antigravity-cli/history.jsonl");
+    match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if args.value("missing-session-policy", "fail") == "skip" {
+                return Ok(out(Vec::new()));
+            }
+            return Err(Error::new(3, "native Antigravity history is absent"));
+        }
+        Err(_) => return fail("native Antigravity history is unavailable"),
+        _ => {}
+    }
+    plain(&path, false)?;
+    let bytes = storage::file(&path)?;
+    let mut rows = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
+        crate::check(context.interrupted)?;
+        if line.len() > 1024 * 1024 {
+            return fail("native history row exceeds the read bound");
+        }
+        let Ok(row) = V::parse(line) else {
+            continue;
+        };
+        if Path::new(text(&row, "workspace")) == repo
+            && !text(&row, "display").trim().is_empty()
+            && (!args.has("session") || text(&row, "conversationId") == args.get("session"))
+        {
+            rows.push(row);
+        }
+    }
+    let conversation = if args.has("session") {
+        args.get("session").to_owned()
+    } else {
+        rows.last()
+            .map_or("", |row| text(row, "conversationId"))
+            .to_owned()
+    };
+    let users = rows
+        .iter()
+        .filter(|row| text(row, "conversationId") == conversation)
+        .collect::<Vec<_>>();
+    if users.len() < args.limit("min-user-turns", 2, 0, usize::MAX)? {
+        return Ok((
+            0,
+            Vec::new(),
+            b"session-handoff: too few user turns; skipped\n".to_vec(),
+        ));
+    }
+    let turns = std::env::var("OMS_HANDOFF_TURNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(6)
+        .min(50);
+    let mut body = format!(
+        "# Session handoff\n\n- agent: antigravity\n- session: {conversation}\n- captured: {}\n- source_kind: prompts-only\n\n{}\n\n## Goal\n{}\n\n## Recent user turns\n",
+        now(),
+        args.get("note"),
+        users
+            .first()
+            .map(|row| safety::truncate(text(row, "display"), 600))
+            .unwrap_or("(no antigravity prompts matched)")
+    );
+    for row in users.iter().rev().take(turns).rev() {
+        body.push_str(&format!(
+            "\n{}\n",
+            safety::truncate(text(row, "display"), 400)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    body.push_str("\n## Last assistant summary\n(antigravity assistant output not available from history.jsonl)\n");
+    if !args.has("allow-sensitive") {
+        safety::outbound(body.as_bytes())?;
+    }
+    let output = if args.has("out") {
+        PathBuf::from(args.get("out"))
+    } else {
+        Path::new(".oms/handoffs").join(format!("antigravity-{}.md", crate::peer::run_id()?))
+    };
+    storage::write(repo, &output, body.into_bytes(), false, context.interrupted)?;
+    Ok(out(
+        format!("{}\n", repo.join(output).display()).into_bytes()
+    ))
 }

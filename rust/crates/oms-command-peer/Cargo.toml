@@ -8,6 +8,9 @@ rust-version = "1.99.1"
 resolver = "3"
 
 [dependencies]
+oms-runtime = { path = "../oms-runtime" }
+oms-command-plan = { path = "../oms-command-plan" }
+oms-toml = { path = "../oms-toml" }
 oms-command-operations = { path = "../oms-command-operations" }
 oms-command-room = { path = "../oms-command-room" }
 oms-command-attempt-bundle = { path = "../oms-command-attempt-bundle" }
