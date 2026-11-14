@@ -1,0 +1,110 @@
+//! Shared runtime semantic API for CLI, panel and MCP consumers.
+//!
+//! Consumers call `parser::parse`, resolve execution/shared-state roots through
+//! `Services::resolve_roots`, open `storage::Runtime`, and call `router::dispatch`.
+//! `router::run` combines those steps and preserves output streams and exit status.
+//! Producers supply canonical facts; runtime projection/evidence/context assembly
+//! stays inside this crate. There is no interpreter or legacy command fallback.
+//!
+//! Public mode/source checklist (implementation coverage; admission pending):
+//!
+//! | Surface | Runtime implementation | Existing native reuse |
+//! | --- | --- | --- |
+//! | envelope show/write | projection, evidence, router | contract Markdown, work completion, safe storage |
+//! | evidence show/unbound/matrix/bind/revoke | receipt strength, lineage, digests, bindings | work matrix/status precedence |
+//! | next/plain/explain, brief/before | projection and router | work action inbox, return brief, renderer |
+//! | failure classify/catalog | router | complete command-failure API |
+//! | context targets/files/requires, phases/budgets/external/debt | actual pack assembly | safe file readers; typed native dependency producer |
+//! | context-inspect manifest/compare/current | router/context verification | context, safe-fs, context-report |
+//! | context-inspect injections/hash/session/timeline | router mode validation | context-source/session |
+//! | profile list/current/show/check/apply/install-plan/install | profile expansion, readiness, planning, state | safe storage; typed installer |
+//! | release status/resolve/apply/promote | channels, digests, policy | typed native revision/publication producers |
+//! | capsule export/verify/import/diff | portable schema, scrub, integrity, advisory continuity | lossless JSON and safe storage |
+//! | backend describe/check/run | capabilities, options, finite limits | typed readiness and full native supervisor |
+//! | target add/remove/list/status/sync | strict local registry, same-path validation | safe storage; typed SSH transport |
+//! | experiment template/validate/compare | router | experiment and command-experiment APIs |
+//! | experiment register/show/run/launch/sweep/summarize/evaluate/invariants | contracts, linkage, budgets, analysis | experiment normalization, runs bootstrap, typed run ledger |
+//! | benchmark show/snapshot/record/compare | measurements, model/cohort attribution | lossless JSON and safe storage |
+//! | doctor/strict, version, help, shared option placement | parser/router | native domain readers |
+//!
+//! Producer contracts are in `services`: root resolution, immutable repository
+//! view, canonical task/verified plan/failure projections over captured bytes,
+//! lineage establishment, graph/AST dependency anchors, private-group account
+//! proof, backend readiness/supervision, profile installation, release Git and
+//! publication, SSH checkout transport, native run ledger, host/process identity,
+//! and reconciled GPU usage. `Unavailable` refuses each required producer.
+//! Services must preserve real lifecycle/room/approval/lease authority and use
+//! the existing native task/plan/operations/runs/journal/memory producers. They
+//! must never infer execution, verification, isolation or publication success.
+//!
+//! State/concurrency/crash inventory:
+//!
+//! | Destination | Concurrent calls and interruption |
+//! | --- | --- |
+//! | envelope output; profile state | canonical file lock/CAS; readers see whole old/new bytes; a kill may leave a private temporary |
+//! | evidence bindings/revocations | canonical stream lock; serialized same-inode append; short/torn or uncertain durable writes return an error |
+//! | context bundle then manifest | individually locked durable writes; a kill between writes can leave an unreferenced bundle |
+//! | capsule export | locked atomic JSON publication; identical repeat retains the same content identity |
+//! | capsule import wrapper then LATEST | one pointer lock spans both writes; a kill can leave an unpointed wrapper; a repeat validates the wrapper |
+//! | target registry | lock spans read/modify/replace; duplicate add and missing remove refuse |
+//! | experiment contract | per-id lock/CAS; differing contract refuses; same contract may update registration time |
+//! | experiment reservation/settlement stream | lock protects budget count/reserve; a kill leaves a held reservation until recorded usage or native stale-process proof |
+//! | experiment run stream | locked append; a recorded run counts even if killed before settlement |
+//! | invariant stream | final append follows service receipts; a kill during a pack leaves independent receipts without a fabricated pack result |
+//! | benchmark outcome/effectiveness streams | serialized native append; uncertain writes require reconciliation before retry |
+//! | backend logs/receipts; installer receipts; release manifest/refs; SSH checkout; run ledger/journal/memory | independent native producer owns locks, exact output, fsync, crash and process recovery |
+//!
+//! Remaining integration and compatibility work is explicit. No concrete
+//! producer is wired here. Strict native JSON parsing currently accepts at most
+//! 4 MiB while runtime inputs permit 8 MiB. The reused native append writer has
+//! a 16 MiB stream bound versus runtime's 32 MiB, and rereads the stream. Its
+//! write preserves the inode, but total append acquisition is not O(newrow).
+//! External output destinations still meet the native Store's repository
+//! confinement. General argparse abbreviation/help/error byte parity is pending;
+//! numeric statistics/repr and the full frozen context corpus need independent
+//! comparison. These are compatibility gaps, with no speedup or completion claim.
+//! No source cache, persisted envelope or portable import supplies mutation
+//! authority. Real process ownership, NFS crash behavior, private-group accounts,
+//! Ubuntu/WSL2/macOS behavior and installed CLI/panel/MCP wiring remain parent
+//! admission work. Tests and frozen fixtures are unchanged by this source phase.
+#![forbid(unsafe_code)]
+pub mod backend;
+pub mod benchmark;
+pub mod capsule;
+pub mod context;
+pub mod evidence;
+pub mod experiment;
+pub mod parser;
+pub mod profiles;
+pub mod projection;
+pub mod release;
+pub mod router;
+pub mod services;
+pub mod storage;
+pub mod targets;
+pub mod value;
+pub use oms_command_plan::{Error, Result};
+pub use parser::{Mode, Request, parse};
+pub use router::{Response, dispatch, run};
+pub use services::{Services, Unavailable};
+pub const CORE_VERSION: &str = "0.7.0";
+pub(crate) fn error(message: impl ToString) -> Error {
+    Error {
+        code: 2,
+        message: message.to_string(),
+    }
+}
+pub(crate) fn unavailable(name: &str) -> Error {
+    error(format!(
+        "native {name} service unavailable; integration pending"
+    ))
+}
+pub(crate) fn require(ok: bool, message: impl ToString) -> Result<()> {
+    if ok { Ok(()) } else { Err(error(message)) }
+}
+pub(crate) fn status(code: i32, message: impl ToString) -> Error {
+    Error {
+        code,
+        message: message.to_string(),
+    }
+}
