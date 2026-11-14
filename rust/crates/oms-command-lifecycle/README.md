@@ -188,8 +188,12 @@ Successful payload install/link/repair and certified Antigravity installation
 still need the embedding host's authenticated native payload. Bootstrap's source
 proof, outside this crate, retains its `scripts/agent-task.sh` authority marker
 and reviewed source inventory. This crate does not weaken that proof. The
-optional `oms-graph-python-helper` artifact is a Cargo-built native Rust parser,
-not an interpreter or a required runtime. Legacy paths in cleanup, cron
+staged payload carries `oms` plus the Cargo-built companions
+`oms-mcp-peer-owner`, `oms-run-bounded-helper`, `oms-state-queue-worker` and
+`oms-graph-python-helper` (a native Rust parser, not an interpreter or a required
+runtime). Verification accepts only `oms` and bootstrap's companion set
+(adding `oms-supervisor` when present) and installs each present one under
+`libexec/<revision>`. Legacy paths in cleanup, cron
 migration, and provider evidence references remain readable. Disposable live
 Antigravity certification probes use shell test fixtures; installed plugins do
 not ship those fixtures. The integrity frontdoor and Git's executable hook entry

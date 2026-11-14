@@ -402,18 +402,41 @@ fn apply_unlink(
 fn retire_interpreter_launcher(paths: &Paths, tx: &mut Transaction) -> Result<()> {
     // Remove only the interpreter link owned by the retired OMS runtime.
     let shim = paths.home.join(".local/bin/python3");
-    if shim.is_symlink() {
-        let to = fs::read_link(&shim)?;
-        let to = if to.is_absolute() {
-            to
-        } else {
-            shim.parent().unwrap().join(to)
-        };
-        if r::physical(&to)?.starts_with(r::physical(&paths.data.join("python-runtime"))?) {
-            tx.remove(&shim)?;
-        }
+    if launcher_owned(&shim, &paths.data.join("python-runtime")) {
+        tx.remove(&shim)?;
     }
     Ok(())
+}
+/// Ownership is judged on the launcher's resolved parent directory, never on
+/// the final component: a dangling link inside the runtime is still the
+/// runtime's, while a symlinked directory leading out of it is foreign. The
+/// launcher must live inside the runtime directory, not be the runtime itself.
+/// Anything that cannot be resolved (dangling parent, loop, permissions) is
+/// not provably owned and is left alone.
+fn launcher_owned(shim: &Path, runtime: &Path) -> bool {
+    let Ok(to) = fs::read_link(shim) else {
+        return false;
+    };
+    let to = if to.is_absolute() {
+        to
+    } else {
+        match shim.parent() {
+            Some(parent) => parent.join(to),
+            None => return false,
+        }
+    };
+    let Some(parent) = to.parent() else {
+        return false;
+    };
+    // A runtime that is itself a symlink points at a tree this installation
+    // does not own (for example the system prefix): never judge by its target.
+    let Ok(runtime) = r::leaf(runtime) else {
+        return false;
+    };
+    if fs::symlink_metadata(&runtime).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
+    r::physical(parent).is_ok_and(|parent| parent.starts_with(&runtime))
 }
 pub(crate) fn unlink(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
     paths.require_owner()?;
@@ -781,5 +804,83 @@ fn uninstall(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crat
         r::check(flag)?;
         tx.commit()?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launcher_owned;
+    use std::{fs, os::unix::fs::symlink, path::PathBuf};
+
+    struct Dir(PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn retired_launcher_ownership_is_judged_on_the_resolved_parent() {
+        let dir = Dir(fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("oms-launcher-owned-{}", std::process::id())));
+        let _ = fs::remove_dir_all(&dir.0);
+        let (bin, runtime) = (
+            dir.0.join("home/.local/bin"),
+            dir.0.join("data/python-runtime"),
+        );
+        let (shim, foreign) = (bin.join("python3"), dir.0.join("foreign"));
+        for d in [&bin, &runtime.join("bin"), &foreign] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let owned = |to: &str| {
+            let _ = fs::remove_file(&shim);
+            symlink(to, &shim).unwrap();
+            launcher_owned(&shim, &runtime)
+        };
+        // Missing, dangling-in-runtime and relative launchers are the runtime's.
+        assert!(owned(runtime.join("bin/python3").to_str().unwrap()));
+        symlink("missing", runtime.join("bin/dangling")).unwrap();
+        assert!(owned(runtime.join("bin/dangling").to_str().unwrap()));
+        assert!(owned("../../../data/python-runtime/bin/python3"));
+        // The runtime tree itself may be absent without failing the decision.
+        fs::remove_dir_all(&runtime).unwrap();
+        assert!(owned(runtime.join("bin/python3").to_str().unwrap()));
+        // A symlinked parent directory leaving the runtime is foreign.
+        fs::create_dir(&runtime).unwrap();
+        symlink(&foreign, runtime.join("out")).unwrap();
+        assert!(!owned(runtime.join("out/python3").to_str().unwrap()));
+        // A dangling directory link in the path or runtime root is unprovable, not fatal.
+        symlink("nowhere", runtime.join("gone")).unwrap();
+        assert!(!owned(runtime.join("gone/python3").to_str().unwrap()));
+        assert!(!owned(foreign.join("python3").to_str().unwrap()));
+        assert!(!owned("foreign-runtime"));
+        // The runtime itself is not a launcher inside it.
+        assert!(!owned(runtime.to_str().unwrap()));
+        assert!(!owned(".."));
+        assert!(!owned("/"));
+        // Not a symlink: never owned.
+        fs::remove_file(&shim).unwrap();
+        fs::write(&shim, b"x").unwrap();
+        assert!(!launcher_owned(&shim, &runtime));
+        // A live symlink runtime to a foreign tree owns nothing, even via its own path.
+        fs::remove_file(&shim).unwrap();
+        fs::remove_dir_all(&runtime).unwrap();
+        fs::create_dir_all(foreign.join("bin")).unwrap();
+        symlink(&foreign, &runtime).unwrap();
+        for to in [
+            foreign.join("python3"),
+            foreign.join("bin/python3"),
+            runtime.join("bin/python3"),
+            runtime.clone(),
+        ] {
+            let _ = fs::remove_file(&shim);
+            symlink(&to, &shim).unwrap();
+            assert!(!launcher_owned(&shim, &runtime), "{}", to.display());
+        }
+        // Dangling runtime root.
+        fs::remove_file(&runtime).unwrap();
+        symlink("nowhere", &runtime).unwrap();
+        assert!(!launcher_owned(&shim, &runtime));
     }
 }
