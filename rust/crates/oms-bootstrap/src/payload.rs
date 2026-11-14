@@ -13,6 +13,16 @@ mod built {
     include!(concat!(env!("OUT_DIR"), "/source_inventory.rs"));
 }
 
+/// Optional native companions a manifest may list besides `oms`. The graph
+/// helper is transitional. Any other name is foreign.
+const COMPANIONS: [&str; 5] = [
+    "oms-supervisor",
+    "oms-state-queue-worker",
+    "oms-mcp-peer-owner",
+    "oms-run-bounded-helper",
+    "oms-graph-python-helper",
+];
+
 pub type SourceFile<'a> = (&'a [u8], &'a str);
 /// Expected bytes from the reviewed build, never an on-disk cache receipt.
 /// The closure includes native runtime dependency sources, manifests and build
@@ -47,7 +57,7 @@ pub struct ValidatedPayload {
     directory_generation: std::fs::Metadata,
     executable: Opened,
     controller: Option<Controller>,
-    helper: Option<Opened>,
+    companions: Vec<(&'static str, Opened)>,
     manifest: Opened,
     checksum: Opened,
     revision: String,
@@ -118,7 +128,7 @@ impl ValidatedPayload {
         };
         if entries
             .iter()
-            .any(|(name, _)| name != b"oms" && name != b"oms-graph-python-helper")
+            .any(|(name, _)| name != b"oms" && !COMPANIONS.iter().any(|c| c.as_bytes() == name))
         {
             return Err(Error::integrity("invalid native artifact name"));
         }
@@ -139,15 +149,16 @@ impl ValidatedPayload {
                 "native executable checksum mismatch; run oms doctor --repair",
             ));
         }
-        let helper = if let Some(expected) = digest(artifacts, b"oms-graph-python-helper")? {
-            let helper = directory.file(Path::new("oms-graph-python-helper"), true)?;
-            if helper.digest(1024 * 1024 * 1024)?.as_bytes() != expected {
-                return Err(Error::integrity("native artifact digest mismatch"));
+        let mut companions = Vec::new();
+        for name in COMPANIONS {
+            if let Some(expected) = digest(artifacts, name.as_bytes())? {
+                let file = directory.file(Path::new(name), true)?;
+                if file.digest(1024 * 1024 * 1024)?.as_bytes() != expected {
+                    return Err(Error::integrity("native artifact digest mismatch"));
+                }
+                companions.push((name, file));
             }
-            Some(helper)
-        } else {
-            None
-        };
+        }
         for entry in rustix::fs::Dir::read_from(directory.last())
             .map_err(|_| Error::integrity("cannot enumerate native payload"))?
         {
@@ -156,7 +167,7 @@ impl ValidatedPayload {
             if !matches!(
                 name,
                 b"." | b".." | b"oms" | b"manifest.json" | b"oms.sha256"
-            ) && !(name == b"oms-graph-python-helper" && helper.is_some())
+            ) && !companions.iter().any(|(c, _)| c.as_bytes() == name)
             {
                 return Err(Error::integrity("foreign native payload content"));
             }
@@ -167,7 +178,7 @@ impl ValidatedPayload {
             directory_generation,
             executable,
             controller,
-            helper,
+            companions,
             manifest,
             checksum,
             revision,
@@ -187,7 +198,14 @@ impl ValidatedPayload {
         self.executable.path()
     }
     pub fn helper(&self) -> Option<PathBuf> {
-        self.helper.as_ref().map(Opened::path)
+        self.companion("oms-graph-python-helper")
+    }
+    /// Path of a manifest-listed, digest-checked companion binary.
+    pub fn companion(&self, name: &str) -> Option<PathBuf> {
+        self.companions
+            .iter()
+            .find(|(c, _)| *c == name)
+            .map(|(_, file)| file.path())
     }
     /// Rechecks identities, permissions, source stamps and revision without
     /// rereading executable contents. No proof survives an exec boundary.
@@ -199,8 +217,8 @@ impl ValidatedPayload {
         self.executable.check()?;
         self.manifest.check()?;
         self.checksum.check()?;
-        if let Some(helper) = &self.helper {
-            helper.check()?;
+        for (_, file) in &self.companions {
+            file.check()?;
         }
         if git::revision(&source.root)? != self.revision {
             return Err(Error::integrity(
@@ -287,3 +305,96 @@ const GIT_ENV: &[&str] = &[
     "GIT_CONFIG",
     "GIT_CONFIG_COUNT",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+    fn sum(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+    fn write(path: &Path, bytes: &[u8], mode: u32) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    /// A checkout anchored only by native markers, plus a cached payload.
+    fn fixture(name: &str, listed: &[(&str, &[u8])], extra: &[&str]) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("oms-bootstrap-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        write(
+            &root.join(".git/HEAD"),
+            format!("{REV}\n").as_bytes(),
+            0o644,
+        );
+        write(&root.join("rust/Cargo.toml"), b"[workspace]\n", 0o644);
+        write(&root.join("README.md"), b"x", 0o644);
+        let dir = root.join("rust/target/oms-native").join(REV);
+        let mut artifacts = vec![format!("\"oms\":\"{}\"", sum(b"oms"))];
+        write(&dir.join("oms"), b"oms", 0o755);
+        for (file, bytes) in listed {
+            write(&dir.join(file), bytes, 0o755);
+            artifacts.push(format!("\"{file}\":\"{}\"", sum(bytes)));
+        }
+        for file in extra {
+            write(&dir.join(file), b"foreign", 0o755);
+        }
+        let manifest = format!(
+            "{{\"schema\":1,\"source_commit\":\"{REV}\",\"artifacts\":{{{}}}}}",
+            artifacts.join(",")
+        );
+        write(&dir.join("manifest.json"), manifest.as_bytes(), 0o644);
+        write(
+            &dir.join("oms.sha256"),
+            format!("{}\n", sum(b"oms")).as_bytes(),
+            0o644,
+        );
+        root
+    }
+    fn load(root: &Path) -> Result<Option<ValidatedPayload>, Error> {
+        let source = Discovery::from_source_root(root)?;
+        let digest = sum(b"x");
+        let files: [SourceFile<'_>; 1] = [(b"README.md", digest.as_str())];
+        ValidatedPayload::load(&source, &SourceInventory::reviewed(&files))
+    }
+
+    #[test]
+    fn companions_validate_without_legacy_markers() {
+        let root = fixture(
+            "ok",
+            &[("oms-supervisor", b"s"), ("oms-graph-python-helper", b"g")],
+            &[],
+        );
+        let payload = load(&root).unwrap().unwrap();
+        assert!(payload.companion("oms-supervisor").is_some());
+        assert!(payload.companion("oms-mcp-peer-owner").is_none());
+        assert!(payload.helper().is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn foreign_unlisted_or_corrupt_companions_fail_closed() {
+        let root = fixture("foreign", &[], &["oms-supervisor"]);
+        assert!(load(&root).is_err(), "unlisted companion is foreign");
+        let root2 = fixture("foreign2", &[], &["stray"]);
+        assert!(load(&root2).is_err());
+        let root3 = fixture("bad", &[("oms-run-bounded-helper", b"r")], &[]);
+        let path = root3
+            .join("rust/target/oms-native")
+            .join(REV)
+            .join("oms-run-bounded-helper");
+        write(&path, b"tampered", 0o755);
+        assert!(load(&root3).is_err(), "digest mismatch");
+        write(&path, b"r", 0o757);
+        assert!(load(&root3).is_err(), "world-writable");
+        let root4 = fixture("name", &[("not-a-companion", b"n")], &[]);
+        assert!(load(&root4).is_err(), "unknown manifest name");
+        for r in [root, root2, root3, root4] {
+            std::fs::remove_dir_all(r).unwrap();
+        }
+    }
+}

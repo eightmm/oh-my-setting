@@ -7,6 +7,9 @@
 
 mod filesystem;
 mod git;
+// Also compiled by build.rs; included here only so its closure test runs.
+#[cfg(test)]
+mod inventory;
 mod limits;
 mod payload;
 mod producer;

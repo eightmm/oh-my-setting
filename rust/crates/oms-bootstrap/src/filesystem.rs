@@ -291,7 +291,12 @@ impl Opened {
                 .map(Some)
                 .map_err(Error::integrity)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            oms_reference::controller::Controller::capture_if_current(&self.file)
+                .map_err(Error::integrity)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             // Reference requires a genuine native descriptor proof on other
             // hosts; pathname equality cannot substitute for that provider.
@@ -391,13 +396,16 @@ pub(crate) fn check_stamp(directory: &Anchor, name: &OsStr, stamp: &Stamp) -> Re
     }
     Ok(())
 }
+// Stat field widths differ by host (macOS dev is i32, mode/nlink are u16);
+// std applies the same widening casts to Metadata.
+#[allow(clippy::unnecessary_cast)]
 fn stat_matches(stat: &fs::Stat, meta: &Metadata) -> bool {
-    stat.st_dev == meta.dev()
-        && stat.st_ino == meta.ino()
-        && stat.st_mode == meta.mode()
+    stat.st_dev as u64 == meta.dev()
+        && stat.st_ino as u64 == meta.ino()
+        && stat.st_mode as u32 == meta.mode()
         && stat.st_uid == meta.uid()
         && stat.st_gid == meta.gid()
-        && stat.st_nlink == meta.nlink()
+        && stat.st_nlink as u64 == meta.nlink()
         && stat.st_size as u64 == meta.len()
         && stat.st_mtime == meta.mtime()
         && stat.st_mtime_nsec as i64 == meta.mtime_nsec()

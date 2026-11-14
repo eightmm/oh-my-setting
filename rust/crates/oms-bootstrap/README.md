@@ -72,8 +72,11 @@ No runtime path writes or repairs an entry.
 ## Source and bootstrap checklist
 
 - Checkout: resolve the dispatcher's logical authority root physically, verify
-  protected scripts without following descendant links, and require the regular
-  `scripts/agent-task.sh` marker. Explicit private roots use the same boundary.
+  protected entries without following descendant links, and require a regular
+  marker: `scripts/agent-task.sh` (transitional), `rust/Cargo.toml`, or
+  `scripts/oms`. Launcher adjacency never accepts `scripts/oms` alone, since the
+  launcher cannot vouch for itself. Explicit private roots and receipt roots
+  accept all three.
 - Symlink: resolve relative/absolute launcher targets for at most 40 links;
   reject loops, nonregular final entries, and protected scripts directory links.
   Physical root aliases, including macOS `/tmp` and `/var` aliases, are allowed.
@@ -92,15 +95,20 @@ No runtime path writes or repairs an entry.
   under the existing SHA-1 payload contract; errors remain explicit.
 - Payload: require fixed directories `rust/target/oms-native/REVISION` and fixed
   regular leaves `oms`, `oms.sha256`, `manifest.json`, plus only the optional
-  manifest-declared `oms-graph-python-helper`. Unknown directory content fails.
+  manifest-declared companions `oms-supervisor`, `oms-state-queue-worker`,
+  `oms-mcp-peer-owner`, `oms-run-bounded-helper` and the transitional
+  `oms-graph-python-helper`. Each listed companion must be a clean regular
+  executable matching its digest; `ValidatedPayload::companion(name)` returns it.
+  Unlisted or unknown directory content fails.
 - Manifest: preserve schema 1, `source_commit` and fixed `artifacts` names.
   Require lowercase 64-hex digests. Preserve unknown top-level JSON fields;
   duplicate names, nonfinite numbers and malformed required fields fail.
 - Checksum: require exactly 64 lowercase hex bytes plus LF, matching manifest
-  `artifacts.oms`; hash the executable once before any exec. Hash an optional
-  helper once too. The native binary never authenticates an unstarted verifier.
+  `artifacts.oms`; hash the executable once before any exec. Hash each listed
+  companion once too. The native binary never authenticates an unstarted verifier.
 - Source content: the build follows local dependencies from `oms`, bootstrap,
-  runtime, graph, peer and landing native roots. It embeds their `src` trees,
+  runtime, graph, peer and landing native roots plus the `oms-command-state` and
+  `oms-mcp-server` producers of the state-queue and MCP companions. It embeds their `src` trees,
   manifests/build scripts, workspace manifest/lock and pinned toolchain, plus
   bundled `config`, `roles` and optional `prompts` trees. This includes
   `config/capability-profiles.json`, embedded SQL/help/data and source-local
@@ -129,8 +137,11 @@ No runtime path writes or repairs an entry.
   again. Named executable replacement cannot authenticate the loaded image.
   A separate launcher may validate and exec another image. In-process use and
   Reference service construction refuse when the image cannot be proven.
-  macOS currently lacks a native executing-artifact provider in Reference;
-  pathname/digest equality cannot replace that proof and fails closed.
+  On macOS, `Controller::capture_if_current` proves the retained file is the
+  running executable through the Reference `F_GETPATH` provider (ancestor,
+  owner and generation checks); a different file yields no controller and an
+  executing file that fails the proof is a terminal error. Pathname/digest
+  equality alone never substitutes for that proof.
 - Limits: manifest/receipt 4 MiB, Git pointer/ref 64 KiB, packed refs 16 MiB,
   native source file 64 MiB, executable/helper 1 GiB, source closure 8192 files
   and 64 path components. Source snapshots also bound retained directories at

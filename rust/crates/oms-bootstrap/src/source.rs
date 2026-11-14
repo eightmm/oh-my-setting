@@ -23,7 +23,7 @@ impl Discovery {
     /// entry. Resolve their logical alias once, then protect descendants.
     pub fn from_source_root(path: &Path) -> Result<Self, Error> {
         let root = Anchor::open(path)?;
-        let marker = root.file(Path::new("scripts/agent-task.sh"), false)?;
+        let marker = checkout_marker(&root, true)?;
         let source = Self {
             root,
             receipt: None,
@@ -46,6 +46,31 @@ impl Discovery {
             receipt.check()?;
         }
         Ok(())
+    }
+}
+
+/// Markers anchoring an OMS checkout, strongest first. `scripts/oms` is the
+/// launcher a caller may already be executing, so adjacency discovery
+/// (`launcher == false`) never accepts it as independent evidence.
+const CHECKOUT_MARKERS: [&str; 3] = ["scripts/agent-task.sh", "rust/Cargo.toml", "scripts/oms"];
+
+fn find_marker(root: &Anchor, launcher: bool) -> Result<Option<Opened>, Error> {
+    for marker in CHECKOUT_MARKERS {
+        if marker == "scripts/oms" && !launcher {
+            continue;
+        }
+        if root.exists(Path::new(marker))? {
+            return root.file(Path::new(marker), false).map(Some);
+        }
+    }
+    Ok(None)
+}
+/// Legacy shell markers are transitional: a native checkout is anchored by
+/// `rust/Cargo.toml` or the `scripts/oms` launcher alone.
+fn checkout_marker(root: &Anchor, launcher: bool) -> Result<Opened, Error> {
+    match find_marker(root, launcher)? {
+        Some(marker) => Ok(marker),
+        None => root.file(Path::new(CHECKOUT_MARKERS[0]), false),
     }
 }
 
@@ -119,15 +144,14 @@ pub fn discover(entry: &Path, receipt: Option<&ReceiptLocation>) -> Result<Disco
         .parent()
         .ok_or_else(|| Error::discovery("dispatcher has no checkout parent"))?;
     // Only scripts/oms can claim a checkout through adjacency. An arbitrary
-    // copied file beside an unrelated agent-task.sh cannot select that root.
+    // copied file beside an unrelated marker cannot select that root.
     if parent.file_name() == Some(OsStr::new("scripts"))
         && resolved.file_name() == Some(OsStr::new("oms"))
     {
         let source = Anchor::open(candidate)?;
         if source.exists(Path::new("scripts"))? {
-            let scripts = source.descend(Path::new("scripts"))?;
-            if scripts.exists(Path::new("agent-task.sh"))? {
-                let marker = scripts.file(Path::new("agent-task.sh"), false)?;
+            // The launcher itself is not independent evidence of a checkout.
+            if let Some(marker) = find_marker(&source, false)? {
                 let kind = if linked {
                     DiscoveryKind::Symlink
                 } else {
@@ -170,9 +194,7 @@ pub fn discover(entry: &Path, receipt: Option<&ReceiptLocation>) -> Result<Disco
         return Err(unavailable(parent, location));
     }
     let root = Anchor::open(&selected).map_err(|_| unavailable(parent, location))?;
-    let marker = root
-        .file(Path::new("scripts/agent-task.sh"), false)
-        .map_err(|_| unavailable(parent, location))?;
+    let marker = checkout_marker(&root, true).map_err(|_| unavailable(parent, location))?;
     let discovery = Discovery {
         root,
         receipt: Some(record),
@@ -235,8 +257,9 @@ fn resolve_launcher(original: &Path) -> Result<(PathBuf, bool), Error> {
 fn unavailable(scripts: &Path, location: &ReceiptLocation) -> Error {
     let mut output = b"error: oms cannot locate its checkout from ".to_vec();
     output.extend_from_slice(scripts.as_os_str().as_bytes());
-    output
-        .extend_from_slice(b"\nerror: no harness scripts there and no usable install receipt at ");
+    output.extend_from_slice(
+        b"\nerror: no OMS checkout markers there and no usable install receipt at ",
+    );
     output.extend_from_slice(
         location
             .authority_root
@@ -244,7 +267,7 @@ fn unavailable(scripts: &Path, location: &ReceiptLocation) -> Error {
             .as_os_str()
             .as_bytes(),
     );
-    output.extend_from_slice(b"\nerror: reinstall, or run scripts/oms from the checkout directly");
+    output.extend_from_slice(b"\nerror: reinstall, or run oms from the checkout directly");
     Error::bytes(1, output)
 }
 
@@ -284,4 +307,50 @@ fn json_os_string(bytes: &[u8]) -> Result<OsString, Error> {
         }
     }
     Ok(OsString::from_vec(output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("oms-source-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        root
+    }
+
+    #[test]
+    fn native_markers_anchor_explicit_roots() {
+        for (name, marker) in [
+            ("legacy", "scripts/agent-task.sh"),
+            ("cargo", "rust/Cargo.toml"),
+            ("launcher", "scripts/oms"),
+        ] {
+            let dir = root(name);
+            std::fs::create_dir_all(dir.join("rust")).unwrap();
+            std::fs::write(dir.join(marker), "").unwrap();
+            assert!(Discovery::from_source_root(&dir).is_ok(), "{marker}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+        let dir = root("none");
+        assert!(Discovery::from_source_root(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn adjacency_ignores_the_launcher_as_its_own_marker() {
+        let dir = root("adjacent");
+        std::fs::write(dir.join("scripts/oms"), "").unwrap();
+        let receipt = ReceiptLocation {
+            authority_root: dir.clone(),
+            relative: PathBuf::from("missing.json"),
+        };
+        assert!(discover(&dir.join("scripts/oms"), Some(&receipt)).is_err());
+        std::fs::create_dir_all(dir.join("rust")).unwrap();
+        std::fs::write(dir.join("rust/Cargo.toml"), "").unwrap();
+        let found = discover(&dir.join("scripts/oms"), Some(&receipt)).unwrap();
+        assert_eq!(found.kind, DiscoveryKind::Checkout);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

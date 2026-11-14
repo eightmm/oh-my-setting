@@ -213,7 +213,13 @@ fn select(
     let first = args.first().map(|v| v.as_bytes()).unwrap_or(b"");
     if first.is_empty() {
         return if terminal.stdin && terminal.stdout {
-            legacy(&[OsString::from("panel")])
+            // Bare interactive `oms` is `oms panel`: honor native ownership.
+            let panel = vec![OsString::from("panel")];
+            if adapter.owns_native(&panel) {
+                Ok(Route::Native { args: panel })
+            } else {
+                legacy(&panel)
+            }
         } else {
             Ok(Route::Navigation {
                 kind: Navigation::Usage,
@@ -371,5 +377,57 @@ impl PrivateInvocation {
                 args,
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Panel(bool);
+    impl CommandAdapter for Panel {
+        fn is_public(&self, _: &OsStr) -> bool {
+            true
+        }
+        fn owns_native(&self, args: &[OsString]) -> bool {
+            self.0 && args == [OsString::from("panel")]
+        }
+        fn navigation(&self, _: &[OsString], _: &Path) -> CommandOutput {
+            (0, Vec::new(), Vec::new())
+        }
+    }
+    const TTY: Terminal = Terminal {
+        stdin: true,
+        stdout: true,
+    };
+
+    #[test]
+    fn bare_interactive_entry_honors_native_panel_ownership() {
+        match select(&[], TTY, &Panel(true)).unwrap() {
+            Route::Native { args } => assert_eq!(args, [OsString::from("panel")]),
+            _ => panic!("owned panel must be native"),
+        }
+        match select(&[], TTY, &Panel(false)).unwrap() {
+            Route::Legacy {
+                tool,
+                replace_process,
+                ..
+            } => {
+                assert_eq!(tool, "panel");
+                assert!(replace_process);
+            }
+            _ => panic!("unowned panel stays legacy"),
+        }
+        let pipe = Terminal {
+            stdin: true,
+            stdout: false,
+        };
+        assert!(matches!(
+            select(&[], pipe, &Panel(true)).unwrap(),
+            Route::Navigation {
+                kind: Navigation::Usage,
+                ..
+            }
+        ));
     }
 }

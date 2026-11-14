@@ -158,16 +158,27 @@ executing image can be proven by its kernel descriptor without adopting a
 filename. Metadata changes during the command conservatively invalidate the
 snapshot. The snapshot rejects reuse in another process after a fork.
 
-On macOS, native process birth proof is implemented separately from executing
-artifact proof. No available safe API here proves that an ordinary named file
-is the loaded controller image, so default controller capture refuses.
+On macOS there is no procfs, so `capture_current` opens the canonical
+`current_exe()` leaf with `O_NOFOLLOW` and takes the kernel vnode name with
+`F_GETPATH` (`rustix::fs::getpath`, no `unsafe`). The leaf must be a single-link
+regular nonempty file owned by the effective user or root with no group/world
+write or setid bits. Every ancestor must be trusted-owned and not
+group-writable; the immediate parent may never be world-writable, higher
+ancestors only when sticky and root-owned (so `/tmp` can sit above, not hold, the
+binary). Each use rechecks that generation (`storage::generation` against the
+metadata captured at open and the offered descriptor), that `F_GETPATH` is
+unchanged, and that both that name and `current_exe()` still resolve to the
+same device/inode; a moved, unlinked or replaced executable fails closed.
+This is a path-and-inode proof, weaker than the Linux kernel link.
+`Controller::capture_if_current(&File)` (macOS) returns `Ok(None)` without any
+strict check when the file is not the running executable, and an error when it
+is but fails the proof. Other hosts still refuse default capture.
 `Controller::from_authenticated_descriptor(File, Arc<dyn ExecutingImage>)`
-is the typed native bootstrap seam: its provider must establish the actual
-descriptor-to-executing-image relationship using kernel facts on every check.
-It is not a path/hash assertion or peer authority. Without such a genuine
-provider, optional intake allocates fresh, while mandatory scope construction
-explicitly refuses before registration. macOS bootstrap proof, native linking
-and runtime behavior remain parent composition/verification gaps.
+remains the typed seam: its provider must establish the descriptor-to-image
+relationship using kernel facts on every check, never a path/hash assertion or
+peer authority. The permission and generation policy is pure over metadata and
+unit-tested on Linux; the macOS provider itself is compile-checked for both
+Apple targets but not executed in Linux CI.
 
 Binding depends on authenticated panel dispatch grants and goal-batch lineage
 (`panel_results.py:1279,1546`, `autopilot-receipt.py:1710`), whose authenticated

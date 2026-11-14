@@ -56,6 +56,10 @@ pub fn paths(root: &Path) -> std::io::Result<Inventory> {
         "oms-command-graph",
         "oms-command-peer",
         "oms-command-landing",
+        // Producers of the companion binaries in payload::COMPANIONS that no
+        // root above reaches: oms-state-queue-worker, oms-mcp-peer-owner.
+        "oms-command-state",
+        "oms-mcp-server",
     ]
     .iter()
     .map(|name| Path::new("rust/crates").join(name))
@@ -128,4 +132,34 @@ pub fn paths(root: &Path) -> std::io::Result<Inventory> {
     }
     out.watches.extend(out.files.iter().cloned());
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every companion binary's producing crate must be in the closure, so a
+    /// dirty checkout at the same HEAD cannot keep a stale cached binary.
+    #[test]
+    fn every_companion_producer_is_in_the_closure() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let inventory = super::paths(&root).unwrap();
+        for krate in [
+            "oms-graph-python",
+            "oms-supervisor",
+            "oms-command-state",
+            "oms-mcp-server",
+            "oms-command-runs",
+        ] {
+            let manifest = std::path::PathBuf::from("rust/crates")
+                .join(krate)
+                .join("Cargo.toml");
+            assert!(inventory.files.contains(&manifest), "{krate} manifest");
+            assert!(
+                inventory
+                    .files
+                    .iter()
+                    .any(|f| f.starts_with(format!("rust/crates/{krate}/src"))),
+                "{krate} sources"
+            );
+        }
+    }
 }
