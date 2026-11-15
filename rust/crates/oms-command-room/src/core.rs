@@ -163,16 +163,17 @@ impl<'a> Room<'a> {
         checkpoint(self.stop)?;
         let store = self.storage()?;
         store.check()?;
-        if let Some(old) = self.snapshots.borrow().get(id) {
-            let s = rustix::fs::statat(
-                &store.threads.fd,
-                Store::name(id),
-                rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-            )
-            .map_err(|_| Error::new("room log unavailable"))?;
-            if stable(&old.stat, &s) {
-                return Ok(Arc::clone(old));
+        let cached = self.snapshots.borrow().get(id).cloned();
+        if let Some(old) = cached {
+            let mut reader = crate::storage::LogReader::open(&store.threads, Store::name(id))?;
+            if let Some(snapshot) = reader.refresh(&old)? {
+                let snapshot = Arc::new(snapshot);
+                self.snapshots
+                    .borrow_mut()
+                    .insert(id.to_owned(), Arc::clone(&snapshot));
+                return Ok(snapshot);
             }
+            return Ok(old);
         }
         let snapshot = Arc::new(store.snapshot(id)?);
         self.snapshots
@@ -414,63 +415,98 @@ impl<'a> Room<'a> {
         text: &str,
         carry: Carry<'_>,
     ) -> Result<bool> {
+        Ok(self.append_batch_at(id, &[(event, text, carry)])?[0])
+    }
+    pub(crate) fn append_batch_at(
+        &self,
+        id: &str,
+        writes: &[(&Value, &str, Carry<'_>)],
+    ) -> Result<Vec<bool>> {
         identifier(id, "room")?;
-        checkpoint(self.stop)?;
-        if text.is_empty() {
-            return Err(Error::new("--text or --text-file is required"));
+        if writes.is_empty() {
+            return Ok(Vec::new());
         }
-        check_turn_text(text)?;
-        let text = turn_text(text);
-        let text = text.as_str();
+        checkpoint(self.stop)?;
         let store = self.storage()?;
         let guard = store.lock(id, self.stop)?;
         guard.check().map_err(|e| Error::new(e.to_string()))?;
         let snapshot = self.snapshot(id)?;
+        let mut rows = snapshot.rows.clone();
+        let mut ranges = snapshot.ranges.clone();
+        let mut bytes = Vec::new();
+        let mut applied = Vec::with_capacity(writes.len());
         let mut proofs = Vec::new();
-        if !self.validate_event_locked(&snapshot.rows, event, text, carry, &mut proofs)? {
-            return Ok(false);
-        }
-        let stamp = match carry {
-            Carry::Replay(Some(t)) => {
-                if t.len() != 20
-                    || t.bytes().enumerate().any(|(i, b)| match i {
-                        4 | 7 => b != b'-',
-                        10 => b != b'T',
-                        13 | 16 => b != b':',
-                        19 => b != b'Z',
-                        _ => !b.is_ascii_digit(),
-                    })
-                    || chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%SZ").is_err()
-                    || t > now().as_str()
-                {
-                    return Err(Error::new("invalid carried room time"));
-                }
-                t.to_owned()
-            }
-            _ => now(),
-        };
-        let seq = snapshot
-            .rows
+        let mut seq = rows
             .iter()
             .filter_map(|r| r["seq"].as_i64())
             .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or_else(|| Error::new("thread sequence exhausted"))?;
-        let row = obj([
-            ("schema", 1u64.into()),
-            ("ts", stamp.into()),
-            ("thread", id.into()),
-            ("seq", seq.into()),
-            ("role", "note".into()),
-            ("agent", self.session.agent.clone().into()),
-            ("text", text.into()),
-            ("room_event", event.clone()),
-        ]);
-        let mut bytes = encode(&row, false, false)?;
-        bytes.push(b'\n');
-        if bytes.len() > crate::MAX_ROW || snapshot.bytes.len() + bytes.len() > crate::MAX_FILE {
-            return Err(Error::new("thread storage budget exceeded"));
+            .unwrap_or(0);
+        for &(event, original, carry) in writes {
+            checkpoint(self.stop)?;
+            if original.is_empty() {
+                return Err(Error::new("--text or --text-file is required"));
+            }
+            check_turn_text(original)?;
+            let text = turn_text(original);
+            let text = text.as_str();
+            if !self.validate_event_locked(
+                &rows,
+                event,
+                text,
+                carry,
+                &mut proofs,
+                text == original,
+            )? {
+                applied.push(false);
+                continue;
+            }
+            let stamp = match carry {
+                Carry::Replay(Some(t)) => {
+                    if t.len() != 20
+                        || t.bytes().enumerate().any(|(i, b)| match i {
+                            4 | 7 => b != b'-',
+                            10 => b != b'T',
+                            13 | 16 => b != b':',
+                            19 => b != b'Z',
+                            _ => !b.is_ascii_digit(),
+                        })
+                        || chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%SZ").is_err()
+                        || t > now().as_str()
+                    {
+                        return Err(Error::new("invalid carried room time"));
+                    }
+                    t.to_owned()
+                }
+                _ => now(),
+            };
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| Error::new("thread sequence exhausted"))?;
+            let row = obj([
+                ("schema", 1u64.into()),
+                ("ts", stamp.into()),
+                ("thread", id.into()),
+                ("seq", seq.into()),
+                ("role", "note".into()),
+                ("agent", self.session.agent.clone().into()),
+                ("text", text.into()),
+                ("room_event", event.clone()),
+            ]);
+            let mut line = encode(&row, false, false)?;
+            line.push(b'\n');
+            if line.len() > crate::MAX_ROW
+                || snapshot.bytes.len() + bytes.len() + line.len() > crate::MAX_FILE
+            {
+                return Err(Error::new("thread storage budget exceeded"));
+            }
+            let start = snapshot.bytes.len() + bytes.len();
+            bytes.extend_from_slice(&line);
+            ranges.push(start..snapshot.bytes.len() + bytes.len());
+            rows.push(row);
+            applied.push(true);
+        }
+        if bytes.is_empty() {
+            return Ok(applied);
         }
         checkpoint(self.stop)?;
         guard.check().map_err(|e| Error::new(e.to_string()))?;
@@ -490,10 +526,6 @@ impl<'a> Room<'a> {
         }
         let mut full = snapshot.bytes.clone();
         full.extend_from_slice(&bytes);
-        let mut rows = snapshot.rows.clone();
-        rows.push(row);
-        let mut ranges = snapshot.ranges.clone();
-        ranges.push(snapshot.bytes.len()..full.len());
         self.snapshots.borrow_mut().insert(
             id.to_owned(),
             Arc::new(Snapshot {
@@ -505,7 +537,7 @@ impl<'a> Room<'a> {
             }),
         );
         guard.release().map_err(|e| Error::new(e.to_string()))?;
-        Ok(true)
+        Ok(applied)
     }
     pub fn append(&self, id: &str, event: &Value, text: &str) -> Result<(bool, String)> {
         let target = self.resolve(id)?;
@@ -556,6 +588,7 @@ impl<'a> Room<'a> {
             title,
             Carry::No,
             &mut Vec::new(),
+            false,
         )?;
         let row = obj([
             ("schema", 1u64.into()),
@@ -1830,4 +1863,79 @@ fn turn_text(text: &str) -> String {
         "[earlier output truncated: see artifact]\n{}",
         &text[start..]
     )
+}
+
+#[cfg(test)]
+mod optimization_tests {
+    use super::*;
+
+    #[test]
+    fn append_batch_stages_validation_and_preserves_prior_bytes() {
+        let path = std::env::temp_dir().join(format!("oms-room-batch-{}", unique().unwrap()));
+        std::fs::create_dir(&path).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            struct Fixture;
+            impl Services for Fixture {
+                fn canonical_provider(&self, value: &str) -> Result<String> {
+                    Ok(value.to_owned())
+                }
+                fn state_repository(&self, path: &Path) -> Result<PathBuf> {
+                    Ok(path.to_owned())
+                }
+            }
+            let stop = AtomicBool::new(false);
+            let room = Room::open(&path, Session::default(), &Fixture, &stop, true, false).unwrap();
+            room.create(Some("batch"), "Batch", None, Some("owner"), None)
+                .unwrap();
+            let valid = obj([("kind", "closed".into()), ("participant", "owner".into())]);
+            let invalid = obj([("kind", "unknown".into())]);
+            let before = std::fs::read(path.join(".oms/threads/batch.jsonl")).unwrap();
+            assert!(
+                room.append_batch_at(
+                    "batch",
+                    &[
+                        (&valid, "Close", Carry::No),
+                        (&invalid, "Invalid", Carry::No)
+                    ]
+                )
+                .is_err()
+            );
+            assert_eq!(
+                std::fs::read(path.join(".oms/threads/batch.jsonl")).unwrap(),
+                before
+            );
+            let refused = ["pass", "word", "=", "abcdefghijklmnop"].concat();
+            assert!(
+                room.append_batch_at("batch", &[(&valid, &refused, Carry::No)])
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read(path.join(".oms/threads/batch.jsonl")).unwrap(),
+                before
+            );
+            assert!(room.append_batch_at("batch", &[]).unwrap().is_empty());
+            assert!(
+                room.append_batch_at("batch", &[(&valid, "", Carry::No)])
+                    .is_err()
+            );
+            assert_eq!(
+                room.append_batch_at("batch", &[(&valid, "Close", Carry::No)])
+                    .unwrap(),
+                vec![true]
+            );
+            let after = std::fs::read(path.join(".oms/threads/batch.jsonl")).unwrap();
+            assert!(after.starts_with(&before));
+            assert_eq!(
+                room.append_batch_at("batch", &[(&valid, "Close", Carry::No)])
+                    .unwrap(),
+                vec![false]
+            );
+            assert_eq!(
+                std::fs::read(path.join(".oms/threads/batch.jsonl")).unwrap(),
+                after
+            );
+        });
+        std::fs::remove_dir_all(path).unwrap();
+        result.unwrap();
+    }
 }

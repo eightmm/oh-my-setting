@@ -174,11 +174,15 @@ pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Val
         "failures",
         collector(failure, ctx.repo.join(".oms/failures.jsonl").exists()),
     )?;
-    let journal = decoded(oms_command_journal::run(
-        &["status".into(), "--json".into()],
-        &ctx.repo,
-        ctx.interrupted,
-    ));
+    let journal = if ctx.repo.join(".oms/work-journal").exists() {
+        decoded(oms_command_journal::run(
+            &["status".into(), "--json".into()],
+            &ctx.repo,
+            ctx.interrupted,
+        ))
+    } else {
+        Err(error(2, "work journal unavailable"))
+    };
     state.set(
         "work_journal",
         collector(journal, ctx.repo.join(".oms/work-journal").exists()),
@@ -447,16 +451,30 @@ pub(crate) fn run(
     if opts.flag("refresh-ci") {
         let _ = projection::refresh_ci(&ctx);
     }
-    let safe_actions = if opts.flag("fix-safe") {
-        projection::repairs(&ctx, host)?
+    let mut cached = if opts.flag("fix-safe") {
+        Some(snapshot(&ctx, host)?)
+    } else {
+        None
+    };
+    let safe_actions = if let Some(state) = cached.as_ref() {
+        projection::repairs(&ctx, host, state)?
     } else {
         vec![]
     };
+    if safe_actions
+        .iter()
+        .any(|action| !action.str().unwrap_or("").ends_with("-failed"))
+    {
+        cached = None;
+    }
     let mut out = Vec::new();
     let mut code = 0;
     for i in 0..count {
         crate::checkpoint(ctx.interrupted)?;
-        let state = snapshot(&ctx, host)?;
+        let state = match cached.take() {
+            Some(state) => state,
+            None => snapshot(&ctx, host)?,
+        };
         let report = match tool {
             "state" => state,
             "inbox" => {

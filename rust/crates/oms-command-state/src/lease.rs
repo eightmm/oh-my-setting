@@ -278,6 +278,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
             ));
         }
         let mut text = String::new();
+        let mut batch = Vec::new();
         for item in targets {
             let row = object([
                 ("schema", number(1)),
@@ -286,9 +287,10 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>) -> Result<Output> {
                 ("holder", string(&me)),
                 ("ts", string(timestamp(now)?)),
             ]);
-            storage::append_locked(&ctx.state_repo, Path::new(STORE), &row)?;
+            batch.push(row);
             text.push_str(&format!("released {}\n", item.text("id")));
         }
+        storage::append_many_locked(&ctx.state_repo, Path::new(STORE), &batch)?;
         if text.is_empty() {
             text = format!("no leases held by {me}\n");
         }

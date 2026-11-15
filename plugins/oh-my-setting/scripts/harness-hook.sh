@@ -3,7 +3,6 @@ set -euo pipefail
 
 tool="${1:-}"
 case "$tool" in skill-router|turn-guard|precompact-handoff|resume-hook|syntax-guard-hook|telemetry-hook) ;; *) exit 0 ;; esac
-payload="$(cat)"
 # Only the Codex plugin dispatches here; Codex SessionStart carries no turn_id.
 export OMS_HOOK_AGENT="${OMS_HOOK_AGENT:-codex}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,6 +11,27 @@ SOURCE_ROOT=""
 if [ -f "$PLUGIN_ROOT/.oh-my-setting-source-root" ]; then
   IFS= read -r SOURCE_ROOT < "$PLUGIN_ROOT/.oh-my-setting-source-root" || SOURCE_ROOT=""
 fi
+
+# Native-first before the payload is read: the first checkout that carries
+# this tool owns the hook (scripts/lib/platform.sh). A missing, declined
+# or unverifiable payload falls through to the shell hook below.
+# A harness child's skill-router/turn-guard stays on the shell no-op below.
+case "${OMS_NATIVE_DISPATCHED:-}:$tool:${OMS_HARNESS_CHILD:-0}" in
+  1:*|*:skill-router:1|*:turn-guard:1) ;;
+  *)
+  for root in "$SOURCE_ROOT" "${OH_MY_SETTING_DIR:-}" "$PLUGIN_ROOT/../.." "$HOME/.oh-my-setting"; do
+    [ -n "$root" ] && [ -f "$root/scripts/$tool.sh" ] || continue
+    if { [ -e "$root/rust/target/oms-native" ] || [ -L "$root/rust/target/oms-native" ]; } &&
+       [ -f "$root/scripts/lib/platform.sh" ]; then
+      # shellcheck source=scripts/lib/platform.sh
+      . "$root/scripts/lib/platform.sh"
+      oms_native_route hook "$root" harness-hook "$@" || exit 0
+    fi
+    break
+  done
+  ;;
+esac
+payload="$(cat)"
 
 # Under Bash 3.2 the launcher re-execs the recorded Bash 5; under Bash 5 keep it.
 launcher_bash=bash

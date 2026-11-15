@@ -18,6 +18,13 @@ set -euo pipefail
 [ "${OMS_HARNESS_CHILD:-0}" = 1 ] && exit 0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Native-first entry before the payload is read (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route hook "$ROOT" skill-router "$@" || exit
+fi
 # shellcheck source=scripts/lib/work-journal.sh
 . "$ROOT/scripts/lib/work-journal.sh"
 

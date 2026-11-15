@@ -18,6 +18,15 @@ esac
 
 retry_command="$(printf '%q ' "$0" "$@")"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Native-first entry (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route strict "$ROOT" update "$@" || exit
+  # Continuing in shell: keep this transaction's sub-steps in shell too.
+  export OMS_NATIVE_DISPATCHED=1
+fi
 if [ -f "$ROOT/scripts/lib/python-runtime.sh" ]; then
   # shellcheck source=scripts/lib/python-runtime.sh
   . "$ROOT/scripts/lib/python-runtime.sh"

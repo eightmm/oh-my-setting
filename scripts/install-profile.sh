@@ -6,6 +6,13 @@ set -euo pipefail
 script_dir="${BASH_SOURCE[0]%/*}"
 [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
 ROOT="$(cd "$script_dir/.." && pwd -P)"
+# Native-first entry (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route strict "$ROOT" install-profile "$@" || exit
+fi
 ACTION=apply
 PRIMARY_PROVIDER="${OH_MY_SETTING_PRIMARY_PROVIDER:-auto}"
 PRIMARY_PROVIDER_SET="${OH_MY_SETTING_PRIMARY_PROVIDER+x}"

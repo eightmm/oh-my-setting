@@ -2,7 +2,7 @@ use crate::core::Carry;
 use crate::model::*;
 use crate::storage::Store;
 use crate::value::{Value, array, obj, strings};
-use crate::{Error, Result, Room, checkpoint, digest};
+use crate::{Error, Result, Room, digest};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn successor_id(old: &str) -> String {
@@ -559,15 +559,18 @@ impl Room<'_> {
         }
         current = project(&self.snapshot(new)?.rows)?;
         let plan = carry_plan(state, Some(&current), bounded)?;
-        for write in plan.writes {
-            checkpoint(self.stop)?;
-            self.append_at(
-                new,
-                &write.event,
-                &write.text,
-                Carry::Replay(write.timestamp.as_deref()),
-            )?;
-        }
+        let writes = plan
+            .writes
+            .iter()
+            .map(|write| {
+                (
+                    &write.event,
+                    write.text.as_str(),
+                    Carry::Replay(write.timestamp.as_deref()),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.append_batch_at(new, &writes)?;
         Ok(plan.dropped)
     }
     fn carried(&self, id: &str) -> Result<bool> {

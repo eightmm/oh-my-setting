@@ -2338,23 +2338,6 @@ mod tests {
     fn osv(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
     }
-    /// Runs one task command with the full native task services.
-    fn task_run(
-        control: &ControlServices<'_>,
-        repo: &Path,
-        args: &[&str],
-    ) -> (i32, String, String) {
-        let stop = Arc::new(AtomicBool::new(false));
-        let mut task = control.task();
-        let (code, out, err) =
-            oms_command_task::run_with_services(&osv(args), repo, &stop, &mut task);
-        (
-            code,
-            String::from_utf8_lossy(&out).into_owned(),
-            String::from_utf8_lossy(&err).into_owned(),
-        )
-    }
-
     /// An initialised active packet written directly: `init` itself is refused
     /// inside a harness child, which would make the tests environment-dependent.
     fn packet(repo: &Path, id: &str) -> PathBuf {

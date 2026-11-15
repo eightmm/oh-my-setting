@@ -31,3 +31,30 @@ atomic publication; interruption can leave its private temporary file. Updates
 are reads, not acknowledgments; repeated ack deduplicates consumed identities.
 Test fixtures use unique temporary roots and non-panicking removal; a killed
 test may leave its private temporary repository.
+
+## Scoped append and polling optimizations
+
+`append_batch_at` stages carry rows and validates each against earlier staged
+rows while retaining producer guards through one locked append write and data
+sync. A validation failure publishes no staged rows. Concurrent cooperating
+writers revalidate after acquiring the same lock. A kill during publication can
+leave a complete prefix or incomplete final turn; prior bytes are preserved and
+incomplete evidence still requires reconciliation.
+
+Cached snapshots read only appended JSONL on growth after checking the first
+256 bytes and prior cursor boundary. A polling reader retains its descriptor:
+unchanged ticks perform metadata checks without byte reads, JSON parsing or
+new delivery allocations. Replacement, truncation or changed boundaries reload
+the stream; cursors still refuse stale generations. The 50 ms poll cadence and
+read-only cursor contract are unchanged. Polling never creates log/cache files.
+
+Outbound scans reuse one bounded process-environment snapshot via `OnceLock`.
+Append scans original text before truncation and avoids a redundant text scan
+when the published text is identical; metadata and changed text still pass the
+clean-content boundary. Embedders must establish their environment before the
+first outbound scan.
+
+The `src/storage.rs` unit module measures idle and incremental read bytes and covers
+replacement, malformed tails and file-size boundaries. the `src/core.rs` unit module
+covers staged refusal and append idempotence; these are the previously untested
+private storage/batch paths. Existing `tests/room_contract.rs` remains intact.

@@ -20,6 +20,29 @@ fn query(ctx: &Context<'_>, argv: &[&str]) -> String {
         .map(|b| String::from_utf8_lossy(&b).trim().to_owned())
         .unwrap_or_default()
 }
+fn git_status(status: &str) -> (String, String, String, Option<u64>) {
+    let mut head = String::new();
+    let mut branch = String::new();
+    let mut upstream = String::new();
+    let mut ahead = None;
+    for line in status.lines() {
+        if let Some(value) = line.strip_prefix("# branch.oid ") {
+            if value != "(initial)" {
+                head = value.into();
+            }
+        } else if let Some(value) = line.strip_prefix("# branch.head ") {
+            if value != "(detached)" {
+                branch = value.into();
+            }
+        } else if let Some(value) = line.strip_prefix("# branch.upstream ") {
+            upstream = value.into();
+        } else if let Some(value) = line.strip_prefix("# branch.ab +") {
+            ahead = value.split_whitespace().next().and_then(|n| n.parse().ok());
+        }
+    }
+    (head, branch, upstream, ahead)
+}
+
 pub(super) fn alive(row: &Value) -> Option<bool> {
     let raw = row.get("pid");
     let pid = raw
@@ -219,12 +242,8 @@ pub(super) fn enrich(ctx: &Context<'_>, state: &mut Value) -> Result<()> {
             ),
         ]),
     )?;
-    let head = query(ctx, &["git", "rev-parse", "HEAD"]);
-    let branch = query(ctx, &["git", "symbolic-ref", "--quiet", "--short", "HEAD"]);
-    let upstream = query(ctx, &["git", "rev-parse", "--abbrev-ref", "@{upstream}"]);
-    let ahead = query(ctx, &["git", "rev-list", "--count", "@{upstream}..HEAD"])
-        .parse::<u64>()
-        .ok();
+    let status = query(ctx, &["git", "status", "--porcelain=v2", "--branch"]);
+    let (head, branch, upstream, ahead) = git_status(&status);
     let (ci_rows, _) = rows(ctx, ".oms/ci.jsonl");
     let mut ci = ci_rows.last().cloned().unwrap_or_else(json::empty);
     let fresh = !head.is_empty()
@@ -664,8 +683,11 @@ pub(super) fn refresh_ci(ctx: &Context<'_>) -> Result<bool> {
     storage::append(&ctx.repo, Path::new(".oms/ci.jsonl"), &row)?;
     Ok(true)
 }
-pub(super) fn repairs(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Vec<Value>> {
-    let state = snapshot(ctx, host)?;
+pub(super) fn repairs(
+    ctx: &Context<'_>,
+    host: &dyn HostServices,
+    state: &Value,
+) -> Result<Vec<Value>> {
     let mut actions = Vec::new();
     if !state
         .get("plan")
@@ -693,8 +715,17 @@ pub(super) fn repairs(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Vec<
     let _guard = storage::lock(&path)?;
     let (rows, resolved, bad) = artifact_rows(ctx)?;
     require(bad == 0, "artifact index is invalid; repair refused")?;
-    let mut repaired = 0;
-    for (i, target) in rows.iter().enumerate() {
+    let mut winners = HashMap::new();
+    let mut resolutions = Vec::new();
+    for target in rows.iter().rev() {
+        if ["patch-admit", "patch-land"].contains(&target.text("kind"))
+            && target.get("exit").is_int(0)
+        {
+            winners.insert(
+                (target.text("patch_sha256"), target.text("provider")),
+                target,
+            );
+        }
         let digest = target.text("patch_sha256");
         if !["patch-admit", "delegate"].contains(&target.text("kind"))
             || !target.get("schema").is_int(1)
@@ -705,12 +736,7 @@ pub(super) fn repairs(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Vec<
         {
             continue;
         }
-        if let Some(winner) = rows[i + 1..].iter().find(|r| {
-            ["patch-admit", "patch-land"].contains(&r.text("kind"))
-                && r.get("exit").is_int(0)
-                && r.text("patch_sha256") == digest
-                && r.text("provider") == target.text("provider")
-        }) {
+        if let Some(winner) = winners.get(&(digest, target.text("provider"))) {
             let row = object([
                 ("schema", number(1)),
                 ("event_id", string(crate::random_id("evt_resolve_")?)),
@@ -731,10 +757,12 @@ pub(super) fn repairs(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Vec<
                     )),
                 ),
             ]);
-            storage::append_locked(&ctx.repo, &path, &row)?;
-            repaired += 1;
+            resolutions.push(row);
         }
     }
+    resolutions.reverse();
+    storage::append_many_locked(&ctx.repo, &path, &resolutions)?;
+    let repaired = resolutions.len();
     if repaired > 0 {
         actions.push(string(format!("resolved-superseded:{repaired}")));
     }

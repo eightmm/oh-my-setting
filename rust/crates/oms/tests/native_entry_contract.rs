@@ -236,24 +236,37 @@ fn public_entry_dispatches_without_python() {
 }
 
 #[test]
-fn dispatch_leaves_other_runtime_commands_to_legacy() {
+fn dispatch_owns_runtime_subcommands_and_leaves_unowned_tools_to_legacy() {
     let f = Fixture::new();
-    let out = Command::new(f.binary())
+    let owned = Command::new(f.binary())
         .arg("--oms-dispatch")
         .arg(&f.0)
         .args([
             "1111111111111111111111111111111111111111",
             "--",
             "runtime",
-            "--repo",
-            "context-inspect",
             "envelope",
+            "--help",
         ])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(75));
-    assert!(out.stdout.is_empty());
-    assert!(out.stderr.is_empty());
+    assert_eq!(owned.status.code(), Some(0));
+    assert!(!owned.stdout.is_empty());
+
+    let unowned = Command::new(f.binary())
+        .arg("--oms-dispatch")
+        .arg(&f.0)
+        .args([
+            "1111111111111111111111111111111111111111",
+            "--",
+            "unowned-legacy-probe",
+            "--help",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(unowned.status.code(), Some(75));
+    assert!(unowned.stdout.is_empty());
+    assert!(unowned.stderr.is_empty());
 }
 
 #[test]
@@ -1305,16 +1318,7 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
     for argv in [
         vec![""],
         vec!["artifact-index.sh", "telemetry"],
-        vec!["runtime", "experiment", "launch", "--help"],
-        vec!["runtime", "experiment", "register", "{}"],
-        vec![
-            "runtime",
-            "--repo",
-            "template",
-            "experiment",
-            "show",
-            "template",
-        ],
+        vec!["unowned-legacy-probe", "--help"],
     ] {
         for mode in ["--oms-select", "--oms-dispatch"] {
             exact(
@@ -1337,6 +1341,15 @@ fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
         b"",
     );
     for argv in [
+        vec!["runtime", "experiment", "launch", "--help"],
+        vec![
+            "runtime",
+            "--repo",
+            "template",
+            "experiment",
+            "show",
+            "template",
+        ],
         vec!["job-digest", "123", "missing.log"],
         vec!["slurm-lint"],
         vec!["slurm-lint", "missing.sh"],
@@ -1919,4 +1932,194 @@ fn private_dispatch_accepts_verified_companions() {
     assert!(run().status.success());
     std::fs::write(dir.join("oms-supervisor"), "changed").unwrap();
     assert_eq!(run().status.code(), Some(2));
+}
+
+#[test]
+fn newly_wired_wave3_families_select_and_dispatch_without_python() {
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    for argv in [
+        vec!["doctor", "--help"],
+        vec!["intent", "--help"],
+        vec!["agent-plan", "--help"],
+        vec!["agent-task", "--help"],
+        vec!["room", "--help"],
+        vec!["journal", "--help"],
+        vec!["graph", "--help"],
+        vec!["land", "--help"],
+        vec!["state", "--help"],
+        vec!["run-ledger", "--help"],
+        vec!["peer-ask", "--help"],
+        vec!["models", "--help"],
+        vec!["panel", "--help"],
+        vec!["agent-supervisor", "--help"],
+        vec!["slurm-submit", "--help"],
+        vec!["runtime", "envelope", "--help"],
+        vec!["runtime", "--help"],
+        vec!["runtime", "--version"],
+    ] {
+        exact(
+            f.private(&bin, "--oms-select")
+                .args(&argv)
+                .output()
+                .unwrap(),
+            0,
+            b"",
+            b"",
+        );
+        let out = f
+            .private(&bin, "--oms-dispatch")
+            .args(&argv)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.stdout.is_empty(), "{argv:?} stdout empty");
+    }
+    for hook in [
+        "command-guard-hook",
+        "command-guard-hook.sh",
+        "harness-hook.sh",
+    ] {
+        exact(
+            f.private(&bin, "--oms-select").arg(hook).output().unwrap(),
+            0,
+            b"",
+            b"",
+        );
+    }
+    exact(
+        f.private(&bin, "--oms-select")
+            .args(["mcp-server"])
+            .output()
+            .unwrap(),
+        0,
+        b"",
+        b"",
+    );
+    assert!(!f.0.join("preflight").exists());
+}
+
+#[test]
+fn validate_payload_rejects_foreign_entry_in_staged_dir() {
+    let f = Fixture::new();
+    let dir = f.binary().parent().unwrap().to_path_buf();
+    std::fs::write(dir.join("stray.txt"), b"unexpected").unwrap();
+    for mode in ["--oms-select", "--oms-dispatch"] {
+        let out = Command::new(f.binary())
+            .arg(mode)
+            .arg(&f.0)
+            .args(["1111111111111111111111111111111111111111", "--", "list"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{mode}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("unexpected file in native payload directory"),
+            "{mode}: {err}"
+        );
+    }
+}
+
+#[test]
+fn frontdoor_routes_navigation_and_native_commands_without_python() {
+    fn copy_regular_tree(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                copy_regular_tree(&from, &to);
+            } else if kind.is_file() {
+                std::fs::copy(&from, &to).unwrap();
+            }
+        }
+    }
+    let f = Fixture::new();
+    let bin = f.guarded_tools();
+    let source = std::env::var_os("OMS_CONTRACT_REPO")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."));
+    for rel in [
+        "rust/Cargo.toml",
+        "rust/Cargo.lock",
+        "rust/rust-toolchain.toml",
+    ] {
+        let src_file = source.join(rel);
+        if src_file.is_file() {
+            std::fs::copy(&src_file, f.0.join(rel)).unwrap();
+        }
+    }
+    for entry_dir in std::fs::read_dir(source.join("rust/crates")).unwrap() {
+        let entry_dir = entry_dir.unwrap();
+        if !entry_dir.file_type().unwrap().is_dir() {
+            continue;
+        }
+        let crate_src = entry_dir.path();
+        let crate_dst = f.0.join("rust/crates").join(entry_dir.file_name());
+        std::fs::create_dir_all(&crate_dst).unwrap();
+        for file in ["Cargo.toml", "build.rs"] {
+            let src_file = crate_src.join(file);
+            if src_file.is_file() {
+                std::fs::copy(&src_file, crate_dst.join(file)).unwrap();
+            }
+        }
+        let src_tree = crate_src.join("src");
+        if src_tree.is_dir() {
+            copy_regular_tree(&src_tree, &crate_dst.join("src"));
+        }
+    }
+    for data_root in ["config", "roles", "prompts"] {
+        let dir = source.join(data_root);
+        if dir.is_dir() {
+            copy_regular_tree(&dir, &f.0.join(data_root));
+        }
+    }
+    let entry = f.0.join("scripts/oms");
+
+    let nav = f
+        .command(&bin, &f.binary())
+        .arg("--oms-frontdoor")
+        .arg(&entry)
+        .args(["--", "list", "--all"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        nav.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&nav.stderr)
+    );
+    let nav_out = String::from_utf8_lossy(&nav.stdout);
+    assert!(nav_out.contains("install-profile"));
+    assert!(nav_out.contains("panel"));
+
+    for argv in [
+        vec!["room", "--help"],
+        vec!["agent-plan", "--help"],
+        vec!["runtime", "envelope", "--help"],
+    ] {
+        let out = f
+            .command(&bin, &f.binary())
+            .arg("--oms-frontdoor")
+            .arg(&entry)
+            .arg("--")
+            .args(&argv)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.stdout.is_empty(), "{argv:?} stdout empty");
+    }
+    assert!(!f.0.join("preflight").exists());
 }

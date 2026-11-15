@@ -122,6 +122,10 @@ OMS_MANAGED_TARGET_HELPER="$OMS_INSTALL_CONTRACT_LIB_DIR/managed-target.py"
 
 # Quarantine only a fixed-shape, non-symlinked current-revision cache entry.
 # The rename preserves its contents for inspection and leaves legacy dispatch usable.
+# Unlike the per-call oms_native_resolve check, this repair path judges the
+# whole manifest, so it keeps a strict JSON parser (duplicate keys, non-finite
+# numbers, exact artifact set): without a fallback interpreter it refuses and
+# changes nothing rather than quarantining on a weaker shell reading.
 oms_install_repair_native_cache() (
   local root="$1" cache="$1/rust/target/oms-native" revision entry item quarantine status
   [ -e "$cache" ] || [ -L "$cache" ] || return 0

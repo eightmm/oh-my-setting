@@ -105,11 +105,126 @@ fn walk(root: &Path, rel: &Path, files: &mut BTreeSet<String>, cancel: &AtomicBo
     }
     Ok(())
 }
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct FileStat {
+    #[serde(default)]
+    mtime_sec: Option<i64>,
+    #[serde(default)]
+    mtime_nsec: Option<i64>,
+    #[serde(default)]
+    ino: Option<u64>,
+    #[serde(default)]
+    bytes: u64,
+}
+impl FileStat {
+    fn from_stat(stat: &rustix::fs::Stat) -> Self {
+        Self {
+            mtime_sec: Some(stat.st_mtime),
+            mtime_nsec: Some(stat.st_mtime_nsec as i64),
+            ino: Some(stat.st_ino),
+            bytes: stat.st_size as u64,
+        }
+    }
+    fn reusable(&self, previous: &Value, started: i64) -> bool {
+        self.mtime_sec.is_some_and(|time| time < started)
+            && serde_json::from_value::<Self>(previous.clone()).is_ok_and(|old| old == *self)
+    }
+    fn add_to(&self, row: &mut Value) {
+        row.as_object_mut().unwrap().extend(
+            serde_json::to_value(self)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+    }
+}
+// Root resolves the repository physically. Traverse relative components with
+// no-follow descriptors so a symlink swap cannot redirect a stat or probe.
+fn source_parent(root: &Root, path: &str) -> std::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+    if !safe_path(path) {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut dir = open(root.physical_root(), flags, Mode::empty())?;
+    let parts: Vec<_> = path.split('/').collect();
+    for part in &parts[..parts.len() - 1] {
+        dir = openat(&dir, *part, flags, Mode::empty())?;
+    }
+    Ok(dir)
+}
+fn source_stat(root: &Root, path: &str) -> std::io::Result<FileStat> {
+    use rustix::fs::{AtFlags, FileType, statat};
+    let parent = source_parent(root, path)?;
+    let stat = statat(
+        &parent,
+        path.rsplit('/').next().unwrap(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_size < 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(FileStat::from_stat(&stat))
+}
+fn probe(root: &Root, path: &str, expected: &FileStat) -> std::io::Result<Vec<u8>> {
+    use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
+    use std::io::Read;
+    let parent = source_parent(root, path)?;
+    let fd = openat(
+        &parent,
+        path.rsplit('/').next().unwrap(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
+        Mode::empty(),
+    )?;
+    let before = fstat(&fd)?;
+    if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
+        || FileStat::from_stat(&before) != *expected
+    {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    (&mut file).take(8192).read_to_end(&mut bytes)?;
+    let after = fstat(&file)?;
+    if FileStat::from_stat(&after) != *expected
+        || before.st_ctime != after.st_ctime
+        || before.st_ctime_nsec != after.st_ctime_nsec
+    {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(bytes)
+}
 struct Discovery {
     files: BTreeMap<String, (String, usize)>,
+    stats: BTreeMap<String, FileStat>,
     skipped: Vec<Value>,
+    build_started_sec: i64,
 }
 fn discover(repo: &Path, options: &BuildOptions, cancel: &AtomicBool) -> Result<Discovery> {
+    discover_cached(repo, options, cancel, None)
+}
+fn discover_cached(
+    repo: &Path,
+    options: &BuildOptions,
+    cancel: &AtomicBool,
+    previous: Option<&Value>,
+) -> Result<Discovery> {
+    let build_started_sec = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let previous_started = previous
+        .and_then(|m| m["build_started_sec"].as_i64())
+        .unwrap_or(i64::MIN);
+    let old_skipped: BTreeMap<&str, &Value> = previous
+        .map(|m| {
+            array(m, "skipped")
+                .iter()
+                .map(|r| (s(r, "path"), r))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut candidates = BTreeSet::new();
     match command(
         repo,
@@ -134,6 +249,7 @@ fn discover(repo: &Path, options: &BuildOptions, cancel: &AtomicBool) -> Result<
         Root::open(repo).map_err(|e| Error::new(format!("cannot open source root: {e:?}")))?;
     let mut files = BTreeMap::new();
     let mut skipped = vec![];
+    let mut stats = BTreeMap::new();
     for path in candidates {
         crate::util::check(cancel)?;
         let name = path.rsplit('/').next().unwrap_or(&path);
@@ -153,40 +269,92 @@ fn discover(repo: &Path, options: &BuildOptions, cancel: &AtomicBool) -> Result<
         } else {
             ""
         };
+        let stat = if reason.is_empty() {
+            source_stat(&root, &path).ok()
+        } else {
+            None
+        };
         if reason.is_empty() {
             if options.max_bytes < 0 {
                 reason = "too-large";
-            } else {
-                match root.read(
-                    &path,
-                    usize::try_from(options.max_bytes).unwrap_or(usize::MAX),
-                    Policy::source(),
-                ) {
-                    Ok(data) => {
-                        if data.iter().take(8192).any(|b| *b == 0) {
-                            reason = "binary";
-                        } else if language(&path).is_none() {
-                            reason = "unparsed";
-                        } else {
-                            files.insert(path.clone(), (sha(&data), data.len()));
+            } else if let Some(stat) = &stat {
+                if stat.bytes > options.max_bytes as u64 {
+                    reason = "too-large";
+                } else if !options.force
+                    && previous.is_some_and(|m| {
+                        let row = &m["files"][&path];
+                        let digest = s(row, "sha256");
+                        stat.reusable(row, previous_started)
+                            && digest.len() == 64
+                            && digest.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                    && language(&path).is_some()
+                {
+                    let old = &previous.unwrap()["files"][&path];
+                    files.insert(path.clone(), (s(old, "sha256").into(), stat.bytes as usize));
+                } else if let Some(old) = old_skipped.get(path.as_str()).filter(|old| {
+                    !options.force
+                        && stat.reusable(old, previous_started)
+                        && (s(old, "reason") == "binary"
+                            || (s(old, "reason") == "unparsed" && language(&path).is_none()))
+                }) {
+                    reason = if s(old, "reason") == "binary" {
+                        "binary"
+                    } else {
+                        "unparsed"
+                    };
+                } else if language(&path).is_none() {
+                    reason = match probe(&root, &path, stat) {
+                        Ok(data) if data.contains(&0) => "binary",
+                        Ok(_) => "unparsed",
+                        Err(_) => "excluded",
+                    };
+                } else {
+                    match root.read(
+                        &path,
+                        usize::try_from(options.max_bytes).unwrap_or(usize::MAX),
+                        Policy::source(),
+                    ) {
+                        Ok(data) if source_stat(&root, &path).as_ref().ok() == Some(stat) => {
+                            if data.iter().take(8192).any(|b| *b == 0) {
+                                reason = "binary";
+                            } else {
+                                files.insert(path.clone(), (sha(&data), data.len()));
+                            }
                         }
-                    }
-                    Err(oms_safe_fs::Error::Oversize) => reason = "too-large",
-                    Err(_) => {
-                        reason = if repo.join(&path).is_symlink() {
-                            "symlink"
-                        } else {
-                            "excluded"
+                        Ok(_) => {
+                            return Err(Error::new(format!(
+                                "source changed during discovery: {path}"
+                            )));
                         }
+                        Err(oms_safe_fs::Error::Oversize) => reason = "too-large",
+                        Err(_) => reason = "excluded",
                     }
                 }
+            } else {
+                reason = if repo.join(&path).is_symlink() {
+                    "symlink"
+                } else {
+                    "excluded"
+                };
             }
         }
         if !reason.is_empty() {
-            skipped.push(json!({"path":path,"reason":reason}));
+            let mut row = json!({"path":path,"reason":reason});
+            if let Some(stat) = stat {
+                stat.add_to(&mut row);
+            }
+            skipped.push(row);
+        } else if let Some(stat) = stat {
+            stats.insert(path, stat);
         }
     }
-    Ok(Discovery { files, skipped })
+    Ok(Discovery {
+        files,
+        stats,
+        skipped,
+        build_started_sec,
+    })
 }
 fn coverage(found: &Discovery) -> Value {
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
@@ -354,7 +522,7 @@ pub fn build(
     explicit_helper: Option<&Path>,
 ) -> Result<Value> {
     let found = discover(repo, options, cancel)?;
-    build_from(repo, state, options, cancel, explicit_helper, found)
+    Ok(build_from(repo, state, options, cancel, explicit_helper, found)?.0)
 }
 fn build_from(
     repo: &Path,
@@ -363,7 +531,7 @@ fn build_from(
     cancel: &AtomicBool,
     explicit_helper: Option<&Path>,
     found: Discovery,
-) -> Result<Value> {
+) -> Result<(Value, super::index::Graph)> {
     let mut settings = oms_lock::Settings::from_env().map_err(|e| Error::new(e.to_string()))?;
     settings.cwd = repo.to_path_buf();
     let lock = oms_lock::Lock::for_file(&state.join("manifest.json"), settings)
@@ -427,10 +595,11 @@ fn build_from(
                 v
             }
         };
-        files.insert(
-            path.clone(),
-            json!({"sha256":digest,"bytes":size,"parser":lang,"cached":was_cached}),
-        );
+        let mut row = json!({"sha256":digest,"bytes":size,"parser":lang,"cached":was_cached});
+        if let Some(stat) = found.stats.get(path) {
+            stat.add_to(&mut row);
+        }
+        files.insert(path.clone(), row);
         extractions.push(oms_graph_resolve::Extraction {
             path: path.clone(),
             sha256: digest.clone(),
@@ -454,7 +623,7 @@ fn build_from(
     include.sort();
     let mut exclude = options.exclude.clone();
     exclude.sort();
-    let manifest = json!({"schema":SCHEMA,"revision":revision,"generated_at":now(),"parser_version":VERSION,"discovery":{"include":include,"exclude":exclude,"max_bytes":options.max_bytes},"files":files,"skipped":found.skipped,"coverage":coverage(&found),"stats":{"files":files.len(),"nodes":nodes.len(),"edges":edges.len(),"cached":cached,"parsed":files.len()-cached}});
+    let manifest = json!({"schema":SCHEMA,"revision":revision,"generated_at":now(),"build_started_sec":found.build_started_sec,"parser_version":VERSION,"discovery":{"include":include,"exclude":exclude,"max_bytes":options.max_bytes},"files":files,"skipped":found.skipped,"coverage":coverage(&found),"stats":{"files":files.len(),"nodes":nodes.len(),"edges":edges.len(),"cached":cached,"parsed":files.len()-cached}});
     guard.check().map_err(|e| Error::new(e.to_string()))?;
     if state.starts_with(repo.join(".oms")) {
         create_marker(repo)?;
@@ -473,7 +642,7 @@ fn build_from(
         &json!({"schema":1,"revision":revision,"generated_at":now(),"text":brief}),
     )?;
     prune_cache(state, &keys)?;
-    Ok(manifest)
+    Ok((manifest, index))
 }
 fn prune_cache(state: &Path, wanted: &BTreeSet<String>) -> Result<()> {
     let directory = state.join("cache");
@@ -499,23 +668,38 @@ pub fn load(state: &Path) -> Result<Value> {
         .ok_or_else(|| Error::new("project graph has not been built; run: oms graph project build"))
 }
 pub fn check(repo: &Path, state: &Path, cancel: &AtomicBool) -> Result<Value> {
-    Ok(freshness(repo, state, cancel)?.0)
+    Ok(freshness(repo, state, cancel, false)?.status)
+}
+struct Freshness {
+    status: Value,
+    found: Option<Discovery>,
+    manifest: Option<Value>,
+    graph: Option<Value>,
+    db: Option<rusqlite::Connection>,
 }
 fn freshness(
     repo: &Path,
     state: &Path,
     cancel: &AtomicBool,
-) -> Result<(Value, Option<Discovery>, Option<Value>)> {
+    prefer_sql: bool,
+) -> Result<Freshness> {
     let Some(manifest) =
         read_json(&state.join("manifest.json"), GRAPH_LIMIT)?.filter(Value::is_object)
     else {
-        return Ok((
-            json!({"present":false,"fresh":false,"revision":"","stale":[],"missing":[],"new":[],"coverage":{"parsed":0,"unparsed":0,"unparsed_by_extension":{},"skipped_by_reason":{}}}),
-            None,
-            None,
-        ));
+        return Ok(Freshness {
+            status: json!({"present":false,"fresh":false,"revision":"","stale":[],"missing":[],"new":[],"coverage":{"parsed":0,"unparsed":0,"unparsed_by_extension":{},"skipped_by_reason":{}}}),
+            found: None,
+            manifest: None,
+            graph: None,
+            db: None,
+        });
     };
-    let found = discover(repo, &BuildOptions::manifest(&manifest), cancel)?;
+    let found = discover_cached(
+        repo,
+        &BuildOptions::manifest(&manifest),
+        cancel,
+        Some(&manifest),
+    )?;
     let current: BTreeSet<&str> = found.files.keys().map(String::as_str).collect();
     let known: BTreeSet<&str> = manifest["files"]
         .as_object()
@@ -534,15 +718,29 @@ fn freshness(
             outdated[key] = json!({"built":manifest[key],"current":expected});
         }
     }
-    let valid = load(state).is_ok_and(|g| {
-        g["schema"] == SCHEMA
-            && g["revision"] == manifest["revision"]
-            && !s(&g, "revision").is_empty()
-            && g["nodes"].is_array()
-            && g["edges"].is_array()
-    });
+    let db = if prefer_sql {
+        super::sqlite::open_verified(state, s(&manifest, "revision"))
+    } else {
+        None
+    };
+    let sql_valid = db.is_some();
+    let graph = if sql_valid { None } else { load(state).ok() };
+    let valid = sql_valid
+        || graph.as_ref().is_some_and(|g| {
+            g["schema"] == SCHEMA
+                && g["revision"] == manifest["revision"]
+                && !s(g, "revision").is_empty()
+                && g["nodes"].is_array()
+                && g["edges"].is_array()
+        });
     let status = json!({"present":true,"fresh":stale.is_empty()&&missing.is_empty()&&new.is_empty()&&outdated.as_object().unwrap().is_empty()&&valid,"revision":manifest["revision"],"stale":stale,"missing":missing,"new":new,"outdated":outdated,"coverage":coverage(&found)});
-    Ok((status, Some(found), Some(manifest)))
+    Ok(Freshness {
+        status,
+        found: Some(found),
+        manifest: Some(manifest),
+        graph,
+        db,
+    })
 }
 pub fn ensure(
     repo: &Path,
@@ -551,9 +749,36 @@ pub fn ensure(
     cancel: &AtomicBool,
     helper: Option<&Path>,
 ) -> Result<Value> {
-    let (status, found, manifest) = freshness(repo, state, cancel)?;
+    Ok(ensure_loaded(repo, state, max_files, cancel, helper, false)?.status)
+}
+pub(super) struct Loaded {
+    pub status: Value,
+    pub manifest: Value,
+    pub graph: Option<super::index::Graph>,
+    pub db: Option<rusqlite::Connection>,
+}
+pub(super) fn ensure_loaded(
+    repo: &Path,
+    state: &Path,
+    max_files: i64,
+    cancel: &AtomicBool,
+    helper: Option<&Path>,
+    prefer_sql: bool,
+) -> Result<Loaded> {
+    let Freshness {
+        status,
+        found,
+        manifest,
+        graph,
+        db,
+    } = freshness(repo, state, cancel, prefer_sql)?;
     if status["fresh"] == true {
-        return Ok(json!({"action":"fresh","revision":status["revision"]}));
+        return Ok(Loaded {
+            status: json!({"action":"fresh","revision":status["revision"]}),
+            manifest: manifest.unwrap(),
+            graph: graph.map(super::index::Graph::new).transpose()?,
+            db,
+        });
     }
     let present = status["present"] == true;
     let options = manifest
@@ -570,10 +795,13 @@ pub fn ensure(
             found.files.len()
         )));
     }
-    let manifest = build_from(repo, state, &options, cancel, helper, found)?;
-    Ok(
-        json!({"action":if present {"refreshed"} else {"built"},"revision":manifest["revision"],"stats":manifest["stats"],"skipped":array(&manifest,"skipped").len()}),
-    )
+    let (manifest, graph) = build_from(repo, state, &options, cancel, helper, found)?;
+    Ok(Loaded {
+        status: json!({"action":if present {"refreshed"} else {"built"},"revision":manifest["revision"],"stats":manifest["stats"],"skipped":array(&manifest,"skipped").len()}),
+        manifest,
+        graph: Some(graph),
+        db: None,
+    })
 }
 
 pub(super) fn revision_nodes(

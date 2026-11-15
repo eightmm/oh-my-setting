@@ -23,6 +23,13 @@ esac
 # time. Downloaded bytes are verified before extraction or execution.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Native-first entry (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route strict "$ROOT" install-tools "$@" || exit
+fi
 TOOL_LOCK="${OH_MY_SETTING_TOOL_LOCK:-$ROOT/tools.lock.json}"
 TOOL_LOCK_HELPER="$ROOT/scripts/lib/tool-lock.py"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"

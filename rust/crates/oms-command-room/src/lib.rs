@@ -109,25 +109,7 @@ pub(crate) fn checkpoint(stop: &AtomicBool) -> Result<()> {
 }
 
 pub(crate) fn outbound_clean(bytes: &[u8]) -> Result<bool> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut values = Vec::new();
-    let mut size = 0usize;
-    for (name, value) in std::env::vars_os() {
-        size = size
-            .saturating_add(name.as_bytes().len())
-            .saturating_add(value.as_bytes().len());
-        if values.len() >= oms_scrub::MAX_ENV_ENTRIES || size > oms_scrub::MAX_ENV_BYTES {
-            return Err(Error::new("room outbound environment exceeds scan limits"));
-        }
-        values.push((name, value));
-    }
-    let view = values
-        .iter()
-        .map(|(name, value)| (name.as_bytes(), value.as_bytes()))
-        .collect::<Vec<_>>();
-    Ok(oms_scrub::scan(bytes, &view)
-        .map_err(|_| Error::new("room outbound content could not be checked"))?
-        .is_empty())
+    value::outbound_clean(bytes)
 }
 
 /// In-process derived data only. Poisoning discards the entire projection;

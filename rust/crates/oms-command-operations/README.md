@@ -111,7 +111,10 @@ to its stronger intent recovery.
 
 ## Persistence, concurrency and interruption
 
-- `events.jsonl`: one `owner.json` transaction lock for writers. A second writer
+- `events.jsonl`: one `owner.json` transaction lock for writers. Transition
+  chains and heartbeat recovery stage and validate the entire batch, then use
+  one append write and data sync. Validation errors publish no partial chain;
+  a kill during the write may still leave a completed prefix or torn tail. A second writer
   sees completed prior rows before allocating its sequence. A kill can leave a
   torn final row; strict projection refuses it. Low-level append separates a
   torn tail with a newline, matching canonical append behavior. No automatic
@@ -178,3 +181,18 @@ therefore fail because the manifest is absent; this is a baseline build failure,
 not evidence that each behavioral assertion detects a regression. Restoration
 is checked byte-for-byte. The contention regression did fail with the initial
 implementation and passed after fixing exclusive ignore-file initialization.
+
+## Scoped storage optimization coverage
+
+LF-only `parse_rows` borrows the decoded input; CR/CRLF normalization allocates
+only when CR is present. Locked multi-step writers use `Ledger::append_batch`
+with the history read through that descriptor, checking its recorded length
+before writing and retaining trace ancestry without another 128 KiB tail read.
+
+`follow` retains device/inode and byte offset between iterations. Growth reads
+only the new tail; truncation or replacement reloads from byte zero and applies
+the existing `--after-event` selection. It retains the established raw ordered
+JSON output contract, including rows outside lifecycle projection schemas.
+Reads create no missing ledger or sidecar cache. The nearest `src/tests.rs`
+fixtures cover batch refusal/idempotence, LF borrowing, stale locked snapshots,
+and incremental follow growth, truncation, replacement and malformed tails.

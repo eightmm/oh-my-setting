@@ -49,6 +49,8 @@ case "$BASH" in
   *) OMS_BASH="$(command -v "$BASH" 2>/dev/null || printf '%s' "$BASH")" ;;
 esac
 export OMS_BASH
+# The native installer takes this same argv once the checkout is selected.
+install_original_args=("$@")
 
 REPO_URL="${OH_MY_SETTING_REPO_URL:-https://github.com/eightmm/oh-my-setting.git}"
 DEST="${OH_MY_SETTING_DIR:-$HOME/.oh-my-setting}"
@@ -1000,6 +1002,17 @@ fi
 # Continue from the updated checkout so old piped/local installers do not run stale logic.
 if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   export OH_MY_SETTING_REEXECED=1
+  # Native-first: a verified payload staged for the selected checkout installs
+  # from it with the original argv, adopting the held lock across exec. Clone,
+  # fetch and ref selection above stay in shell; a re-exec'd installer has no
+  # argv and stays in shell (oms_native_route, scripts/lib/platform.sh).
+  if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] &&
+     { [ -e "$DEST/rust/target/oms-native" ] || [ -L "$DEST/rust/target/oms-native" ]; } &&
+     [ -f "$DEST/scripts/lib/platform.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$DEST/scripts/lib/platform.sh"
+    oms_native_route recover "$DEST" install "${install_original_args[@]}" || exit
+  fi
   if grep -Fq 'OMS_INSTALL_LIFECYCLE_PROTOCOL=1' "$DEST/install.sh"; then
     exec "$OMS_BASH" "$DEST/install.sh"
   fi
@@ -1007,6 +1020,10 @@ if [ "${OH_MY_SETTING_REEXECED:-0}" != "1" ] && [ -f "$DEST/install.sh" ]; then
   # the old installer runs as a child, then release it on our EXIT trap.
   "$OMS_BASH" "$DEST/install.sh"
   exit $?
+fi
+# Continuing in shell with a payload staged: keep the sub-steps in shell too.
+if [ -e "$DEST/rust/target/oms-native" ] || [ -L "$DEST/rust/target/oms-native" ]; then
+  export OMS_NATIVE_DISPATCHED=1
 fi
 
 # One failure past this point can leave a partial install: tools present but

@@ -25,6 +25,15 @@ esac
 script_dir="${BASH_SOURCE[0]%/*}"
 [ "$script_dir" != "${BASH_SOURCE[0]}" ] || script_dir=.
 ROOT="$(cd "$script_dir/.." && pwd -P)"
+# Native-first entry (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route recover "$ROOT" doctor "$@" || exit
+  # Continuing in shell: keep this transaction's sub-steps in shell too.
+  export OMS_NATIVE_DISPATCHED=1
+fi
 # Judge the install with the interpreter that configured it: a host python3
 # older than 3.11 cannot read the TOML the 3.12 runtime wrote and failed a
 # healthy install. install.sh already runs doctor this way.

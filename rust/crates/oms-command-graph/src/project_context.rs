@@ -56,6 +56,7 @@ fn rank(repo: &Path, index: &Graph, terms: &[String], cancel: &AtomicBool) -> Re
     let quoted =
         regex::Regex::new(r#"'([^'\\]*(?:\\.[^'\\]*)*)'|"([^"\\]*(?:\\.[^"\\]*)*)""#).unwrap();
     let mut docs = vec![];
+    let mut inverted: BTreeMap<String, Vec<(usize, [usize; 4])>> = BTreeMap::new();
     for node in candidates {
         let path = s(node, "path");
         let lines = sources.get(path).map(Vec::as_slice).unwrap_or(&[]);
@@ -96,30 +97,42 @@ fn rank(repo: &Path, index: &Graph, terms: &[String], cancel: &AtomicBool) -> Re
             })
             .collect();
         let lengths: Vec<usize> = counters.iter().map(|c| c.values().sum()).collect();
-        docs.push((node, counters, lengths));
+        let vocabulary: BTreeSet<&str> = counters
+            .iter()
+            .flat_map(|c| c.keys().map(String::as_str))
+            .collect();
+        for term in vocabulary {
+            inverted.entry(term.to_owned()).or_default().push((
+                docs.len(),
+                std::array::from_fn(|f| *counters[f].get(term).unwrap_or(&0)),
+            ));
+        }
+        docs.push((node, lengths));
     }
     let count = docs.len();
     let averages: Vec<f64> = (0..4)
-        .map(|f| docs.iter().map(|d| d.2[f]).sum::<usize>() as f64 / count.max(1) as f64)
+        .map(|f| docs.iter().map(|d| d.1[f]).sum::<usize>() as f64 / count.max(1) as f64)
         .collect();
-    let mut rows = vec![];
-    for (node, counters, lengths) in &docs {
-        let mut score = 0.0;
-        for term in &unique {
-            let frequency = docs
-                .iter()
-                .filter(|d| d.1.iter().any(|c| c.contains_key(term)))
-                .count() as f64;
-            let weight = (1.0 + (count as f64 - frequency + 0.5) / (frequency + 0.5)).ln();
+    let mut scores = vec![0.0; count];
+    for term in &unique {
+        let Some(postings) = inverted.get(term.as_str()) else {
+            continue;
+        };
+        let frequency = postings.len() as f64;
+        let weight = (1.0 + (count as f64 - frequency + 0.5) / (frequency + 0.5)).ln();
+        for (i, frequencies) in postings {
             for field in 0..4 {
-                let tf = *counters[field].get(term).unwrap_or(&0) as f64;
+                let tf = frequencies[field] as f64;
                 if tf > 0.0 {
                     let norm =
-                        1.2 * (0.25 + 0.75 * lengths[field] as f64 / averages[field].max(1.0));
-                    score += [3.0, 1.0, 1.5, 0.6][field] * weight * tf * 2.2 / (tf + norm);
+                        1.2 * (0.25 + 0.75 * docs[*i].1[field] as f64 / averages[field].max(1.0));
+                    scores[*i] += [3.0, 1.0, 1.5, 0.6][field] * weight * tf * 2.2 / (tf + norm);
                 }
             }
         }
+    }
+    let mut rows = vec![];
+    for ((node, _), score) in docs.iter().zip(scores) {
         if score > 0.0 {
             rows.push(json!({"id":node["id"],"score":(score*100.0).round_ties_even()as i64}));
         }
@@ -216,7 +229,7 @@ pub fn select(
         .into_iter()
         .collect();
     for path in &change_paths {
-        if index.nodes.values().any(|n| s(n, "path") == path) {
+        if index.by_path.contains_key(path) {
             *scores.entry(path.clone()).or_default() += 800;
             reasons
                 .entry(path.clone())

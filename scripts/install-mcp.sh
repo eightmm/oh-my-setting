@@ -11,6 +11,13 @@ set -euo pipefail
 # cannot prove a provider-local registration is absent without that provider.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+# Native-first entry (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route strict "$ROOT" install-mcp "$@" || exit
+fi
 SERVER="$ROOT/scripts/oms-mcp-server.py"
 NAME="oh-my-setting"
 REMOVE=0

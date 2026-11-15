@@ -11,6 +11,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HELPER="$ROOT/scripts/lib/hook_state.py"
 
 [ "${OMS_HARNESS_CHILD:-0}" != 1 ] || exit 0
+# Native-first entry before the payload is read (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route hook "$ROOT" telemetry-hook "$@" || exit
+fi
 [ -f "$HELPER" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 

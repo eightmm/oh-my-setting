@@ -86,7 +86,7 @@ suite or negative-control test was run in this implementation-only phase.
 
 | Written state | Second call / kill between publications |
 | --- | --- |
-| Lease/failure streams and their compaction | The canonical stream lock serializes cooperating writers. Atomic replacement retains whole old/new bytes. Releasing several leases can leave a released prefix; the next release recomputes remaining targets. GC retains undated or unresolved failure rows. |
+| Lease/failure streams and their compaction | The canonical stream lock serializes cooperating writers. Append preserves the existing inode and bytes; multi-lease releases share one batch write and data sync. A killed append can leave a partial new tail; a retry recomputes remaining targets. Intentional failure-ledger retention still replaces under lock and retains undated or unresolved rows. |
 | Run spine and CURRENT | New/close take CURRENT then spine lock. A mint can exist before CURRENT points to it; a close can exist before pointer clearing. Repeated close may append another close, and another run's pointer is preserved. |
 | Capsule diff, environment locks, log, capsule, index, companion ledger and spine link | Random IDs and a per-capsule lock isolate captures. Log bytes stream while execution runs. A kill can leave a partial bundle, an unindexed capsule or missing companions. No publication retry reruns the command. A forced kill can leave a child without a native start receipt; it never authorizes replay. |
 | Claims/figure streams | Their stream locks span reads, pinning and publication. IDs project last-row wins. Files changed later are stale; existing rows are not silently repinned. Capsule cleanup holds both provenance-stream locks before deciding retention. |
@@ -119,3 +119,26 @@ Tests, boundary executions and the reverted-implementation negative control
 are skipped because this phase explicitly permits only the source checks.
 No existing test is changed. No commit, push, dispatcher wiring or root
 workspace/dependency-version change is part of this worker result.
+
+## Scoped append and read optimizations
+
+`storage::append_locked` delegates to `append_many_locked`: descriptor-relative
+no-follow opens, owned regular single-link leaves, `O_APPEND`, one trailing-byte
+read, one batch `write_all` and `sync_data`. Lease releases, GC stale-run closes
+and artifact resolutions batch under their existing exclusive stream locks.
+Artifact repairs use a reverse hash index while preserving the earliest later
+successful event and original resolution order. Existing failure-ledger
+retention and artifact-index compaction remain intentional replacements.
+
+CI enrichment uses one `git status --porcelain=v2 --branch` query. An
+`inbox --fix-safe` invocation reuses its collected snapshot when no repair
+succeeds. State, inbox and dashboard invoke journal `status` only when
+`.oms/work-journal` already exists on disk (avoiding spurious creation on
+unadopted repositories), while canonical storage health remains a read-only
+observation. Full task/plan single-read reuse still needs sibling snapshot APIs;
+this change preserves their existing validation rather than duplicating it.
+
+Regression coverage lives in `tests/host_services.rs` and
+`src/storage.rs` unit module; the latter adds the previously uncovered direct
+append size, empty-batch and unsafe-target boundaries. The historical
+implementation-only verification notes above describe the earlier draft.

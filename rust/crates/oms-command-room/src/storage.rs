@@ -5,7 +5,7 @@ use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
@@ -285,12 +285,11 @@ impl Directory {
         if !stable(old, &opened) {
             return Err(Error::new("room log changed before append"));
         }
-        if rustix::io::write(&fd, body).map_err(io)? != body.len() {
-            return Err(Error::new(
-                "room append was short; incomplete evidence is withheld",
-            ));
-        }
-        fs::fsync(&fd).map_err(|e| Error::new(format!("room append durability unknown: {e}")))?;
+        let mut file = File::from(fd);
+        file.write_all(body).map_err(io)?;
+        file.sync_data()
+            .map_err(|e| Error::new(format!("room append durability unknown: {e}")))?;
+        let fd = file;
         let after = fs::fstat(&fd).map_err(io)?;
         let named = fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
         if !regular(&after)
@@ -354,6 +353,118 @@ impl Directory {
         result
     }
 }
+/// A read-only poll descriptor. Unchanged ticks inspect metadata without reading bytes.
+pub(crate) struct LogReader<'a> {
+    directory: &'a Directory,
+    name: OsString,
+    file: File,
+    #[cfg(test)]
+    bytes_read: usize,
+}
+impl<'a> LogReader<'a> {
+    pub(crate) fn open(directory: &'a Directory, name: OsString) -> Result<Self> {
+        let fd = fs::openat(
+            &directory.fd,
+            &name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io)?;
+        let reader = Self {
+            directory,
+            name,
+            file: File::from(fd),
+            #[cfg(test)]
+            bytes_read: 0,
+        };
+        reader.stat()?;
+        Ok(reader)
+    }
+    fn stat(&self) -> Result<Stat> {
+        self.directory.check()?;
+        let opened = fs::fstat(&self.file).map_err(io)?;
+        let named =
+            fs::statat(&self.directory.fd, &self.name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+        if !regular(&named) || named.st_size < 0 || named.st_size as u64 > MAX_FILE as u64 {
+            return Err(Error::new("unsafe or oversized room log"));
+        }
+        if !same(&opened, &named) {
+            return Ok(named);
+        }
+        if !regular(&opened) || !stable(&opened, &named) {
+            return Err(Error::new("room input changed during stat"));
+        }
+        Ok(opened)
+    }
+    pub(crate) fn poll(&mut self, old: &Snapshot) -> Result<Option<Snapshot>> {
+        let stat = self.stat()?;
+        if same(&old.stat, &stat) && old.stat.st_size == stat.st_size {
+            return Ok(None);
+        }
+        self.refresh(old)
+    }
+    pub(crate) fn refresh(&mut self, old: &Snapshot) -> Result<Option<Snapshot>> {
+        let stat = self.stat()?;
+        if stable(&old.stat, &stat) {
+            return Ok(None);
+        }
+        let opened = fs::fstat(&self.file).map_err(io)?;
+        if !same(&opened, &stat) {
+            *self = Self::open(self.directory, self.name.clone())?;
+        }
+        let mut incremental = same(&old.stat, &stat) && stat.st_size as usize >= old.bytes.len();
+        if incremental {
+            let length = old.bytes.len().min(256);
+            let mut prefix = vec![0; length];
+            self.file.seek(SeekFrom::Start(0)).map_err(io)?;
+            self.file.read_exact(&mut prefix).map_err(io)?;
+            #[cfg(test)]
+            {
+                self.bytes_read += prefix.len();
+            }
+            incremental = crate::digest(&prefix) == crate::digest(&old.bytes[..length]);
+            // Preserve cursor boundary checks when an in-place edit accompanies growth.
+            let start = old.bytes.len().saturating_sub(256);
+            let mut boundary = vec![0; old.bytes.len() - start];
+            self.file.seek(SeekFrom::Start(start as u64)).map_err(io)?;
+            self.file.read_exact(&mut boundary).map_err(io)?;
+            #[cfg(test)]
+            {
+                self.bytes_read += boundary.len();
+            }
+            incremental &= boundary == old.bytes[start..];
+        }
+        let offset = if incremental { old.bytes.len() } else { 0 };
+        self.file.seek(SeekFrom::Start(offset as u64)).map_err(io)?;
+        let mut bytes = vec![0; stat.st_size as usize - offset];
+        self.file.read_exact(&mut bytes).map_err(io)?;
+        #[cfg(test)]
+        {
+            self.bytes_read += bytes.len();
+        }
+        if !stable(&stat, &self.stat()?) || !stable(&stat, &fs::fstat(&self.file).map_err(io)?) {
+            return Err(Error::new("room input changed during read"));
+        }
+        let mut snapshot = Snapshot::decode(&old.id, bytes, stat)?;
+        if incremental {
+            for range in &mut snapshot.ranges {
+                range.start += offset;
+                range.end += offset;
+            }
+            let mut bytes = old.bytes.clone();
+            bytes.extend_from_slice(&snapshot.bytes);
+            snapshot.bytes = bytes;
+            let mut rows = old.rows.clone();
+            rows.append(&mut snapshot.rows);
+            snapshot.rows = rows;
+            let mut ranges = old.ranges.clone();
+            ranges.append(&mut snapshot.ranges);
+            snapshot.ranges = ranges;
+        }
+        Ok(Some(snapshot))
+    }
+}
+
 pub struct Store {
     pub root: Directory,
     pub oms: Directory,
@@ -525,5 +636,60 @@ impl Snapshot {
             ranges,
             stat,
         })
+    }
+}
+
+#[cfg(test)]
+mod optimization_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_ticks_read_nothing_and_growth_seeks_to_tail() {
+        let path = std::env::temp_dir().join(format!("oms-room-tail-{}", crate::unique().unwrap()));
+        std::fs::create_dir(&path).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let directory = Directory::open(&path).unwrap();
+            let name = OsStr::new("log");
+            let line = b"{\"thread\":\"room\",\"seq\":1}\n";
+            let bytes = line.repeat(100);
+            directory.create(name, &bytes).unwrap();
+            let (bytes, stat) = directory.read(name, MAX_FILE).unwrap();
+            let snapshot = Snapshot::decode("room", bytes, stat).unwrap();
+            let mut reader = LogReader::open(&directory, name.to_owned()).unwrap();
+            assert!(reader.poll(&snapshot).unwrap().is_none());
+            assert_eq!(reader.bytes_read, 0);
+            directory.append(name, &snapshot.stat, line).unwrap();
+            let updated = reader.poll(&snapshot).unwrap().unwrap();
+            assert_eq!(reader.bytes_read, 512 + line.len());
+            assert_eq!(updated.rows.len(), 101);
+            assert_eq!(updated.ranges.last().unwrap().start, snapshot.bytes.len());
+            assert!(reader.poll(&updated).unwrap().is_none());
+            assert_eq!(reader.bytes_read, 512 + line.len());
+            std::fs::write(path.join(name), b"{}\n").unwrap();
+            assert!(reader.refresh(&updated).is_err());
+            let replacement = OsStr::new("next");
+            directory.create(replacement, line).unwrap();
+            std::fs::rename(path.join(replacement), path.join(name)).unwrap();
+            let replaced = reader.refresh(&updated).unwrap().unwrap();
+            assert_eq!(replaced.rows.len(), 1);
+            assert!(!same(&replaced.stat, &updated.stat));
+            let bounded = OsStr::new("bounded");
+            directory.create(bounded, b"").unwrap();
+            let bounded_path = path.join(bounded);
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&bounded_path)
+                .unwrap();
+            assert!(LogReader::open(&directory, bounded.to_owned()).is_ok());
+            file.set_len(MAX_FILE as u64).unwrap();
+            assert!(LogReader::open(&directory, bounded.to_owned()).is_ok());
+            file.set_len(MAX_FILE as u64 + 1).unwrap();
+            assert!(LogReader::open(&directory, bounded.to_owned()).is_err());
+            let invalid = b"{\"thread\":\"room\",\"seq\":2}";
+            directory.append(name, &replaced.stat, invalid).unwrap();
+            assert!(reader.refresh(&replaced).is_err());
+        });
+        std::fs::remove_dir_all(path).unwrap();
+        result.unwrap();
     }
 }

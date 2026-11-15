@@ -707,6 +707,7 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
             capsule_refs.insert(name.into(), id.into());
         }
     }
+    let mut closing = Vec::new();
     for (id, last) in &last {
         if *last < cutoff && !closed.contains(id) {
             items.push(object([
@@ -721,11 +722,12 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
                     ("ts", string(timestamp(epoch())?)),
                     ("detail", string(format!("gc: no event in {days}d"))),
                 ]);
-                storage::append_locked(&ctx.repo, &spine, &row)?;
+                closing.push(row);
                 closed.insert(id.clone());
             }
         }
     }
+    storage::append_many_locked(&ctx.repo, &spine, &closing)?;
     drop(_spine_guard);
     let _claims = storage::lock(&ctx.repo.join(".oms/claims.jsonl"))?;
     let _figures = storage::lock(&ctx.repo.join(".oms/figures.jsonl"))?;

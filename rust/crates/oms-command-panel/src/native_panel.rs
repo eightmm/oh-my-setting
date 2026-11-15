@@ -1031,7 +1031,7 @@ fn split_shell_words(input: &str) -> Option<Vec<String>> {
     let mut cur = String::new();
     let mut chars = input.chars().peekable();
     let mut quote: Option<char> = None;
-    let mut token = false;
+    let mut in_word = false;
     while let Some(c) = chars.next() {
         match quote {
             Some('\'') => {
@@ -1052,22 +1052,22 @@ fn split_shell_words(input: &str) -> Option<Vec<String>> {
             }
             None => match c {
                 ' ' | '\t' | '\n' => {
-                    if token {
+                    if in_word {
                         out.push(std::mem::take(&mut cur));
-                        token = false;
+                        in_word = false;
                     }
                 }
                 '\'' | '"' => {
                     quote = Some(c);
-                    token = true;
+                    in_word = true;
                 }
                 '\\' => {
                     cur.push(chars.next()?);
-                    token = true;
+                    in_word = true;
                 }
                 _ => {
                     cur.push(c);
-                    token = true;
+                    in_word = true;
                 }
             },
             _ => unreachable!(),
@@ -1076,7 +1076,7 @@ fn split_shell_words(input: &str) -> Option<Vec<String>> {
     if quote.is_some() {
         return None;
     }
-    if token {
+    if in_word {
         out.push(cur);
     }
     Some(out)

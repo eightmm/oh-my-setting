@@ -135,6 +135,14 @@ where
     if let Some(prior) = existing_idempotent(&rows, &candidate)? {
         return Ok(prior);
     }
+    prepare_candidate(&mut candidate, current)?;
+    checkpoint(interrupted)?;
+    append_row(&path, &mut candidate, false)?;
+    Ok(candidate)
+}
+
+fn prepare_candidate(candidate: &mut V, current: Option<&V>) -> Result<()> {
+    let attempt = candidate.get("attempt_id").py();
     let event_type = candidate.get("event_type").py();
     if event_type == "attempt.created" {
         if current.is_some() {
@@ -165,10 +173,41 @@ where
             check_transition(old, candidate.get("to_state"))?;
         }
     }
-    projection::validate(&candidate, 0)?;
+    projection::validate(candidate, 0)?;
+    Ok(())
+}
+
+fn append_lifecycle_batch(
+    repo: &Path,
+    candidates: Vec<V>,
+    interrupted: &AtomicBool,
+) -> Result<Vec<V>> {
+    storage::ensure_oms(repo)?;
+    let path = event_path(repo);
+    let _lock = FileLock::acquire(&path, interrupted)?;
+    let mut ledger = storage::Ledger::open(&path, true, false)?;
+    let mut history = storage::parse_rows(&path, &ledger.read()?)?;
+    let original = history.len();
+    let mut projection = projection::Projection::default();
+    projection.extend(&history)?;
+    let mut batch = Vec::new();
+    let mut results = Vec::new();
+    for mut candidate in candidates {
+        checkpoint(interrupted)?;
+        if let Some(prior) = existing_idempotent(&history, &candidate)? {
+            results.push(prior);
+            continue;
+        }
+        let attempt = candidate.get("attempt_id").py();
+        prepare_candidate(&mut candidate, select(&projection.attempts, &attempt))?;
+        projection.extend(std::slice::from_ref(&candidate))?;
+        history.push(candidate.clone());
+        results.push(candidate.clone());
+        batch.push(candidate);
+    }
     checkpoint(interrupted)?;
-    append_row(&path, &mut candidate, false)?;
-    Ok(candidate)
+    ledger.append_batch(&mut batch, &history[..original])?;
+    Ok(results)
 }
 fn check_transition(old: &V, new: &V) -> Result<()> {
     if projection::terminal(old.text().unwrap_or(""))
@@ -460,6 +499,7 @@ pub(crate) fn execute(
                 idempotency_key: args.string("idempotency-key"),
             };
             let attempt = create_attempt(repo, &request, interrupted)?;
+            let mut candidates = Vec::new();
             for spec in args.all("then") {
                 let (state, key) = then(&spec)?;
                 let row = new_event(
@@ -479,7 +519,10 @@ pub(crate) fn execute(
                         ),
                     ]),
                 )?;
-                append_lifecycle(repo, row, interrupted)?;
+                candidates.push(row);
+            }
+            if !candidates.is_empty() {
+                append_lifecycle_batch(repo, candidates, interrupted)?;
             }
             line(out, attempt)
         }
@@ -497,12 +540,14 @@ pub(crate) fn execute(
                     return Err(format!("invalid lifecycle state: {state}"));
                 }
             }
-            for (index, (state, key)) in steps.iter().enumerate() {
-                let row = append_lifecycle(
-                    repo,
-                    transition_event(&attempt, state, key, args, index == 0)?,
-                    interrupted,
-                )?;
+            let candidates = steps
+                .iter()
+                .enumerate()
+                .map(|(index, (state, key))| {
+                    transition_event(&attempt, state, key, args, index == 0)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for row in append_lifecycle_batch(repo, candidates, interrupted)? {
                 line(out, row.get("event_id").py())?;
             }
             Ok(())
@@ -696,7 +741,8 @@ fn recover(
     }
     let path = event_path(repo);
     let _lock = FileLock::acquire(&path, interrupted)?;
-    let mut rows = read_rows(&path)?;
+    let mut ledger = storage::Ledger::open(&path, true, false)?;
+    let rows = storage::parse_rows(&path, &ledger.read()?)?;
     let projection = projection::project_values(&rows)?;
     let mut current = select(&projection, &attempt)
         .cloned()
@@ -707,9 +753,10 @@ fn recover(
     {
         return Err("attempt is no longer the expected heartbeat-expired generation".into());
     }
+    let mut batch = Vec::new();
     for state in ["working", "verifying", "review"] {
         checkpoint(interrupted)?;
-        let mut row = new_event(
+        let row = new_event(
             &attempt,
             V::Num(add(&current.get("sequence").py(), "1")),
             "attempt.state_changed",
@@ -725,12 +772,12 @@ fn recover(
         )?;
         check_transition(current.get("state"), row.get("to_state"))?;
         projection::validate(&row, 0)?;
-        append_row(&path, &mut row, false)?;
-        rows.push(row);
-        current = select(&projection::project_values(&rows)?, &attempt)
-            .cloned()
-            .ok_or("attempt disappeared")?;
+        current.set("state", state);
+        current.set("sequence", row.get("seq").clone());
+        batch.push(row);
     }
+    checkpoint(interrupted)?;
+    ledger.append_batch(&mut batch, &rows)?;
     line(out, attempt)
 }
 fn follow(
@@ -744,14 +791,18 @@ fn follow(
     let interval = args.float("interval")?;
     let limit = args.number("limit")?;
     let started = Instant::now();
-    let mut offset = 0;
+    let mut tail = storage::FollowTail::default();
+    let mut initialized = false;
     let mut emitted = 0i64;
     let mut seen = after.is_empty();
     loop {
         checkpoint(interrupted)?;
-        let rows = storage::follow_rows(&event_path(repo))?;
-        let mut start = offset;
-        if !after.is_empty() && offset == 0 {
+        let (reset, rows) = tail.read(&event_path(repo))?;
+        if reset {
+            initialized = false;
+        }
+        let mut start = 0;
+        if !after.is_empty() && !initialized {
             start = rows.len();
             for (index, (row, _)) in rows.iter().enumerate() {
                 if row.get("event_id").text() == Some(&after) {
@@ -774,7 +825,7 @@ fn follow(
                 return Ok(());
             }
         }
-        offset = rows.len();
+        initialized = true;
         if timeout == 0.0 || timeout >= 0.0 && started.elapsed().as_secs_f64() >= timeout {
             return Ok(());
         }

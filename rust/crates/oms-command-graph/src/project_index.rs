@@ -14,11 +14,138 @@ pub const RELATIONS: &[&str] = &[
     "depends_on",
     "reads_env",
 ];
+type NodeId = u32;
+
+// All views share one JSON arena; indices never clone node or edge payloads.
+pub struct Nodes {
+    arena: std::sync::Arc<Value>,
+    ids: std::sync::Arc<BTreeMap<String, NodeId>>,
+}
+impl Nodes {
+    pub fn get(&self, id: &str) -> Option<&Value> {
+        self.ids
+            .get(id)
+            .and_then(|i| array(&self.arena, "nodes").get(*i as usize))
+    }
+    pub fn contains_key(&self, id: &str) -> bool {
+        self.get(id).is_some()
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.iter().map(|(id, _)| id)
+    }
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.iter().map(|(_, n)| n)
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.ids.iter().filter_map(|(id, i)| {
+            array(&self.arena, "nodes")
+                .get(*i as usize)
+                .map(|node| (id, node))
+        })
+    }
+}
+impl std::ops::Index<&str> for Nodes {
+    type Output = Value;
+    fn index(&self, id: &str) -> &Value {
+        self.get(id).expect("indexed node")
+    }
+}
+impl<'a> IntoIterator for &'a Nodes {
+    type Item = (&'a String, &'a Value);
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
+pub struct Adjacency {
+    arena: std::sync::Arc<Value>,
+    ids: std::sync::Arc<BTreeMap<String, NodeId>>,
+    offsets: Vec<usize>,
+    edges: Vec<u32>,
+}
+pub struct EdgeIter<'a> {
+    arena: &'a Value,
+    indices: std::slice::Iter<'a, u32>,
+}
+impl<'a> Iterator for EdgeIter<'a> {
+    type Item = &'a Value;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices
+            .next()
+            .map(|i| &self.arena["edges"][*i as usize])
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.indices.size_hint()
+    }
+}
+impl ExactSizeIterator for EdgeIter<'_> {}
+impl Adjacency {
+    fn new(
+        arena: std::sync::Arc<Value>,
+        ids: std::sync::Arc<BTreeMap<String, NodeId>>,
+        field: &str,
+    ) -> Self {
+        let input = array(&arena, "edges");
+        let mut offsets = vec![0; ids.values().max().map_or(1, |id| *id as usize + 2)];
+        for edge in input {
+            offsets[ids[s(edge, field)] as usize + 1] += 1;
+        }
+        for i in 1..offsets.len() {
+            offsets[i] += offsets[i - 1];
+        }
+        let mut cursor = offsets.clone();
+        let mut edges = vec![0; input.len()];
+        for (i, edge) in input.iter().enumerate() {
+            let slot = &mut cursor[ids[s(edge, field)] as usize];
+            edges[*slot] = i as u32;
+            *slot += 1;
+        }
+        for range in offsets.windows(2) {
+            let compare = |a: &u32, b: &u32| {
+                let a = &input[*a as usize];
+                let b = &input[*b as usize];
+                (s(a, "source"), s(a, "target"), s(a, "relation")).cmp(&(
+                    s(b, "source"),
+                    s(b, "target"),
+                    s(b, "relation"),
+                ))
+            };
+            let slice = &mut edges[range[0]..range[1]];
+            if !slice.is_sorted_by(|a, b| compare(a, b).is_le()) {
+                slice.sort_by(compare);
+            }
+        }
+        Self {
+            arena,
+            ids,
+            offsets,
+            edges,
+        }
+    }
+    pub fn values(&self) -> impl Iterator<Item = EdgeIter<'_>> {
+        self.ids.keys().filter_map(|id| self.get(id))
+    }
+    pub fn get(&self, id: &str) -> Option<EdgeIter<'_>> {
+        let i = *self.ids.get(id)? as usize;
+        if self.offsets[i] == self.offsets[i + 1] {
+            return None;
+        }
+        Some(EdgeIter {
+            arena: &self.arena,
+            indices: self.edges[self.offsets[i]..self.offsets[i + 1]].iter(),
+        })
+    }
+}
+
 pub struct Graph {
-    pub graph: Value,
-    pub nodes: BTreeMap<String, Value>,
-    pub out: BTreeMap<String, Vec<Value>>,
-    pub ins: BTreeMap<String, Vec<Value>>,
+    pub graph: std::sync::Arc<Value>,
+    pub nodes: Nodes,
+    pub out: Adjacency,
+    pub ins: Adjacency,
+    pub by_path: BTreeMap<String, Vec<NodeId>>,
+    pub test_paths: BTreeSet<String>,
+    terms: BTreeMap<String, Vec<(NodeId, u8)>>,
 }
 pub fn words(text: &str) -> Vec<String> {
     let mut expanded = String::new();
@@ -35,14 +162,6 @@ pub fn words(text: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .collect()
-}
-fn hits(term: &str, text: &str) -> bool {
-    words(text).iter().any(|word| {
-        word == term
-            || (term.chars().count() >= 4
-                && (word.starts_with(term)
-                    || (word.chars().count() >= 4 && term.starts_with(word))))
-    })
 }
 fn rounded(value: f64) -> f64 {
     value.round_ties_even()
@@ -61,35 +180,78 @@ impl Graph {
         if !graph["nodes"].is_array() || !graph["edges"].is_array() {
             return Err(Error::new("project graph has an invalid shape"));
         }
-        let mut nodes = BTreeMap::new();
-        let mut out: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        let mut ins: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-        for node in array(&graph, "nodes") {
+        if array(&graph, "nodes").len() > u32::MAX as usize
+            || array(&graph, "edges").len() > u32::MAX as usize
+        {
+            return Err(Error::new("project graph exceeds index capacity"));
+        }
+        let graph = std::sync::Arc::new(graph);
+        let mut ids = BTreeMap::new();
+        for (i, node) in array(&graph, "nodes").iter().enumerate() {
             if !node["id"].is_string() {
                 return Err(Error::new("project graph node has no id"));
             }
-            nodes.insert(s(node, "id").into(), node.clone());
+            ids.insert(s(node, "id").to_owned(), i as NodeId);
         }
+        let mut next = array(&graph, "nodes").len();
         for edge in array(&graph, "edges") {
-            if !edge["source"].is_string() || !edge["target"].is_string() {
-                return Err(Error::new("project graph edge has invalid endpoints"));
+            for field in ["source", "target"] {
+                if !edge[field].is_string() {
+                    return Err(Error::new("project graph edge has invalid endpoints"));
+                }
+                let label = s(edge, field);
+                if !ids.contains_key(label) {
+                    let index = u32::try_from(next)
+                        .map_err(|_| Error::new("project graph exceeds index capacity"))?;
+                    ids.insert(label.to_owned(), index);
+                    next += 1;
+                }
             }
-            out.entry(s(edge, "source").into())
-                .or_default()
-                .push(edge.clone());
-            ins.entry(s(edge, "target").into())
-                .or_default()
-                .push(edge.clone());
         }
-        for map in [&mut out, &mut ins] {
-            for edges in map.values_mut() {
-                edges.sort_by(|a, b| {
-                    (s(a, "source"), s(a, "target"), s(a, "relation")).cmp(&(
-                        s(b, "source"),
-                        s(b, "target"),
-                        s(b, "relation"),
-                    ))
-                });
+        let ids = std::sync::Arc::new(ids);
+        let nodes = Nodes {
+            arena: graph.clone(),
+            ids: ids.clone(),
+        };
+        let out = Adjacency::new(graph.clone(), ids.clone(), "source");
+        let ins = Adjacency::new(graph.clone(), ids, "target");
+        let mut by_path: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
+        let mut test_paths = BTreeSet::new();
+        let mut terms: BTreeMap<String, Vec<(NodeId, u8)>> = BTreeMap::new();
+        for (id, node) in &nodes {
+            let i = nodes.ids[id];
+            by_path
+                .entry(s(node, "path").to_owned())
+                .or_default()
+                .push(i);
+            if let Some(path) = id.strip_prefix("test:") {
+                test_paths.insert(path.to_owned());
+            }
+            let text = format!(
+                "{} {} {} {}",
+                s(node, "name"),
+                s(node, "path"),
+                s(&node["metadata"], "qualname"),
+                s(node, "summary")
+            );
+            let mut fields = BTreeMap::<String, u8>::new();
+            for term in words(&text) {
+                *fields.entry(term).or_default() |= 8;
+            }
+            for (text, mask) in [
+                (
+                    format!("{} {}", s(node, "name"), s(&node["metadata"], "qualname")),
+                    1,
+                ),
+                (s(node, "path").to_owned(), 2),
+                (s(node, "summary").to_owned(), 4),
+            ] {
+                for term in words(&super::unicode::casefold(&text)) {
+                    *fields.entry(term).or_default() |= mask;
+                }
+            }
+            for (term, mask) in fields {
+                terms.entry(term).or_default().push((i, mask));
             }
         }
         Ok(Self {
@@ -97,12 +259,22 @@ impl Graph {
             nodes,
             out,
             ins,
+            by_path,
+            test_paths,
+            terms,
         })
     }
+    pub fn path_nodes(&self, path: &str) -> impl Iterator<Item = &Value> {
+        self.by_path
+            .get(path)
+            .into_iter()
+            .flatten()
+            .map(|i| &self.graph["nodes"][*i as usize])
+    }
     pub fn is_test(&self, id: &str) -> bool {
-        self.nodes.get(id).is_some_and(|n| {
-            s(n, "kind") == "test" || self.nodes.contains_key(&format!("test:{}", s(n, "path")))
-        })
+        self.nodes
+            .get(id)
+            .is_some_and(|n| s(n, "kind") == "test" || self.test_paths.contains(s(n, "path")))
     }
     pub fn node(&self, id: &str) -> Result<&Value> {
         self.nodes
@@ -121,31 +293,53 @@ impl Graph {
                     && (include_tests || kind == "test" || !self.is_test(s(node, "id")))
             })
             .collect();
-        let weights: BTreeMap<&str, i64> = terms
-            .iter()
-            .map(|term| {
-                let frequency = candidates
-                    .iter()
-                    .filter(|node| {
-                        hits(
-                            term,
-                            &format!(
-                                "{} {} {} {}",
-                                s(node, "name"),
-                                s(node, "path"),
-                                s(&node["metadata"], "qualname"),
-                                s(node, "summary")
-                            ),
-                        )
-                    })
-                    .count();
-                (
-                    term.as_str(),
-                    rounded(1.0 + ((candidates.len() + 1) as f64 / (frequency + 1) as f64).log2())
-                        .clamp(1.0, 8.0) as i64,
-                )
-            })
-            .collect();
+        let mut eligible = vec![false; array(&self.graph, "nodes").len()];
+        for node in &candidates {
+            eligible[self.nodes.ids[s(node, "id")] as usize] = true;
+        }
+        let mut lexical = vec![0i64; eligible.len()];
+        for term in &terms {
+            let mut postings = BTreeMap::<NodeId, u8>::new();
+            let mut add = |values: &[(NodeId, u8)]| {
+                for (id, mask) in values {
+                    if eligible[*id as usize] {
+                        *postings.entry(*id).or_default() |= mask;
+                    }
+                }
+            };
+            if term.chars().count() >= 4 {
+                for (_, values) in self
+                    .terms
+                    .range(term.clone()..)
+                    .take_while(|(word, _)| word.starts_with(term))
+                {
+                    add(values);
+                }
+                for (offset, _) in term.char_indices().skip(4) {
+                    if let Some(values) = self.terms.get(&term[..offset]) {
+                        add(values);
+                    }
+                }
+            } else if let Some(values) = self.terms.get(term) {
+                add(values);
+            }
+            let frequency = postings.values().filter(|mask| **mask & 8 != 0).count();
+            let weight =
+                rounded(1.0 + ((candidates.len() + 1) as f64 / (frequency + 1) as f64).log2())
+                    .clamp(1.0, 8.0) as i64;
+            for (id, mask) in postings {
+                lexical[id as usize] += weight
+                    * if mask & 1 != 0 {
+                        8
+                    } else if mask & 2 != 0 {
+                        3
+                    } else if mask & 4 != 0 {
+                        2
+                    } else {
+                        0
+                    };
+            }
+        }
         let mut rows = vec![];
         for node in candidates {
             let name = super::unicode::casefold(s(node, "name"));
@@ -172,24 +366,7 @@ impl Graph {
             } else if !normalized.is_empty() && words(&summary).join(" ").contains(&normalized) {
                 45
             } else {
-                terms
-                    .iter()
-                    .map(|term| {
-                        let weight = weights[term.as_str()];
-                        (if hits(term, &format!("{name} {qual}")) {
-                            8 * weight
-                        } else {
-                            0
-                        })
-                        .max(if hits(term, &path) { 3 * weight } else { 0 })
-                        .max(if hits(term, &summary) {
-                            2 * weight
-                        } else {
-                            0
-                        })
-                    })
-                    .sum::<i64>()
-                    .min(90)
+                lexical[self.nodes.ids[s(node, "id")] as usize].min(90)
             };
             if s(node, "kind") == "env" && name == needle {
                 score = 103;
@@ -212,100 +389,10 @@ impl Graph {
         rows
     }
     pub fn file_api(&self, path: &str, limit: i64) -> Result<Value> {
-        let path = path.replace('\\', "/");
-        if !safe_path(&path) {
-            return Err(Error::new(
-                "project api requires a normalized repo-relative path",
-            ));
-        }
-        let matching: Vec<&Value> = self
-            .nodes
-            .values()
-            .filter(|n| s(n, "path") == path)
-            .collect();
-        if matching.is_empty() {
-            return Err(Error::new(format!(
-                "path is not indexed by the project graph: {path}"
-            )));
-        }
-        let roots: Vec<&Value> = matching
-            .iter()
-            .copied()
-            .filter(|n| ["file", "test", "document", "config", "module"].contains(&s(n, "kind")))
-            .collect();
-        let mut symbols = vec![];
-        for node in matching
-            .iter()
-            .copied()
-            .filter(|n| SYMBOLS.contains(&s(n, "kind")))
-        {
-            let qual = if s(&node["metadata"], "qualname").is_empty() {
-                s(node, "name")
-            } else {
-                s(&node["metadata"], "qualname")
-            };
-            let signature = if s(&node["metadata"], "signature").is_empty() {
-                if s(node, "kind") == "class" {
-                    format!("class {qual}")
-                } else {
-                    format!("def {qual}(...)")
-                }
-            } else {
-                s(&node["metadata"], "signature").into()
-            };
-            let mut row = json!({"id":node["id"],"kind":node["kind"],"name":node["name"],"qualname":qual,"line":line(node),"end_line":end(node),"signature":signature});
-            if !s(node, "summary").is_empty() {
-                row["summary"] = node["summary"].clone();
-            }
-            symbols.push(row);
-        }
-        symbols.sort_by(|a, b| {
-            (
-                if n(a, "line") == 0 {
-                    1 << 31
-                } else {
-                    n(a, "line")
-                },
-                s(a, "qualname"),
-                s(a, "id"),
-            )
-                .cmp(&(
-                    if n(b, "line") == 0 {
-                        1 << 31
-                    } else {
-                        n(b, "line")
-                    },
-                    s(b, "qualname"),
-                    s(b, "id"),
-                ))
-        });
-        let total = symbols.len();
-        symbols.truncate(limit.clamp(1, 2000) as usize);
-        Ok(
-            json!({"schema":1,"path":path,"language":roots.iter().map(|n|s(n,"language")).find(|s|!s.is_empty()).unwrap_or(""),"content_trust":"untrusted-source-data","summary":roots.iter().map(|n|s(n,"summary")).find(|s|!s.is_empty()),"total_symbols":total,"returned_symbols":symbols.len(),"truncated":symbols.len()<total,"symbols":symbols}),
-        )
+        ReadGraph::file_api(self, path, limit)
     }
     pub fn neighbors(&self, id: &str, relation: &str, direction: &str) -> Result<Vec<Value>> {
-        self.node(id)?;
-        let mut rows = vec![];
-        for (map, dir, field) in [(&self.out, "out", "target"), (&self.ins, "in", "source")] {
-            if direction != dir && direction != "both" {
-                continue;
-            }
-            for edge in map.get(id).into_iter().flatten() {
-                if relation.is_empty() || s(edge, "relation") == relation {
-                    rows.push(json!({"id":edge[field],"relation":edge["relation"],"direction":dir,"confidence":edge["confidence"]}));
-                }
-            }
-        }
-        rows.sort_by(|a, b| {
-            (s(a, "id"), s(a, "relation"), s(a, "direction")).cmp(&(
-                s(b, "id"),
-                s(b, "relation"),
-                s(b, "direction"),
-            ))
-        });
-        Ok(rows)
+        ReadGraph::neighbors(self, id, relation, direction)
     }
     pub fn trace(
         &self,
@@ -316,67 +403,14 @@ impl Graph {
         max_nodes: usize,
         max_edges: usize,
     ) -> Result<Value> {
-        self.node(id)?;
-        let mut seen = BTreeMap::from([(id.to_owned(), json!({"id":id,"distance":0,"via":""}))]);
-        let mut queue = VecDeque::from([id.to_owned()]);
-        let mut edges = vec![];
-        let mut omitted = 0;
-        let mut limited = false;
-        while let Some(current) = queue.pop_front() {
-            let distance = n(&seen[&current], "distance");
-            if distance as i128 >= depth.max(0) as i128 {
-                continue;
-            }
-            let candidates = if direction == "out" {
-                &self.out
-            } else {
-                &self.ins
-            };
-            for edge in candidates.get(&current).into_iter().flatten() {
-                if !confidences.is_empty() && !confidences.contains(&s(edge, "confidence")) {
-                    continue;
-                }
-                let adjacent = s(
-                    edge,
-                    if direction == "out" {
-                        "target"
-                    } else {
-                        "source"
-                    },
-                );
-                if !seen.contains_key(adjacent) && seen.len() >= max_nodes.max(1) {
-                    limited = true;
-                    omitted += 1;
-                    continue;
-                }
-                if !seen.contains_key(adjacent) {
-                    seen.insert(adjacent.into(),json!({"id":adjacent,"distance":distance+1,"via":edge["relation"],"confidence":edge["confidence"]}));
-                    queue.push_back(adjacent.into());
-                }
-                if edges.len() >= max_edges {
-                    omitted += 1;
-                    continue;
-                }
-                let mut evidence = json!({});
-                for key in ["path", "line"] {
-                    if let Some(v) = edge["evidence"].get(key) {
-                        evidence[key] = v.clone();
-                    }
-                }
-                edges.push(json!({"source":edge["source"],"target":edge["target"],"relation":edge["relation"],"confidence":edge["confidence"],"evidence":evidence}));
-            }
-        }
-        let mut rows: Vec<Value> = seen.into_values().collect();
-        rows.sort_by(|a, b| (n(a, "distance"), s(a, "id")).cmp(&(n(b, "distance"), s(b, "id"))));
-        edges.sort_by(|a, b| {
-            (s(a, "source"), s(a, "target"), s(a, "relation")).cmp(&(
-                s(b, "source"),
-                s(b, "target"),
-                s(b, "relation"),
-            ))
-        });
-        Ok(
-            json!({"schema":1,"root":id,"direction":direction,"depth":depth,"nodes":rows,"edges":edges,"limits":{"nodes":max_nodes.max(1),"edges":max_edges},"truncated":limited||omitted>0,"node_limit_reached":limited,"omitted_edges":omitted}),
+        ReadGraph::trace(
+            self,
+            id,
+            direction,
+            depth,
+            confidences,
+            max_nodes,
+            max_edges,
         )
     }
     pub fn blast(
@@ -392,11 +426,13 @@ impl Graph {
         let mut matched = BTreeSet::new();
         let mut seeds = BTreeSet::new();
         for path in paths {
-            for (id, node) in &self.nodes {
-                if s(node, "path") == path || (id == path && path.starts_with("env:")) {
-                    matched.insert(path.clone());
-                    seeds.insert(id.clone());
-                }
+            for node in self.path_nodes(path) {
+                matched.insert(path.clone());
+                seeds.insert(s(node, "id").to_owned());
+            }
+            if path.starts_with("env:") && self.nodes.contains_key(path) {
+                matched.insert(path.clone());
+                seeds.insert(path.clone());
             }
         }
         for id in seed_ids {
@@ -557,7 +593,7 @@ impl Graph {
         json!({"revision":self.graph["revision"],"counts":{"kind":kinds,"language":languages,"confidence":confidence},"hubs":hubs,"file_hubs":file_hubs,"areas":areas,"groups":groups,"assurance":{"schema":1,"basis":assurance["basis"],"note":assurance["note"],"counts":assurance["counts"],"attention":attention}})
     }
     pub fn unreferenced(&self, limit: i64, include_tests: bool) -> Value {
-        let mut rows:Vec<Value>=self.nodes.iter().filter(|(id,node)|SYMBOLS.contains(&s(node,"kind"))&&(include_tests||!self.is_test(id))&&s(node,"name")!="main"&&!(s(node,"name").starts_with("__")&&s(node,"name").ends_with("__"))&&!self.ins.get(*id).into_iter().flatten().any(|e|s(e,"relation")!="contains")).map(|(id,n)|json!({"id":id,"kind":n["kind"],"path":n["path"],"line":n["metadata"]["line"]})).collect();
+        let mut rows:Vec<Value>=self.nodes.iter().filter(|(id,node)|SYMBOLS.contains(&s(node,"kind"))&&(include_tests||!self.is_test(id))&&s(node,"name")!="main"&&!(s(node,"name").starts_with("__")&&s(node,"name").ends_with("__"))&&!self.ins.get(id).into_iter().flatten().any(|e|s(e,"relation")!="contains")).map(|(id,n)|json!({"id":id,"kind":n["kind"],"path":n["path"],"line":n["metadata"]["line"]})).collect();
         rows.sort_by(|a, b| {
             (s(a, "path"), n(a, "line"), s(a, "id")).cmp(&(s(b, "path"), n(b, "line"), s(b, "id")))
         });
@@ -599,6 +635,196 @@ impl Graph {
         ranked: bool,
         cancel: &AtomicBool,
     ) -> Result<Value> {
+        ReadGraph::search(self, repo, query, limit, ranked, cancel)
+    }
+    pub fn symbol(
+        &self,
+        repo: &Path,
+        name: &str,
+        limit: i64,
+        cancel: &AtomicBool,
+    ) -> Result<Value> {
+        ReadGraph::symbol(self, repo, name, limit, cancel)
+    }
+}
+// Query algorithms are shared by the compact graph and the SQLite projection.
+// SQLite supplies only the rows required by each indexed lookup.
+pub(super) trait ReadGraph {
+    fn lookup(&self, id: &str) -> Result<Option<Value>>;
+    fn path_rows(&self, path: &str) -> Result<Vec<Value>>;
+    fn root_rows(&self) -> Result<Vec<Value>>;
+    fn symbol_rows(&self, name: &str, fold: bool) -> Result<Vec<Value>>;
+    fn adjacent(&self, id: &str, direction: &str) -> Result<Vec<Value>>;
+    fn test(&self, id: &str) -> Result<bool>;
+    fn require(&self, id: &str) -> Result<()> {
+        if self.lookup(id)?.is_some() {
+            Ok(())
+        } else {
+            Err(Error::new(format!("unknown graph node: {id}")))
+        }
+    }
+    fn file_api(&self, path: &str, limit: i64) -> Result<Value> {
+        let path = path.replace('\\', "/");
+        if !safe_path(&path) {
+            return Err(Error::new(
+                "project api requires a normalized repo-relative path",
+            ));
+        }
+        let matching = self.path_rows(&path)?;
+        if matching.is_empty() {
+            return Err(Error::new(format!(
+                "path is not indexed by the project graph: {path}"
+            )));
+        }
+        let roots: Vec<&Value> = matching
+            .iter()
+            .filter(|n| ["file", "test", "document", "config", "module"].contains(&s(n, "kind")))
+            .collect();
+        let mut symbols = vec![];
+        for node in matching.iter().filter(|n| SYMBOLS.contains(&s(n, "kind"))) {
+            let qual = if s(&node["metadata"], "qualname").is_empty() {
+                s(node, "name")
+            } else {
+                s(&node["metadata"], "qualname")
+            };
+            let signature = if s(&node["metadata"], "signature").is_empty() {
+                if s(node, "kind") == "class" {
+                    format!("class {qual}")
+                } else {
+                    format!("def {qual}(...)")
+                }
+            } else {
+                s(&node["metadata"], "signature").into()
+            };
+            let mut row = json!({"id":node["id"],"kind":node["kind"],"name":node["name"],"qualname":qual,"line":line(node),"end_line":end(node),"signature":signature});
+            if !s(node, "summary").is_empty() {
+                row["summary"] = node["summary"].clone();
+            }
+            symbols.push(row);
+        }
+        symbols.sort_by(|a, b| {
+            (
+                if n(a, "line") == 0 {
+                    1 << 31
+                } else {
+                    n(a, "line")
+                },
+                s(a, "qualname"),
+                s(a, "id"),
+            )
+                .cmp(&(
+                    if n(b, "line") == 0 {
+                        1 << 31
+                    } else {
+                        n(b, "line")
+                    },
+                    s(b, "qualname"),
+                    s(b, "id"),
+                ))
+        });
+        let total = symbols.len();
+        symbols.truncate(limit.clamp(1, 2000) as usize);
+        Ok(
+            json!({"schema":1,"path":path,"language":roots.iter().map(|n|s(n,"language")).find(|s|!s.is_empty()).unwrap_or(""),"content_trust":"untrusted-source-data","summary":roots.iter().map(|n|s(n,"summary")).find(|s|!s.is_empty()),"total_symbols":total,"returned_symbols":symbols.len(),"truncated":symbols.len()<total,"symbols":symbols}),
+        )
+    }
+    fn neighbors(&self, id: &str, relation: &str, direction: &str) -> Result<Vec<Value>> {
+        self.require(id)?;
+        let mut rows = vec![];
+        for (dir, field) in [("out", "target"), ("in", "source")] {
+            if direction != dir && direction != "both" {
+                continue;
+            }
+            for edge in &self.adjacent(id, dir)? {
+                if relation.is_empty() || s(edge, "relation") == relation {
+                    rows.push(json!({"id":edge[field],"relation":edge["relation"],"direction":dir,"confidence":edge["confidence"]}));
+                }
+            }
+        }
+        rows.sort_by(|a, b| {
+            (s(a, "id"), s(a, "relation"), s(a, "direction")).cmp(&(
+                s(b, "id"),
+                s(b, "relation"),
+                s(b, "direction"),
+            ))
+        });
+        Ok(rows)
+    }
+    fn trace(
+        &self,
+        id: &str,
+        direction: &str,
+        depth: i64,
+        confidences: &[&str],
+        max_nodes: usize,
+        max_edges: usize,
+    ) -> Result<Value> {
+        self.require(id)?;
+        let mut seen = BTreeMap::from([(id.to_owned(), json!({"id":id,"distance":0,"via":""}))]);
+        let mut queue = VecDeque::from([id.to_owned()]);
+        let mut edges = vec![];
+        let mut omitted = 0;
+        let mut limited = false;
+        while let Some(current) = queue.pop_front() {
+            let distance = n(&seen[&current], "distance");
+            if distance as i128 >= depth.max(0) as i128 {
+                continue;
+            }
+            for edge in &self.adjacent(&current, if direction == "out" { "out" } else { "in" })? {
+                if !confidences.is_empty() && !confidences.contains(&s(edge, "confidence")) {
+                    continue;
+                }
+                let adjacent = s(
+                    edge,
+                    if direction == "out" {
+                        "target"
+                    } else {
+                        "source"
+                    },
+                );
+                if !seen.contains_key(adjacent) && seen.len() >= max_nodes.max(1) {
+                    limited = true;
+                    omitted += 1;
+                    continue;
+                }
+                if !seen.contains_key(adjacent) {
+                    seen.insert(adjacent.into(),json!({"id":adjacent,"distance":distance+1,"via":edge["relation"],"confidence":edge["confidence"]}));
+                    queue.push_back(adjacent.into());
+                }
+                if edges.len() >= max_edges {
+                    omitted += 1;
+                    continue;
+                }
+                let mut evidence = json!({});
+                for key in ["path", "line"] {
+                    if let Some(v) = edge["evidence"].get(key) {
+                        evidence[key] = v.clone();
+                    }
+                }
+                edges.push(json!({"source":edge["source"],"target":edge["target"],"relation":edge["relation"],"confidence":edge["confidence"],"evidence":evidence}));
+            }
+        }
+        let mut rows: Vec<Value> = seen.into_values().collect();
+        rows.sort_by(|a, b| (n(a, "distance"), s(a, "id")).cmp(&(n(b, "distance"), s(b, "id"))));
+        edges.sort_by(|a, b| {
+            (s(a, "source"), s(a, "target"), s(a, "relation")).cmp(&(
+                s(b, "source"),
+                s(b, "target"),
+                s(b, "relation"),
+            ))
+        });
+        Ok(
+            json!({"schema":1,"root":id,"direction":direction,"depth":depth,"nodes":rows,"edges":edges,"limits":{"nodes":max_nodes.max(1),"edges":max_edges},"truncated":limited||omitted>0,"node_limit_reached":limited,"omitted_edges":omitted}),
+        )
+    }
+    fn search(
+        &self,
+        repo: &Path,
+        query: &str,
+        limit: i64,
+        ranked: bool,
+        cancel: &AtomicBool,
+    ) -> Result<Value> {
         if query.is_empty() || query.len() > 1024 || ranked && query.trim().is_empty() {
             return Err(Error::new(if ranked {
                 "project search --ranked requires a non-empty query of at most 1024 bytes"
@@ -617,13 +843,9 @@ impl Graph {
                 "project search --ranked found no word in the query",
             ));
         }
-        let roots: BTreeMap<&str, &Value> = self
-            .nodes
-            .values()
-            .filter(|node| {
-                ["file", "test", "document", "config"].contains(&s(node, "kind"))
-                    && !s(node, "path").is_empty()
-            })
+        let root_nodes = self.root_rows()?;
+        let roots: BTreeMap<&str, &Value> = root_nodes
+            .iter()
             .map(|node| (s(node, "path"), node))
             .collect();
         let root =
@@ -655,10 +877,10 @@ impl Graph {
                 continue;
             }
             searched += 1;
-            let symbols: Vec<&Value> = self
-                .nodes
-                .values()
-                .filter(|n| s(n, "path") == *path && SYMBOLS.contains(&s(n, "kind")))
+            let path_nodes = self.path_rows(path)?;
+            let symbols: Vec<&Value> = path_nodes
+                .iter()
+                .filter(|n| SYMBOLS.contains(&s(n, "kind")))
                 .collect();
             for (offset, text) in String::from_utf8_lossy(&data).lines().enumerate() {
                 let number = offset as u64 + 1;
@@ -698,7 +920,12 @@ impl Graph {
                         continue;
                     }
                     captured += 1;
-                    let group=groups.entry(s(owner,"id").into()).or_insert_with(||json!({"id":owner["id"],"kind":owner["kind"],"path":owner["path"],"name":owner["name"],"incoming":self.ins.get(s(owner,"id")).map_or(0,Vec::len),"hits":[]}));
+                    let incoming = if groups.contains_key(s(owner, "id")) {
+                        0
+                    } else {
+                        self.adjacent(s(owner, "id"), "in")?.len()
+                    };
+                    let group=groups.entry(s(owner,"id").into()).or_insert_with(||json!({"id":owner["id"],"kind":owner["kind"],"path":owner["path"],"name":owner["name"],"incoming":incoming,"hits":[]}));
                     let rows = group["hits"].as_array_mut().unwrap();
                     if rows.len() < 8 {
                         rows.push(json!({"line":number,"text":scrub(&text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(240).collect::<String>())}));
@@ -781,13 +1008,7 @@ impl Graph {
             json!({"schema":1,"query":query,"match":"literal-case-insensitive","content_trust":"untrusted-source-data","indexed_files":roots.len(),"searched_files":searched,"stale_files":stale,"skipped_files":skipped,"total_hits":total,"returned_hits":returned,"truncated":returned<total,"groups":rows}),
         )
     }
-    pub fn symbol(
-        &self,
-        repo: &Path,
-        name: &str,
-        limit: i64,
-        cancel: &AtomicBool,
-    ) -> Result<Value> {
+    fn symbol(&self, repo: &Path, name: &str, limit: i64, cancel: &AtomicBool) -> Result<Value> {
         let name = name.trim();
         if name.is_empty() || name.len() > 512 {
             return Err(Error::new(
@@ -797,38 +1018,21 @@ impl Graph {
         let mut found = vec![];
         let mut mode = "none";
         if let Some(node) = self
-            .nodes
-            .get(name)
+            .lookup(name)?
             .filter(|n| SYMBOLS.contains(&s(n, "kind")))
         {
             found.push(node);
             mode = "id";
         } else {
             for (label, fold) in [("exact", false), ("case-insensitive", true)] {
-                found = self
-                    .nodes
-                    .values()
-                    .filter(|n| {
-                        SYMBOLS.contains(&s(n, "kind"))
-                            && [s(n, "name"), s(&n["metadata"], "qualname")]
-                                .iter()
-                                .any(|s| {
-                                    if fold {
-                                        super::unicode::casefold(s)
-                                            == super::unicode::casefold(name)
-                                    } else {
-                                        *s == name
-                                    }
-                                })
-                    })
-                    .collect();
+                found = self.symbol_rows(name, fold)?;
                 if !found.is_empty() {
                     mode = label;
                     break;
                 }
             }
         }
-        found.sort_by_key(|n| (s(n, "path"), s(n, "id")));
+        found.sort_by(|a, b| (s(a, "path"), s(a, "id")).cmp(&(s(b, "path"), s(b, "id"))));
         let mut omitted = json!({"definitions":found.len().saturating_sub(20)});
         found.truncate(20);
         let mut definitions = vec![];
@@ -849,15 +1053,16 @@ impl Graph {
                 row["path"] = node["path"].clone();
                 definitions.push(row);
             }
-            for edge in self.ins.get(s(node, "id")).into_iter().flatten() {
+            let incoming = self.adjacent(s(node, "id"), "in")?;
+            for edge in &incoming {
                 if ["contains", "defines"].contains(&s(edge, "relation")) {
                     continue;
                 }
                 let key = (
-                    s(edge, "source"),
-                    s(node, "id"),
-                    s(edge, "relation"),
-                    s(edge, "confidence"),
+                    s(edge, "source").to_owned(),
+                    s(node, "id").to_owned(),
+                    s(edge, "relation").to_owned(),
+                    s(edge, "confidence").to_owned(),
                     n(&edge["evidence"], "line"),
                 );
                 if !seen.insert(key) {
@@ -869,7 +1074,7 @@ impl Graph {
                 let row = json!({"source":edge["source"],"target":node["id"],"relation":edge["relation"],"confidence":edge["confidence"],"path":path,"line":line});
                 if s(edge, "confidence") != "EXTRACTED" {
                     inferred.push(row);
-                } else if self.is_test(s(edge, "source")) {
+                } else if self.test(s(edge, "source"))? {
                     tests.push(row);
                 } else {
                     callers.push(row);
@@ -949,6 +1154,61 @@ impl Graph {
         )
     }
 }
+
+impl ReadGraph for Graph {
+    fn lookup(&self, id: &str) -> Result<Option<Value>> {
+        Ok(self.nodes.get(id).cloned())
+    }
+    fn path_rows(&self, path: &str) -> Result<Vec<Value>> {
+        Ok(self.path_nodes(path).cloned().collect())
+    }
+    fn root_rows(&self) -> Result<Vec<Value>> {
+        Ok(self
+            .nodes
+            .values()
+            .filter(|n| {
+                ["file", "test", "document", "config"].contains(&s(n, "kind"))
+                    && !s(n, "path").is_empty()
+            })
+            .cloned()
+            .collect())
+    }
+    fn symbol_rows(&self, name: &str, fold: bool) -> Result<Vec<Value>> {
+        Ok(self
+            .nodes
+            .values()
+            .filter(|n| {
+                SYMBOLS.contains(&s(n, "kind"))
+                    && [s(n, "name"), s(&n["metadata"], "qualname")]
+                        .iter()
+                        .any(|v| {
+                            if fold {
+                                super::unicode::casefold(v) == super::unicode::casefold(name)
+                            } else {
+                                *v == name
+                            }
+                        })
+            })
+            .cloned()
+            .collect())
+    }
+    fn adjacent(&self, id: &str, direction: &str) -> Result<Vec<Value>> {
+        Ok((if direction == "out" {
+            &self.out
+        } else {
+            &self.ins
+        })
+        .get(id)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect())
+    }
+    fn test(&self, id: &str) -> Result<bool> {
+        Ok(self.is_test(id))
+    }
+}
+
 fn counts_block(title: &str, value: &Value) -> Vec<String> {
     let mut rows = value
         .as_object()

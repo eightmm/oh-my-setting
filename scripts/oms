@@ -80,95 +80,27 @@ if [ -f "$SCRIPTS_DIR/lib/platform.sh" ]; then
   . "$SCRIPTS_DIR/lib/platform.sh"
   oms_bash_enter
 fi
-# Native-first: with a non-empty tool name and a native payload present the
-# verified binary owns routing for every tool (--oms-select exits 75 for tools
-# it does not own, which falls through to the shell dispatcher below, so no
-# wrapper re-enters itself). Wait: recovery commands (`doctor`, `uninstall`)
-# must still reach their shell fallback if the cached native payload is
-# missing or corrupt instead of deadlocking `oms doctor --repair`.
-if [ -n "${1:-}" ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; }; then
-  native_skip_corrupt=0
-  case "${1:-}" in doctor|uninstall) native_skip_corrupt=1 ;; esac
-  for native_dir in "$ROOT/rust" "$ROOT/rust/target" "$ROOT/rust/target/oms-native"; do
-    if [ -L "$native_dir" ] || [ ! -d "$native_dir" ]; then
-      echo "error: foreign native payload directory: $native_dir" >&2
-      exit 2
-    fi
-  done
-  native_revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$ROOT" rev-parse --verify HEAD 2>/dev/null)" || {
-    echo 'error: cannot determine native payload revision' >&2
-    exit 2
-  }
-  case "$native_revision" in *[!0-9a-f]*|'') echo 'error: invalid native payload revision' >&2; exit 2 ;; esac
-  [ "${#native_revision}" = 40 ] || { echo 'error: invalid native payload revision' >&2; exit 2; }
-  native_binary="$ROOT/rust/target/oms-native/$native_revision/oms"
-  if [ -e "${native_binary%/*}" ] || [ -L "${native_binary%/*}" ]; then
-  if [ -L "${native_binary%/*}" ] || [ ! -d "${native_binary%/*}" ] || [ -L "$native_binary" ]; then
-    echo "error: foreign native payload entry: ${native_binary%/*}" >&2
-    exit 2
-  fi
-  native_ready=1
-  if [ ! -f "$native_binary" ] || [ ! -x "$native_binary" ]; then
-    if [ "$native_skip_corrupt" -eq 1 ]; then
-      native_ready=0
-    else
+# Native-first: with a native payload present the verified binary owns routing
+# for every tool (--oms-select exits 75 for tools it does not own, which falls
+# through to the shell dispatcher below, so no wrapper re-enters itself). Bare
+# `oms` on a terminal asks for the panel; without a terminal it prints usage in
+# shell. Recovery commands (`doctor`, `uninstall`) reach their shell fallback
+# when the cached payload is missing, foreign or corrupt instead of deadlocking
+# `oms doctor --repair`; every other tool refuses an unverifiable payload.
+native_outcome=absent
+if [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; then
+  native_args=("$@")
+  if [ "$#" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then native_args=(panel); fi
+  if [ "${#native_args[@]}" -gt 0 ] && [ -n "${native_args[0]}" ]; then
+    native_policy=strict
+    case "${native_args[0]}" in doctor|uninstall) native_policy=recover ;; esac
+    if declare -F oms_native_route >/dev/null; then
+      oms_native_route "$native_policy" "$ROOT" "${native_args[@]}" || exit
+      native_outcome="$OMS_NATIVE_OUTCOME"
+    elif [ "$native_policy" = strict ]; then
       echo 'error: native payload unavailable; run oms doctor --repair' >&2
       exit 2
     fi
-  fi
-  # The staging writer binds this fixed-size checksum to the reviewed artifact.
-  # Verify before either private invocation; self-validation cannot authenticate
-  # an executable that has already started. Same-UID code replacement is outside
-  # the checkout's trust boundary.
-  if [ "$native_ready" -eq 1 ]; then
-    native_checksum="${native_binary%/*}/oms.sha256"
-    native_expected=""
-    if [ -L "$native_checksum" ]; then
-      echo "error: foreign native checksum: $native_checksum" >&2
-      exit 2
-    fi
-    if [ ! -f "$native_checksum" ] ||
-       [ "$(LC_ALL=C wc -c < "$native_checksum")" -ne 65 ] ||
-       ! IFS= read -r native_expected < "$native_checksum"; then
-      if [ "$native_skip_corrupt" -eq 1 ]; then
-        native_ready=0
-      else
-        echo 'error: native executable checksum unavailable; run oms doctor --repair' >&2
-        exit 2
-      fi
-    fi
-  fi
-  if [ "$native_ready" -eq 1 ]; then
-    case "$native_expected" in *[!0-9a-f]*|'')
-      if [ "$native_skip_corrupt" -eq 1 ]; then
-        native_ready=0
-      else
-        echo 'error: invalid native executable checksum' >&2
-        exit 2
-      fi
-      ;;
-    esac
-  fi
-  if [ "$native_ready" -eq 1 ]; then
-    if [ "${#native_expected}" -ne 64 ] ||
-       ! native_actual="$(oms_sha256_file "$native_binary")" ||
-       [ "$native_actual" != "$native_expected" ]; then
-      if [ "$native_skip_corrupt" -eq 1 ]; then
-        native_ready=0
-      else
-        echo 'error: native executable checksum mismatch; run oms doctor --repair' >&2
-        exit 2
-      fi
-    fi
-  fi
-  if [ "$native_ready" -eq 1 ]; then
-    native_status=0
-    "$native_binary" --oms-select "$ROOT" "$native_revision" -- "$@" || native_status=$?
-    if [ "$native_status" = 0 ]; then
-      exec "$native_binary" --oms-dispatch "$ROOT" "$native_revision" -- "$@"
-    fi
-    [ "$native_status" = 75 ] || exit "$native_status"
-  fi
   fi
 fi
 if [ -f "$SCRIPTS_DIR/lib/python-runtime.sh" ]; then
@@ -480,6 +412,13 @@ if [ "$TOOL" = panel ] || [ "$TOOL" = harness ]; then
   # Interactive entrypoints own the caller PID so signals reach their cleanup.
   exec bash "$TARGET" "$@"
 fi
+# Native already declined this wrapper verb, or cannot be trusted for a
+# recovery verb: the wrapper must not select again.
+case "$native_outcome:$TOOL" in
+  declined:tick|declined:update|declined:status|declined:snapshot|declined:auto-update|declined:install-profile|declined:doctor|declined:uninstall|unverified:doctor|unverified:uninstall)
+    export OMS_NATIVE_DISPATCHED=1
+    ;;
+esac
 RC=0
 bash "$TARGET" "$@" || RC=$?
 if [ "$RC" -eq 2 ]; then

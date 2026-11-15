@@ -5,6 +5,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParseResult {
@@ -13,8 +14,21 @@ pub struct ParseResult {
     pub refs: Vec<Value>,
 }
 
-fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("static expression")
+fn re(pattern: &str) -> Arc<Regex> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Regex>>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(compiled) = cache.get(pattern) {
+        return Arc::clone(compiled);
+    }
+    let compiled = Arc::new(Regex::new(pattern).expect("static expression"));
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(pattern.to_owned(), Arc::clone(&compiled));
+    compiled
 }
 fn node_id(kind: &str, path: &str, name: &str) -> String {
     let normalized = path.replace('\\', "/");

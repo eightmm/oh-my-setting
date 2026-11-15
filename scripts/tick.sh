@@ -11,6 +11,13 @@
 # resumes the autopilot contract the user already approved. `install` wires an hourly
 # user-level timer (systemd, cron fallback) so sessions start on a swept tree.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Native-first entry (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route strict "$ROOT" tick "$@" || exit
+fi
 # shellcheck source=scripts/lib/platform.sh
 . "$ROOT/scripts/lib/platform.sh"
 oms_bash_enter

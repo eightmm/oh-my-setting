@@ -188,3 +188,133 @@ oms_bash_enter() {
   export PATH
   hash -r 2>/dev/null || true
 }
+
+# Native-first routing shared by the `oms` frontdoor and every shell entry
+# wrapper (provider/Git hooks, lifecycle commands, install.sh). Wrappers test
+# for "$ROOT/rust/target/oms-native" with builtins before sourcing this file,
+# so a checkout without a staged payload spawns nothing for routing.
+#
+# Recursion guard: OMS_NATIVE_DISPATCHED=1 means shell fallback routing for this
+# process tree is already decided. It is exported ONLY by a shell lifecycle
+# transaction (install, update, doctor, uninstall, auto-update) that continues
+# in shell so its sub-steps stay in one implementation, and by the frontdoor for
+# a wrapper verb native already declined — NOT on the native dispatch exec, so
+# child hooks or subcommands spawned by native oms still enter native routing.
+# Wrappers test it, as exactly 1, before sourcing this file; the frontdoor does
+# not, because --oms-select exits 75 for verbs native does not own and native
+# never re-enters the frontdoor for a verb it owns.
+#
+# The staged executable is authenticated before either private invocation: it
+# must be a regular, non-symlinked, executable file in a non-symlinked entry
+# directory owned by the effective user and not world-writable, matching the
+# fixed-size oms.sha256 written by the staging step. Hashing uses
+# oms_sha256_file (sha256sum, BSD shasum or openssl), only host digest tools. Same-UID
+# replacement stays outside this boundary.
+
+# oms_native_resolve ROOT: on success sets OMS_NATIVE_BINARY, OMS_NATIVE_ROOT
+# and OMS_NATIVE_REVISION and returns 0. Returns 1 when no payload is staged for
+# the current revision, 2 when one is present but unverifiable; the reason is
+# left in OMS_NATIVE_ERROR. Never exits and never executes the payload.
+oms_native_resolve() {
+  local root cache dir entry binary checksum expected actual revision size
+  OMS_NATIVE_BINARY="" OMS_NATIVE_ROOT="" OMS_NATIVE_REVISION="" OMS_NATIVE_ERROR=""
+  root="$(cd "$1" 2>/dev/null && pwd -P)" || { OMS_NATIVE_ERROR="cannot resolve native payload root: $1"; return 2; }
+  cache="$root/rust/target/oms-native"
+  [ -e "$cache" ] || [ -L "$cache" ] || return 1
+  for dir in "$root/rust" "$root/rust/target" "$cache"; do
+    if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+      OMS_NATIVE_ERROR="foreign native payload directory: $dir"
+      return 2
+    fi
+  done
+  revision="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX; git -C "$root" rev-parse --verify HEAD 2>/dev/null)" || {
+    OMS_NATIVE_ERROR='cannot determine native payload revision'
+    return 2
+  }
+  case "$revision" in *[!0-9a-f]*|'') OMS_NATIVE_ERROR='invalid native payload revision'; return 2 ;; esac
+  [ "${#revision}" = 40 ] || { OMS_NATIVE_ERROR='invalid native payload revision'; return 2; }
+  entry="$cache/$revision"
+  [ -e "$entry" ] || [ -L "$entry" ] || return 1
+  binary="$entry/oms"
+  checksum="$entry/oms.sha256"
+  if [ -L "$entry" ] || [ ! -d "$entry" ] || [ -L "$binary" ]; then
+    OMS_NATIVE_ERROR="foreign native payload entry: $entry"
+    return 2
+  fi
+  if [ -L "$checksum" ]; then
+    OMS_NATIVE_ERROR="foreign native checksum: $checksum"
+    return 2
+  fi
+  if [ ! -f "$binary" ] || [ ! -x "$binary" ]; then
+    OMS_NATIVE_ERROR='native payload unavailable; run oms doctor --repair'
+    return 2
+  fi
+  if [ ! -O "$entry" ] || [ ! -O "$binary" ] ||
+     [ -n "$(find "$entry" "$binary" -prune -perm -0002 -print 2>/dev/null)" ]; then
+    OMS_NATIVE_ERROR="untrusted native payload ownership: $entry"
+    return 2
+  fi
+  size=""
+  [ ! -f "$checksum" ] || size="$(LC_ALL=C wc -c < "$checksum" 2>/dev/null)" || size=""
+  size="${size//[[:space:]]/}"
+  expected=""
+  if [ "$size" != 65 ] || ! IFS= read -r expected < "$checksum"; then
+    OMS_NATIVE_ERROR='native executable checksum unavailable; run oms doctor --repair'
+    return 2
+  fi
+  case "$expected" in *[!0-9a-f]*|'') OMS_NATIVE_ERROR='invalid native executable checksum'; return 2 ;; esac
+  if [ "${#expected}" -ne 64 ] ||
+     ! actual="$(oms_sha256_file "$binary" 2>/dev/null)" ||
+     [ "$actual" != "$expected" ]; then
+    OMS_NATIVE_ERROR='native executable checksum mismatch; run oms doctor --repair'
+    return 2
+  fi
+  OMS_NATIVE_BINARY="$binary" OMS_NATIVE_ROOT="$root" OMS_NATIVE_REVISION="$revision"
+}
+
+# oms_native_route POLICY ROOT VERB [ARG...]
+# Execs the verified native `oms VERB ARG...` with stdin, stdout, stderr and
+# the exit status untouched when the payload selects VERB. Returns 0 when the
+# caller must run its shell body: no payload for this revision, --oms-select
+# declined (75), or a recovering POLICY met an unverifiable payload;
+# OMS_NATIVE_OUTCOME names which (absent, declined, unverified). Any other
+# nonzero return is the caller's exit status.
+#   strict   unverifiable payload: print why on stderr, return 2; a failing
+#            select returns its status
+#   recover  repair/removal paths (doctor, uninstall, install): never block on
+#            an unverifiable payload, never execute one
+#   hook     provider/Git hooks: like recover but silent, so a corrupt cache
+#            cannot deny the tool call that would repair it
+# shellcheck disable=SC2034 # OMS_NATIVE_OUTCOME is the caller's result.
+oms_native_route() {
+  local policy="$1" root="$2" status=0
+  shift 2
+  OMS_NATIVE_OUTCOME=absent
+  oms_native_resolve "$root" || status=$?
+  case "$status" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      OMS_NATIVE_OUTCOME=unverified
+      case "$policy" in
+        strict) echo "error: $OMS_NATIVE_ERROR" >&2; return 2 ;;
+        recover) echo "warning: $OMS_NATIVE_ERROR; continuing with the shell implementation" >&2; return 0 ;;
+        *) return 0 ;;
+      esac
+      ;;
+  esac
+  if [ "$policy" = hook ]; then
+    "$OMS_NATIVE_BINARY" --oms-select "$OMS_NATIVE_ROOT" "$OMS_NATIVE_REVISION" -- "$@" </dev/null >/dev/null 2>&1 || status=$?
+  else
+    "$OMS_NATIVE_BINARY" --oms-select "$OMS_NATIVE_ROOT" "$OMS_NATIVE_REVISION" -- "$@" </dev/null >/dev/null || status=$?
+  fi
+  case "$status" in
+    0) exec "$OMS_NATIVE_BINARY" --oms-dispatch "$OMS_NATIVE_ROOT" "$OMS_NATIVE_REVISION" -- "$@" ;;
+    75) OMS_NATIVE_OUTCOME=declined; return 0 ;;
+  esac
+  OMS_NATIVE_OUTCOME=unverified
+  # An interrupted select is the caller's interruption, whatever the policy.
+  [ "$status" -lt 128 ] || return "$status"
+  [ "$policy" = strict ] && return "$status"
+  return 0
+}

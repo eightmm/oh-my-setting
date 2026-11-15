@@ -197,14 +197,82 @@ pub fn array<'a>(v: &'a Value, key: &str) -> &'a [Value] {
         .unwrap_or(&[])
 }
 pub fn bytes(value: &Value, pretty: bool) -> Result<Vec<u8>> {
-    let value =
-        oms_command_operations::value::V::parse(&serde_json::to_vec(value)?).map_err(Error::new)?;
-    let mut data = value.json(pretty).map_err(Error::new)?;
-    if pretty && data.last() == Some(&b'\n') {
-        data.pop();
+    enum Frame<'a> {
+        Value(&'a Value, usize),
+        Array(std::slice::Iter<'a, Value>, usize, bool),
+        Object(std::vec::IntoIter<(&'a String, &'a Value)>, usize, bool),
     }
-    data.push(b'\n');
-    Ok(data)
+    fn separator(out: &mut Vec<u8>, pretty: bool, depth: usize, first: bool) {
+        if !first {
+            out.push(b',');
+        }
+        if pretty {
+            out.push(b'\n');
+            out.resize(out.len() + depth * 2, b' ');
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![Frame::Value(value, 0)];
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Value(value, depth) => match value {
+                Value::Array(items) => {
+                    if depth >= 1024 {
+                        return Err(Error::new("JSON depth limit"));
+                    }
+                    out.push(b'[');
+                    stack.push(Frame::Array(items.iter(), depth, true));
+                }
+                Value::Object(items) => {
+                    if depth >= 1024 {
+                        return Err(Error::new("JSON depth limit"));
+                    }
+                    let mut fields: Vec<_> = items.iter().collect();
+                    fields.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    out.push(b'{');
+                    stack.push(Frame::Object(fields.into_iter(), depth, true));
+                }
+                Value::Number(number) if number.is_f64() => out.extend(
+                    oms_json::agent_event_json_bytes(&oms_json::Value::Float(
+                        number.as_f64().unwrap(),
+                    ))
+                    .map_err(|e| Error::new(e.to_string()))?,
+                ),
+                _ => serde_json::to_writer(&mut out, value)?,
+            },
+            Frame::Array(mut items, depth, first) => {
+                if let Some(item) = items.next() {
+                    separator(&mut out, pretty, depth + 1, first);
+                    stack.push(Frame::Array(items, depth, false));
+                    stack.push(Frame::Value(item, depth + 1));
+                } else {
+                    if pretty && !first {
+                        separator(&mut out, true, depth, true);
+                    }
+                    out.push(b']');
+                }
+            }
+            Frame::Object(mut items, depth, first) => {
+                if let Some((key, item)) = items.next() {
+                    separator(&mut out, pretty, depth + 1, first);
+                    serde_json::to_writer(&mut out, key)?;
+                    out.push(b':');
+                    if pretty {
+                        out.push(b' ');
+                    }
+                    stack.push(Frame::Object(items, depth, false));
+                    stack.push(Frame::Value(item, depth + 1));
+                } else {
+                    if pretty && !first {
+                        separator(&mut out, true, depth, true);
+                    }
+                    out.push(b'}');
+                }
+            }
+        }
+    }
+    out.push(b'\n');
+    Ok(out)
 }
 pub fn read_json(path: &Path, limit: usize) -> Result<Option<Value>> {
     no_symlinks(path)?;
@@ -275,6 +343,13 @@ pub fn write_json(path: &Path, value: &Value) -> Result<()> {
     write(path, &bytes(value, false)?)
 }
 pub fn glob(pattern: &str, value: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(compiled) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(pattern) {
+        return compiled.as_ref().is_some_and(|r| r.is_match(value));
+    }
     let mut p = String::from("(?s)^");
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
@@ -303,7 +378,14 @@ pub fn glob(pattern: &str, value: &str) -> bool {
         }
     }
     p.push('$');
-    regex::Regex::new(&p).is_ok_and(|r| r.is_match(value))
+    let compiled = regex::Regex::new(&p).ok();
+    let matched = compiled.as_ref().is_some_and(|r| r.is_match(value));
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 256 {
+        cache.clear();
+    }
+    cache.insert(pattern.to_owned(), compiled);
+    matched
 }
 pub fn safe_path(path: &str) -> bool {
     !path.is_empty()

@@ -211,7 +211,7 @@ pub fn report_with_helper(
             continue;
         }
         let hunks = super::cases::hunks(repo, base, head, path, cancel);
-        let indexed = graph.nodes.values().any(|node| s(node, "path") == path);
+        let indexed = graph.by_path.contains_key(path);
         let before = super::cases::revision(repo, base, path, cancel);
         let after = super::cases::revision(repo, head, path, cancel);
         if !indexed {
@@ -276,7 +276,7 @@ pub fn report_with_helper(
             .all(|path| runner_paths.contains(path.as_str()));
     let filtered;
     let index = if cut {
-        let mut value = graph.graph.clone();
+        let mut value = (*graph.graph).clone();
         value["edges"] = json!(
             array(&graph.graph, "edges")
                 .iter()
@@ -426,7 +426,7 @@ pub fn report_with_helper(
     let mut ignored = BTreeMap::<String, usize>::new();
     let mut seen = BTreeSet::new();
     for id in &reached {
-        for edge in graph.ins.get(*id).into_iter().flatten() {
+        for edge in graph.ins.get(id).into_iter().flatten() {
             let confidence = s(edge, "confidence");
             let key = (
                 s(edge, "source"),

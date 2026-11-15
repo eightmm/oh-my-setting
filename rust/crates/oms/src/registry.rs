@@ -313,6 +313,11 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     ),
 ];
 
+pub(super) fn is_public(tool: &std::ffi::OsStr) -> bool {
+    tool.to_str()
+        .is_some_and(|name| PUBLIC.lines().any(|entry| entry == name))
+}
+
 pub(super) fn owns(args: &[OsString]) -> bool {
     args.first()
         .is_some_and(|arg| matches!(arg.as_bytes(), b"help" | b"list" | b"-h" | b"--help"))

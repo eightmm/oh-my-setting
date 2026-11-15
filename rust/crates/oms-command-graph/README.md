@@ -74,7 +74,9 @@ No workspace sibling source or dependency feature was changed.
 parser's options, children, help and usage. `graph.html` extends the legacy
 interactive template (staying synchronized with
 `oms-mcp-server/src/project-graph.html`) with precomputed search haystacks,
-zoom-tier label thresholds, and `/` + `Escape` search shortcuts.
+zoom-tier label thresholds, and `/` + `Escape` search shortcuts. Without D3,
+a deterministic SVG grid uses the same search, filters, node inspection and
+zoom/reset controls; the CDN script loads asynchronously.
 Changes to those Python contracts require updating the corresponding native
 asset and reviewing callers. The native schema additionally exposes `project
 benchmark --count N --revision REF --output FILE --snapshot FILE` and `project
@@ -93,13 +95,29 @@ file in host precedence order, with the last matching rule owning each path,
 including explicit rules with no owners. There is no legacy `--oversized` CLI
 option: oversized suite selection is automatic.
 
-Build discovery retains only source digests and lengths. Cache misses reread and
-verify one source at a time; cache hits reuse the discovery snapshot. Configured
-source caps are preserved without an extra 64 MiB discovery ceiling. Python sessions start
-at the default source bound and grow only for larger selected sources, up to
-the helper's ceiling. JSON remains the query
-authority, matching the inspected Python engine, which has no SQLite query path;
-the native SQLite file remains a regenerable projection of that same graph.
+Build discovery retains source digests, lengths and optional `mtime_sec`,
+`mtime_nsec` and `ino` metadata in `manifest.json` file entries. Freshness reuses
+a digest only when all four stat fields match and the mtime second precedes
+`build_started_sec`. Legacy or malformed metadata and racy timestamps trigger
+full hashing; `build --force` always hashes and reparses. Non-code files are
+classified from at most 8192 bytes without hashing. Unchanged binary/unparsed
+classifications are cached in skipped rows. Source size caps still apply.
+Cache misses reread and verify one source at a time, bounding discovery memory
+by file metadata plus one capped source. Python sessions grow from the default
+source bound up to the helper's ceiling.
+
+`symbol`, `api`, `neighbors` and bounded `trace` use prepared SQLite lookups
+when the read-only immutable projection has matching revision/schema metadata.
+Missing, corrupt, old-schema, stale or linked projections fall back to JSON;
+queries create no SQLite journals or sidecars. Shared query algorithms preserve
+ordering, duplicate edges, Unicode case folding and result limits. Symbol text
+scans still verify source digests. Other queries reuse the graph and manifest
+loaded during freshness rather than parsing them again. The compact graph
+shares one JSON arena through integer CSR adjacency views, with path/test
+indexes and inverted lexical postings. Context BM25 builds term frequencies
+once and scores matching postings, preserving its existing field weights.
+Canonical JSON writes traverse the existing value directly with sorted object
+keys and the shared Python-compatible float formatter.
 Normalization and validation traverse nested graph definitions iteratively, so
 validation reports nested node errors rather than refusing at depth two.
 Fixture gate values, repeat counters and task identities follow Python coercions.
@@ -112,7 +130,7 @@ CLI execution step budgets retain arbitrary-size decimal integers through
 | --- | --- |
 | `.oms/.gitignore` | The atomic preserve-existing operation keeps an existing marker unchanged. A failed creation can leave private parent directories. |
 | `cache/<digest>.json` | Entries are regenerable and atomically replaced. The project build lock excludes another native build. Pruning follows publication and removes only safely snapshotted stale files using descriptor-relative generation checks. A kill may leave reusable stale entries; the next build prunes them. |
-| `graph.json`, `index.sqlite3`, `manifest.json` | Each publication is atomic, under the project build lock. SQLite is constructed in memory. Manifest publication follows graph and SQLite publication; a kill between them leaves a revision mismatch that freshness checking rejects. JSON is the query authority. |
+| `graph.json`, `index.sqlite3`, `manifest.json` | Each publication is atomic, under the project build lock. SQLite is constructed in memory. Manifest publication follows graph and SQLite publication; a kill between them leaves a revision mismatch that freshness checking rejects. Readers verify the projection revision against the manifest and otherwise use JSON; immutable SQLite readers retain an opened inode across atomic replacement. |
 | `orientation.json` | Derived after manifest publication. A missing orientation can be regenerated; it grants no authority. |
 | `context/<digest>.json` | Content-addressed atomic writes can be repeated. A kill leaves an older complete file or no published file. |
 | `runs/<run>/graph.json`, `events.jsonl` | The event lock protects new-run exclusion, sequence allocation and event append. A kill between spec publication and its first event leaves a frozen run that can be inspected and resumed. |
@@ -178,10 +196,14 @@ behavioral equivalence nor cross-platform execution.
 
 ## Verification phase
 
-The worker brief limits this phase to Rust compilation and formatting. Cargo
-check and rustfmt check are the verification commands; behavioral suites,
-branch/limit edge cases, failure-under-reversion checks and cross-platform
-execution were not run. No existing tests were changed or removed.
+The engine optimization checks live in `tests/project_engine.rs`, with frozen
+lexical/BM25 reference cases in `tests/project-engine-reference.json`, and the
+offline renderer check runs with `node tests/offline_graph.cjs`. The reference
+records the existing native duplicate-query document-frequency behavior, which
+differs from the Python query's duplicate-token counting. Existing tests remain;
+the new cases cover previously untested stat caching, SQL-only querying, CSR
+payload sharing and offline SVG interaction. Native macOS/WSL2 execution and
+the complete repository gate remain parent checks.
 Legacy inspection covered context, affected selection, suite cases, benchmark,
 CODEOWNERS, validation, routing, parser, freshness, event, journal, rendering and
 cache contracts. It was source inspection, not behavioral test-pass evidence.

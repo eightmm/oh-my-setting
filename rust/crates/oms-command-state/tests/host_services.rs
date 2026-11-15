@@ -253,3 +253,209 @@ fn runtime_host_entry_threads_host_services() {
     assert!(custom.get("runtime").get("healthy").truth());
     assert!(!call(&NoHostServices).get("plan").get("healthy").truth());
 }
+
+#[test]
+fn read_only_views_and_zero_repair_snapshot() {
+    struct CountingHost(AtomicU64);
+    impl HostServices for CountingHost {
+        fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+            &GroupPlan
+        }
+        fn task_status(&self, _: &Path, _: &AtomicBool) -> Option<oms_command_state::Output> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some((0, br#"{"schema":1,"present":false}"#.to_vec(), vec![]))
+        }
+    }
+    let repo = TempRepo::new();
+    let stop = AtomicBool::new(false);
+    let host = CountingHost(AtomicU64::new(0));
+    for tool in ["state", "inbox", "dashboard"] {
+        let (code, _, err) = run_with_host(
+            tool,
+            &args(&["--json", "--repo", &repo.path().to_string_lossy()]),
+            repo.path(),
+            &stop,
+            &mut Dummy,
+            &host,
+        );
+        assert!(code <= 1, "{}", String::from_utf8_lossy(&err));
+        assert!(!repo.path().join(".oms").exists(), "{tool} created state");
+    }
+    host.0.store(0, Ordering::Relaxed);
+    let (code, _, err) = run_with_host(
+        "inbox",
+        &args(&[
+            "--json",
+            "--fix-safe",
+            "--repo",
+            &repo.path().to_string_lossy(),
+        ]),
+        repo.path(),
+        &stop,
+        &mut Dummy,
+        &host,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    assert_eq!(host.0.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn lease_append_preserves_descriptor_bytes_and_concurrent_batches() {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let repo = TempRepo::new();
+    let call = |words: &[&str]| {
+        let (code, _, err) = run_with_host(
+            "lease",
+            &args(words),
+            repo.path(),
+            &AtomicBool::new(false),
+            &mut Dummy,
+            &NoHostServices,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    };
+    call(&["add", "first"]);
+    let path = repo.path().join(".oms/leases.jsonl");
+    let mut first = fs::read(&path).unwrap();
+    assert_eq!(first.pop(), Some(b'\n'));
+    fs::write(&path, &first).unwrap();
+    let mut descriptor = fs::File::open(&path).unwrap();
+    let inode = descriptor.metadata().unwrap().ino();
+    std::thread::scope(|scope| {
+        for i in 0..4 {
+            let call = &call;
+            scope.spawn(move || call(&["add", &format!("path-{i}")]));
+        }
+    });
+    call(&["release", "--mine"]);
+    call(&["release", "--mine"]);
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    let mut observed = Vec::new();
+    descriptor.read_to_end(&mut observed).unwrap();
+    assert_eq!(observed, fs::read(&path).unwrap());
+    assert!(observed.starts_with(&first));
+    let lines = observed
+        .split(|b| *b == b'\n')
+        .filter(|b| !b.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 10);
+    for line in lines {
+        json::parse(line).unwrap();
+    }
+}
+
+#[test]
+fn state_git_projection_uses_one_status() {
+    if let Some(path) = std::env::var_os("OMS_STATE_GIT_FIXTURE") {
+        let repo = Path::new(&path);
+        let _ = state(repo, &CustomHost { plan: GroupPlan });
+        let trace = fs::read_to_string(repo.join("git-calls")).unwrap();
+        assert_eq!(
+            trace
+                .lines()
+                .filter(|l| l.contains("status --porcelain=v2 --branch"))
+                .count(),
+            1,
+            "{trace}"
+        );
+        assert!(!trace.contains("rev-list --count"), "{trace}");
+        assert!(!trace.contains("--abbrev-ref @{upstream}"), "{trace}");
+        return;
+    }
+    let repo = TempRepo::new();
+    let original = std::env::var_os("PATH").unwrap();
+    let git = std::env::split_paths(&original)
+        .map(|p| p.join("git"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let bin = repo.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fs::write(bin.join("git"), b"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$OMS_GIT_TRACE_FILE\"\nexec \"$OMS_GIT_REAL\" \"$@\"\n").unwrap();
+    fs::set_permissions(bin.join("git"), Permissions::from_mode(0o700)).unwrap();
+    let path =
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&original))).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "state_git_projection_uses_one_status",
+            "--nocapture",
+        ])
+        .env("PATH", path)
+        .env("OMS_STATE_GIT_FIXTURE", repo.path())
+        .env("OMS_GIT_REAL", git)
+        .env("OMS_GIT_TRACE_FILE", repo.path().join("git-calls"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn artifact_repairs_preserve_inode_and_first_later_success() {
+    use std::os::unix::fs::MetadataExt;
+    let repo = TempRepo::new();
+    let path = repo.path().join(".oms/artifacts/index.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    let count = 256;
+    for i in 0..count + 2 {
+        let row = json::object([
+            ("schema", json::number(1)),
+            ("event_id", json::string(format!("event-{i}"))),
+            ("operation_id", json::string(format!("op-{i}"))),
+            ("artifact_id", json::string(format!("artifact-{i}"))),
+            ("ts", json::string("2026-01-01T00:00:00Z")),
+            (
+                "kind",
+                json::string(if i < count { "delegate" } else { "patch-admit" }),
+            ),
+            ("provider", json::string("fixture")),
+            ("exit", json::number(if i < count { 1 } else { 0 })),
+            ("patch_sha256", json::string("a".repeat(64))),
+        ]);
+        bytes.extend_from_slice(&json::default_bytes(&row, false).unwrap());
+        bytes.push(b'\n');
+    }
+    fs::write(&path, &bytes).unwrap();
+    let inode = fs::metadata(&path).unwrap().ino();
+    let invoke = || {
+        let result = run_with_host(
+            "inbox",
+            &args(&[
+                "--repo",
+                &repo.path().to_string_lossy(),
+                "--json",
+                "--fix-safe",
+            ]),
+            repo.path(),
+            &AtomicBool::new(false),
+            &mut Dummy,
+            &CustomHost { plan: GroupPlan },
+        );
+        assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+    };
+    invoke();
+    let repaired = fs::read(&path).unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert!(repaired.starts_with(&bytes));
+    let rows = repaired
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| json::parse(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), count * 2 + 2);
+    for (i, row) in rows.iter().skip(count + 2).enumerate() {
+        assert_eq!(row.text("resolves_event_id"), format!("event-{i}"));
+        assert!(
+            row.text("reason")
+                .starts_with(&format!("superseded by event-{count} "))
+        );
+    }
+    invoke();
+    assert_eq!(fs::read(&path).unwrap(), repaired);
+}

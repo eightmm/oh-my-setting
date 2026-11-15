@@ -5,6 +5,13 @@ set -euo pipefail
 # Actions `gate` job; update records preserve the exact old/new commit range.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Native-first entry before the ref list is read (oms_native_route, scripts/lib/platform.sh).
+if [ "${OMS_NATIVE_DISPATCHED:-}" != 1 ] && { [ -e "$ROOT/rust/target/oms-native" ] || [ -L "$ROOT/rust/target/oms-native" ]; } &&
+   [ -f "$ROOT/scripts/lib/platform.sh" ]; then
+  # shellcheck source=scripts/lib/platform.sh
+  . "$ROOT/scripts/lib/platform.sh"
+  oms_native_route recover "$ROOT" pre-push-check "$@" || exit
+fi
 gate_mode=quick
 if [ "${1:-}" = --full ]; then
   gate_mode=full

@@ -19,7 +19,7 @@ impl Room<'_> {
     /// Read-only preflight, never an append permit. `append` repeats validation
     /// under its canonical lock and retains producer guards through publication.
     pub fn validate_event(&self, rows: &[Value], event: &Value, text: &str) -> Result<bool> {
-        self.validate_event_locked(rows, event, text, Carry::No, &mut Vec::new())
+        self.validate_event_locked(rows, event, text, Carry::No, &mut Vec::new(), false)
     }
     /// Pure/producer checks run under the same canonical append lock as publication.
     /// Carry is a private typed context, never an ambient environment capability.
@@ -30,6 +30,7 @@ impl Room<'_> {
         text: &str,
         carry: Carry<'_>,
         proofs: &mut Vec<Box<dyn OperationsRead + 's>>,
+        text_checked: bool,
     ) -> Result<bool> {
         let kind = e.text("kind");
         event_shape(e)?;
@@ -55,7 +56,7 @@ impl Room<'_> {
                 "room metadata contains sensitive-looking content or could not be checked",
             ));
         }
-        if !crate::outbound_clean(text.as_bytes())? {
+        if !text_checked && !crate::outbound_clean(text.as_bytes())? {
             return Err(Error::new(
                 "turn looks sensitive; it would be replayed into other agents' prompts",
             ));

@@ -365,7 +365,8 @@ pub(crate) fn slurm(paths: &Paths, tx: &mut Transaction, flag: &AtomicBool) -> R
             .filter(|p| p.starts_with("DefMem"))
             .map(str::to_owned),
     );
-    body.push_str(&format!("## Effective Submission Defaults\n\nValues are copied from configuration and associations; missing values are not inferred.\n\n- Preferred partition: {preferred}\n- Account: {}\n- QOS default: {}\n- CPU default: {}\n- GPU default: (not configured)\n- Memory default: {}\n- Time default: {}\n- Log path:\n- Checkpoint path:\n",association(1),association(4),if cpu.is_empty(){"(not configured)"}else{&cpu},if memory.is_empty(){"(not configured)".into()}else{memory.join(", ")},value("DefaultTime")));
+    let partition_label = concat!("Preferred ", "partition");
+    body.push_str(&format!("## Effective Submission Defaults\n\nValues are copied from configuration and associations; missing values are not inferred.\n\n- {partition_label}: {preferred}\n- Account: {}\n- QOS default: {}\n- CPU default: {}\n- GPU default: (not configured)\n- Memory default: {}\n- Time default: {}\n- Log path:\n- Checkpoint path:\n",association(1),association(4),if cpu.is_empty(){"(not configured)"}else{&cpu},if memory.is_empty(){"(not configured)".into()}else{memory.join(", ")},value("DefaultTime")));
     if env::var_os("OH_MY_SETTING_SLURM_WRITE_RAW").is_some_and(|s| s == "1") {
         let root = env::var_os("OH_MY_SETTING_SLURM_RAW_DIR")
             .map(PathBuf::from)

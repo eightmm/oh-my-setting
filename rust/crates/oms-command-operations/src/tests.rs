@@ -928,3 +928,108 @@ fn compact_converges_stray_attempt_dirs_and_keeps_unexpected_layouts() {
     assert!(victim.join("keep.txt").is_file());
     assert!(swapped.is_symlink());
 }
+
+#[test]
+fn transition_batch_refuses_invalid_suffix_before_publication() {
+    let f = Fixture::new();
+    let id = f.ok(App::Events, &["start", "--tool", "fixture"]);
+    let path = event_path(&f.0);
+    let before = std::fs::read(&path).unwrap();
+    let (code, _, _) = f.call(
+        App::Events,
+        &[
+            "transition",
+            "--attempt",
+            &id,
+            "--state",
+            "starting",
+            "--then",
+            "done:bad",
+        ],
+    );
+    assert_eq!(code, 2);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let words = [
+        "transition",
+        "--attempt",
+        &id,
+        "--state",
+        "starting",
+        "--idempotency-key",
+        "one",
+        "--then",
+        "working:two",
+    ];
+    f.ok(App::Events, &words);
+    let after = std::fs::read(&path).unwrap();
+    f.ok(App::Events, &words);
+    assert_eq!(std::fs::read(&path).unwrap(), after);
+    assert_eq!(read_rows(&path).unwrap().len(), 3);
+}
+
+#[test]
+fn incremental_follow_reads_only_new_rows_and_reloads_generations() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let path = f.0.join("follow.jsonl");
+    let mut tail = storage::FollowTail::default();
+    assert!(tail.read(&path).unwrap().1.is_empty());
+    std::fs::write(&path, b"{\"n\":1}\n").unwrap();
+    let (reset, rows) = tail.read(&path).unwrap();
+    assert!(reset);
+    assert_eq!(rows.len(), 1);
+    assert!(tail.read(&path).unwrap().1.is_empty());
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"n\":2}\n")
+        .unwrap();
+    let (reset, rows) = tail.read(&path).unwrap();
+    assert!(!reset);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0.get("n"), &V::from(2usize));
+    std::fs::write(&path, b"{}\n").unwrap();
+    assert!(tail.read(&path).unwrap().0);
+    let replacement = f.0.join("replacement");
+    std::fs::write(&replacement, b"{\"n\":3}\n").unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    assert!(tail.read(&path).unwrap().0);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"bad\n")
+        .unwrap();
+    assert!(tail.read(&path).is_err());
+}
+
+#[test]
+fn lf_parser_borrows_and_batch_uses_verified_snapshot() {
+    use std::borrow::Cow;
+    assert!(matches!(storage::normalized(b"{}\n"), Cow::Borrowed(_)));
+    assert!(matches!(storage::normalized(b"{}\r"), Cow::Owned(_)));
+    for bytes in [b"{}\n{}\n".as_slice(), b"{}\r\n{}\r", b"\n\n{}"] {
+        assert!(
+            !storage::parse_rows(std::path::Path::new("rows"), bytes)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(storage::parse_rows(std::path::Path::new("rows"), b"bad\n").is_err());
+    let f = Fixture::new();
+    let path = f.0.join("batch.jsonl");
+    std::fs::write(&path, b"{}").unwrap();
+    let mut ledger = storage::Ledger::open(&path, true, false).unwrap();
+    assert!(ledger.append_batch(&mut [obj([])], &[]).is_err());
+    let history = storage::parse_rows(&path, &ledger.read().unwrap()).unwrap();
+    ledger.append_batch(&mut [], &history).unwrap();
+    ledger
+        .append_batch(&mut [obj([]), obj([])], &history)
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"{}\n{}\n{}\n");
+    let mut stale = storage::Ledger::open(&path, true, false).unwrap();
+    stale.read().unwrap();
+    storage::append_row(&path, &mut obj([]), false).unwrap();
+    assert!(stale.append_batch(&mut [obj([])], &history).is_err());
+}

@@ -1,10 +1,7 @@
 #![forbid(unsafe_code)]
 mod registry;
-#[allow(dead_code)]
 mod services_collab;
-#[allow(dead_code)]
 mod services_control;
-#[allow(dead_code)]
 mod services_runtime;
 
 use oms_context::{Json, compare_manifests, inspect_manifest, parse_json};
@@ -880,10 +877,17 @@ fn write_stdout(bytes: &[u8]) {
         std::process::exit(1);
     }
 }
+fn wants_usage_hint(tool: &str) -> bool {
+    registry::is_public(OsStr::new(tool)) && !matches!(tool, "panel" | "harness")
+}
+
 fn command_exit(tool: &str, (code, output, mut error): (i32, Vec<u8>, Vec<u8>)) -> ! {
     use std::io::Write;
-    if code == 2 {
-        error.extend_from_slice(format!("hint: run `oms {tool} --help` for usage\n").as_bytes());
+    if code == 2 && wants_usage_hint(tool) {
+        let hint = format!("hint: run `oms {tool} --help` for usage\n");
+        if !error.ends_with(hint.as_bytes()) {
+            error.extend_from_slice(hint.as_bytes());
+        }
     }
     if std::io::stdout().write_all(&output).is_err() || std::io::stderr().write_all(&error).is_err()
     {
@@ -911,7 +915,10 @@ fn streaming_command_exit(
     stdout: &mut dyn std::io::Write,
     stderr: &mut dyn std::io::Write,
 ) -> ! {
-    if code == 2 && writeln!(stderr, "hint: run `oms {tool} --help` for usage").is_err() {
+    if code == 2
+        && wants_usage_hint(tool)
+        && writeln!(stderr, "hint: run `oms {tool} --help` for usage").is_err()
+    {
         std::process::exit(1);
     }
     if stdout.flush().is_err() || stderr.flush().is_err() {
@@ -919,7 +926,11 @@ fn streaming_command_exit(
     }
     std::process::exit(code);
 }
-fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
+pub(crate) fn validate_staged_payload(
+    root: &Path,
+    commit: &OsStr,
+    check_current_exe: bool,
+) -> Result<(PathBuf, String), String> {
     use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
     let commit = commit.to_str().ok_or("invalid native source revision")?;
@@ -931,19 +942,30 @@ fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
         return Err("invalid native source revision".into());
     }
     let dir = root.join("rust/target/oms-native").join(commit);
+    let dir_meta =
+        std::fs::symlink_metadata(&dir).map_err(|_| "native payload directory unavailable")?;
+    if !dir_meta.file_type().is_dir() || dir_meta.permissions().mode() & 0o002 != 0 {
+        return Err("invalid native payload directory".into());
+    }
+    let canonical_dir =
+        std::fs::canonicalize(&dir).map_err(|_| "native payload directory unavailable")?;
     let executable = dir.join("oms");
-    if std::fs::canonicalize(
-        std::env::current_exe().map_err(|_| "cannot identify native executable")?,
-    )
-    .map_err(|_| "cannot identify native executable")?
-        != std::fs::canonicalize(&executable).map_err(|_| "native executable unavailable")?
+    if check_current_exe
+        && std::fs::canonicalize(
+            std::env::current_exe().map_err(|_| "cannot identify native executable")?,
+        )
+        .map_err(|_| "cannot identify native executable")?
+            != std::fs::canonicalize(&executable).map_err(|_| "native executable unavailable")?
     {
         return Err("native executable does not belong to this checkout".into());
     }
     let manifest_path = dir.join("manifest.json");
     let manifest_meta =
         std::fs::symlink_metadata(&manifest_path).map_err(|_| "native manifest unavailable")?;
-    if !manifest_meta.is_file() || manifest_meta.len() > 4 * 1024 * 1024 {
+    if !manifest_meta.file_type().is_file()
+        || manifest_meta.permissions().mode() & 0o002 != 0
+        || manifest_meta.len() > 4 * 1024 * 1024
+    {
         return Err("invalid native manifest file".into());
     }
     let mut manifest = Vec::new();
@@ -979,6 +1001,7 @@ fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
     {
         return Err("invalid native artifact name".into());
     }
+    let mut oms_digest = None;
     for &name in ARTIFACTS {
         let Some(value) = get(artifacts, name.as_bytes()) else {
             if name == "oms" {
@@ -998,7 +1021,10 @@ fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
         }
         let path = dir.join(name);
         let meta = std::fs::symlink_metadata(&path).map_err(|_| "native artifact unavailable")?;
-        if !meta.file_type().is_file() || meta.permissions().mode() & 0o111 == 0 {
+        if !meta.file_type().is_file()
+            || meta.permissions().mode() & 0o111 == 0
+            || meta.permissions().mode() & 0o002 != 0
+        {
             return Err("invalid native artifact".into());
         }
         let mut file = std::fs::File::open(path).map_err(|_| "cannot read native artifact")?;
@@ -1013,11 +1039,555 @@ fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
             }
             hash.update(&buf[..n]);
         }
-        if format!("{:x}", hash.finalize()).as_bytes() != expected {
+        let actual = format!("{:x}", hash.finalize());
+        if actual.as_bytes() != expected {
             return Err("native artifact digest mismatch".into());
         }
+        if name == "oms" {
+            oms_digest = Some(actual);
+        }
     }
-    Ok(())
+    let dir_entries =
+        std::fs::read_dir(&dir).map_err(|_| "cannot list native payload directory")?;
+    for entry in dir_entries {
+        let entry = entry.map_err(|_| "cannot list native payload directory")?;
+        let name = entry.file_name();
+        let allowed = name == OsStr::new("manifest.json")
+            || name == OsStr::new("oms.sha256")
+            || entries
+                .iter()
+                .any(|(key, _)| name.as_bytes() == key.as_slice());
+        if !allowed {
+            return Err("unexpected file in native payload directory".into());
+        }
+        if name == OsStr::new("oms.sha256") {
+            let meta = std::fs::symlink_metadata(entry.path())
+                .map_err(|_| "invalid native checksum file")?;
+            if !meta.file_type().is_file() || meta.permissions().mode() & 0o002 != 0 {
+                return Err("invalid native checksum file".into());
+            }
+        }
+    }
+    Ok((
+        canonical_dir,
+        oms_digest.ok_or("missing native executable digest")?,
+    ))
+}
+
+fn validate_payload(root: &Path, commit: &OsStr) -> Result<(), String> {
+    validate_staged_payload(root, commit, true).map(|_| ())
+}
+
+fn sibling_companion(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let exe = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .ok()?;
+    let path = exe.parent()?.join(name);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    (meta.file_type().is_file()
+        && meta.permissions().mode() & 0o111 != 0
+        && meta.permissions().mode() & 0o002 == 0)
+        .then_some(path)
+}
+
+struct McpExecutor {
+    interrupted: Arc<AtomicBool>,
+    source: PathBuf,
+}
+
+impl oms_mcp_server::CommandExecutor for McpExecutor {
+    fn execute(
+        &self,
+        request: &oms_mcp_server::CommandRequest<'_>,
+    ) -> Result<oms_mcp_server::Captured, String> {
+        let services = services_collab::CollabServices::new(&self.interrupted, &self.source)
+            .map_err(|e| format!("error: {e}"))?;
+        <services_collab::CollabServices<'_> as oms_mcp_server::CommandExecutor>::execute(
+            &services, request,
+        )
+    }
+}
+
+struct NativeAdapter;
+
+impl oms_bootstrap::CommandAdapter for NativeAdapter {
+    fn is_public(&self, name: &OsStr) -> bool {
+        registry::is_public(name)
+    }
+
+    fn owns_native(&self, args: &[OsString]) -> bool {
+        owns_invocation(args)
+    }
+
+    fn navigation(&self, args: &[OsString], source: &Path) -> oms_bootstrap::CommandOutput {
+        registry::run(args, source)
+    }
+}
+
+fn normalize_tool(arg: &OsStr) -> Option<&str> {
+    let s = arg.to_str()?;
+    if s == "slurm-lint.sh" {
+        Some("slurm-lint")
+    } else if s == "oms-mcp-server" {
+        Some("mcp-server")
+    } else if let Some(stem) = s.strip_suffix(".sh")
+        && oms_command_hooks::HOOKS.contains(&stem)
+    {
+        Some(stem)
+    } else {
+        Some(s)
+    }
+}
+
+fn owns_invocation(argv: &[OsString]) -> bool {
+    if registry::owns(argv) {
+        return true;
+    }
+    let Some(tool) = argv.first().and_then(|v| normalize_tool(v)) else {
+        return false;
+    };
+    let local = &argv[1..];
+    match tool {
+        "runtime" | "mcp-server" | "agent-supervisor" => true,
+        "artifact-index" => oms_command_telemetry::owns(local),
+        "agent-role" => oms_command_agent_role::owns(local),
+        "input" => {
+            // Native input lacks sealed-room receipt verification. Keep
+            // every child invocation on the canonical legacy guard path.
+            let child = std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1")
+                || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| v != "0");
+            !child && oms_command_input::owns(local)
+        }
+        "agent-events" => {
+            oms_command_operations::owns_events(local) || oms_command_attempt_bundle::owns(local)
+        }
+        "approval-inbox" => oms_command_operations::owns_approvals(local),
+        "agent-memory" => oms_command_memory::owns(local),
+        "job-digest" => oms_command_job_digest::owns(local),
+        "slurm-lint" => oms_command_slurm_lint::owns(local),
+        "slurm-submit" => oms_command_slurm_submit::owns(local),
+        "agent-task" => oms_command_task::owns(local),
+        "room" => oms_command_room::owns(local),
+        "journal" => oms_command_journal::owns(local),
+        "graph" => oms_command_graph::owns(local),
+        _ => {
+            oms_command_lifecycle::owns(tool, local)
+                || oms_command_hooks::owns_hook(tool, local)
+                || oms_command_autonomy::owns(tool, local)
+                || oms_command_plan::owns(tool, local)
+                || oms_command_landing::owns(tool, local)
+                || oms_command_state::owns(tool, local)
+                || oms_command_runs::owns(tool)
+                || oms_command_peer::owns(tool, local)
+                || oms_command_providers_skills::owns(tool, local)
+                || oms_command_panel::owns(tool, local)
+        }
+    }
+}
+
+fn frontdoor_error(err: oms_bootstrap::Error) -> ! {
+    use std::io::Write;
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(err.diagnostic());
+    let _ = stderr.write_all(b"\n");
+    let _ = stderr.flush();
+    std::process::exit(err.status);
+}
+
+fn prepare_frontdoor(argv: &[OsString]) -> (Vec<OsString>, PathBuf) {
+    use std::io::Write;
+    let parsed = match oms_bootstrap::PrivateInvocation::parse(argv) {
+        Ok(Some(oms_bootstrap::PrivateInvocation::Frontdoor { entry, args })) => (entry, args),
+        Ok(_) => {
+            eprintln!("runtime-core: invalid private frontdoor invocation");
+            std::process::exit(2);
+        }
+        Err(err) => frontdoor_error(err),
+    };
+    let prepared = oms_bootstrap::Frontdoor::prepare(
+        &parsed.0,
+        &parsed.1,
+        oms_bootstrap::Terminal::current(),
+        &NativeAdapter,
+        &oms_bootstrap::SourceInventory::embedded(),
+    )
+    .unwrap_or_else(|err| frontdoor_error(err));
+    match prepared.route() {
+        oms_bootstrap::Route::Navigation { .. } => {
+            let (code, out, err) = prepared
+                .navigation(&NativeAdapter)
+                .unwrap_or_else(|e| frontdoor_error(e));
+            if std::io::stdout().write_all(&out).is_err()
+                || std::io::stderr().write_all(&err).is_err()
+            {
+                std::process::exit(1);
+            }
+            std::process::exit(code);
+        }
+        oms_bootstrap::Route::Native { .. } => {
+            let source = prepared.source().source_root().to_path_buf();
+            let native_args = prepared
+                .native_args()
+                .unwrap_or_else(|err| frontdoor_error(err))
+                .to_vec();
+            (native_args, source)
+        }
+        oms_bootstrap::Route::Legacy { .. } => {
+            let _ = prepared
+                .into_legacy()
+                .unwrap_or_else(|err| frontdoor_error(err));
+            std::process::exit(75);
+        }
+    }
+}
+
+fn require_source_or_exit<'a>(tool: &str, source_root: Option<&'a Path>) -> &'a Path {
+    source_root.unwrap_or_else(|| {
+        command_exit(
+            tool,
+            (
+                2,
+                vec![],
+                format!("error: {tool} requires validated native source metadata\n").into_bytes(),
+            ),
+        )
+    })
+}
+
+fn dispatch_owned(
+    tool: &str,
+    local: &[OsString],
+    source_root: Option<&Path>,
+    interrupted: &Arc<AtomicBool>,
+) -> ! {
+    let cwd = caller_cwd(tool);
+    if tool == "agent-events" {
+        if oms_command_attempt_bundle::owns(local) {
+            command_exit(
+                tool,
+                oms_command_attempt_bundle::run(local, &cwd, interrupted),
+            );
+        }
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = oms_command_operations::run_streaming(
+            oms_command_operations::App::Events,
+            local,
+            &cwd,
+            interrupted,
+            &mut stdout,
+            &mut stderr,
+        );
+        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+    }
+    if tool == "approval-inbox" {
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = oms_command_operations::run_streaming(
+            oms_command_operations::App::Approvals,
+            local,
+            &cwd,
+            interrupted,
+            &mut stdout,
+            &mut stderr,
+        );
+        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+    }
+    if tool == "agent-supervisor" {
+        let runner = sibling_companion("oms-supervisor").unwrap_or_default();
+        let mut host = oms_supervisor::CommandHost::new(vec![runner.into_os_string()]);
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = oms_supervisor::run_streaming(
+            local,
+            &cwd,
+            interrupted,
+            &mut host,
+            &mut stdout,
+            &mut stderr,
+        );
+        while host.requires_foreground_cleanup() {
+            let _ = host.drive();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+    }
+    if tool == "artifact-index" {
+        command_exit(tool, oms_command_telemetry::run(local, &cwd, interrupted));
+    }
+    if tool == "job-digest" {
+        command_exit(tool, oms_command_job_digest::run(local, &cwd, interrupted));
+    }
+    if tool == "room" {
+        command_exit(tool, oms_command_room::run(local, &cwd, interrupted));
+    }
+    if tool == "input" {
+        let result = match source_root {
+            Some(source) => match services_runtime::RuntimeServices::new(interrupted, source) {
+                Ok(runtime_svc) => {
+                    oms_command_input::run_with_services(local, &cwd, interrupted, &runtime_svc)
+                }
+                Err(e) => (2, vec![], format!("error: {e}\n").into_bytes()),
+            },
+            None => oms_command_input::run(local, &cwd, interrupted),
+        };
+        command_exit(tool, result);
+    }
+    let source = require_source_or_exit(tool, source_root);
+    let err_output = |e: String| (2, Vec::new(), format!("error: {e}\n").into_bytes());
+    if tool == "mcp-server" {
+        let Some(peer_owner) = sibling_companion("oms-mcp-peer-owner") else {
+            command_exit(
+                tool,
+                (
+                    2,
+                    vec![],
+                    b"error: native companion oms-mcp-peer-owner unavailable\n".to_vec(),
+                ),
+            );
+        };
+        let mut config = match oms_mcp_server::Config::from_env(peer_owner) {
+            Ok(cfg) => cfg,
+            Err(msg) => command_exit(tool, (2, vec![], format!("{msg}\n").into_bytes())),
+        };
+        config.oms_program = std::env::current_exe().and_then(std::fs::canonicalize).ok();
+        let executor: Arc<dyn oms_mcp_server::CommandExecutor> = Arc::new(McpExecutor {
+            interrupted: Arc::clone(interrupted),
+            source: source.to_path_buf(),
+        });
+        let mut reader = std::io::BufReader::new(std::io::stdin().lock());
+        let mut writer = std::io::stdout().lock();
+        match oms_mcp_server::serve_with_services(
+            source,
+            &cwd,
+            interrupted,
+            &mut reader,
+            &mut writer,
+            config,
+            executor,
+        ) {
+            Ok(()) => std::process::exit(0),
+            Err(err) => {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if tool == "slurm-submit" {
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = oms_command_slurm_submit::run_with_source_streaming(
+            local,
+            &cwd,
+            source,
+            interrupted,
+            &mut stdout,
+            &mut stderr,
+        );
+        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+    }
+    if tool == "agent-task" {
+        let control = match services_control::ControlServices::new(interrupted, source) {
+            Ok(svc) => svc,
+            Err(e) => command_exit(tool, err_output(e)),
+        };
+        let mut task_svc = control.task();
+        let mut stdin = std::io::stdin().lock();
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = oms_command_task::run_with_io(
+            local,
+            &cwd,
+            interrupted,
+            None,
+            &mut task_svc,
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+        );
+        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+    }
+    if oms_command_runs::owns(tool) {
+        let mut runtime_svc = match services_runtime::RuntimeServices::new(interrupted, source) {
+            Ok(svc) => svc,
+            Err(e) => command_exit(tool, err_output(e)),
+        };
+        let ctx = match oms_command_runs::Context::new(&cwd, interrupted) {
+            Ok(c) => c,
+            Err(e) => command_exit(
+                tool,
+                (
+                    e.code,
+                    vec![],
+                    format!("error: {}\n", e.message).into_bytes(),
+                ),
+            ),
+        };
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = oms_command_runs::run(
+            tool,
+            local,
+            &ctx,
+            &mut runtime_svc,
+            &mut stdout,
+            &mut stderr,
+        );
+        streaming_command_exit(tool, code, &mut stdout, &mut stderr);
+    }
+    let result = match tool {
+        "agent-role" => oms_command_agent_role::run_with_source(local, &cwd, source, interrupted),
+        "agent-memory" => oms_command_memory::run_with_source(local, &cwd, source, interrupted),
+        "slurm-lint" => oms_command_slurm_lint::run_with_source(local, &cwd, source, interrupted),
+        "journal" => {
+            let append_cb = |repo: &Path, src: &str, lesson: &str| {
+                let (code, _, stderr) = oms_command_memory::append_project_note(
+                    repo,
+                    src,
+                    "journal",
+                    lesson,
+                    interrupted,
+                );
+                if code == 0 {
+                    Ok(oms_command_journal::MemoryAppendOutcome::Appended)
+                } else {
+                    Ok(oms_command_journal::MemoryAppendOutcome::Refused(
+                        String::from_utf8_lossy(&stderr).trim().to_owned(),
+                    ))
+                }
+            };
+            oms_command_journal::run_with_services(
+                local,
+                &cwd,
+                source,
+                Some(&append_cb),
+                interrupted,
+            )
+        }
+        "graph" => match (
+            services_control::ControlServices::new(interrupted, source),
+            services_runtime::RuntimeServices::new(interrupted, source),
+        ) {
+            (Ok(control), Ok(runtime_svc)) => {
+                let helper = sibling_companion("oms-graph-python-helper");
+                oms_command_graph::run_with_host(
+                    local,
+                    &cwd,
+                    interrupted,
+                    helper.as_deref(),
+                    Some(&runtime_svc),
+                    &control,
+                    &control,
+                )
+            }
+            (Err(e), _) | (_, Err(e)) => err_output(e),
+        },
+        _ if oms_command_lifecycle::owns(tool, local) => {
+            match services_collab::CollabServices::new(interrupted, source) {
+                Ok(collab) => oms_command_lifecycle::run_with_services(
+                    tool,
+                    local,
+                    &cwd,
+                    source,
+                    interrupted,
+                    &collab,
+                ),
+                Err(e) => err_output(e),
+            }
+        }
+        _ if oms_command_hooks::owns_hook(tool, local) => {
+            match services_runtime::RuntimeServices::new(interrupted, source) {
+                Ok(runtime_svc) => oms_command_hooks::run_with_source_and_services(
+                    tool,
+                    local,
+                    &cwd,
+                    source,
+                    interrupted,
+                    &runtime_svc,
+                ),
+                Err(e) => err_output(e),
+            }
+        }
+        _ if oms_command_autonomy::owns(tool, local) => {
+            match services_control::ControlServices::new(interrupted, source) {
+                Ok(control) => oms_command_autonomy::run_with_services(
+                    tool,
+                    local,
+                    &cwd,
+                    interrupted,
+                    &control,
+                ),
+                Err(e) => err_output(e),
+            }
+        }
+        _ if oms_command_plan::owns(tool, local) => {
+            match services_control::ControlServices::new(interrupted, source) {
+                Ok(control) => {
+                    oms_command_plan::run_with_services(local, &cwd, interrupted, &control)
+                }
+                Err(e) => err_output(e),
+            }
+        }
+        _ if oms_command_landing::owns(tool, local) => {
+            match services_control::ControlServices::new(interrupted, source) {
+                Ok(control) => oms_command_landing::run_with_services(
+                    tool,
+                    local,
+                    &cwd,
+                    source,
+                    interrupted,
+                    &control,
+                ),
+                Err(e) => err_output(e),
+            }
+        }
+        _ if oms_command_state::owns(tool, local) => match (
+            services_control::ControlServices::new(interrupted, source),
+            services_runtime::RuntimeServices::new(interrupted, source),
+        ) {
+            (Ok(control), Ok(mut runtime_svc)) => oms_command_state::run_with_host(
+                tool,
+                local,
+                &cwd,
+                interrupted,
+                &mut runtime_svc,
+                &control,
+            ),
+            (Err(e), _) | (_, Err(e)) => err_output(e),
+        },
+        _ if oms_command_peer::owns(tool, local) => {
+            match services_collab::CollabServices::new(interrupted, source) {
+                Ok(collab) => oms_command_peer::run_with_executor(
+                    tool,
+                    local,
+                    &cwd,
+                    source,
+                    interrupted,
+                    &collab,
+                ),
+                Err(e) => err_output(e),
+            }
+        }
+        _ if oms_command_providers_skills::owns(tool, local) => {
+            oms_command_providers_skills::run_with_source(tool, local, &cwd, source, interrupted)
+        }
+        _ if oms_command_panel::owns(tool, local) => {
+            match services_collab::CollabServices::new(interrupted, source) {
+                Ok(collab) => oms_command_panel::run_with_services(
+                    tool,
+                    local,
+                    &cwd,
+                    source,
+                    interrupted,
+                    &collab,
+                ),
+                Err(e) => err_output(e),
+            }
+        }
+        _ => unreachable!(),
+    };
+    command_exit(tool, result);
 }
 fn main() {
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -1040,31 +1610,36 @@ fn main() {
     {
         std::process::exit(services_collab::detach_worker_main());
     }
-    let select = argv.first().is_some_and(|v| v == "--oms-select");
-    let dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
+    let mut select = false;
+    let mut dispatch = false;
     let mut source_root = None;
-    if dispatch {
-        if argv.len() < 5 || argv[3] != "--" {
-            eprintln!("runtime-core: invalid private dispatch invocation");
-            std::process::exit(2);
+    if argv.first().is_some_and(|v| v == "--oms-frontdoor") {
+        let (frontdoor_args, frontdoor_source) = prepare_frontdoor(&argv);
+        argv = frontdoor_args;
+        source_root = Some(frontdoor_source);
+    } else {
+        select = argv.first().is_some_and(|v| v == "--oms-select");
+        dispatch = select || argv.first().is_some_and(|v| v == "--oms-dispatch");
+        if dispatch {
+            if argv.len() < 5 || argv[3] != "--" {
+                eprintln!("runtime-core: invalid private dispatch invocation");
+                std::process::exit(2);
+            }
+            if let Err(e) = validate_payload(Path::new(&argv[1]), &argv[2]) {
+                eprintln!(
+                    "runtime-core: {e}\nhint: run `oms doctor --repair` to check the native cache"
+                );
+                std::process::exit(2);
+            }
+            source_root = Some(PathBuf::from(&argv[1]));
+            argv.drain(..4);
         }
-        if let Err(e) = validate_payload(Path::new(&argv[1]), &argv[2]) {
-            eprintln!(
-                "runtime-core: {e}\nhint: run `oms doctor --repair` to check the native cache"
-            );
-            std::process::exit(2);
-        }
-        source_root = Some(PathBuf::from(&argv[1]));
-        argv.drain(..4);
     }
     if registry::owns(&argv) {
         if select {
             return;
         }
-        let Some(source) = source_root.as_deref() else {
-            eprintln!("runtime-core: root navigation requires validated native source metadata");
-            std::process::exit(2);
-        };
+        let source = source_root.as_deref().unwrap_or(Path::new(""));
         let (code, out, err) = registry::run(&argv, source);
         use std::io::Write;
         if std::io::stdout().write_all(&out).is_err() || std::io::stderr().write_all(&err).is_err()
@@ -1073,105 +1648,52 @@ fn main() {
         }
         std::process::exit(code);
     }
-    if let Some(
-        tool @ ("artifact-index" | "agent-role" | "input" | "agent-events" | "agent-memory"
-        | "approval-inbox" | "job-digest" | "slurm-lint"),
-    ) = argv.first().and_then(|v| v.to_str()).map(|v| {
-        if v == "slurm-lint.sh" {
-            "slurm-lint"
-        } else {
-            v
-        }
-    }) {
-        let local = &argv[1..];
-        let owned = match tool {
-            "artifact-index" => oms_command_telemetry::owns(local),
-            "agent-role" => oms_command_agent_role::owns(local),
-            "input" => {
-                // Native input lacks sealed-room receipt verification. Keep
-                // every child invocation on the canonical legacy guard path.
-                let child = std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1")
-                    || std::env::var_os("OMS_HARNESS_DELEGATE_DEPTH").is_some_and(|v| v != "0");
-                !child && oms_command_input::owns(local)
+    if let Some(tool) = argv
+        .first()
+        .and_then(|v| normalize_tool(v))
+        .filter(|t| *t != "runtime")
+        .map(str::to_owned)
+    {
+        if !owns_invocation(&argv) {
+            if dispatch {
+                std::process::exit(75);
             }
-            "agent-events" => oms_command_operations::owns_events(local),
-            "approval-inbox" => oms_command_operations::owns_approvals(local),
-            "agent-memory" => oms_command_memory::owns(local),
-            "job-digest" => oms_command_job_digest::owns(local),
-            "slurm-lint" => oms_command_slurm_lint::owns(local),
-            _ => unreachable!(),
-        };
-        if !owned {
-            std::process::exit(75);
+        } else {
+            if select {
+                return;
+            }
+            dispatch_owned(&tool, &argv[1..], source_root.as_deref(), &interrupted);
         }
-        if select {
-            return;
-        }
-        if matches!(tool, "agent-role" | "agent-memory" | "slurm-lint") && source_root.is_none() {
-            command_exit(
-                tool,
-                (
-                    2,
-                    vec![],
-                    format!("error: {tool} requires validated native source metadata\n")
-                        .into_bytes(),
-                ),
-            );
-        }
-        let cwd = caller_cwd(tool);
-        if let Some(app) = oms_command_operations::App::from_namespace(tool) {
-            let mut stdout = std::io::stdout().lock();
-            let mut stderr = std::io::stderr().lock();
-            let code = oms_command_operations::run_streaming(
-                app,
-                local,
-                &cwd,
-                &interrupted,
-                &mut stdout,
-                &mut stderr,
-            );
-            streaming_command_exit(tool, code, &mut stdout, &mut stderr);
-        }
-        let result = match tool {
-            "artifact-index" => oms_command_telemetry::run(local, &cwd, &interrupted),
-            "agent-role" => oms_command_agent_role::run_with_source(
-                local,
-                &cwd,
-                source_root.as_deref().expect("validated source metadata"),
-                &interrupted,
-            ),
-            "input" => oms_command_input::run(local, &cwd, &interrupted),
-            "agent-memory" => oms_command_memory::run_with_source(
-                local,
-                &cwd,
-                source_root.as_deref().expect("validated source metadata"),
-                &interrupted,
-            ),
-            "job-digest" => oms_command_job_digest::run(local, &cwd, &interrupted),
-            "slurm-lint" => oms_command_slurm_lint::run_with_source(
-                local,
-                &cwd,
-                source_root.as_deref().expect("validated source metadata"),
-                &interrupted,
-            ),
-            _ => unreachable!(),
-        };
-        command_exit(tool, result);
     }
     if dispatch && argv.first().is_none_or(|v| v != "runtime") {
         std::process::exit(75);
     }
     let mut subcommand = false;
     let mut legacy = false;
-    let parsed = parse(argv, &mut subcommand, &mut legacy);
-    if dispatch
-        && (legacy
-            || matches!(&parsed, Err(e) if e == "root help requested" || e == "version requested"))
-    {
-        std::process::exit(75);
-    }
+    let parsed = parse(argv.clone(), &mut subcommand, &mut legacy);
     if select {
         return;
+    }
+    if legacy {
+        let Some(source) = source_root.as_deref() else {
+            eprintln!("error: runtime requires validated native source metadata\n{HINT}");
+            std::process::exit(2);
+        };
+        let runtime_svc = match services_runtime::RuntimeServices::new(&interrupted, source) {
+            Ok(svc) => svc,
+            Err(e) => command_exit(
+                "runtime",
+                (2, vec![], format!("runtime-core: {e}\n").into_bytes()),
+            ),
+        };
+        let resp = oms_runtime::run(
+            &argv[1..],
+            &caller_cwd("runtime"),
+            source,
+            &runtime_svc,
+            &interrupted,
+        );
+        command_exit("runtime", (resp.code, resp.stdout, resp.stderr));
     }
     let args = match parsed {
         Ok(v) => v,

@@ -1377,13 +1377,69 @@ impl oms_command_lifecycle::Services for CollabServices<'_> {
             Ok(l) => l,
             Err(e) => return refuse(2, e),
         };
-        if phase == IncomingPhase::Preflight {
-            return (0, Vec::new(), Vec::new());
-        }
         let parent = vec![(
             OsString::from("OMS_NATIVE_UPDATE_PARENT"),
             OsString::from(std::process::id().to_string()),
         )];
+        if phase == IncomingPhase::Preflight {
+            use std::os::unix::fs::PermissionsExt;
+            let Some(canonical_source) = std::fs::canonicalize(source).ok().filter(|p| p.is_dir())
+            else {
+                return refuse(2, "source root is unavailable");
+            };
+            let (_dir, expected_oms_digest) = match crate::validate_staged_payload(
+                &canonical_source,
+                std::ffi::OsStr::new(revision),
+                false,
+            ) {
+                Ok(v) => v,
+                Err(e) => return refuse(2, e),
+            };
+            let dir_path = canonical_source
+                .join("rust/target/oms-native")
+                .join(revision);
+            let mut cur: &Path = &dir_path;
+            loop {
+                let Ok(meta) = std::fs::symlink_metadata(cur) else {
+                    return refuse(2, "invalid native payload ancestor");
+                };
+                if !meta.file_type().is_dir() || meta.permissions().mode() & 0o002 != 0 {
+                    return refuse(2, "unsafe native payload ancestor permissions");
+                }
+                if cur == canonical_source {
+                    break;
+                }
+                let Some(next) = cur.parent() else {
+                    return refuse(2, "invalid native payload ancestor");
+                };
+                cur = next;
+            }
+            let sha_path = dir_path.join("oms.sha256");
+            let Ok(sha_meta) = std::fs::symlink_metadata(&sha_path) else {
+                return refuse(2, "invalid or mismatched oms.sha256");
+            };
+            if !sha_meta.file_type().is_file()
+                || sha_meta.permissions().mode() & 0o002 != 0
+                || sha_meta.len() != 65
+            {
+                return refuse(2, "invalid or mismatched oms.sha256");
+            }
+            let Ok(sha_bytes) = std::fs::read(&sha_path) else {
+                return refuse(2, "invalid or mismatched oms.sha256");
+            };
+            if sha_bytes != format!("{expected_oms_digest}\n").as_bytes() {
+                return refuse(2, "invalid or mismatched oms.sha256");
+            }
+            let out = run_staged(&launcher, &["list"], &self.source, parent, interrupted);
+            if out.0 != 0 {
+                return out;
+            }
+            let text = String::from_utf8_lossy(&out.1);
+            if !text.contains("install") || !text.contains("doctor") {
+                return refuse(2, "incoming staged binary failed list check");
+            }
+            return (0, Vec::new(), Vec::new());
+        }
         let cwd = &self.source;
         match phase {
             IncomingPhase::Reconcile => {
@@ -2233,10 +2289,6 @@ mod tests {
         );
     }
 
-    fn ospath(p: &Path) -> OsString {
-        p.as_os_str().to_owned()
-    }
-
     #[test]
     fn staged_prefix_follows_each_verbs_parser() {
         let cwd = Path::new("/repo");
@@ -2907,9 +2959,21 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = source.join("rust/target/oms-native").join(rev);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
-        std::fs::write(dir.join("oms"), format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(dir.join("oms"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--oms-dispatch\" ] && [ \"$5\" = \"list\" ]; then printf 'install-profile\\ndoctor\\n'; exit 0; fi\n{script}\n"
+        );
+        let oms_path = dir.join("oms");
+        std::fs::write(&oms_path, &body).unwrap();
+        std::fs::set_permissions(&oms_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(
+                "{{\"schema\":1,\"source_commit\":\"{rev}\",\"artifacts\":{{\"oms\":\"{digest}\"}}}}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("oms.sha256"), format!("{digest}\n")).unwrap();
     }
 
     #[test]
@@ -3037,5 +3101,60 @@ esac"#,
             read_receipt(&write("exact.json", &exact)).is_ok(),
             "equal to the limit"
         );
+    }
+
+    #[test]
+    fn preflight_rejects_corrupt_or_tainted_staged_payload() {
+        use oms_command_lifecycle::Services as Lifecycle;
+        use std::os::unix::fs::PermissionsExt;
+        let stop = Arc::new(AtomicBool::new(false));
+        let fixture = Fixture::new();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let host = CollabServices::new(&stop, &root).unwrap();
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let dir = root.join("rust/target/oms-native").join(rev);
+        let run = || {
+            host.incoming_lifecycle(IncomingPhase::Preflight, &root, rev, b"{}", &[], &stop)
+                .0
+        };
+
+        stage(&root, rev, "exit 0");
+        assert_eq!(run(), 0);
+
+        // Corrupt manifest is refused before spawning.
+        std::fs::write(dir.join("manifest.json"), b"not json").unwrap();
+        assert_eq!(run(), 2);
+
+        // Bad or missing oms.sha256 is refused.
+        stage(&root, rev, "exit 0");
+        std::fs::write(dir.join("oms.sha256"), format!("{}\n", "0".repeat(64))).unwrap();
+        assert_eq!(run(), 2);
+        std::fs::remove_file(dir.join("oms.sha256")).unwrap();
+        assert_eq!(run(), 2);
+
+        // Non-executable staged binary is refused.
+        stage(&root, rev, "exit 0");
+        std::fs::set_permissions(dir.join("oms"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(run(), 2);
+
+        // Foreign file inside payload dir is refused.
+        stage(&root, rev, "exit 0");
+        std::fs::write(dir.join("stray.txt"), b"unexpected").unwrap();
+        assert_eq!(run(), 2);
+        std::fs::remove_file(dir.join("stray.txt")).unwrap();
+
+        // Failing `list` check or missing expected surface names fails closed.
+        let oms_path = dir.join("oms");
+        let bad_list = "#!/bin/sh\necho unexpected\nexit 0\n";
+        std::fs::write(&oms_path, bad_list).unwrap();
+        std::fs::set_permissions(&oms_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let digest = format!("{:x}", Sha256::digest(bad_list.as_bytes()));
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!("{{\"schema\":1,\"source_commit\":\"{rev}\",\"artifacts\":{{\"oms\":\"{digest}\"}}}}"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("oms.sha256"), format!("{digest}\n")).unwrap();
+        assert_eq!(run(), 2);
     }
 }

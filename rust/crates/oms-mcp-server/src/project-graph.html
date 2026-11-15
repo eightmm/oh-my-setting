@@ -119,17 +119,12 @@
   #oms-graph-view-19ff9c65bfcf .oms-graph-actions { align-items: stretch; flex-direction: column; }
 }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
 <script>
 (() => {
   const root = document.getElementById('oms-graph-view-19ff9c65bfcf');
   if (!root) return;
   const error = root.querySelector('#oms-graph-view-19ff9c65bfcf-error');
-  if (!window.d3) {
-    error.hidden = false;
-    error.textContent = 'The graph renderer could not be loaded.';
-    return;
-  }
   const embeddedData = JSON.parse(root.querySelector('#oms-graph-view-19ff9c65bfcf-data').textContent);
   const toolOutput = window.openai && window.openai.toolOutput;
   const delivered = toolOutput && toolOutput.structuredContent ? toolOutput.structuredContent : toolOutput;
@@ -192,7 +187,52 @@
   const zoomOut = root.querySelector('#oms-graph-view-19ff9c65bfcf-zoom-out');
   const visible = root.querySelector('#oms-graph-view-19ff9c65bfcf-visible');
   const d3 = window.d3;
-  const svg = d3.select(svgElement);
+  // A small DOM selection adapter keeps controls identical without the CDN.
+  function nativeSelection(elements) {
+    const selection = {
+      append(tag) {
+        return nativeSelection(elements.map(parent => {
+          const child = document.createElementNS('http://www.w3.org/2000/svg', tag);
+          child.__data__ = parent.__data__;
+          parent.append(child);
+          return child;
+        }));
+      },
+      attr(name, value) {
+        elements.forEach(element => element.setAttribute(name, typeof value === 'function' ? value(element.__data__) : value));
+        return selection;
+      },
+      classed(name, value) {
+        elements.forEach(element => element.classList.toggle(name, Boolean(typeof value === 'function' ? value(element.__data__) : value)));
+        return selection;
+      },
+      text(value) {
+        elements.forEach(element => { element.textContent = typeof value === 'function' ? value(element.__data__) : value; });
+        return selection;
+      },
+      select(selector) {
+        return nativeSelection(elements.map(parent => {
+          const child = parent.querySelector(selector);
+          if (child) child.__data__ = parent.__data__;
+          return child;
+        }).filter(Boolean));
+      },
+      selectAll() {
+        return {data: rows => ({join: tag => nativeSelection(elements.flatMap(parent => rows.map(row => {
+          const child = document.createElementNS('http://www.w3.org/2000/svg', tag);
+          child.__data__ = row;
+          parent.append(child);
+          return child;
+        })))})};
+      },
+      on(name, handler) {
+        elements.forEach(element => element.addEventListener(name, event => handler(event, element.__data__)));
+        return selection;
+      }
+    };
+    return selection;
+  }
+  const svg = d3 ? d3.select(svgElement) : nativeSelection([svgElement]);
   const viewport = svg.append('g');
   const markerId = 'oms-graph-view-19ff9c65bfcf-arrow';
   svg.append('defs').append('marker')
@@ -258,8 +298,19 @@
     if (rows <= 1) return height / 2;
     return 70 + Math.floor(row.index / columns) * (height - 140) / (rows - 1);
   }
+  const gridNodes = nodes.slice().sort((a, b) => (a.distance ?? 0) - (b.distance ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  function layoutOffline() {
+    const columns = Math.max(1, Math.ceil(Math.sqrt(nodes.length * width / height)));
+    const rows = Math.max(1, Math.ceil(nodes.length / columns));
+    gridNodes.forEach((row, index) => {
+      row.x = (index % columns + .5) * width / columns;
+      row.y = (Math.floor(index / columns) + .5) * height / rows;
+    });
+    paint();
+  }
+  if (!d3) links.forEach(row => { row.source = byId.get(row.source); row.target = byId.get(row.target); });
   const projectCharge = -Math.max(65, Math.min(150, 1350 / Math.sqrt(Math.max(nodes.length, 1))));
-  const simulation = d3.forceSimulation(nodes).randomSource(d3.randomLcg(0.42))
+  const simulation = d3 ? d3.forceSimulation(nodes).randomSource(d3.randomLcg(0.42))
     .force('link', d3.forceLink(links).id(row => row.id).distance(data.kind === 'execution' ? 130 : nodes.length > 120 ? 58 : 72).strength(data.kind === 'execution' ? .18 : .45))
     .force('charge', d3.forceManyBody().strength(data.kind === 'execution' ? -420 : projectCharge))
     .force('center', d3.forceCenter(width / 2, height / 2))
@@ -267,7 +318,7 @@
     .force('execution-x', data.kind === 'execution' ? d3.forceX(executionX).strength(.85) : null)
     .force('execution-y', data.kind === 'execution' ? d3.forceY(executionY).strength(.85) : null)
     .force('project-x', data.kind === 'project' ? d3.forceX(width / 2).strength(.055) : null)
-    .force('project-y', data.kind === 'project' ? d3.forceY(height / 2).strength(.055) : null);
+    .force('project-y', data.kind === 'project' ? d3.forceY(height / 2).strength(.055) : null) : null;
   function paint() {
     nodes.forEach(row => {
       row.x = Math.max(14, Math.min(width - 14, row.x || width / 2));
@@ -284,23 +335,29 @@
         return row.label.length > cap ? `${row.label.slice(0, cap - 1)}…` : row.label;
       });
   }
-  simulation.stop();
-  for (let index = 0; index < 180; index += 1) simulation.tick();
-  paint();
-  simulation.on('tick', paint);
+  if (simulation) {
+    simulation.stop();
+    for (let index = 0; index < 180; index += 1) simulation.tick();
+    paint();
+    simulation.on('tick', paint);
+  } else {
+    requestAnimationFrame(layoutOffline);
+  }
 
-  const zoom = d3.zoom().scaleExtent([.3, 5]).on('zoom', event => {
+  const zoom = d3 ? d3.zoom().scaleExtent([.3, 5]).on('zoom', event => {
     const tier = scale => scale < 1.7 ? 0 : (scale < 2.4 ? 1 : 2);
     const changed = tier(zoomScale) !== tier(event.transform.k);
     zoomScale = event.transform.k;
     viewport.attr('transform', event.transform);
     if (changed) applyFilters();
-  });
-  svg.call(zoom);
-  node.call(d3.drag()
+  }) : null;
+  if (d3) {
+    svg.call(zoom);
+    node.call(d3.drag()
     .on('start', (event, row) => { if (!event.active) simulation.alphaTarget(.18).restart(); row.fx = row.x; row.fy = row.y; })
     .on('drag', (event, row) => { row.fx = event.x; row.fy = event.y; })
     .on('end', (event, row) => { if (!event.active) simulation.alphaTarget(0); row.fx = null; row.fy = null; }));
+  }
 
   function describe(row) {
     if (!row) return 'Select a node to inspect it.';
@@ -420,9 +477,39 @@
     selectNode((nodes.find(row => row.focus) || nodes[0] || {}).id || '');
     applyFilters();
     const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 180;
-    svg.transition().duration(duration).call(zoom.transform, d3.zoomIdentity);
+    if (d3) svg.transition().duration(duration).call(zoom.transform, d3.zoomIdentity);
+    else { zoomScale = 1; panX = 0; panY = 0; offlineTransform(); }
   });
+  let panX = 0;
+  let panY = 0;
+  function offlineTransform() {
+    viewport.attr('transform', `translate(${panX},${panY}) translate(${width / 2},${height / 2}) scale(${zoomScale}) translate(${-width / 2},${-height / 2})`);
+    applyFilters();
+  }
+  if (!d3) {
+    svgElement.addEventListener('wheel', event => {
+      event.preventDefault();
+      zoomBy(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+    }, {passive: false});
+    let pointer = null;
+    svgElement.addEventListener('pointerdown', event => {
+      if (event.target.closest('.oms-graph-node')) return;
+      pointer = {id: event.pointerId, x: event.clientX, y: event.clientY};
+      svgElement.setPointerCapture(event.pointerId);
+    });
+    svgElement.addEventListener('pointermove', event => {
+      if (!pointer || pointer.id !== event.pointerId) return;
+      const bounds = svgElement.getBoundingClientRect();
+      panX += (event.clientX - pointer.x) * width / Math.max(1, bounds.width);
+      panY += (event.clientY - pointer.y) * height / Math.max(1, bounds.height);
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+      offlineTransform();
+    });
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) svgElement.addEventListener(name, () => { pointer = null; });
+  }
   function zoomBy(factor) {
+    if (!d3) { zoomScale = Math.max(.3, Math.min(5, zoomScale * factor)); offlineTransform(); return; }
     const duration = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 120;
     svg.transition().duration(duration).call(zoom.scaleBy, factor);
   }
@@ -477,6 +564,7 @@
     width = nextWidth;
     height = width <= 480 ? 420 : 520;
     svg.attr('viewBox', `0 0 ${width} ${height}`);
+    if (!simulation) { layoutOffline(); offlineTransform(); return; }
     simulation.force('center', d3.forceCenter(width / 2, height / 2));
     if (data.kind === 'execution') {
       simulation.force('execution-x', d3.forceX(executionX).strength(.85));

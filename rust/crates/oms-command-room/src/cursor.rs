@@ -281,19 +281,27 @@ impl Room<'_> {
             ));
         }
         let end = Instant::now() + Duration::from_secs_f64(wait);
-        let mut after = after.to_owned();
+        let mut snapshot = self.snapshot(id)?;
+        let mut reader = crate::storage::LogReader::open(
+            &self.storage()?.threads,
+            crate::storage::Store::name(id),
+        )?;
+        let at = offset(&snapshot, after)?;
+        let mut delta = self.delta(&snapshot, at, budget, limit, first_over)?;
         loop {
             checkpoint(self.stop)?;
-            let s = self.snapshot(id)?;
-            let at = offset(&s, &after)?;
-            let delta = self.delta(&s, at, budget, limit, first_over)?;
             if !delta.list("turns").is_empty() || Instant::now() >= end {
                 return Ok(delta);
             }
-            after = delta.text("cursor").to_owned();
             std::thread::sleep(
                 Duration::from_millis(50).min(end.saturating_duration_since(Instant::now())),
             );
+            if let Some(updated) = reader.poll(&snapshot)? {
+                // A retained cursor must still bind the generation after replacement/truncation.
+                let at = offset(&updated, delta.text("cursor"))?;
+                snapshot = std::sync::Arc::new(updated);
+                delta = self.delta(&snapshot, at, budget, limit, first_over)?;
+            }
         }
     }
     pub fn thread_receipt(&self, id: &str, after: &str, consumer: &str) -> Result<Value> {

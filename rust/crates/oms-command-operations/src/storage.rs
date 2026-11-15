@@ -150,6 +150,7 @@ pub struct Ledger {
     file: File,
     parent_before: fs::Metadata,
     opened: fs::Metadata,
+    read_len: Option<u64>,
 }
 impl Ledger {
     pub fn open(path: &Path, write: bool, private: bool) -> Result<Self> {
@@ -213,6 +214,7 @@ impl Ledger {
             file,
             parent_before: before,
             opened,
+            read_len: None,
         };
         ledger.check()?;
         if private {
@@ -240,8 +242,13 @@ impl Ledger {
         Ok(())
     }
     pub fn read(&mut self) -> Result<Vec<u8>> {
+        let bytes = self.read_from(0)?;
+        self.read_len = Some(bytes.len() as u64);
+        Ok(bytes)
+    }
+    fn read_from(&mut self, offset: u64) -> Result<Vec<u8>> {
         self.file
-            .seek(SeekFrom::Start(0))
+            .seek(SeekFrom::Start(offset))
             .map_err(|e| e.to_string())?;
         let mut bytes = Vec::new();
         self.file
@@ -249,6 +256,55 @@ impl Ledger {
             .map_err(|e| e.to_string())?;
         self.check()?;
         Ok(bytes)
+    }
+    /// History was read through this descriptor while the caller held the ledger lock.
+    pub(crate) fn append_batch(&mut self, rows: &mut [V], history: &[V]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.check()?;
+        let length = self.file.metadata().map_err(|e| e.to_string())?.len();
+        if self.read_len != Some(length) {
+            return Err("ledger changed since locked snapshot".into());
+        }
+        let mut previous = std::collections::BTreeMap::new();
+        let key = |row: &V| {
+            let field = if row.get("attempt_id").truth() {
+                "attempt_id"
+            } else {
+                "approval_id"
+            };
+            (field, crate::projection::identity(row.get(field)))
+        };
+        for row in history {
+            previous.insert(key(row), row.clone());
+        }
+        let mut bytes = Vec::new();
+        if length > 0 {
+            self.file
+                .seek(SeekFrom::End(-1))
+                .map_err(|e| e.to_string())?;
+            let mut last = [0];
+            self.file.read_exact(&mut last).map_err(|e| e.to_string())?;
+            if last[0] != b'\n' {
+                bytes.push(b'\n');
+            }
+        }
+        for row in rows {
+            let identity = key(row);
+            attach_trace(row, previous.get(&identity))?;
+            bytes.extend_from_slice(&row.json(false)?);
+            bytes.push(b'\n');
+            previous.insert(identity, row.clone());
+        }
+        self.check()?;
+        self.file
+            .write_all(&bytes)
+            .and_then(|_| self.file.sync_data())
+            .map_err(|e| e.to_string())?;
+        self.check()?;
+        self.read_len = Some(length + bytes.len() as u64);
+        self.parent.sync_all().map_err(|e| e.to_string())
     }
     pub fn append(&mut self, row: &mut V) -> Result<()> {
         let length = self
@@ -308,10 +364,17 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+pub(crate) fn normalized(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    let text = String::from_utf8_lossy(bytes);
+    if bytes.contains(&b'\r') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        text
+    }
+}
+
 pub fn parse_rows(path: &Path, bytes: &[u8]) -> Result<Vec<V>> {
-    let text = String::from_utf8_lossy(bytes)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
+    let text = normalized(bytes);
     let mut rows = Vec::new();
     for (index, line) in text.split_inclusive('\n').enumerate() {
         if line
@@ -439,12 +502,41 @@ pub(crate) fn stat_identity(path: &Path) -> Result<(u64, u64)> {
     Ok((m.dev(), m.ino()))
 }
 
-pub(crate) fn follow_rows(path: &Path) -> Result<Vec<(V, oms_context::Json)>> {
-    let bytes = read_bytes(path)?;
-    let rows = parse_rows(path, &bytes)?;
-    let text = String::from_utf8_lossy(&bytes)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
+#[derive(Default)]
+pub(crate) struct FollowTail {
+    identity: Option<(u64, u64)>,
+    offset: u64,
+}
+impl FollowTail {
+    pub(crate) fn read(&mut self, path: &Path) -> Result<(bool, Vec<(V, oms_context::Json)>)> {
+        let mut ledger = match Ledger::open(path, false, false) {
+            Ok(ledger) => ledger,
+            Err(_)
+                if fs::symlink_metadata(path)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                read_bytes(path)?;
+                let reset = self.identity.take().is_some();
+                self.offset = 0;
+                return Ok((reset, Vec::new()));
+            }
+            Err(e) => return Err(e),
+        };
+        let metadata = ledger.file.metadata().map_err(|e| e.to_string())?;
+        let identity = (metadata.dev(), metadata.ino());
+        let reset = self.identity != Some(identity) || metadata.len() < self.offset;
+        let offset = if reset { 0 } else { self.offset };
+        let bytes = ledger.read_from(offset)?;
+        let rows = follow_bytes(path, &bytes)?;
+        self.identity = Some(identity);
+        self.offset = offset + bytes.len() as u64;
+        Ok((reset, rows))
+    }
+}
+
+pub(crate) fn follow_bytes(path: &Path, bytes: &[u8]) -> Result<Vec<(V, oms_context::Json)>> {
+    let rows = parse_rows(path, bytes)?;
+    let text = normalized(bytes);
     rows.into_iter()
         .zip(text.split_inclusive('\n').filter(|line| {
             !line

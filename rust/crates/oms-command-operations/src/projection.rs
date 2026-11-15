@@ -284,134 +284,155 @@ pub(crate) fn dictionary(value: &V) -> Result<V, String> {
 }
 /// Validate every event before the caller selects an attempt. Values retain their Python JSON types.
 pub fn project_values(rows: &[V]) -> Result<BTreeMap<String, V>, String> {
-    let mut attempts: BTreeMap<String, V> = BTreeMap::new();
-    let mut events = HashSet::new();
-    let mut keys = HashSet::new();
-    for (index, row) in rows.iter().enumerate() {
-        validate(row, index + 1)?;
-        let event = row.get("event_id");
-        if !events.insert(identity(event)) {
-            return Err(format!("duplicate lifecycle event_id: {}", event.py()));
-        }
-        let raw = row.get("attempt_id");
-        let key = identity(raw);
-        let current = attempts.get_mut(&key);
-        let expected = current
-            .as_ref()
-            .map_or("1".into(), |v| add(&v.get("sequence").py(), "1"));
-        if row.get("seq").py() != expected {
-            return Err(format!(
-                "attempt {} sequence is {}, expected {expected}",
-                raw.py(),
-                row.get("seq").py()
-            ));
-        }
-        let idem = row.get("idempotency_key");
-        if idem.truth() && !keys.insert((key.clone(), identity(idem))) {
-            return Err(format!(
-                "duplicate idempotency key was appended: {}",
-                idem.py()
-            ));
-        }
-        let kind = row.get("event_type").text().unwrap_or("");
-        if kind == "attempt.created" {
-            if current.is_some() {
-                return Err(format!("attempt {} was created twice", raw.py()));
+    let mut projection = Projection::default();
+    projection.extend(rows)?;
+    Ok(projection.attempts)
+}
+
+#[derive(Default)]
+pub(crate) struct Projection {
+    pub(crate) attempts: BTreeMap<String, V>,
+    events: HashSet<String>,
+    keys: HashSet<(String, String)>,
+    count: usize,
+}
+impl Projection {
+    pub(crate) fn extend(&mut self, rows: &[V]) -> Result<(), String> {
+        let Self {
+            attempts,
+            events,
+            keys,
+            count,
+        } = self;
+        for row in rows {
+            *count += 1;
+            let index = *count - 1;
+            validate(row, index + 1)?;
+            let event = row.get("event_id");
+            if !events.insert(identity(event)) {
+                return Err(format!("duplicate lifecycle event_id: {}", event.py()));
             }
-            if row.get("from_state") != &V::Null || row.get("to_state").text() != Some("queued") {
-                return Err("attempt.created must transition null -> queued".into());
-            }
-            let zero = obj([
-                ("tokens", 0usize.into()),
-                ("duration_ms", 0usize.into()),
-                ("cost_microusd", 0usize.into()),
-            ]);
-            let mut attempt = obj([
-                ("schema", 1usize.into()),
-                ("attempt_id", raw.clone()),
-                ("state", "queued".into()),
-                ("sequence", row.get("seq").clone()),
-                ("created_at", row.get("ts").clone()),
-                ("updated_at", row.get("ts").clone()),
-                ("last_heartbeat_at", row.get("ts").clone()),
-                ("reason_code", row.default("reason_code", "")),
-                ("usage", zero.clone()),
-                ("usage_reports", zero),
-                ("budget", dictionary(&row.default("budget", obj([])))?),
-                ("refs", dictionary(&row.default("refs", obj([])))?),
-                ("terminal", false.into()),
-            ]);
-            for k in [
-                "run_id",
-                "task_id",
-                "parent_attempt_id",
-                "provider",
-                "tool",
-                "base_sha",
-            ] {
-                attempt.set(k, row.default(k, ""));
-            }
-            attempts.insert(key, attempt);
-            continue;
-        }
-        let a =
-            current.ok_or_else(|| format!("event precedes attempt.created for {}", raw.py()))?;
-        if kind == "attempt.state_changed" {
-            let old = a.get("state").text().unwrap_or("");
-            let new = row.get("to_state").text().unwrap_or("");
-            if row.get("from_state").text() != Some(old) {
+            let raw = row.get("attempt_id");
+            let key = identity(raw);
+            let current = attempts.get_mut(&key);
+            let expected = current
+                .as_ref()
+                .map_or("1".into(), |v| add(&v.get("sequence").py(), "1"));
+            if row.get("seq").py() != expected {
                 return Err(format!(
-                    "attempt {} from_state does not match projection",
-                    raw.py()
+                    "attempt {} sequence is {}, expected {expected}",
+                    raw.py(),
+                    row.get("seq").py()
                 ));
             }
-            if terminal(old) || !transition(old, new) {
+            let idem = row.get("idempotency_key");
+            if idem.truth() && !keys.insert((key.clone(), identity(idem))) {
                 return Err(format!(
-                    "illegal lifecycle transition: {old} -> {}",
-                    row.get("to_state").py()
+                    "duplicate idempotency key was appended: {}",
+                    idem.py()
                 ));
             }
-            a.set("state", new);
-            a.set("terminal", terminal(new));
-            a.set("reason_code", row.default("reason_code", ""));
-            if new == "review" {
-                a.set("review_entered_at", row.get("ts").clone());
-            }
-        } else if kind == "attempt.usage" {
-            let usage = row.default("usage", obj([]));
-            let V::Obj(items) = usage else {
-                return Err("usage is not an object".into());
-            };
-            for (k, value) in items {
-                let k = std::str::from_utf8(&k).map_err(|_| "unknown usage key")?;
-                if !a.get("usage").has(k) {
-                    return Err(format!("unknown usage key: {k}"));
+            let kind = row.get("event_type").text().unwrap_or("");
+            if kind == "attempt.created" {
+                if current.is_some() {
+                    return Err(format!("attempt {} was created twice", raw.py()));
                 }
-                let old = a.get("usage").get(k).py();
-                let n = add(&old, &value.py());
-                let mut usage = a.get("usage").clone();
-                usage.set(k, V::Num(n));
-                a.set("usage", usage);
-                let n = add(&a.get("usage_reports").get(k).py(), "1");
-                let mut reports = a.get("usage_reports").clone();
-                reports.set(k, V::Num(n));
-                a.set("usage_reports", reports);
+                if row.get("from_state") != &V::Null || row.get("to_state").text() != Some("queued")
+                {
+                    return Err("attempt.created must transition null -> queued".into());
+                }
+                let zero = obj([
+                    ("tokens", 0usize.into()),
+                    ("duration_ms", 0usize.into()),
+                    ("cost_microusd", 0usize.into()),
+                ]);
+                let mut attempt = obj([
+                    ("schema", 1usize.into()),
+                    ("attempt_id", raw.clone()),
+                    ("state", "queued".into()),
+                    ("sequence", row.get("seq").clone()),
+                    ("created_at", row.get("ts").clone()),
+                    ("updated_at", row.get("ts").clone()),
+                    ("last_heartbeat_at", row.get("ts").clone()),
+                    ("reason_code", row.default("reason_code", "")),
+                    ("usage", zero.clone()),
+                    ("usage_reports", zero),
+                    ("budget", dictionary(&row.default("budget", obj([])))?),
+                    ("refs", dictionary(&row.default("refs", obj([])))?),
+                    ("terminal", false.into()),
+                ]);
+                for k in [
+                    "run_id",
+                    "task_id",
+                    "parent_attempt_id",
+                    "provider",
+                    "tool",
+                    "base_sha",
+                ] {
+                    attempt.set(k, row.default(k, ""));
+                }
+                attempts.insert(key, attempt);
+                continue;
+            }
+            let a = current
+                .ok_or_else(|| format!("event precedes attempt.created for {}", raw.py()))?;
+            if kind == "attempt.state_changed" {
+                let old = a.get("state").text().unwrap_or("");
+                let new = row.get("to_state").text().unwrap_or("");
+                if row.get("from_state").text() != Some(old) {
+                    return Err(format!(
+                        "attempt {} from_state does not match projection",
+                        raw.py()
+                    ));
+                }
+                if terminal(old) || !transition(old, new) {
+                    return Err(format!(
+                        "illegal lifecycle transition: {old} -> {}",
+                        row.get("to_state").py()
+                    ));
+                }
+                a.set("state", new);
+                a.set("terminal", terminal(new));
+                a.set("reason_code", row.default("reason_code", ""));
+                if new == "review" {
+                    a.set("review_entered_at", row.get("ts").clone());
+                }
+            } else if kind == "attempt.usage" {
+                let usage = row.default("usage", obj([]));
+                let V::Obj(items) = usage else {
+                    return Err("usage is not an object".into());
+                };
+                for (k, value) in items {
+                    let k = std::str::from_utf8(&k).map_err(|_| "unknown usage key")?;
+                    if !a.get("usage").has(k) {
+                        return Err(format!("unknown usage key: {k}"));
+                    }
+                    let old = a.get("usage").get(k).py();
+                    let n = add(&old, &value.py());
+                    let mut usage = a.get("usage").clone();
+                    usage.set(k, V::Num(n));
+                    a.set("usage", usage);
+                    let n = add(&a.get("usage_reports").get(k).py(), "1");
+                    let mut reports = a.get("usage_reports").clone();
+                    reports.set(k, V::Num(n));
+                    a.set("usage_reports", reports);
+                }
+            }
+            a.set("sequence", row.get("seq").clone());
+            a.set("updated_at", row.get("ts").clone());
+            if matches!(kind, "attempt.heartbeat" | "attempt.state_changed") {
+                a.set("last_heartbeat_at", row.get("ts").clone());
+            }
+            if let V::Obj(items) = row.get("refs") {
+                let mut refs = a.get("refs").clone();
+                if let V::Obj(ref mut map) = refs {
+                    map.extend(items.clone());
+                }
+                a.set("refs", refs);
             }
         }
-        a.set("sequence", row.get("seq").clone());
-        a.set("updated_at", row.get("ts").clone());
-        if matches!(kind, "attempt.heartbeat" | "attempt.state_changed") {
-            a.set("last_heartbeat_at", row.get("ts").clone());
-        }
-        if let V::Obj(items) = row.get("refs") {
-            let mut refs = a.get("refs").clone();
-            if let V::Obj(ref mut map) = refs {
-                map.extend(items.clone());
-            }
-            a.set("refs", refs);
-        }
+        Ok(())
     }
-    Ok(attempts)
 }
 pub fn select<'a>(attempts: &'a BTreeMap<String, V>, id: &str) -> Option<&'a V> {
     attempts.get(&format!("s:{id}"))

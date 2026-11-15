@@ -23,7 +23,7 @@ mod unicode;
 pub(crate) mod visual;
 
 use crate::{CommandResult, Error, Result, cli::Args, util::*};
-use index::Graph;
+use index::{Graph, ReadGraph};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -203,27 +203,68 @@ pub(crate) fn dispatch(
             }
         }
     } else {
-        if !args.flag("no_refresh")
+        let fast = matches!(action, "symbol" | "api" | "neighbors" | "trace");
+        let (mut loaded_graph, manifest, db) = if !args.flag("no_refresh")
             && std::env::var("OMS_GRAPH_AUTOBUILD")
                 .unwrap_or_default()
                 .trim()
                 != "0"
         {
-            let refreshed = ensure(repo, &state, 20000, cancel, helper)?;
-            if s(&refreshed, "action") != "fresh" {
+            let loaded = build::ensure_loaded(repo, &state, 20000, cancel, helper, fast)?;
+            if s(&loaded.status, "action") != "fresh" {
                 err.push_str(&format!(
                     "{}\n",
-                    summary(s(&refreshed, "action"), &refreshed)
+                    summary(s(&loaded.status, "action"), &loaded.status)
                 ));
             }
+            (loaded.graph, loaded.manifest, loaded.db)
+        } else {
+            let manifest =
+                read_json(&state.join("manifest.json"), build::GRAPH_LIMIT)?.unwrap_or(json!({}));
+            let db = if fast {
+                sqlite::open_verified(&state, s(&manifest, "revision"))
+            } else {
+                None
+            };
+            (None, manifest, db)
+        };
+        let fast_result = if fast {
+            db.and_then(|db| {
+                match action {
+                    "api" => ReadGraph::file_api(&db, args.text("path"), args.int("limit")),
+                    "symbol" => {
+                        ReadGraph::symbol(&db, repo, args.text("name"), args.int("limit"), cancel)
+                    }
+                    "neighbors" => ReadGraph::neighbors(
+                        &db,
+                        args.text("node"),
+                        args.text("relation"),
+                        args.text("direction"),
+                    )
+                    .map(Value::from),
+                    _ => ReadGraph::trace(
+                        &db,
+                        args.text("node"),
+                        args.text("direction"),
+                        args.int("depth"),
+                        &[],
+                        128,
+                        160,
+                    ),
+                }
+                .ok()
+            })
+        } else {
+            None
+        };
+        if fast_result.is_none() && loaded_graph.is_none() {
+            loaded_graph = Some(Graph::new(load(&state)?)?);
         }
-        let graph = Graph::new(load(&state)?)?;
-        let coverage = read_json(&state.join("manifest.json"), build::GRAPH_LIMIT)?
-            .unwrap_or(json!({}))["coverage"]
-            .clone();
+        let graph = loaded_graph.as_ref();
+        let coverage = manifest["coverage"].clone();
         value = match action {
             "find" => {
-                let mut rows = graph.find(
+                let mut rows = graph.expect("loaded graph").find(
                     args.text("query"),
                     args.text("kind"),
                     args.int("limit"),
@@ -233,7 +274,7 @@ pub(crate) fn dispatch(
                     err.push_str("graph find: no lexical match; search source identifiers or paths directly. The query is not translated, and an empty result does not prove missing code.\n");
                 }
                 let assurance = analytics::assurance(
-                    &graph,
+                    graph.expect("loaded graph"),
                     args.flag("include_tests") || args.text("kind") == "test",
                 );
                 for row in &mut rows {
@@ -255,7 +296,12 @@ pub(crate) fn dispatch(
                 json!(rows)
             }
             "api" => {
-                let result = graph.file_api(args.text("path"), args.int("limit"))?;
+                let result = match fast_result {
+                    Some(value) => value,
+                    None => graph
+                        .expect("loaded graph")
+                        .file_api(args.text("path"), args.int("limit"))?,
+                };
                 text.push_str(&format!(
                     "path: {}\nlanguage: {}\n",
                     s(&result, "path"),
@@ -279,11 +325,14 @@ pub(crate) fn dispatch(
                 result
             }
             "neighbors" => {
-                let rows = graph.neighbors(
-                    args.text("node"),
-                    args.text("relation"),
-                    args.text("direction"),
-                )?;
+                let rows = match fast_result {
+                    Some(Value::Array(rows)) => rows,
+                    _ => graph.expect("loaded graph").neighbors(
+                        args.text("node"),
+                        args.text("relation"),
+                        args.text("direction"),
+                    )?,
+                };
                 for row in &rows {
                     text.push_str(&format!(
                         "{}  {}  {}  {}\n",
@@ -296,14 +345,17 @@ pub(crate) fn dispatch(
                 json!(rows)
             }
             "trace" => {
-                let result = graph.trace(
-                    args.text("node"),
-                    args.text("direction"),
-                    args.int("depth"),
-                    &[],
-                    128,
-                    160,
-                )?;
+                let result = match fast_result {
+                    Some(value) => value,
+                    None => graph.expect("loaded graph").trace(
+                        args.text("node"),
+                        args.text("direction"),
+                        args.int("depth"),
+                        &[],
+                        128,
+                        160,
+                    )?,
+                };
                 for row in array(&result, "nodes") {
                     text.push_str(&format!(
                         "{}{}{}\n",
@@ -319,7 +371,7 @@ pub(crate) fn dispatch(
                 result
             }
             "search" => {
-                let result = graph.search(
+                let result = graph.expect("loaded graph").search(
                     repo,
                     args.text("query"),
                     args.int("limit"),
@@ -383,12 +435,22 @@ pub(crate) fn dispatch(
                 result
             }
             "symbol" => {
-                let result = graph.symbol(repo, args.text("name"), args.int("limit"), cancel)?;
+                let result = match fast_result {
+                    Some(value) => value,
+                    None => graph.expect("loaded graph").symbol(
+                        repo,
+                        args.text("name"),
+                        args.int("limit"),
+                        cancel,
+                    )?,
+                };
                 text = index::symbol_text(&result);
                 result
             }
             "unreferenced" => {
-                let result = graph.unreferenced(args.int("limit"), args.flag("include_tests"));
+                let result = graph
+                    .expect("loaded graph")
+                    .unreferenced(args.int("limit"), args.flag("include_tests"));
                 text.push_str(&format!("{}\n", s(&result, "note")));
                 for row in array(&result, "candidates") {
                     text.push_str(&format!(
@@ -404,7 +466,7 @@ pub(crate) fn dispatch(
                 if args.flag("signatures") {
                     let result = context::signature_map(
                         repo,
-                        &graph,
+                        graph.expect("loaded graph"),
                         args.text("task"),
                         args.int("max_files"),
                         args.int("max_bytes"),
@@ -420,7 +482,7 @@ pub(crate) fn dispatch(
                     text = format!("{}\n", s(&result, "text"));
                     result
                 } else if args.flag("ui_model") || !args.text("html_fragment").is_empty() {
-                    let result = graph.visual(
+                    let result = graph.expect("loaded graph").visual(
                         args.int("limit"),
                         args.int("depth"),
                         args.flag("include_tests"),
@@ -433,7 +495,9 @@ pub(crate) fn dispatch(
                     text = index::html(&result);
                     result
                 } else {
-                    let mut result = graph.map_summary(args.flag("include_tests"));
+                    let mut result = graph
+                        .expect("loaded graph")
+                        .map_summary(args.flag("include_tests"));
                     result["coverage"] = coverage.clone();
                     text = index::map_text(&result);
                     result
@@ -442,7 +506,7 @@ pub(crate) fn dispatch(
             "context" => {
                 let mut pack = context::select(
                     repo,
-                    &graph,
+                    graph.expect("loaded graph"),
                     args.text("task"),
                     args.int("max_files"),
                     &args.list("entry_path"),
@@ -493,7 +557,7 @@ pub(crate) fn dispatch(
                         .filter_map(Value::as_str)
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
-                    let result = graph.visual(
+                    let result = graph.expect("loaded graph").visual(
                         args.int("max_files").saturating_mul(6).clamp(48, 120),
                         2,
                         false,
@@ -525,7 +589,12 @@ pub(crate) fn dispatch(
                 } else {
                     args.list("path")
                 };
-                let mut result = graph.blast(&paths, Some(args.int("depth")), &[], &[])?;
+                let mut result = graph.expect("loaded graph").blast(
+                    &paths,
+                    Some(args.int("depth")),
+                    &[],
+                    &[],
+                )?;
                 result["paths"] = json!(paths);
                 result["changed_paths"] =
                     affected::workspace_changes(repo, args.text("base"), cancel)?;
@@ -538,7 +607,7 @@ pub(crate) fn dispatch(
             "coupling" => {
                 let result = history::report(
                     repo,
-                    &graph,
+                    graph.expect("loaded graph"),
                     args.int("commits"),
                     args.int("max_changeset"),
                     args.int("min_shared"),
@@ -553,7 +622,7 @@ pub(crate) fn dispatch(
             "affected" => {
                 let result = affected::report_with_helper(
                     repo,
-                    &graph,
+                    graph.expect("loaded graph"),
                     args.text("base"),
                     args.text("head"),
                     args.int("depth"),
@@ -568,7 +637,7 @@ pub(crate) fn dispatch(
             "impact" => {
                 let result = affected::impact_with_helper(
                     repo,
-                    &graph,
+                    graph.expect("loaded graph"),
                     args.text("base"),
                     args.text("head"),
                     args.int("depth"),
