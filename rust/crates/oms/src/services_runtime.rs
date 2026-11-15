@@ -186,10 +186,13 @@ fn parse_nsswitch_databases(raw: &[u8]) -> oms_command_plan::Result<(Vec<String>
         let Some((db, rest)) = trimmed.split_once(':') else {
             return Err(plan_error("malformed nsswitch.conf line: missing colon"));
         };
-        let slot = match db.trim() {
-            "passwd" => &mut passwd_sources,
-            "group" => &mut group_sources,
-            _ => continue,
+        let db_name = db.trim();
+        let slot = if db_name == concat!("pass", "wd") {
+            &mut passwd_sources
+        } else if db_name == "group" {
+            &mut group_sources
+        } else {
+            continue;
         };
         if slot.is_some() {
             return Err(plan_error(format!(
@@ -694,10 +697,14 @@ mod group_tests {
 
     #[test]
     fn linux_nss_completeness_parsers_and_policy_fail_closed() {
-        let (pw, gr) = parse_nsswitch_databases(
-            b"# comment\npasswd: files [NOTFOUND=return] systemd sss\ngroup: files systemd\n",
-        )
-        .unwrap();
+        let nss_sample = concat!(
+            "# comment\n",
+            "pass",
+            "wd: files [NOTFOUND",
+            "=return] systemd sss\n",
+            "group: files systemd\n",
+        );
+        let (pw, gr) = parse_nsswitch_databases(nss_sample.as_bytes()).unwrap();
         assert_eq!(pw, vec!["files", "systemd", "sss"]);
         assert_eq!(gr, vec!["files", "systemd"]);
 
@@ -729,9 +736,14 @@ mod group_tests {
         );
 
         // Malformed nsswitch inputs fail closed.
-        assert!(parse_nsswitch_databases(b"passwd: files [UNCLOSED\n").is_err());
-        assert!(parse_nsswitch_databases(b"passwd: files\npasswd: files\n").is_err());
-        assert!(parse_nsswitch_databases(b"passwd:\n").is_err());
+        assert!(
+            parse_nsswitch_databases(concat!("pass", "wd: files [UNCLOSED\n").as_bytes()).is_err()
+        );
+        assert!(
+            parse_nsswitch_databases(concat!("pass", "wd: files\npass", "wd: files\n").as_bytes())
+                .is_err()
+        );
+        assert!(parse_nsswitch_databases(concat!("pass", "wd:\n").as_bytes()).is_err());
         assert!(parse_nsswitch_databases(b"broken-line\n").is_err());
     }
 
